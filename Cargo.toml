@@ -4,4 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arrow-array = "57.3.0"
+chrono = "0.4.44"
+futures = "0.3.32"
+lancedb = "0.26.2"
+miette = { version = "7.6.0", features = ["fancy"] }
+ndarray = "0.17.2"
+ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
+parking_lot = "0.12.5"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_path_to_error = "0.1.20"
+sysinfo = "0.38.4"
+thiserror = "2.0.18"
+tokenizers = { version = "0.22.2", default-features = false, features = [
+    "progressbar",
+    "onig",
+] }
 tokio = { version = "1.50.0", features = ["full"] }
+toml = "1.0.6"
+uuid = { version = "1.22.0", features = ["v4"] }
