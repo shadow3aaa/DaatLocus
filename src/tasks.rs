@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::get_spinova_home;
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Tasks {
     tasks: Vec<Task>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Task {
     description: String,
 }

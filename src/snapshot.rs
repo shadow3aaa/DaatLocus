@@ -2,7 +2,7 @@
 
 use std::fmt::{Display, format};
 
-use crate::{memory::Memory, system_info::SystemInfo, tasks::Tasks};
+use crate::{context::Context, memory::Memory, system_info::SystemInfo, tasks::Tasks};
 
 /// 快照保存着当前agent的大脑状态
 ///
@@ -14,11 +14,11 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    pub async fn new(memory: &mut Memory, tasks: Tasks) -> Self {
+    pub async fn new(context: &mut Context) -> Self {
         Self {
             sensory: Sensory::new(),
-            current_memory: CurrentMemory::new(memory).await,
-            tasks,
+            current_memory: CurrentMemory::new(&mut context.memory).await,
+            tasks: context.tasks.clone(),
         }
     }
 }
