@@ -2,6 +2,7 @@ mod config;
 mod context;
 mod core;
 mod embeding;
+mod emotion;
 mod memory;
 mod snapshot;
 mod system_info;
@@ -9,7 +10,9 @@ mod tasks;
 
 use std::{env, path::PathBuf};
 
-use crate::{config::load_config, context::Context, memory::Memory};
+use crate::{
+    config::load_config, context::Context, emotion::Emotion, memory::Memory, tasks::Tasks,
+};
 
 #[tokio::main]
 async fn main() {
@@ -21,11 +24,13 @@ async fn main() {
         }
     };
     let memory = Memory::new().await;
-    let tasks = tasks::Tasks::new().await;
+    let tasks = Tasks::new().await;
+    let emotion = Emotion::new().await;
     let mut context = Context {
         config,
         memory,
         tasks,
+        emotion,
     };
 
     loop {
