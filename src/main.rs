@@ -12,7 +12,8 @@ mod tasks;
 use std::{env, path::PathBuf};
 
 use crate::{
-    config::load_config, context::Context, emotion::Emotion, memory::Memory, pty::Pty, tasks::Tasks,
+    config::load_config, context::Context, emotion::Emotion, memory::Memory, pty::Pty,
+    snapshot::Snapshot, tasks::Tasks,
 };
 
 #[tokio::main]
@@ -49,6 +50,8 @@ async fn main() {
 
 async fn spinova_loop(context: &mut Context) {
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let snapshot = Snapshot::new(context).await;
+    println!("{snapshot}");
 }
 
 pub async fn get_spinova_home() -> PathBuf {
