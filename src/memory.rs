@@ -107,7 +107,7 @@ impl Memory {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct L1Memory {
     trail: VecDeque<L1Item>,
 }
@@ -125,14 +125,6 @@ impl Display for L1Item {
             "在【{}】时，发生：【{}】",
             self.current_doing, self.description
         )
-    }
-}
-
-impl Default for L1Memory {
-    fn default() -> Self {
-        Self {
-            trail: VecDeque::new(),
-        }
     }
 }
 
