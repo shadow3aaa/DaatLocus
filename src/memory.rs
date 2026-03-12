@@ -34,15 +34,6 @@ pub struct Memory {
     last_2_l1drop: VecDeque<L1Item>, // 记录最近两次L1淘汰的内容
 }
 
-impl Drop for Memory {
-    fn drop(&mut self) {
-        let l1_clone = self.l1.clone();
-        tokio::runtime::Handle::current().block_on(async move {
-            l1_clone.sync_to_disk().await;
-        });
-    }
-}
-
 impl Memory {
     pub async fn new() -> Self {
         let l1 = L1Memory::new().await;
@@ -107,6 +98,10 @@ impl Memory {
             .into_iter()
             .map(|item| item.description)
             .collect()
+    }
+
+    pub async fn shutdown(self) {
+        self.l1.sync_to_disk().await;
     }
 }
 
