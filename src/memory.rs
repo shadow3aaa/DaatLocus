@@ -30,17 +30,30 @@ use crate::{embeding::EmbeddingModel, get_spinova_home};
 pub struct Memory {
     l1: L1Memory,
     l2: L2Memory,
+    embeder: EmbeddingModel,
     last_2_l1drop: VecDeque<L1Item>, // 记录最近两次L1淘汰的内容
+}
+
+impl Drop for Memory {
+    fn drop(&mut self) {
+        let l1_clone = self.l1.clone();
+        tokio::runtime::Handle::current().block_on(async move {
+            l1_clone.sync_to_disk().await;
+        });
+    }
 }
 
 impl Memory {
     pub async fn new() -> Self {
-        let l1 = L1Memory::new();
-        let l2 = L2Memory::new().await;
+        let l1 = L1Memory::new().await;
+        let embeder = EmbeddingModel::new();
+        let l2 = L2Memory::new(&embeder).await;
         let last_2_l1drop = VecDeque::new();
+
         Self {
             l1,
             l2,
+            embeder,
             last_2_l1drop,
         }
     }
@@ -73,16 +86,36 @@ impl Memory {
                 }
             }
 
-            self.l2.ingest(l1_drop, sandwich_payload).await;
+            self.l2
+                .ingest(&mut self.embeder, l1_drop, sandwich_payload)
+                .await;
         }
+    }
+
+    pub async fn search_mem(&mut self, query: &str, top_k: usize) -> Vec<String> {
+        self.l2.search(&mut self.embeder, query, top_k).await
+    }
+
+    pub fn current_doing(&self) -> Option<String> {
+        self.l1.trail.back().map(|item| item.current_doing.clone())
+    }
+
+    pub fn trail(&self) -> Vec<String> {
+        self.l1
+            .trail
+            .clone()
+            .into_iter()
+            .map(|item| item.description)
+            .collect()
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct L1Memory {
     trail: VecDeque<L1Item>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct L1Item {
     current_doing: String,
     description: String,
@@ -98,14 +131,25 @@ impl Display for L1Item {
     }
 }
 
+impl Default for L1Memory {
+    fn default() -> Self {
+        Self {
+            trail: VecDeque::new(),
+        }
+    }
+}
+
 impl L1Memory {
     /// 队列最大长度
     const MAX_CAPACITY: usize = 10; // TODO: 考虑按实际的token长度来限制而不是元素数量?未验证哪种更合理
 
-    fn new() -> Self {
-        Self {
-            trail: VecDeque::new(),
-        }
+    async fn new() -> Self {
+        let l1_persistence_path = get_spinova_home().await.join("l1_memory");
+        tokio::fs::read(l1_persistence_path)
+            .await
+            .ok()
+            .and_then(|data| postcard::from_bytes::<Self>(&data).ok())
+            .unwrap_or_else(|| Self::default())
     }
 
     fn update(&mut self, current_doing: String, action_description: String) -> Option<L1Item> {
@@ -120,11 +164,16 @@ impl L1Memory {
             None
         }
     }
+
+    async fn sync_to_disk(&self) {
+        let l1_persistence_path = get_spinova_home().await.join("l1_memory");
+        let data = postcard::to_allocvec(self).unwrap();
+        tokio::fs::write(l1_persistence_path, data).await.unwrap();
+    }
 }
 
 pub struct L2Memory {
     table: lancedb::Table,
-    embedder: EmbeddingModel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,8 +197,7 @@ pub struct L2MemoryRecord {
 }
 
 impl L2Memory {
-    async fn new() -> Self {
-        let embedder = EmbeddingModel::new();
+    async fn new(embedder: &EmbeddingModel) -> Self {
         let db_path = get_spinova_home().await.join("l2_memory.lancedb");
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -178,11 +226,16 @@ impl L2Memory {
                 .await
                 .unwrap(),
         };
-        Self { table, embedder }
+        Self { table }
     }
 
-    async fn ingest(&mut self, l1_drop: L1Item, sandwich_payload: String) {
-        let vector_data = self.embedder.encode(&l1_drop.to_string());
+    async fn ingest(
+        &mut self,
+        embedder: &mut EmbeddingModel,
+        l1_drop: L1Item,
+        sandwich_payload: String,
+    ) {
+        let vector_data = embedder.encode(&l1_drop.to_string());
 
         let id = Uuid::new_v4().to_string();
         let timestamp = Utc::now().timestamp_millis();
@@ -196,7 +249,7 @@ impl L2Memory {
         // 向量列比较特殊：它是一个 512 维的 FixedSizeList
         let mut vector_builder = FixedSizeListBuilder::new(
             PrimitiveBuilder::<Float32Type>::new(),
-            self.embedder.dimension() as i32,
+            embedder.dimension() as i32,
         );
         vector_builder.values().append_slice(&vector_data);
         vector_builder.append(true);
@@ -220,8 +273,13 @@ impl L2Memory {
         self.table.add(batches).execute().await.unwrap();
     }
 
-    async fn search(&mut self, query: &str, top_k: usize) -> Vec<String> {
-        let query_vector = self.embedder.encode_query(query);
+    async fn search(
+        &mut self,
+        embedder: &mut EmbeddingModel,
+        query: &str,
+        top_k: usize,
+    ) -> Vec<String> {
+        let query_vector = embedder.encode_query(query);
         let mut results = self
             .table
             .vector_search(query_vector.as_slice())
