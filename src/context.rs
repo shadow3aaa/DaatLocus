@@ -2,6 +2,7 @@
 
 use crate::{
     config::Config,
+    emotion::Emotion,
     memory::Memory,
     tasks::{Task, Tasks},
 };
@@ -10,13 +11,13 @@ pub struct Context {
     pub config: Config,
     pub memory: Memory,
     pub tasks: Tasks,
-    /// 无聊程度，范围0-1
-    pub boredom: f32,
+    pub emotion: Emotion,
 }
 
 impl Context {
     pub async fn shutdown(self) {
         self.memory.shutdown().await;
         self.tasks.shutdown().await;
+        self.emotion.shutdown().await;
     }
 }
