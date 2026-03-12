@@ -4,6 +4,7 @@ mod embeding;
 mod memory;
 mod snapshot;
 mod system_info;
+mod tasks;
 
 use std::{env, path::PathBuf};
 
@@ -19,12 +20,14 @@ async fn main() {
         }
     };
     let memory = Memory::new().await;
+    let tasks = tasks::Tasks::new().await;
 
     loop {
         tokio::select! {
             _ = spinova_loop() => {},
             _ = tokio::signal::ctrl_c() => {
                 memory.shutdown().await;
+                tasks.shutdown().await;
                 break;
             }
         }
