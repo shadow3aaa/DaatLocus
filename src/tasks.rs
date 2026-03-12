@@ -12,7 +12,7 @@ pub struct Tasks {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Task {
+pub struct Task {
     description: String,
 }
 
@@ -30,8 +30,12 @@ impl Tasks {
         self.tasks.push(Task { description });
     }
 
-    pub fn delete_task(&mut self, index: usize) {
-        self.tasks.remove(index);
+    pub fn delete_task(&mut self, index: usize) -> Option<Task> {
+        if index > 0 && index <= self.tasks.len() {
+            Some(self.tasks.remove(index - 1))
+        } else {
+            None
+        }
     }
 
     pub async fn shutdown(self) {
