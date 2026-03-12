@@ -2,7 +2,7 @@
 
 use std::fmt::{Display, format};
 
-use crate::{context::Context, memory::Memory, system_info::SystemInfo, tasks::Tasks};
+use crate::{context::Context, memory::Memory, pty::Pty, system_info::SystemInfo, tasks::Tasks};
 
 /// 快照保存着当前agent的大脑状态
 ///
@@ -11,6 +11,7 @@ pub struct Snapshot {
     sensory: Sensory,
     current_memory: CurrentMemory,
     tasks: Tasks,
+    terminal: TerminalSnapshot,
 }
 
 impl Snapshot {
@@ -19,6 +20,7 @@ impl Snapshot {
             sensory: Sensory::new(),
             current_memory: CurrentMemory::new(&mut context.memory).await,
             tasks: context.tasks.clone(),
+            terminal: TerminalSnapshot::new(&context.pty),
         }
     }
 }
@@ -30,7 +32,9 @@ impl Display for Snapshot {
         writeln!(f, "记忆：")?;
         writeln!(f, "{}", self.current_memory)?;
         writeln!(f, "任务列表：")?;
-        write!(f, "{}", self.tasks)
+        writeln!(f, "{}", self.tasks)?;
+        writeln!(f, "终端：")?;
+        write!(f, "{}", self.terminal)
     }
 }
 
@@ -113,4 +117,63 @@ impl Display for CurrentMemory {
         }
         Ok(())
     }
+}
+
+struct TerminalSnapshot {
+    screen: String,
+    cursor_pos: (u16, u16),
+}
+
+impl Display for TerminalSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "终端光标位置为<CURSOR>")?;
+        writeln!(
+            f,
+            "光标位置：({}, {})",
+            self.cursor_pos.0, self.cursor_pos.1
+        )?;
+        writeln!(f, "--- 终端显示 ---")?;
+        let screen = insert_cursor_marker(&self.screen, self.cursor_pos);
+        writeln!(f, "{screen}")?;
+        write!(f, "--- 终端显示 ---")
+    }
+}
+
+impl TerminalSnapshot {
+    fn new(pty: &Pty) -> Self {
+        let screen = pty.screen_text();
+        let cursor_pos = pty.cursor_pos();
+        Self { screen, cursor_pos }
+    }
+}
+
+// 在屏幕文本中插入光标位置标记
+fn insert_cursor_marker(screen: &str, cursor_pos: (u16, u16)) -> String {
+    let (cursor_row, cursor_col) = cursor_pos;
+    let cursor_row = cursor_row as usize;
+    let cursor_col = cursor_col as usize;
+
+    let mut lines: Vec<String> = screen.lines().map(|s| s.to_string()).collect();
+
+    if cursor_row < lines.len() {
+        let line = &lines[cursor_row];
+
+        let chars: Vec<char> = line.chars().collect();
+        let col = if cursor_col <= chars.len() {
+            cursor_col
+        } else {
+            chars.len()
+        };
+
+        let before: String = chars[..col].iter().collect();
+        let after: String = chars[col..].iter().collect();
+        lines[cursor_row] = format!("{}<CURSOR>{}", before, after);
+    } else {
+        while lines.len() <= cursor_row {
+            lines.push(String::new());
+        }
+        lines[cursor_row] = "<CURSOR>".to_string();
+    }
+
+    lines.join("\n")
 }
