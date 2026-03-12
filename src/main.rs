@@ -1,4 +1,5 @@
 mod config;
+mod context;
 mod core;
 mod embeding;
 mod memory;
@@ -8,7 +9,7 @@ mod tasks;
 
 use std::{env, path::PathBuf};
 
-use crate::{config::load_config, memory::Memory};
+use crate::{config::load_config, context::Context, memory::Memory};
 
 #[tokio::main]
 async fn main() {
@@ -21,20 +22,24 @@ async fn main() {
     };
     let memory = Memory::new().await;
     let tasks = tasks::Tasks::new().await;
+    let mut context = Context {
+        config,
+        memory,
+        tasks,
+    };
 
     loop {
         tokio::select! {
-            _ = spinova_loop() => {},
+            _ = spinova_loop(&mut context) => {},
             _ = tokio::signal::ctrl_c() => {
-                memory.shutdown().await;
-                tasks.shutdown().await;
+                context.shutdown().await;
                 break;
             }
         }
     }
 }
 
-async fn spinova_loop() {
+async fn spinova_loop(context: &mut Context) {
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 }
 
