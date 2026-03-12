@@ -10,6 +10,8 @@ pub struct Context {
     pub config: Config,
     pub memory: Memory,
     pub tasks: Tasks,
+    /// 无聊程度，范围0-1
+    pub boredom: f32,
 }
 
 impl Context {
