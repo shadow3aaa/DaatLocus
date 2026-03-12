@@ -1,8 +1,8 @@
-//! 本模块包括快照定义，以及感官输入。记忆和短期任务在别处定义，因其较为复杂。
+//! 本模块定义快照，即LLM应当看到的输入。
 
 use std::fmt::{Display, format};
 
-use crate::{memory::Memory, system_info::SystemInfo};
+use crate::{memory::Memory, system_info::SystemInfo, tasks::Tasks};
 
 /// 快照保存着当前agent的大脑状态
 ///
@@ -10,13 +10,15 @@ use crate::{memory::Memory, system_info::SystemInfo};
 pub struct Snapshot {
     sensory: Sensory,
     current_memory: CurrentMemory,
+    tasks: Tasks,
 }
 
 impl Snapshot {
-    pub async fn new(memory: &mut Memory) -> Self {
+    pub async fn new(memory: &mut Memory, tasks: Tasks) -> Self {
         Self {
             sensory: Sensory::new(),
             current_memory: CurrentMemory::new(memory).await,
+            tasks,
         }
     }
 }
@@ -26,7 +28,9 @@ impl Display for Snapshot {
         writeln!(f, "感官：")?;
         writeln!(f, "{}", self.sensory)?;
         writeln!(f, "记忆：")?;
-        write!(f, "{}", self.current_memory)
+        writeln!(f, "{}", self.current_memory)?;
+        writeln!(f, "任务列表：")?;
+        write!(f, "{}", self.tasks)
     }
 }
 
