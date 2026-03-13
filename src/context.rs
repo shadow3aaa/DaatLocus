@@ -3,10 +3,10 @@
 use crate::{
     config::Config,
     core::LLM,
+    device::DeviceManager,
     emotion::Emotion,
     memory::Memory,
-    pty::Pty,
-    tasks::{Task, Tasks},
+    tasks::Tasks,
 };
 
 pub struct Context {
@@ -15,7 +15,7 @@ pub struct Context {
     pub memory: Memory,
     pub tasks: Tasks,
     pub emotion: Emotion,
-    pub pty: Pty,
+    pub devices: DeviceManager,
 }
 
 impl Context {

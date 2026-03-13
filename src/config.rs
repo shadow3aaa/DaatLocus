@@ -1,8 +1,3 @@
-use std::{
-    env::{self, home_dir},
-    path::{Path, PathBuf},
-};
-
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

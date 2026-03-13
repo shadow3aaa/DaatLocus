@@ -1,6 +1,6 @@
 //! 本模块定义策略路由，它的作用是根据spinova状态判定下一步应该进入什么阶段
 
-use crate::context::{self, Context};
+use crate::context::Context;
 
 pub enum Strategy {
     /// 无聊程度适中，将进入任务执行阶段

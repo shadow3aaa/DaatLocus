@@ -1,8 +1,14 @@
 //! 本模块定义快照，即LLM应当看到的输入。
 
-use std::fmt::{Display, format};
+use std::fmt::Display;
 
-use crate::{context::Context, memory::Memory, pty::Pty, system_info::SystemInfo, tasks::Tasks};
+use crate::{
+    context::Context,
+    device::{DeviceId, FocusedRender, PeripheralRender},
+    memory::Memory,
+    system_info::SystemInfo,
+    tasks::Tasks,
+};
 
 /// 快照保存着当前agent的大脑状态
 ///
@@ -11,7 +17,7 @@ pub struct Snapshot {
     sensory: Sensory,
     current_memory: CurrentMemory,
     tasks: Tasks,
-    terminal: TerminalSnapshot,
+    devices: DeviceSnapshot,
 }
 
 impl Snapshot {
@@ -20,7 +26,7 @@ impl Snapshot {
             sensory: Sensory::new(),
             current_memory: CurrentMemory::new(&mut context.memory).await,
             tasks: context.tasks.clone(),
-            terminal: TerminalSnapshot::new(&context.pty),
+            devices: DeviceSnapshot::new(context),
         }
     }
 }
@@ -33,8 +39,8 @@ impl Display for Snapshot {
         writeln!(f, "{}", self.current_memory)?;
         writeln!(f, "任务列表：")?;
         writeln!(f, "{}", self.tasks)?;
-        writeln!(f, "终端：")?;
-        write!(f, "{}", self.terminal)
+        writeln!(f, "设备：")?;
+        write!(f, "{}", self.devices)
     }
 }
 
@@ -119,61 +125,54 @@ impl Display for CurrentMemory {
     }
 }
 
-struct TerminalSnapshot {
-    screen: String,
-    cursor_pos: (u16, u16),
+struct DeviceSnapshot {
+    focused_device: Option<DeviceId>,
+    peripheral: Vec<(DeviceId, PeripheralRender)>,
+    focused_view: Option<FocusedRender>,
 }
 
-impl Display for TerminalSnapshot {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "终端光标位置为<CURSOR>")?;
-        writeln!(
-            f,
-            "光标位置：({}, {})",
-            self.cursor_pos.0, self.cursor_pos.1
-        )?;
-        writeln!(f, "--- 终端显示 ---")?;
-        let screen = insert_cursor_marker(&self.screen, self.cursor_pos, "<CURSOR>");
-        writeln!(f, "{screen}")?;
-        write!(f, "--- 终端显示 ---")
-    }
-}
-
-impl TerminalSnapshot {
-    fn new(pty: &Pty) -> Self {
-        let screen = pty.screen_text();
-        let cursor_pos = pty.cursor_pos();
-        Self { screen, cursor_pos }
-    }
-}
-
-// 在屏幕文本中插入光标位置标记
-pub fn insert_cursor_marker(screen: &str, cursor_pos: (u16, u16), marker: &str) -> String {
-    let (cursor_row, cursor_col) = cursor_pos;
-    let cursor_row = cursor_row as usize;
-    let cursor_col = cursor_col as usize;
-
-    let mut lines: Vec<String> = screen.lines().map(|s| s.to_string()).collect();
-
-    if cursor_row < lines.len() {
-        let line = &lines[cursor_row];
-
-        let chars: Vec<char> = line.chars().collect();
-        let col = if cursor_col <= chars.len() {
-            cursor_col
-        } else {
-            chars.len()
-        };
-
-        let before: String = chars[..col].iter().collect();
-        let after: String = chars[col..].iter().collect();
-        lines[cursor_row] = format!("{}{marker}{}", before, after);
-    } else {
-        while lines.len() <= cursor_row {
-            lines.push(String::new());
+impl DeviceSnapshot {
+    fn new(context: &Context) -> Self {
+        Self {
+            focused_device: context.devices.focused(),
+            peripheral: context.devices.peripheral_renders(),
+            focused_view: context.devices.focused_render(),
         }
-        lines[cursor_row] = marker.to_string();
     }
+}
 
-    lines.join("\n")
+impl Display for DeviceSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.focused_device {
+            Some(device) => writeln!(f, "当前前景设备：{device}")?,
+            None => writeln!(f, "当前前景设备：无")?,
+        }
+
+        writeln!(f, "设备外围感知：")?;
+        for (id, render) in &self.peripheral {
+            let focus_state = if render.is_focused { "前景" } else { "后台" };
+            let action_state = if render.interactive {
+                "可操作"
+            } else {
+                "只读"
+            };
+            writeln!(
+                f,
+                "- {id} / {}：{}，{}，注意力等级={}",
+                render.title, focus_state, action_state, render.attention
+            )?;
+            writeln!(f, "  {}", render.summary)?;
+        }
+
+        if let Some(view) = &self.focused_view {
+            let action_state = if view.interactive { "可操作" } else { "只读" };
+            writeln!(f, "前景设备画面：")?;
+            writeln!(f, "--- {} / {} ---", view.title, action_state)?;
+            writeln!(f, "{}", view.content)?;
+            write!(f, "--- {} / {} ---", view.title, action_state)?;
+        } else {
+            write!(f, "当前没有设备处于前景，因此看不到任何设备的完整画面。")?;
+        }
+        Ok(())
+    }
 }
