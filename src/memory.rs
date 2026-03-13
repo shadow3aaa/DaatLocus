@@ -165,26 +165,6 @@ pub struct L2Memory {
     table: lancedb::Table,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct L2MemoryRecord {
-    /// 唯一标识符 (UUID v4)
-    pub id: String,
-    /// 时间戳
-    pub timestamp: i64,
-    /// 连续行为描述
-    pub current_doing: String,
-    /// 分立行为描述
-    pub description: String,
-    /// 夹心上下文
-    ///
-    /// 它不仅包括向量化本条目使用的current_doing和description，还包括时间上前后相邻条目的current_doing和description
-    ///
-    /// 这样的设计是为了提供更丰富的上下文信息
-    pub sandwich_payload: String,
-    /// 语义特征向量，用于相似度搜索
-    pub vector: Vec<f32>,
-}
-
 impl L2Memory {
     async fn new(embedder: &EmbeddingModel) -> Self {
         let db_path = get_spinova_home().await.join("l2_memory.lancedb");
