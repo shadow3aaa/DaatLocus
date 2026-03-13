@@ -68,7 +68,7 @@ impl LLM for OpenAIClient {
                     "function": {
                         "strict": true,
                         "name": "submit_action",
-                        "description": "本次的思考与动作",
+                        "description": "本次的思考内容、分析结论与做了什么动作",
                         "parameters": output_schema
                     }
                 }
