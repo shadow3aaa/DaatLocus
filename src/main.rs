@@ -83,7 +83,7 @@ async fn main() {
     };
 
     let (tx, mut rx) = tokio::sync::watch::channel(DashboardState {
-        pty_screen: context.pty.screen(),
+        pty_parser: context.pty.parser(),
         tasks: context
             .tasks
             .tasks()
@@ -134,16 +134,14 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
         .record(output.current_doing, output.description)
         .await;
     execute_action(context, output.action).await;
-    tx.send(DashboardState {
-        pty_screen: context.pty.screen(),
-        tasks: context
+    tx.send_modify(|state| {
+        state.tasks = context
             .tasks
             .tasks()
             .map(|(id, task)| (id, task.description.clone()))
-            .collect(),
-        working_task: context.tasks.working_task(),
-    })
-    .unwrap();
+            .collect();
+        state.working_task = context.tasks.working_task();
+    });
 }
 
 async fn execute_action(context: &mut Context, action: Action) {

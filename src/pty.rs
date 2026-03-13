@@ -104,8 +104,8 @@ impl Pty {
         }
     }
 
-    pub fn screen(&self) -> vt100::Screen {
-        self.parser.lock().screen().clone()
+    pub fn parser(&self) -> Arc<Mutex<vt100::Parser>> {
+        self.parser.clone()
     }
 
     pub fn screen_text(&self) -> String {

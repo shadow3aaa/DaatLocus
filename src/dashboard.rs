@@ -1,8 +1,9 @@
 //! 本模块定义tui面板显示相关的内容
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crossterm::event::{Event, KeyCode};
+use parking_lot::Mutex;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Paragraph},
@@ -13,7 +14,7 @@ use uuid::Uuid;
 use crate::snapshot::insert_cursor_marker;
 
 pub struct DashboardState {
-    pub pty_screen: vt100::Screen,
+    pub pty_parser: Arc<Mutex<vt100::Parser>>,
     pub tasks: HashMap<Uuid, String>,
     pub working_task: Option<Uuid>,
 }
@@ -28,7 +29,7 @@ pub async fn run_tui_dashboard(
     let mut terminal = Terminal::new(backend)?;
 
     loop {
-        if crossterm::event::poll(Duration::from_millis(100))? {
+        if crossterm::event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = crossterm::event::read()? {
                 if key.code == KeyCode::Char('q') {
                     break;
@@ -50,7 +51,8 @@ pub async fn run_tui_dashboard(
                 .split(chunks[1]);
 
             // 渲染虚拟终端
-            let pty_widget = PseudoTerminal::new(&state.pty_screen)
+            let screen = state.pty_parser.lock().screen().clone();
+            let pty_widget = PseudoTerminal::new(&screen)
                 .block(Block::default().title("Terminal").borders(Borders::ALL));
             f.render_widget(pty_widget, chunks[0]);
 
