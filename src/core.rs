@@ -1,43 +1,56 @@
+use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::snapshot::Snapshot;
+use crate::{context::Context, snapshot::Snapshot};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type")]
+/// 你做出的行动，必须是下面五种之一：
+/// 1. TaskAdd
+/// 2. TaskDelete
+/// 3. TaskSelect
+/// 4. TerminalInput
+/// 5. Wait
 pub enum Action {
-    /// 添加一个新的任务
+    /// TaskAdd: 添加一个新的任务
     TaskAdd {
         /// 任务的描述
         description: String,
     },
-    /// 删除一个任务
+    /// TaskDelete: 删除一个任务
     TaskDelete {
-        /// 任务的编号
-        task_id: usize,
+        /// 任务的id
+        task_id: String,
     },
-    /// 选中要执行的任务
+    /// TaskSelect: 选中要执行的任务
     TaskSelect {
-        /// 任务的编号
-        task_id: usize,
+        /// 任务的id
+        task_id: String,
     },
-    /// 输入终端
-    TerminalInput { text: String },
+    /// TerminalInput: 输入终端
+    TerminalInput {
+        /// 输入终端的内容
+        text: String,
+    },
     /// 不进行操作，不思观望
     Wait,
 }
 
 /// LLM 输出
+#[derive(Deserialize, Serialize, JsonSchema)]
 pub struct Output {
     /// 对于本次行为的描述
     pub description: String,
-    /// 对当前正在进行的连续行为的描述。区别于description对本次行为的描述
+    /// 对当前正在进行的连续行为的描述。区别于description对单次行为的描述
     pub current_doing: String,
     /// 本次进行的动作
     pub action: Action,
 }
 
 /// LLM 负责思考
+#[async_trait]
 pub trait LLM {
     /// 根据输入的快照进行思考
-    async fn think(&self, input: &Snapshot) -> Output;
+    async fn think(&self, context: &Context, input: &Snapshot, instruction: &str) -> Output;
 }

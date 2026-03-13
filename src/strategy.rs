@@ -14,7 +14,8 @@ impl Strategy {
 
     pub fn route(context: &Context) -> Self {
         let boredom = context.emotion.boredom;
-        if boredom > Self::BOREDOM_THRESHOLD {
+        // TODO: 完成真正的贝叶斯惊奇评估后，去掉context.tasks.is_empty()
+        if context.tasks.is_empty() || boredom > Self::BOREDOM_THRESHOLD {
             Self::ExploreNewTasks
         } else {
             Self::ExecuteTask

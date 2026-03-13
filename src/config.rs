@@ -24,6 +24,7 @@ impl Default for Config {
                 base_url: "https://api.openai.com/v1".to_string(),
                 model_name: "gpt-4.1".to_string(),
                 api_key: "your-api-key".to_string(),
+                temperature: 1.0,
             },
             /* embedding_model: EmbeddingModelConfig {
                 base_url: "https://api.openai.com/v1".to_string(),
@@ -39,6 +40,7 @@ pub struct MainModelConfig {
     pub base_url: String,
     pub model_name: String,
     pub api_key: String,
+    pub temperature: f64,
 }
 
 #[derive(Serialize, Deserialize)]

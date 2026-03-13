@@ -20,8 +20,8 @@ pub enum Action {
 }
 
 pub struct Pty {
-    master: Box<dyn portable_pty::MasterPty>,
-    child: Box<dyn portable_pty::Child>,
+    master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
     parser: Arc<Mutex<vt100::Parser>>,
     writer: SharedWriter,
     last_update: Arc<Mutex<Instant>>,
@@ -76,7 +76,7 @@ impl Pty {
         });
 
         Self {
-            master,
+            master: Arc::new(Mutex::new(master)),
             parser,
             child,
             writer,
