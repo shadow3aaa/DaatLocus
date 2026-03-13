@@ -88,9 +88,16 @@ impl LLM for OpenAIClient {
             .await
             .unwrap();
         let response_json: serde_json::Value = response.json().await.unwrap();
-        let tool_calls = response_json["choices"][0]["message"]["tool_calls"]
-            .as_array()
-            .unwrap();
+        let tool_calls = match response_json["choices"][0]["message"]["tool_calls"].as_array() {
+            Some(s) => s,
+            None => {
+                let instruction_with_error = format!(
+                    "{}\n注意：你的上一次输出非法，这次请注意。错误原因：没有正确调用工具函数",
+                    instruction
+                );
+                return self.think(context, input, &instruction_with_error).await;
+            }
+        };
         let arguments_str = tool_calls[0]["function"]["arguments"].as_str().unwrap();
         match serde_json::from_str(arguments_str) {
             Ok(o) => o,
