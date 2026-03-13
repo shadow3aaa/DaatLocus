@@ -133,7 +133,7 @@ impl Display for TerminalSnapshot {
             self.cursor_pos.0, self.cursor_pos.1
         )?;
         writeln!(f, "--- 终端显示 ---")?;
-        let screen = insert_cursor_marker(&self.screen, self.cursor_pos);
+        let screen = insert_cursor_marker(&self.screen, self.cursor_pos, "<CURSOR>");
         writeln!(f, "{screen}")?;
         write!(f, "--- 终端显示 ---")
     }
@@ -148,7 +148,7 @@ impl TerminalSnapshot {
 }
 
 // 在屏幕文本中插入光标位置标记
-fn insert_cursor_marker(screen: &str, cursor_pos: (u16, u16)) -> String {
+pub fn insert_cursor_marker(screen: &str, cursor_pos: (u16, u16), marker: &str) -> String {
     let (cursor_row, cursor_col) = cursor_pos;
     let cursor_row = cursor_row as usize;
     let cursor_col = cursor_col as usize;
@@ -167,12 +167,12 @@ fn insert_cursor_marker(screen: &str, cursor_pos: (u16, u16)) -> String {
 
         let before: String = chars[..col].iter().collect();
         let after: String = chars[col..].iter().collect();
-        lines[cursor_row] = format!("{}<CURSOR>{}", before, after);
+        lines[cursor_row] = format!("{}{marker}{}", before, after);
     } else {
         while lines.len() <= cursor_row {
             lines.push(String::new());
         }
-        lines[cursor_row] = "<CURSOR>".to_string();
+        lines[cursor_row] = marker.to_string();
     }
 
     lines.join("\n")

@@ -15,7 +15,7 @@ pub struct Tasks {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Task {
-    description: String,
+    pub description: String,
 }
 
 impl Tasks {
@@ -60,6 +60,14 @@ impl Tasks {
 
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
+    }
+
+    pub fn tasks(&self) -> impl Iterator<Item = (Uuid, &Task)> {
+        self.tasks.iter().map(|(id, task)| (*id, task))
+    }
+
+    pub fn working_task(&self) -> Option<Uuid> {
+        self.working_task
     }
 }
 
