@@ -17,6 +17,7 @@ pub struct DashboardState {
     pub pty_parser: Arc<Mutex<vt100::Parser>>,
     pub tasks: HashMap<Uuid, String>,
     pub working_task: Option<Uuid>,
+    pub trail: Vec<String>,
 }
 
 pub async fn run_tui_dashboard(
@@ -73,6 +74,13 @@ pub async fn run_tui_dashboard(
                 .wrap(Wrap { trim: true })
                 .block(Block::default().title("Tasks").borders(Borders::ALL));
             f.render_widget(tasks_widget, right_chunks[0]);
+
+            // 渲染最近的行动轨迹
+            let trail_display = state.trail.join("\n");
+            let trail_widget = Paragraph::new(trail_display)
+                .wrap(Wrap { trim: true })
+                .block(Block::default().title("Trail").borders(Borders::ALL));
+            f.render_widget(trail_widget, right_chunks[1]);
         })?;
     }
 
