@@ -1,6 +1,7 @@
 mod config;
 mod context;
 mod core;
+mod dashboard;
 mod embeding;
 mod emotion;
 mod memory;
@@ -16,8 +17,17 @@ use std::{env, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
 use crate::{
-    config::load_config, context::Context, core::Action, emotion::Emotion, memory::Memory,
-    providers::OpenAIClient, pty::Pty, snapshot::Snapshot, strategy::Strategy, tasks::Tasks,
+    config::load_config,
+    context::Context,
+    core::Action,
+    dashboard::{DashboardState, run_tui_dashboard},
+    emotion::Emotion,
+    memory::Memory,
+    providers::OpenAIClient,
+    pty::Pty,
+    snapshot::Snapshot,
+    strategy::Strategy,
+    tasks::Tasks,
 };
 
 pub const SYSTEM_PROMPT: &str = r#"你叫 Spinova，一个自主智能体。
@@ -72,18 +82,26 @@ async fn main() {
         pty,
     };
 
-    loop {
-        tokio::select! {
-            _ = spinova_loop(&mut context) => {},
-            _ = tokio::signal::ctrl_c() => {
-                context.shutdown().await;
-                break;
+    let (tx, mut rx) = tokio::sync::watch::channel(DashboardState::default());
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+
+    let agent_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = spinova_loop(&mut context, &tx) => {}
+                _ = &mut shutdown_rx => {
+                    context.shutdown().await;
+                    break;
+                }
             }
         }
-    }
+    });
+    run_tui_dashboard(&mut rx).await.unwrap();
+    let _ = shutdown_tx.send(());
+    let _ = agent_handle.await;
 }
 
-async fn spinova_loop(context: &mut Context) {
+async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<DashboardState>) {
     context
         .pty
         .wait_until_silent(Duration::from_secs(1), Duration::from_secs(3))
@@ -108,7 +126,17 @@ async fn spinova_loop(context: &mut Context) {
         .record(output.current_doing, output.description)
         .await;
     execute_action(context, output.action).await;
-    println!("{}", snapshot.to_string().trim());
+    tx.send(DashboardState {
+        pty_string: context.pty.screen_text(),
+        pty_cursor: context.pty.cursor_pos(),
+        tasks: context
+            .tasks
+            .tasks()
+            .map(|(id, task)| (id, task.description.clone()))
+            .collect(),
+        working_task: context.tasks.working_task(),
+    })
+    .unwrap();
 }
 
 async fn execute_action(context: &mut Context, action: Action) {
