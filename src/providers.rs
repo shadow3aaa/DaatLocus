@@ -92,7 +92,6 @@ impl LLM for OpenAIClient {
             .as_array()
             .unwrap();
         let arguments_str = tool_calls[0]["function"]["arguments"].as_str().unwrap();
-        eprintln!("LLM output: {arguments_str}");
         match serde_json::from_str(arguments_str) {
             Ok(o) => o,
             Err(e) => {
