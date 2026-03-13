@@ -2,6 +2,7 @@
 
 use crate::{
     config::Config,
+    core::LLM,
     emotion::Emotion,
     memory::Memory,
     pty::Pty,
@@ -9,6 +10,7 @@ use crate::{
 };
 
 pub struct Context {
+    pub llm: Box<dyn LLM + Send + Sync>,
     pub config: Config,
     pub memory: Memory,
     pub tasks: Tasks,
