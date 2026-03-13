@@ -90,6 +90,7 @@ async fn main() {
             .map(|(id, task)| (id, task.description.clone()))
             .collect(),
         working_task: context.tasks.working_task(),
+        trail: context.memory.trail(),
     });
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -141,6 +142,7 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
             .map(|(id, task)| (id, task.description.clone()))
             .collect();
         state.working_task = context.tasks.working_task();
+        state.trail = context.memory.trail();
     });
 }
 
