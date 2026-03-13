@@ -6,7 +6,7 @@ use crossterm::event::{Event, KeyCode};
 use parking_lot::Mutex;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use tui_term::widget::PseudoTerminal;
 use uuid::Uuid;
@@ -70,6 +70,7 @@ pub async fn run_tui_dashboard(
                 .collect::<Vec<String>>()
                 .join("\n");
             let tasks_widget = Paragraph::new(tasks_display)
+                .wrap(Wrap { trim: true })
                 .block(Block::default().title("Tasks").borders(Borders::ALL));
             f.render_widget(tasks_widget, right_chunks[0]);
         })?;
