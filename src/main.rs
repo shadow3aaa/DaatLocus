@@ -6,6 +6,7 @@ mod emotion;
 mod memory;
 mod pty;
 mod snapshot;
+mod strategy;
 mod system_info;
 mod tasks;
 
@@ -13,7 +14,7 @@ use std::{env, path::PathBuf};
 
 use crate::{
     config::load_config, context::Context, emotion::Emotion, memory::Memory, pty::Pty,
-    snapshot::Snapshot, tasks::Tasks,
+    snapshot::Snapshot, strategy::Strategy, tasks::Tasks,
 };
 
 #[tokio::main]
@@ -50,6 +51,14 @@ async fn main() {
 
 async fn spinova_loop(context: &mut Context) {
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    match Strategy::route(context) {
+        Strategy::ExecuteTask => {
+            // todo
+        }
+        Strategy::ExploreNewTasks => {
+            // todo
+        }
+    }
     let snapshot = Snapshot::new(context).await;
     println!("{snapshot}");
 }
