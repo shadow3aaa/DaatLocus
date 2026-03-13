@@ -2,6 +2,13 @@
 
 自用通用ai agent。
 
+# 运行
+
+```bash
+sudo apt install protobuf-compiler
+cargo run
+```
+
 ## 架构
 
 ```mermaid
