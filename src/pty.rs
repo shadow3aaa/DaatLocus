@@ -104,6 +104,10 @@ impl Pty {
         }
     }
 
+    pub fn screen(&self) -> vt100::Screen {
+        self.parser.lock().screen().clone()
+    }
+
     pub fn screen_text(&self) -> String {
         let lock = self.parser.lock();
         let screen = lock.screen();

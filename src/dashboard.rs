@@ -7,14 +7,13 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Paragraph},
 };
+use tui_term::widget::PseudoTerminal;
 use uuid::Uuid;
 
 use crate::snapshot::insert_cursor_marker;
 
-#[derive(Clone, Default)]
 pub struct DashboardState {
-    pub pty_string: String,
-    pub pty_cursor: (u16, u16),
+    pub pty_screen: vt100::Screen,
     pub tasks: HashMap<Uuid, String>,
     pub working_task: Option<Uuid>,
 }
@@ -37,7 +36,7 @@ pub async fn run_tui_dashboard(
             }
         }
 
-        let state = rx.borrow().clone();
+        let state = rx.borrow();
 
         terminal.draw(|f| {
             let chunks = Layout::default()
@@ -51,8 +50,7 @@ pub async fn run_tui_dashboard(
                 .split(chunks[1]);
 
             // 渲染虚拟终端
-            let pty_screen = insert_cursor_marker(&state.pty_string, state.pty_cursor, "|");
-            let pty_widget = Paragraph::new(pty_screen)
+            let pty_widget = PseudoTerminal::new(&state.pty_screen)
                 .block(Block::default().title("Terminal").borders(Borders::ALL));
             f.render_widget(pty_widget, chunks[0]);
 

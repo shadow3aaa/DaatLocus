@@ -82,7 +82,15 @@ async fn main() {
         pty,
     };
 
-    let (tx, mut rx) = tokio::sync::watch::channel(DashboardState::default());
+    let (tx, mut rx) = tokio::sync::watch::channel(DashboardState {
+        pty_screen: context.pty.screen(),
+        tasks: context
+            .tasks
+            .tasks()
+            .map(|(id, task)| (id, task.description.clone()))
+            .collect(),
+        working_task: context.tasks.working_task(),
+    });
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 
     let agent_handle = tokio::spawn(async move {
@@ -127,8 +135,7 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
         .await;
     execute_action(context, output.action).await;
     tx.send(DashboardState {
-        pty_string: context.pty.screen_text(),
-        pty_cursor: context.pty.cursor_pos(),
+        pty_screen: context.pty.screen(),
         tasks: context
             .tasks
             .tasks()
