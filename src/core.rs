@@ -2,7 +2,11 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{context::Context, snapshot::Snapshot};
+use crate::{
+    context::Context,
+    device::{DeviceAction, DeviceId},
+    snapshot::Snapshot,
+};
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type")]
@@ -10,8 +14,10 @@ use crate::{context::Context, snapshot::Snapshot};
 /// 1. TaskAdd
 /// 2. TaskDelete
 /// 3. TaskSelect
-/// 4. TerminalInput
-/// 5. Wait
+/// 4. FocusDevice
+/// 5. PutAwayDevice
+/// 6. DeviceAction
+/// 7. Wait
 pub enum Action {
     /// TaskAdd: 添加一个新的任务
     TaskAdd {
@@ -28,12 +34,19 @@ pub enum Action {
         /// 任务的id
         task_id: String,
     },
-    /// TerminalInput: 输入终端
-    TerminalInput {
-        /// 输入终端的内容
-        text: String,
+    /// FocusDevice: 将某个设备切到前景
+    FocusDevice {
+        /// 设备id
+        device: DeviceId,
     },
-    /// 不进行操作，不思观望
+    /// PutAwayDevice: 将当前前景设备放回后台
+    PutAwayDevice,
+    /// DeviceAction: 对当前前景设备执行动作
+    DeviceAction {
+        /// 设备动作
+        action: DeviceAction,
+    },
+    /// Wait: 不进行操作，不思观望
     Wait,
 }
 

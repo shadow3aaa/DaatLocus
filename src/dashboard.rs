@@ -11,8 +11,6 @@ use ratatui::{
 use tui_term::widget::PseudoTerminal;
 use uuid::Uuid;
 
-use crate::snapshot::insert_cursor_marker;
-
 pub struct DashboardState {
     pub pty_parser: Arc<Mutex<vt100::Parser>>,
     pub tasks: HashMap<Uuid, String>,
