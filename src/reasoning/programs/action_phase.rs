@@ -5,6 +5,7 @@ use crate::{
         ir::PromptIR,
         program::Program,
         prompts::{SYSTEM_PROMPT, build_device_context_prompt},
+        signature::Signature,
     },
     snapshot::Snapshot,
 };
@@ -85,6 +86,32 @@ impl Program for ActionPhaseProgram {
 
     fn description(&self) -> &'static str {
         "根据当前阶段和完整快照，输出下一步全局动作。"
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::new("基于当前阶段、设备上下文和完整快照，选择一条最合适的全局动作。")
+            .input(
+                "阶段",
+                "当前推理阶段，例如处理提醒、执行下一步动作、为项目规划下一步、探索新任务。",
+            )
+            .input("设备上下文", "当前前景设备、可操作约束和后台提醒摘要。")
+            .input(
+                "完整快照",
+                "世界状态的完整文本视图，包含记忆、义务、项目、下一步动作和设备画面。",
+            )
+            .output(
+                "observation",
+                "本轮从快照中提炼出的具体事实、结论或新信息。",
+            )
+            .output(
+                "description",
+                "为何选择该动作，以及它与当前阶段目标的关系。",
+            )
+            .output("current_doing", "正在持续推进的高层行为。")
+            .output("action", "一条合法的全局动作，必须能直接交给执行层处理。")
+            .rule("输出必须与当前阶段目标一致，不要越阶段做无关决策。")
+            .rule("优先使用快照中出现的 UUID 作为 task_id、obligation_id、project_id。")
+            .rule("不要把动作 bookkeeping 解释成 observation；observation 必须包含环境事实。")
     }
 
     fn build_ir(&self, context: &Context, snapshot: &Snapshot) -> PromptIR {
