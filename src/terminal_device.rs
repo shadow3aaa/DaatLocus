@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use miette::Result;
+use miette::{Result, bail};
 use parking_lot::Mutex;
 
 use crate::{
@@ -63,6 +63,9 @@ impl Device for TerminalDevice {
             DeviceAction::TerminalInput { text } => {
                 self.pty.write(&text);
                 Ok(())
+            }
+            DeviceAction::TelegramSelectChat { .. } | DeviceAction::TelegramSendMessage { .. } => {
+                bail!("telegram action is not supported by Terminal")
             }
         }
     }

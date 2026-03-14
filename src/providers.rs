@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::{
-    SYSTEM_PROMPT, TERMINAL_PROMPT,
+    SYSTEM_PROMPT, TELEGRAM_PROMPT, TERMINAL_PROMPT,
     config::Config,
     context::Context,
     core::{LLM, Output},
@@ -45,7 +45,10 @@ impl LLM for OpenAIClient {
         let url = self.url();
         let temperature = context.config.main_model.temperature;
         let output_schema = serde_json::to_value(schemars::schema_for!(Output)).unwrap();
-        let system_prompt = format!("{} \n {}", SYSTEM_PROMPT, TERMINAL_PROMPT);
+        let system_prompt = format!(
+            "{} \n {} \n {}",
+            SYSTEM_PROMPT, TERMINAL_PROMPT, TELEGRAM_PROMPT
+        );
         let payload = json!({
             "model": self.model,
             "messages": [

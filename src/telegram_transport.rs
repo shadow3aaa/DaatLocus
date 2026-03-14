@@ -1,0 +1,255 @@
+use std::{collections::HashSet, time::Duration};
+
+use miette::{Result, bail, miette};
+use reqwest::Client;
+use serde::Deserialize;
+
+use crate::{config::TelegramConfig, telegram_device::TelegramDeviceHandle};
+
+pub struct TelegramTransport {
+    client: Client,
+    config: TelegramConfig,
+    allowed_chat_ids: HashSet<i64>,
+    handle: TelegramDeviceHandle,
+    offset: Option<i64>,
+}
+
+impl TelegramTransport {
+    pub fn new(config: TelegramConfig, handle: TelegramDeviceHandle) -> Self {
+        let allowed_chat_ids = config.allowed_chat_ids.iter().copied().collect();
+        Self {
+            client: Client::new(),
+            config,
+            allowed_chat_ids,
+            handle,
+            offset: None,
+        }
+    }
+
+    pub async fn run(mut self) {
+        loop {
+            if let Err(err) = self.run_once().await {
+                eprintln!("telegram transport error: {err:?}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
+
+    async fn run_once(&mut self) -> Result<()> {
+        self.flush_outbox().await?;
+        let updates = self.get_updates().await?;
+        for update in updates {
+            self.offset = Some(update.update_id + 1);
+            self.handle_update(update);
+        }
+        self.flush_outbox().await?;
+        Ok(())
+    }
+
+    async fn flush_outbox(&mut self) -> Result<()> {
+        while let Some(message) = self.handle.take_next_outbound() {
+            let chat_id = message
+                .chat_id
+                .parse::<i64>()
+                .map_err(|err| miette!("invalid telegram chat id {}: {err}", message.chat_id))?;
+            if !self.allowed_chat_ids.contains(&chat_id) {
+                self.handle.mark_outgoing_failed(
+                    &message.local_message_id,
+                    "chat is not in telegram whitelist",
+                );
+                continue;
+            }
+
+            match self.send_message(chat_id, &message.text).await {
+                Ok(()) => self.handle.mark_outgoing_delivered(&message.local_message_id),
+                Err(err) => self.handle.mark_outgoing_failed(
+                    &message.local_message_id,
+                    truncate_reason(&format!("{err:?}")),
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_update(&self, update: TelegramUpdate) {
+        let Some(message) = update.message else {
+            return;
+        };
+        if !self.allowed_chat_ids.contains(&message.chat.id) {
+            return;
+        }
+
+        let text = extract_message_text(&message);
+        let sender = message
+            .from
+            .as_ref()
+            .map(render_user_name)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| render_chat_title(&message.chat));
+        let chat_title = render_chat_title(&message.chat);
+        self.handle
+            .ingest_incoming_message(message.chat.id.to_string(), chat_title, sender, text);
+    }
+
+    async fn get_updates(&self) -> Result<Vec<TelegramUpdate>> {
+        let url = self.endpoint("getUpdates");
+        let response = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({
+                "offset": self.offset,
+                "timeout": self.config.poll_timeout_secs,
+                "allowed_updates": ["message"],
+            }))
+            .send()
+            .await
+            .map_err(|err| miette!("telegram getUpdates request failed: {err}"))?
+            .error_for_status()
+            .map_err(|err| miette!("telegram getUpdates http error: {err}"))?;
+
+        let payload: TelegramApiResponse<Vec<TelegramUpdate>> = response
+            .json()
+            .await
+            .map_err(|err| miette!("telegram getUpdates json decode failed: {err}"))?;
+        if payload.ok {
+            Ok(payload.result)
+        } else {
+            bail!(
+                "telegram getUpdates failed: {}",
+                payload
+                    .description
+                    .unwrap_or_else(|| "unknown api error".to_string())
+            );
+        }
+    }
+
+    async fn send_message(&self, chat_id: i64, text: &str) -> Result<()> {
+        let url = self.endpoint("sendMessage");
+        let response = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "text": text,
+            }))
+            .send()
+            .await
+            .map_err(|err| miette!("telegram sendMessage request failed: {err}"))?
+            .error_for_status()
+            .map_err(|err| miette!("telegram sendMessage http error: {err}"))?;
+
+        let payload: TelegramApiResponse<serde_json::Value> = response
+            .json()
+            .await
+            .map_err(|err| miette!("telegram sendMessage json decode failed: {err}"))?;
+        if payload.ok {
+            Ok(())
+        } else {
+            bail!(
+                "telegram sendMessage failed: {}",
+                payload
+                    .description
+                    .unwrap_or_else(|| "unknown api error".to_string())
+            );
+        }
+    }
+
+    fn endpoint(&self, method: &str) -> String {
+        format!(
+            "https://api.telegram.org/bot{}/{}",
+            self.config.bot_token, method
+        )
+    }
+}
+
+#[derive(Deserialize)]
+struct TelegramApiResponse<T> {
+    ok: bool,
+    result: T,
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TelegramUpdate {
+    update_id: i64,
+    message: Option<TelegramIncomingMessage>,
+}
+
+#[derive(Deserialize)]
+struct TelegramIncomingMessage {
+    chat: TelegramChat,
+    from: Option<TelegramUser>,
+    text: Option<String>,
+    caption: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TelegramChat {
+    id: i64,
+    title: Option<String>,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    username: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TelegramUser {
+    first_name: Option<String>,
+    last_name: Option<String>,
+    username: Option<String>,
+}
+
+fn extract_message_text(message: &TelegramIncomingMessage) -> String {
+    message
+        .text
+        .as_deref()
+        .or(message.caption.as_deref())
+        .unwrap_or("[unsupported non-text message]")
+        .to_string()
+}
+
+fn render_chat_title(chat: &TelegramChat) -> String {
+    if let Some(title) = chat.title.as_deref() {
+        return title.to_string();
+    }
+    render_name_parts(
+        chat.first_name.as_deref(),
+        chat.last_name.as_deref(),
+        chat.username.as_deref(),
+    )
+}
+
+fn render_user_name(user: &TelegramUser) -> String {
+    render_name_parts(
+        user.first_name.as_deref(),
+        user.last_name.as_deref(),
+        user.username.as_deref(),
+    )
+}
+
+fn render_name_parts(first: Option<&str>, last: Option<&str>, username: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(first) = first.filter(|s| !s.trim().is_empty()) {
+        parts.push(first.trim().to_string());
+    }
+    if let Some(last) = last.filter(|s| !s.trim().is_empty()) {
+        parts.push(last.trim().to_string());
+    }
+    if !parts.is_empty() {
+        return parts.join(" ");
+    }
+    if let Some(username) = username.filter(|s| !s.trim().is_empty()) {
+        return format!("@{}", username.trim());
+    }
+    "Unknown".to_string()
+}
+
+fn truncate_reason(text: &str) -> String {
+    let mut chars = text.chars();
+    let preview = chars.by_ref().take(96).collect::<String>();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}

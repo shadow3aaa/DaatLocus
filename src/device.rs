@@ -8,12 +8,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
 pub enum DeviceId {
     Terminal,
+    Telegram,
 }
 
 impl Display for DeviceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Terminal => write!(f, "Terminal"),
+            Self::Telegram => write!(f, "Telegram"),
         }
     }
 }
@@ -54,7 +56,16 @@ pub struct FocusedRender {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum DeviceAction {
+    /// 将文本输入到终端并由 PTY 原样接收
     TerminalInput {
+        text: String,
+    },
+    /// 打开 Telegram 的某个会话
+    TelegramSelectChat {
+        chat_id: String,
+    },
+    /// 向当前打开的 Telegram 会话发送一条消息
+    TelegramSendMessage {
         text: String,
     },
 }
