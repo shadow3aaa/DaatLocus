@@ -2,6 +2,7 @@
 
 use std::{collections::HashMap, fmt::Display};
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -18,6 +19,8 @@ pub struct Task {
     pub description: String,
     #[serde(default)]
     pub project_id: Option<Uuid>,
+    #[serde(default)]
+    pub last_touched_at_ms: Option<i64>,
 }
 
 impl Tasks {
@@ -33,6 +36,7 @@ impl Tasks {
     pub fn select_working_task(&mut self, id: Uuid) -> Option<&Task> {
         if self.tasks.contains_key(&id) {
             self.working_task = Some(id);
+            self.touch_task(id);
             self.tasks.get(&id)
         } else {
             None
@@ -50,6 +54,7 @@ impl Tasks {
             Task {
                 description,
                 project_id,
+                last_touched_at_ms: None,
             },
         );
         id
@@ -93,6 +98,18 @@ impl Tasks {
 
     pub fn working_task(&self) -> Option<Uuid> {
         self.working_task
+    }
+
+    pub fn touch_working_task(&mut self) {
+        if let Some(id) = self.working_task {
+            self.touch_task(id);
+        }
+    }
+
+    fn touch_task(&mut self, id: Uuid) {
+        if let Some(task) = self.tasks.get_mut(&id) {
+            task.last_touched_at_ms = Some(Utc::now().timestamp_millis());
+        }
     }
 }
 

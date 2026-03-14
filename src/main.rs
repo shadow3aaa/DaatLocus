@@ -22,6 +22,7 @@ mod terminal_device;
 
 use std::{env, path::PathBuf, time::Duration};
 
+use chrono::{Local, TimeZone};
 use miette::miette;
 use uuid::Uuid;
 
@@ -29,7 +30,7 @@ use crate::{
     config::load_config,
     context::Context,
     core::{Action, TelegramResolution},
-    dashboard::{DashboardState, run_tui_dashboard},
+    dashboard::{DashboardState, DashboardTaskEntry, run_tui_dashboard},
     device::{DeviceId, DeviceManager},
     emotion::Emotion,
     memory::Memory,
@@ -270,7 +271,8 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
         .await;
     let snapshot = Snapshot::new(context).await;
     let renderer = OpenAIToolRenderer;
-    let output = match Strategy::route(context) {
+    let strategy = Strategy::route(context);
+    let output = match strategy {
         Strategy::AttendNotifications => {
             if context.telegram.has_pending_resolution() {
                 let program = ResolveTelegramChatProgram;
@@ -369,6 +371,9 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
         .record(output.current_doing, output.observation, output.description)
         .await;
     execute_action(context, output.action).await;
+    if matches!(strategy, Strategy::ExecuteTask) {
+        context.tasks.touch_working_task();
+    }
     sync_dashboard_state(context, tx);
 }
 
@@ -546,17 +551,59 @@ fn render_projects_for_dashboard(context: &Context) -> Vec<String> {
         .collect()
 }
 
-fn render_task_for_dashboard(task: &crate::tasks::Task, context: &Context) -> String {
-    let Some(project_id) = task.project_id else {
-        return task.description.clone();
+fn render_task_for_dashboard(task: &crate::tasks::Task, context: &Context) -> DashboardTaskEntry {
+    let description_tail = truncate_from_left(&task.description, 42);
+    let last_touched = format_last_touched(task.last_touched_at_ms);
+
+    let display = match task.project_id {
+        Some(project_id) => {
+            let project_title = context
+                .projects
+                .projects()
+                .find(|(id, _)| *id == project_id)
+                .map(|(_, project)| project.title.clone())
+                .unwrap_or_else(|| project_id.to_string());
+            format!(
+                "{description_tail}\n  上次处理: {last_touched} | 项目: {}",
+                truncate_from_left(&project_title, 18)
+            )
+        }
+        None => format!("{description_tail}\n  上次处理: {last_touched}"),
     };
-    let project_title = context
-        .projects
-        .projects()
-        .find(|(id, _)| *id == project_id)
-        .map(|(_, project)| project.title.clone())
-        .unwrap_or_else(|| project_id.to_string());
-    format!("{} [project: {}]", task.description, project_title)
+
+    DashboardTaskEntry {
+        display,
+        last_touched_at_ms: task.last_touched_at_ms,
+    }
+}
+
+fn format_last_touched(last_touched_at_ms: Option<i64>) -> String {
+    let Some(timestamp_ms) = last_touched_at_ms else {
+        return "未处理".to_string();
+    };
+
+    let Some(datetime) = Local.timestamp_millis_opt(timestamp_ms).single() else {
+        return "时间无效".to_string();
+    };
+
+    let now = Local::now();
+    if now.date_naive() == datetime.date_naive() {
+        datetime.format("%H:%M:%S").to_string()
+    } else {
+        datetime.format("%m-%d %H:%M").to_string()
+    }
+}
+
+fn truncate_from_left(text: &str, max_chars: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+
+    let tail = chars[chars.len().saturating_sub(max_chars - 1)..]
+        .iter()
+        .collect::<String>();
+    format!("…{tail}")
 }
 
 fn normalize_reference(reference: &str) -> String {
