@@ -12,7 +12,8 @@ use super::{
         action_phase::{ActionPhase, ActionPhaseProgram},
         resolve_telegram::ResolveTelegramChatProgram,
     },
-    runtime::execute_program_with_ir,
+    runtime::execute_program_with_ir_report,
+    trace_mining::derive_resolve_telegram_eval_cases,
 };
 
 pub struct EvalCase<O> {
@@ -26,6 +27,7 @@ pub struct EvalCaseResult {
     pub case_name: &'static str,
     pub passed: bool,
     pub detail: String,
+    pub attempts_used: usize,
 }
 
 pub async fn run_reasoning_eval(context: &Context) -> Result<Vec<EvalCaseResult>> {
@@ -33,13 +35,15 @@ pub async fn run_reasoning_eval(context: &Context) -> Result<Vec<EvalCaseResult>
     let mut results = Vec::new();
 
     let resolve_program = ResolveTelegramChatProgram;
+    let mut resolve_cases = resolve_program.eval_cases();
+    resolve_cases.extend(derive_resolve_telegram_eval_cases(&resolve_program));
     results.extend(
         run_suite(
             context,
             &renderer,
             &resolve_program,
             "resolve_telegram_chat",
-            resolve_program.eval_cases(),
+            resolve_cases,
         )
         .await,
     );
@@ -69,7 +73,7 @@ async fn run_suite<P: Program>(
     let mut results = Vec::new();
 
     for case in cases {
-        let result = match execute_program_with_ir(
+        let result = match execute_program_with_ir_report(
             context.llm.as_ref(),
             context,
             renderer,
@@ -79,18 +83,20 @@ async fn run_suite<P: Program>(
         )
         .await
         {
-            Ok(output) => match case.check.as_ref()(&output) {
+            Ok(outcome) => match case.check.as_ref()(&outcome.output) {
                 Ok(()) => EvalCaseResult {
                     suite: suite_name.to_string(),
                     case_name: case.name,
                     passed: true,
                     detail: "passed".to_string(),
+                    attempts_used: outcome.attempts_used,
                 },
                 Err(err) => EvalCaseResult {
                     suite: suite_name.to_string(),
                     case_name: case.name,
                     passed: false,
                     detail: format!("metric failed: {err}"),
+                    attempts_used: outcome.attempts_used,
                 },
             },
             Err(err) => EvalCaseResult {
@@ -98,6 +104,7 @@ async fn run_suite<P: Program>(
                 case_name: case.name,
                 passed: false,
                 detail: format!("program failed: {err}"),
+                attempts_used: 2,
             },
         };
 
@@ -118,7 +125,7 @@ pub async fn run_suite_with_tuning<P: Program>(
     let mut results = Vec::new();
 
     for case in cases {
-        let result = match execute_program_with_ir(
+        let result = match execute_program_with_ir_report(
             context.llm.as_ref(),
             context,
             renderer,
@@ -128,18 +135,20 @@ pub async fn run_suite_with_tuning<P: Program>(
         )
         .await
         {
-            Ok(output) => match case.check.as_ref()(&output) {
+            Ok(outcome) => match case.check.as_ref()(&outcome.output) {
                 Ok(()) => EvalCaseResult {
                     suite: suite_name.to_string(),
                     case_name: case.name,
                     passed: true,
                     detail: "passed".to_string(),
+                    attempts_used: outcome.attempts_used,
                 },
                 Err(err) => EvalCaseResult {
                     suite: suite_name.to_string(),
                     case_name: case.name,
                     passed: false,
                     detail: format!("metric failed: {err}"),
+                    attempts_used: outcome.attempts_used,
                 },
             },
             Err(err) => EvalCaseResult {
@@ -147,6 +156,7 @@ pub async fn run_suite_with_tuning<P: Program>(
                 case_name: case.name,
                 passed: false,
                 detail: format!("program failed: {err}"),
+                attempts_used: 2,
             },
         };
 
