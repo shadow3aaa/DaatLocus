@@ -118,9 +118,10 @@ pub async fn run_tui_dashboard(
             f.render_widget(projects_widget, right_chunks[1]);
 
             // 渲染任务
-            let tasks_display = state
-                .tasks
-                .iter()
+            let mut task_items = state.tasks.iter().collect::<Vec<_>>();
+            task_items.sort_by_key(|(id, _)| id.to_string());
+            let tasks_display = task_items
+                .into_iter()
                 .map(|(id, desc)| {
                     if Some(*id) == state.working_task {
                         format!("> {desc}")
@@ -146,7 +147,14 @@ pub async fn run_tui_dashboard(
             f.render_widget(access_widget, right_chunks[3]);
 
             // 渲染最近的行动轨迹
-            let trail_display = state.trail.join("\n");
+            let trail_display = state
+                .trail
+                .iter()
+                .rev()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
             let trail_widget = Paragraph::new(trail_display)
                 .wrap(Wrap { trim: true })
                 .block(Block::default().title("Trail").borders(Borders::ALL));
