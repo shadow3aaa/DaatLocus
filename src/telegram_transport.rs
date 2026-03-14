@@ -1,26 +1,33 @@
-use std::{collections::HashSet, time::Duration};
+use std::time::Duration;
 
 use miette::{Result, bail, miette};
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::{config::TelegramConfig, telegram_device::TelegramDeviceHandle};
+use crate::{
+    config::TelegramConfig,
+    telegram_acl::{AccessDecision, TelegramAclHandle},
+    telegram_device::TelegramDeviceHandle,
+};
 
 pub struct TelegramTransport {
     client: Client,
     config: TelegramConfig,
-    allowed_chat_ids: HashSet<i64>,
+    acl: TelegramAclHandle,
     handle: TelegramDeviceHandle,
     offset: Option<i64>,
 }
 
 impl TelegramTransport {
-    pub fn new(config: TelegramConfig, handle: TelegramDeviceHandle) -> Self {
-        let allowed_chat_ids = config.allowed_chat_ids.iter().copied().collect();
+    pub fn new(
+        config: TelegramConfig,
+        handle: TelegramDeviceHandle,
+        acl: TelegramAclHandle,
+    ) -> Self {
         Self {
             client: Client::new(),
             config,
-            allowed_chat_ids,
+            acl,
             handle,
             offset: None,
         }
@@ -52,10 +59,10 @@ impl TelegramTransport {
                 .chat_id
                 .parse::<i64>()
                 .map_err(|err| miette!("invalid telegram chat id {}: {err}", message.chat_id))?;
-            if !self.allowed_chat_ids.contains(&chat_id) {
+            if self.acl.classify(chat_id) != AccessDecision::Approved {
                 self.handle.mark_outgoing_failed(
                     &message.local_message_id,
-                    "chat is not in telegram whitelist",
+                    "chat is not approved in telegram acl",
                 );
                 continue;
             }
@@ -75,10 +82,6 @@ impl TelegramTransport {
         let Some(message) = update.message else {
             return;
         };
-        if !self.allowed_chat_ids.contains(&message.chat.id) {
-            return;
-        }
-
         let text = extract_message_text(&message);
         let sender = message
             .from
@@ -87,8 +90,29 @@ impl TelegramTransport {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| render_chat_title(&message.chat));
         let chat_title = render_chat_title(&message.chat);
-        self.handle
-            .ingest_incoming_message(message.chat.id.to_string(), chat_title, sender, text);
+
+        match self.acl.classify(message.chat.id) {
+            AccessDecision::Approved => {
+                self.handle.ingest_incoming_message(
+                    message.chat.id.to_string(),
+                    chat_title,
+                    sender,
+                    text,
+                );
+            }
+            AccessDecision::Blocked => return,
+            AccessDecision::Unknown => {
+                if let Err(err) = self.acl.register_pending(
+                    message.chat.id,
+                    chat_title,
+                    sender,
+                    truncate_reason(&text),
+                    chrono::Utc::now().timestamp_millis(),
+                ) {
+                    eprintln!("register pending telegram chat failed: {err:?}");
+                }
+            }
+        }
     }
 
     async fn get_updates(&self) -> Result<Vec<TelegramUpdate>> {

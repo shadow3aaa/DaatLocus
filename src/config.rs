@@ -53,7 +53,6 @@ impl Default for MainModelConfig {
 pub struct TelegramConfig {
     pub enabled: bool,
     pub bot_token: String,
-    pub allowed_chat_ids: Vec<i64>,
     pub poll_timeout_secs: u64,
 }
 
@@ -62,7 +61,6 @@ impl Default for TelegramConfig {
         Self {
             enabled: false,
             bot_token: "your-telegram-bot-token".to_string(),
-            allowed_chat_ids: Vec::new(),
             poll_timeout_secs: 30,
         }
     }

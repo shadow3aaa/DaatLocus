@@ -13,6 +13,7 @@ mod strategy;
 mod system_info;
 mod terminal_device;
 mod tasks;
+mod telegram_acl;
 mod telegram_device;
 mod telegram_transport;
 
@@ -33,6 +34,7 @@ use crate::{
     strategy::Strategy,
     terminal_device::TerminalDevice,
     tasks::Tasks,
+    telegram_acl::TelegramAclHandle,
     telegram_device::TelegramDevice,
     telegram_transport::TelegramTransport,
 };
@@ -56,7 +58,7 @@ pub const TELEGRAM_PROMPT: &str = r#"Telegram 设备使用提示：
 2. 如果你想查看某个会话，请输出 `DeviceAction` 来执行 `TelegramSelectChat`。
 3. 如果你想发送消息，请在 Telegram 设备处于前景且已经打开某个会话时，输出 `DeviceAction` 来执行 `TelegramSendMessage`。
 4. 当 Telegram transport 已配置时，白名单中的真实消息会进入该设备，且你的发送消息动作会真正发出。
-5. 只有白名单中的 chat 会出现在你的世界里。"#;
+5. 未审批的 chat 不会进入你的世界，只会等待人工审批。"#;
 const EXECUTE_TASK_INSTRUCTION: &str = r#"当前状态：任务执行阶段
 你的无聊度处于合理范围，你专注推进当前的任务。
 请根据快照状态，遵循以下指南选择你的 Action：
@@ -88,6 +90,7 @@ async fn main() {
     let memory = Memory::new().await;
     let tasks = Tasks::new().await;
     let emotion = Emotion::new().await;
+    let telegram_acl = TelegramAclHandle::load().await;
     let terminal = TerminalDevice::new();
     let telegram = TelegramDevice::new();
     let telegram_handle = telegram.handle();
@@ -100,7 +103,12 @@ async fn main() {
     .unwrap();
     let telegram_transport = if config.telegram.enabled && config.telegram.has_real_credentials() {
         Some(tokio::spawn(
-            TelegramTransport::new(config.telegram.clone(), telegram_handle).run(),
+            TelegramTransport::new(
+                config.telegram.clone(),
+                telegram_handle,
+                telegram_acl.clone(),
+            )
+            .run(),
         ))
     } else {
         None
@@ -138,7 +146,7 @@ async fn main() {
             }
         }
     });
-    run_tui_dashboard(&mut rx).await.unwrap();
+    run_tui_dashboard(&mut rx, telegram_acl).await.unwrap();
     if let Some(handle) = telegram_transport {
         handle.abort();
     }
