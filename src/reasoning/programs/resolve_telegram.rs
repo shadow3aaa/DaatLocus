@@ -9,6 +9,7 @@ use crate::{
         ir::PromptIR,
         program::Program,
         prompts::{SYSTEM_PROMPT, TELEGRAM_PROMPT},
+        signature::Signature,
     },
     snapshot::Snapshot,
 };
@@ -49,6 +50,24 @@ impl Program for ResolveTelegramChatProgram {
 
     fn description(&self) -> &'static str {
         "判断一条 Telegram 原始来信应如何处理，只允许输出与 Telegram 消息处理相关的局部动作。"
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::new("判断 Telegram 原始来信的处理方式，并只输出 Telegram 局部处理动作。")
+            .input("待判断会话", "仍显示“待判断：是”的 Telegram 会话列表。")
+            .input("当前前景设备", "当前是否已经聚焦 Telegram。")
+            .input("Telegram 设备约束", "Telegram 设备的可操作规则。")
+            .input("完整快照", "用于理解消息上下文、当前项目和任务状态。")
+            .output("observation", "从消息和快照中提炼出的关键信息。")
+            .output("description", "为何选择该 Telegram 局部动作。")
+            .output("current_doing", "正在处理哪类 Telegram 会话问题。")
+            .output(
+                "action",
+                "只能是 FocusTelegram、OpenChat、ResolveChat、ReplyInCurrentChat 或 Wait。",
+            )
+            .rule("不要在这个 program 里直接做项目 bookkeeping 或终端探索。")
+            .rule("只有明确接受未来持续工作时，才使用 AcceptAsProject。")
+            .rule("如果只差补发消息，不要重新做语义判定。")
     }
 
     fn build_ir(&self, context: &Context, snapshot: &Snapshot) -> PromptIR {
