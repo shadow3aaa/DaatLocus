@@ -117,7 +117,7 @@ pub enum Action {
 }
 
 /// LLM 输出
-#[derive(Deserialize, Serialize, JsonSchema)]
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
 pub struct Output {
     /// 你从当前快照、终端输出、消息内容、报错或文件内容中观察到并归纳出的关键信息。
     /// 必须写出具体得到的事实、结论或内容摘要，而不是只写“我看了某个文件/执行了某个命令”。

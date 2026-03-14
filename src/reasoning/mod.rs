@@ -1,7 +1,15 @@
+pub mod compiled;
+pub mod dataset_store;
+pub mod datasets;
+pub mod eval;
+pub mod examples;
 pub mod ir;
+pub mod optimize;
+pub mod optimizer;
 pub mod program;
 pub mod programs;
 pub mod prompts;
 pub mod render;
 pub mod runtime;
 pub mod signature;
+pub mod trace;

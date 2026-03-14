@@ -2,6 +2,8 @@ use crate::{
     context::Context,
     core::Output,
     reasoning::{
+        datasets::action_phase as dataset,
+        examples::ProgramExample,
         ir::PromptIR,
         program::Program,
         prompts::{SYSTEM_PROMPT, build_device_context_prompt},
@@ -10,6 +12,7 @@ use crate::{
     snapshot::Snapshot,
 };
 
+#[derive(Clone, Copy)]
 pub enum ActionPhase {
     AttendNotifications,
     ExecuteTask,
@@ -24,6 +27,10 @@ pub struct ActionPhaseProgram {
 impl ActionPhaseProgram {
     pub fn new(phase: ActionPhase) -> Self {
         Self { phase }
+    }
+
+    pub fn phase(&self) -> ActionPhase {
+        self.phase
     }
 
     fn title(&self) -> &'static str {
@@ -75,6 +82,26 @@ impl ActionPhaseProgram {
             ],
         }
     }
+
+    pub fn dataset_ir(&self, device_context: String, snapshot_text: String) -> PromptIR {
+        let mut ir = PromptIR::with_system(SYSTEM_PROMPT);
+        for instruction in self.instructions() {
+            ir.push_instruction(instruction);
+        }
+        ir.push_section("当前阶段", self.title());
+        ir.push_section("设备上下文", device_context);
+        ir.push_section("完整快照", snapshot_text);
+        ir
+    }
+
+    pub fn eval_suite_name(&self) -> &'static str {
+        match self.phase {
+            ActionPhase::AttendNotifications => "action_phase.attend_notifications",
+            ActionPhase::ExecuteTask => "action_phase.execute_task",
+            ActionPhase::PlanFromProject => "action_phase.plan_from_project",
+            ActionPhase::ExploreNewTasks => "action_phase.explore_new_tasks",
+        }
+    }
 }
 
 impl Program for ActionPhaseProgram {
@@ -86,6 +113,10 @@ impl Program for ActionPhaseProgram {
 
     fn description(&self) -> &'static str {
         "根据当前阶段和完整快照，输出下一步全局动作。"
+    }
+
+    fn tuning_key(&self) -> String {
+        self.eval_suite_name().to_string()
     }
 
     fn signature(&self) -> Signature {
@@ -114,14 +145,17 @@ impl Program for ActionPhaseProgram {
             .rule("不要把动作 bookkeeping 解释成 observation；observation 必须包含环境事实。")
     }
 
+    fn examples(&self) -> Vec<ProgramExample<Self::Output>> {
+        dataset::examples(self.phase)
+    }
+
     fn build_ir(&self, context: &Context, snapshot: &Snapshot) -> PromptIR {
-        let mut ir = PromptIR::with_system(SYSTEM_PROMPT);
-        for instruction in self.instructions() {
-            ir.push_instruction(instruction);
-        }
-        ir.push_section("当前阶段", self.title());
-        ir.push_section("设备上下文", build_device_context_prompt(context));
-        ir.push_section("完整快照", snapshot.to_string());
-        ir
+        self.dataset_ir(build_device_context_prompt(context), snapshot.to_string())
+    }
+}
+
+impl ActionPhaseProgram {
+    pub fn eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<Output>> {
+        dataset::eval_cases(self)
     }
 }

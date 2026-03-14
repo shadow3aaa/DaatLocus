@@ -1,11 +1,13 @@
-#[derive(Clone, Default)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PromptIR {
     pub system: Vec<String>,
     pub instructions: Vec<String>,
     pub sections: Vec<PromptSection>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PromptSection {
     pub title: String,
     pub body: String,

@@ -37,6 +37,10 @@ use crate::{
     projects::{ProjectOrigin, Projects},
     providers::OpenAIClient,
     reasoning::{
+        compiled::CompiledPromptStore,
+        eval::run_reasoning_eval,
+        optimize::ensure_reasoning_compiled,
+        optimize::run_reasoning_optimize,
         programs::action_phase::{ActionPhase, ActionPhaseProgram},
         programs::resolve_telegram::{
             ResolveTelegramChatProgram, ResolveTelegramProgramAction, ResolveTelegramProgramOutput,
@@ -55,6 +59,7 @@ use crate::{
 
 #[tokio::main]
 async fn main() {
+    let args = env::args().skip(1).collect::<Vec<_>>();
     let config = match load_config().await {
         Ok(o) => o,
         Err(e) => {
@@ -62,6 +67,47 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    if is_reasoning_eval_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_reasoning_eval(&context).await {
+            Ok(results) => {
+                print_reasoning_eval_results(&results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if is_reasoning_optimize_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_reasoning_optimize(&context).await {
+            Ok(results) => {
+                print_reasoning_optimization_results(&results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let compiled_prompts = match prepare_compiled_prompts(&config).await {
+        Ok(store) => store,
+        Err(err) => {
+            eprintln!("{err:?}");
+            std::process::exit(1);
+        }
+    };
+
     let memory = Memory::new().await;
     let obligations = Obligations::new().await;
     let projects = Projects::new().await;
@@ -101,6 +147,7 @@ async fn main() {
         emotion,
         devices,
         telegram: telegram_handle,
+        compiled_prompts,
     };
 
     let (tx, mut rx) = tokio::sync::watch::channel(DashboardState {
@@ -134,6 +181,86 @@ async fn main() {
     }
     let _ = shutdown_tx.send(());
     let _ = agent_handle.await;
+}
+
+fn is_reasoning_eval_command(args: &[String]) -> bool {
+    matches!(args, [command, target] if command == "eval" && target == "reasoning")
+        || matches!(args, [command] if command == "eval-reasoning")
+}
+
+fn is_reasoning_optimize_command(args: &[String]) -> bool {
+    matches!(args, [command, target] if command == "optimize" && target == "reasoning")
+        || matches!(args, [command] if command == "optimize-reasoning")
+}
+
+async fn build_eval_context(config: crate::config::Config) -> Context {
+    let memory = Memory::new().await;
+    let obligations = Obligations::new().await;
+    let projects = Projects::new().await;
+    let tasks = Tasks::new().await;
+    let emotion = Emotion::new().await;
+    let terminal = TerminalDevice::new();
+    let telegram = TelegramDevice::new();
+    let telegram_handle = telegram.handle();
+    let devices = DeviceManager::new(
+        Some(DeviceId::Terminal),
+        vec![Box::new(terminal), Box::new(telegram)],
+    )
+    .await
+    .unwrap();
+    let client = OpenAIClient::new(&config);
+
+    Context {
+        llm: Box::new(client),
+        config,
+        memory,
+        obligations,
+        projects,
+        tasks,
+        emotion,
+        devices,
+        telegram: telegram_handle,
+        compiled_prompts: CompiledPromptStore::empty(),
+    }
+}
+
+async fn prepare_compiled_prompts(
+    config: &crate::config::Config,
+) -> miette::Result<CompiledPromptStore> {
+    let context = build_eval_context(config.clone()).await;
+    let compiled = ensure_reasoning_compiled(&context).await;
+    context.shutdown().await;
+    compiled.map(CompiledPromptStore::from_entries)
+}
+
+fn print_reasoning_eval_results(results: &[crate::reasoning::eval::EvalCaseResult]) {
+    let passed = results.iter().filter(|result| result.passed).count();
+    let failed = results.len().saturating_sub(passed);
+    println!(
+        "reasoning eval: total={} passed={} failed={}",
+        results.len(),
+        passed,
+        failed
+    );
+    for result in results {
+        let status = if result.passed { "PASS" } else { "FAIL" };
+        println!(
+            "[{}] {} / {} - {}",
+            status, result.suite, result.case_name, result.detail
+        );
+    }
+}
+
+fn print_reasoning_optimization_results(
+    results: &[crate::reasoning::optimizer::OptimizationResult],
+) {
+    println!("reasoning optimize:");
+    for result in results {
+        println!(
+            "- suite={} best_candidate={} score={}/{}",
+            result.suite, result.best_candidate, result.score, result.total_cases
+        );
+    }
 }
 
 async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<DashboardState>) {

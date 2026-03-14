@@ -1,4 +1,6 @@
-#[derive(Clone, Default)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Signature {
     pub objective: String,
     pub inputs: Vec<SignatureField>,
@@ -6,7 +8,7 @@ pub struct Signature {
     pub rules: Vec<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SignatureField {
     pub name: String,
     pub description: String,

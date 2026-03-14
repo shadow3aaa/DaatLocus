@@ -1,11 +1,17 @@
 use miette::{Result, miette};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{context::Context, core::LLM, snapshot::Snapshot};
 
-use super::{program::Program, render::Renderer};
+use super::{
+    optimizer::PromptTuningConfig,
+    program::Program,
+    render::Renderer,
+    trace::{ProgramTraceRecord, append_program_trace},
+};
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PromptRequest {
     pub tool_name: String,
     pub tool_description: String,
@@ -13,13 +19,13 @@ pub struct PromptRequest {
     pub messages: Vec<PromptMessage>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PromptMessage {
     pub role: PromptRole,
     pub content: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum PromptRole {
     System,
     User,
@@ -60,15 +66,53 @@ pub async fn execute_program<P: Program, R: Renderer>(
     program: &P,
 ) -> Result<P::Output> {
     let ir = program.build_ir(context, snapshot);
-    let mut request = renderer.render(program, ir);
-    let mut last_error = None;
+    let tuning = context
+        .compiled_prompts
+        .get_tuning(program)
+        .unwrap_or_else(|| program.default_tuning());
+    execute_program_with_ir(llm, context, renderer, program, ir, &tuning).await
+}
 
-    for _ in 0..2 {
+pub async fn execute_program_with_ir<P: Program, R: Renderer>(
+    llm: &(dyn LLM + Send + Sync),
+    context: &Context,
+    renderer: &R,
+    program: &P,
+    ir: super::ir::PromptIR,
+    tuning: &PromptTuningConfig<P::Output>,
+) -> Result<P::Output> {
+    let mut request = renderer.render(program, ir, tuning);
+    let mut last_error = None;
+    let signature = program.signature();
+
+    for attempt in 0..2 {
         let value = llm.run_json(context, request.clone()).await;
-        match serde_json::from_value::<P::Output>(value) {
-            Ok(output) => return Ok(output),
+        match serde_json::from_value::<P::Output>(value.clone()) {
+            Ok(output) => {
+                append_program_trace(ProgramTraceRecord::new(
+                    program.name(),
+                    attempt + 1,
+                    signature.clone(),
+                    request.clone(),
+                    value,
+                    serde_json::to_value(&output).ok(),
+                    None,
+                ))
+                .await;
+                return Ok(output);
+            }
             Err(err) => {
                 last_error = Some(err.to_string());
+                append_program_trace(ProgramTraceRecord::new(
+                    program.name(),
+                    attempt + 1,
+                    signature.clone(),
+                    request.clone(),
+                    value,
+                    None,
+                    Some(err.to_string()),
+                ))
+                .await;
                 request = request.with_retry_note(err.to_string());
             }
         }

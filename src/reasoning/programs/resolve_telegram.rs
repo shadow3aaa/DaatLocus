@@ -6,6 +6,8 @@ use crate::{
     core::TelegramResolution,
     device::DeviceId,
     reasoning::{
+        datasets::resolve_telegram as dataset,
+        examples::ProgramExample,
         ir::PromptIR,
         program::Program,
         prompts::{SYSTEM_PROMPT, TELEGRAM_PROMPT},
@@ -70,7 +72,38 @@ impl Program for ResolveTelegramChatProgram {
             .rule("如果只差补发消息，不要重新做语义判定。")
     }
 
+    fn examples(&self) -> Vec<ProgramExample<Self::Output>> {
+        dataset::examples()
+    }
+
     fn build_ir(&self, context: &Context, snapshot: &Snapshot) -> PromptIR {
+        let pending_resolution = context.telegram.pending_resolution_refs();
+        let pending_text = if pending_resolution.is_empty() {
+            "当前没有待判断的 Telegram 会话。".to_string()
+        } else {
+            pending_resolution
+                .into_iter()
+                .map(|(chat_id, title)| format!("- {title} ({chat_id})"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let focus = match context.devices.focused() {
+            Some(DeviceId::Telegram) => "Telegram",
+            Some(DeviceId::Terminal) => "Terminal",
+            None => "None",
+        };
+        self.dataset_ir(pending_text, focus.to_string(), snapshot.to_string())
+    }
+}
+
+impl ResolveTelegramChatProgram {
+    pub fn dataset_ir(
+        &self,
+        pending_text: String,
+        focus: String,
+        snapshot_text: String,
+    ) -> PromptIR {
         let mut ir = PromptIR::with_system(SYSTEM_PROMPT);
         ir.push_instruction(
             "你现在只负责处理 Telegram 原始来信，不要规划终端探索，也不要处理无关任务。",
@@ -89,27 +122,16 @@ impl Program for ResolveTelegramChatProgram {
         ir.push_instruction(
             "不要输出项目 bookkeeping；系统会根据你的 `TelegramResolution` 自动创建项目和第一条下一步动作。",
         );
-
-        let pending_resolution = context.telegram.pending_resolution_refs();
-        let pending_text = if pending_resolution.is_empty() {
-            "当前没有待判断的 Telegram 会话。".to_string()
-        } else {
-            pending_resolution
-                .into_iter()
-                .map(|(chat_id, title)| format!("- {title} ({chat_id})"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
         ir.push_section("待判断会话", pending_text);
-
-        let focus = match context.devices.focused() {
-            Some(DeviceId::Telegram) => "Telegram",
-            Some(DeviceId::Terminal) => "Terminal",
-            None => "None",
-        };
         ir.push_section("当前前景设备", focus);
         ir.push_section("Telegram 设备约束", TELEGRAM_PROMPT);
-        ir.push_section("完整快照", snapshot.to_string());
+        ir.push_section("完整快照", snapshot_text);
         ir
+    }
+
+    pub fn eval_cases(
+        &self,
+    ) -> Vec<crate::reasoning::eval::EvalCase<ResolveTelegramProgramOutput>> {
+        dataset::eval_cases(self)
     }
 }
