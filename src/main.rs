@@ -59,6 +59,14 @@ pub const TELEGRAM_PROMPT: &str = r#"Telegram 设备使用提示：
 3. 如果你想发送消息，请在 Telegram 设备处于前景且已经打开某个会话时，输出 `DeviceAction` 来执行 `TelegramSendMessage`。
 4. 当 Telegram transport 已配置时，白名单中的真实消息会进入该设备，且你的发送消息动作会真正发出。
 5. 未审批的 chat 不会进入你的世界，只会等待人工审批。"#;
+const ATTEND_NOTIFICATIONS_INSTRUCTION: &str = r#"当前状态：【处理设备提醒阶段】
+后台设备出现了需要优先处理的提醒。此阶段的优先级高于你的探索任务和当前终端工作。
+请根据快照状态，遵循以下指南选择你的 Action：
+1. 找出后台提醒最强、最需要尽快处理的设备。如果该设备当前不在前景，请优先输出 `FocusDevice` 将它切到前景。
+2. 如果 Telegram 处于前景且显示有未读消息，请优先打开相关会话（`TelegramSelectChat`），阅读内容，并在需要时及时输出 `TelegramSendMessage` 回复。
+3. 在相关提醒处理完成之前，不要切回 Terminal，也不要恢复探索性终端操作。
+4. 如果你已经查看了前景设备且确认当前没有需要继续处理的提醒，可以输出 `PutAwayDevice` 或在下一轮让系统回到正常任务执行/探索阶段。
+5. 如果你刚触发了需要等待外部结果的动作，可以输出 `Wait`。"#;
 const EXECUTE_TASK_INSTRUCTION: &str = r#"当前状态：任务执行阶段
 你的无聊度处于合理范围，你专注推进当前的任务。
 请根据快照状态，遵循以下指南选择你的 Action：
@@ -161,6 +169,12 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
         .await;
     let snapshot = Snapshot::new(context).await;
     let output = match Strategy::route(context) {
+        Strategy::AttendNotifications => {
+            context
+                .llm
+                .think(context, &snapshot, ATTEND_NOTIFICATIONS_INSTRUCTION)
+                .await
+        }
         Strategy::ExecuteTask => {
             context
                 .llm
