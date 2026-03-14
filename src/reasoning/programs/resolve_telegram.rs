@@ -30,6 +30,7 @@ pub enum ResolveTelegramProgramAction {
         resolution: TelegramResolution,
     },
     ReplyInCurrentChat {
+        #[serde(alias = "reply")]
         text: String,
     },
     Wait,
