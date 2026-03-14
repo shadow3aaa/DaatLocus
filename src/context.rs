@@ -2,8 +2,8 @@
 
 use crate::{
     config::Config, core::LLM, device::DeviceManager, emotion::Emotion, memory::Memory,
-    obligations::Obligations, projects::Projects, tasks::Tasks,
-    telegram_device::TelegramDeviceHandle,
+    obligations::Obligations, projects::Projects, reasoning::compiled::CompiledPromptStore,
+    tasks::Tasks, telegram_device::TelegramDeviceHandle,
 };
 
 pub struct Context {
@@ -16,6 +16,7 @@ pub struct Context {
     pub emotion: Emotion,
     pub devices: DeviceManager,
     pub telegram: TelegramDeviceHandle,
+    pub compiled_prompts: CompiledPromptStore,
 }
 
 impl Context {

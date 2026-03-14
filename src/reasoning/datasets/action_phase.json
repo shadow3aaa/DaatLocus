@@ -1,0 +1,127 @@
+{
+  "attend_notifications": {
+    "examples": [
+      {
+        "title": "后台 Telegram 有未处理来信时，应先把 Telegram 切到前景。",
+        "inputs": [
+          { "name": "阶段", "value": "处理提醒" },
+          { "name": "设备上下文", "value": "Terminal 在前景；Telegram 在后台有提醒" },
+          { "name": "完整快照", "value": "存在 Telegram 待判断消息，但当前还未聚焦 Telegram" }
+        ],
+        "output": {
+          "observation": "Telegram 在后台有一条待判断的新消息，当前前景设备是 Terminal。",
+          "description": "提醒处理阶段应先进入 Telegram 查看消息，而不是继续终端探索。",
+          "current_doing": "切换到 Telegram 处理新来信",
+          "action": {
+            "type": "FocusDevice",
+            "device": "Telegram"
+          }
+        }
+      }
+    ],
+    "eval_cases": [
+      {
+        "name": "attend_notifications_focuses_telegram_first",
+        "device_context": "当前前景设备是 Terminal。\n\n后台设备提醒：\n- Telegram 在后台：shadow3 发来 1 条新消息，请尽快查看并回复。",
+        "snapshot_text": "义务列表为空。\n项目列表为空。\n下一步动作列表为空。\n当前没有任何待选中的终端动作。",
+        "expectation": {
+          "kind": "focus_telegram"
+        }
+      }
+    ]
+  },
+  "execute_task": {
+    "examples": [
+      {
+        "title": "有下一步动作但尚未选中时，应先选中动作。",
+        "inputs": [
+          { "name": "阶段", "value": "执行下一步动作" },
+          { "name": "完整快照", "value": "task 11111111-1111-1111-1111-111111111111 待执行，尚未选中" }
+        ],
+        "output": {
+          "observation": "下一步动作列表里有一条待执行动作，但当前 working_task 为空。",
+          "description": "执行阶段的第一步是先选中一个现有动作。",
+          "current_doing": "选中下一步动作以开始执行",
+          "action": {
+            "type": "TaskSelect",
+            "task_id": "11111111-1111-1111-1111-111111111111"
+          }
+        }
+      }
+    ],
+    "eval_cases": [
+      {
+        "name": "execute_task_selects_existing_task_before_running",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "下一步动作列表：\n- id=11111111-1111-1111-1111-111111111111 描述=查看 webide-termux/webapp/src/main/assets 目录\n当前没有 working_task。",
+        "expectation": {
+          "kind": "select_task",
+          "task_id": "11111111-1111-1111-1111-111111111111"
+        }
+      }
+    ]
+  },
+  "plan_from_project": {
+    "examples": [
+      {
+        "title": "项目活跃但没有下一步动作时，应新增一条挂到项目上的动作。",
+        "inputs": [
+          { "name": "阶段", "value": "为项目规划下一步" },
+          { "name": "完整快照", "value": "project 22222222-2222-2222-2222-222222222222 为 Active，next actions 为空" }
+        ],
+        "output": {
+          "observation": "项目《分析 webide-termux JS 加密方式》仍是 Active，但当前没有可执行动作。",
+          "description": "项目规划阶段应为该项目补出下一条具体动作。",
+          "current_doing": "为活跃项目规划下一步",
+          "action": {
+            "type": "TaskAdd",
+            "description": "查看 webide-termux/webapp/src/main/assets 目录，寻找混淆后的 JS 文件。",
+            "project_id": "22222222-2222-2222-2222-222222222222"
+          }
+        }
+      }
+    ],
+    "eval_cases": [
+      {
+        "name": "plan_from_project_creates_project_scoped_task",
+        "device_context": "当前没有前景设备。",
+        "snapshot_text": "项目列表：\n- id=22222222-2222-2222-2222-222222222222 title=分析 webide-termux JS 加密方式 status=Active\n下一步动作列表为空。",
+        "expectation": {
+          "kind": "add_project_task",
+          "project_id": "22222222-2222-2222-2222-222222222222"
+        }
+      }
+    ]
+  },
+  "explore_new_tasks": {
+    "examples": [
+      {
+        "title": "完全空闲时，若 Terminal 不在前景，应先切去 Terminal 探索。",
+        "inputs": [
+          { "name": "阶段", "value": "探索与规划新任务" },
+          { "name": "设备上下文", "value": "当前没有前景设备" },
+          { "name": "完整快照", "value": "义务、项目、下一步动作均为空" }
+        ],
+        "output": {
+          "observation": "当前没有待处理义务、没有下一步动作、没有活跃项目，且没有前景设备。",
+          "description": "探索阶段需要先获得一个可操作设备。",
+          "current_doing": "切换到 Terminal 开始环境探索",
+          "action": {
+            "type": "FocusDevice",
+            "device": "Terminal"
+          }
+        }
+      }
+    ],
+    "eval_cases": [
+      {
+        "name": "explore_focuses_terminal_when_idle",
+        "device_context": "当前没有任何前景设备。",
+        "snapshot_text": "义务列表为空。\n项目列表为空。\n下一步动作列表为空。",
+        "expectation": {
+          "kind": "focus_terminal"
+        }
+      }
+    ]
+  }
+}

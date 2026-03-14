@@ -6108,6 +6108,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "sha2",
  "sysinfo",
  "thiserror 2.0.18",
  "tokenizers",

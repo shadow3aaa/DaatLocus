@@ -1,7 +1,9 @@
 use schemars::schema_for;
 
 use crate::reasoning::{
+    examples::ProgramExample,
     ir::PromptIR,
+    optimizer::PromptTuningConfig,
     program::Program,
     runtime::{PromptMessage, PromptRequest},
     signature::Signature,
@@ -12,9 +14,23 @@ use super::Renderer;
 pub struct OpenAIToolRenderer;
 
 impl Renderer for OpenAIToolRenderer {
-    fn render<P: Program>(&self, program: &P, ir: PromptIR) -> PromptRequest {
+    fn render<P: Program>(
+        &self,
+        program: &P,
+        mut ir: PromptIR,
+        tuning: &PromptTuningConfig<P::Output>,
+    ) -> PromptRequest {
         let mut messages = Vec::new();
         let signature = program.signature();
+        let examples = if tuning.examples.is_empty() {
+            program.examples()
+        } else {
+            tuning.examples.clone()
+        };
+
+        for instruction in &tuning.extra_instructions {
+            ir.instructions.push(instruction.clone());
+        }
 
         if !ir.system.is_empty() {
             messages.push(PromptMessage::system(ir.system.join("\n\n")));
@@ -22,6 +38,9 @@ impl Renderer for OpenAIToolRenderer {
 
         let mut user_sections = Vec::new();
         user_sections.push(render_signature_block(&signature));
+        if !examples.is_empty() {
+            user_sections.push(render_examples_block(&examples));
+        }
         if !ir.instructions.is_empty() {
             user_sections.push(format!("任务说明：\n{}", ir.instructions.join("\n")));
         }
@@ -73,4 +92,32 @@ fn render_signature_block(signature: &Signature) -> String {
     }
 
     format!("## 程序签名\n{}", sections.join("\n\n"))
+}
+
+fn render_examples_block<O: serde::Serialize>(examples: &[ProgramExample<O>]) -> String {
+    let sections = examples
+        .iter()
+        .enumerate()
+        .map(|(index, example)| {
+            let mut body = vec![format!("### 示例 {}\n{}", index + 1, example.title)];
+            if !example.inputs.is_empty() {
+                body.push(format!(
+                    "输入：\n{}",
+                    example
+                        .inputs
+                        .iter()
+                        .map(|field| format!("- {}: {}", field.name, field.value))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
+            }
+            body.push(format!(
+                "输出(JSON)：\n```json\n{}\n```",
+                serde_json::to_string_pretty(&example.output).unwrap()
+            ));
+            body.join("\n\n")
+        })
+        .collect::<Vec<_>>();
+
+    format!("## 示例\n{}", sections.join("\n\n"))
 }
