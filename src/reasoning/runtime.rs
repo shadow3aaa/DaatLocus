@@ -8,7 +8,7 @@ use super::{
     optimizer::PromptTuningConfig,
     program::Program,
     render::Renderer,
-    trace::{ProgramTraceRecord, append_program_trace},
+    trace::{ProgramTraceRecord, TraceOrigin, append_program_trace},
 };
 
 pub struct ProgramExecutionOutcome<O> {
@@ -86,9 +86,17 @@ pub async fn execute_program_with_ir<P: Program, R: Renderer>(
     ir: super::ir::PromptIR,
     tuning: &PromptTuningConfig<P::Output>,
 ) -> Result<P::Output> {
-    execute_program_with_ir_report(llm, context, renderer, program, ir, tuning)
-        .await
-        .map(|outcome| outcome.output)
+    execute_program_with_ir_report(
+        llm,
+        context,
+        renderer,
+        program,
+        ir,
+        tuning,
+        TraceOrigin::Runtime,
+    )
+    .await
+    .map(|outcome| outcome.output)
 }
 
 pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
@@ -98,6 +106,7 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
     program: &P,
     ir: super::ir::PromptIR,
     tuning: &PromptTuningConfig<P::Output>,
+    trace_origin: TraceOrigin,
 ) -> Result<ProgramExecutionOutcome<P::Output>> {
     let mut request = renderer.render(program, ir, tuning);
     let mut last_error = None;
@@ -109,6 +118,7 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
             Err(err) => {
                 let error_text = err.to_string();
                 append_program_trace(ProgramTraceRecord::new(
+                    trace_origin,
                     program.name(),
                     attempt + 1,
                     signature.clone(),
@@ -126,6 +136,7 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
         match serde_json::from_value::<P::Output>(value.clone()) {
             Ok(output) => {
                 append_program_trace(ProgramTraceRecord::new(
+                    trace_origin,
                     program.name(),
                     attempt + 1,
                     signature.clone(),
@@ -143,6 +154,7 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
             Err(err) => {
                 last_error = Some(err.to_string());
                 append_program_trace(ProgramTraceRecord::new(
+                    trace_origin,
                     program.name(),
                     attempt + 1,
                     signature.clone(),

@@ -13,7 +13,7 @@ use super::{
         ResolveTelegramChatProgram, ResolveTelegramProgramAction, ResolveTelegramProgramOutput,
     },
     runtime::{PromptRequest, PromptRole},
-    trace::ProgramTraceRecord,
+    trace::{ProgramTraceRecord, TraceOrigin},
 };
 
 const TRACE_FILE_NAME: &str = "reasoning_traces.jsonl";
@@ -227,7 +227,7 @@ fn trace_samples_from_records(records: Vec<ProgramTraceRecord>) -> Vec<TraceReso
     let mut samples = Vec::new();
 
     for record in records.into_iter().rev() {
-        if record.program_name != "resolve_telegram_chat" {
+        if record.program_name != "resolve_telegram_chat" || record.origin != TraceOrigin::Runtime {
             continue;
         }
         let Some((pending_text, focus, snapshot_text)) = extract_resolve_sections(&record.request)

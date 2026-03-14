@@ -19,10 +19,11 @@ use super::{
         resolve_telegram::ResolveTelegramChatProgram,
     },
     signature::Signature,
+    trace::TraceOrigin,
     trace_mining::{derive_resolve_telegram_eval_cases, propose_resolve_telegram_candidates},
 };
 
-const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v2";
+const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v3";
 const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<OptimizationResult>> {
@@ -161,6 +162,7 @@ async fn ensure_suite_compiled<P: Program>(
             suite_name,
             clone_eval_cases(&cases),
             &candidate.config,
+            TraceOrigin::Compile,
         )
         .await;
         let score = results.iter().filter(|result| result.passed).count();

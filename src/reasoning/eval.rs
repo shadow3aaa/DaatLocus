@@ -13,6 +13,7 @@ use super::{
         resolve_telegram::ResolveTelegramChatProgram,
     },
     runtime::execute_program_with_ir_report,
+    trace::TraceOrigin,
     trace_mining::derive_resolve_telegram_eval_cases,
 };
 
@@ -80,6 +81,7 @@ async fn run_suite<P: Program>(
             program,
             case.ir,
             &program.default_tuning(),
+            TraceOrigin::Eval,
         )
         .await
         {
@@ -121,6 +123,7 @@ pub async fn run_suite_with_tuning<P: Program>(
     suite_name: &str,
     cases: Vec<EvalCase<P::Output>>,
     tuning: &PromptTuningConfig<P::Output>,
+    trace_origin: TraceOrigin,
 ) -> Vec<EvalCaseResult> {
     let mut results = Vec::new();
 
@@ -132,6 +135,7 @@ pub async fn run_suite_with_tuning<P: Program>(
             program,
             case.ir,
             tuning,
+            trace_origin,
         )
         .await
         {

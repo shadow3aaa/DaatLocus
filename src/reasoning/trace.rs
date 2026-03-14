@@ -9,9 +9,21 @@ use super::{runtime::PromptRequest, signature::Signature};
 
 const TRACE_FILE_NAME: &str = "reasoning_traces.jsonl";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceOrigin {
+    Runtime,
+    Compile,
+    Eval,
+    #[default]
+    Unknown,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ProgramTraceRecord {
     pub timestamp_ms: i64,
+    #[serde(default)]
+    pub origin: TraceOrigin,
     pub program_name: String,
     pub attempt: usize,
     pub signature: Signature,
@@ -42,6 +54,7 @@ pub async fn append_program_trace(record: ProgramTraceRecord) {
 
 impl ProgramTraceRecord {
     pub fn new(
+        origin: TraceOrigin,
         program_name: impl Into<String>,
         attempt: usize,
         signature: Signature,
@@ -52,6 +65,7 @@ impl ProgramTraceRecord {
     ) -> Self {
         Self {
             timestamp_ms: Utc::now().timestamp_millis(),
+            origin,
             program_name: program_name.into(),
             attempt,
             signature,
