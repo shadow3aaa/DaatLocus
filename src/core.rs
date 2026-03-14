@@ -14,12 +14,13 @@ use crate::{
 /// 1. TaskAdd
 /// 2. TaskDelete
 /// 3. TaskSelect
-/// 4. CommitToProject
-/// 5. ProjectComplete
-/// 6. FocusDevice
-/// 7. PutAwayDevice
-/// 8. DeviceAction
-/// 9. Wait
+/// 4. ObligationSatisfy
+/// 5. CommitToProject
+/// 6. ProjectComplete
+/// 7. FocusDevice
+/// 8. PutAwayDevice
+/// 9. DeviceAction
+/// 10. Wait
 pub enum Action {
     /// TaskAdd: 添加一个新的任务
     TaskAdd {
@@ -37,6 +38,11 @@ pub enum Action {
     TaskSelect {
         /// 要选中的下一步动作 id。优先填写快照里显示的 UUID，不要填写动作描述。
         task_id: String,
+    },
+    /// ObligationSatisfy: 将一条已经妥善处理完的义务标记为完成
+    ObligationSatisfy {
+        /// 要完成的义务 id。优先填写快照里显示的 UUID，不要填写义务摘要。
+        obligation_id: String,
     },
     /// CommitToProject: 明确接受某项义务，将其升级为项目
     CommitToProject {

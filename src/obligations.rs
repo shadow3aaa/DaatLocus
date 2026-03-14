@@ -117,13 +117,17 @@ impl Obligations {
             obligation.urgency = urgency;
             changed = true;
         }
-        if obligation.linked_project != linked_project {
-            obligation.linked_project = linked_project;
-            changed = true;
+        if let Some(linked_project) = linked_project {
+            if obligation.linked_project != Some(linked_project) {
+                obligation.linked_project = Some(linked_project);
+                changed = true;
+            }
         }
-        if obligation.reply_target != reply_target {
-            obligation.reply_target = reply_target;
-            changed = true;
+        if let Some(reply_target) = reply_target {
+            if obligation.reply_target.as_ref() != Some(&reply_target) {
+                obligation.reply_target = Some(reply_target);
+                changed = true;
+            }
         }
         if obligation.status != ObligationStatus::Pending {
             obligation.status = ObligationStatus::Pending;

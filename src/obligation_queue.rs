@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use uuid::Uuid;
 
 use crate::{
-    obligations::{ObligationSource, ObligationStatus, Obligations, Urgency},
+    obligations::{ObligationSource, Obligations, Urgency},
     projects::ReportTarget,
 };
 
@@ -28,10 +28,6 @@ enum ObligationEvent {
         urgency: Urgency,
         linked_project: Option<Uuid>,
         reply_target: Option<ReportTarget>,
-    },
-    SetStatus {
-        dedupe_key: String,
-        status: ObligationStatus,
     },
 }
 
@@ -58,18 +54,6 @@ impl ObligationQueue {
             urgency,
             linked_project,
             reply_target,
-        });
-    }
-
-    pub fn set_status(
-        &self,
-        source: ObligationSource,
-        key: impl Into<String>,
-        status: ObligationStatus,
-    ) {
-        self.inner.lock().events.push(ObligationEvent::SetStatus {
-            dedupe_key: dedupe_key(source, &key.into()),
-            status,
         });
     }
 
@@ -115,12 +99,6 @@ impl ObligationQueue {
                     };
                     state.active.insert(dedupe_key, id);
                     changed = true;
-                }
-                ObligationEvent::SetStatus { dedupe_key, status } => {
-                    let Some(id) = state.active.get(&dedupe_key).copied() else {
-                        continue;
-                    };
-                    changed |= obligations.set_status(id, status);
                 }
             }
         }

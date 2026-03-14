@@ -7,7 +7,7 @@ use serde::Deserialize;
 use crate::{
     config::TelegramConfig,
     obligation_queue::ObligationQueue,
-    obligations::{ObligationSource, ObligationStatus, Urgency},
+    obligations::{ObligationSource, Urgency},
     projects::ReportTarget,
     telegram_acl::{AccessDecision, TelegramAclHandle},
     telegram_device::TelegramDeviceHandle,
@@ -77,11 +77,6 @@ impl TelegramTransport {
                 Ok(()) => {
                     self.handle
                         .mark_outgoing_delivered(&message.local_message_id);
-                    self.obligation_queue.set_status(
-                        ObligationSource::Telegram,
-                        obligation_key(chat_id),
-                        ObligationStatus::Satisfied,
-                    );
                 }
                 Err(err) => self.handle.mark_outgoing_failed(
                     &message.local_message_id,
