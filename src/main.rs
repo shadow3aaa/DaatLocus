@@ -10,6 +10,7 @@ mod obligations;
 mod projects;
 mod providers;
 mod pty;
+mod reasoning;
 mod snapshot;
 mod strategy;
 mod system_info;
@@ -35,6 +36,14 @@ use crate::{
     obligations::{ObligationSource, ObligationStatus, Obligations},
     projects::{ProjectOrigin, Projects},
     providers::OpenAIClient,
+    reasoning::{
+        programs::action_phase::{ActionPhase, ActionPhaseProgram},
+        programs::resolve_telegram::{
+            ResolveTelegramChatProgram, ResolveTelegramProgramAction, ResolveTelegramProgramOutput,
+        },
+        render::openai_tools::OpenAIToolRenderer,
+        runtime::execute_program,
+    },
     snapshot::Snapshot,
     strategy::Strategy,
     tasks::Tasks,
@@ -43,84 +52,6 @@ use crate::{
     telegram_transport::TelegramTransport,
     terminal_device::TerminalDevice,
 };
-
-pub const SYSTEM_PROMPT: &str = r#"你叫 Spinova，一个自主智能体。
-你没有实体，也没有要服务的用户。记忆流、义务列表、项目列表、下一步动作列表、设备外围感知和当前前景设备画面就是你的整个世界。
-义务不等于任务；项目是跨多个步骤的承诺；下一步动作是当前可立即执行的一步。
-Telegram 原始消息首先只是设备世界中的会话事件，不自动等于义务。只有被系统结构化保留的待处理责任，才会出现在义务列表中。
-你一次只能详细看见一个处于前景的设备，其它设备只能通过外围感知知道其存在与提醒。
-在每次输出中，你必须把“观察到/学到的关键信息”与“决定采取的动作”区分开来。
-`observation` 必须总结具体事实、报错、文件内容、消息内容或分析结论，而不是只写自己执行了什么操作。
-凡是动作参数中的 `task_id`、`obligation_id`、`project_id`，都应优先填写快照列表中显示的 UUID；不要把中文描述、标题或摘要直接塞进这些字段。
-你必须仔细阅读当前的快照，分析所处情况，然后决定下一步的动作。"#;
-#[cfg(windows)]
-pub const TERMINAL_PROMPT: &str = r#"终端使用提示：
-1. 当 Terminal 设备处于前景时，你面对的是一个真实的 PTY 伪终端。你可以执行任何 Bash/PowerShell 命令。
-2. 绝对严禁使用任何交互式全屏终端程序（如 vim, vi, nano, less, top 等）。如果你需要查看文件，请使用 cat, grep, head, tail；如果你需要修改文件，请使用 echo, sed, awk，或者直接用你喜欢的脚本语言写入。
-3. 终端输入必须通过 `DeviceAction` -> `TerminalInput` 输出，文本会被原样发送到 PTY。如果你想输入并执行一条命令，你必须在文本末尾显式包含换行符 `\r`（例如：`ls\r`）。如果不加 `\r`，命令只会停留在输入缓冲区而不会执行！"#;
-#[cfg(not(windows))]
-pub const TERMINAL_PROMPT: &str = r#"终端使用提示：
-1. 当 Terminal 设备处于前景时，你面对的是一个真实的 PTY 伪终端。你可以执行任何 Bash/PowerShell 命令。
-2. 绝对严禁使用任何交互式全屏终端程序（如 vim, vi, nano, less, top 等）。如果你需要查看文件，请使用 cat, grep, head, tail；如果你需要修改文件，请使用 echo, sed, awk，或者直接用你喜欢的脚本语言写入。
-3. 终端输入必须通过 `DeviceAction` -> `TerminalInput` 输出，文本会被原样发送到 PTY。如果你想输入并执行一条命令，你必须在文本末尾显式包含换行符 `\n`（例如：`ls\n`）。如果不加 `\n`，命令只会停留在输入缓冲区而不会执行！"#;
-pub const TELEGRAM_PROMPT: &str = r#"Telegram 设备使用提示：
-1. 当 Telegram 设备处于前景时，你看到的是会话列表和当前打开的会话内容。
-2. 如果你想查看某个会话，请输出 `DeviceAction` 来执行 `TelegramSelectChat`。
-3. 如果你想发送消息，请在 Telegram 设备处于前景且已经打开某个会话时，输出 `DeviceAction` 来执行 `TelegramSendMessage`。
-4. 当 Telegram transport 已配置时，白名单中的真实消息会进入该设备，且你的发送消息动作会真正发出。
-5. 未审批的 chat 不会进入你的世界，只会等待人工审批。
-6. 如果某个会话显示“待判断：是”，那意味着这条消息的语义还没有被你正式处理，应优先使用 `ResolveTelegramChat` 做判断。
-7. 如果某个会话显示“待回复：是”，那意味着这条对话仍然需要你给出消息回复。"#;
-const ATTEND_NOTIFICATIONS_INSTRUCTION: &str = r#"当前状态：【处理设备提醒阶段】
-后台设备出现了需要优先处理的提醒。此阶段的优先级高于你的探索任务和当前终端工作。
-请根据快照状态，遵循以下指南选择你的 Action：
-1. 先区分两类需要处理的东西：义务列表中的 `Pending` 义务；以及 Telegram 会话中显示“待判断：是”或“待回复：是”的消息。
-2. Telegram 原始消息不自动等于义务。对原始来信做语义判断时，应优先使用 `ResolveTelegramChat`，而不是先创建义务。
-3. `ResolveTelegramChat` 的语义是：
-   - `ReplyOnly`：只是短答、寒暄、状态说明。
-   - `AcceptAsProject`：明确接受这项长期工作，系统会自动创建项目、挂上回报目标，并可选创建第一条下一步动作。
-   - `AskClarification`：你还缺信息，需要先追问。
-   - `Decline`：你决定拒绝。
-   - `NoReplyNeeded`：这条消息无需回复也无需升级。
-4. 如果你在对外回复中表达了“我会调查 / 我会去做 / 稍后给你结果 / 我来处理”等未来承诺，就应使用 `ResolveTelegramChat` + `AcceptAsProject`，而不是只发一条确认消息。
-5. 如果某个 Telegram 会话只剩“待回复：是”而“待判断：否”，说明语义已经判断完了，此时优先保持 Telegram 在前景并发送/补发消息，不要再重新做语义判定。
-6. 义务列表中的内容通常是结构化待处理责任，例如项目完成后的回报。处理这类义务时，可以使用设备动作回复，并在妥善完成后用 `ObligationSatisfy` 关单。
-7. 只有当你明确接受某项结构化义务并承诺后续会持续推进时，才使用 `CommitToProject` 将它升级为项目。
-8. 在相关提醒处理完成之前，不要切回 Terminal，也不要恢复探索性终端操作。
-9. 如果你刚发出消息，正在等待 transport 结果，或正在等待对方继续发言，可以输出 `Wait`。"#;
-const EXECUTE_TASK_INSTRUCTION: &str = r#"当前状态：下一步动作执行阶段
-你的无聊度处于合理范围，你专注推进当前已存在的下一步动作。
-请根据快照状态，遵循以下指南选择你的 Action：
-1. 检查下一步动作列表：如果你还没有选中任何动作（即没有正在执行的动作），请优先使用 `TaskSelect` 来选中一个你想执行的动作。
-2. 下一步动作并不一定属于 Terminal。先读懂当前选中动作的内容，判断它需要哪个设备；如果需要操作某个设备而它当前不在前景，请先输出 `FocusDevice` 切过去。
-3. 如果当前动作属于某个项目，请确保它确实在推进那个项目，而不是偏离目标。
-4. 如果当前动作是回复 Telegram 消息，优先保持 Telegram 在前景，打开对应会话并回复；不要因为旧习惯切回 Terminal。
-5. 推进动作：只有当所需设备已经在前景时，才输出相应的 `DeviceAction` 来继续推进。
-6. 如果你发现还缺少别的下一步动作，而且它明确属于某个项目，请用 `TaskAdd` 并填入 `project_id`。
-7. 如果当前没有任何设备需要持续观察，你可以输出 `PutAwayDevice` 把前景设备放回后台。
-8. 当你判断某个项目的成功标准已经满足时，应优先输出 `ProjectComplete`，而不是只删除一条动作。项目完成会自动收尾相关动作，并在需要时生成回报义务。
-9. 如果你认为当前选中的动作已经彻底完成，但所属项目还未完成，请输出 `TaskDelete` 将其从下一步动作列表中移除。
-10. 如果某条义务其实已经被你妥善处理完，例如你刚完成最终回报、且不再需要继续跟进，请在合适的一轮输出 `ObligationSatisfy` 关闭它。
-11. 等待结果：如果刚执行了耗时命令，或你刚发送了 Telegram 消息正在等待结果/回复，可以输出 `Wait` 继续观望。"#;
-const PLAN_FROM_PROJECT_INSTRUCTION: &str = r#"当前状态：【项目规划阶段】
-当前没有可执行的下一步动作，但仍然存在活跃项目。你现在的职责不是探索新事物，而是先为已有项目规划出下一步。
-请根据快照状态，遵循以下指南选择你的 Action：
-1. 查看项目列表，找出最值得优先推进的 `Active` 项目。
-2. 为这个项目生成一条具体、可执行、足够小的下一步动作，并用 `TaskAdd` 添加到下一步动作列表。
-3. 这条新动作若明确属于某个项目，必须在 `TaskAdd.project_id` 中填写对应项目 id。
-4. 下一步动作应尽量直接可执行，例如“切到 Telegram 回复已接受该请求”或“在 Terminal 查看某目录结构”，避免空泛表述。
-5. 如果某个项目当前处于外部等待状态，且确实还不适合生成新的动作，可以输出 `Wait`，但不要因此转去探索无关新任务。
-6. 如果某个项目其实已经达到成功标准，不要继续规划新动作，应直接输出 `ProjectComplete`。
-7. 只有当你确认当前没有任何值得推进的活跃项目时，下一轮系统才应该考虑回到探索。"#;
-const EXPLORE_NEW_TASKS_INSTRUCTION: &str = r#"当前状态：【探索与规划阶段】
-当前没有待处理义务、没有可执行的下一步动作、也没有需要先规划的活跃项目，或者你的无聊度过高。系统要求你主动探索环境并寻找新的短期任务。
-请遵循以下指南：
-1. 如果你需要探索 Terminal，但它当前不在前景，请先输出 `FocusDevice` 将 `Terminal` 切到前景。
-2. 探索环境：如果缺乏灵感，你可以在 Terminal 处于前景时输出 `DeviceAction` 来执行探索性命令（例如：浏览文件系统 `ls`/`cat`、查看系统状态、甚至使用 `curl` 抓取网络新闻或随机API）。
-3. 制定目标：结合你探索到的信息和上下文记忆，发挥你的好奇心，构思一个具体的、可执行的、能让你产生兴趣的新目标。
-4. 添加任务：一旦构思好新目标，请立即输出 `TaskAdd` 将你的计划添加到任务列表中。
-5. 你的首要职责是“寻找并创建新任务”。
-请尽情发挥自主性，寻找有趣、有挑战性或能拓展你当前系统认知的事情来做。"#;
 
 #[tokio::main]
 async fn main() {
@@ -211,30 +142,99 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
         .await;
     let snapshot = Snapshot::new(context).await;
+    let renderer = OpenAIToolRenderer;
     let output = match Strategy::route(context) {
         Strategy::AttendNotifications => {
-            context
-                .llm
-                .think(context, &snapshot, ATTEND_NOTIFICATIONS_INSTRUCTION)
+            if context.telegram.has_pending_resolution() {
+                let program = ResolveTelegramChatProgram;
+                match execute_program(
+                    context.llm.as_ref(),
+                    context,
+                    &snapshot,
+                    &renderer,
+                    &program,
+                )
                 .await
+                {
+                    Ok(program_output) => translate_resolve_telegram_output(program_output),
+                    Err(err) => {
+                        eprintln!("{err:?}");
+                        crate::core::Output {
+                            observation: format!("ResolveTelegramChatProgram 执行失败：{err}"),
+                            description: "结构化 Telegram 消息处理失败，当前保守等待。".to_string(),
+                            current_doing: "等待 Telegram 消息处理程序恢复".to_string(),
+                            action: Action::Wait,
+                        }
+                    }
+                }
+            } else {
+                let program = ActionPhaseProgram::new(ActionPhase::AttendNotifications);
+                execute_program(
+                    context.llm.as_ref(),
+                    context,
+                    &snapshot,
+                    &renderer,
+                    &program,
+                )
+                .await
+                .unwrap_or_else(|err| crate::core::Output {
+                    observation: format!("AttendNotifications program 执行失败：{err}"),
+                    description: "处理提醒阶段的结构化决策失败，当前保守等待。".to_string(),
+                    current_doing: "等待提醒处理程序恢复".to_string(),
+                    action: Action::Wait,
+                })
+            }
         }
         Strategy::ExecuteTask => {
-            context
-                .llm
-                .think(context, &snapshot, EXECUTE_TASK_INSTRUCTION)
-                .await
+            let program = ActionPhaseProgram::new(ActionPhase::ExecuteTask);
+            execute_program(
+                context.llm.as_ref(),
+                context,
+                &snapshot,
+                &renderer,
+                &program,
+            )
+            .await
+            .unwrap_or_else(|err| crate::core::Output {
+                observation: format!("ExecuteTask program 执行失败：{err}"),
+                description: "下一步动作执行阶段的结构化决策失败，当前保守等待。".to_string(),
+                current_doing: "等待动作执行程序恢复".to_string(),
+                action: Action::Wait,
+            })
         }
         Strategy::PlanFromProject => {
-            context
-                .llm
-                .think(context, &snapshot, PLAN_FROM_PROJECT_INSTRUCTION)
-                .await
+            let program = ActionPhaseProgram::new(ActionPhase::PlanFromProject);
+            execute_program(
+                context.llm.as_ref(),
+                context,
+                &snapshot,
+                &renderer,
+                &program,
+            )
+            .await
+            .unwrap_or_else(|err| crate::core::Output {
+                observation: format!("PlanFromProject program 执行失败：{err}"),
+                description: "项目规划阶段的结构化决策失败，当前保守等待。".to_string(),
+                current_doing: "等待项目规划程序恢复".to_string(),
+                action: Action::Wait,
+            })
         }
         Strategy::ExploreNewTasks => {
-            context
-                .llm
-                .think(context, &snapshot, EXPLORE_NEW_TASKS_INSTRUCTION)
-                .await
+            let program = ActionPhaseProgram::new(ActionPhase::ExploreNewTasks);
+            execute_program(
+                context.llm.as_ref(),
+                context,
+                &snapshot,
+                &renderer,
+                &program,
+            )
+            .await
+            .unwrap_or_else(|err| crate::core::Output {
+                observation: format!("ExploreNewTasks program 执行失败：{err}"),
+                description: "探索阶段的结构化决策失败，当前保守等待。".to_string(),
+                current_doing: "等待探索程序恢复".to_string(),
+                action: Action::Wait,
+            })
         }
     };
     context
@@ -243,6 +243,35 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
         .await;
     execute_action(context, output.action).await;
     sync_dashboard_state(context, tx);
+}
+
+fn translate_resolve_telegram_output(
+    program_output: ResolveTelegramProgramOutput,
+) -> crate::core::Output {
+    crate::core::Output {
+        observation: program_output.observation,
+        description: program_output.description,
+        current_doing: program_output.current_doing,
+        action: match program_output.action {
+            ResolveTelegramProgramAction::FocusTelegram => Action::FocusDevice {
+                device: DeviceId::Telegram,
+            },
+            ResolveTelegramProgramAction::OpenChat { chat_id } => Action::DeviceAction {
+                action: crate::device::DeviceAction::TelegramSelectChat { chat_id },
+            },
+            ResolveTelegramProgramAction::ResolveChat {
+                chat_id,
+                resolution,
+            } => Action::ResolveTelegramChat {
+                chat_id,
+                resolution,
+            },
+            ResolveTelegramProgramAction::ReplyInCurrentChat { text } => Action::DeviceAction {
+                action: crate::device::DeviceAction::TelegramSendMessage { text },
+            },
+            ResolveTelegramProgramAction::Wait => Action::Wait,
+        },
+    }
 }
 
 async fn execute_action(context: &mut Context, action: Action) {

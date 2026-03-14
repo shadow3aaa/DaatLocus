@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     context::Context,
     device::{DeviceAction, DeviceId},
-    snapshot::Snapshot,
+    reasoning::runtime::PromptRequest,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -133,6 +133,6 @@ pub struct Output {
 /// LLM 负责思考
 #[async_trait]
 pub trait LLM {
-    /// 根据输入的快照进行思考
-    async fn think(&self, context: &Context, input: &Snapshot, instruction: &str) -> Output;
+    /// 执行一个结构化 program 请求，返回原始 JSON 参数对象。
+    async fn run_json(&self, context: &Context, request: PromptRequest) -> serde_json::Value;
 }

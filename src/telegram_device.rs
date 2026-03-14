@@ -145,6 +145,22 @@ impl TelegramDeviceHandle {
             .collect()
     }
 
+    pub fn pending_resolution_refs(&self) -> Vec<(String, String)> {
+        let state = self.state.lock();
+        state
+            .order
+            .iter()
+            .filter_map(|id| state.chats.get(id))
+            .filter(|chat| chat.pending_resolution)
+            .map(|chat| (chat.id.clone(), chat.title.clone()))
+            .collect()
+    }
+
+    pub fn has_pending_resolution(&self) -> bool {
+        let state = self.state.lock();
+        state.chats.values().any(|chat| chat.pending_resolution)
+    }
+
     pub fn resolve_chat(&self, chat_id: &str, needs_reply: Option<bool>) -> Result<()> {
         let mut state = self.state.lock();
         let Some(chat) = state.chats.get_mut(chat_id) else {
