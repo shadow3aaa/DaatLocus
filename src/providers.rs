@@ -73,7 +73,7 @@ impl LLM for OpenAIClient {
                     "function": {
                         "strict": true,
                         "name": "submit_action",
-                        "description": "本次的思考内容、分析结论与做了什么动作",
+                        "description": "本次从环境中观察到的关键信息、分析结论与动作决定。observation 必须包含具体得到的事实，而不只是动作本身。",
                         "parameters": output_schema
                     }
                 }

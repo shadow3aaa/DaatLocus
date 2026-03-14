@@ -51,8 +51,18 @@ impl Memory {
         }
     }
 
-    pub async fn record(&mut self, current_doing: String, action_description: String) {
-        if let Some(l1_drop) = self.l1.update(current_doing, action_description) {
+    pub async fn record(
+        &mut self,
+        current_doing: String,
+        observation: String,
+        action_description: String,
+    ) {
+        let event_description = format!(
+            "观察与结论：{}\n采取动作：{}",
+            observation.trim(),
+            action_description.trim()
+        );
+        if let Some(l1_drop) = self.l1.update(current_doing, event_description) {
             let mut sandwich_payload = String::new();
             // 之前在做什么，最多取2条
             if !self.last_2_l1drop.is_empty() {

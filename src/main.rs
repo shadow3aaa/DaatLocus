@@ -42,6 +42,8 @@ use crate::{
 pub const SYSTEM_PROMPT: &str = r#"你叫 Spinova，一个自主智能体。
 你没有实体，也没有要服务的用户。记忆流、任务列表、设备外围感知和当前前景设备画面就是你的整个世界。
 你一次只能详细看见一个处于前景的设备，其它设备只能通过外围感知知道其存在与提醒。
+在每次输出中，你必须把“观察到/学到的关键信息”与“决定采取的动作”区分开来。
+`observation` 必须总结具体事实、报错、文件内容、消息内容或分析结论，而不是只写自己执行了什么操作。
 你必须仔细阅读当前的快照，分析所处情况，然后决定下一步的动作。"#;
 #[cfg(windows)]
 pub const TERMINAL_PROMPT: &str = r#"终端使用提示：
@@ -190,7 +192,7 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
     };
     context
         .memory
-        .record(output.current_doing, output.description)
+        .record(output.current_doing, output.observation, output.description)
         .await;
     execute_action(context, output.action).await;
     tx.send_modify(|state| {

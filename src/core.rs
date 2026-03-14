@@ -53,7 +53,10 @@ pub enum Action {
 /// LLM 输出
 #[derive(Deserialize, Serialize, JsonSchema)]
 pub struct Output {
-    /// 对于本次行为、分析结论和你思考内容的描述
+    /// 你从当前快照、终端输出、消息内容、报错或文件内容中观察到并归纳出的关键信息。
+    /// 必须写出具体得到的事实、结论或内容摘要，而不是只写“我看了某个文件/执行了某个命令”。
+    pub observation: String,
+    /// 对于本次动作决定、分析结论和你为什么这样做的描述
     pub description: String,
     /// 对当前正在进行的连续行为的描述。区别于description对单次行为的描述
     pub current_doing: String,
