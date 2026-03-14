@@ -6,9 +6,6 @@ use serde::Deserialize;
 
 use crate::{
     config::TelegramConfig,
-    obligation_queue::ObligationQueue,
-    obligations::{ObligationSource, Urgency},
-    projects::ReportTarget,
     telegram_acl::{AccessDecision, TelegramAclHandle},
     telegram_device::TelegramDeviceHandle,
 };
@@ -18,7 +15,6 @@ pub struct TelegramTransport {
     config: TelegramConfig,
     acl: TelegramAclHandle,
     handle: TelegramDeviceHandle,
-    obligation_queue: ObligationQueue,
     offset: Option<i64>,
 }
 
@@ -27,14 +23,12 @@ impl TelegramTransport {
         config: TelegramConfig,
         handle: TelegramDeviceHandle,
         acl: TelegramAclHandle,
-        obligation_queue: ObligationQueue,
     ) -> Self {
         Self {
             client: Client::new(),
             config,
             acl,
             handle,
-            obligation_queue,
             offset: None,
         }
     }
@@ -107,18 +101,6 @@ impl TelegramTransport {
                     chat_title.clone(),
                     sender,
                     text.clone(),
-                );
-                self.obligation_queue.upsert(
-                    ObligationSource::Telegram,
-                    obligation_key(message.chat.id),
-                    build_obligation_summary(&chat_title, &text),
-                    true,
-                    Urgency::High,
-                    None,
-                    Some(ReportTarget {
-                        device: crate::device::DeviceId::Telegram,
-                        target: message.chat.id.to_string(),
-                    }),
                 );
             }
             AccessDecision::Blocked => return,
@@ -297,16 +279,4 @@ fn truncate_reason(text: &str) -> String {
     } else {
         preview
     }
-}
-
-fn build_obligation_summary(chat_title: &str, text: &str) -> String {
-    format!(
-        "回复 Telegram 会话 {} 的消息：{}",
-        chat_title,
-        truncate_reason(text)
-    )
-}
-
-fn obligation_key(chat_id: i64) -> String {
-    format!("telegram-reply:{chat_id}")
 }

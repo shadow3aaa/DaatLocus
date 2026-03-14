@@ -5,7 +5,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Local, Utc};
-use miette::{Result, bail};
+use miette::{Result, bail, miette};
 use parking_lot::Mutex;
 use uuid::Uuid;
 
@@ -31,6 +31,7 @@ struct TelegramChat {
     id: String,
     title: String,
     unread: usize,
+    pending_resolution: bool,
     needs_reply: bool,
     messages: Vec<TelegramMessage>,
 }
@@ -101,6 +102,7 @@ impl TelegramDeviceHandle {
         if should_count_as_unread {
             chat.unread += 1;
         }
+        chat.pending_resolution = true;
         chat.needs_reply = true;
         chat.messages.push(TelegramMessage {
             id: Uuid::new_v4().to_string(),
@@ -133,6 +135,29 @@ impl TelegramDeviceHandle {
         self.state.lock().refresh_background_attention();
     }
 
+    pub fn chat_refs(&self) -> Vec<(String, String)> {
+        let state = self.state.lock();
+        state
+            .order
+            .iter()
+            .filter_map(|id| state.chats.get(id))
+            .map(|chat| (chat.id.clone(), chat.title.clone()))
+            .collect()
+    }
+
+    pub fn resolve_chat(&self, chat_id: &str, needs_reply: Option<bool>) -> Result<()> {
+        let mut state = self.state.lock();
+        let Some(chat) = state.chats.get_mut(chat_id) else {
+            return Err(miette!("unknown telegram chat: {chat_id}"));
+        };
+        chat.pending_resolution = false;
+        if let Some(needs_reply) = needs_reply {
+            chat.needs_reply = needs_reply;
+        }
+        state.refresh_background_attention();
+        Ok(())
+    }
+
     fn with_message_mut(
         &self,
         local_message_id: &str,
@@ -143,7 +168,7 @@ impl TelegramDeviceHandle {
             if let Some(index) = chat
                 .messages
                 .iter()
-                .position(|msg| msg.id == local_message_id)
+                .position(|message| message.id == local_message_id)
             {
                 let mut message = chat.messages.remove(index);
                 f(chat, &mut message);
@@ -162,9 +187,14 @@ impl Device for TelegramDevice {
 
     fn render_peripheral(&self, is_focused: bool) -> PeripheralRender {
         let state = self.state.lock();
+        let resolution_chats = state
+            .chats
+            .values()
+            .filter(|chat| chat.pending_resolution)
+            .count();
+        let reply_chats = state.chats.values().filter(|chat| chat.needs_reply).count();
         let unread_chats = state.chats.values().filter(|chat| chat.unread > 0).count();
         let unread_messages = state.chats.values().map(|chat| chat.unread).sum::<usize>();
-        let reply_chats = state.chats.values().filter(|chat| chat.needs_reply).count();
 
         let (attention, summary) = if is_focused {
             let focus = state
@@ -176,11 +206,16 @@ impl Device for TelegramDevice {
             (
                 AttentionLevel::Quiet,
                 format!(
-                    "设备在前景，当前会话：{focus}。共有 {unread_messages} 条未读消息分布在 {unread_chats} 个会话中，另有 {reply_chats} 个会话仍待回复。"
+                    "设备在前景，当前会话：{focus}。共有 {unread_messages} 条未读消息分布在 {unread_chats} 个会话中，另有 {resolution_chats} 个会话待判断，{reply_chats} 个会话仍待回复。"
                 ),
             )
         } else if let Some(attention) = &state.background_attention {
             (AttentionLevel::Notice, attention.summary.clone())
+        } else if resolution_chats > 0 {
+            (
+                AttentionLevel::Notice,
+                pending_resolution_summary(&state, resolution_chats),
+            )
         } else if reply_chats > 0 {
             (
                 AttentionLevel::Notice,
@@ -204,10 +239,9 @@ impl Device for TelegramDevice {
 
     fn render_focused(&self) -> FocusedRender {
         let state = self.state.lock();
-        let content = render_telegram_view(&state);
         FocusedRender {
             title: "Telegram".to_string(),
-            content,
+            content: render_telegram_view(&state),
             interactive: true,
         }
     }
@@ -228,7 +262,11 @@ impl Device for TelegramDevice {
 
     fn requires_attention(&self) -> bool {
         let state = self.state.lock();
-        state.background_attention.is_some() || state.chats.values().any(|chat| chat.needs_reply)
+        state.background_attention.is_some()
+            || state
+                .chats
+                .values()
+                .any(|chat| chat.pending_resolution || chat.needs_reply)
     }
 
     async fn execute(&mut self, action: DeviceAction) -> Result<()> {
@@ -242,6 +280,7 @@ impl Device for TelegramDevice {
                 if let Some(chat) = state.chats.get_mut(&chat_id) {
                     chat.unread = 0;
                 }
+                state.refresh_background_attention();
                 Ok(())
             }
             DeviceAction::TelegramSendMessage { text } => {
@@ -266,6 +305,7 @@ impl Device for TelegramDevice {
                     chat_id: selected_chat,
                     text,
                 });
+                state.refresh_background_attention();
                 Ok(())
             }
             DeviceAction::TerminalInput { .. } => {
@@ -285,6 +325,7 @@ impl TelegramState {
                     id: chat_id.clone(),
                     title,
                     unread: 0,
+                    pending_resolution: false,
                     needs_reply: false,
                     messages: Vec::new(),
                 },
@@ -322,19 +363,27 @@ impl TelegramState {
             return;
         };
 
+        let preview = chat
+            .messages
+            .last()
+            .map(|message| truncate_preview(message.text.trim(), 48))
+            .unwrap_or_else(|| "暂无预览".to_string());
+
         let summary = if unread_chats == 1 {
-            let preview = chat
-                .messages
-                .last()
-                .map(|message| truncate_preview(message.text.trim(), 48))
-                .unwrap_or_else(|| "暂无预览".to_string());
-            format!(
-                "Telegram 在后台：{} 发来 {} 条新消息，请尽快查看并回复。最近一条：{}",
-                chat.title, unread_messages, preview
-            )
+            if chat.pending_resolution {
+                format!(
+                    "Telegram 在后台：{} 发来 {} 条新消息，请尽快查看并判断如何处理。最近一条：{}",
+                    chat.title, unread_messages, preview
+                )
+            } else {
+                format!(
+                    "Telegram 在后台：{} 发来 {} 条新消息，请尽快查看并回复。最近一条：{}",
+                    chat.title, unread_messages, preview
+                )
+            }
         } else {
             format!(
-                "Telegram 在后台：共有 {unread_messages} 条新消息，涉及 {unread_chats} 个会话，请尽快处理。最新活跃会话是 {}。",
+                "Telegram 在后台：共有 {unread_messages} 条新消息，涉及 {unread_chats} 个会话，请尽快查看并判断如何处理。最新活跃会话是 {}。",
                 chat.title
             )
         };
@@ -374,7 +423,7 @@ fn render_telegram_view(state: &TelegramState) -> String {
     }
 
     sections.push(
-        "如果要发送消息，请使用 `DeviceAction` -> `TelegramSendMessage`。\n如果某个会话显示“待回复：是”，请优先把回复它当成当前任务。若 transport 已配置，消息会真正发出。"
+        "如果要发送消息，请使用 `DeviceAction` -> `TelegramSendMessage`。\n如果会话显示“待判断：是”，优先使用高阶动作去判断其语义；如果只剩“待回复：是”，说明判断已经做完，但消息还需要发送或补发。"
             .to_string(),
     );
 
@@ -388,10 +437,11 @@ fn render_chat_summary(chat: &TelegramChat) -> String {
         .map(|message| truncate_preview(message.text.trim(), 48))
         .unwrap_or_else(|| "暂无消息".to_string());
     format!(
-        "- {} ({}) | 未读={} | 待回复={} | 最近消息={}",
+        "- {} ({}) | 未读={} | 待判断={} | 待回复={} | 最近消息={}",
         chat.title,
         chat.id,
         chat.unread,
+        yes_no(chat.pending_resolution),
         yes_no(chat.needs_reply),
         latest
     )
@@ -408,9 +458,10 @@ fn render_selected_chat(chat: &TelegramChat) -> String {
             .join("\n")
     };
     format!(
-        "当前会话：{} ({})\n待回复：{}\n--- 消息 ---\n{}\n--- 消息 ---",
+        "当前会话：{} ({})\n待判断：{}\n待回复：{}\n--- 消息 ---\n{}\n--- 消息 ---",
         chat.title,
         chat.id,
+        yes_no(chat.pending_resolution),
         yes_no(chat.needs_reply),
         messages
     )
@@ -452,6 +503,35 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
         format!("{preview}...")
     } else {
         preview
+    }
+}
+
+fn pending_resolution_summary(state: &TelegramState, resolution_chats: usize) -> String {
+    let Some(chat) = state
+        .order
+        .iter()
+        .rev()
+        .filter_map(|id| state.chats.get(id))
+        .find(|chat| chat.pending_resolution)
+    else {
+        return "Telegram 在后台：有会话需要你判断如何处理。".to_string();
+    };
+
+    if resolution_chats == 1 {
+        let preview = chat
+            .messages
+            .last()
+            .map(|message| truncate_preview(message.text.trim(), 48))
+            .unwrap_or_else(|| "暂无预览".to_string());
+        format!(
+            "Telegram 在后台：{} 发来新消息，等待你判断如何处理。最近一条：{}",
+            chat.title, preview
+        )
+    } else {
+        format!(
+            "Telegram 在后台：共有 {resolution_chats} 个会话有新消息等待你判断如何处理。最新活跃会话是 {}。",
+            chat.title
+        )
     }
 }
 

@@ -161,6 +161,15 @@ impl Obligations {
             .map(|(id, obligation)| (*id, obligation))
     }
 
+    pub fn active_obligations(&self) -> impl Iterator<Item = (Uuid, &Obligation)> {
+        self.obligations().filter(|(_, obligation)| {
+            !matches!(
+                obligation.status,
+                ObligationStatus::Satisfied | ObligationStatus::Dropped
+            )
+        })
+    }
+
     pub fn has_pending(&self) -> bool {
         self.obligations
             .values()
@@ -176,11 +185,10 @@ impl Obligations {
 
 impl Display for Obligations {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.obligations.is_empty() {
+        let mut items = self.active_obligations().collect::<Vec<_>>();
+        if items.is_empty() {
             return write!(f, "当前没有待处理义务。");
         }
-
-        let mut items = self.obligations().collect::<Vec<_>>();
         items.sort_by_key(|(id, _)| id.to_string());
 
         for (index, (id, obligation)) in items.into_iter().enumerate() {
