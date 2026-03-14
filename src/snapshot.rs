@@ -6,17 +6,21 @@ use crate::{
     context::Context,
     device::{DeviceId, FocusedRender, PeripheralRender},
     memory::Memory,
+    obligations::Obligations,
+    projects::Projects,
     system_info::SystemInfo,
     tasks::Tasks,
 };
 
 /// 快照保存着当前agent的大脑状态
 ///
-/// 这包括记忆、短期任务、感官输入。
+/// 这包括记忆、义务、项目、下一步动作和感官输入。
 pub struct Snapshot {
     sensory: Sensory,
     current_memory: CurrentMemory,
-    tasks: Tasks,
+    obligations: Obligations,
+    projects: Projects,
+    next_actions: Tasks,
     devices: DeviceSnapshot,
 }
 
@@ -25,7 +29,9 @@ impl Snapshot {
         Self {
             sensory: Sensory::new(),
             current_memory: CurrentMemory::new(&mut context.memory).await,
-            tasks: context.tasks.clone(),
+            obligations: context.obligations.clone(),
+            projects: context.projects.clone(),
+            next_actions: context.tasks.clone(),
             devices: DeviceSnapshot::new(context),
         }
     }
@@ -37,8 +43,12 @@ impl Display for Snapshot {
         writeln!(f, "{}", self.sensory)?;
         writeln!(f, "记忆：")?;
         writeln!(f, "{}", self.current_memory)?;
-        writeln!(f, "任务列表：")?;
-        writeln!(f, "{}", self.tasks)?;
+        writeln!(f, "义务列表：")?;
+        writeln!(f, "{}", self.obligations)?;
+        writeln!(f, "项目列表：")?;
+        writeln!(f, "{}", self.projects)?;
+        writeln!(f, "下一步动作列表：")?;
+        writeln!(f, "{}", self.next_actions)?;
         writeln!(f, "设备：")?;
         write!(f, "{}", self.devices)
     }

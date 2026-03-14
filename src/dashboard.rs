@@ -15,6 +15,8 @@ use crate::telegram_acl::TelegramAclHandle;
 
 pub struct DashboardState {
     pub pty_parser: Arc<Mutex<vt100::Parser>>,
+    pub obligations: Vec<String>,
+    pub projects: Vec<String>,
     pub tasks: HashMap<Uuid, String>,
     pub working_task: Option<Uuid>,
     pub trail: Vec<String>,
@@ -81,9 +83,11 @@ pub async fn run_tui_dashboard(
             let right_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
+                    Constraint::Percentage(12),
+                    Constraint::Percentage(14),
+                    Constraint::Percentage(16),
                     Constraint::Percentage(18),
-                    Constraint::Percentage(28),
-                    Constraint::Percentage(54),
+                    Constraint::Percentage(40),
                 ])
                 .split(chunks[1]);
 
@@ -92,6 +96,26 @@ pub async fn run_tui_dashboard(
             let pty_widget = PseudoTerminal::new(&screen)
                 .block(Block::default().title("Terminal").borders(Borders::ALL));
             f.render_widget(pty_widget, chunks[0]);
+
+            let obligations_display = if state.obligations.is_empty() {
+                "No obligations.".to_string()
+            } else {
+                state.obligations.join("\n")
+            };
+            let obligations_widget = Paragraph::new(obligations_display)
+                .wrap(Wrap { trim: true })
+                .block(Block::default().title("Obligations").borders(Borders::ALL));
+            f.render_widget(obligations_widget, right_chunks[0]);
+
+            let projects_display = if state.projects.is_empty() {
+                "No projects.".to_string()
+            } else {
+                state.projects.join("\n")
+            };
+            let projects_widget = Paragraph::new(projects_display)
+                .wrap(Wrap { trim: true })
+                .block(Block::default().title("Projects").borders(Borders::ALL));
+            f.render_widget(projects_widget, right_chunks[1]);
 
             // 渲染任务
             let tasks_display = state
@@ -108,8 +132,8 @@ pub async fn run_tui_dashboard(
                 .join("\n");
             let tasks_widget = Paragraph::new(tasks_display)
                 .wrap(Wrap { trim: true })
-                .block(Block::default().title("Tasks").borders(Borders::ALL));
-            f.render_widget(tasks_widget, right_chunks[0]);
+                .block(Block::default().title("Next Actions").borders(Borders::ALL));
+            f.render_widget(tasks_widget, right_chunks[2]);
 
             let access_display = render_pending_requests(&pending_requests, pending_index);
             let access_widget = Paragraph::new(access_display)
@@ -119,14 +143,14 @@ pub async fn run_tui_dashboard(
                         .title("Telegram Access (Up/Down, a=approve, r=reject)")
                         .borders(Borders::ALL),
                 );
-            f.render_widget(access_widget, right_chunks[1]);
+            f.render_widget(access_widget, right_chunks[3]);
 
             // 渲染最近的行动轨迹
             let trail_display = state.trail.join("\n");
             let trail_widget = Paragraph::new(trail_display)
                 .wrap(Wrap { trim: true })
                 .block(Block::default().title("Trail").borders(Borders::ALL));
-            f.render_widget(trail_widget, right_chunks[2]);
+            f.render_widget(trail_widget, right_chunks[4]);
         })?;
     }
 

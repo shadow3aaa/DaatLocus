@@ -1,4 +1,4 @@
-//! 本模块定义任务列表
+//! 本模块定义下一步动作列表。
 
 use std::{collections::HashMap, fmt::Display};
 
@@ -16,6 +16,8 @@ pub struct Tasks {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Task {
     pub description: String,
+    #[serde(default)]
+    pub project_id: Option<Uuid>,
 }
 
 impl Tasks {
@@ -38,8 +40,18 @@ impl Tasks {
     }
 
     pub fn add_task(&mut self, description: String) -> Uuid {
+        self.add_task_with_project(description, None)
+    }
+
+    pub fn add_task_with_project(&mut self, description: String, project_id: Option<Uuid>) -> Uuid {
         let id = Uuid::new_v4();
-        self.tasks.insert(id, Task { description });
+        self.tasks.insert(
+            id,
+            Task {
+                description,
+                project_id,
+            },
+        );
         id
     }
 
@@ -66,6 +78,19 @@ impl Tasks {
         self.tasks.iter().map(|(id, task)| (*id, task))
     }
 
+    pub fn delete_tasks_for_project(&mut self, project_id: Uuid) -> usize {
+        let task_ids = self
+            .tasks
+            .iter()
+            .filter_map(|(id, task)| (task.project_id == Some(project_id)).then_some(*id))
+            .collect::<Vec<_>>();
+        let deleted = task_ids.len();
+        for task_id in task_ids {
+            self.delete_task(task_id);
+        }
+        deleted
+    }
+
     pub fn working_task(&self) -> Option<Uuid> {
         self.working_task
     }
@@ -74,23 +99,27 @@ impl Tasks {
 impl Display for Tasks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.tasks.is_empty() {
-            return Ok(());
+            return write!(f, "当前没有下一步动作。");
         }
 
         if self.working_task.is_none() {
             writeln!(
                 f,
-                "当前没有选中的任务。如果要执行任务，必须先选择一个任务再执行。"
+                "当前没有选中的下一步动作。如果要执行动作，必须先选择一个动作再执行。"
             )?;
         }
 
         for (id, task) in self.tasks.iter() {
+            let project_suffix = task
+                .project_id
+                .map(|project_id| format!(" [project={project_id}]"))
+                .unwrap_or_default();
             if Some(id) == self.working_task.as_ref() {
-                writeln!(f, "--- 选中的任务 ---")?;
-                writeln!(f, "{id}. {}", task.description)?;
-                writeln!(f, "--- 选中的任务 ---")?;
+                writeln!(f, "--- 选中的下一步动作 ---")?;
+                writeln!(f, "{id}. {}{}", task.description, project_suffix)?;
+                writeln!(f, "--- 选中的下一步动作 ---")?;
             } else {
-                writeln!(f, "{id}. {}", task.description)?;
+                writeln!(f, "{id}. {}{}", task.description, project_suffix)?;
             }
         }
         Ok(())

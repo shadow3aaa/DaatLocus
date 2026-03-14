@@ -6,6 +6,9 @@ use crate::{
     device::DeviceManager,
     emotion::Emotion,
     memory::Memory,
+    obligations::Obligations,
+    obligation_queue::ObligationQueue,
+    projects::Projects,
     tasks::Tasks,
 };
 
@@ -13,6 +16,9 @@ pub struct Context {
     pub llm: Box<dyn LLM + Send + Sync>,
     pub config: Config,
     pub memory: Memory,
+    pub obligations: Obligations,
+    pub obligation_queue: ObligationQueue,
+    pub projects: Projects,
     pub tasks: Tasks,
     pub emotion: Emotion,
     pub devices: DeviceManager,
@@ -21,6 +27,8 @@ pub struct Context {
 impl Context {
     pub async fn shutdown(self) {
         self.memory.shutdown().await;
+        self.obligations.shutdown().await;
+        self.projects.shutdown().await;
         self.tasks.shutdown().await;
         self.emotion.shutdown().await;
     }
