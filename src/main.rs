@@ -3,7 +3,6 @@ mod context;
 mod core;
 mod dashboard;
 mod device;
-mod device_tasks;
 mod embeding;
 mod emotion;
 mod memory;
@@ -28,7 +27,6 @@ use crate::{
     core::Action,
     dashboard::{DashboardState, run_tui_dashboard},
     device::{DeviceId, DeviceManager},
-    device_tasks::DeviceTaskQueue,
     emotion::Emotion,
     memory::Memory,
     providers::OpenAIClient,
@@ -67,12 +65,13 @@ pub const TELEGRAM_PROMPT: &str = r#"Telegram 设备使用提示：
 const ATTEND_NOTIFICATIONS_INSTRUCTION: &str = r#"当前状态：【处理设备提醒阶段】
 后台设备出现了需要优先处理的提醒。此阶段的优先级高于你的探索任务和当前终端工作。
 请根据快照状态，遵循以下指南选择你的 Action：
-1. 某些后台设备会在世界变化时自动创建对应任务。例如 Telegram 新消息会自动生成“回复某个会话”的任务。处理提醒前，先在任务列表中找到并 `TaskSelect` 选中对应任务；只有明确缺失时，才自行 `TaskAdd`。
-2. 只有在已经为这件事建立了明确任务后，才去处理设备本身。如果目标设备当前不在前景，再输出 `FocusDevice` 将它切到前景。
+1. 后台提醒并不自动等于任务。先判断这条消息只是需要短答，还是会引出一个需要持续推进的工作。
+2. 如果只是礼貌回复、状态说明或短答，不要创建任务；直接去处理设备本身即可。如果目标设备当前不在前景，先输出 `FocusDevice` 将它切到前景。
 3. 如果 Telegram 处于前景且某个会话显示“待回复：是”，请优先打开相关会话（`TelegramSelectChat`），阅读内容，并及时输出 `TelegramSendMessage` 回复。对方若直接询问你在做什么，应先正面回答。
-4. 在相关提醒处理完成之前，不要切回 Terminal，也不要恢复探索性终端操作。
-5. 只有当消息已经得到合适回复，或你明确判断当前无需回复时，才可以输出 `PutAwayDevice` 或在下一轮回到正常任务执行/探索阶段。
-6. 如果你刚发出消息，正在等待 transport 结果，或正在等待对方继续发言，可以输出 `Wait`。"#;
+4. 只有当你决定承诺后续持续工作，或消息明确提出了一项需要后续推进的请求时，才创建/选中任务。若任务列表中还没有对应任务，请先 `TaskAdd`；若已存在但未选中，再 `TaskSelect`。
+5. 在相关提醒处理完成之前，不要切回 Terminal，也不要恢复探索性终端操作。
+6. 只有当消息已经得到合适回复，或你明确判断当前无需回复时，才可以输出 `PutAwayDevice` 或在下一轮回到正常任务执行/探索阶段。
+7. 如果你刚发出消息，正在等待 transport 结果，或正在等待对方继续发言，可以输出 `Wait`。"#;
 const EXECUTE_TASK_INSTRUCTION: &str = r#"当前状态：任务执行阶段
 你的无聊度处于合理范围，你专注推进当前的任务。
 请根据快照状态，遵循以下指南选择你的 Action：
@@ -106,7 +105,6 @@ async fn main() {
     let tasks = Tasks::new().await;
     let emotion = Emotion::new().await;
     let telegram_acl = TelegramAclHandle::load().await;
-    let device_tasks = DeviceTaskQueue::new();
     let terminal = TerminalDevice::new();
     let telegram = TelegramDevice::new();
     let telegram_handle = telegram.handle();
@@ -123,7 +121,6 @@ async fn main() {
                 config.telegram.clone(),
                 telegram_handle,
                 telegram_acl.clone(),
-                device_tasks.clone(),
             )
             .run(),
         ))
@@ -136,7 +133,6 @@ async fn main() {
         config,
         memory,
         tasks,
-        device_tasks,
         emotion,
         devices,
     };
@@ -173,7 +169,6 @@ async fn main() {
 }
 
 async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<DashboardState>) {
-    context.device_tasks.apply_to_tasks(&mut context.tasks);
     context
         .devices
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
@@ -204,15 +199,7 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
         .record(output.current_doing, output.observation, output.description)
         .await;
     execute_action(context, output.action).await;
-    tx.send_modify(|state| {
-        state.tasks = context
-            .tasks
-            .tasks()
-            .map(|(id, task)| (id, task.description.clone()))
-            .collect();
-        state.working_task = context.tasks.working_task();
-        state.trail = context.memory.trail();
-    });
+    sync_dashboard_state(context, tx);
 }
 
 async fn execute_action(context: &mut Context, action: Action) {
@@ -223,7 +210,6 @@ async fn execute_action(context: &mut Context, action: Action) {
         Action::TaskDelete { task_id } => {
             let id = Uuid::parse_str(&task_id).unwrap();
             context.tasks.delete_task(id);
-            context.device_tasks.forget_task(id);
         }
         Action::TaskSelect { task_id } => {
             let id = Uuid::parse_str(&task_id).unwrap();
@@ -248,6 +234,18 @@ async fn execute_action(context: &mut Context, action: Action) {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     }
+}
+
+fn sync_dashboard_state(context: &Context, tx: &tokio::sync::watch::Sender<DashboardState>) {
+    tx.send_modify(|state| {
+        state.tasks = context
+            .tasks
+            .tasks()
+            .map(|(id, task)| (id, task.description.clone()))
+            .collect();
+        state.working_task = context.tasks.working_task();
+        state.trail = context.memory.trail();
+    });
 }
 
 pub async fn get_spinova_home() -> PathBuf {

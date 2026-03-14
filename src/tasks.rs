@@ -43,21 +43,6 @@ impl Tasks {
         id
     }
 
-    pub fn update_task_description(&mut self, id: Uuid, description: String) -> bool {
-        let Some(task) = self.tasks.get_mut(&id) else {
-            return false;
-        };
-        if task.description == description {
-            return false;
-        }
-        task.description = description;
-        true
-    }
-
-    pub fn contains_task(&self, id: Uuid) -> bool {
-        self.tasks.contains_key(&id)
-    }
-
     pub fn delete_task(&mut self, id: Uuid) -> Option<Task> {
         if self.working_task == Some(id) {
             self.working_task = None;

@@ -6,8 +6,6 @@ use serde::Deserialize;
 
 use crate::{
     config::TelegramConfig,
-    device::DeviceId,
-    device_tasks::DeviceTaskQueue,
     telegram_acl::{AccessDecision, TelegramAclHandle},
     telegram_device::TelegramDeviceHandle,
 };
@@ -17,7 +15,6 @@ pub struct TelegramTransport {
     config: TelegramConfig,
     acl: TelegramAclHandle,
     handle: TelegramDeviceHandle,
-    device_tasks: DeviceTaskQueue,
     offset: Option<i64>,
 }
 
@@ -26,14 +23,12 @@ impl TelegramTransport {
         config: TelegramConfig,
         handle: TelegramDeviceHandle,
         acl: TelegramAclHandle,
-        device_tasks: DeviceTaskQueue,
     ) -> Self {
         Self {
             client: Client::new(),
             config,
             acl,
             handle,
-            device_tasks,
             offset: None,
         }
     }
@@ -103,11 +98,6 @@ impl TelegramTransport {
                     chat_title.clone(),
                     sender,
                     text.clone(),
-                );
-                self.device_tasks.enqueue_device_task(
-                    DeviceId::Telegram,
-                    format!("reply:{}", message.chat.id),
-                    build_reply_task_description(&chat_title, &text),
                 );
             }
             AccessDecision::Blocked => return,
@@ -286,12 +276,4 @@ fn truncate_reason(text: &str) -> String {
     } else {
         preview
     }
-}
-
-fn build_reply_task_description(chat_title: &str, text: &str) -> String {
-    format!(
-        "回复 Telegram 会话 {} 的新消息：{}",
-        chat_title,
-        truncate_reason(text)
-    )
 }

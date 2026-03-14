@@ -4,7 +4,6 @@ use crate::{
     config::Config,
     core::LLM,
     device::DeviceManager,
-    device_tasks::DeviceTaskQueue,
     emotion::Emotion,
     memory::Memory,
     tasks::Tasks,
@@ -15,7 +14,6 @@ pub struct Context {
     pub config: Config,
     pub memory: Memory,
     pub tasks: Tasks,
-    pub device_tasks: DeviceTaskQueue,
     pub emotion: Emotion,
     pub devices: DeviceManager,
 }
