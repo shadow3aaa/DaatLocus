@@ -6,7 +6,6 @@ mod device;
 mod embeding;
 mod emotion;
 mod memory;
-mod obligation_queue;
 mod obligations;
 mod projects;
 mod providers;
@@ -28,12 +27,11 @@ use uuid::Uuid;
 use crate::{
     config::load_config,
     context::Context,
-    core::Action,
+    core::{Action, TelegramResolution},
     dashboard::{DashboardState, run_tui_dashboard},
     device::{DeviceId, DeviceManager},
     emotion::Emotion,
     memory::Memory,
-    obligation_queue::ObligationQueue,
     obligations::{ObligationSource, ObligationStatus, Obligations},
     projects::{ProjectOrigin, Projects},
     providers::OpenAIClient,
@@ -49,6 +47,7 @@ use crate::{
 pub const SYSTEM_PROMPT: &str = r#"你叫 Spinova，一个自主智能体。
 你没有实体，也没有要服务的用户。记忆流、义务列表、项目列表、下一步动作列表、设备外围感知和当前前景设备画面就是你的整个世界。
 义务不等于任务；项目是跨多个步骤的承诺；下一步动作是当前可立即执行的一步。
+Telegram 原始消息首先只是设备世界中的会话事件，不自动等于义务。只有被系统结构化保留的待处理责任，才会出现在义务列表中。
 你一次只能详细看见一个处于前景的设备，其它设备只能通过外围感知知道其存在与提醒。
 在每次输出中，你必须把“观察到/学到的关键信息”与“决定采取的动作”区分开来。
 `observation` 必须总结具体事实、报错、文件内容、消息内容或分析结论，而不是只写自己执行了什么操作。
@@ -70,22 +69,25 @@ pub const TELEGRAM_PROMPT: &str = r#"Telegram 设备使用提示：
 3. 如果你想发送消息，请在 Telegram 设备处于前景且已经打开某个会话时，输出 `DeviceAction` 来执行 `TelegramSendMessage`。
 4. 当 Telegram transport 已配置时，白名单中的真实消息会进入该设备，且你的发送消息动作会真正发出。
 5. 未审批的 chat 不会进入你的世界，只会等待人工审批。
-6. 如果某个会话显示“待回复：是”，那意味着这条对话还没有完成处理。除非你已经发出合适的回复，否则不要把它当作已结束。"#;
+6. 如果某个会话显示“待判断：是”，那意味着这条消息的语义还没有被你正式处理，应优先使用 `ResolveTelegramChat` 做判断。
+7. 如果某个会话显示“待回复：是”，那意味着这条对话仍然需要你给出消息回复。"#;
 const ATTEND_NOTIFICATIONS_INSTRUCTION: &str = r#"当前状态：【处理设备提醒阶段】
 后台设备出现了需要优先处理的提醒。此阶段的优先级高于你的探索任务和当前终端工作。
 请根据快照状态，遵循以下指南选择你的 Action：
-1. 先查看义务列表，找出当前最需要处理的 `Pending` 义务，尤其是 `需回复=是` 的义务。
-2. 后台提醒并不自动等于项目或下一步动作。先判断这条消息只是需要短答，还是会引出一个需要持续推进的工作。
-3. 如果只是礼貌回复、状态说明或短答，不要创建项目或下一步动作；直接去处理设备本身即可。如果目标设备当前不在前景，先输出 `FocusDevice` 将它切到前景。
-4. 如果 Telegram 处于前景且某个会话显示“待回复：是”，请优先打开相关会话（`TelegramSelectChat`），阅读内容，并及时输出 `TelegramSendMessage` 回复。对方若直接询问你在做什么，应先正面回答。
-5. 如果你只是礼貌回复、状态说明或短答，不要升级成项目；在你确认已经妥善回复、且没有后续持续工作时，应使用 `ObligationSatisfy` 将这条义务关单。
-6. 只有当你明确接受某项义务并承诺后续会持续推进时，才使用 `CommitToProject` 将它升级为项目。这个动作会原子地创建项目、可选创建第一条下一步动作，并可选发送确认消息。
-7. 如果你在对外回复中表达了“我会调查 / 我会去做 / 稍后给你结果 / 我来处理”等未来承诺，就必须使用 `CommitToProject`，不能只发送一条确认消息。
-8. 如果你只是接受了工作但还没给出下一步动作，可以在 `CommitToProject` 的 `initial_next_action` 中填写第一步；如果只是短答，则不要升级成项目。
-9. 当你后来追加新的下一步动作，而且它明显属于某个项目时，请在 `TaskAdd.project_id` 中填写对应项目 id，不要制造悬空动作。
-10. 在相关提醒处理完成之前，不要切回 Terminal，也不要恢复探索性终端操作。
-11. 只有当消息已经得到合适回复，或你明确判断当前无需回复时，才可以输出 `PutAwayDevice` 或在下一轮回到正常任务执行/探索阶段。
-12. 如果你刚发出消息，正在等待 transport 结果，或正在等待对方继续发言，可以输出 `Wait`。"#;
+1. 先区分两类需要处理的东西：义务列表中的 `Pending` 义务；以及 Telegram 会话中显示“待判断：是”或“待回复：是”的消息。
+2. Telegram 原始消息不自动等于义务。对原始来信做语义判断时，应优先使用 `ResolveTelegramChat`，而不是先创建义务。
+3. `ResolveTelegramChat` 的语义是：
+   - `ReplyOnly`：只是短答、寒暄、状态说明。
+   - `AcceptAsProject`：明确接受这项长期工作，系统会自动创建项目、挂上回报目标，并可选创建第一条下一步动作。
+   - `AskClarification`：你还缺信息，需要先追问。
+   - `Decline`：你决定拒绝。
+   - `NoReplyNeeded`：这条消息无需回复也无需升级。
+4. 如果你在对外回复中表达了“我会调查 / 我会去做 / 稍后给你结果 / 我来处理”等未来承诺，就应使用 `ResolveTelegramChat` + `AcceptAsProject`，而不是只发一条确认消息。
+5. 如果某个 Telegram 会话只剩“待回复：是”而“待判断：否”，说明语义已经判断完了，此时优先保持 Telegram 在前景并发送/补发消息，不要再重新做语义判定。
+6. 义务列表中的内容通常是结构化待处理责任，例如项目完成后的回报。处理这类义务时，可以使用设备动作回复，并在妥善完成后用 `ObligationSatisfy` 关单。
+7. 只有当你明确接受某项结构化义务并承诺后续会持续推进时，才使用 `CommitToProject` 将它升级为项目。
+8. 在相关提醒处理完成之前，不要切回 Terminal，也不要恢复探索性终端操作。
+9. 如果你刚发出消息，正在等待 transport 结果，或正在等待对方继续发言，可以输出 `Wait`。"#;
 const EXECUTE_TASK_INSTRUCTION: &str = r#"当前状态：下一步动作执行阶段
 你的无聊度处于合理范围，你专注推进当前已存在的下一步动作。
 请根据快照状态，遵循以下指南选择你的 Action：
@@ -131,7 +133,6 @@ async fn main() {
     };
     let memory = Memory::new().await;
     let obligations = Obligations::new().await;
-    let obligation_queue = ObligationQueue::new();
     let projects = Projects::new().await;
     let tasks = Tasks::new().await;
     let emotion = Emotion::new().await;
@@ -150,9 +151,8 @@ async fn main() {
         Some(tokio::spawn(
             TelegramTransport::new(
                 config.telegram.clone(),
-                telegram_handle,
+                telegram_handle.clone(),
                 telegram_acl.clone(),
-                obligation_queue.clone(),
             )
             .run(),
         ))
@@ -165,11 +165,11 @@ async fn main() {
         config,
         memory,
         obligations,
-        obligation_queue,
         projects,
         tasks,
         emotion,
         devices,
+        telegram: telegram_handle,
     };
 
     let (tx, mut rx) = tokio::sync::watch::channel(DashboardState {
@@ -206,9 +206,6 @@ async fn main() {
 }
 
 async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<DashboardState>) {
-    if context.obligation_queue.apply_to(&mut context.obligations) {
-        sync_dashboard_state(context, tx);
-    }
     context
         .devices
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
@@ -277,6 +274,14 @@ async fn execute_action(context: &mut Context, action: Action) {
             }
             Err(err) => eprintln!("{err:?}"),
         },
+        Action::ResolveTelegramChat {
+            chat_id,
+            resolution,
+        } => {
+            if let Err(err) = execute_resolve_telegram_chat(context, &chat_id, resolution).await {
+                eprintln!("{err:?}");
+            }
+        }
         Action::ObligationSatisfy { obligation_id } => {
             match resolve_obligation_reference(context, &obligation_id) {
                 Ok(id) => {
@@ -351,7 +356,7 @@ fn sync_dashboard_state(context: &Context, tx: &tokio::sync::watch::Sender<Dashb
 }
 
 fn render_obligations_for_dashboard(context: &Context) -> Vec<String> {
-    let mut obligations = context.obligations.obligations().collect::<Vec<_>>();
+    let mut obligations = context.obligations.active_obligations().collect::<Vec<_>>();
     obligations.sort_by_key(|(id, _)| id.to_string());
     obligations
         .into_iter()
@@ -463,6 +468,64 @@ fn resolve_reference(
     ))
 }
 
+fn resolve_string_reference(
+    kind: &str,
+    reference: &str,
+    candidates: Vec<(String, String)>,
+) -> miette::Result<String> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err(miette!("{kind} reference is empty"));
+    }
+
+    if let Some((id, _)) = candidates
+        .iter()
+        .find(|(candidate_id, _)| candidate_id == reference)
+    {
+        return Ok(id.clone());
+    }
+
+    let normalized_reference = normalize_reference(reference);
+    let exact_matches = candidates
+        .iter()
+        .filter_map(|(id, label)| {
+            (normalize_reference(label) == normalized_reference).then_some(id.clone())
+        })
+        .collect::<Vec<_>>();
+    if exact_matches.len() == 1 {
+        return Ok(exact_matches[0].clone());
+    }
+    if exact_matches.len() > 1 {
+        return Err(miette!(
+            "ambiguous {kind} reference `{reference}`: matched {} items by exact description/title",
+            exact_matches.len()
+        ));
+    }
+
+    let fuzzy_matches = candidates
+        .iter()
+        .filter_map(|(id, label)| {
+            let normalized_label = normalize_reference(label);
+            (normalized_label.contains(&normalized_reference)
+                || normalized_reference.contains(&normalized_label))
+            .then_some(id.clone())
+        })
+        .collect::<Vec<_>>();
+    if fuzzy_matches.len() == 1 {
+        return Ok(fuzzy_matches[0].clone());
+    }
+    if fuzzy_matches.len() > 1 {
+        return Err(miette!(
+            "ambiguous {kind} reference `{reference}`: matched {} items fuzzily",
+            fuzzy_matches.len()
+        ));
+    }
+
+    Err(miette!(
+        "invalid {kind} reference `{reference}`: expected a chat id from the device view, or a unique matching title"
+    ))
+}
+
 fn resolve_task_reference(context: &Context, reference: &str) -> miette::Result<Uuid> {
     resolve_reference(
         "task",
@@ -497,6 +560,105 @@ fn resolve_project_reference(context: &Context, reference: &str) -> miette::Resu
             .map(|(id, project)| (id, project.title.clone()))
             .collect(),
     )
+}
+
+fn resolve_telegram_chat_reference(context: &Context, reference: &str) -> miette::Result<String> {
+    resolve_string_reference("telegram chat", reference, context.telegram.chat_refs())
+}
+
+fn trim_optional_field(value: Option<String>) -> Option<String> {
+    value.and_then(trim_required_field)
+}
+
+fn trim_required_field(value: String) -> Option<String> {
+    let trimmed = value.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn require_field(value: String, field_name: &str) -> miette::Result<String> {
+    trim_required_field(value).ok_or_else(|| miette!("missing required field: {field_name}"))
+}
+
+async fn send_telegram_message(
+    context: &mut Context,
+    chat_id: &str,
+    text: String,
+) -> miette::Result<()> {
+    context.devices.focus(DeviceId::Telegram).await?;
+    context
+        .devices
+        .execute_focused(crate::device::DeviceAction::TelegramSelectChat {
+            chat_id: chat_id.to_string(),
+        })
+        .await?;
+    context
+        .devices
+        .execute_focused(crate::device::DeviceAction::TelegramSendMessage { text })
+        .await?;
+    Ok(())
+}
+
+async fn execute_resolve_telegram_chat(
+    context: &mut Context,
+    chat_reference: &str,
+    resolution: TelegramResolution,
+) -> miette::Result<()> {
+    let chat_id = resolve_telegram_chat_reference(context, chat_reference)?;
+
+    match resolution {
+        TelegramResolution::ReplyOnly { reply } => {
+            let reply = require_field(reply, "reply")?;
+            send_telegram_message(context, &chat_id, reply).await?;
+            context.telegram.resolve_chat(&chat_id, Some(false))?;
+        }
+        TelegramResolution::AskClarification { reply } => {
+            let reply = require_field(reply, "reply")?;
+            send_telegram_message(context, &chat_id, reply).await?;
+            context.telegram.resolve_chat(&chat_id, Some(false))?;
+        }
+        TelegramResolution::Decline { reply } => {
+            let reply = require_field(reply, "reply")?;
+            send_telegram_message(context, &chat_id, reply).await?;
+            context.telegram.resolve_chat(&chat_id, Some(false))?;
+        }
+        TelegramResolution::NoReplyNeeded => {
+            context.telegram.resolve_chat(&chat_id, Some(false))?;
+        }
+        TelegramResolution::AcceptAsProject {
+            reply,
+            project_title,
+            success_criteria,
+            first_next_action,
+        } => {
+            let project_title = require_field(project_title, "project_title")?;
+            let success_criteria = require_field(success_criteria, "success_criteria")?;
+            let project_id = context.projects.add(
+                project_title,
+                ProjectOrigin::Telegram,
+                success_criteria,
+                Some(crate::projects::ReportTarget {
+                    device: DeviceId::Telegram,
+                    target: chat_id.clone(),
+                }),
+            );
+
+            if let Some(next_action) = trim_optional_field(first_next_action) {
+                let task_id = context
+                    .tasks
+                    .add_task_with_project(next_action, Some(project_id));
+                context.tasks.select_working_task(task_id);
+            }
+
+            if let Some(reply) = trim_optional_field(reply) {
+                send_telegram_message(context, &chat_id, reply).await?;
+                context.telegram.resolve_chat(&chat_id, Some(false))?;
+            } else {
+                context.telegram.resolve_chat(&chat_id, None)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn execute_commit_to_project(

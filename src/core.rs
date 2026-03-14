@@ -9,18 +9,47 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "kind")]
+pub enum TelegramResolution {
+    ReplyOnly {
+        /// 仅做简短回复时要发送的内容
+        reply: String,
+    },
+    AcceptAsProject {
+        /// 如果需要先对外确认接下该工作，可填写回复内容；也可以留空，稍后再回
+        reply: Option<String>,
+        /// 新项目的标题
+        project_title: String,
+        /// 如何判断该项目完成
+        success_criteria: String,
+        /// 接下项目后立即要执行的第一条下一步动作
+        first_next_action: Option<String>,
+    },
+    AskClarification {
+        /// 需要进一步澄清时发送的追问内容
+        reply: String,
+    },
+    Decline {
+        /// 拒绝时发送的回复内容
+        reply: String,
+    },
+    NoReplyNeeded,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 /// 你做出的行动，必须是下面几种之一：
 /// 1. TaskAdd
 /// 2. TaskDelete
 /// 3. TaskSelect
-/// 4. ObligationSatisfy
-/// 5. CommitToProject
-/// 6. ProjectComplete
-/// 7. FocusDevice
-/// 8. PutAwayDevice
-/// 9. DeviceAction
-/// 10. Wait
+/// 4. ResolveTelegramChat
+/// 5. ObligationSatisfy
+/// 6. CommitToProject
+/// 7. ProjectComplete
+/// 8. FocusDevice
+/// 9. PutAwayDevice
+/// 10. DeviceAction
+/// 11. Wait
 pub enum Action {
     /// TaskAdd: 添加一个新的任务
     TaskAdd {
@@ -38,6 +67,13 @@ pub enum Action {
     TaskSelect {
         /// 要选中的下一步动作 id。优先填写快照里显示的 UUID，不要填写动作描述。
         task_id: String,
+    },
+    /// ResolveTelegramChat: 对某个 Telegram 会话中的最新来信做语义判断，并由系统自动落地后续 bookkeeping
+    ResolveTelegramChat {
+        /// 要处理的 Telegram 会话 id。优先填写设备视图里显示的 chat id；若标题能唯一匹配，也可填写标题。
+        chat_id: String,
+        /// 你对这条会话来信的判断结果与执行所需负载
+        resolution: TelegramResolution,
     },
     /// ObligationSatisfy: 将一条已经妥善处理完的义务标记为完成
     ObligationSatisfy {
