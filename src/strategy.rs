@@ -1,6 +1,6 @@
 //! 本模块定义策略路由，它的作用是根据spinova状态判定下一步应该进入什么阶段
 
-use crate::{context::Context, device::AttentionLevel};
+use crate::context::Context;
 
 pub enum Strategy {
     /// 后台设备出现需要优先处理的提醒
@@ -15,15 +15,7 @@ impl Strategy {
     const BOREDOM_THRESHOLD: f32 = 0.8;
 
     pub fn route(context: &Context) -> Self {
-        if context
-            .devices
-            .peripheral_renders()
-            .into_iter()
-            .any(|(_, render)| {
-                !render.is_focused
-                    && matches!(render.attention, AttentionLevel::Notice | AttentionLevel::Urgent)
-            })
-        {
+        if context.devices.requires_attention() {
             return Self::AttendNotifications;
         }
 

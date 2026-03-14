@@ -78,6 +78,10 @@ pub trait Device: Send + Sync {
 
     fn render_focused(&self) -> FocusedRender;
 
+    fn requires_attention(&self) -> bool {
+        false
+    }
+
     async fn on_focus(&mut self) -> Result<()> {
         Ok(())
     }
@@ -142,6 +146,10 @@ impl DeviceManager {
     pub fn focused_render(&self) -> Option<FocusedRender> {
         self.focused
             .and_then(|id| self.devices.get(&id).map(|device| device.render_focused()))
+    }
+
+    pub fn requires_attention(&self) -> bool {
+        self.devices.values().any(|device| device.requires_attention())
     }
 
     pub async fn focus(&mut self, id: DeviceId) -> Result<()> {
