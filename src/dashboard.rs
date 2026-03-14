@@ -1,6 +1,6 @@
 //! 本模块定义tui面板显示相关的内容
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{cmp::Reverse, collections::HashMap, sync::Arc, time::Duration};
 
 use crossterm::event::{Event, KeyCode};
 use parking_lot::Mutex;
@@ -17,9 +17,14 @@ pub struct DashboardState {
     pub pty_parser: Arc<Mutex<vt100::Parser>>,
     pub obligations: Vec<String>,
     pub projects: Vec<String>,
-    pub tasks: HashMap<Uuid, String>,
+    pub tasks: HashMap<Uuid, DashboardTaskEntry>,
     pub working_task: Option<Uuid>,
     pub trail: Vec<String>,
+}
+
+pub struct DashboardTaskEntry {
+    pub display: String,
+    pub last_touched_at_ms: Option<i64>,
 }
 
 pub async fn run_tui_dashboard(
@@ -119,14 +124,20 @@ pub async fn run_tui_dashboard(
 
             // 渲染任务
             let mut task_items = state.tasks.iter().collect::<Vec<_>>();
-            task_items.sort_by_key(|(id, _)| id.to_string());
+            task_items.sort_by_key(|(id, desc)| {
+                (
+                    Some(**id) != state.working_task,
+                    Reverse(desc.last_touched_at_ms.unwrap_or(0)),
+                    id.to_string(),
+                )
+            });
             let tasks_display = task_items
                 .into_iter()
                 .map(|(id, desc)| {
                     if Some(*id) == state.working_task {
-                        format!("> {desc}")
+                        format!("> {}", desc.display)
                     } else {
-                        desc.clone()
+                        desc.display.clone()
                     }
                 })
                 .collect::<Vec<String>>()
