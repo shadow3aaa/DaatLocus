@@ -108,18 +108,22 @@ impl OpenAIClient {
                 truncate_for_error(&body)
             )
         })?;
-        let tool_calls = response_json["choices"][0]["message"]["tool_calls"]
-            .as_array()
-            .ok_or_else(|| {
-                let content = response_json["choices"][0]["message"]["content"]
-                    .as_str()
-                    .unwrap_or("");
-                miette!(
-                    "llm response did not include tool_calls; content={}; response={}",
-                    truncate_for_error(content),
-                    truncate_for_json_error(&response_json)
-                )
-            })?;
+        let content = response_json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("");
+        let Some(tool_calls) = response_json["choices"][0]["message"]["tool_calls"].as_array()
+        else {
+            if !content.trim().is_empty() {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
+                    return Ok(value);
+                }
+            }
+            return Err(miette!(
+                "llm response did not include tool_calls; content={}; response={}",
+                truncate_for_error(content),
+                truncate_for_json_error(&response_json)
+            ));
+        };
         let first_tool_call = tool_calls.first().ok_or_else(|| {
             miette!(
                 "llm response included empty tool_calls; response={}",
