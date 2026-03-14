@@ -3,6 +3,7 @@ mod context;
 mod core;
 mod dashboard;
 mod device;
+mod device_tasks;
 mod embeding;
 mod emotion;
 mod memory;
@@ -27,6 +28,7 @@ use crate::{
     core::Action,
     dashboard::{DashboardState, run_tui_dashboard},
     device::{DeviceId, DeviceManager},
+    device_tasks::DeviceTaskQueue,
     emotion::Emotion,
     memory::Memory,
     providers::OpenAIClient,
@@ -65,7 +67,7 @@ pub const TELEGRAM_PROMPT: &str = r#"Telegram 设备使用提示：
 const ATTEND_NOTIFICATIONS_INSTRUCTION: &str = r#"当前状态：【处理设备提醒阶段】
 后台设备出现了需要优先处理的提醒。此阶段的优先级高于你的探索任务和当前终端工作。
 请根据快照状态，遵循以下指南选择你的 Action：
-1. 如果提醒来自 Telegram，先把这件事变成一个明确任务。若任务列表中还没有对应任务，请先输出 `TaskAdd`，例如“回复 Telegram 会话 shadow3 的消息”；若任务已存在但未选中，请先 `TaskSelect` 选中它。
+1. 某些后台设备会在世界变化时自动创建对应任务。例如 Telegram 新消息会自动生成“回复某个会话”的任务。处理提醒前，先在任务列表中找到并 `TaskSelect` 选中对应任务；只有明确缺失时，才自行 `TaskAdd`。
 2. 只有在已经为这件事建立了明确任务后，才去处理设备本身。如果目标设备当前不在前景，再输出 `FocusDevice` 将它切到前景。
 3. 如果 Telegram 处于前景且某个会话显示“待回复：是”，请优先打开相关会话（`TelegramSelectChat`），阅读内容，并及时输出 `TelegramSendMessage` 回复。对方若直接询问你在做什么，应先正面回答。
 4. 在相关提醒处理完成之前，不要切回 Terminal，也不要恢复探索性终端操作。
@@ -104,6 +106,7 @@ async fn main() {
     let tasks = Tasks::new().await;
     let emotion = Emotion::new().await;
     let telegram_acl = TelegramAclHandle::load().await;
+    let device_tasks = DeviceTaskQueue::new();
     let terminal = TerminalDevice::new();
     let telegram = TelegramDevice::new();
     let telegram_handle = telegram.handle();
@@ -120,6 +123,7 @@ async fn main() {
                 config.telegram.clone(),
                 telegram_handle,
                 telegram_acl.clone(),
+                device_tasks.clone(),
             )
             .run(),
         ))
@@ -132,6 +136,7 @@ async fn main() {
         config,
         memory,
         tasks,
+        device_tasks,
         emotion,
         devices,
     };
@@ -168,6 +173,7 @@ async fn main() {
 }
 
 async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<DashboardState>) {
+    context.device_tasks.apply_to_tasks(&mut context.tasks);
     context
         .devices
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
@@ -217,6 +223,7 @@ async fn execute_action(context: &mut Context, action: Action) {
         Action::TaskDelete { task_id } => {
             let id = Uuid::parse_str(&task_id).unwrap();
             context.tasks.delete_task(id);
+            context.device_tasks.forget_task(id);
         }
         Action::TaskSelect { task_id } => {
             let id = Uuid::parse_str(&task_id).unwrap();
