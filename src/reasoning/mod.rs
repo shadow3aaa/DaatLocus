@@ -13,3 +13,4 @@ pub mod render;
 pub mod runtime;
 pub mod signature;
 pub mod trace;
+pub mod trace_mining;

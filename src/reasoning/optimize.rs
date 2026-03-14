@@ -19,9 +19,10 @@ use super::{
         resolve_telegram::ResolveTelegramChatProgram,
     },
     signature::Signature,
+    trace_mining::{derive_resolve_telegram_eval_cases, propose_resolve_telegram_candidates},
 };
 
-const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v1";
+const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v2";
 const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<OptimizationResult>> {
@@ -43,7 +44,7 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
 
     let resolve_program = ResolveTelegramChatProgram;
     let resolve_base = resolve_program.default_tuning();
-    let resolve_candidates = vec![
+    let mut resolve_candidates = vec![
         CandidateConfig {
             name: "baseline".to_string(),
             config: resolve_base.clone(),
@@ -66,13 +67,16 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
             },
         },
     ];
+    resolve_candidates.extend(propose_resolve_telegram_candidates(&resolve_base));
+    let mut resolve_cases = resolve_program.eval_cases();
+    resolve_cases.extend(derive_resolve_telegram_eval_cases(&resolve_program));
     compiled.push(
         ensure_suite_compiled(
             context,
             &renderer,
             &resolve_program,
             "resolve_telegram_chat",
-            resolve_program.eval_cases(),
+            resolve_cases,
             resolve_candidates,
         )
         .await?,
@@ -117,7 +121,7 @@ async fn ensure_suite_compiled<P: Program>(
     }
 
     let total_cases = cases.len();
-    let mut best: Option<(String, PromptTuningConfig<P::Output>, usize)> = None;
+    let mut best: Option<(String, PromptTuningConfig<P::Output>, usize, usize)> = None;
 
     for candidate in candidates {
         let results = run_suite_with_tuning(
@@ -130,15 +134,18 @@ async fn ensure_suite_compiled<P: Program>(
         )
         .await;
         let score = results.iter().filter(|result| result.passed).count();
+        let attempts_used = results.iter().map(|result| result.attempts_used).sum();
         if best
             .as_ref()
-            .is_none_or(|(_, _, best_score)| score > *best_score)
+            .is_none_or(|(_, _, best_score, best_attempts)| {
+                score > *best_score || (score == *best_score && attempts_used < *best_attempts)
+            })
         {
-            best = Some((candidate.name, candidate.config, score));
+            best = Some((candidate.name, candidate.config, score, attempts_used));
         }
     }
 
-    let Some((best_candidate, best_tuning, score)) = best else {
+    let Some((best_candidate, best_tuning, score, _attempts_used)) = best else {
         return Err(miette!(
             "no optimization candidates available for suite {suite_name}"
         ));

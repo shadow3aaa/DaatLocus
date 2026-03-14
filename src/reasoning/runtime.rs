@@ -11,6 +11,11 @@ use super::{
     trace::{ProgramTraceRecord, append_program_trace},
 };
 
+pub struct ProgramExecutionOutcome<O> {
+    pub output: O,
+    pub attempts_used: usize,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PromptRequest {
     pub tool_name: String,
@@ -81,6 +86,19 @@ pub async fn execute_program_with_ir<P: Program, R: Renderer>(
     ir: super::ir::PromptIR,
     tuning: &PromptTuningConfig<P::Output>,
 ) -> Result<P::Output> {
+    execute_program_with_ir_report(llm, context, renderer, program, ir, tuning)
+        .await
+        .map(|outcome| outcome.output)
+}
+
+pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
+    llm: &(dyn LLM + Send + Sync),
+    context: &Context,
+    renderer: &R,
+    program: &P,
+    ir: super::ir::PromptIR,
+    tuning: &PromptTuningConfig<P::Output>,
+) -> Result<ProgramExecutionOutcome<P::Output>> {
     let mut request = renderer.render(program, ir, tuning);
     let mut last_error = None;
     let signature = program.signature();
@@ -117,7 +135,10 @@ pub async fn execute_program_with_ir<P: Program, R: Renderer>(
                     None,
                 ))
                 .await;
-                return Ok(output);
+                return Ok(ProgramExecutionOutcome {
+                    output,
+                    attempts_used: attempt + 1,
+                });
             }
             Err(err) => {
                 last_error = Some(err.to_string());

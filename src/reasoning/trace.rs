@@ -1,5 +1,5 @@
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 
@@ -9,7 +9,7 @@ use super::{runtime::PromptRequest, signature::Signature};
 
 const TRACE_FILE_NAME: &str = "reasoning_traces.jsonl";
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProgramTraceRecord {
     pub timestamp_ms: i64,
     pub program_name: String,
