@@ -1,6 +1,6 @@
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{context::Context, core::LLM, snapshot::Snapshot};
 
@@ -86,7 +86,25 @@ pub async fn execute_program_with_ir<P: Program, R: Renderer>(
     let signature = program.signature();
 
     for attempt in 0..2 {
-        let value = llm.run_json(context, request.clone()).await;
+        let value = match llm.run_json(context, request.clone()).await {
+            Ok(value) => value,
+            Err(err) => {
+                let error_text = err.to_string();
+                append_program_trace(ProgramTraceRecord::new(
+                    program.name(),
+                    attempt + 1,
+                    signature.clone(),
+                    request.clone(),
+                    json!({ "provider_error": error_text }),
+                    None,
+                    Some(err.to_string()),
+                ))
+                .await;
+                last_error = Some(error_text.clone());
+                request = request.with_retry_note(error_text);
+                continue;
+            }
+        };
         match serde_json::from_value::<P::Output>(value.clone()) {
             Ok(output) => {
                 append_program_trace(ProgramTraceRecord::new(

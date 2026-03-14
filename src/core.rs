@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use miette::Result;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -134,5 +135,9 @@ pub struct Output {
 #[async_trait]
 pub trait LLM {
     /// 执行一个结构化 program 请求，返回原始 JSON 参数对象。
-    async fn run_json(&self, context: &Context, request: PromptRequest) -> serde_json::Value;
+    async fn run_json(
+        &self,
+        context: &Context,
+        request: PromptRequest,
+    ) -> Result<serde_json::Value>;
 }
