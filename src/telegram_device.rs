@@ -31,6 +31,7 @@ struct TelegramChat {
     id: String,
     title: String,
     unread: usize,
+    needs_reply: bool,
     messages: Vec<TelegramMessage>,
 }
 
@@ -100,6 +101,7 @@ impl TelegramDeviceHandle {
         if should_count_as_unread {
             chat.unread += 1;
         }
+        chat.needs_reply = true;
         chat.messages.push(TelegramMessage {
             id: Uuid::new_v4().to_string(),
             sender: sender.into(),
@@ -116,27 +118,32 @@ impl TelegramDeviceHandle {
     }
 
     pub fn mark_outgoing_delivered(&self, local_message_id: &str) {
-        self.with_message_mut(local_message_id, |message| {
+        self.with_message_mut(local_message_id, |chat, message| {
             message.delivery = DeliveryState::Delivered;
+            chat.needs_reply = false;
         });
     }
 
     pub fn mark_outgoing_failed(&self, local_message_id: &str, reason: impl Into<String>) {
         let reason = reason.into();
-        self.with_message_mut(local_message_id, |message| {
+        self.with_message_mut(local_message_id, |chat, message| {
             message.delivery = DeliveryState::Failed(reason.clone());
+            chat.needs_reply = true;
         });
+        self.state.lock().refresh_background_attention();
     }
 
     fn with_message_mut(
         &self,
         local_message_id: &str,
-        f: impl FnOnce(&mut TelegramMessage),
+        f: impl FnOnce(&mut TelegramChat, &mut TelegramMessage),
     ) {
         let mut state = self.state.lock();
         for chat in state.chats.values_mut() {
-            if let Some(message) = chat.messages.iter_mut().find(|msg| msg.id == local_message_id) {
-                f(message);
+            if let Some(index) = chat.messages.iter().position(|msg| msg.id == local_message_id) {
+                let mut message = chat.messages.remove(index);
+                f(chat, &mut message);
+                chat.messages.insert(index, message);
                 break;
             }
         }
@@ -153,6 +160,7 @@ impl Device for TelegramDevice {
         let state = self.state.lock();
         let unread_chats = state.chats.values().filter(|chat| chat.unread > 0).count();
         let unread_messages = state.chats.values().map(|chat| chat.unread).sum::<usize>();
+        let reply_chats = state.chats.values().filter(|chat| chat.needs_reply).count();
 
         let (attention, summary) = if is_focused {
             let focus = state
@@ -164,11 +172,16 @@ impl Device for TelegramDevice {
             (
                 AttentionLevel::Quiet,
                 format!(
-                    "设备在前景，当前会话：{focus}。共有 {unread_messages} 条未读消息分布在 {unread_chats} 个会话中。"
+                    "设备在前景，当前会话：{focus}。共有 {unread_messages} 条未读消息分布在 {unread_chats} 个会话中，另有 {reply_chats} 个会话仍待回复。"
                 ),
             )
         } else if let Some(attention) = &state.background_attention {
             (AttentionLevel::Notice, attention.summary.clone())
+        } else if reply_chats > 0 {
+            (
+                AttentionLevel::Notice,
+                pending_reply_summary(&state, reply_chats),
+            )
         } else {
             (
                 AttentionLevel::Quiet,
@@ -203,8 +216,15 @@ impl Device for TelegramDevice {
     }
 
     async fn on_blur(&mut self) -> Result<()> {
-        self.state.lock().is_focused = false;
+        let mut state = self.state.lock();
+        state.is_focused = false;
+        state.refresh_background_attention();
         Ok(())
+    }
+
+    fn requires_attention(&self) -> bool {
+        let state = self.state.lock();
+        state.background_attention.is_some() || state.chats.values().any(|chat| chat.needs_reply)
     }
 
     async fn execute(&mut self, action: DeviceAction) -> Result<()> {
@@ -236,6 +256,7 @@ impl Device for TelegramDevice {
                     delivery: DeliveryState::PendingTransport,
                     timestamp: Utc::now(),
                 });
+                chat.needs_reply = false;
                 state.outbox.push_back(PendingOutboundMessage {
                     local_message_id,
                     chat_id: selected_chat,
@@ -258,6 +279,7 @@ impl TelegramState {
                     id: chat_id.clone(),
                     title,
                     unread: 0,
+                    needs_reply: false,
                     messages: Vec::new(),
                 },
             );
@@ -345,7 +367,7 @@ fn render_telegram_view(state: &TelegramState) -> String {
     }
 
     sections.push(
-        "如果要发送消息，请使用 `DeviceAction` -> `TelegramSendMessage`。\n当前 Telegram 仍是本地设备模型，尚未接入真实网络 transport。"
+        "如果要发送消息，请使用 `DeviceAction` -> `TelegramSendMessage`。\n如果某个会话显示“待回复：是”，请优先把回复它当成当前任务。若 transport 已配置，消息会真正发出。"
             .to_string(),
     );
 
@@ -359,8 +381,12 @@ fn render_chat_summary(chat: &TelegramChat) -> String {
         .map(|message| truncate_preview(message.text.trim(), 48))
         .unwrap_or_else(|| "暂无消息".to_string());
     format!(
-        "- {} ({}) | 未读={} | 最近消息={}",
-        chat.title, chat.id, chat.unread, latest
+        "- {} ({}) | 未读={} | 待回复={} | 最近消息={}",
+        chat.title,
+        chat.id,
+        chat.unread,
+        yes_no(chat.needs_reply),
+        latest
     )
 }
 
@@ -375,8 +401,11 @@ fn render_selected_chat(chat: &TelegramChat) -> String {
             .join("\n")
     };
     format!(
-        "当前会话：{} ({})\n--- 消息 ---\n{}\n--- 消息 ---",
-        chat.title, chat.id, messages
+        "当前会话：{} ({})\n待回复：{}\n--- 消息 ---\n{}\n--- 消息 ---",
+        chat.title,
+        chat.id,
+        yes_no(chat.needs_reply),
+        messages
     )
 }
 
@@ -415,4 +444,37 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
     } else {
         preview
     }
+}
+
+fn pending_reply_summary(state: &TelegramState, reply_chats: usize) -> String {
+    let Some(chat) = state
+        .order
+        .iter()
+        .rev()
+        .filter_map(|id| state.chats.get(id))
+        .find(|chat| chat.needs_reply)
+    else {
+        return "Telegram 在后台：有会话待回复，请尽快处理。".to_string();
+    };
+
+    if reply_chats == 1 {
+        let preview = chat
+            .messages
+            .last()
+            .map(|message| truncate_preview(message.text.trim(), 48))
+            .unwrap_or_else(|| "暂无预览".to_string());
+        format!(
+            "Telegram 在后台：{} 仍在等待你的回复，请尽快返回处理。最近一条：{}",
+            chat.title, preview
+        )
+    } else {
+        format!(
+            "Telegram 在后台：共有 {reply_chats} 个会话仍在等待你的回复，请优先处理。最新活跃会话是 {}。",
+            chat.title
+        )
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "是" } else { "否" }
 }
