@@ -101,6 +101,7 @@ async fn main() {
         }
     }
 
+    eprintln!("[prompt-compile] preparing compiled prompts before dashboard startup...");
     let compiled_prompts = match prepare_compiled_prompts(&config).await {
         Ok(store) => store,
         Err(err) => {

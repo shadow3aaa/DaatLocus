@@ -41,6 +41,7 @@ pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<Optimizatio
 pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<CompiledProgram>> {
     let renderer = OpenAIToolRenderer;
     let mut compiled = Vec::new();
+    let total_suites = 5usize;
 
     let resolve_program = ResolveTelegramChatProgram;
     let resolve_base = resolve_program.default_tuning();
@@ -78,6 +79,8 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
             "resolve_telegram_chat",
             resolve_cases,
             resolve_candidates,
+            1,
+            total_suites,
         )
         .await?,
     );
@@ -99,6 +102,8 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
                 &action_program.tuning_key(),
                 action_program.eval_cases(),
                 action_candidates,
+                compiled.len() + 1,
+                total_suites,
             )
             .await?,
         );
@@ -114,16 +119,41 @@ async fn ensure_suite_compiled<P: Program>(
     suite_name: &str,
     cases: Vec<EvalCase<P::Output>>,
     candidates: Vec<CandidateConfig<P::Output>>,
+    suite_index: usize,
+    total_suites: usize,
 ) -> Result<CompiledProgram> {
     let compile_key = build_compile_key(&context.config, program, suite_name, &cases, &candidates)?;
     if let Some(compiled) = load_compiled_program(&compile_key).await? {
+        eprintln!(
+            "[prompt-compile {}/{}] {}: cache hit ({}/{}) using {}",
+            suite_index,
+            total_suites,
+            suite_name,
+            compiled.score,
+            compiled.total_cases,
+            compiled.best_candidate
+        );
         return Ok(compiled);
     }
 
     let total_cases = cases.len();
+    let total_candidates = candidates.len();
+    eprintln!(
+        "[prompt-compile {}/{}] {}: cache miss, compiling {} candidates x {} cases",
+        suite_index, total_suites, suite_name, total_candidates, total_cases
+    );
     let mut best: Option<(String, PromptTuningConfig<P::Output>, usize, usize)> = None;
 
-    for candidate in candidates {
+    for (candidate_index, candidate) in candidates.into_iter().enumerate() {
+        eprintln!(
+            "[prompt-compile {}/{}] {}: candidate {}/{} ({})",
+            suite_index,
+            total_suites,
+            suite_name,
+            candidate_index + 1,
+            total_candidates,
+            candidate.name
+        );
         let results = run_suite_with_tuning(
             context,
             renderer,
@@ -160,6 +190,15 @@ async fn ensure_suite_compiled<P: Program>(
         tuning: StoredPromptTuningConfig::from_typed(&best_tuning),
     };
     save_compiled_program(&compiled).await?;
+    eprintln!(
+        "[prompt-compile {}/{}] {}: selected {} ({}/{})",
+        suite_index,
+        total_suites,
+        suite_name,
+        compiled.best_candidate,
+        compiled.score,
+        compiled.total_cases
+    );
     Ok(compiled)
 }
 
