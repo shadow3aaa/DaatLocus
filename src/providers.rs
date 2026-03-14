@@ -8,6 +8,7 @@ use crate::{
     config::Config,
     context::Context,
     core::{LLM, Output},
+    device::{AttentionLevel, DeviceId},
     snapshot::Snapshot,
 };
 pub struct OpenAIClient {
@@ -45,20 +46,21 @@ impl LLM for OpenAIClient {
         let url = self.url();
         let temperature = context.config.main_model.temperature;
         let output_schema = serde_json::to_value(schemars::schema_for!(Output)).unwrap();
-        let system_prompt = format!(
-            "{} \n {} \n {}",
-            SYSTEM_PROMPT, TERMINAL_PROMPT, TELEGRAM_PROMPT
-        );
+        let device_context_prompt = build_device_context_prompt(context);
         let payload = json!({
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": system_prompt,
+                    "content": SYSTEM_PROMPT,
                 },
                 {
                     "role": "user",
                     "content": instruction.to_string()
+                },
+                {
+                    "role": "user",
+                    "content": device_context_prompt
                 },
                 {
                     "role": "user",
@@ -112,5 +114,55 @@ impl LLM for OpenAIClient {
                 self.think(context, input, &instruction_with_error).await
             }
         }
+    }
+}
+
+fn build_device_context_prompt(context: &Context) -> String {
+    let mut sections = vec![String::from(
+        "设备动作约束：你只能对当前前景设备执行 `DeviceAction`。如果想查看或操作后台设备，必须先输出 `FocusDevice` 将它切到前景。",
+    )];
+
+    match context.devices.focused() {
+        Some(DeviceId::Terminal) => sections.push(TERMINAL_PROMPT.to_string()),
+        Some(DeviceId::Telegram) => sections.push(TELEGRAM_PROMPT.to_string()),
+        None => sections.push(String::from(
+            "当前没有任何前景设备。如果你需要读取设备内容或执行设备动作，请先输出 `FocusDevice`。",
+        )),
+    }
+
+    let attention_hints = context
+        .devices
+        .peripheral_renders()
+        .into_iter()
+        .filter(|(_, render)| !render.is_focused)
+        .filter_map(|(device_id, render)| {
+            if matches!(render.attention, AttentionLevel::Notice | AttentionLevel::Urgent) {
+                Some(background_attention_hint(device_id, render.summary))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if !attention_hints.is_empty() {
+        sections.push(format!(
+            "后台设备提醒：\n{}",
+            attention_hints.join("\n")
+        ));
+    }
+
+    sections.join("\n\n")
+}
+
+fn background_attention_hint(device_id: DeviceId, summary: String) -> String {
+    match device_id {
+        DeviceId::Terminal => format!(
+            "- {} 如果你决定查看终端，请先输出 `FocusDevice` 将 `Terminal` 切到前景。",
+            summary
+        ),
+        DeviceId::Telegram => format!(
+            "- {} 如果你决定处理它，请先输出 `FocusDevice` 将 `Telegram` 切到前景；聚焦后再使用 `TelegramSelectChat` 或 `TelegramSendMessage`。",
+            summary
+        ),
     }
 }

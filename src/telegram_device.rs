@@ -147,13 +147,12 @@ impl Device for TelegramDevice {
         let state = self.state.lock();
         let unread_chats = state.chats.values().filter(|chat| chat.unread > 0).count();
         let unread_messages = state.chats.values().map(|chat| chat.unread).sum::<usize>();
-        let latest_unread = state
+        let latest_unread_chat = state
             .order
             .iter()
             .rev()
             .filter_map(|id| state.chats.get(id))
-            .find(|chat| chat.unread > 0)
-            .and_then(|chat| chat.messages.last().map(|message| (chat.title.clone(), message)));
+            .find(|chat| chat.unread > 0);
 
         let (attention, summary) = if is_focused {
             let focus = state
@@ -169,17 +168,26 @@ impl Device for TelegramDevice {
                 ),
             )
         } else if unread_messages > 0 {
-            let preview = latest_unread.map(|(title, message)| {
-                format!(
-                    "最近未读来自 {title}：{}",
-                    truncate_preview(message.text.trim(), 48)
-                )
-            });
-            let mut summary = format!("设备在后台，有 {unread_messages} 条未读消息，涉及 {unread_chats} 个会话。");
-            if let Some(preview) = preview {
-                summary.push(' ');
-                summary.push_str(&preview);
-            }
+            let summary = match latest_unread_chat {
+                Some(chat) if unread_chats == 1 => {
+                    let preview = chat
+                        .messages
+                        .last()
+                        .map(|message| truncate_preview(message.text.trim(), 48))
+                        .unwrap_or_else(|| "暂无预览".to_string());
+                    format!(
+                        "Telegram 在后台：{} 发来 {} 条新消息，请尽快查看并回复。最近一条：{}",
+                        chat.title, unread_messages, preview
+                    )
+                }
+                Some(chat) => format!(
+                    "Telegram 在后台：共有 {unread_messages} 条新消息，涉及 {unread_chats} 个会话，请尽快处理。最新活跃会话是 {}。",
+                    chat.title
+                ),
+                None => format!(
+                    "Telegram 在后台：共有 {unread_messages} 条新消息，涉及 {unread_chats} 个会话，请尽快处理。"
+                ),
+            };
             (AttentionLevel::Notice, summary)
         } else {
             (
