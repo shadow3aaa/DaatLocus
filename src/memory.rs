@@ -51,6 +51,18 @@ impl Memory {
         }
     }
 
+    pub async fn empty() -> Self {
+        let embeder = EmbeddingModel::new();
+        let l2 = L2Memory::reset(&embeder).await;
+
+        Self {
+            l1: L1Memory::default(),
+            l2,
+            embeder,
+            last_2_l1drop: VecDeque::new(),
+        }
+    }
+
     pub async fn record(
         &mut self,
         current_doing: String,
@@ -178,6 +190,18 @@ pub struct L2Memory {
 impl L2Memory {
     async fn new(embedder: &EmbeddingModel) -> Self {
         let db_path = get_spinova_home().await.join("l2_memory.lancedb");
+        Self::open_or_create(db_path, embedder).await
+    }
+
+    async fn reset(embedder: &EmbeddingModel) -> Self {
+        let db_path = get_spinova_home().await.join("l2_memory.lancedb");
+        if db_path.exists() {
+            let _ = tokio::fs::remove_dir_all(&db_path).await;
+        }
+        Self::open_or_create(db_path, embedder).await
+    }
+
+    async fn open_or_create(db_path: std::path::PathBuf, embedder: &EmbeddingModel) -> Self {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
             Field::new("timestamp", DataType::Int64, false),

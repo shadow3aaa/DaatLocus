@@ -23,7 +23,7 @@ mod terminal_device;
 use std::{env, path::PathBuf, time::Duration};
 
 use chrono::{Local, TimeZone};
-use miette::miette;
+use miette::{Result, miette};
 use uuid::Uuid;
 
 use crate::{
@@ -61,6 +61,15 @@ use crate::{
 #[tokio::main]
 async fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
+
+    if is_mem_reset_command(&args) {
+        if let Err(err) = run_mem_reset().await {
+            eprintln!("{err:?}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let config = match load_config().await {
         Ok(o) => o,
         Err(e) => {
@@ -194,6 +203,52 @@ fn is_reasoning_eval_command(args: &[String]) -> bool {
 fn is_reasoning_optimize_command(args: &[String]) -> bool {
     matches!(args, [command, target] if command == "optimize" && target == "reasoning")
         || matches!(args, [command] if command == "optimize-reasoning")
+}
+
+fn is_mem_reset_command(args: &[String]) -> bool {
+    matches!(args, [command] if command == "mem-reset")
+}
+
+async fn run_mem_reset() -> Result<()> {
+    let home = get_spinova_home().await;
+    let config = crate::config::Config::default();
+    let telegram = TelegramDevice::new();
+    let telegram_handle = telegram.handle();
+    let devices = DeviceManager::new(None, vec![])
+        .await
+        .map_err(|err| miette!("failed to construct default devices for mem-reset: {err}"))?;
+    let context = Context {
+        llm: Box::new(OpenAIClient::new(&config)),
+        config,
+        memory: Memory::empty().await,
+        obligations: Obligations::default(),
+        projects: Projects::default(),
+        tasks: Tasks::default(),
+        emotion: Emotion::default(),
+        devices,
+        telegram: telegram_handle,
+        compiled_prompts: CompiledPromptStore::empty(),
+    };
+    context.shutdown().await;
+
+    let trace_path = home.join("reasoning_traces.jsonl");
+    if trace_path.exists() {
+        tokio::fs::remove_file(&trace_path)
+            .await
+            .map_err(|err| miette!("failed to remove {}: {err}", trace_path.display()))?;
+    }
+
+    println!(
+        "[mem-reset] reset persistent runtime state under {}",
+        home.display()
+    );
+    println!(
+        "[mem-reset] cleared via empty context shutdown: l1_memory, l2_memory.lancedb, tasks, projects, obligations, emotion"
+    );
+    println!("[mem-reset] cleared: reasoning_traces.jsonl");
+    println!("[mem-reset] preserved: config.toml, reasoning_compiled/, telegram_acl.json");
+
+    Ok(())
 }
 
 async fn build_eval_context(config: crate::config::Config) -> Context {
