@@ -57,17 +57,11 @@ pub struct FocusedRender {
 #[serde(tag = "type")]
 pub enum DeviceAction {
     /// 将文本输入到终端并由 PTY 原样接收
-    TerminalInput {
-        text: String,
-    },
+    TerminalInput { text: String },
     /// 打开 Telegram 的某个会话
-    TelegramSelectChat {
-        chat_id: String,
-    },
+    TelegramSelectChat { chat_id: String },
     /// 向当前打开的 Telegram 会话发送一条消息
-    TelegramSendMessage {
-        text: String,
-    },
+    TelegramSendMessage { text: String },
 }
 
 #[async_trait]
@@ -149,7 +143,9 @@ impl DeviceManager {
     }
 
     pub fn requires_attention(&self) -> bool {
-        self.devices.values().any(|device| device.requires_attention())
+        self.devices
+            .values()
+            .any(|device| device.requires_attention())
     }
 
     pub async fn focus(&mut self, id: DeviceId) -> Result<()> {

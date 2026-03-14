@@ -1,15 +1,8 @@
 //! 本模块包含context，它是spinova自旋循环中承载状态的结构体
 
 use crate::{
-    config::Config,
-    core::LLM,
-    device::DeviceManager,
-    emotion::Emotion,
-    memory::Memory,
-    obligations::Obligations,
-    obligation_queue::ObligationQueue,
-    projects::Projects,
-    tasks::Tasks,
+    config::Config, core::LLM, device::DeviceManager, emotion::Emotion, memory::Memory,
+    obligation_queue::ObligationQueue, obligations::Obligations, projects::Projects, tasks::Tasks,
 };
 
 pub struct Context {

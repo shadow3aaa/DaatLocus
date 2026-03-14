@@ -25,22 +25,22 @@ pub enum Action {
     TaskAdd {
         /// 任务的描述
         description: String,
-        /// 若这条下一步动作属于某个项目，可填写项目 id；否则留空
+        /// 若这条下一步动作属于某个项目，可填写项目 id；否则留空。优先填写快照里显示的项目 UUID，不要填写项目描述。
         project_id: Option<String>,
     },
     /// TaskDelete: 删除一个任务
     TaskDelete {
-        /// 任务的id
+        /// 要删除的下一步动作 id。优先填写快照里显示的 UUID，不要填写动作描述。
         task_id: String,
     },
     /// TaskSelect: 选中要执行的任务
     TaskSelect {
-        /// 任务的id
+        /// 要选中的下一步动作 id。优先填写快照里显示的 UUID，不要填写动作描述。
         task_id: String,
     },
     /// CommitToProject: 明确接受某项义务，将其升级为项目
     CommitToProject {
-        /// 要升级的义务 id
+        /// 要升级的义务 id。优先填写快照里显示的 UUID，不要填写义务摘要。
         obligation_id: String,
         /// 新项目的标题
         title: String,
@@ -53,7 +53,7 @@ pub enum Action {
     },
     /// ProjectComplete: 将项目标记为完成，并可附上结果摘要
     ProjectComplete {
-        /// 要完成的项目 id
+        /// 要完成的项目 id。优先填写快照里显示的 UUID，不要填写项目标题。
         project_id: String,
         /// 项目已完成的结果摘要，可用于后续回报
         summary: String,

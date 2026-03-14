@@ -136,7 +136,10 @@ fn build_device_context_prompt(context: &Context) -> String {
         .into_iter()
         .filter(|(_, render)| !render.is_focused)
         .filter_map(|(device_id, render)| {
-            if matches!(render.attention, AttentionLevel::Notice | AttentionLevel::Urgent) {
+            if matches!(
+                render.attention,
+                AttentionLevel::Notice | AttentionLevel::Urgent
+            ) {
                 Some(background_attention_hint(device_id, render.summary))
             } else {
                 None
@@ -145,10 +148,7 @@ fn build_device_context_prompt(context: &Context) -> String {
         .collect::<Vec<_>>();
 
     if !attention_hints.is_empty() {
-        sections.push(format!(
-            "后台设备提醒：\n{}",
-            attention_hints.join("\n")
-        ));
+        sections.push(format!("后台设备提醒：\n{}", attention_hints.join("\n")));
     }
 
     sections.join("\n\n")

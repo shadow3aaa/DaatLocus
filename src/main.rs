@@ -6,19 +6,19 @@ mod device;
 mod embeding;
 mod emotion;
 mod memory;
-mod obligations;
 mod obligation_queue;
+mod obligations;
+mod projects;
 mod providers;
 mod pty;
-mod projects;
 mod snapshot;
 mod strategy;
 mod system_info;
-mod terminal_device;
 mod tasks;
 mod telegram_acl;
 mod telegram_device;
 mod telegram_transport;
+mod terminal_device;
 
 use std::{env, path::PathBuf, time::Duration};
 
@@ -33,17 +33,17 @@ use crate::{
     device::{DeviceId, DeviceManager},
     emotion::Emotion,
     memory::Memory,
-    obligations::{ObligationSource, ObligationStatus, Obligations},
     obligation_queue::ObligationQueue,
-    providers::OpenAIClient,
+    obligations::{ObligationSource, ObligationStatus, Obligations},
     projects::{ProjectOrigin, Projects},
+    providers::OpenAIClient,
     snapshot::Snapshot,
     strategy::Strategy,
-    terminal_device::TerminalDevice,
     tasks::Tasks,
     telegram_acl::TelegramAclHandle,
     telegram_device::TelegramDevice,
     telegram_transport::TelegramTransport,
+    terminal_device::TerminalDevice,
 };
 
 pub const SYSTEM_PROMPT: &str = r#"你叫 Spinova，一个自主智能体。
@@ -52,6 +52,7 @@ pub const SYSTEM_PROMPT: &str = r#"你叫 Spinova，一个自主智能体。
 你一次只能详细看见一个处于前景的设备，其它设备只能通过外围感知知道其存在与提醒。
 在每次输出中，你必须把“观察到/学到的关键信息”与“决定采取的动作”区分开来。
 `observation` 必须总结具体事实、报错、文件内容、消息内容或分析结论，而不是只写自己执行了什么操作。
+凡是动作参数中的 `task_id`、`obligation_id`、`project_id`，都应优先填写快照列表中显示的 UUID；不要把中文描述、标题或摘要直接塞进这些字段。
 你必须仔细阅读当前的快照，分析所处情况，然后决定下一步的动作。"#;
 #[cfg(windows)]
 pub const TERMINAL_PROMPT: &str = r#"终端使用提示：
@@ -252,9 +253,8 @@ async fn execute_action(context: &mut Context, action: Action) {
         } => {
             let project_id = project_id
                 .as_deref()
-                .map(Uuid::parse_str)
-                .transpose()
-                .map_err(|err| miette!("invalid project id in TaskAdd: {err}"));
+                .map(|project_id| resolve_project_reference(context, project_id))
+                .transpose();
             match project_id {
                 Ok(project_id) => {
                     context.tasks.add_task_with_project(description, project_id);
@@ -262,14 +262,18 @@ async fn execute_action(context: &mut Context, action: Action) {
                 Err(err) => eprintln!("{err:?}"),
             }
         }
-        Action::TaskDelete { task_id } => {
-            let id = Uuid::parse_str(&task_id).unwrap();
-            context.tasks.delete_task(id);
-        }
-        Action::TaskSelect { task_id } => {
-            let id = Uuid::parse_str(&task_id).unwrap();
-            context.tasks.select_working_task(id);
-        }
+        Action::TaskDelete { task_id } => match resolve_task_reference(context, &task_id) {
+            Ok(id) => {
+                context.tasks.delete_task(id);
+            }
+            Err(err) => eprintln!("{err:?}"),
+        },
+        Action::TaskSelect { task_id } => match resolve_task_reference(context, &task_id) {
+            Ok(id) => {
+                context.tasks.select_working_task(id);
+            }
+            Err(err) => eprintln!("{err:?}"),
+        },
         Action::CommitToProject {
             obligation_id,
             title,
@@ -290,7 +294,10 @@ async fn execute_action(context: &mut Context, action: Action) {
                 eprintln!("{err:?}");
             }
         }
-        Action::ProjectComplete { project_id, summary } => {
+        Action::ProjectComplete {
+            project_id,
+            summary,
+        } => {
             if let Err(err) = execute_project_complete(context, &project_id, summary) {
                 eprintln!("{err:?}");
             }
@@ -321,10 +328,10 @@ fn sync_dashboard_state(context: &Context, tx: &tokio::sync::watch::Sender<Dashb
         state.obligations = render_obligations_for_dashboard(context);
         state.projects = render_projects_for_dashboard(context);
         state.tasks = context
-        .tasks
-        .tasks()
-        .map(|(id, task)| (id, render_task_for_dashboard(task, context)))
-        .collect();
+            .tasks
+            .tasks()
+            .map(|(id, task)| (id, render_task_for_dashboard(task, context)))
+            .collect();
         state.working_task = context.tasks.working_task();
         state.trail = context.memory.trail();
     });
@@ -340,7 +347,11 @@ fn render_obligations_for_dashboard(context: &Context) -> Vec<String> {
                 "[{} / {} / reply={}] {}",
                 obligation.status,
                 obligation.urgency,
-                if obligation.requires_reply { "yes" } else { "no" },
+                if obligation.requires_reply {
+                    "yes"
+                } else {
+                    "no"
+                },
                 obligation.summary
             )
         })
@@ -352,7 +363,12 @@ fn render_projects_for_dashboard(context: &Context) -> Vec<String> {
     projects.sort_by_key(|(id, _)| id.to_string());
     projects
         .into_iter()
-        .map(|(_, project)| format!("[{} / {}] {}", project.status, project.origin, project.title))
+        .map(|(_, project)| {
+            format!(
+                "[{} / {}] {}",
+                project.status, project.origin, project.title
+            )
+        })
         .collect()
 }
 
@@ -369,6 +385,107 @@ fn render_task_for_dashboard(task: &crate::tasks::Task, context: &Context) -> St
     format!("{} [project: {}]", task.description, project_title)
 }
 
+fn normalize_reference(reference: &str) -> String {
+    reference.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn resolve_reference(
+    kind: &str,
+    reference: &str,
+    candidates: Vec<(Uuid, String)>,
+) -> miette::Result<Uuid> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err(miette!("{kind} reference is empty"));
+    }
+
+    if let Ok(id) = Uuid::parse_str(reference) {
+        if candidates
+            .iter()
+            .any(|(candidate_id, _)| *candidate_id == id)
+        {
+            return Ok(id);
+        }
+        return Err(miette!("unknown {kind} id: {reference}"));
+    }
+
+    let normalized_reference = normalize_reference(reference);
+    let exact_matches = candidates
+        .iter()
+        .filter_map(|(id, label)| {
+            (normalize_reference(label) == normalized_reference).then_some(*id)
+        })
+        .collect::<Vec<_>>();
+    if exact_matches.len() == 1 {
+        return Ok(exact_matches[0]);
+    }
+    if exact_matches.len() > 1 {
+        return Err(miette!(
+            "ambiguous {kind} reference `{reference}`: matched {} items by exact description/title",
+            exact_matches.len()
+        ));
+    }
+
+    let fuzzy_matches = candidates
+        .iter()
+        .filter_map(|(id, label)| {
+            let normalized_label = normalize_reference(label);
+            (normalized_label.contains(&normalized_reference)
+                || normalized_reference.contains(&normalized_label))
+            .then_some(*id)
+        })
+        .collect::<Vec<_>>();
+    if fuzzy_matches.len() == 1 {
+        return Ok(fuzzy_matches[0]);
+    }
+    if fuzzy_matches.len() > 1 {
+        return Err(miette!(
+            "ambiguous {kind} reference `{reference}`: matched {} items fuzzily",
+            fuzzy_matches.len()
+        ));
+    }
+
+    Err(miette!(
+        "invalid {kind} reference `{reference}`: expected a UUID from the snapshot, or a unique matching title/summary"
+    ))
+}
+
+fn resolve_task_reference(context: &Context, reference: &str) -> miette::Result<Uuid> {
+    resolve_reference(
+        "task",
+        reference,
+        context
+            .tasks
+            .tasks()
+            .map(|(id, task)| (id, task.description.clone()))
+            .collect(),
+    )
+}
+
+fn resolve_obligation_reference(context: &Context, reference: &str) -> miette::Result<Uuid> {
+    resolve_reference(
+        "obligation",
+        reference,
+        context
+            .obligations
+            .obligations()
+            .map(|(id, obligation)| (id, obligation.summary.clone()))
+            .collect(),
+    )
+}
+
+fn resolve_project_reference(context: &Context, reference: &str) -> miette::Result<Uuid> {
+    resolve_reference(
+        "project",
+        reference,
+        context
+            .projects
+            .projects()
+            .map(|(id, project)| (id, project.title.clone()))
+            .collect(),
+    )
+}
+
 async fn execute_commit_to_project(
     context: &mut Context,
     obligation_id: &str,
@@ -377,8 +494,7 @@ async fn execute_commit_to_project(
     initial_next_action: Option<String>,
     acknowledgment: Option<String>,
 ) -> miette::Result<()> {
-    let obligation_id = Uuid::parse_str(obligation_id)
-        .map_err(|err| miette!("invalid obligation id {obligation_id}: {err}"))?;
+    let obligation_id = resolve_obligation_reference(context, obligation_id)?;
     let Some(obligation) = context.obligations.get(obligation_id).cloned() else {
         return Err(miette!("unknown obligation: {obligation_id}"));
     };
@@ -468,13 +584,14 @@ fn execute_project_complete(
     project_id: &str,
     summary: String,
 ) -> miette::Result<()> {
-    let project_id =
-        Uuid::parse_str(project_id).map_err(|err| miette!("invalid project id {project_id}: {err}"))?;
+    let project_id = resolve_project_reference(context, project_id)?;
     let Some(project) = context.projects.get(project_id).cloned() else {
         return Err(miette!("unknown project: {project_id}"));
     };
 
-    context.projects.set_status(project_id, crate::projects::ProjectStatus::Completed);
+    context
+        .projects
+        .set_status(project_id, crate::projects::ProjectStatus::Completed);
     context.tasks.delete_tasks_for_project(project_id);
 
     if let Some(target) = project.report_back_to {
@@ -483,7 +600,11 @@ fn execute_project_complete(
                 DeviceId::Telegram => ObligationSource::Telegram,
                 DeviceId::Terminal => ObligationSource::Terminal,
             },
-            format!("把项目《{}》的结果回复给对方：{}", project.title, summary.trim()),
+            format!(
+                "把项目《{}》的结果回复给对方：{}",
+                project.title,
+                summary.trim()
+            ),
             true,
             crate::obligations::Urgency::High,
             Some(project_id),

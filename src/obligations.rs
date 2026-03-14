@@ -152,7 +152,9 @@ impl Obligations {
     }
 
     pub fn obligations(&self) -> impl Iterator<Item = (Uuid, &Obligation)> {
-        self.obligations.iter().map(|(id, obligation)| (*id, obligation))
+        self.obligations
+            .iter()
+            .map(|(id, obligation)| (*id, obligation))
     }
 
     pub fn has_pending(&self) -> bool {

@@ -160,7 +160,11 @@ impl Display for DeviceSnapshot {
 
         writeln!(f, "设备外围感知：")?;
         for (id, render) in &self.peripheral {
-            let focus_state = if render.is_focused { "前景" } else { "后台" };
+            let focus_state = if render.is_focused {
+                "前景"
+            } else {
+                "后台"
+            };
             let action_state = if render.interactive {
                 "可操作"
             } else {
@@ -175,7 +179,11 @@ impl Display for DeviceSnapshot {
         }
 
         if let Some(view) = &self.focused_view {
-            let action_state = if view.interactive { "可操作" } else { "只读" };
+            let action_state = if view.interactive {
+                "可操作"
+            } else {
+                "只读"
+            };
             writeln!(f, "前景设备画面：")?;
             writeln!(f, "--- {} / {} ---", view.title, action_state)?;
             writeln!(f, "{}", view.content)?;

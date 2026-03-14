@@ -75,7 +75,8 @@ impl TelegramTransport {
 
             match self.send_message(chat_id, &message.text).await {
                 Ok(()) => {
-                    self.handle.mark_outgoing_delivered(&message.local_message_id);
+                    self.handle
+                        .mark_outgoing_delivered(&message.local_message_id);
                     self.obligation_queue.set_status(
                         ObligationSource::Telegram,
                         obligation_key(chat_id),

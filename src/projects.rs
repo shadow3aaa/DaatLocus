@@ -119,14 +119,14 @@ impl Display for Projects {
             if index > 0 {
                 writeln!(f)?;
             }
-            writeln!(f, "- {id}. [{} / {}] {}", project.status, project.origin, project.title)?;
+            writeln!(
+                f,
+                "- {id}. [{} / {}] {}",
+                project.status, project.origin, project.title
+            )?;
             writeln!(f, "  成功标准：{}", project.success_criteria)?;
             match &project.report_back_to {
-                Some(target) => writeln!(
-                    f,
-                    "  回报对象：{} / {}",
-                    target.device, target.target
-                )?,
+                Some(target) => writeln!(f, "  回报对象：{} / {}", target.device, target.target)?,
                 None => writeln!(f, "  回报对象：无")?,
             }
         }

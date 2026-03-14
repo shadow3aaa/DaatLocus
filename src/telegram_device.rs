@@ -95,8 +95,8 @@ impl TelegramDeviceHandle {
     ) {
         let chat_id = chat_id.into();
         let mut state = self.state.lock();
-        let should_count_as_unread = !(state.is_focused
-            && state.selected_chat.as_deref() == Some(chat_id.as_str()));
+        let should_count_as_unread =
+            !(state.is_focused && state.selected_chat.as_deref() == Some(chat_id.as_str()));
         let chat = state.ensure_chat(chat_id, chat_title.into());
         if should_count_as_unread {
             chat.unread += 1;
@@ -140,7 +140,11 @@ impl TelegramDeviceHandle {
     ) {
         let mut state = self.state.lock();
         for chat in state.chats.values_mut() {
-            if let Some(index) = chat.messages.iter().position(|msg| msg.id == local_message_id) {
+            if let Some(index) = chat
+                .messages
+                .iter()
+                .position(|msg| msg.id == local_message_id)
+            {
                 let mut message = chat.messages.remove(index);
                 f(chat, &mut message);
                 chat.messages.insert(index, message);
@@ -264,7 +268,9 @@ impl Device for TelegramDevice {
                 });
                 Ok(())
             }
-            DeviceAction::TerminalInput { .. } => bail!("terminal action is not supported by Telegram"),
+            DeviceAction::TerminalInput { .. } => {
+                bail!("terminal action is not supported by Telegram")
+            }
         }
     }
 }
@@ -342,7 +348,8 @@ fn render_telegram_view(state: &TelegramState) -> String {
 
     if state.order.is_empty() {
         sections.push(
-            "当前没有任何会话。\n如果未来接入 transport，这里会展示聊天列表与未读状态。".to_string(),
+            "当前没有任何会话。\n如果未来接入 transport，这里会展示聊天列表与未读状态。"
+                .to_string(),
         );
     } else {
         let chat_overview = state
@@ -422,13 +429,15 @@ fn render_message(message: &TelegramMessage) -> String {
     let delivery = match message.delivery {
         DeliveryState::Delivered => "delivered",
         DeliveryState::PendingTransport => "pending_transport",
-        DeliveryState::Failed(ref reason) => return format!(
-            "[{timestamp}] {} / {direction} / failed({}) / {}: {}",
-            message.id,
-            truncate_preview(reason, 32),
-            message.sender,
-            message.text
-        ),
+        DeliveryState::Failed(ref reason) => {
+            return format!(
+                "[{timestamp}] {} / {direction} / failed({}) / {}: {}",
+                message.id,
+                truncate_preview(reason, 32),
+                message.sender,
+                message.text
+            );
+        }
     };
     format!(
         "[{timestamp}] {} / {direction} / {delivery} / {}: {}",

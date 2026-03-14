@@ -5,9 +5,7 @@ use miette::{Result, bail};
 use parking_lot::Mutex;
 
 use crate::{
-    device::{
-        AttentionLevel, Device, DeviceAction, DeviceId, FocusedRender, PeripheralRender,
-    },
+    device::{AttentionLevel, Device, DeviceAction, DeviceId, FocusedRender, PeripheralRender},
     pty::Pty,
 };
 
