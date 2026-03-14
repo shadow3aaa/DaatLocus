@@ -21,6 +21,26 @@ impl TerminalDevice {
     pub fn parser(&self) -> Arc<Mutex<vt100::Parser>> {
         self.pty.parser()
     }
+
+    fn forbidden_input_reason(text: &str) -> Option<&'static str> {
+        let normalized = text.trim().to_ascii_lowercase();
+        let forbidden_prefixes = [
+            "gh auth login",
+            "gh auth refresh",
+            "gh auth setup-git",
+            "docker login",
+            "npm login",
+            "pnpm login",
+            "yarn login",
+            "huggingface-cli login",
+            "hf auth login",
+        ];
+
+        forbidden_prefixes
+            .iter()
+            .find(|prefix| normalized.starts_with(**prefix))
+            .map(|_| "interactive authentication/login commands are not allowed in Terminal; abort and use a non-interactive alternative")
+    }
 }
 
 #[async_trait]
@@ -59,6 +79,9 @@ impl Device for TerminalDevice {
     async fn execute(&mut self, action: DeviceAction) -> Result<()> {
         match action {
             DeviceAction::TerminalInput { text } => {
+                if let Some(reason) = Self::forbidden_input_reason(&text) {
+                    bail!(reason);
+                }
                 self.pty.write(&text);
                 Ok(())
             }

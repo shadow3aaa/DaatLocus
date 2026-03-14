@@ -48,6 +48,8 @@ enum ActionPhaseExpectation {
     SelectTask { task_id: String },
     #[serde(rename = "add_project_task")]
     AddProjectTask { project_id: String },
+    #[serde(rename = "cancel_interactive_prompt")]
+    CancelInteractivePrompt,
     #[serde(rename = "focus_terminal")]
     FocusTerminal,
 }
@@ -72,6 +74,9 @@ pub fn eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
                     }
                     ActionPhaseExpectation::AddProjectTask { project_id } => {
                         register_add_project_task_check(project_id)
+                    }
+                    ActionPhaseExpectation::CancelInteractivePrompt => {
+                        Arc::new(check_cancel_interactive_prompt)
                     }
                     ActionPhaseExpectation::FocusTerminal => Arc::new(check_focus_terminal),
                 },
@@ -108,6 +113,18 @@ fn check_focus_terminal(output: &Output) -> Result<()> {
             device: DeviceId::Terminal,
         } => Ok(()),
         other => Err(miette!("expected FocusDevice(Terminal), got {:?}", other)),
+    }
+}
+
+fn check_cancel_interactive_prompt(output: &Output) -> Result<()> {
+    match &output.action {
+        Action::DeviceAction {
+            action: crate::device::DeviceAction::TerminalInput { text },
+        } if text.contains('\u{3}') => Ok(()),
+        other => Err(miette!(
+            "expected TerminalInput containing Ctrl+C to cancel interactive prompt, got {:?}",
+            other
+        )),
     }
 }
 

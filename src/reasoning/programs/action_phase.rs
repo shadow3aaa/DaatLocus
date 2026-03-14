@@ -59,6 +59,8 @@ impl ActionPhaseProgram {
                 "如果当前动作属于某个项目，请确保它确实在推进那个项目，而不是偏离目标。",
                 "如果当前动作是回复 Telegram 消息，优先保持 Telegram 在前景并回复，不要因为旧习惯切回 Terminal。",
                 "只有当所需设备已经在前景时，才输出相应的 `DeviceAction`。",
+                "如果终端当前停在交互式认证、登录向导、密码提示或需要人工授权的提问界面，不要继续回答这些问题；应优先输出 `DeviceAction` -> `TerminalInput` 发送 Ctrl+C（`\\u0003`）中断，再改用非交互替代方案。",
+                "不要主动启动 `gh auth login`、`docker login`、`npm login` 这类需要外部账号或浏览器授权的命令。",
                 "如果你发现还缺少别的下一步动作，而且它明确属于某个项目，请用 `TaskAdd` 并填入 `project_id`。",
                 "当你判断某个项目的成功标准已经满足时，应优先输出 `ProjectComplete`。",
                 "如果当前选中的动作已经彻底完成，但所属项目还未完成，请输出 `TaskDelete`。",

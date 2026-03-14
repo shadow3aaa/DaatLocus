@@ -47,6 +47,26 @@
             "task_id": "11111111-1111-1111-1111-111111111111"
           }
         }
+      },
+      {
+        "title": "终端卡在交互式认证向导时，应先中断而不是继续登录。",
+        "inputs": [
+          { "name": "阶段", "value": "执行下一步动作" },
+          { "name": "设备上下文", "value": "当前前景设备是 Terminal。" },
+          { "name": "完整快照", "value": "已选中的下一步动作要求检索 GitHub 项目资料，但终端当前停在 gh auth login 的认证提示上。" }
+        ],
+        "output": {
+          "observation": "终端当前停在 gh auth login 的交互式认证提示上，这种流程需要外部账号授权，不适合继续推进。",
+          "description": "执行阶段应先中断错误进入的交互式认证向导，再改用非交互查询方案。",
+          "current_doing": "中断交互式认证流程以恢复可自动执行状态",
+          "action": {
+            "type": "DeviceAction",
+            "action": {
+              "type": "TerminalInput",
+              "text": "\u0003"
+            }
+          }
+        }
       }
     ],
     "eval_cases": [
@@ -57,6 +77,14 @@
         "expectation": {
           "kind": "select_task",
           "task_id": "11111111-1111-1111-1111-111111111111"
+        }
+      },
+      {
+        "name": "execute_task_cancels_interactive_auth_prompt",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "下一步动作列表：\n- id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa 描述=检索 github 和开源社区资料\n当前 working_task 已选中。\n终端显示：gh auth login\n? Authenticate Git with your GitHub credentials? (Y/n)",
+        "expectation": {
+          "kind": "cancel_interactive_prompt"
         }
       }
     ]
