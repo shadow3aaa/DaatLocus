@@ -24,6 +24,7 @@ struct TelegramState {
     order: Vec<String>,
     chats: HashMap<String, TelegramChat>,
     outbox: VecDeque<PendingOutboundMessage>,
+    background_attention: Option<BackgroundAttention>,
 }
 
 struct TelegramChat {
@@ -51,6 +52,10 @@ enum DeliveryState {
     Delivered,
     PendingTransport,
     Failed(String),
+}
+
+struct BackgroundAttention {
+    summary: String,
 }
 
 #[derive(Clone)]
@@ -103,6 +108,7 @@ impl TelegramDeviceHandle {
             delivery: DeliveryState::Delivered,
             timestamp: Utc::now(),
         });
+        state.refresh_background_attention();
     }
 
     pub fn take_next_outbound(&self) -> Option<PendingOutboundMessage> {
@@ -147,12 +153,6 @@ impl Device for TelegramDevice {
         let state = self.state.lock();
         let unread_chats = state.chats.values().filter(|chat| chat.unread > 0).count();
         let unread_messages = state.chats.values().map(|chat| chat.unread).sum::<usize>();
-        let latest_unread_chat = state
-            .order
-            .iter()
-            .rev()
-            .filter_map(|id| state.chats.get(id))
-            .find(|chat| chat.unread > 0);
 
         let (attention, summary) = if is_focused {
             let focus = state
@@ -167,28 +167,8 @@ impl Device for TelegramDevice {
                     "设备在前景，当前会话：{focus}。共有 {unread_messages} 条未读消息分布在 {unread_chats} 个会话中。"
                 ),
             )
-        } else if unread_messages > 0 {
-            let summary = match latest_unread_chat {
-                Some(chat) if unread_chats == 1 => {
-                    let preview = chat
-                        .messages
-                        .last()
-                        .map(|message| truncate_preview(message.text.trim(), 48))
-                        .unwrap_or_else(|| "暂无预览".to_string());
-                    format!(
-                        "Telegram 在后台：{} 发来 {} 条新消息，请尽快查看并回复。最近一条：{}",
-                        chat.title, unread_messages, preview
-                    )
-                }
-                Some(chat) => format!(
-                    "Telegram 在后台：共有 {unread_messages} 条新消息，涉及 {unread_chats} 个会话，请尽快处理。最新活跃会话是 {}。",
-                    chat.title
-                ),
-                None => format!(
-                    "Telegram 在后台：共有 {unread_messages} 条新消息，涉及 {unread_chats} 个会话，请尽快处理。"
-                ),
-            };
-            (AttentionLevel::Notice, summary)
+        } else if let Some(attention) = &state.background_attention {
+            (AttentionLevel::Notice, attention.summary.clone())
         } else {
             (
                 AttentionLevel::Quiet,
@@ -216,7 +196,9 @@ impl Device for TelegramDevice {
     }
 
     async fn on_focus(&mut self) -> Result<()> {
-        self.state.lock().is_focused = true;
+        let mut state = self.state.lock();
+        state.is_focused = true;
+        state.background_attention = None;
         Ok(())
     }
 
@@ -286,6 +268,50 @@ impl TelegramState {
         self.chats
             .get_mut(&chat_id)
             .expect("chat should exist after ensure_chat")
+    }
+
+    fn refresh_background_attention(&mut self) {
+        if self.is_focused {
+            self.background_attention = None;
+            return;
+        }
+
+        let unread_chats = self.chats.values().filter(|chat| chat.unread > 0).count();
+        let unread_messages = self.chats.values().map(|chat| chat.unread).sum::<usize>();
+        if unread_messages == 0 {
+            self.background_attention = None;
+            return;
+        }
+
+        let Some(chat) = self
+            .order
+            .iter()
+            .rev()
+            .filter_map(|id| self.chats.get(id))
+            .find(|chat| chat.unread > 0)
+        else {
+            self.background_attention = None;
+            return;
+        };
+
+        let summary = if unread_chats == 1 {
+            let preview = chat
+                .messages
+                .last()
+                .map(|message| truncate_preview(message.text.trim(), 48))
+                .unwrap_or_else(|| "暂无预览".to_string());
+            format!(
+                "Telegram 在后台：{} 发来 {} 条新消息，请尽快查看并回复。最近一条：{}",
+                chat.title, unread_messages, preview
+            )
+        } else {
+            format!(
+                "Telegram 在后台：共有 {unread_messages} 条新消息，涉及 {unread_chats} 个会话，请尽快处理。最新活跃会话是 {}。",
+                chat.title
+            )
+        };
+
+        self.background_attention = Some(BackgroundAttention { summary });
     }
 }
 
