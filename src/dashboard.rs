@@ -19,7 +19,8 @@ pub struct DashboardState {
     pub projects: Vec<String>,
     pub tasks: HashMap<Uuid, DashboardTaskEntry>,
     pub working_task: Option<Uuid>,
-    pub trail: Vec<String>,
+    pub latest_trail: Option<String>,
+    pub last_cycle_elapsed_ms: Option<u128>,
 }
 
 pub struct DashboardTaskEntry {
@@ -158,14 +159,8 @@ pub async fn run_tui_dashboard(
             f.render_widget(access_widget, right_chunks[3]);
 
             // 渲染最近的行动轨迹
-            let trail_display = state
-                .trail
-                .iter()
-                .rev()
-                .take(12)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("\n");
+            let trail_display =
+                render_latest_trail(state.latest_trail.as_deref(), state.last_cycle_elapsed_ms);
             let trail_widget = Paragraph::new(trail_display)
                 .wrap(Wrap { trim: true })
                 .block(Block::default().title("Trail").borders(Borders::ALL));
@@ -179,6 +174,19 @@ pub async fn run_tui_dashboard(
         crossterm::terminal::LeaveAlternateScreen
     )?;
     Ok(())
+}
+
+fn render_latest_trail(latest_trail: Option<&str>, last_cycle_elapsed_ms: Option<u128>) -> String {
+    let elapsed = last_cycle_elapsed_ms
+        .map(|ms| format!("{ms} ms"))
+        .unwrap_or_else(|| "未知".to_string());
+
+    match latest_trail {
+        Some(trail) if !trail.trim().is_empty() => {
+            format!("最近事件：\n{}\n\n处理耗时：{}", trail.trim(), elapsed)
+        }
+        _ => format!("No recent events.\n\n处理耗时：{}", elapsed),
+    }
 }
 
 fn render_pending_requests(

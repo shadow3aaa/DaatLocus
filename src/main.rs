@@ -161,7 +161,8 @@ async fn main() {
             .map(|(id, task)| (id, render_task_for_dashboard(task, &context)))
             .collect(),
         working_task: context.tasks.working_task(),
-        trail: context.memory.trail(),
+        latest_trail: context.memory.trail().last().cloned(),
+        last_cycle_elapsed_ms: None,
     });
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -265,6 +266,7 @@ fn print_reasoning_optimization_results(
 }
 
 async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<DashboardState>) {
+    let cycle_started_at = std::time::Instant::now();
     context
         .devices
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
@@ -374,7 +376,7 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
     if matches!(strategy, Strategy::ExecuteTask) {
         context.tasks.touch_working_task();
     }
-    sync_dashboard_state(context, tx);
+    sync_dashboard_state(context, tx, Some(cycle_started_at.elapsed().as_millis()));
 }
 
 fn translate_resolve_telegram_output(
@@ -502,7 +504,11 @@ async fn execute_action(context: &mut Context, action: Action) {
     }
 }
 
-fn sync_dashboard_state(context: &Context, tx: &tokio::sync::watch::Sender<DashboardState>) {
+fn sync_dashboard_state(
+    context: &Context,
+    tx: &tokio::sync::watch::Sender<DashboardState>,
+    last_cycle_elapsed_ms: Option<u128>,
+) {
     tx.send_modify(|state| {
         state.obligations = render_obligations_for_dashboard(context);
         state.projects = render_projects_for_dashboard(context);
@@ -512,7 +518,8 @@ fn sync_dashboard_state(context: &Context, tx: &tokio::sync::watch::Sender<Dashb
             .map(|(id, task)| (id, render_task_for_dashboard(task, context)))
             .collect();
         state.working_task = context.tasks.working_task();
-        state.trail = context.memory.trail();
+        state.latest_trail = context.memory.trail().last().cloned();
+        state.last_cycle_elapsed_ms = last_cycle_elapsed_ms;
     });
 }
 
