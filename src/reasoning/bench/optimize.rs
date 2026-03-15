@@ -6,6 +6,7 @@ use crate::{
     config::Config,
     context::Context,
     reasoning::{
+        bench::datasets,
         compiled::{
             BENCH_COMPILED_DIR_NAME, CompiledProgram, StoredPromptTuningConfig,
             load_compiled_program_from_dir, save_compiled_program_to_dir,
@@ -22,10 +23,10 @@ use crate::{
 
 use super::{
     programs::{continuity_guard::ContinuityGuardProgram, memory_recall::MemoryRecallProgram},
-    proposer::{propose_continuity_guard_candidates, propose_memory_recall_candidates},
+    proposer::{BenchProposalSpec, propose_candidates},
 };
 
-const BENCH_OPTIMIZER_VERSION: &str = "reasoning-bench-optimizer-v2";
+const BENCH_OPTIMIZER_VERSION: &str = "reasoning-bench-optimizer-v3";
 const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_bench_optimize_memory(context: &Context) -> Result<Vec<OptimizationResult>> {
@@ -111,7 +112,34 @@ async fn ensure_bench_memory_compiled(context: &Context) -> Result<CompiledProgr
             },
         },
     ];
-    candidates.extend(propose_memory_recall_candidates(&base, &baseline_results));
+    let proposal_specs = [
+        BenchProposalSpec {
+            candidate_name: "auto_blocker_continuity",
+            when: memory_recall_blocker_failure,
+            instruction: "如果当前关键事实是阻塞，至少同时保留三类记忆：阻塞事件本身、阻塞原因、仍可继续推进该项目的替代路径或后续线索。",
+            bootstrap_case_name: Some("remember_blocker_not_idle_waits"),
+            bootstrap_examples: datasets::memory_recall::bootstrap_examples,
+        },
+        BenchProposalSpec {
+            candidate_name: "auto_noise_suppression",
+            when: memory_recall_noise_failure,
+            instruction: "纯等待、寒暄和与当前问题无关的聊天只算噪声；除非它们直接改变项目状态，否则不要把它们选进关键记忆。",
+            bootstrap_case_name: Some("prefer_owner_reply_over_small_talk"),
+            bootstrap_examples: datasets::memory_recall::bootstrap_examples,
+        },
+        BenchProposalSpec {
+            candidate_name: "auto_supporting_recall",
+            when: memory_recall_supporting_failure,
+            instruction: "如果你已经选中了事件性记忆(T*)，还要补上支撑它的联想回忆(M*)，尤其是能解释后续推进路径的那条。",
+            bootstrap_case_name: Some("remember_blocker_not_idle_waits"),
+            bootstrap_examples: datasets::memory_recall::bootstrap_examples,
+        },
+    ];
+    candidates.extend(propose_candidates(
+        &base,
+        &baseline_results,
+        &proposal_specs,
+    ));
     ensure_suite_compiled(
         context,
         &renderer,
@@ -170,9 +198,33 @@ async fn ensure_bench_continuity_compiled(context: &Context) -> Result<CompiledP
             },
         },
     ];
-    candidates.extend(propose_continuity_guard_candidates(
+    let proposal_specs = [
+        BenchProposalSpec {
+            candidate_name: "auto_commitment_guard",
+            when: continuity_commitment_failure,
+            instruction: "如果输入里出现 owner 承诺、活跃项目或明确未完成调查，近期寒暄和等待噪声不应改变主目标。",
+            bootstrap_case_name: Some("continue_owner_commitment_despite_small_talk"),
+            bootstrap_examples: datasets::continuity_guard::bootstrap_examples,
+        },
+        BenchProposalSpec {
+            candidate_name: "auto_blocker_guard",
+            when: continuity_blocker_failure,
+            instruction: "阻塞不等于换项目；如果当前问题是阻塞，应继续原项目，并把阻塞与替代推进方式一起说清楚。",
+            bootstrap_case_name: Some("remember_blocker_instead_of_switching_goal"),
+            bootstrap_examples: datasets::continuity_guard::bootstrap_examples,
+        },
+        BenchProposalSpec {
+            candidate_name: "auto_no_forced_continuity",
+            when: continuity_no_project_failure,
+            instruction: "如果没有活跃项目、长期承诺或未完成调查，不要因为等待和轻量聊天而虚构连续性。",
+            bootstrap_case_name: Some("no_project_no_forced_continuity"),
+            bootstrap_examples: datasets::continuity_guard::bootstrap_examples,
+        },
+    ];
+    candidates.extend(propose_candidates(
         &base,
         &baseline_results,
+        &proposal_specs,
     ));
     ensure_suite_compiled(
         context,
@@ -339,4 +391,32 @@ fn build_compile_key<P: Program>(
         .map_err(|err| miette!("failed to serialize bench compile fingerprint: {err}"))?;
     let digest = Sha256::digest(bytes);
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn memory_recall_blocker_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed && result.case_name.contains("blocker") && result.detail.contains("contain M")
+}
+
+fn memory_recall_noise_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed && result.detail.contains("avoid noise")
+}
+
+fn memory_recall_supporting_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed && result.case_name.contains("blocker") && result.detail.contains("contain M")
+}
+
+fn continuity_commitment_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed
+        && result.case_name.contains("commitment")
+        && result.detail.contains("should_continue_project")
+}
+
+fn continuity_blocker_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed && result.case_name.contains("blocker") && result.detail.contains("contain T")
+}
+
+fn continuity_no_project_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed
+        && result.case_name.contains("no_project")
+        && result.detail.contains("expected empty project_title")
 }
