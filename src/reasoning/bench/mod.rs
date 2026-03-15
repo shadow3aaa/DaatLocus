@@ -2,3 +2,4 @@ pub mod datasets;
 pub mod eval;
 pub mod optimize;
 pub mod programs;
+pub mod proposer;

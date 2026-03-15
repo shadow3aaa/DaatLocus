@@ -20,12 +20,13 @@ use crate::{
     },
 };
 
-use super::programs::{
-    continuity_guard::ContinuityGuardProgram, memory_recall::MemoryRecallProgram,
+use super::{
+    programs::{continuity_guard::ContinuityGuardProgram, memory_recall::MemoryRecallProgram},
+    proposer::{propose_continuity_guard_candidates, propose_memory_recall_candidates},
 };
 
 const BENCH_COMPILED_DIR_NAME: &str = "reasoning_bench_compiled";
-const BENCH_OPTIMIZER_VERSION: &str = "reasoning-bench-optimizer-v1";
+const BENCH_OPTIMIZER_VERSION: &str = "reasoning-bench-optimizer-v2";
 const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_bench_optimize_memory(context: &Context) -> Result<Vec<OptimizationResult>> {
@@ -52,7 +53,17 @@ async fn ensure_bench_memory_compiled(context: &Context) -> Result<CompiledProgr
     let renderer = OpenAIToolRenderer;
     let program = MemoryRecallProgram;
     let base = program.default_tuning();
-    let candidates = vec![
+    let baseline_results = run_suite_with_tuning(
+        context,
+        &renderer,
+        &program,
+        program.suite_name(),
+        program.eval_cases(),
+        &base,
+        TraceOrigin::BenchCompile,
+    )
+    .await;
+    let mut candidates = vec![
         CandidateConfig {
             name: "baseline".to_string(),
             config: base.clone(),
@@ -84,6 +95,7 @@ async fn ensure_bench_memory_compiled(context: &Context) -> Result<CompiledProgr
             },
         },
     ];
+    candidates.extend(propose_memory_recall_candidates(&base, &baseline_results));
     ensure_suite_compiled(
         context,
         &renderer,
@@ -99,7 +111,17 @@ async fn ensure_bench_continuity_compiled(context: &Context) -> Result<CompiledP
     let renderer = OpenAIToolRenderer;
     let program = ContinuityGuardProgram;
     let base = program.default_tuning();
-    let candidates = vec![
+    let baseline_results = run_suite_with_tuning(
+        context,
+        &renderer,
+        &program,
+        program.suite_name(),
+        program.eval_cases(),
+        &base,
+        TraceOrigin::BenchCompile,
+    )
+    .await;
+    let mut candidates = vec![
         CandidateConfig {
             name: "baseline".to_string(),
             config: base.clone(),
@@ -132,6 +154,10 @@ async fn ensure_bench_continuity_compiled(context: &Context) -> Result<CompiledP
             },
         },
     ];
+    candidates.extend(propose_continuity_guard_candidates(
+        &base,
+        &baseline_results,
+    ));
     ensure_suite_compiled(
         context,
         &renderer,
