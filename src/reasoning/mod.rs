@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod compiled;
 pub mod dataset_store;
 pub mod datasets;
