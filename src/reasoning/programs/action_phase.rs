@@ -51,7 +51,8 @@ impl ActionPhaseProgram {
                 "义务列表中的内容通常是结构化待处理责任，例如项目完成后的回报。处理这类义务时，可以使用设备动作回复，并在妥善完成后用 `ObligationSatisfy` 关单。",
                 "只有当你明确接受某项结构化义务并承诺后续会持续推进时，才使用 `CommitToProject` 将它升级为项目。",
                 "在相关提醒处理完成之前，不要切回 Terminal，也不要恢复探索性终端操作。",
-                "如果你刚发出消息，正在等待 transport 结果，或正在等待对方继续发言，可以输出 `Wait`。",
+                "如果你刚发出消息，正在等待 transport 结果，或正在等待某个明确外部状态变化，可以输出 `Wait`。",
+                "如果只是空闲等待对方继续发言、新消息或新输入，不要写普通 `Wait`；应输出 `SilentWait`。",
             ],
             ActionPhase::ExecuteTask => vec![
                 "检查下一步动作列表：如果你还没有选中任何动作，请优先使用 `TaskSelect`。",
@@ -65,7 +66,8 @@ impl ActionPhaseProgram {
                 "当你判断某个项目的成功标准已经满足时，应优先输出 `ProjectComplete`。",
                 "如果当前选中的动作已经彻底完成，但所属项目还未完成，请输出 `TaskDelete`。",
                 "如果某条义务已经被你妥善处理完，例如刚完成最终回报、且不再需要继续跟进，请输出 `ObligationSatisfy`。",
-                "如果刚执行了耗时命令，或刚发送了 Telegram 消息正在等待结果/回复，可以输出 `Wait`。",
+                "如果刚执行了耗时命令，或刚发送了 Telegram 消息正在等待 transport 结果，可以输出 `Wait`。",
+                "如果只是空闲地等待用户回复，不要写普通 `Wait`；应输出 `SilentWait`。",
             ],
             ActionPhase::PlanFromProject => vec![
                 "查看项目列表，找出最值得优先推进的 `Active` 项目。",
@@ -81,6 +83,7 @@ impl ActionPhaseProgram {
                 "探索环境时，可在 Terminal 处于前景时输出 `DeviceAction` 来执行探索性命令。",
                 "一旦构思好新目标，请立即输出 `TaskAdd` 将计划添加到任务列表中。",
                 "你的首要职责是寻找并创建新任务。",
+                "如果当前完全空闲，只是在等新的 Telegram 消息或外部输入，请输出 `SilentWait`，不要把这种空转等待写进记忆。",
             ],
         }
     }

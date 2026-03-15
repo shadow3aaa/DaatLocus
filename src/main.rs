@@ -424,10 +424,16 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
             })
         }
     };
-    context
-        .memory
-        .record(output.current_doing, output.observation, output.description)
-        .await;
+    if should_record_action(&output.action) {
+        context
+            .memory
+            .record(
+                output.current_doing.clone(),
+                output.observation.clone(),
+                output.description.clone(),
+            )
+            .await;
+    }
     execute_action(context, output.action).await;
     if matches!(strategy, Strategy::ExecuteTask) {
         context.tasks.touch_working_task();
@@ -462,6 +468,10 @@ fn translate_resolve_telegram_output(
             ResolveTelegramProgramAction::Wait => Action::Wait,
         },
     }
+}
+
+fn should_record_action(action: &Action) -> bool {
+    !matches!(action, Action::SilentWait)
 }
 
 async fn execute_action(context: &mut Context, action: Action) {
@@ -555,6 +565,9 @@ async fn execute_action(context: &mut Context, action: Action) {
             }
         }
         Action::Wait => {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        Action::SilentWait => {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     }

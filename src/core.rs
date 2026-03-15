@@ -51,6 +51,7 @@ pub enum TelegramResolution {
 /// 9. PutAwayDevice
 /// 10. DeviceAction
 /// 11. Wait
+/// 12. SilentWait
 pub enum Action {
     /// TaskAdd: 添加一个新的任务
     TaskAdd {
@@ -115,6 +116,8 @@ pub enum Action {
     },
     /// Wait: 不进行操作，不思观望
     Wait,
+    /// SilentWait: 静默等待，不写入记忆；适用于空闲等待用户消息、新任务或新外部输入
+    SilentWait,
 }
 
 /// LLM 输出

@@ -139,6 +139,22 @@
             "device": "Terminal"
           }
         }
+      },
+      {
+        "title": "完全空闲且已确认没有新输入时，应静默等待而不是把空转写入记忆。",
+        "inputs": [
+          { "name": "阶段", "value": "探索与规划新任务" },
+          { "name": "设备上下文", "value": "当前前景设备是 Telegram，后台没有任何提醒" },
+          { "name": "完整快照", "value": "义务列表为空。项目列表为空。下一步动作列表为空。当前会话无未读、待判断或待回复消息。" }
+        ],
+        "output": {
+          "observation": "当前没有待处理义务、没有活跃项目、没有下一步动作，Telegram 也没有新消息或待回复内容。",
+          "description": "此时只是空闲等待新的外部输入，不应把这种等待写入记忆。",
+          "current_doing": "静默等待新的外部输入",
+          "action": {
+            "type": "SilentWait"
+          }
+        }
       }
     ],
     "eval_cases": [
@@ -148,6 +164,14 @@
         "snapshot_text": "义务列表为空。\n项目列表为空。\n下一步动作列表为空。",
         "expectation": {
           "kind": "focus_terminal"
+        }
+      },
+      {
+        "name": "explore_uses_silent_wait_when_completely_idle",
+        "device_context": "当前前景设备是 Telegram。\nTelegram 在前景，当前会话 shadow3 无未读、待判断或待回复消息。",
+        "snapshot_text": "义务列表为空。\n项目列表为空。\n下一步动作列表为空。",
+        "expectation": {
+          "kind": "silent_wait"
         }
       }
     ]

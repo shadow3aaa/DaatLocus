@@ -52,6 +52,8 @@ enum ActionPhaseExpectation {
     CancelInteractivePrompt,
     #[serde(rename = "focus_terminal")]
     FocusTerminal,
+    #[serde(rename = "silent_wait")]
+    SilentWait,
 }
 
 pub fn examples(phase: ActionPhase) -> Vec<ProgramExample<Output>> {
@@ -79,6 +81,7 @@ pub fn eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
                         Arc::new(check_cancel_interactive_prompt)
                     }
                     ActionPhaseExpectation::FocusTerminal => Arc::new(check_focus_terminal),
+                    ActionPhaseExpectation::SilentWait => Arc::new(check_silent_wait),
                 },
             }
         })
@@ -113,6 +116,13 @@ fn check_focus_terminal(output: &Output) -> Result<()> {
             device: DeviceId::Terminal,
         } => Ok(()),
         other => Err(miette!("expected FocusDevice(Terminal), got {:?}", other)),
+    }
+}
+
+fn check_silent_wait(output: &Output) -> Result<()> {
+    match &output.action {
+        Action::SilentWait => Ok(()),
+        other => Err(miette!("expected SilentWait, got {:?}", other)),
     }
 }
 
