@@ -15,6 +15,8 @@ pub enum TraceOrigin {
     Runtime,
     Compile,
     Eval,
+    BenchCompile,
+    BenchEval,
     #[default]
     Unknown,
 }

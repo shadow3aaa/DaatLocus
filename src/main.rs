@@ -38,6 +38,10 @@ use crate::{
     projects::{ProjectOrigin, Projects},
     providers::OpenAIClient,
     reasoning::{
+        bench::{
+            eval::{run_bench_eval_continuity, run_bench_eval_memory},
+            optimize::{run_bench_optimize_continuity, run_bench_optimize_memory},
+        },
         compiled::CompiledPromptStore,
         eval::run_reasoning_eval,
         optimize::ensure_reasoning_compiled,
@@ -99,6 +103,70 @@ async fn main() {
         match run_reasoning_optimize(&context).await {
             Ok(results) => {
                 print_reasoning_optimization_results(&results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if is_bench_eval_memory_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_bench_eval_memory(&context).await {
+            Ok(results) => {
+                print_bench_eval_results("memory", &results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if is_bench_eval_continuity_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_bench_eval_continuity(&context).await {
+            Ok(results) => {
+                print_bench_eval_results("continuity", &results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if is_bench_optimize_memory_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_bench_optimize_memory(&context).await {
+            Ok(results) => {
+                print_bench_optimization_results("memory", &results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if is_bench_optimize_continuity_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_bench_optimize_continuity(&context).await {
+            Ok(results) => {
+                print_bench_optimization_results("continuity", &results);
                 context.shutdown().await;
                 return;
             }
@@ -221,6 +289,26 @@ fn is_mem_reset_command(args: &[String]) -> bool {
     matches!(args, [command] if command == "mem-reset")
 }
 
+fn is_bench_eval_memory_command(args: &[String]) -> bool {
+    matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "memory")
+        || matches!(args, [command] if command == "eval-bench-memory")
+}
+
+fn is_bench_eval_continuity_command(args: &[String]) -> bool {
+    matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "continuity")
+        || matches!(args, [command] if command == "eval-bench-continuity")
+}
+
+fn is_bench_optimize_memory_command(args: &[String]) -> bool {
+    matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "memory")
+        || matches!(args, [command] if command == "optimize-bench-memory")
+}
+
+fn is_bench_optimize_continuity_command(args: &[String]) -> bool {
+    matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "continuity")
+        || matches!(args, [command] if command == "optimize-bench-continuity")
+}
+
 async fn run_mem_reset() -> Result<()> {
     let home = get_spinova_home().await;
     let config = crate::config::Config::default();
@@ -334,6 +422,41 @@ fn print_reasoning_optimization_results(
     results: &[crate::reasoning::optimizer::OptimizationResult],
 ) {
     println!("reasoning optimize:");
+    for result in results {
+        println!(
+            "- suite={} best_candidate={} score={}/{}",
+            result.suite, result.best_candidate, result.score, result.total_cases
+        );
+    }
+}
+
+fn print_bench_eval_results(
+    benchmark_name: &str,
+    results: &[crate::reasoning::eval::EvalCaseResult],
+) {
+    let passed = results.iter().filter(|result| result.passed).count();
+    let failed = results.len().saturating_sub(passed);
+    println!(
+        "bench eval ({}): total={} passed={} failed={}",
+        benchmark_name,
+        results.len(),
+        passed,
+        failed
+    );
+    for result in results {
+        let status = if result.passed { "PASS" } else { "FAIL" };
+        println!(
+            "[{}] {} / {} - {}",
+            status, result.suite, result.case_name, result.detail
+        );
+    }
+}
+
+fn print_bench_optimization_results(
+    benchmark_name: &str,
+    results: &[crate::reasoning::optimizer::OptimizationResult],
+) {
+    println!("bench optimize ({}):", benchmark_name);
     for result in results {
         println!(
             "- suite={} best_candidate={} score={}/{}",

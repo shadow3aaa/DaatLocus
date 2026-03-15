@@ -107,7 +107,16 @@ impl StoredPromptTuningConfig {
 }
 
 pub async fn load_compiled_program(compile_key: &str) -> Result<Option<CompiledProgram>> {
-    let path = compiled_dir().await.join(format!("{compile_key}.json"));
+    load_compiled_program_from_dir(COMPILED_DIR_NAME, compile_key).await
+}
+
+pub async fn load_compiled_program_from_dir(
+    dir_name: &str,
+    compile_key: &str,
+) -> Result<Option<CompiledProgram>> {
+    let path = compiled_dir_named(dir_name)
+        .await
+        .join(format!("{compile_key}.json"));
     let Ok(bytes) = fs::read(path).await else {
         return Ok(None);
     };
@@ -118,7 +127,14 @@ pub async fn load_compiled_program(compile_key: &str) -> Result<Option<CompiledP
 }
 
 pub async fn save_compiled_program(compiled: &CompiledProgram) -> Result<()> {
-    let dir = compiled_dir().await;
+    save_compiled_program_to_dir(COMPILED_DIR_NAME, compiled).await
+}
+
+pub async fn save_compiled_program_to_dir(
+    dir_name: &str,
+    compiled: &CompiledProgram,
+) -> Result<()> {
+    let dir = compiled_dir_named(dir_name).await;
     if !dir.exists() {
         fs::create_dir_all(&dir)
             .await
@@ -134,5 +150,9 @@ pub async fn save_compiled_program(compiled: &CompiledProgram) -> Result<()> {
 }
 
 async fn compiled_dir() -> PathBuf {
-    get_spinova_home().await.join(COMPILED_DIR_NAME)
+    compiled_dir_named(COMPILED_DIR_NAME).await
+}
+
+async fn compiled_dir_named(dir_name: &str) -> PathBuf {
+    get_spinova_home().await.join(dir_name)
 }
