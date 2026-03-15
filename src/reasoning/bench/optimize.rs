@@ -25,7 +25,7 @@ use crate::{
     },
 };
 
-const BENCH_OPTIMIZER_VERSION: &str = "reasoning-bench-optimizer-v3";
+const BENCH_OPTIMIZER_VERSION: &str = "reasoning-bench-optimizer-v4";
 const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_bench_optimize_memory(context: &Context) -> Result<Vec<OptimizationResult>> {

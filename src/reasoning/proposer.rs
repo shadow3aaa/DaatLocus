@@ -54,7 +54,7 @@ pub fn propose_candidates<O: Clone>(
                 name: "auto_bootstrap_demo".to_string(),
                 config: PromptTuningConfig {
                     extra_instructions: base.extra_instructions.clone(),
-                    examples: append_examples(&base.examples, &bootstrap_examples),
+                    examples: bootstrap_examples.clone(),
                 },
             });
 
@@ -68,7 +68,7 @@ pub fn propose_candidates<O: Clone>(
                 name: "auto_bootstrap_combo".to_string(),
                 config: PromptTuningConfig {
                     extra_instructions: dedupe_instructions(base, combo_instructions),
-                    examples: append_examples(&base.examples, &bootstrap_examples),
+                    examples: bootstrap_examples,
                 },
             });
         }
@@ -88,13 +88,4 @@ fn dedupe_instructions<O>(
         }
     }
     combined
-}
-
-fn append_examples<O: Clone>(
-    base_examples: &[ProgramExample<O>],
-    extra_examples: &[ProgramExample<O>],
-) -> Vec<ProgramExample<O>> {
-    let mut examples = base_examples.to_vec();
-    examples.extend_from_slice(extra_examples);
-    examples
 }
