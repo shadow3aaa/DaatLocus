@@ -27,7 +27,7 @@ use super::{
     trace_mining::{derive_resolve_telegram_eval_cases, propose_resolve_telegram_candidates},
 };
 
-const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v7";
+const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v8";
 const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<OptimizationResult>> {
