@@ -164,6 +164,17 @@ async fn main() {
 
     let (tx, mut rx) = tokio::sync::watch::channel(DashboardState {
         pty_parser: terminal_parser,
+        focused_device: context.devices.focused(),
+        focused_title: context
+            .devices
+            .focused_render()
+            .as_ref()
+            .map(|view| view.title.clone()),
+        focused_content: context
+            .devices
+            .focused_render()
+            .as_ref()
+            .map(|view| view.content.clone()),
         obligations: render_obligations_for_dashboard(&context),
         projects: render_projects_for_dashboard(&context),
         tasks: context
@@ -589,6 +600,10 @@ fn sync_dashboard_state(
     last_cycle_elapsed_ms: Option<u128>,
 ) {
     tx.send_modify(|state| {
+        let focused_render = context.devices.focused_render();
+        state.focused_device = context.devices.focused();
+        state.focused_title = focused_render.as_ref().map(|view| view.title.clone());
+        state.focused_content = focused_render.as_ref().map(|view| view.content.clone());
         state.obligations = render_obligations_for_dashboard(context);
         state.projects = render_projects_for_dashboard(context);
         state.tasks = context

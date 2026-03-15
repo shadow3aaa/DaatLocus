@@ -11,10 +11,13 @@ use ratatui::{
 use tui_term::widget::PseudoTerminal;
 use uuid::Uuid;
 
-use crate::telegram_acl::TelegramAclHandle;
+use crate::{device::DeviceId, telegram_acl::TelegramAclHandle};
 
 pub struct DashboardState {
     pub pty_parser: Arc<Mutex<vt100::Parser>>,
+    pub focused_device: Option<DeviceId>,
+    pub focused_title: Option<String>,
+    pub focused_content: Option<String>,
     pub obligations: Vec<String>,
     pub projects: Vec<String>,
     pub tasks: HashMap<Uuid, DashboardTaskEntry>,
@@ -97,11 +100,7 @@ pub async fn run_tui_dashboard(
                 ])
                 .split(chunks[1]);
 
-            // 渲染虚拟终端
-            let screen = state.pty_parser.lock().screen().clone();
-            let pty_widget = PseudoTerminal::new(&screen)
-                .block(Block::default().title("Terminal").borders(Borders::ALL));
-            f.render_widget(pty_widget, chunks[0]);
+            render_main_pane(f, chunks[0], &state);
 
             let obligations_display = if state.obligations.is_empty() {
                 "No obligations.".to_string()
@@ -174,6 +173,96 @@ pub async fn run_tui_dashboard(
         crossterm::terminal::LeaveAlternateScreen
     )?;
     Ok(())
+}
+
+fn render_main_pane(f: &mut Frame, area: Rect, state: &DashboardState) {
+    match state.focused_device {
+        Some(DeviceId::Terminal) => {
+            let screen = state.pty_parser.lock().screen().clone();
+            let title = state.focused_title.as_deref().unwrap_or("Terminal");
+            let pty_widget = PseudoTerminal::new(&screen)
+                .block(Block::default().title(title).borders(Borders::ALL));
+            f.render_widget(pty_widget, area);
+        }
+        Some(DeviceId::Telegram) => render_telegram_pane(
+            f,
+            area,
+            state.focused_title.as_deref().unwrap_or("Telegram"),
+            state.focused_content.as_deref().unwrap_or(""),
+        ),
+        None => {
+            let widget = Paragraph::new("当前没有前景设备。")
+                .wrap(Wrap { trim: true })
+                .block(Block::default().title("No Device").borders(Borders::ALL));
+            f.render_widget(widget, area);
+        }
+    }
+}
+
+fn render_telegram_pane(f: &mut Frame, area: Rect, title: &str, content: &str) {
+    let (list_text, chat_text, footer_text) = split_telegram_view(content);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(32),
+            Constraint::Percentage(58),
+            Constraint::Percentage(10),
+        ])
+        .split(area);
+
+    let list_widget = Paragraph::new(list_text).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .title(format!("{title} / Chats"))
+            .borders(Borders::ALL),
+    );
+    f.render_widget(list_widget, chunks[0]);
+
+    let chat_widget = Paragraph::new(chat_text).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .title(format!("{title} / Current Chat"))
+            .borders(Borders::ALL),
+    );
+    f.render_widget(chat_widget, chunks[1]);
+
+    let footer_widget = Paragraph::new(footer_text).wrap(Wrap { trim: true }).block(
+        Block::default()
+            .title(format!("{title} / Tips"))
+            .borders(Borders::ALL),
+    );
+    f.render_widget(footer_widget, chunks[2]);
+}
+
+fn split_telegram_view(content: &str) -> (String, String, String) {
+    let list_title = "聊天列表页";
+    let chat_title = "当前会话页";
+    let tips_marker = "如果要发送消息，请使用 `DeviceAction` -> `TelegramSendMessage`。";
+
+    let list_text = extract_section(content, list_title)
+        .unwrap_or_else(|| "当前没有可显示的聊天列表。".to_string());
+    let chat_text = extract_section(content, chat_title)
+        .unwrap_or_else(|| "当前没有打开任何会话。".to_string());
+    let footer_text = content
+        .find(tips_marker)
+        .map(|start| content[start..].trim().to_string())
+        .unwrap_or_else(|| "No tips.".to_string());
+
+    (list_text, chat_text, footer_text)
+}
+
+fn extract_section(content: &str, title: &str) -> Option<String> {
+    let start = content.find(title)?;
+    let rest = &content[start..];
+    let next_title = rest
+        .char_indices()
+        .skip(1)
+        .find_map(|(idx, _)| rest[idx..].starts_with("当前会话页").then_some(idx))
+        .or_else(|| {
+            rest.char_indices()
+                .skip(1)
+                .find_map(|(idx, _)| rest[idx..].starts_with("如果要发送消息").then_some(idx))
+        })
+        .unwrap_or(rest.len());
+    Some(rest[..next_title].trim().to_string())
 }
 
 fn render_latest_trail(latest_trail: Option<&str>, last_cycle_elapsed_ms: Option<u128>) -> String {
