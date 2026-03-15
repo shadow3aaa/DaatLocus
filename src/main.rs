@@ -128,6 +128,7 @@ async fn main() {
     let terminal = TerminalDevice::new();
     let telegram = TelegramDevice::new();
     let telegram_handle = telegram.handle();
+    bootstrap_telegram_device_from_acl(&telegram_handle, &telegram_acl);
     let terminal_parser = terminal.parser();
     let devices = DeviceManager::new(
         Some(DeviceId::Terminal),
@@ -212,9 +213,9 @@ fn is_mem_reset_command(args: &[String]) -> bool {
 async fn run_mem_reset() -> Result<()> {
     let home = get_spinova_home().await;
     let config = crate::config::Config::default();
-    let telegram = TelegramDevice::new();
+    let telegram = TelegramDevice::empty();
     let telegram_handle = telegram.handle();
-    let devices = DeviceManager::new(None, vec![])
+    let devices = DeviceManager::new(None, vec![Box::new(telegram)])
         .await
         .map_err(|err| miette!("failed to construct default devices for mem-reset: {err}"))?;
     let context = Context {
@@ -279,6 +280,15 @@ async fn build_eval_context(config: crate::config::Config) -> Context {
         devices,
         telegram: telegram_handle,
         compiled_prompts: CompiledPromptStore::empty(),
+    }
+}
+
+fn bootstrap_telegram_device_from_acl(
+    telegram_handle: &crate::telegram_device::TelegramDeviceHandle,
+    telegram_acl: &TelegramAclHandle,
+) {
+    for chat in telegram_acl.approved_chats() {
+        telegram_handle.register_known_chat(chat.chat_id.to_string(), chat.title);
     }
 }
 

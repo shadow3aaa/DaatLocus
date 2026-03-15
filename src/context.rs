@@ -26,5 +26,6 @@ impl Context {
         self.projects.shutdown().await;
         self.tasks.shutdown().await;
         self.emotion.shutdown().await;
+        let _ = self.devices.shutdown().await;
     }
 }

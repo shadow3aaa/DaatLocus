@@ -84,6 +84,10 @@ pub trait Device: Send + Sync {
         Ok(())
     }
 
+    async fn shutdown(&mut self) -> Result<()> {
+        Ok(())
+    }
+
     async fn wait_until_settled(&self, _silence_duration: Duration, _timeout: Duration) -> bool {
         true
     }
@@ -198,5 +202,14 @@ impl DeviceManager {
             return Err(miette!("focused device missing: {focused}"));
         };
         device.execute(action).await
+    }
+
+    pub async fn shutdown(mut self) -> Result<()> {
+        for id in self.order {
+            if let Some(device) = self.devices.get_mut(&id) {
+                device.shutdown().await?;
+            }
+        }
+        Ok(())
     }
 }

@@ -96,6 +96,15 @@ impl TelegramTransport {
 
         match self.acl.classify(message.chat.id) {
             AccessDecision::Approved => {
+                if let Err(err) = self.acl.observe_approved(
+                    message.chat.id,
+                    chat_title.clone(),
+                    sender.clone(),
+                    truncate_reason(&text),
+                    chrono::Utc::now().timestamp_millis(),
+                ) {
+                    eprintln!("update approved telegram chat metadata failed: {err:?}");
+                }
                 self.handle.ingest_incoming_message(
                     message.chat.id.to_string(),
                     chat_title.clone(),
