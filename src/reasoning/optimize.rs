@@ -21,11 +21,12 @@ use super::{
     },
     proposer::{ProposalSpec, propose_candidates},
     signature::Signature,
+    teleprompter::build_teleprompter_candidates,
     trace::TraceOrigin,
     trace_mining::{derive_resolve_telegram_eval_cases, propose_resolve_telegram_candidates},
 };
 
-const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v4";
+const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v5";
 const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<OptimizationResult>> {
@@ -85,6 +86,17 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
         },
     ];
     resolve_candidates.extend(propose_resolve_telegram_candidates(&resolve_base));
+    resolve_candidates.extend(build_teleprompter_candidates(
+        &resolve_base,
+        "teleprompt_instruction",
+        "teleprompt_train_demos",
+        "teleprompt_train_combo",
+        &[
+            "优先按训练边界处理 Telegram：先聚焦，再打开会话，再区分 ReplyOnly、AcceptAsProject、AskClarification、Decline。",
+            "如果当前只剩待回复，不要重新语义判定；如果请求需要长期推进，优先识别为项目而不是礼貌确认。",
+        ],
+        datasets::resolve_telegram::all_bootstrap_examples(),
+    ));
     let resolve_proposal_specs = [
         ProposalSpec {
             candidate_name: "auto_focus_first",
@@ -410,6 +422,15 @@ fn build_action_phase_candidates(
         });
     }
 
+    candidates.extend(build_teleprompter_candidates(
+        base,
+        "teleprompt_instruction",
+        "teleprompt_train_demos",
+        "teleprompt_train_combo",
+        action_phase_teleprompter_instructions(program.phase()),
+        datasets::action_phase::all_bootstrap_examples(program.phase()),
+    ));
+
     let proposal_specs = match program.phase() {
         ActionPhase::AttendNotifications => vec![ProposalSpec {
             candidate_name: "auto_focus_telegram",
@@ -462,6 +483,23 @@ fn build_action_phase_candidates(
     candidates.extend(propose_candidates(base, baseline_results, &proposal_specs));
 
     candidates
+}
+
+fn action_phase_teleprompter_instructions(phase: ActionPhase) -> &'static [&'static str] {
+    match phase {
+        ActionPhase::AttendNotifications => &[
+            "提醒处理阶段优先按照训练边界行动：先处理 Telegram 与 Pending 义务，再考虑其他设备或探索。",
+        ],
+        ActionPhase::ExecuteTask => &[
+            "执行阶段优先按照训练边界行动：先选中已有动作、保持正确设备前景、误入交互式认证时先中断。",
+        ],
+        ActionPhase::PlanFromProject => &[
+            "项目规划阶段优先按照训练边界行动：为 Active 项目补出 project-scoped 的具体下一步动作，而不是偏离项目。",
+        ],
+        ActionPhase::ExploreNewTasks => &[
+            "探索阶段优先按照训练边界行动：无前景设备时先 FocusTerminal，完全空闲时用 SilentWait。",
+        ],
+    }
 }
 
 fn bootstrap_attend_notifications_examples(
