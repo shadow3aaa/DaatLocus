@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::reasoning::{
     bench::datasets::continuity_guard as continuity_guard_dataset,
+    bench::datasets::memory_recall as memory_recall_dataset,
     eval::EvalCaseResult,
     examples::ProgramExample,
     optimizer::{CandidateConfig, PromptTuningConfig},
@@ -14,6 +15,7 @@ pub fn propose_memory_recall_candidates(
     baseline_results: &[EvalCaseResult],
 ) -> Vec<CandidateConfig<MemoryRecallOutput>> {
     let mut proposals = BTreeMap::<String, Vec<String>>::new();
+    let mut bootstrap_case_names = Vec::<&str>::new();
 
     for failure in baseline_results.iter().filter(|result| !result.passed) {
         if failure.case_name.contains("blocker")
@@ -26,6 +28,7 @@ pub fn propose_memory_recall_candidates(
                 .entry("auto_blocker_continuity".to_string())
                 .or_default()
                 .push("如果当前关键事实是阻塞，至少同时保留三类记忆：阻塞事件本身、阻塞原因、仍可继续推进该项目的替代路径或后续线索。".to_string());
+            bootstrap_case_names.push(failure.case_name);
         }
 
         if failure.case_name.contains("small_talk")
@@ -36,6 +39,7 @@ pub fn propose_memory_recall_candidates(
                 .entry("auto_noise_suppression".to_string())
                 .or_default()
                 .push("纯等待、寒暄和与当前问题无关的聊天只算噪声；除非它们直接改变项目状态，否则不要把它们选进关键记忆。".to_string());
+            bootstrap_case_names.push(failure.case_name);
         }
 
         if failure
@@ -46,10 +50,11 @@ pub fn propose_memory_recall_candidates(
                 .entry("auto_supporting_recall".to_string())
                 .or_default()
                 .push("如果你已经选中了事件性记忆(T*)，还要补上支撑它的联想回忆(M*)，尤其是能解释后续推进路径的那条。".to_string());
+            bootstrap_case_names.push(failure.case_name);
         }
     }
 
-    proposals
+    let mut candidates = proposals
         .into_iter()
         .map(|(name, instructions)| CandidateConfig {
             name,
@@ -58,7 +63,34 @@ pub fn propose_memory_recall_candidates(
                 examples: base.examples.clone(),
             },
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    let bootstrap_examples = memory_recall_dataset::bootstrap_examples(&bootstrap_case_names);
+    if !bootstrap_examples.is_empty() {
+        candidates.push(CandidateConfig {
+            name: "auto_bootstrap_demo".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: base.extra_instructions.clone(),
+                examples: append_examples(&base.examples, &bootstrap_examples),
+            },
+        });
+
+        let mut combo_instructions = Vec::new();
+        for candidate in &candidates {
+            if candidate.name.starts_with("auto_") && candidate.name != "auto_bootstrap_demo" {
+                combo_instructions.extend(candidate.config.extra_instructions.clone());
+            }
+        }
+        candidates.push(CandidateConfig {
+            name: "auto_bootstrap_combo".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: dedupe_instructions(base, combo_instructions),
+                examples: append_examples(&base.examples, &bootstrap_examples),
+            },
+        });
+    }
+
+    candidates
 }
 
 pub fn propose_continuity_guard_candidates(
