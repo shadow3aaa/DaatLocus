@@ -19,7 +19,7 @@
         }
       }
     ],
-    "eval_cases": [
+    "train_cases": [
       {
         "name": "attend_notifications_focuses_telegram_first",
         "device_context": "当前前景设备是 Terminal。\n\n后台设备提醒：\n- Telegram 在后台：shadow3 发来 1 条新消息，请尽快查看并回复。",
@@ -33,6 +33,16 @@
             "device": "Telegram"
           }
         },
+        "expectation": {
+          "kind": "focus_telegram"
+        }
+      }
+    ],
+    "dev_cases": [
+      {
+        "name": "attend_notifications_focuses_telegram_first_variant",
+        "device_context": "当前前景设备是 Terminal。\n\n后台设备提醒：\n- Telegram 在后台：shadow3 发来 2 条新消息，请尽快查看并回复。",
+        "snapshot_text": "义务列表为空。\n项目列表为空。\n下一步动作列表为空。\n当前没有选中的下一步动作。",
         "expectation": {
           "kind": "focus_telegram"
         }
@@ -78,7 +88,7 @@
         }
       }
     ],
-    "eval_cases": [
+    "train_cases": [
       {
         "name": "execute_task_selects_existing_task_before_running",
         "device_context": "当前前景设备是 Terminal。",
@@ -117,6 +127,25 @@
           "kind": "cancel_interactive_prompt"
         }
       }
+    ],
+    "dev_cases": [
+      {
+        "name": "execute_task_selects_existing_task_before_running_variant",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "下一步动作列表：\n- id=33333333-3333-3333-3333-333333333333 描述=查看 webide-termux/webapp/src/main/assets/js 目录\n当前没有 working_task。",
+        "expectation": {
+          "kind": "select_task",
+          "task_id": "33333333-3333-3333-3333-333333333333"
+        }
+      },
+      {
+        "name": "execute_task_cancels_interactive_auth_prompt_variant",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "下一步动作列表：\n- id=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb 描述=拉取公开开源资料\n当前 working_task 已选中。\n终端显示：docker login\nUsername:",
+        "expectation": {
+          "kind": "cancel_interactive_prompt"
+        }
+      }
     ]
   },
   "plan_from_project": {
@@ -139,7 +168,7 @@
         }
       }
     ],
-    "eval_cases": [
+    "train_cases": [
       {
         "name": "plan_from_project_creates_project_scoped_task",
         "device_context": "当前没有前景设备。",
@@ -157,6 +186,17 @@
         "expectation": {
           "kind": "add_project_task",
           "project_id": "22222222-2222-2222-2222-222222222222"
+        }
+      }
+    ],
+    "dev_cases": [
+      {
+        "name": "plan_from_project_creates_project_scoped_task_variant",
+        "device_context": "当前没有前景设备。",
+        "snapshot_text": "项目列表：\n- id=44444444-4444-4444-4444-444444444444 title=调查开源皮套直播 LLM 方案 status=Active\n下一步动作列表为空。",
+        "expectation": {
+          "kind": "add_project_task",
+          "project_id": "44444444-4444-4444-4444-444444444444"
         }
       }
     ]
@@ -197,7 +237,7 @@
         }
       }
     ],
-    "eval_cases": [
+    "train_cases": [
       {
         "name": "explore_focuses_terminal_when_idle",
         "device_context": "当前没有任何前景设备。",
@@ -227,6 +267,24 @@
             "type": "SilentWait"
           }
         },
+        "expectation": {
+          "kind": "silent_wait"
+        }
+      }
+    ],
+    "dev_cases": [
+      {
+        "name": "explore_focuses_terminal_when_idle_variant",
+        "device_context": "当前没有任何前景设备。",
+        "snapshot_text": "义务列表为空。\n项目列表为空。\n下一步动作列表为空。\n当前也没有选中的动作。",
+        "expectation": {
+          "kind": "focus_terminal"
+        }
+      },
+      {
+        "name": "explore_uses_silent_wait_when_completely_idle_variant",
+        "device_context": "当前前景设备是 Telegram。\nTelegram 在前景，当前没有未读、待判断或待回复消息。",
+        "snapshot_text": "义务列表为空。\n项目列表为空。\n下一步动作列表为空。",
         "expectation": {
           "kind": "silent_wait"
         }
