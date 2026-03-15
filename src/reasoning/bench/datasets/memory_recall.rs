@@ -36,6 +36,7 @@ struct MemoryRecallEvalCase {
     required_ids: Vec<String>,
     forbidden_ids: Vec<String>,
     answer_must_include: Vec<String>,
+    bootstrap_output: Option<MemoryRecallOutput>,
 }
 
 pub fn examples() -> Vec<ProgramExample<MemoryRecallOutput>> {
@@ -72,6 +73,38 @@ pub fn eval_cases(program: &MemoryRecallProgram) -> Vec<EvalCase<MemoryRecallOut
                     check_answer_contains(output, &answer_must_include)
                 }),
             }
+        })
+        .collect()
+}
+
+pub fn bootstrap_examples(case_names: &[&str]) -> Vec<ProgramExample<MemoryRecallOutput>> {
+    load_dataset()
+        .eval_cases
+        .into_iter()
+        .filter(|case| case_names.iter().any(|name| *name == case.name))
+        .filter_map(|case| {
+            case.bootstrap_output.map(|output| ProgramExample {
+                title: format!("Bootstrap from {}", case.name),
+                inputs: vec![
+                    ExampleField {
+                        name: "当前目标".to_string(),
+                        value: case.current_goal,
+                    },
+                    ExampleField {
+                        name: "近期经历".to_string(),
+                        value: case.recent_trail,
+                    },
+                    ExampleField {
+                        name: "联想回忆".to_string(),
+                        value: case.associated_memories,
+                    },
+                    ExampleField {
+                        name: "问题".to_string(),
+                        value: case.question,
+                    },
+                ],
+                output,
+            })
         })
         .collect()
 }

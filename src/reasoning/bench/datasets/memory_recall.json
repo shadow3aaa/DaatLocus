@@ -76,7 +76,15 @@
       "answer_must_include": [
         "webide-termux",
         "assets"
-      ]
+      ],
+      "bootstrap_output": {
+        "relevant_memory_ids": [
+          "T1",
+          "T2",
+          "M1"
+        ],
+        "answer": "最关键的是你已经承诺并创建了 webide-termux 分析项目，且已有线索表明应优先检查 webapp/src/main/assets；连续的等待记录只是噪声。"
+      }
     },
     {
       "name": "prefer_owner_reply_over_small_talk",
@@ -95,7 +103,14 @@
       "answer_must_include": [
         "shadow3",
         "owner"
-      ]
+      ],
+      "bootstrap_output": {
+        "relevant_memory_ids": [
+          "T1",
+          "M1"
+        ],
+        "answer": "应优先保留 shadow3 的提问和它作为 owner 的身份，这决定了应该先回复 owner；无关寒暄和空转等待都不是关键记忆。"
+      }
     },
     {
       "name": "remember_blocker_not_idle_waits",
@@ -114,7 +129,15 @@
       "answer_must_include": [
         "gh auth login",
         "非交互"
-      ]
+      ],
+      "bootstrap_output": {
+        "relevant_memory_ids": [
+          "T2",
+          "M1",
+          "M2"
+        ],
+        "answer": "当前最关键的阻塞是 gh auth login 进入交互式认证，不适合 agent；同时应保留改用非交互方案继续推进调查的线索。"
+      }
     }
   ]
 }
