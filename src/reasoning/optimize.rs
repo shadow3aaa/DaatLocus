@@ -48,14 +48,15 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
 
     let resolve_program = ResolveTelegramChatProgram;
     let resolve_base = resolve_program.default_tuning();
-    let mut resolve_cases = resolve_program.eval_cases();
-    resolve_cases.extend(derive_resolve_telegram_eval_cases(&resolve_program));
+    let mut resolve_train_cases = resolve_program.train_eval_cases();
+    resolve_train_cases.extend(derive_resolve_telegram_eval_cases(&resolve_program));
+    let resolve_dev_cases = resolve_program.dev_eval_cases();
     let resolve_baseline_results = run_suite_with_tuning(
         context,
         &renderer,
         &resolve_program,
-        "resolve_telegram_chat",
-        clone_eval_cases(&resolve_cases),
+        "resolve_telegram_chat.train",
+        clone_eval_cases(&resolve_train_cases),
         &resolve_base,
         TraceOrigin::Compile,
     )
@@ -148,7 +149,7 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
             &renderer,
             &resolve_program,
             "resolve_telegram_chat",
-            resolve_cases,
+            resolve_dev_cases,
             resolve_candidates,
             1,
             total_suites,

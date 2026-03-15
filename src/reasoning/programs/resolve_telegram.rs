@@ -130,9 +130,15 @@ impl ResolveTelegramChatProgram {
         ir
     }
 
-    pub fn eval_cases(
+    pub fn train_eval_cases(
         &self,
     ) -> Vec<crate::reasoning::eval::EvalCase<ResolveTelegramProgramOutput>> {
-        dataset::eval_cases(self)
+        dataset::train_eval_cases(self)
+    }
+
+    pub fn dev_eval_cases(
+        &self,
+    ) -> Vec<crate::reasoning::eval::EvalCase<ResolveTelegramProgramOutput>> {
+        dataset::dev_eval_cases(self)
     }
 }

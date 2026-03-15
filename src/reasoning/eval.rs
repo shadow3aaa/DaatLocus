@@ -14,7 +14,6 @@ use super::{
     },
     runtime::execute_program_with_ir_report,
     trace::TraceOrigin,
-    trace_mining::derive_resolve_telegram_eval_cases,
 };
 
 pub struct EvalCase<O> {
@@ -36,15 +35,13 @@ pub async fn run_reasoning_eval(context: &Context) -> Result<Vec<EvalCaseResult>
     let mut results = Vec::new();
 
     let resolve_program = ResolveTelegramChatProgram;
-    let mut resolve_cases = resolve_program.eval_cases();
-    resolve_cases.extend(derive_resolve_telegram_eval_cases(&resolve_program));
     results.extend(
         run_suite(
             context,
             &renderer,
             &resolve_program,
             "resolve_telegram_chat",
-            resolve_cases,
+            resolve_program.dev_eval_cases(),
         )
         .await,
     );
