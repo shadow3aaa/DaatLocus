@@ -21,7 +21,8 @@ const DATASET_JSON: &str = include_str!("resolve_telegram.json");
 #[derive(Deserialize)]
 struct ResolveTelegramDataset {
     examples: Vec<ResolveTelegramExample>,
-    eval_cases: Vec<ResolveTelegramEvalCase>,
+    train_cases: Vec<ResolveTelegramEvalCase>,
+    dev_cases: Vec<ResolveTelegramEvalCase>,
 }
 
 #[derive(Deserialize)]
@@ -72,11 +73,57 @@ pub fn examples() -> Vec<ProgramExample<ResolveTelegramProgramOutput>> {
         .collect()
 }
 
-pub fn eval_cases(
+pub fn train_eval_cases(
     program: &ResolveTelegramChatProgram,
 ) -> Vec<EvalCase<ResolveTelegramProgramOutput>> {
+    to_eval_cases(program, load_dataset().train_cases)
+}
+
+pub fn dev_eval_cases(
+    program: &ResolveTelegramChatProgram,
+) -> Vec<EvalCase<ResolveTelegramProgramOutput>> {
+    to_eval_cases(program, load_dataset().dev_cases)
+}
+
+pub fn bootstrap_examples(
+    case_names: &[&str],
+) -> Vec<ProgramExample<ResolveTelegramProgramOutput>> {
     load_dataset()
-        .eval_cases
+        .train_cases
+        .into_iter()
+        .filter(|case| case_names.iter().any(|name| *name == case.name))
+        .filter_map(|case| {
+            case.bootstrap_output.map(|output| ProgramExample {
+                title: format!("Bootstrap from {}", case.name),
+                inputs: vec![
+                    ExampleField {
+                        name: "待判断会话".to_string(),
+                        value: case.pending_text,
+                    },
+                    ExampleField {
+                        name: "当前前景设备".to_string(),
+                        value: case.focus,
+                    },
+                    ExampleField {
+                        name: "完整快照".to_string(),
+                        value: case.snapshot_text,
+                    },
+                ],
+                output,
+            })
+        })
+        .collect()
+}
+
+fn load_dataset() -> ResolveTelegramDataset {
+    decode_dataset_json(DATASET_FILE, DATASET_JSON).expect("resolve_telegram dataset must be valid")
+}
+
+fn to_eval_cases(
+    program: &ResolveTelegramChatProgram,
+    cases: Vec<ResolveTelegramEvalCase>,
+) -> Vec<EvalCase<ResolveTelegramProgramOutput>> {
+    cases
         .into_iter()
         .map(|case| {
             let expectation = case.expectation;
@@ -107,40 +154,6 @@ pub fn eval_cases(
             }
         })
         .collect()
-}
-
-pub fn bootstrap_examples(
-    case_names: &[&str],
-) -> Vec<ProgramExample<ResolveTelegramProgramOutput>> {
-    load_dataset()
-        .eval_cases
-        .into_iter()
-        .filter(|case| case_names.iter().any(|name| *name == case.name))
-        .filter_map(|case| {
-            case.bootstrap_output.map(|output| ProgramExample {
-                title: format!("Bootstrap from {}", case.name),
-                inputs: vec![
-                    ExampleField {
-                        name: "待判断会话".to_string(),
-                        value: case.pending_text,
-                    },
-                    ExampleField {
-                        name: "当前前景设备".to_string(),
-                        value: case.focus,
-                    },
-                    ExampleField {
-                        name: "完整快照".to_string(),
-                        value: case.snapshot_text,
-                    },
-                ],
-                output,
-            })
-        })
-        .collect()
-}
-
-fn load_dataset() -> ResolveTelegramDataset {
-    decode_dataset_json(DATASET_FILE, DATASET_JSON).expect("resolve_telegram dataset must be valid")
 }
 
 fn check_focus_telegram(output: &ResolveTelegramProgramOutput) -> Result<()> {
