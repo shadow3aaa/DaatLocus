@@ -39,6 +39,7 @@ struct ContinuityGuardEvalCase {
     required_ids: Vec<String>,
     forbidden_ids: Vec<String>,
     reason_must_include: Vec<String>,
+    bootstrap_output: Option<ContinuityGuardOutput>,
 }
 
 pub fn examples() -> Vec<ProgramExample<ContinuityGuardOutput>> {
@@ -83,6 +84,42 @@ pub fn eval_cases(program: &ContinuityGuardProgram) -> Vec<EvalCase<ContinuityGu
                     check_reason_contains(output, &reason_must_include)
                 }),
             }
+        })
+        .collect()
+}
+
+pub fn bootstrap_examples(case_names: &[&str]) -> Vec<ProgramExample<ContinuityGuardOutput>> {
+    load_dataset()
+        .eval_cases
+        .into_iter()
+        .filter(|case| case_names.iter().any(|name| *name == case.name))
+        .filter_map(|case| {
+            case.bootstrap_output.map(|output| ProgramExample {
+                title: format!("Bootstrap from {}", case.name),
+                inputs: vec![
+                    ExampleField {
+                        name: "活跃项目".to_string(),
+                        value: case.active_projects,
+                    },
+                    ExampleField {
+                        name: "当前下一步动作".to_string(),
+                        value: case.next_actions,
+                    },
+                    ExampleField {
+                        name: "近期经历".to_string(),
+                        value: case.recent_trail,
+                    },
+                    ExampleField {
+                        name: "联想回忆".to_string(),
+                        value: case.associated_memories,
+                    },
+                    ExampleField {
+                        name: "问题".to_string(),
+                        value: case.question,
+                    },
+                ],
+                output,
+            })
         })
         .collect()
 }

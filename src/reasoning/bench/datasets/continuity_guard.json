@@ -90,7 +90,17 @@
       "reason_must_include": [
         "调查开源皮套直播 LLM 方案",
         "寒暄"
-      ]
+      ],
+      "bootstrap_output": {
+        "should_continue_project": true,
+        "project_title": "调查开源皮套直播 LLM 方案",
+        "supporting_memory_ids": [
+          "T1",
+          "M1",
+          "M2"
+        ],
+        "reason": "应继续推进《调查开源皮套直播 LLM 方案》，因为已经有承诺且项目仍是 Active；近期寒暄不应改变主目标。"
+      }
     },
     {
       "name": "remember_blocker_instead_of_switching_goal",
@@ -112,7 +122,17 @@
       "reason_must_include": [
         "gh auth login",
         "非交互"
-      ]
+      ],
+      "bootstrap_output": {
+        "should_continue_project": true,
+        "project_title": "调查开源皮套直播 LLM 方案",
+        "supporting_memory_ids": [
+          "T2",
+          "M1",
+          "M2"
+        ],
+        "reason": "应继续推进《调查开源皮套直播 LLM 方案》，因为当前真正的阻塞是 gh auth login，需要改用非交互方案，而不是切换到别的目标。"
+      }
     },
     {
       "name": "no_project_no_forced_continuity",
@@ -133,7 +153,15 @@
       "reason_must_include": [
         "没有",
         "活跃项目"
-      ]
+      ],
+      "bootstrap_output": {
+        "should_continue_project": false,
+        "project_title": null,
+        "supporting_memory_ids": [
+          "M1"
+        ],
+        "reason": "当前没有任何活跃项目或长期承诺，因此不应虚构连续性。"
+      }
     }
   ]
 }

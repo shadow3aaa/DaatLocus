@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::reasoning::{
+    bench::datasets::continuity_guard as continuity_guard_dataset,
     eval::EvalCaseResult,
+    examples::ProgramExample,
     optimizer::{CandidateConfig, PromptTuningConfig},
 };
 
@@ -64,6 +66,7 @@ pub fn propose_continuity_guard_candidates(
     baseline_results: &[EvalCaseResult],
 ) -> Vec<CandidateConfig<ContinuityGuardOutput>> {
     let mut proposals = BTreeMap::<String, Vec<String>>::new();
+    let mut bootstrap_case_names = Vec::<&str>::new();
 
     for failure in baseline_results.iter().filter(|result| !result.passed) {
         if failure.case_name.contains("small_talk")
@@ -76,6 +79,7 @@ pub fn propose_continuity_guard_candidates(
                 .entry("auto_commitment_guard".to_string())
                 .or_default()
                 .push("如果输入里出现 owner 承诺、活跃项目或明确未完成调查，近期寒暄和等待噪声不应改变主目标。".to_string());
+            bootstrap_case_names.push(failure.case_name);
         }
 
         if failure.case_name.contains("blocker")
@@ -86,6 +90,7 @@ pub fn propose_continuity_guard_candidates(
                 .entry("auto_blocker_guard".to_string())
                 .or_default()
                 .push("阻塞不等于换项目；如果当前问题是阻塞，应继续原项目，并把阻塞与替代推进方式一起说清楚。".to_string());
+            bootstrap_case_names.push(failure.case_name);
         }
 
         if failure.case_name.contains("no_project")
@@ -100,10 +105,11 @@ pub fn propose_continuity_guard_candidates(
                     "如果没有活跃项目、长期承诺或未完成调查，不要因为等待和轻量聊天而虚构连续性。"
                         .to_string(),
                 );
+            bootstrap_case_names.push(failure.case_name);
         }
     }
 
-    proposals
+    let mut candidates = proposals
         .into_iter()
         .map(|(name, instructions)| CandidateConfig {
             name,
@@ -112,7 +118,34 @@ pub fn propose_continuity_guard_candidates(
                 examples: base.examples.clone(),
             },
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    let bootstrap_examples = continuity_guard_dataset::bootstrap_examples(&bootstrap_case_names);
+    if !bootstrap_examples.is_empty() {
+        candidates.push(CandidateConfig {
+            name: "auto_bootstrap_demo".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: base.extra_instructions.clone(),
+                examples: append_examples(&base.examples, &bootstrap_examples),
+            },
+        });
+
+        let mut combo_instructions = Vec::new();
+        for candidate in &candidates {
+            if candidate.name.starts_with("auto_") && candidate.name != "auto_bootstrap_demo" {
+                combo_instructions.extend(candidate.config.extra_instructions.clone());
+            }
+        }
+        candidates.push(CandidateConfig {
+            name: "auto_bootstrap_combo".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: dedupe_instructions(base, combo_instructions),
+                examples: append_examples(&base.examples, &bootstrap_examples),
+            },
+        });
+    }
+
+    candidates
 }
 
 fn dedupe_instructions<O>(
@@ -126,4 +159,13 @@ fn dedupe_instructions<O>(
         }
     }
     combined
+}
+
+fn append_examples<O: Clone>(
+    base_examples: &[ProgramExample<O>],
+    extra_examples: &[ProgramExample<O>],
+) -> Vec<ProgramExample<O>> {
+    let mut examples = base_examples.to_vec();
+    examples.extend_from_slice(extra_examples);
+    examples
 }
