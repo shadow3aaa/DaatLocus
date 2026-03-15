@@ -115,6 +115,33 @@ pub fn bootstrap_examples(
         .collect()
 }
 
+pub fn all_bootstrap_examples() -> Vec<ProgramExample<ResolveTelegramProgramOutput>> {
+    load_dataset()
+        .train_cases
+        .into_iter()
+        .filter_map(|case| {
+            case.bootstrap_output.map(|output| ProgramExample {
+                title: format!("Bootstrap from {}", case.name),
+                inputs: vec![
+                    ExampleField {
+                        name: "待判断会话".to_string(),
+                        value: case.pending_text,
+                    },
+                    ExampleField {
+                        name: "当前前景设备".to_string(),
+                        value: case.focus,
+                    },
+                    ExampleField {
+                        name: "完整快照".to_string(),
+                        value: case.snapshot_text,
+                    },
+                ],
+                output,
+            })
+        })
+        .collect()
+}
+
 fn load_dataset() -> ResolveTelegramDataset {
     decode_dataset_json(DATASET_FILE, DATASET_JSON).expect("resolve_telegram dataset must be valid")
 }

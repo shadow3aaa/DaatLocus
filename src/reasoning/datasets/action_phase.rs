@@ -100,6 +100,29 @@ pub fn bootstrap_examples(phase: ActionPhase, case_names: &[&str]) -> Vec<Progra
         .collect()
 }
 
+pub fn all_bootstrap_examples(phase: ActionPhase) -> Vec<ProgramExample<Output>> {
+    section_for_phase(load_dataset(), phase)
+        .train_cases
+        .into_iter()
+        .filter_map(|case| {
+            case.bootstrap_output.map(|output| ProgramExample {
+                title: format!("Bootstrap from {}", case.name),
+                inputs: vec![
+                    crate::reasoning::examples::ExampleField {
+                        name: "设备上下文".to_string(),
+                        value: case.device_context,
+                    },
+                    crate::reasoning::examples::ExampleField {
+                        name: "完整快照".to_string(),
+                        value: case.snapshot_text,
+                    },
+                ],
+                output,
+            })
+        })
+        .collect()
+}
+
 fn load_dataset() -> ActionPhaseDataset {
     decode_dataset_json(DATASET_FILE, DATASET_JSON).expect("action_phase dataset must be valid")
 }

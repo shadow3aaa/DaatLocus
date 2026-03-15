@@ -14,5 +14,6 @@ pub mod proposer;
 pub mod render;
 pub mod runtime;
 pub mod signature;
+pub mod teleprompter;
 pub mod trace;
 pub mod trace_mining;
