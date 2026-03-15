@@ -113,6 +113,29 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
             bootstrap_case_name: Some("resolve_telegram_replies_when_only_reply_pending"),
             bootstrap_examples: datasets::resolve_telegram::bootstrap_examples,
         },
+        ProposalSpec {
+            candidate_name: "auto_reply_only",
+            when: resolve_reply_only_failure,
+            instruction: "对于简单状态询问、寒暄或无需持续推进的短消息，应使用 ReplyOnly，而不是误接成项目。",
+            bootstrap_case_name: Some("resolve_telegram_uses_reply_only_for_status_question"),
+            bootstrap_examples: datasets::resolve_telegram::bootstrap_examples,
+        },
+        ProposalSpec {
+            candidate_name: "auto_ask_clarification",
+            when: resolve_ask_clarification_failure,
+            instruction: "如果请求缺少项目名称、链接或具体目标，信息不足时应先 AskClarification，而不是直接 AcceptAsProject。",
+            bootstrap_case_name: Some(
+                "resolve_telegram_asks_clarification_when_request_is_underspecified",
+            ),
+            bootstrap_examples: datasets::resolve_telegram::bootstrap_examples,
+        },
+        ProposalSpec {
+            candidate_name: "auto_decline_sensitive",
+            when: resolve_decline_failure,
+            instruction: "如果消息要求提供 token、密码或其他敏感凭据，应明确 Decline，并保持安全边界。",
+            bootstrap_case_name: Some("resolve_telegram_declines_credential_request"),
+            bootstrap_examples: datasets::resolve_telegram::bootstrap_examples,
+        },
     ];
     resolve_candidates.extend(propose_candidates(
         &resolve_base,
@@ -484,6 +507,21 @@ fn resolve_reply_pending_failure(result: &crate::reasoning::eval::EvalCaseResult
     !result.passed
         && (result.case_name.contains("reply")
             || result.detail.contains("expected ReplyInCurrentChat"))
+}
+
+fn resolve_reply_only_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed
+        && (result.case_name.contains("reply_only") || result.detail.contains("ReplyOnly"))
+}
+
+fn resolve_ask_clarification_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed
+        && (result.case_name.contains("clarification")
+            || result.detail.contains("AskClarification"))
+}
+
+fn resolve_decline_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed && (result.case_name.contains("decline") || result.detail.contains("Decline"))
 }
 
 fn action_phase_focus_telegram_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {

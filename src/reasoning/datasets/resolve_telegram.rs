@@ -50,6 +50,12 @@ enum ResolveTelegramExpectation {
     OpenChat { chat_id: String },
     #[serde(rename = "accept_as_project")]
     AcceptAsProject { chat_id: String },
+    #[serde(rename = "reply_only")]
+    ReplyOnly { chat_id: String },
+    #[serde(rename = "ask_clarification")]
+    AskClarification { chat_id: String },
+    #[serde(rename = "decline")]
+    Decline { chat_id: String },
     #[serde(rename = "reply_in_current_chat")]
     ReplyInCurrentChat,
 }
@@ -84,6 +90,15 @@ pub fn eval_cases(
                     }
                     ResolveTelegramExpectation::AcceptAsProject { chat_id } => {
                         register_accept_project_check(chat_id)
+                    }
+                    ResolveTelegramExpectation::ReplyOnly { chat_id } => {
+                        register_reply_only_check(chat_id)
+                    }
+                    ResolveTelegramExpectation::AskClarification { chat_id } => {
+                        register_ask_clarification_check(chat_id)
+                    }
+                    ResolveTelegramExpectation::Decline { chat_id } => {
+                        register_decline_check(chat_id)
                     }
                     ResolveTelegramExpectation::ReplyInCurrentChat => {
                         Arc::new(check_reply_in_current_chat)
@@ -185,6 +200,60 @@ fn register_accept_project_check(
             }
             other => Err(miette!(
                 "expected ResolveChat with AcceptAsProject for chat {}, got {:?}",
+                expected_chat_id,
+                other
+            )),
+        },
+    )
+}
+
+fn register_reply_only_check(
+    expected_chat_id: String,
+) -> Arc<dyn Fn(&ResolveTelegramProgramOutput) -> Result<()> + Send + Sync> {
+    Arc::new(
+        move |output: &ResolveTelegramProgramOutput| match &output.action {
+            ResolveTelegramProgramAction::ResolveChat {
+                chat_id,
+                resolution: TelegramResolution::ReplyOnly { reply },
+            } if chat_id == &expected_chat_id && !reply.trim().is_empty() => Ok(()),
+            other => Err(miette!(
+                "expected ResolveChat with ReplyOnly for chat {}, got {:?}",
+                expected_chat_id,
+                other
+            )),
+        },
+    )
+}
+
+fn register_ask_clarification_check(
+    expected_chat_id: String,
+) -> Arc<dyn Fn(&ResolveTelegramProgramOutput) -> Result<()> + Send + Sync> {
+    Arc::new(
+        move |output: &ResolveTelegramProgramOutput| match &output.action {
+            ResolveTelegramProgramAction::ResolveChat {
+                chat_id,
+                resolution: TelegramResolution::AskClarification { reply },
+            } if chat_id == &expected_chat_id && !reply.trim().is_empty() => Ok(()),
+            other => Err(miette!(
+                "expected ResolveChat with AskClarification for chat {}, got {:?}",
+                expected_chat_id,
+                other
+            )),
+        },
+    )
+}
+
+fn register_decline_check(
+    expected_chat_id: String,
+) -> Arc<dyn Fn(&ResolveTelegramProgramOutput) -> Result<()> + Send + Sync> {
+    Arc::new(
+        move |output: &ResolveTelegramProgramOutput| match &output.action {
+            ResolveTelegramProgramAction::ResolveChat {
+                chat_id,
+                resolution: TelegramResolution::Decline { reply },
+            } if chat_id == &expected_chat_id && !reply.trim().is_empty() => Ok(()),
+            other => Err(miette!(
+                "expected ResolveChat with Decline for chat {}, got {:?}",
                 expected_chat_id,
                 other
             )),
