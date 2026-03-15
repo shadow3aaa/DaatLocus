@@ -13,7 +13,8 @@ use super::{
     program::Program,
 };
 
-const COMPILED_DIR_NAME: &str = "reasoning_compiled";
+pub const COMPILED_DIR_NAME: &str = "reasoning_compiled";
+pub const BENCH_COMPILED_DIR_NAME: &str = "reasoning_bench_compiled";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredProgramExample {
