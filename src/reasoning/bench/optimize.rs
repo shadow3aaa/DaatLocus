@@ -48,6 +48,23 @@ pub async fn run_bench_optimize_continuity(context: &Context) -> Result<Vec<Opti
     }])
 }
 
+pub async fn load_or_compile_bench_memory_tuning(
+    context: &Context,
+) -> Result<PromptTuningConfig<crate::reasoning::bench::programs::memory_recall::MemoryRecallOutput>>
+{
+    let compiled = ensure_bench_memory_compiled(context).await?;
+    compiled.tuning.to_typed()
+}
+
+pub async fn load_or_compile_bench_continuity_tuning(
+    context: &Context,
+) -> Result<
+    PromptTuningConfig<crate::reasoning::bench::programs::continuity_guard::ContinuityGuardOutput>,
+> {
+    let compiled = ensure_bench_continuity_compiled(context).await?;
+    compiled.tuning.to_typed()
+}
+
 async fn ensure_bench_memory_compiled(context: &Context) -> Result<CompiledProgram> {
     let renderer = OpenAIToolRenderer;
     let program = MemoryRecallProgram;
