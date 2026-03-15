@@ -37,6 +37,7 @@ struct ActionPhaseEvalCase {
     device_context: String,
     snapshot_text: String,
     expectation: ActionPhaseExpectation,
+    bootstrap_output: Option<Output>,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +85,30 @@ pub fn eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
                     ActionPhaseExpectation::SilentWait => Arc::new(check_silent_wait),
                 },
             }
+        })
+        .collect()
+}
+
+pub fn bootstrap_examples(phase: ActionPhase, case_names: &[&str]) -> Vec<ProgramExample<Output>> {
+    section_for_phase(load_dataset(), phase)
+        .eval_cases
+        .into_iter()
+        .filter(|case| case_names.iter().any(|name| *name == case.name))
+        .filter_map(|case| {
+            case.bootstrap_output.map(|output| ProgramExample {
+                title: format!("Bootstrap from {}", case.name),
+                inputs: vec![
+                    crate::reasoning::examples::ExampleField {
+                        name: "设备上下文".to_string(),
+                        value: case.device_context,
+                    },
+                    crate::reasoning::examples::ExampleField {
+                        name: "完整快照".to_string(),
+                        value: case.snapshot_text,
+                    },
+                ],
+                output,
+            })
         })
         .collect()
 }

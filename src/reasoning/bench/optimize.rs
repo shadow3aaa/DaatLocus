@@ -2,6 +2,9 @@ use miette::{Result, miette};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use super::programs::{
+    continuity_guard::ContinuityGuardProgram, memory_recall::MemoryRecallProgram,
+};
 use crate::{
     config::Config,
     context::Context,
@@ -15,15 +18,11 @@ use crate::{
         ir::PromptIR,
         optimizer::{CandidateConfig, OptimizationResult, PromptTuningConfig},
         program::Program,
+        proposer::{ProposalSpec, propose_candidates},
         render::openai_tools::OpenAIToolRenderer,
         signature::Signature,
         trace::TraceOrigin,
     },
-};
-
-use super::{
-    programs::{continuity_guard::ContinuityGuardProgram, memory_recall::MemoryRecallProgram},
-    proposer::{BenchProposalSpec, propose_candidates},
 };
 
 const BENCH_OPTIMIZER_VERSION: &str = "reasoning-bench-optimizer-v3";
@@ -113,21 +112,21 @@ async fn ensure_bench_memory_compiled(context: &Context) -> Result<CompiledProgr
         },
     ];
     let proposal_specs = [
-        BenchProposalSpec {
+        ProposalSpec {
             candidate_name: "auto_blocker_continuity",
             when: memory_recall_blocker_failure,
             instruction: "如果当前关键事实是阻塞，至少同时保留三类记忆：阻塞事件本身、阻塞原因、仍可继续推进该项目的替代路径或后续线索。",
             bootstrap_case_name: Some("remember_blocker_not_idle_waits"),
             bootstrap_examples: datasets::memory_recall::bootstrap_examples,
         },
-        BenchProposalSpec {
+        ProposalSpec {
             candidate_name: "auto_noise_suppression",
             when: memory_recall_noise_failure,
             instruction: "纯等待、寒暄和与当前问题无关的聊天只算噪声；除非它们直接改变项目状态，否则不要把它们选进关键记忆。",
             bootstrap_case_name: Some("prefer_owner_reply_over_small_talk"),
             bootstrap_examples: datasets::memory_recall::bootstrap_examples,
         },
-        BenchProposalSpec {
+        ProposalSpec {
             candidate_name: "auto_supporting_recall",
             when: memory_recall_supporting_failure,
             instruction: "如果你已经选中了事件性记忆(T*)，还要补上支撑它的联想回忆(M*)，尤其是能解释后续推进路径的那条。",
@@ -199,21 +198,21 @@ async fn ensure_bench_continuity_compiled(context: &Context) -> Result<CompiledP
         },
     ];
     let proposal_specs = [
-        BenchProposalSpec {
+        ProposalSpec {
             candidate_name: "auto_commitment_guard",
             when: continuity_commitment_failure,
             instruction: "如果输入里出现 owner 承诺、活跃项目或明确未完成调查，近期寒暄和等待噪声不应改变主目标。",
             bootstrap_case_name: Some("continue_owner_commitment_despite_small_talk"),
             bootstrap_examples: datasets::continuity_guard::bootstrap_examples,
         },
-        BenchProposalSpec {
+        ProposalSpec {
             candidate_name: "auto_blocker_guard",
             when: continuity_blocker_failure,
             instruction: "阻塞不等于换项目；如果当前问题是阻塞，应继续原项目，并把阻塞与替代推进方式一起说清楚。",
             bootstrap_case_name: Some("remember_blocker_instead_of_switching_goal"),
             bootstrap_examples: datasets::continuity_guard::bootstrap_examples,
         },
-        BenchProposalSpec {
+        ProposalSpec {
             candidate_name: "auto_no_forced_continuity",
             when: continuity_no_project_failure,
             instruction: "如果没有活跃项目、长期承诺或未完成调查，不要因为等待和轻量聊天而虚构连续性。",

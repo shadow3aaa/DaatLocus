@@ -38,6 +38,7 @@ struct ResolveTelegramEvalCase {
     focus: String,
     snapshot_text: String,
     expectation: ResolveTelegramExpectation,
+    bootstrap_output: Option<ResolveTelegramProgramOutput>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +90,36 @@ pub fn eval_cases(
                     }
                 },
             }
+        })
+        .collect()
+}
+
+pub fn bootstrap_examples(
+    case_names: &[&str],
+) -> Vec<ProgramExample<ResolveTelegramProgramOutput>> {
+    load_dataset()
+        .eval_cases
+        .into_iter()
+        .filter(|case| case_names.iter().any(|name| *name == case.name))
+        .filter_map(|case| {
+            case.bootstrap_output.map(|output| ProgramExample {
+                title: format!("Bootstrap from {}", case.name),
+                inputs: vec![
+                    ExampleField {
+                        name: "待判断会话".to_string(),
+                        value: case.pending_text,
+                    },
+                    ExampleField {
+                        name: "当前前景设备".to_string(),
+                        value: case.focus,
+                    },
+                    ExampleField {
+                        name: "完整快照".to_string(),
+                        value: case.snapshot_text,
+                    },
+                ],
+                output,
+            })
         })
         .collect()
 }
