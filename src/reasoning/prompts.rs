@@ -33,12 +33,14 @@ pub const TERMINAL_PROMPT: &str = r#"终端使用提示：
 
 pub const TELEGRAM_PROMPT: &str = r#"Telegram 设备使用提示：
 1. 当 Telegram 设备处于前景时，你看到的是会话列表和当前打开的会话内容。
-2. 如果你想查看某个会话，请输出 `DeviceAction` 来执行 `TelegramSelectChat`。
-3. 如果你想发送消息，请在 Telegram 设备处于前景且已经打开某个会话时，输出 `DeviceAction` 来执行 `TelegramSendMessage`。
-4. 当 Telegram transport 已配置时，白名单中的真实消息会进入该设备，且你的发送消息动作会真正发出。
-5. 未审批的 chat 不会进入你的世界，只会等待人工审批。
-6. 如果某个会话显示“待判断：是”，那意味着这条消息的语义还没有被你正式处理，应优先使用 `ResolveTelegramChat` 做判断。
-7. 如果某个会话显示“待回复：是”，那意味着这条对话仍然需要你给出消息回复。"#;
+2. 前景中的聊天列表会优先把“待判断 > 待回复 > 未读 > 最近活跃”的会话排在前面。
+3. 如果当前没有打开任何会话，你看到的是列表页；这时如果要看具体对话，应先执行 `TelegramSelectChat`。
+4. 如果你想查看某个会话，请输出 `DeviceAction` 来执行 `TelegramSelectChat`。
+5. 如果你想发送消息，请在 Telegram 设备处于前景且已经打开某个会话时，输出 `DeviceAction` 来执行 `TelegramSendMessage`。
+6. 当 Telegram transport 已配置时，白名单中的真实消息会进入该设备，且你的发送消息动作会真正发出。
+7. 未审批的 chat 不会进入你的世界，只会等待人工审批。
+8. 如果某个会话显示“待判断：是”，那意味着这条消息的语义还没有被你正式处理，应优先使用 `ResolveTelegramChat` 做判断。
+9. 如果某个会话显示“待回复：是”，那意味着这条对话仍然需要你给出消息回复。"#;
 
 pub fn build_device_context_prompt(context: &Context) -> String {
     let mut sections = vec![String::from(

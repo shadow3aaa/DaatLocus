@@ -45,6 +45,8 @@ struct ResolveTelegramEvalCase {
 enum ResolveTelegramExpectation {
     #[serde(rename = "focus_telegram")]
     FocusTelegram,
+    #[serde(rename = "open_chat")]
+    OpenChat { chat_id: String },
     #[serde(rename = "accept_as_project")]
     AcceptAsProject { chat_id: String },
     #[serde(rename = "reply_in_current_chat")]
@@ -76,6 +78,9 @@ pub fn eval_cases(
                 ir: program.dataset_ir(case.pending_text, case.focus, case.snapshot_text),
                 check: match expectation {
                     ResolveTelegramExpectation::FocusTelegram => Arc::new(check_focus_telegram),
+                    ResolveTelegramExpectation::OpenChat { chat_id } => {
+                        register_open_chat_check(chat_id)
+                    }
                     ResolveTelegramExpectation::AcceptAsProject { chat_id } => {
                         register_accept_project_check(chat_id)
                     }
@@ -109,6 +114,23 @@ fn check_reply_in_current_chat(output: &ResolveTelegramProgramOutput) -> Result<
             other
         )),
     }
+}
+
+fn register_open_chat_check(
+    expected_chat_id: String,
+) -> Arc<dyn Fn(&ResolveTelegramProgramOutput) -> Result<()> + Send + Sync> {
+    Arc::new(
+        move |output: &ResolveTelegramProgramOutput| match &output.action {
+            ResolveTelegramProgramAction::OpenChat { chat_id } if chat_id == &expected_chat_id => {
+                Ok(())
+            }
+            other => Err(miette!(
+                "expected OpenChat for chat {}, got {:?}",
+                expected_chat_id,
+                other
+            )),
+        },
+    )
 }
 
 fn register_accept_project_check(

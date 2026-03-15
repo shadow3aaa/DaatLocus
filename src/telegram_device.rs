@@ -479,11 +479,58 @@ impl TelegramState {
 
         self.background_attention = Some(BackgroundAttention { summary });
     }
+
+    fn sanitize_selected_chat(&mut self) {
+        let is_valid = self
+            .selected_chat
+            .as_deref()
+            .and_then(|id| self.chats.get(id))
+            .is_some();
+        if !is_valid {
+            self.selected_chat = None;
+        }
+    }
+
+    fn sorted_chat_ids(&self) -> Vec<String> {
+        let mut ids = self.order.clone();
+        ids.sort_by(|left, right| {
+            let left_chat = self.chats.get(left);
+            let right_chat = self.chats.get(right);
+            match (left_chat, right_chat) {
+                (Some(left_chat), Some(right_chat)) => right_chat
+                    .priority_tuple()
+                    .cmp(&left_chat.priority_tuple())
+                    .then_with(|| left_chat.title.cmp(&right_chat.title)),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => left.cmp(right),
+            }
+        });
+        ids
+    }
+}
+
+impl TelegramChat {
+    fn latest_activity_ms(&self) -> i64 {
+        self.messages
+            .last()
+            .map(|message| message.timestamp_ms)
+            .unwrap_or(0)
+    }
+
+    fn priority_tuple(&self) -> (u8, u8, u8, i64) {
+        (
+            self.pending_resolution as u8,
+            self.needs_reply as u8,
+            (self.unread > 0) as u8,
+            self.latest_activity_ms(),
+        )
+    }
 }
 
 impl From<PersistedTelegramState> for TelegramState {
     fn from(value: PersistedTelegramState) -> Self {
-        Self {
+        let mut state = Self {
             is_focused: false,
             selected_chat: value.selected_chat,
             order: value.order,
@@ -494,7 +541,9 @@ impl From<PersistedTelegramState> for TelegramState {
                 .collect(),
             outbox: value.outbox,
             background_attention: None,
-        }
+        };
+        state.sanitize_selected_chat();
+        state
     }
 }
 
@@ -574,21 +623,28 @@ impl From<&TelegramMessage> for PersistedTelegramMessage {
 
 fn render_telegram_view(state: &TelegramState) -> String {
     let mut sections = Vec::new();
+    let sorted_chat_ids = state.sorted_chat_ids();
 
-    if state.order.is_empty() {
+    if sorted_chat_ids.is_empty() {
         sections.push(
             "当前没有任何会话。\n如果未来接入 transport，这里会展示聊天列表与未读状态。"
                 .to_string(),
         );
     } else {
-        let chat_overview = state
-            .order
+        let chat_overview = sorted_chat_ids
             .iter()
             .filter_map(|id| state.chats.get(id))
-            .map(render_chat_summary)
+            .map(|chat| {
+                render_chat_summary(
+                    chat,
+                    state.selected_chat.as_deref() == Some(chat.id.as_str()),
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        sections.push(format!("会话列表：\n{chat_overview}"));
+        sections.push(format!(
+            "聊天列表页（按 待判断 > 待回复 > 未读 > 最近活跃 排序）：\n{chat_overview}"
+        ));
     }
 
     match state
@@ -610,14 +666,15 @@ fn render_telegram_view(state: &TelegramState) -> String {
     sections.join("\n\n")
 }
 
-fn render_chat_summary(chat: &TelegramChat) -> String {
+fn render_chat_summary(chat: &TelegramChat, is_selected: bool) -> String {
     let latest = chat
         .messages
         .last()
         .map(|message| truncate_preview(message.text.trim(), 48))
         .unwrap_or_else(|| "暂无消息".to_string());
+    let marker = if is_selected { ">" } else { " " };
     format!(
-        "- {} ({}) | 未读={} | 待判断={} | 待回复={} | 最近消息={}",
+        "{marker} {} ({}) | 未读={} | 待判断={} | 待回复={} | 最近消息={}",
         chat.title,
         chat.id,
         chat.unread,
@@ -638,7 +695,7 @@ fn render_selected_chat(chat: &TelegramChat) -> String {
             .join("\n")
     };
     format!(
-        "当前会话：{} ({})\n待判断：{}\n待回复：{}\n--- 消息 ---\n{}\n--- 消息 ---",
+        "当前会话页：{} ({})\n待判断：{}\n待回复：{}\n--- 消息 ---\n{}\n--- 消息 ---",
         chat.title,
         chat.id,
         yes_no(chat.pending_resolution),
