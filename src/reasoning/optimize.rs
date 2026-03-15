@@ -8,7 +8,8 @@ use crate::{
 
 use super::{
     compiled::{
-        CompiledProgram, StoredPromptTuningConfig, load_compiled_program, save_compiled_program,
+        CompiledCandidateReport, CompiledFailureCaseReport, CompiledProgram, CompiledProgramReport,
+        StoredPromptTuningConfig, load_compiled_program, save_compiled_program,
     },
     datasets,
     eval::{EvalCase, run_suite_with_tuning},
@@ -26,7 +27,7 @@ use super::{
     trace_mining::{derive_resolve_telegram_eval_cases, propose_resolve_telegram_candidates},
 };
 
-const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v5";
+const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v6";
 const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<OptimizationResult>> {
@@ -161,6 +162,7 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
             &renderer,
             &resolve_program,
             "resolve_telegram_chat",
+            resolve_train_cases,
             resolve_dev_cases,
             resolve_candidates,
             1,
@@ -197,6 +199,7 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
                 &renderer,
                 &action_program,
                 &action_program.tuning_key(),
+                action_train_cases,
                 action_dev_cases,
                 action_candidates,
                 compiled.len() + 1,
@@ -214,12 +217,20 @@ async fn ensure_suite_compiled<P: Program>(
     renderer: &OpenAIToolRenderer,
     program: &P,
     suite_name: &str,
-    cases: Vec<EvalCase<P::Output>>,
+    train_cases: Vec<EvalCase<P::Output>>,
+    dev_cases: Vec<EvalCase<P::Output>>,
     candidates: Vec<CandidateConfig<P::Output>>,
     suite_index: usize,
     total_suites: usize,
 ) -> Result<CompiledProgram> {
-    let compile_key = build_compile_key(&context.config, program, suite_name, &cases, &candidates)?;
+    let compile_key = build_compile_key(
+        &context.config,
+        program,
+        suite_name,
+        &train_cases,
+        &dev_cases,
+        &candidates,
+    )?;
     if let Some(compiled) = load_compiled_program(&compile_key).await? {
         eprintln!(
             "[prompt-compile {}/{}] {}: cache hit ({}/{}) using {}",
@@ -233,13 +244,14 @@ async fn ensure_suite_compiled<P: Program>(
         return Ok(compiled);
     }
 
-    let total_cases = cases.len();
+    let total_cases = dev_cases.len();
     let total_candidates = candidates.len();
     eprintln!(
         "[prompt-compile {}/{}] {}: cache miss, compiling {} candidates x {} cases",
         suite_index, total_suites, suite_name, total_candidates, total_cases
     );
     let mut best: Option<(String, PromptTuningConfig<P::Output>, usize, usize)> = None;
+    let mut candidate_reports = Vec::new();
 
     for (candidate_index, candidate) in candidates.into_iter().enumerate() {
         eprintln!(
@@ -256,13 +268,34 @@ async fn ensure_suite_compiled<P: Program>(
             renderer,
             program,
             suite_name,
-            clone_eval_cases(&cases),
+            clone_eval_cases(&dev_cases),
             &candidate.config,
             TraceOrigin::Compile,
         )
         .await;
         let score = results.iter().filter(|result| result.passed).count();
         let attempts_used = results.iter().map(|result| result.attempts_used).sum();
+        candidate_reports.push(CompiledCandidateReport {
+            name: candidate.name.clone(),
+            score,
+            total_cases,
+            attempts_used,
+            extra_instructions: candidate.config.extra_instructions.clone(),
+            example_titles: candidate
+                .config
+                .examples
+                .iter()
+                .map(|example| example.title.clone())
+                .collect(),
+            failed_cases: results
+                .iter()
+                .filter(|result| !result.passed)
+                .map(|result| CompiledFailureCaseReport {
+                    case_name: result.case_name.to_string(),
+                    detail: result.detail.clone(),
+                })
+                .collect(),
+        });
         if best
             .as_ref()
             .is_none_or(|(_, _, best_score, best_attempts)| {
@@ -279,6 +312,35 @@ async fn ensure_suite_compiled<P: Program>(
         ));
     };
 
+    let selected_dev_results = run_suite_with_tuning(
+        context,
+        renderer,
+        program,
+        suite_name,
+        clone_eval_cases(&dev_cases),
+        &best_tuning,
+        TraceOrigin::Compile,
+    )
+    .await;
+    let selected_train_results = run_suite_with_tuning(
+        context,
+        renderer,
+        program,
+        &format!("{suite_name}.train"),
+        clone_eval_cases(&train_cases),
+        &best_tuning,
+        TraceOrigin::Compile,
+    )
+    .await;
+    let dev_attempts_used = selected_dev_results
+        .iter()
+        .map(|result| result.attempts_used)
+        .sum();
+    let train_attempts_used = selected_train_results
+        .iter()
+        .map(|result| result.attempts_used)
+        .sum();
+
     let compiled = CompiledProgram {
         suite: suite_name.to_string(),
         compile_key,
@@ -286,6 +348,27 @@ async fn ensure_suite_compiled<P: Program>(
         score,
         total_cases,
         tuning: StoredPromptTuningConfig::from_typed(&best_tuning),
+        report: Some(CompiledProgramReport {
+            train_score: selected_train_results
+                .iter()
+                .filter(|result| result.passed)
+                .count(),
+            train_total_cases: train_cases.len(),
+            train_attempts_used,
+            dev_score: selected_dev_results
+                .iter()
+                .filter(|result| result.passed)
+                .count(),
+            dev_total_cases: dev_cases.len(),
+            dev_attempts_used,
+            selected_extra_instructions: best_tuning.extra_instructions.clone(),
+            selected_example_titles: best_tuning
+                .examples
+                .iter()
+                .map(|example| example.title.clone())
+                .collect(),
+            candidates: candidate_reports,
+        }),
     };
     save_compiled_program(&compiled).await?;
     eprintln!(
@@ -315,7 +398,8 @@ fn build_compile_key<P: Program>(
     config: &Config,
     program: &P,
     suite_name: &str,
-    cases: &[EvalCase<P::Output>],
+    train_cases: &[EvalCase<P::Output>],
+    dev_cases: &[EvalCase<P::Output>],
     candidates: &[CandidateConfig<P::Output>],
 ) -> Result<String> {
     #[derive(Serialize)]
@@ -341,7 +425,8 @@ fn build_compile_key<P: Program>(
         temperature: f64,
         signature: Signature,
         base_tuning: PromptTuningConfig<O>,
-        cases: Vec<EvalCaseFingerprint<'a>>,
+        train_cases: Vec<EvalCaseFingerprint<'a>>,
+        dev_cases: Vec<EvalCaseFingerprint<'a>>,
         candidates: Vec<CandidateFingerprint<'a, O>>,
     }
 
@@ -355,7 +440,14 @@ fn build_compile_key<P: Program>(
         temperature: config.main_model.temperature,
         signature: program.signature(),
         base_tuning: program.default_tuning(),
-        cases: cases
+        train_cases: train_cases
+            .iter()
+            .map(|case| EvalCaseFingerprint {
+                name: case.name,
+                ir: &case.ir,
+            })
+            .collect(),
+        dev_cases: dev_cases
             .iter()
             .map(|case| EvalCaseFingerprint {
                 name: case.name,

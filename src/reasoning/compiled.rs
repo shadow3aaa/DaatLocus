@@ -37,6 +37,38 @@ pub struct CompiledProgram {
     pub score: usize,
     pub total_cases: usize,
     pub tuning: StoredPromptTuningConfig,
+    #[serde(default)]
+    pub report: Option<CompiledProgramReport>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CompiledProgramReport {
+    pub train_score: usize,
+    pub train_total_cases: usize,
+    pub train_attempts_used: usize,
+    pub dev_score: usize,
+    pub dev_total_cases: usize,
+    pub dev_attempts_used: usize,
+    pub selected_extra_instructions: Vec<String>,
+    pub selected_example_titles: Vec<String>,
+    pub candidates: Vec<CompiledCandidateReport>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CompiledCandidateReport {
+    pub name: String,
+    pub score: usize,
+    pub total_cases: usize,
+    pub attempts_used: usize,
+    pub extra_instructions: Vec<String>,
+    pub example_titles: Vec<String>,
+    pub failed_cases: Vec<CompiledFailureCaseReport>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CompiledFailureCaseReport {
+    pub case_name: String,
+    pub detail: String,
 }
 
 #[derive(Clone, Default)]

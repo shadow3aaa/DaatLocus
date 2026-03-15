@@ -310,6 +310,7 @@ async fn ensure_suite_compiled<P: Program>(
         score,
         total_cases,
         tuning: StoredPromptTuningConfig::from_typed(&best_tuning),
+        report: None,
     };
     save_compiled_program_to_dir(BENCH_COMPILED_DIR_NAME, &compiled).await?;
     eprintln!(
