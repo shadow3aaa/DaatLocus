@@ -7,8 +7,8 @@ use crate::{
     context::Context,
     reasoning::{
         compiled::{
-            CompiledProgram, StoredPromptTuningConfig, load_compiled_program_from_dir,
-            save_compiled_program_to_dir,
+            BENCH_COMPILED_DIR_NAME, CompiledProgram, StoredPromptTuningConfig,
+            load_compiled_program_from_dir, save_compiled_program_to_dir,
         },
         eval::{EvalCase, run_suite_with_tuning},
         ir::PromptIR,
@@ -25,7 +25,6 @@ use super::{
     proposer::{propose_continuity_guard_candidates, propose_memory_recall_candidates},
 };
 
-const BENCH_COMPILED_DIR_NAME: &str = "reasoning_bench_compiled";
 const BENCH_OPTIMIZER_VERSION: &str = "reasoning-bench-optimizer-v2";
 const RENDERER_NAME: &str = "openai_tools";
 

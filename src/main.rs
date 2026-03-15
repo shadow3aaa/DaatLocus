@@ -42,7 +42,7 @@ use crate::{
             eval::{run_bench_eval_continuity, run_bench_eval_memory},
             optimize::{run_bench_optimize_continuity, run_bench_optimize_memory},
         },
-        compiled::CompiledPromptStore,
+        compiled::{BENCH_COMPILED_DIR_NAME, COMPILED_DIR_NAME, CompiledPromptStore},
         eval::run_reasoning_eval,
         optimize::ensure_reasoning_compiled,
         optimize::run_reasoning_optimize,
@@ -68,6 +68,14 @@ async fn main() {
 
     if is_mem_reset_command(&args) {
         if let Err(err) = run_mem_reset().await {
+            eprintln!("{err:?}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if is_prompt_reset_command(&args) {
+        if let Err(err) = run_prompt_reset().await {
             eprintln!("{err:?}");
             std::process::exit(1);
         }
@@ -289,6 +297,11 @@ fn is_mem_reset_command(args: &[String]) -> bool {
     matches!(args, [command] if command == "mem-reset")
 }
 
+fn is_prompt_reset_command(args: &[String]) -> bool {
+    matches!(args, [command] if command == "prompt-reset")
+        || matches!(args, [command] if command == "compile-reset")
+}
+
 fn is_bench_eval_memory_command(args: &[String]) -> bool {
     matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "memory")
         || matches!(args, [command] if command == "eval-bench-memory")
@@ -349,6 +362,45 @@ async fn run_mem_reset() -> Result<()> {
     println!("[mem-reset] preserved: config.toml, reasoning_compiled/, telegram_acl.json");
 
     Ok(())
+}
+
+async fn run_prompt_reset() -> Result<()> {
+    let home = get_spinova_home().await;
+    let cleared = clear_prompt_cache_dirs(&home).await?;
+
+    println!(
+        "[prompt-reset] cleared prompt compile cache under {}",
+        home.display()
+    );
+    if cleared.is_empty() {
+        println!(
+            "[prompt-reset] nothing to remove; {} and {} were already absent",
+            COMPILED_DIR_NAME, BENCH_COMPILED_DIR_NAME
+        );
+    } else {
+        println!("[prompt-reset] cleared: {}", cleared.join(", "));
+    }
+    println!(
+        "[prompt-reset] preserved: config.toml, telegram_acl.json, reasoning_traces.jsonl, runtime memory state"
+    );
+
+    Ok(())
+}
+
+async fn clear_prompt_cache_dirs(home: &PathBuf) -> Result<Vec<String>> {
+    let mut cleared = Vec::new();
+
+    for dir_name in [COMPILED_DIR_NAME, BENCH_COMPILED_DIR_NAME] {
+        let path = home.join(dir_name);
+        if path.exists() {
+            tokio::fs::remove_dir_all(&path)
+                .await
+                .map_err(|err| miette!("failed to remove {}: {err}", path.display()))?;
+            cleared.push(dir_name.to_string());
+        }
+    }
+
+    Ok(cleared)
 }
 
 async fn build_eval_context(config: crate::config::Config) -> Context {
