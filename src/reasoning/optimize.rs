@@ -27,8 +27,10 @@ use super::{
     trace_mining::{derive_resolve_telegram_eval_cases, propose_resolve_telegram_candidates},
 };
 
-const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v8";
+const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v9";
 const RENDERER_NAME: &str = "openai_tools";
+const SEARCH_SEED_LIMIT: usize = 4;
+const SEARCH_PAIR_LIMIT: usize = 6;
 
 pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<OptimizationResult>> {
     let compiled = ensure_reasoning_compiled(context).await?;
@@ -257,59 +259,70 @@ async fn ensure_suite_compiled<P: Program>(
         "[prompt-compile {}/{}] {}: cache miss, compiling {} candidates x {} cases",
         suite_index, total_suites, suite_name, total_candidates, total_cases
     );
+    let mut evaluations = evaluate_candidates(
+        context,
+        renderer,
+        program,
+        suite_name,
+        &dev_cases,
+        candidates,
+        suite_index,
+        total_suites,
+        total_candidates,
+    )
+    .await;
+
+    let search_candidates = build_search_candidates(&evaluations)?;
+    if !search_candidates.is_empty() {
+        let search_total = search_candidates.len();
+        evaluations.extend(
+            evaluate_candidates(
+                context,
+                renderer,
+                program,
+                suite_name,
+                &dev_cases,
+                search_candidates,
+                suite_index,
+                total_suites,
+                search_total,
+            )
+            .await,
+        );
+    }
+
     let mut best: Option<(String, PromptTuningConfig<P::Output>, usize, usize)> = None;
     let mut candidate_reports = Vec::new();
-
-    for (candidate_index, candidate) in candidates.into_iter().enumerate() {
-        eprintln!(
-            "[prompt-compile {}/{}] {}: candidate {}/{} ({})",
-            suite_index,
-            total_suites,
-            suite_name,
-            candidate_index + 1,
-            total_candidates,
-            candidate.name
-        );
-        let results = run_suite_with_tuning(
-            context,
-            renderer,
-            program,
-            suite_name,
-            clone_eval_cases(&dev_cases),
-            &candidate.config,
-            TraceOrigin::Compile,
-        )
-        .await;
-        let score = results.iter().filter(|result| result.passed).count();
-        let attempts_used = results.iter().map(|result| result.attempts_used).sum();
+    for evaluation in &evaluations {
         candidate_reports.push(CompiledCandidateReport {
-            name: candidate.name.clone(),
-            score,
+            name: evaluation.candidate.name.clone(),
+            score: evaluation.score,
             total_cases,
-            attempts_used,
-            extra_instructions: candidate.config.extra_instructions.clone(),
-            example_titles: candidate
+            attempts_used: evaluation.attempts_used,
+            extra_instructions: evaluation.candidate.config.extra_instructions.clone(),
+            example_titles: evaluation
+                .candidate
                 .config
                 .examples
                 .iter()
                 .map(|example| example.title.clone())
                 .collect(),
-            failed_cases: results
-                .iter()
-                .filter(|result| !result.passed)
-                .map(|result| CompiledFailureCaseReport {
-                    case_name: result.case_name.to_string(),
-                    detail: result.detail.clone(),
-                })
-                .collect(),
+            failed_cases: evaluation.failed_cases.clone(),
         });
         if best
             .as_ref()
             .is_none_or(|(_, _, best_score, best_attempts)| {
-                score > *best_score || (score == *best_score && attempts_used < *best_attempts)
+                evaluation.score > *best_score
+                    || (evaluation.score == *best_score
+                        && evaluation.attempts_used < *best_attempts)
             })
         {
-            best = Some((candidate.name, candidate.config, score, attempts_used));
+            best = Some((
+                evaluation.candidate.name.clone(),
+                evaluation.candidate.config.clone(),
+                evaluation.score,
+                evaluation.attempts_used,
+            ));
         }
     }
 
@@ -388,6 +401,142 @@ async fn ensure_suite_compiled<P: Program>(
         compiled.total_cases
     );
     Ok(compiled)
+}
+
+#[derive(Clone)]
+struct CandidateEvaluation<O: Clone> {
+    candidate: CandidateConfig<O>,
+    score: usize,
+    attempts_used: usize,
+    failed_cases: Vec<CompiledFailureCaseReport>,
+}
+
+async fn evaluate_candidates<P: Program>(
+    context: &Context,
+    renderer: &OpenAIToolRenderer,
+    program: &P,
+    suite_name: &str,
+    dev_cases: &[EvalCase<P::Output>],
+    candidates: Vec<CandidateConfig<P::Output>>,
+    suite_index: usize,
+    total_suites: usize,
+    total_candidates: usize,
+) -> Vec<CandidateEvaluation<P::Output>> {
+    let mut evaluations = Vec::new();
+    for (candidate_index, candidate) in candidates.into_iter().enumerate() {
+        eprintln!(
+            "[prompt-compile {}/{}] {}: candidate {}/{} ({})",
+            suite_index,
+            total_suites,
+            suite_name,
+            candidate_index + 1,
+            total_candidates,
+            candidate.name
+        );
+        let results = run_suite_with_tuning(
+            context,
+            renderer,
+            program,
+            suite_name,
+            clone_eval_cases(dev_cases),
+            &candidate.config,
+            TraceOrigin::Compile,
+        )
+        .await;
+        evaluations.push(CandidateEvaluation {
+            candidate,
+            score: results.iter().filter(|result| result.passed).count(),
+            attempts_used: results.iter().map(|result| result.attempts_used).sum(),
+            failed_cases: results
+                .iter()
+                .filter(|result| !result.passed)
+                .map(|result| CompiledFailureCaseReport {
+                    case_name: result.case_name.to_string(),
+                    detail: result.detail.clone(),
+                })
+                .collect(),
+        });
+    }
+    evaluations
+}
+
+fn build_search_candidates<O: Clone + Serialize>(
+    evaluations: &[CandidateEvaluation<O>],
+) -> Result<Vec<CandidateConfig<O>>> {
+    let mut ranked = evaluations.to_vec();
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then(left.attempts_used.cmp(&right.attempts_used))
+            .then(left.candidate.name.cmp(&right.candidate.name))
+    });
+    let seeds = ranked
+        .into_iter()
+        .filter(|evaluation| evaluation.candidate.name != "baseline")
+        .take(SEARCH_SEED_LIMIT)
+        .collect::<Vec<_>>();
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut combos = Vec::new();
+    for i in 0..seeds.len() {
+        for j in (i + 1)..seeds.len() {
+            if combos.len() >= SEARCH_PAIR_LIMIT {
+                return Ok(combos);
+            }
+            let merged =
+                merge_tuning_configs(&seeds[i].candidate.config, &seeds[j].candidate.config)?;
+            let signature = serialize_tuning_signature(&merged)?;
+            if !seen.insert(signature) {
+                continue;
+            }
+            combos.push(CandidateConfig {
+                name: format!(
+                    "search_combo({}+{})",
+                    seeds[i].candidate.name, seeds[j].candidate.name
+                ),
+                config: merged,
+            });
+        }
+    }
+    Ok(combos)
+}
+
+fn merge_tuning_configs<O: Clone + Serialize>(
+    left: &PromptTuningConfig<O>,
+    right: &PromptTuningConfig<O>,
+) -> Result<PromptTuningConfig<O>> {
+    let mut extra_instructions = left.extra_instructions.clone();
+    for instruction in &right.extra_instructions {
+        if !extra_instructions
+            .iter()
+            .any(|existing| existing == instruction)
+        {
+            extra_instructions.push(instruction.clone());
+        }
+    }
+
+    let mut examples = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for example in left.examples.iter().chain(right.examples.iter()) {
+        let fingerprint = serde_json::to_string(example)
+            .map_err(|err| miette!("failed to serialize example fingerprint: {err}"))?;
+        if seen.insert(fingerprint) {
+            examples.push(example.clone());
+        }
+    }
+
+    Ok(PromptTuningConfig {
+        extra_instructions,
+        examples,
+    })
+}
+
+fn serialize_tuning_signature<O: Clone + Serialize>(
+    tuning: &PromptTuningConfig<O>,
+) -> Result<String> {
+    serde_json::to_string(tuning)
+        .map_err(|err| miette!("failed to serialize tuning signature: {err}"))
 }
 
 fn clone_eval_cases<O>(cases: &[EvalCase<O>]) -> Vec<EvalCase<O>> {
