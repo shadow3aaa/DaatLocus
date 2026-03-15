@@ -20,7 +20,7 @@ pub async fn run_bench_eval_memory(context: &Context) -> Result<Vec<EvalCaseResu
         &renderer,
         &program,
         program.suite_name(),
-        program.eval_cases(),
+        program.dev_eval_cases(),
         &tuning,
         crate::reasoning::trace::TraceOrigin::BenchEval,
     )
@@ -36,7 +36,7 @@ pub async fn run_bench_eval_continuity(context: &Context) -> Result<Vec<EvalCase
         &renderer,
         &program,
         program.suite_name(),
-        program.eval_cases(),
+        program.dev_eval_cases(),
         &tuning,
         crate::reasoning::trace::TraceOrigin::BenchEval,
     )

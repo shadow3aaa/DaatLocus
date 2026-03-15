@@ -50,8 +50,12 @@ impl ContinuityGuardProgram {
         ir
     }
 
-    pub fn eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<ContinuityGuardOutput>> {
-        dataset::eval_cases(self)
+    pub fn train_eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<ContinuityGuardOutput>> {
+        dataset::train_eval_cases(self)
+    }
+
+    pub fn dev_eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<ContinuityGuardOutput>> {
+        dataset::dev_eval_cases(self)
     }
 }
 

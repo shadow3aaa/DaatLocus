@@ -16,7 +16,8 @@ const DATASET_JSON: &str = include_str!("memory_recall.json");
 #[derive(Deserialize)]
 struct MemoryRecallDataset {
     examples: Vec<MemoryRecallExample>,
-    eval_cases: Vec<MemoryRecallEvalCase>,
+    train_cases: Vec<MemoryRecallEvalCase>,
+    dev_cases: Vec<MemoryRecallEvalCase>,
 }
 
 #[derive(Deserialize)]
@@ -51,9 +52,19 @@ pub fn examples() -> Vec<ProgramExample<MemoryRecallOutput>> {
         .collect()
 }
 
-pub fn eval_cases(program: &MemoryRecallProgram) -> Vec<EvalCase<MemoryRecallOutput>> {
-    load_dataset()
-        .eval_cases
+pub fn train_eval_cases(program: &MemoryRecallProgram) -> Vec<EvalCase<MemoryRecallOutput>> {
+    to_eval_cases(program, load_dataset().train_cases)
+}
+
+pub fn dev_eval_cases(program: &MemoryRecallProgram) -> Vec<EvalCase<MemoryRecallOutput>> {
+    to_eval_cases(program, load_dataset().dev_cases)
+}
+
+fn to_eval_cases(
+    program: &MemoryRecallProgram,
+    cases: Vec<MemoryRecallEvalCase>,
+) -> Vec<EvalCase<MemoryRecallOutput>> {
+    cases
         .into_iter()
         .map(|case| {
             let required_ids = case.required_ids;
@@ -79,7 +90,7 @@ pub fn eval_cases(program: &MemoryRecallProgram) -> Vec<EvalCase<MemoryRecallOut
 
 pub fn bootstrap_examples(case_names: &[&str]) -> Vec<ProgramExample<MemoryRecallOutput>> {
     load_dataset()
-        .eval_cases
+        .train_cases
         .into_iter()
         .filter(|case| case_names.iter().any(|name| *name == case.name))
         .filter_map(|case| {

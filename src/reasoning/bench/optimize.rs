@@ -69,12 +69,14 @@ async fn ensure_bench_memory_compiled(context: &Context) -> Result<CompiledProgr
     let renderer = OpenAIToolRenderer;
     let program = MemoryRecallProgram;
     let base = program.default_tuning();
+    let train_cases = program.train_eval_cases();
+    let dev_cases = program.dev_eval_cases();
     let baseline_results = run_suite_with_tuning(
         context,
         &renderer,
         &program,
         program.suite_name(),
-        program.eval_cases(),
+        clone_eval_cases(&train_cases),
         &base,
         TraceOrigin::BenchCompile,
     )
@@ -144,7 +146,7 @@ async fn ensure_bench_memory_compiled(context: &Context) -> Result<CompiledProgr
         &renderer,
         &program,
         program.suite_name(),
-        program.eval_cases(),
+        dev_cases,
         candidates,
     )
     .await
@@ -154,12 +156,14 @@ async fn ensure_bench_continuity_compiled(context: &Context) -> Result<CompiledP
     let renderer = OpenAIToolRenderer;
     let program = ContinuityGuardProgram;
     let base = program.default_tuning();
+    let train_cases = program.train_eval_cases();
+    let dev_cases = program.dev_eval_cases();
     let baseline_results = run_suite_with_tuning(
         context,
         &renderer,
         &program,
         program.suite_name(),
-        program.eval_cases(),
+        clone_eval_cases(&train_cases),
         &base,
         TraceOrigin::BenchCompile,
     )
@@ -230,7 +234,7 @@ async fn ensure_bench_continuity_compiled(context: &Context) -> Result<CompiledP
         &renderer,
         &program,
         program.suite_name(),
-        program.eval_cases(),
+        dev_cases,
         candidates,
     )
     .await

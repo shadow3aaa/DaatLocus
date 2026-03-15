@@ -48,8 +48,12 @@ impl MemoryRecallProgram {
         ir
     }
 
-    pub fn eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<MemoryRecallOutput>> {
-        dataset::eval_cases(self)
+    pub fn train_eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<MemoryRecallOutput>> {
+        dataset::train_eval_cases(self)
+    }
+
+    pub fn dev_eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<MemoryRecallOutput>> {
+        dataset::dev_eval_cases(self)
     }
 }
 

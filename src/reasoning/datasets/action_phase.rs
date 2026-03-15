@@ -28,7 +28,8 @@ struct ActionPhaseDataset {
 #[derive(Deserialize)]
 struct ActionPhaseSection {
     examples: Vec<ProgramExample<Output>>,
-    eval_cases: Vec<ActionPhaseEvalCase>,
+    train_cases: Vec<ActionPhaseEvalCase>,
+    dev_cases: Vec<ActionPhaseEvalCase>,
 }
 
 #[derive(Deserialize)]
@@ -61,37 +62,23 @@ pub fn examples(phase: ActionPhase) -> Vec<ProgramExample<Output>> {
     section_for_phase(load_dataset(), phase).examples
 }
 
-pub fn eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
-    section_for_phase(load_dataset(), program.phase())
-        .eval_cases
-        .into_iter()
-        .map(|case| {
-            let expectation = case.expectation;
-            EvalCase {
-                name: Box::leak(case.name.into_boxed_str()),
-                ir: program.dataset_ir(case.device_context, case.snapshot_text),
-                check: match expectation {
-                    ActionPhaseExpectation::FocusTelegram => Arc::new(check_focus_telegram),
-                    ActionPhaseExpectation::SelectTask { task_id } => {
-                        register_select_task_check(task_id)
-                    }
-                    ActionPhaseExpectation::AddProjectTask { project_id } => {
-                        register_add_project_task_check(project_id)
-                    }
-                    ActionPhaseExpectation::CancelInteractivePrompt => {
-                        Arc::new(check_cancel_interactive_prompt)
-                    }
-                    ActionPhaseExpectation::FocusTerminal => Arc::new(check_focus_terminal),
-                    ActionPhaseExpectation::SilentWait => Arc::new(check_silent_wait),
-                },
-            }
-        })
-        .collect()
+pub fn train_eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
+    to_eval_cases(
+        program,
+        section_for_phase(load_dataset(), program.phase()).train_cases,
+    )
+}
+
+pub fn dev_eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
+    to_eval_cases(
+        program,
+        section_for_phase(load_dataset(), program.phase()).dev_cases,
+    )
 }
 
 pub fn bootstrap_examples(phase: ActionPhase, case_names: &[&str]) -> Vec<ProgramExample<Output>> {
     section_for_phase(load_dataset(), phase)
-        .eval_cases
+        .train_cases
         .into_iter()
         .filter(|case| case_names.iter().any(|name| *name == case.name))
         .filter_map(|case| {
@@ -115,6 +102,36 @@ pub fn bootstrap_examples(phase: ActionPhase, case_names: &[&str]) -> Vec<Progra
 
 fn load_dataset() -> ActionPhaseDataset {
     decode_dataset_json(DATASET_FILE, DATASET_JSON).expect("action_phase dataset must be valid")
+}
+
+fn to_eval_cases(
+    program: &ActionPhaseProgram,
+    cases: Vec<ActionPhaseEvalCase>,
+) -> Vec<EvalCase<Output>> {
+    cases
+        .into_iter()
+        .map(|case| {
+            let expectation = case.expectation;
+            EvalCase {
+                name: Box::leak(case.name.into_boxed_str()),
+                ir: program.dataset_ir(case.device_context, case.snapshot_text),
+                check: match expectation {
+                    ActionPhaseExpectation::FocusTelegram => Arc::new(check_focus_telegram),
+                    ActionPhaseExpectation::SelectTask { task_id } => {
+                        register_select_task_check(task_id)
+                    }
+                    ActionPhaseExpectation::AddProjectTask { project_id } => {
+                        register_add_project_task_check(project_id)
+                    }
+                    ActionPhaseExpectation::CancelInteractivePrompt => {
+                        Arc::new(check_cancel_interactive_prompt)
+                    }
+                    ActionPhaseExpectation::FocusTerminal => Arc::new(check_focus_terminal),
+                    ActionPhaseExpectation::SilentWait => Arc::new(check_silent_wait),
+                },
+            }
+        })
+        .collect()
 }
 
 fn section_for_phase(dataset: ActionPhaseDataset, phase: ActionPhase) -> ActionPhaseSection {

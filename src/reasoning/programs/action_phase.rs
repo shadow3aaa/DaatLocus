@@ -160,7 +160,11 @@ impl Program for ActionPhaseProgram {
 }
 
 impl ActionPhaseProgram {
-    pub fn eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<Output>> {
-        dataset::eval_cases(self)
+    pub fn train_eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<Output>> {
+        dataset::train_eval_cases(self)
+    }
+
+    pub fn dev_eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<Output>> {
+        dataset::dev_eval_cases(self)
     }
 }

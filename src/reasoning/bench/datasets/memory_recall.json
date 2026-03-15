@@ -58,7 +58,7 @@
       }
     }
   ],
-  "eval_cases": [
+  "train_cases": [
     {
       "name": "prefer_commitment_over_wait_noise",
       "current_goal": "继续推进项目《分析 webide-termux 的 JS 加密方式》",
@@ -138,6 +138,65 @@
         ],
         "answer": "当前最关键的阻塞是 gh auth login 进入交互式认证，不适合 agent；同时应保留改用非交互方案继续推进调查的线索。"
       }
+    }
+  ],
+  "dev_cases": [
+    {
+      "name": "prefer_commitment_over_wait_noise_variant",
+      "current_goal": "继续推进项目《分析 webide-termux 的 JS 加密方式》",
+      "recent_trail": "[T1] 告诉 shadow3：我会分析 webide-termux 的 JS 加密方式并整理结论。\n[T2] 把《分析 webide-termux 的 JS 加密方式》设为当前活跃项目。\n[T3] 静默等待 Telegram 新消息。\n[T4] 再次等待外部输入。",
+      "associated_memories": "[M1] Android WebView 一类项目的 JS 通常会落在 webapp/src/main/assets。\n[M2] 之前为了测试 Telegram 发过一次不相关的 greeting。",
+      "question": "此刻最值得保留的连续性事实是什么？",
+      "required_ids": [
+        "T1",
+        "M1"
+      ],
+      "forbidden_ids": [
+        "T4",
+        "M2"
+      ],
+      "answer_must_include": [
+        "webide-termux",
+        "assets"
+      ]
+    },
+    {
+      "name": "prefer_owner_reply_over_small_talk_variant",
+      "current_goal": "回复 Telegram 会话 shadow3",
+      "recent_trail": "[T1] shadow3 问：你目前在处理什么？\n[T2] 另一个 chat 发来“晚上好”。\n[T3] 静默等待新的外部输入。",
+      "associated_memories": "[M1] shadow3 是 owner，通常会继续分配主任务。\n[M2] “晚上好”只是无关寒暄，不影响当前主线。",
+      "question": "为了回复当前 owner，会话里最该保留哪些记忆？",
+      "required_ids": [
+        "T1",
+        "M1"
+      ],
+      "forbidden_ids": [
+        "T2",
+        "T3"
+      ],
+      "answer_must_include": [
+        "shadow3",
+        "owner"
+      ]
+    },
+    {
+      "name": "remember_blocker_not_idle_waits_variant",
+      "current_goal": "继续推进项目《调查开源皮套直播 LLM 方案》",
+      "recent_trail": "[T1] 选中了动作：在 Terminal 收集皮套直播 LLM 相关开源项目资料。\n[T2] 终端陷入 gh auth login 的交互式认证。\n[T3] 再次等待 Telegram 消息。",
+      "associated_memories": "[M1] gh auth login 依赖人工授权，不适合 agent，应切换到非交互方案。\n[M2] 可以改用网页检索、公开 API 或普通 git clone 继续收集资料。",
+      "question": "当前最应该记住的阻塞与后续线索是什么？",
+      "required_ids": [
+        "T2",
+        "M1",
+        "M2"
+      ],
+      "forbidden_ids": [
+        "T3"
+      ],
+      "answer_must_include": [
+        "gh auth login",
+        "非交互"
+      ]
     }
   ]
 }

@@ -165,13 +165,14 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
     ] {
         let action_program = ActionPhaseProgram::new(phase);
         let action_base = action_program.default_tuning();
-        let action_cases = action_program.eval_cases();
+        let action_train_cases = action_program.train_eval_cases();
+        let action_dev_cases = action_program.dev_eval_cases();
         let action_baseline_results = run_suite_with_tuning(
             context,
             &renderer,
             &action_program,
-            &action_program.tuning_key(),
-            clone_eval_cases(&action_cases),
+            &format!("{}.train", action_program.tuning_key()),
+            clone_eval_cases(&action_train_cases),
             &action_base,
             TraceOrigin::Compile,
         )
@@ -184,7 +185,7 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
                 &renderer,
                 &action_program,
                 &action_program.tuning_key(),
-                action_cases,
+                action_dev_cases,
                 action_candidates,
                 compiled.len() + 1,
                 total_suites,

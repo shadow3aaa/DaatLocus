@@ -16,7 +16,8 @@ const DATASET_JSON: &str = include_str!("continuity_guard.json");
 #[derive(Deserialize)]
 struct ContinuityGuardDataset {
     examples: Vec<ContinuityGuardExample>,
-    eval_cases: Vec<ContinuityGuardEvalCase>,
+    train_cases: Vec<ContinuityGuardEvalCase>,
+    dev_cases: Vec<ContinuityGuardEvalCase>,
 }
 
 #[derive(Deserialize)]
@@ -54,9 +55,19 @@ pub fn examples() -> Vec<ProgramExample<ContinuityGuardOutput>> {
         .collect()
 }
 
-pub fn eval_cases(program: &ContinuityGuardProgram) -> Vec<EvalCase<ContinuityGuardOutput>> {
-    load_dataset()
-        .eval_cases
+pub fn train_eval_cases(program: &ContinuityGuardProgram) -> Vec<EvalCase<ContinuityGuardOutput>> {
+    to_eval_cases(program, load_dataset().train_cases)
+}
+
+pub fn dev_eval_cases(program: &ContinuityGuardProgram) -> Vec<EvalCase<ContinuityGuardOutput>> {
+    to_eval_cases(program, load_dataset().dev_cases)
+}
+
+fn to_eval_cases(
+    program: &ContinuityGuardProgram,
+    cases: Vec<ContinuityGuardEvalCase>,
+) -> Vec<EvalCase<ContinuityGuardOutput>> {
+    cases
         .into_iter()
         .map(|case| {
             let expected_should_continue = case.expected_should_continue;
@@ -90,7 +101,7 @@ pub fn eval_cases(program: &ContinuityGuardProgram) -> Vec<EvalCase<ContinuityGu
 
 pub fn bootstrap_examples(case_names: &[&str]) -> Vec<ProgramExample<ContinuityGuardOutput>> {
     load_dataset()
-        .eval_cases
+        .train_cases
         .into_iter()
         .filter(|case| case_names.iter().any(|name| *name == case.name))
         .filter_map(|case| {

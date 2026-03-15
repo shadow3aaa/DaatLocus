@@ -54,7 +54,7 @@ pub async fn run_reasoning_eval(context: &Context) -> Result<Vec<EvalCaseResult>
     ] {
         let program = ActionPhaseProgram::new(phase);
         let suite_name = program.eval_suite_name();
-        let cases = program.eval_cases();
+        let cases = program.dev_eval_cases();
         results.extend(run_suite(context, &renderer, &program, suite_name, cases).await);
     }
 
