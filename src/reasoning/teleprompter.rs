@@ -6,10 +6,7 @@ use crate::reasoning::{
 pub fn build_teleprompter_candidates<O: Clone>(
     base: &PromptTuningConfig<O>,
     instruction_candidate_name: &str,
-    demos_candidate_name: &str,
-    combo_candidate_name: &str,
     instructions: &[&str],
-    bootstrap_examples: Vec<ProgramExample<O>>,
 ) -> Vec<CandidateConfig<O>> {
     let mut candidates = Vec::new();
     let merged_instructions = merge_instructions(base, instructions);
@@ -24,12 +21,25 @@ pub fn build_teleprompter_candidates<O: Clone>(
         });
     }
 
+    candidates
+}
+
+pub fn build_bootstrap_demo_candidates<O: Clone>(
+    base: &PromptTuningConfig<O>,
+    demos_candidate_name: &str,
+    combo_candidate_name: &str,
+    instructions: &[&str],
+    bootstrap_examples: Vec<ProgramExample<O>>,
+) -> Vec<CandidateConfig<O>> {
+    let mut candidates = Vec::new();
+    let merged_instructions = merge_instructions(base, instructions);
+
     if !bootstrap_examples.is_empty() {
         candidates.push(CandidateConfig {
             name: demos_candidate_name.to_string(),
             config: PromptTuningConfig {
                 extra_instructions: base.extra_instructions.clone(),
-                examples: append_examples(&base.examples, &bootstrap_examples),
+                examples: bootstrap_examples.clone(),
             },
         });
 
@@ -38,7 +48,7 @@ pub fn build_teleprompter_candidates<O: Clone>(
                 name: combo_candidate_name.to_string(),
                 config: PromptTuningConfig {
                     extra_instructions: merged_instructions,
-                    examples: append_examples(&base.examples, &bootstrap_examples),
+                    examples: bootstrap_examples,
                 },
             });
         }
@@ -56,13 +66,4 @@ fn merge_instructions<O>(base: &PromptTuningConfig<O>, additions: &[&str]) -> Ve
         }
     }
     merged
-}
-
-fn append_examples<O: Clone>(
-    base_examples: &[ProgramExample<O>],
-    extra_examples: &[ProgramExample<O>],
-) -> Vec<ProgramExample<O>> {
-    let mut examples = base_examples.to_vec();
-    examples.extend_from_slice(extra_examples);
-    examples
 }

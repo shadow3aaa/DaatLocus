@@ -22,12 +22,12 @@ use super::{
     },
     proposer::{ProposalSpec, propose_candidates},
     signature::Signature,
-    teleprompter::build_teleprompter_candidates,
+    teleprompter::{build_bootstrap_demo_candidates, build_teleprompter_candidates},
     trace::TraceOrigin,
     trace_mining::{derive_resolve_telegram_eval_cases, propose_resolve_telegram_candidates},
 };
 
-const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v6";
+const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v7";
 const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<OptimizationResult>> {
@@ -90,8 +90,15 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
     resolve_candidates.extend(build_teleprompter_candidates(
         &resolve_base,
         "teleprompt_instruction",
-        "teleprompt_train_demos",
-        "teleprompt_train_combo",
+        &[
+            "优先按训练边界处理 Telegram：先聚焦，再打开会话，再区分 ReplyOnly、AcceptAsProject、AskClarification、Decline。",
+            "如果当前只剩待回复，不要重新语义判定；如果请求需要长期推进，优先识别为项目而不是礼貌确认。",
+        ],
+    ));
+    resolve_candidates.extend(build_bootstrap_demo_candidates(
+        &resolve_base,
+        "bootstrap_train_demos",
+        "bootstrap_train_combo",
         &[
             "优先按训练边界处理 Telegram：先聚焦，再打开会话，再区分 ReplyOnly、AcceptAsProject、AskClarification、Decline。",
             "如果当前只剩待回复，不要重新语义判定；如果请求需要长期推进，优先识别为项目而不是礼貌确认。",
@@ -517,8 +524,12 @@ fn build_action_phase_candidates(
     candidates.extend(build_teleprompter_candidates(
         base,
         "teleprompt_instruction",
-        "teleprompt_train_demos",
-        "teleprompt_train_combo",
+        action_phase_teleprompter_instructions(program.phase()),
+    ));
+    candidates.extend(build_bootstrap_demo_candidates(
+        base,
+        "bootstrap_train_demos",
+        "bootstrap_train_combo",
         action_phase_teleprompter_instructions(program.phase()),
         datasets::action_phase::all_bootstrap_examples(program.phase()),
     ));
