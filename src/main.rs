@@ -60,6 +60,7 @@ use crate::{
         programs::resolve_telegram::{
             ResolveTelegramChatProgram, ResolveTelegramProgramAction, ResolveTelegramProgramOutput,
         },
+        programs::terminal_next_step::TerminalNextStepProgram,
         render::openai_tools::OpenAIToolRenderer,
         runtime::execute_program,
         sleep::run_sleep,
@@ -794,21 +795,39 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
             }
         }
         Strategy::ExecuteTask => {
-            let program = ActionPhaseProgram::new(ActionPhase::ExecuteTask);
-            execute_program(
-                context.llm.as_ref(),
-                context,
-                &snapshot,
-                &renderer,
-                &program,
-            )
-            .await
-            .unwrap_or_else(|err| crate::core::Output {
-                observation: format!("ExecuteTask program 执行失败：{err}"),
-                description: "下一步动作执行阶段的结构化决策失败，当前保守等待。".to_string(),
-                current_doing: "等待动作执行程序恢复".to_string(),
-                action: Action::Wait,
-            })
+            if context.devices.focused() == Some(DeviceId::Terminal) {
+                let program = TerminalNextStepProgram;
+                execute_program(
+                    context.llm.as_ref(),
+                    context,
+                    &snapshot,
+                    &renderer,
+                    &program,
+                )
+                .await
+                .unwrap_or_else(|err| crate::core::Output {
+                    observation: format!("TerminalNextStep program 执行失败：{err}"),
+                    description: "终端下一步决策失败，当前保守等待。".to_string(),
+                    current_doing: "等待终端决策程序恢复".to_string(),
+                    action: Action::Wait,
+                })
+            } else {
+                let program = ActionPhaseProgram::new(ActionPhase::ExecuteTask);
+                execute_program(
+                    context.llm.as_ref(),
+                    context,
+                    &snapshot,
+                    &renderer,
+                    &program,
+                )
+                .await
+                .unwrap_or_else(|err| crate::core::Output {
+                    observation: format!("ExecuteTask program 执行失败：{err}"),
+                    description: "下一步动作执行阶段的结构化决策失败，当前保守等待。".to_string(),
+                    current_doing: "等待动作执行程序恢复".to_string(),
+                    action: Action::Wait,
+                })
+            }
         }
         Strategy::PlanFromProject => {
             let program = ActionPhaseProgram::new(ActionPhase::PlanFromProject);
