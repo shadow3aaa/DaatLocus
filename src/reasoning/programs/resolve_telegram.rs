@@ -141,4 +141,16 @@ impl ResolveTelegramChatProgram {
     ) -> Vec<crate::reasoning::eval::EvalCase<ResolveTelegramProgramOutput>> {
         dataset::dev_eval_cases(self)
     }
+
+    pub fn acceptance_eval_cases(
+        &self,
+    ) -> Vec<crate::reasoning::eval::EvalCase<ResolveTelegramProgramOutput>> {
+        dataset::acceptance_eval_cases(self)
+    }
+
+    pub fn stress_eval_cases(
+        &self,
+    ) -> Vec<crate::reasoning::eval::EvalCase<ResolveTelegramProgramOutput>> {
+        dataset::stress_eval_cases(self)
+    }
 }

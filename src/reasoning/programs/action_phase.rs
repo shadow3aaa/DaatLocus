@@ -167,4 +167,12 @@ impl ActionPhaseProgram {
     pub fn dev_eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<Output>> {
         dataset::dev_eval_cases(self)
     }
+
+    pub fn acceptance_eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<Output>> {
+        dataset::acceptance_eval_cases(self)
+    }
+
+    pub fn stress_eval_cases(&self) -> Vec<crate::reasoning::eval::EvalCase<Output>> {
+        dataset::stress_eval_cases(self)
+    }
 }
