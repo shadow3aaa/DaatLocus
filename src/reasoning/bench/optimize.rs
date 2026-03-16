@@ -14,21 +14,28 @@ use crate::{
     reasoning::{
         bench::datasets,
         compiled::{
-            BENCH_COMPILED_DIR_NAME, CompiledProgram, StoredPromptTuningConfig,
+            BENCH_COMPILED_DIR_NAME, CompiledCandidateReport, CompiledFailureCaseReport,
+            CompiledProgram, CompiledProgramReport, StoredPromptTuningConfig,
             load_compiled_program_from_dir, save_compiled_program_to_dir,
         },
         eval::{EvalCase, run_suite_with_tuning},
         ir::PromptIR,
         optimizer::{CandidateConfig, OptimizationResult, PromptTuningConfig},
         program::Program,
+        programs::pairwise_judge::PairwiseJudgeProgram,
         proposer::{ProposalSpec, propose_candidates},
         render::openai_tools::OpenAIToolRenderer,
+        runtime::execute_program_with_ir_report,
+        selection::{
+            CandidateCaseEvaluation, CandidateEvaluation, apply_pairwise_judge_tiebreak,
+            compare_candidate_evaluations, render_case_context,
+        },
         signature::Signature,
         trace::TraceOrigin,
     },
 };
 
-const BENCH_OPTIMIZER_VERSION: &str = "reasoning-bench-optimizer-v4";
+const BENCH_OPTIMIZER_VERSION: &str = "reasoning-bench-optimizer-v5";
 const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_bench_optimize_memory(context: &Context) -> Result<Vec<OptimizationResult>> {
@@ -479,7 +486,7 @@ async fn ensure_suite_compiled<P: Program>(
         "[bench-compile] {}: cache miss, compiling {} candidates x {} cases",
         suite_name, total_candidates, total_cases
     );
-    let mut best: Option<(String, PromptTuningConfig<P::Output>, usize, usize)> = None;
+    let mut evaluations = Vec::new();
 
     for (candidate_index, candidate) in candidates.into_iter().enumerate() {
         eprintln!(
@@ -489,42 +496,143 @@ async fn ensure_suite_compiled<P: Program>(
             total_candidates,
             candidate.name
         );
-        let results = run_suite_with_tuning(
-            context,
-            renderer,
-            program,
-            suite_name,
-            clone_eval_cases(&cases),
-            &candidate.config,
-            TraceOrigin::BenchCompile,
-        )
-        .await;
-        let score = results.iter().filter(|result| result.passed).count();
-        let attempts_used = results.iter().map(|result| result.attempts_used).sum();
-        if best
-            .as_ref()
-            .is_none_or(|(_, _, best_score, best_attempts)| {
-                score > *best_score || (score == *best_score && attempts_used < *best_attempts)
-            })
-        {
-            best = Some((candidate.name, candidate.config, score, attempts_used));
+        let mut score = 0usize;
+        let mut attempts_used = 0usize;
+        let mut failed_cases = Vec::new();
+        let mut case_results = Vec::new();
+        for case in clone_eval_cases(&cases) {
+            let case_name = case.name.to_string();
+            let case_context = render_case_context(&case.ir);
+            match execute_program_with_ir_report(
+                context.llm.as_ref(),
+                context,
+                renderer,
+                program,
+                case.ir,
+                &candidate.config,
+                TraceOrigin::BenchCompile,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    attempts_used += outcome.attempts_used;
+                    match case.check.as_ref()(&outcome.output) {
+                        Ok(()) => {
+                            score += 1;
+                            case_results.push(CandidateCaseEvaluation {
+                                case_name,
+                                case_context,
+                                output: Some(outcome.output),
+                                passed: true,
+                            });
+                        }
+                        Err(err) => {
+                            failed_cases.push(CompiledFailureCaseReport {
+                                case_name: case_name.clone(),
+                                detail: format!("metric failed: {err}"),
+                            });
+                            case_results.push(CandidateCaseEvaluation {
+                                case_name,
+                                case_context,
+                                output: Some(outcome.output),
+                                passed: false,
+                            });
+                        }
+                    }
+                }
+                Err(err) => {
+                    attempts_used += 2;
+                    failed_cases.push(CompiledFailureCaseReport {
+                        case_name: case_name.clone(),
+                        detail: format!("program failed: {err}"),
+                    });
+                    case_results.push(CandidateCaseEvaluation {
+                        case_name,
+                        case_context,
+                        output: None,
+                        passed: false,
+                    });
+                }
+            }
         }
+        evaluations.push(CandidateEvaluation {
+            candidate,
+            acceptance_score: None,
+            acceptance_total_cases: None,
+            acceptance_attempts_used: None,
+            score,
+            attempts_used,
+            judge_wins: 0,
+            judge_losses: 0,
+            judge_ties: 0,
+            failed_cases,
+            case_results,
+        });
     }
 
-    let Some((best_candidate, best_tuning, score, _attempts_used)) = best else {
+    apply_pairwise_judge_tiebreak(context, renderer, program, suite_name, &mut evaluations)
+        .await?;
+    evaluations.sort_by(compare_candidate_evaluations);
+
+    let Some(best) = evaluations.first() else {
         return Err(miette!(
             "no optimization candidates available for bench suite {suite_name}"
         ));
     };
 
+    let candidate_reports = evaluations
+        .iter()
+        .map(|evaluation| CompiledCandidateReport {
+            name: evaluation.candidate.name.clone(),
+            acceptance_score: None,
+            acceptance_total_cases: None,
+            acceptance_attempts_used: None,
+            score: evaluation.score,
+            total_cases,
+            attempts_used: evaluation.attempts_used,
+            judge_wins: evaluation.judge_wins,
+            judge_losses: evaluation.judge_losses,
+            judge_ties: evaluation.judge_ties,
+            extra_instructions: evaluation.candidate.config.extra_instructions.clone(),
+            example_titles: evaluation
+                .candidate
+                .config
+                .examples
+                .iter()
+                .map(|example| example.title.clone())
+                .collect(),
+            failed_cases: evaluation.failed_cases.clone(),
+        })
+        .collect::<Vec<_>>();
+
     let compiled = CompiledProgram {
         suite: suite_name.to_string(),
         compile_key,
-        best_candidate,
-        score,
+        best_candidate: best.candidate.name.clone(),
+        score: best.score,
         total_cases,
-        tuning: StoredPromptTuningConfig::from_typed(&best_tuning),
-        report: None,
+        tuning: StoredPromptTuningConfig::from_typed(&best.candidate.config),
+        report: Some(CompiledProgramReport {
+            train_score: 0,
+            train_total_cases: 0,
+            train_attempts_used: 0,
+            acceptance_score: None,
+            acceptance_total_cases: None,
+            acceptance_attempts_used: None,
+            dev_score: best.score,
+            dev_total_cases: total_cases,
+            dev_attempts_used: best.attempts_used,
+            ranking_label: Some("dev".to_string()),
+            selected_extra_instructions: best.candidate.config.extra_instructions.clone(),
+            selected_example_titles: best
+                .candidate
+                .config
+                .examples
+                .iter()
+                .map(|example| example.title.clone())
+                .collect(),
+            candidates: candidate_reports,
+        }),
     };
     save_compiled_program_to_dir(BENCH_COMPILED_DIR_NAME, &compiled).await?;
     eprintln!(
@@ -565,6 +673,17 @@ fn build_compile_key<P: Program>(
     }
 
     #[derive(Serialize)]
+    struct JudgeFingerprint<'a> {
+        enabled: bool,
+        model_base_url: &'a str,
+        model_name: &'a str,
+        temperature: f64,
+        max_pairwise_candidates: usize,
+        max_pairwise_cases: usize,
+        signature: Signature,
+    }
+
+    #[derive(Serialize)]
     struct CompileFingerprint<'a, O> {
         optimizer_version: &'static str,
         renderer: &'static str,
@@ -574,10 +693,14 @@ fn build_compile_key<P: Program>(
         model_name: &'a str,
         temperature: f64,
         signature: Signature,
+        judge: JudgeFingerprint<'a>,
         base_tuning: PromptTuningConfig<O>,
         cases: Vec<EvalCaseFingerprint<'a>>,
         candidates: Vec<CandidateFingerprint<'a, O>>,
     }
+
+    let resolved_judge_model = config.judge.resolved_model(&config.main_model);
+    let pairwise_judge = PairwiseJudgeProgram;
 
     let payload = CompileFingerprint {
         optimizer_version: BENCH_OPTIMIZER_VERSION,
@@ -588,6 +711,15 @@ fn build_compile_key<P: Program>(
         model_name: &config.main_model.model_name,
         temperature: config.main_model.temperature,
         signature: program.signature(),
+        judge: JudgeFingerprint {
+            enabled: config.judge.enabled,
+            model_base_url: &resolved_judge_model.base_url,
+            model_name: &resolved_judge_model.model_name,
+            temperature: resolved_judge_model.temperature,
+            max_pairwise_candidates: config.judge.max_pairwise_candidates,
+            max_pairwise_cases: config.judge.max_pairwise_cases,
+            signature: pairwise_judge.signature(),
+        },
         base_tuning: program.default_tuning(),
         cases: cases
             .iter()

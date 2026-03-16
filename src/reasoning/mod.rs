@@ -14,6 +14,7 @@ pub mod prompts;
 pub mod proposer;
 pub mod render;
 pub mod runtime;
+pub mod selection;
 pub mod signature;
 pub mod teleprompter;
 pub mod trace;

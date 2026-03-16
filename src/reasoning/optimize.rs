@@ -14,7 +14,6 @@ use super::{
     datasets,
     eval::{EvalCase, run_suite_with_tuning},
     ir::PromptIR,
-    judge::judge_pairwise_outputs,
     optimizer::{CandidateConfig, OptimizationResult, PromptTuningConfig},
     program::Program,
     programs::{
@@ -24,6 +23,10 @@ use super::{
     },
     proposer::{ProposalSpec, propose_candidates},
     runtime::execute_program_with_ir_report,
+    selection::{
+        CandidateCaseEvaluation, CandidateEvaluation, apply_pairwise_judge_tiebreak,
+        compare_candidate_evaluations, render_case_context,
+    },
     signature::Signature,
     teleprompter::{build_bootstrap_demo_candidates, build_teleprompter_candidates},
     trace::TraceOrigin,
@@ -312,7 +315,8 @@ async fn ensure_suite_compiled<P: Program>(
         );
     }
 
-    apply_judge_tiebreak(context, renderer, program, suite_name, &mut evaluations).await?;
+    apply_pairwise_judge_tiebreak(context, renderer, program, suite_name, &mut evaluations)
+        .await?;
     evaluations.sort_by(compare_candidate_evaluations);
 
     let mut best: Option<(
@@ -328,9 +332,9 @@ async fn ensure_suite_compiled<P: Program>(
     for evaluation in &evaluations {
         candidate_reports.push(CompiledCandidateReport {
             name: evaluation.candidate.name.clone(),
-            acceptance_score: Some(evaluation.acceptance_score),
-            acceptance_total_cases: Some(evaluation.acceptance_total_cases),
-            acceptance_attempts_used: Some(evaluation.acceptance_attempts_used),
+            acceptance_score: evaluation.acceptance_score,
+            acceptance_total_cases: evaluation.acceptance_total_cases,
+            acceptance_attempts_used: evaluation.acceptance_attempts_used,
             score: evaluation.score,
             total_cases,
             attempts_used: evaluation.attempts_used,
@@ -482,29 +486,6 @@ async fn ensure_suite_compiled<P: Program>(
     Ok(compiled)
 }
 
-#[derive(Clone)]
-struct CandidateCaseEvaluation<O: Clone> {
-    case_name: String,
-    case_context: String,
-    output: Option<O>,
-    passed: bool,
-}
-
-#[derive(Clone)]
-struct CandidateEvaluation<O: Clone> {
-    candidate: CandidateConfig<O>,
-    acceptance_score: usize,
-    acceptance_total_cases: usize,
-    acceptance_attempts_used: usize,
-    score: usize,
-    attempts_used: usize,
-    judge_wins: usize,
-    judge_losses: usize,
-    judge_ties: usize,
-    failed_cases: Vec<CompiledFailureCaseReport>,
-    case_results: Vec<CandidateCaseEvaluation<O>>,
-}
-
 async fn evaluate_candidates<P: Program>(
     context: &Context,
     renderer: &OpenAIToolRenderer,
@@ -640,9 +621,9 @@ async fn evaluate_candidates<P: Program>(
         }
         evaluations.push(CandidateEvaluation {
             candidate,
-            acceptance_score,
-            acceptance_total_cases: acceptance_cases.len(),
-            acceptance_attempts_used,
+            acceptance_score: Some(acceptance_score),
+            acceptance_total_cases: Some(acceptance_cases.len()),
+            acceptance_attempts_used: Some(acceptance_attempts_used),
             score,
             attempts_used: acceptance_attempts_used + attempts_used,
             judge_wins: 0,
@@ -655,190 +636,6 @@ async fn evaluate_candidates<P: Program>(
     evaluations
 }
 
-fn compare_candidate_evaluations<O: Clone>(
-    left: &CandidateEvaluation<O>,
-    right: &CandidateEvaluation<O>,
-) -> std::cmp::Ordering {
-    right
-        .acceptance_score
-        .cmp(&left.acceptance_score)
-        .then(right.acceptance_total_cases.cmp(&left.acceptance_total_cases))
-        .then(left.acceptance_attempts_used.cmp(&right.acceptance_attempts_used))
-        .then(
-    right
-        .score
-        .cmp(&left.score)
-        .then(right.judge_wins.cmp(&left.judge_wins))
-        .then(left.judge_losses.cmp(&right.judge_losses))
-        .then(left.attempts_used.cmp(&right.attempts_used))
-        .then(left.candidate.name.cmp(&right.candidate.name)))
-}
-
-async fn apply_judge_tiebreak<P: Program>(
-    context: &Context,
-    renderer: &OpenAIToolRenderer,
-    program: &P,
-    suite_name: &str,
-    evaluations: &mut [CandidateEvaluation<P::Output>],
-) -> Result<()> {
-    if !context.config.judge.enabled || evaluations.len() < 2 {
-        return Ok(());
-    }
-
-    let Some(best_score) = evaluations
-        .iter()
-        .filter(|evaluation| evaluation.acceptance_score == evaluation.acceptance_total_cases)
-        .map(|evaluation| evaluation.score)
-        .max()
-    else {
-        return Ok(());
-    };
-
-    let mut candidate_indexes = evaluations
-        .iter()
-        .enumerate()
-        .filter_map(|(index, evaluation)| {
-            (evaluation.acceptance_score == evaluation.acceptance_total_cases
-                && evaluation.score == best_score)
-                .then_some(index)
-        })
-        .collect::<Vec<_>>();
-    if candidate_indexes.len() < 2 {
-        return Ok(());
-    }
-
-    candidate_indexes.sort_by(|left, right| {
-        evaluations[*left]
-            .attempts_used
-            .cmp(&evaluations[*right].attempts_used)
-            .then(
-                evaluations[*left]
-                    .candidate
-                    .name
-                    .cmp(&evaluations[*right].candidate.name),
-            )
-    });
-    candidate_indexes.truncate(context.config.judge.max_pairwise_candidates.max(2));
-
-    for left_pos in 0..candidate_indexes.len() {
-        for right_pos in (left_pos + 1)..candidate_indexes.len() {
-            let left_index = candidate_indexes[left_pos];
-            let right_index = candidate_indexes[right_pos];
-            let shared_cases =
-                collect_judgeable_cases(&evaluations[left_index], &evaluations[right_index]);
-            if shared_cases.is_empty() {
-                continue;
-            }
-
-            let judgeable_cases = shared_cases
-                .into_iter()
-                .take(context.config.judge.max_pairwise_cases.max(1))
-                .collect::<Vec<_>>();
-
-            for (case_name, case_context, left_output, right_output) in judgeable_cases {
-                let ab = judge_pairwise_outputs(
-                    context,
-                    renderer,
-                    program,
-                    suite_name,
-                    &case_name,
-                    &case_context,
-                    &left_output,
-                    &right_output,
-                )
-                .await?;
-                let ba = judge_pairwise_outputs(
-                    context,
-                    renderer,
-                    program,
-                    suite_name,
-                    &case_name,
-                    &case_context,
-                    &right_output,
-                    &left_output,
-                )
-                .await?;
-
-                use super::programs::pairwise_judge::PairwiseWinner;
-                let (left_eval, right_eval) = if left_index < right_index {
-                    let (left_slice, right_slice) = evaluations.split_at_mut(right_index);
-                    (&mut left_slice[left_index], &mut right_slice[0])
-                } else {
-                    let (left_slice, right_slice) = evaluations.split_at_mut(left_index);
-                    (&mut right_slice[0], &mut left_slice[right_index])
-                };
-                match (ab.winner, ba.winner) {
-                    (PairwiseWinner::A, PairwiseWinner::B) => {
-                        left_eval.judge_wins += 1;
-                        right_eval.judge_losses += 1;
-                    }
-                    (PairwiseWinner::B, PairwiseWinner::A) => {
-                        right_eval.judge_wins += 1;
-                        left_eval.judge_losses += 1;
-                    }
-                    _ => {
-                        left_eval.judge_ties += 1;
-                        right_eval.judge_ties += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn collect_judgeable_cases<O: Clone + Serialize>(
-    left: &CandidateEvaluation<O>,
-    right: &CandidateEvaluation<O>,
-) -> Vec<(String, String, O, O)> {
-    let mut cases = Vec::new();
-
-    for (left_case, right_case) in left.case_results.iter().zip(right.case_results.iter()) {
-        if !left_case.passed || !right_case.passed {
-            continue;
-        }
-
-        let (Some(left_output), Some(right_output)) = (&left_case.output, &right_case.output)
-        else {
-            continue;
-        };
-        if left_case.case_name != right_case.case_name {
-            continue;
-        }
-
-        let Ok(left_json) = serde_json::to_string(left_output) else {
-            continue;
-        };
-        let Ok(right_json) = serde_json::to_string(right_output) else {
-            continue;
-        };
-        if left_json == right_json {
-            continue;
-        }
-
-        cases.push((
-            left_case.case_name.clone(),
-            left_case.case_context.clone(),
-            left_output.clone(),
-            right_output.clone(),
-        ));
-    }
-
-    cases
-}
-
-fn render_case_context(ir: &PromptIR) -> String {
-    let mut sections = Vec::new();
-    if !ir.instructions.is_empty() {
-        sections.push(format!("任务说明：\n{}", ir.instructions.join("\n")));
-    }
-    for section in &ir.sections {
-        sections.push(format!("## {}\n{}", section.title, section.body));
-    }
-    sections.join("\n\n")
-}
-
 fn build_search_candidates<O: Clone + Serialize>(
     evaluations: &[CandidateEvaluation<O>],
 ) -> Result<Vec<CandidateConfig<O>>> {
@@ -846,7 +643,7 @@ fn build_search_candidates<O: Clone + Serialize>(
     ranked.sort_by(compare_candidate_evaluations);
     let seeds = ranked
         .into_iter()
-        .filter(|evaluation| evaluation.acceptance_score == evaluation.acceptance_total_cases)
+        .filter(|evaluation| evaluation.acceptance_is_full())
         .filter(|evaluation| evaluation.candidate.name != "baseline")
         .take(SEARCH_SEED_LIMIT)
         .collect::<Vec<_>>();
