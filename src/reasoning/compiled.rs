@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, time::SystemTime};
 
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -113,6 +113,14 @@ impl CompiledPromptStore {
         self.entries.insert(entry.suite.clone(), entry);
     }
 
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn get_tuning<P: Program>(&self, program: &P) -> Option<PromptTuningConfig<P::Output>> {
         self.entries
             .get(&program.tuning_key())
@@ -177,6 +185,58 @@ pub async fn load_compiled_program_from_dir(
     let compiled = serde_json::from_slice::<CompiledProgram>(&bytes)
         .map_err(|err| miette!("failed to decode compiled prompt config: {err}"))?;
     Ok(Some(compiled))
+}
+
+pub async fn load_all_compiled_programs() -> Result<Vec<CompiledProgram>> {
+    load_all_compiled_programs_from_dir(COMPILED_DIR_NAME).await
+}
+
+pub async fn load_all_compiled_programs_from_dir(dir_name: &str) -> Result<Vec<CompiledProgram>> {
+    let dir = compiled_dir_named(dir_name).await;
+    let Ok(mut entries) = fs::read_dir(&dir).await else {
+        return Ok(Vec::new());
+    };
+
+    let mut newest_by_suite: HashMap<String, (SystemTime, CompiledProgram)> = HashMap::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|err| miette!("failed to iterate compiled dir {}: {err}", dir.display()))?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let bytes = fs::read(&path).await.map_err(|err| {
+            miette!(
+                "failed to read compiled prompt config {}: {err}",
+                path.display()
+            )
+        })?;
+        let program = serde_json::from_slice::<CompiledProgram>(&bytes).map_err(|err| {
+            miette!(
+                "failed to decode compiled prompt config {}: {err}",
+                path.display()
+            )
+        })?;
+        let modified = entry
+            .metadata()
+            .await
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        match newest_by_suite.get(&program.suite) {
+            Some((existing_modified, _)) if *existing_modified >= modified => {}
+            _ => {
+                newest_by_suite.insert(program.suite.clone(), (modified, program));
+            }
+        }
+    }
+
+    Ok(newest_by_suite
+        .into_values()
+        .map(|(_, program)| program)
+        .collect())
 }
 
 pub async fn save_compiled_program(compiled: &CompiledProgram) -> Result<()> {

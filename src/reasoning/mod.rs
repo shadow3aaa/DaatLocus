@@ -16,6 +16,8 @@ pub mod render;
 pub mod runtime;
 pub mod selection;
 pub mod signature;
+pub mod sleep;
+pub mod sleep_artifacts;
 pub mod teleprompter;
 pub mod trace;
 pub mod trace_mining;

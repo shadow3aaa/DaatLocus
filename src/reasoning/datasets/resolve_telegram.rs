@@ -158,6 +158,35 @@ pub fn all_bootstrap_examples() -> Vec<ProgramExample<ResolveTelegramProgramOutp
         .collect()
 }
 
+pub fn bootstrap_examples_by_names(
+    case_names: &[String],
+) -> Vec<ProgramExample<ResolveTelegramProgramOutput>> {
+    let refs = case_names.iter().map(String::as_str).collect::<Vec<_>>();
+    bootstrap_examples(&refs)
+}
+
+pub fn stress_eval_cases_by_names(
+    program: &ResolveTelegramChatProgram,
+    case_names: &[String],
+) -> Vec<EvalCase<ResolveTelegramProgramOutput>> {
+    let dataset = load_dataset();
+    let cases = dataset
+        .stress_cases
+        .into_iter()
+        .filter(|case| case_names.iter().any(|name| name == &case.name))
+        .collect::<Vec<_>>();
+    to_eval_cases(program, cases)
+}
+
+pub fn all_case_names() -> Vec<String> {
+    let dataset = load_dataset();
+    let mut names = Vec::new();
+    names.extend(dataset.train_cases.into_iter().map(|case| case.name));
+    names.extend(dataset.acceptance_cases.into_iter().map(|case| case.name));
+    names.extend(dataset.stress_cases.into_iter().map(|case| case.name));
+    names
+}
+
 fn load_dataset() -> ResolveTelegramDataset {
     decode_dataset_json(DATASET_FILE, DATASET_JSON).expect("resolve_telegram dataset must be valid")
 }

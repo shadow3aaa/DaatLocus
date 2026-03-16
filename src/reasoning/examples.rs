@@ -7,7 +7,7 @@ pub struct ProgramExample<O> {
     pub output: O,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct ExampleField {
     pub name: String,
     pub value: String,

@@ -40,17 +40,19 @@ use crate::{
     reasoning::{
         bench::{
             eval::{
-                run_bench_eval_continuity, run_bench_eval_interactive_cli,
-                run_bench_eval_memory, run_bench_eval_terminal_completion,
+                run_bench_eval_continuity, run_bench_eval_interactive_cli, run_bench_eval_memory,
+                run_bench_eval_terminal_completion,
             },
             optimize::{
                 run_bench_optimize_continuity, run_bench_optimize_interactive_cli,
                 run_bench_optimize_memory, run_bench_optimize_terminal_completion,
             },
         },
-        compiled::{BENCH_COMPILED_DIR_NAME, COMPILED_DIR_NAME, CompiledPromptStore},
+        compiled::{
+            BENCH_COMPILED_DIR_NAME, COMPILED_DIR_NAME, CompiledPromptStore,
+            load_all_compiled_programs,
+        },
         eval::run_reasoning_eval,
-        optimize::ensure_reasoning_compiled,
         optimize::run_reasoning_optimize,
         programs::action_phase::{ActionPhase, ActionPhaseProgram},
         programs::resolve_telegram::{
@@ -58,6 +60,8 @@ use crate::{
         },
         render::openai_tools::OpenAIToolRenderer,
         runtime::execute_program,
+        sleep::run_sleep,
+        sleep_artifacts::SleepArtifactSuggestedFixKind,
     },
     snapshot::Snapshot,
     strategy::Strategy,
@@ -95,6 +99,32 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    if is_sleep_command(&args) {
+        let mut context = build_eval_context(config).await;
+        match run_sleep(&mut context).await {
+            Ok(summary) => {
+                print_sleep_summary(&summary);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if is_sleep_optimize_command(&args) {
+        match run_sleep_optimize(config).await {
+            Ok(()) => return,
+            Err(err) => {
+                eprintln!("{err:?}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     if is_reasoning_eval_command(&args) {
         let context = build_eval_context(config).await;
@@ -256,14 +286,22 @@ async fn main() {
         }
     }
 
-    eprintln!("[prompt-compile] preparing compiled prompts before dashboard startup...");
-    let compiled_prompts = match prepare_compiled_prompts(&config).await {
+    eprintln!("[prompt-compile] loading compiled prompts before dashboard startup...");
+    let compiled_prompts = match load_compiled_prompts_only().await {
         Ok(store) => store,
         Err(err) => {
             eprintln!("{err:?}");
             std::process::exit(1);
         }
     };
+    if compiled_prompts.is_empty() {
+        eprintln!("[prompt-compile] no compiled prompts found; running with baseline prompts");
+    } else {
+        eprintln!(
+            "[prompt-compile] loaded {} compiled prompt suites",
+            compiled_prompts.len()
+        );
+    }
 
     let memory = Memory::new().await;
     let obligations = Obligations::new().await;
@@ -373,6 +411,14 @@ fn is_mem_reset_command(args: &[String]) -> bool {
 fn is_prompt_reset_command(args: &[String]) -> bool {
     matches!(args, [command] if command == "prompt-reset")
         || matches!(args, [command] if command == "compile-reset")
+}
+
+fn is_sleep_command(args: &[String]) -> bool {
+    matches!(args, [command] if command == "sleep")
+}
+
+fn is_sleep_optimize_command(args: &[String]) -> bool {
+    matches!(args, [command] if command == "sleep-optimize")
 }
 
 fn is_bench_eval_memory_command(args: &[String]) -> bool {
@@ -541,13 +587,21 @@ fn bootstrap_telegram_device_from_acl(
     }
 }
 
-async fn prepare_compiled_prompts(
-    config: &crate::config::Config,
-) -> miette::Result<CompiledPromptStore> {
-    let context = build_eval_context(config.clone()).await;
-    let compiled = ensure_reasoning_compiled(&context).await;
+async fn load_compiled_prompts_only() -> miette::Result<CompiledPromptStore> {
+    let compiled = load_all_compiled_programs().await?;
+    Ok(CompiledPromptStore::from_entries(compiled))
+}
+
+async fn run_sleep_optimize(config: crate::config::Config) -> Result<()> {
+    let mut context = build_eval_context(config.clone()).await;
+    let summary = run_sleep(&mut context).await?;
+    print_sleep_summary(&summary);
+    let results = run_reasoning_optimize(&context).await;
     context.shutdown().await;
-    compiled.map(CompiledPromptStore::from_entries)
+
+    let results = results?;
+    print_reasoning_optimization_results(&results);
+    Ok(())
 }
 
 fn print_reasoning_eval_results(results: &[crate::reasoning::eval::EvalCaseResult]) {
@@ -611,6 +665,35 @@ fn print_bench_optimization_results(
         println!(
             "- suite={} best_candidate={} score={}/{}",
             result.suite, result.best_candidate, result.score, result.total_cases
+        );
+    }
+}
+
+fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
+    println!(
+        "sleep: derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, promoted {} l3 entries (failure={}, success={})",
+        summary.failure_patterns.len(),
+        summary.bootstrap_demos,
+        summary.stress_cases,
+        summary.instruction_hypotheses,
+        summary.promoted_l3_entries,
+        summary.promoted_failure_l3_entries,
+        summary.promoted_success_l3_entries
+    );
+    for pattern in &summary.failure_patterns {
+        let kind = match pattern.suggested_fix_kind {
+            SleepArtifactSuggestedFixKind::Demo => "demo",
+            SleepArtifactSuggestedFixKind::Instruction => "instruction",
+            SleepArtifactSuggestedFixKind::StressCase => "stress_case",
+        };
+        println!(
+            "- suite={} pattern_id={} frequency={} severity={} fix={} traces={}",
+            pattern.suite,
+            pattern.pattern_id,
+            pattern.frequency,
+            pattern.severity,
+            kind,
+            pattern.supporting_trace_ids.len()
         );
     }
 }

@@ -24,14 +24,70 @@ use lancedb::{
     arrow::arrow_schema::{ArrowError, DataType, Field, Schema},
     query::{ExecutableQuery, QueryBase, Select},
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{embeding::EmbeddingModel, get_spinova_home};
+use crate::{
+    embeding::{EmbeddingModel, similarity},
+    get_spinova_home,
+};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub enum L3EntryKind {
+    TerminalPolicy,
+    InteractionBoundary,
+    ProjectContinuity,
+    ToolUsage,
+    FailureAvoidance,
+    General,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub enum L3EntryStability {
+    Tentative,
+    Stable,
+    Canonical,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct L3EntryDraft {
+    pub kind: L3EntryKind,
+    pub lesson: String,
+    pub evidence_summary: String,
+    pub retrieval_text: String,
+    pub confidence: f32,
+    pub stability: L3EntryStability,
+    pub source_trace_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct L3Entry {
+    pub id: String,
+    pub kind: L3EntryKind,
+    pub lesson: String,
+    pub evidence_summary: String,
+    pub retrieval_text: String,
+    pub confidence: f32,
+    pub stability: L3EntryStability,
+    pub source_trace_ids: Vec<String>,
+    pub updated_at_ms: i64,
+    pub vector: Vec<f32>,
+}
+
+impl L3Entry {
+    fn render(&self) -> String {
+        format!(
+            "习得经验【{:?}/{:?}，置信度 {:.2}】：{}\n依据：{}",
+            self.kind, self.stability, self.confidence, self.lesson, self.evidence_summary
+        )
+    }
+}
 
 pub struct Memory {
     l1: L1Memory,
     l2: L2Memory,
+    l3: L3Memory,
     embeder: EmbeddingModel,
     last_2_l1drop: VecDeque<L1Item>, // 记录最近两次L1淘汰的内容
 }
@@ -41,11 +97,13 @@ impl Memory {
         let l1 = L1Memory::new().await;
         let embeder = EmbeddingModel::new();
         let l2 = L2Memory::new(&embeder).await;
+        let l3 = L3Memory::new().await;
         let last_2_l1drop = VecDeque::new();
 
         Self {
             l1,
             l2,
+            l3,
             embeder,
             last_2_l1drop,
         }
@@ -58,6 +116,7 @@ impl Memory {
         Self {
             l1: L1Memory::default(),
             l2,
+            l3: L3Memory::default(),
             embeder,
             last_2_l1drop: VecDeque::new(),
         }
@@ -111,6 +170,14 @@ impl Memory {
         self.l2.search(&mut self.embeder, query, top_k).await
     }
 
+    pub fn search_l3(&mut self, query: &str, top_k: usize) -> Vec<String> {
+        self.l3.search(&mut self.embeder, query, top_k)
+    }
+
+    pub fn upsert_l3_entries(&mut self, drafts: Vec<L3EntryDraft>) {
+        self.l3.upsert(&mut self.embeder, drafts);
+    }
+
     pub fn current_doing(&self) -> Option<String> {
         self.l1.trail.back().map(|item| item.current_doing.clone())
     }
@@ -126,6 +193,7 @@ impl Memory {
 
     pub async fn shutdown(self) {
         self.l1.sync_to_disk().await;
+        self.l3.sync_to_disk().await;
     }
 }
 
@@ -313,5 +381,94 @@ impl L2Memory {
         }
 
         retrieved_payloads
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+struct L3Memory {
+    entries: Vec<L3Entry>,
+}
+
+impl L3Memory {
+    async fn new() -> Self {
+        let persistence_path = get_spinova_home().await.join("l3_memory");
+        tokio::fs::read(persistence_path)
+            .await
+            .ok()
+            .and_then(|data| postcard::from_bytes::<Self>(&data).ok())
+            .unwrap_or_default()
+    }
+
+    fn search(&mut self, embedder: &mut EmbeddingModel, query: &str, top_k: usize) -> Vec<String> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let query_vector = embedder.encode_query(query);
+        let mut ranked = self
+            .entries
+            .iter()
+            .map(|entry| (similarity(&query_vector, &entry.vector), entry))
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            right
+                .0
+                .partial_cmp(&left.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        ranked
+            .into_iter()
+            .take(top_k)
+            .map(|(_, entry)| entry.render())
+            .collect()
+    }
+
+    fn upsert(&mut self, embedder: &mut EmbeddingModel, drafts: Vec<L3EntryDraft>) {
+        for draft in drafts {
+            let updated_at_ms = Utc::now().timestamp_millis();
+            let vector = embedder.encode_query(&draft.retrieval_text);
+            if let Some(existing) = self.entries.iter_mut().find(|entry| {
+                entry.kind == draft.kind && entry.lesson.trim() == draft.lesson.trim()
+            }) {
+                existing.evidence_summary = draft.evidence_summary;
+                existing.retrieval_text = draft.retrieval_text;
+                existing.confidence = existing.confidence.max(draft.confidence);
+                existing.stability = max_stability(&existing.stability, &draft.stability);
+                for trace_id in draft.source_trace_ids {
+                    if !existing.source_trace_ids.iter().any(|id| id == &trace_id) {
+                        existing.source_trace_ids.push(trace_id);
+                    }
+                }
+                existing.updated_at_ms = updated_at_ms;
+                existing.vector = vector;
+            } else {
+                self.entries.push(L3Entry {
+                    id: Uuid::new_v4().to_string(),
+                    kind: draft.kind,
+                    lesson: draft.lesson,
+                    evidence_summary: draft.evidence_summary,
+                    retrieval_text: draft.retrieval_text,
+                    confidence: draft.confidence,
+                    stability: draft.stability,
+                    source_trace_ids: draft.source_trace_ids,
+                    updated_at_ms,
+                    vector,
+                });
+            }
+        }
+    }
+
+    async fn sync_to_disk(&self) {
+        let persistence_path = get_spinova_home().await.join("l3_memory");
+        let data = postcard::to_allocvec(self).unwrap();
+        tokio::fs::write(persistence_path, data).await.unwrap();
+    }
+}
+
+fn max_stability(current: &L3EntryStability, incoming: &L3EntryStability) -> L3EntryStability {
+    use L3EntryStability::*;
+    match (current, incoming) {
+        (Canonical, _) | (_, Canonical) => Canonical,
+        (Stable, _) | (_, Stable) => Stable,
+        _ => Tentative,
     }
 }
