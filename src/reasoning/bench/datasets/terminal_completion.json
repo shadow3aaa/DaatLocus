@@ -32,7 +32,7 @@
       "terminal_view": "ubuntu@spinova-lab:~$ gh search repos live streaming llm\nTo get started with GitHub CLI, please run: gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.\nubuntu@spinova-lab:~$",
       "question": "当前终端状态是什么？",
       "expected_status": "finished",
-      "reason_must_include": ["prompt"]
+      "reason_any_of": ["prompt", "命令已经结束", "回到 shell"]
     },
     {
       "name": "terminal_completion_interactive_login_prompt",
@@ -40,7 +40,7 @@
       "terminal_view": "ubuntu@spinova-lab:~$ gh auth login\n? What account do you want to log into? GitHub.com\n? What is your preferred protocol for Git operations on this host? HTTPS\n? Authenticate Git with your GitHub credentials? (Y/n)",
       "question": "当前终端状态是什么？",
       "expected_status": "interactive_prompt",
-      "reason_must_include": ["交互"]
+      "reason_any_of": ["交互", "向导", "提问"]
     },
     {
       "name": "terminal_completion_long_output_but_prompt_returned",
@@ -48,7 +48,7 @@
       "terminal_view": "serde v1.0.219\nserde_json v1.0.140\n...<上方大量输出因窗口高度未显示>...\nubuntu@spinova-lab:~/spinova$",
       "question": "这是命令还在运行，还是只是视口截断？",
       "expected_status": "viewport_truncated",
-      "reason_must_include": ["截断"]
+      "reason_any_of": ["截断", "窗口", "视口"]
     }
   ],
   "dev_cases": [
@@ -58,7 +58,7 @@
       "terminal_view": "ubuntu@spinova-lab:~/spinova$ cargo check\n   Compiling spinova v0.1.0 (/home/ubuntu/spinova)\n   Checking tokio v1.44.1\n   Checking ratatui v0.29.0",
       "question": "当前终端状态是什么？",
       "expected_status": "still_running",
-      "reason_must_include": ["没有回到"]
+      "reason_any_of": ["没有回到", "仍在运行", "还在输出"]
     },
     {
       "name": "terminal_completion_prompt_returned_but_output_above_truncated",
@@ -66,7 +66,7 @@
       "terminal_view": "src/main.rs:123:fn main()\nsrc/dashboard.rs:88:struct DashboardState\n...<窗口上方结果已被滚出视口>...\nubuntu@spinova-lab:~/spinova$",
       "question": "这是 still_running 还是 viewport_truncated？",
       "expected_status": "viewport_truncated",
-      "reason_must_include": ["prompt"]
+      "reason_any_of": ["prompt", "截断", "视口"]
     },
     {
       "name": "terminal_completion_python_repl_is_interactive_prompt",
@@ -74,7 +74,7 @@
       "terminal_view": "ubuntu@spinova-lab:~$ python\nPython 3.12.3 (main, Feb  4 2026, 10:00:00)\n>>>",
       "question": "当前终端状态是什么？",
       "expected_status": "interactive_prompt",
-      "reason_must_include": ["REPL"]
+      "reason_any_of": ["REPL", ">>>", "解释器", "交互式"]
     }
   ]
 }

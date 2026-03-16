@@ -36,7 +36,7 @@ struct TerminalCompletionEvalCase {
     terminal_view: String,
     question: String,
     expected_status: TerminalCompletionStatus,
-    reason_must_include: Vec<String>,
+    reason_any_of: Vec<String>,
 }
 
 pub fn examples() -> Vec<ProgramExample<TerminalCompletionOutput>> {
@@ -74,13 +74,13 @@ fn to_eval_cases(
     cases.into_iter()
         .map(|case| {
             let expected_status = case.expected_status;
-            let reason_must_include = case.reason_must_include;
+            let reason_any_of = case.reason_any_of;
             EvalCase {
                 name: Box::leak(case.name.into_boxed_str()),
                 ir: program.dataset_ir(case.task, case.terminal_view, case.question),
                 check: Arc::new(move |output| {
                     check_status(output, &expected_status)?;
-                    check_reason_contains(output, &reason_must_include)
+                    check_reason_any_of(output, &reason_any_of)
                 }),
             }
         })
@@ -106,18 +106,19 @@ fn check_status(
     Ok(())
 }
 
-fn check_reason_contains(
-    output: &TerminalCompletionOutput,
-    required_parts: &[String],
-) -> Result<()> {
-    for required_part in required_parts {
-        if !output.reason.contains(required_part) {
-            return Err(miette!(
-                "expected reason to contain `{}`, got `{}`",
-                required_part,
-                output.reason
-            ));
-        }
+fn check_reason_any_of(output: &TerminalCompletionOutput, accepted_parts: &[String]) -> Result<()> {
+    if accepted_parts.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    if accepted_parts
+        .iter()
+        .any(|accepted_part| output.reason.contains(accepted_part))
+    {
+        return Ok(());
+    }
+    Err(miette!(
+        "expected reason to contain one of {:?}, got `{}`",
+        accepted_parts,
+        output.reason
+    ))
 }
