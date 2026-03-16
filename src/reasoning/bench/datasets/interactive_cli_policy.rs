@@ -64,9 +64,7 @@ pub fn dev_eval_cases(
     to_eval_cases(program, load_dataset().dev_cases)
 }
 
-pub fn bootstrap_examples(
-    _case_names: &[&str],
-) -> Vec<ProgramExample<InteractiveCliPolicyOutput>> {
+pub fn bootstrap_examples(_case_names: &[&str]) -> Vec<ProgramExample<InteractiveCliPolicyOutput>> {
     Vec::new()
 }
 
@@ -74,7 +72,8 @@ fn to_eval_cases(
     program: &InteractiveCliPolicyProgram,
     cases: Vec<InteractiveCliPolicyEvalCase>,
 ) -> Vec<EvalCase<InteractiveCliPolicyOutput>> {
-    cases.into_iter()
+    cases
+        .into_iter()
         .map(|case| {
             let expected_policy = case.expected_policy;
             let expected_next_input = case.expected_next_input;

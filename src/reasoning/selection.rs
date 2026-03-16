@@ -57,7 +57,11 @@ where
         return Ok(());
     }
 
-    let best_score = evaluations.iter().map(|evaluation| evaluation.score).max().unwrap_or(0);
+    let best_score = evaluations
+        .iter()
+        .map(|evaluation| evaluation.score)
+        .max()
+        .unwrap_or(0);
     let tied_indices = evaluations
         .iter()
         .enumerate()

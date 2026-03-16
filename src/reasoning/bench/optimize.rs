@@ -3,10 +3,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::programs::{
-    continuity_guard::ContinuityGuardProgram,
-    interactive_cli_policy::InteractiveCliPolicyProgram,
-    memory_recall::MemoryRecallProgram,
-    terminal_completion::TerminalCompletionProgram,
+    continuity_guard::ContinuityGuardProgram, interactive_cli_policy::InteractiveCliPolicyProgram,
+    memory_recall::MemoryRecallProgram, terminal_completion::TerminalCompletionProgram,
 };
 use crate::{
     config::Config,
@@ -570,8 +568,7 @@ async fn ensure_suite_compiled<P: Program>(
         });
     }
 
-    apply_pairwise_judge_tiebreak(context, renderer, program, suite_name, &mut evaluations)
-        .await?;
+    apply_pairwise_judge_tiebreak(context, renderer, program, suite_name, &mut evaluations).await?;
     evaluations.sort_by(compare_candidate_evaluations);
 
     let Some(best) = evaluations.first() else {
@@ -773,7 +770,8 @@ fn continuity_no_project_failure(result: &crate::reasoning::eval::EvalCaseResult
 
 fn terminal_completion_prompt_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
     !result.passed
-        && (result.case_name.contains("prompt") || result.detail.contains("expected status ViewportTruncated"))
+        && (result.case_name.contains("prompt")
+            || result.detail.contains("expected status ViewportTruncated"))
 }
 
 fn terminal_completion_interactive_failure(
@@ -784,7 +782,10 @@ fn terminal_completion_interactive_failure(
 
 fn interactive_cli_interrupt_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
     !result.passed
-        && (result.case_name.contains("interrupt") || result.detail.contains("expected policy InterruptAndSwitchNoninteractive"))
+        && (result.case_name.contains("interrupt")
+            || result
+                .detail
+                .contains("expected policy InterruptAndSwitchNoninteractive"))
 }
 
 fn interactive_cli_continue_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {

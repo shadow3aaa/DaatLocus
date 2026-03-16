@@ -71,7 +71,8 @@ fn to_eval_cases(
     program: &TerminalCompletionProgram,
     cases: Vec<TerminalCompletionEvalCase>,
 ) -> Vec<EvalCase<TerminalCompletionOutput>> {
-    cases.into_iter()
+    cases
+        .into_iter()
         .map(|case| {
             let expected_status = case.expected_status;
             let reason_any_of = case.reason_any_of;

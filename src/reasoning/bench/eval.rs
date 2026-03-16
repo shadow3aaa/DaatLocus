@@ -7,10 +7,8 @@ use super::optimize::{
     load_or_compile_bench_memory_tuning, load_or_compile_bench_terminal_completion_tuning,
 };
 use super::programs::{
-    continuity_guard::ContinuityGuardProgram,
-    interactive_cli_policy::InteractiveCliPolicyProgram,
-    memory_recall::MemoryRecallProgram,
-    terminal_completion::TerminalCompletionProgram,
+    continuity_guard::ContinuityGuardProgram, interactive_cli_policy::InteractiveCliPolicyProgram,
+    memory_recall::MemoryRecallProgram, terminal_completion::TerminalCompletionProgram,
 };
 
 pub use crate::reasoning::eval::EvalCaseResult;

@@ -38,10 +38,14 @@ impl TerminalCompletionProgram {
 
     pub fn dataset_ir(&self, task: String, terminal_view: String, question: String) -> PromptIR {
         let mut ir = PromptIR::with_system(BENCH_SYSTEM_PROMPT);
-        ir.push_instruction("先判断终端现在属于：命令已结束、命令仍在运行、只是窗口截断、或进入交互式提示。");
+        ir.push_instruction(
+            "先判断终端现在属于：命令已结束、命令仍在运行、只是窗口截断、或进入交互式提示。",
+        );
         ir.push_instruction("如果终端底部已经回到 shell prompt，优先判断为 finished。");
         ir.push_instruction("如果内容只是高度不够导致看不全，但已经回到 prompt，应判断为 viewport_truncated，而不是 still_running。");
-        ir.push_instruction("如果画面停在明确的交互式提问或登录向导，应判断为 interactive_prompt。");
+        ir.push_instruction(
+            "如果画面停在明确的交互式提问或登录向导，应判断为 interactive_prompt。",
+        );
         ir.push_section("当前任务", task);
         ir.push_section("终端画面", terminal_view);
         ir.push_section("问题", question);
@@ -81,7 +85,10 @@ impl Program for TerminalCompletionProgram {
             .input("当前任务", "agent 当前想完成的事情。")
             .input("终端画面", "当前 PTY 里能看到的终端内容。")
             .input("问题", "需要回答的状态判断问题。")
-            .output("status", "finished/still_running/viewport_truncated/interactive_prompt 之一。")
+            .output(
+                "status",
+                "finished/still_running/viewport_truncated/interactive_prompt 之一。",
+            )
             .output("reason", "简洁说明为什么是这个判断。")
             .rule("看到 shell prompt 返回时，不要误判为命令仍在运行。")
             .rule("窗口高度不够导致的截断不等于 still_running。")
