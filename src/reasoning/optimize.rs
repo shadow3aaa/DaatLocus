@@ -57,7 +57,8 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
     let resolve_base = resolve_program.default_tuning();
     let mut resolve_train_cases = resolve_program.train_eval_cases();
     resolve_train_cases.extend(derive_resolve_telegram_eval_cases(&resolve_program));
-    let resolve_dev_cases = resolve_program.dev_eval_cases();
+    let resolve_acceptance_cases = resolve_program.acceptance_eval_cases();
+    let resolve_stress_cases = resolve_program.stress_eval_cases();
     let resolve_baseline_results = run_suite_with_tuning(
         context,
         &renderer,
@@ -175,7 +176,9 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
             &resolve_program,
             "resolve_telegram_chat",
             resolve_train_cases,
-            resolve_dev_cases,
+            resolve_acceptance_cases,
+            resolve_stress_cases,
+            "stress",
             resolve_candidates,
             1,
             total_suites,
@@ -192,7 +195,8 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
         let action_program = ActionPhaseProgram::new(phase);
         let action_base = action_program.default_tuning();
         let action_train_cases = action_program.train_eval_cases();
-        let action_dev_cases = action_program.dev_eval_cases();
+        let action_acceptance_cases = action_program.acceptance_eval_cases();
+        let action_stress_cases = action_program.stress_eval_cases();
         let action_baseline_results = run_suite_with_tuning(
             context,
             &renderer,
@@ -212,7 +216,9 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
                 &action_program,
                 &action_program.tuning_key(),
                 action_train_cases,
-                action_dev_cases,
+                action_acceptance_cases,
+                action_stress_cases,
+                "stress",
                 action_candidates,
                 compiled.len() + 1,
                 total_suites,
@@ -230,7 +236,9 @@ async fn ensure_suite_compiled<P: Program>(
     program: &P,
     suite_name: &str,
     train_cases: Vec<EvalCase<P::Output>>,
-    dev_cases: Vec<EvalCase<P::Output>>,
+    acceptance_cases: Vec<EvalCase<P::Output>>,
+    ranking_cases: Vec<EvalCase<P::Output>>,
+    ranking_label: &str,
     candidates: Vec<CandidateConfig<P::Output>>,
     suite_index: usize,
     total_suites: usize,
@@ -240,7 +248,9 @@ async fn ensure_suite_compiled<P: Program>(
         program,
         suite_name,
         &train_cases,
-        &dev_cases,
+        &acceptance_cases,
+        ranking_label,
+        &ranking_cases,
         &candidates,
     )?;
     if let Some(compiled) = load_compiled_program(&compile_key).await? {
@@ -256,18 +266,25 @@ async fn ensure_suite_compiled<P: Program>(
         return Ok(compiled);
     }
 
-    let total_cases = dev_cases.len();
+    let total_cases = ranking_cases.len();
     let total_candidates = candidates.len();
     eprintln!(
-        "[prompt-compile {}/{}] {}: cache miss, compiling {} candidates x {} cases",
-        suite_index, total_suites, suite_name, total_candidates, total_cases
+        "[prompt-compile {}/{}] {}: cache miss, compiling {} candidates x {} acceptance + {} {} cases",
+        suite_index,
+        total_suites,
+        suite_name,
+        total_candidates,
+        acceptance_cases.len(),
+        total_cases,
+        ranking_label
     );
     let mut evaluations = evaluate_candidates(
         context,
         renderer,
         program,
         suite_name,
-        &dev_cases,
+        &acceptance_cases,
+        &ranking_cases,
         candidates,
         suite_index,
         total_suites,
@@ -284,7 +301,8 @@ async fn ensure_suite_compiled<P: Program>(
                 renderer,
                 program,
                 suite_name,
-                &dev_cases,
+                &acceptance_cases,
+                &ranking_cases,
                 search_candidates,
                 suite_index,
                 total_suites,
@@ -310,6 +328,9 @@ async fn ensure_suite_compiled<P: Program>(
     for evaluation in &evaluations {
         candidate_reports.push(CompiledCandidateReport {
             name: evaluation.candidate.name.clone(),
+            acceptance_score: Some(evaluation.acceptance_score),
+            acceptance_total_cases: Some(evaluation.acceptance_total_cases),
+            acceptance_attempts_used: Some(evaluation.acceptance_attempts_used),
             score: evaluation.score,
             total_cases,
             attempts_used: evaluation.attempts_used,
@@ -326,6 +347,9 @@ async fn ensure_suite_compiled<P: Program>(
                 .collect(),
             failed_cases: evaluation.failed_cases.clone(),
         });
+        if evaluation.acceptance_score != evaluation.acceptance_total_cases {
+            continue;
+        }
         if best.as_ref().is_none_or(
             |(_, _, best_score, best_attempts, best_judge_wins, best_judge_losses, _)| {
                 evaluation.score > *best_score
@@ -369,7 +393,17 @@ async fn ensure_suite_compiled<P: Program>(
         renderer,
         program,
         suite_name,
-        clone_eval_cases(&dev_cases),
+        clone_eval_cases(&ranking_cases),
+        &best_tuning,
+        TraceOrigin::Compile,
+    )
+    .await;
+    let selected_acceptance_results = run_suite_with_tuning(
+        context,
+        renderer,
+        program,
+        &format!("{suite_name}.acceptance"),
+        clone_eval_cases(&acceptance_cases),
         &best_tuning,
         TraceOrigin::Compile,
     )
@@ -385,6 +419,10 @@ async fn ensure_suite_compiled<P: Program>(
     )
     .await;
     let dev_attempts_used = selected_dev_results
+        .iter()
+        .map(|result| result.attempts_used)
+        .sum();
+    let acceptance_attempts_used = selected_acceptance_results
         .iter()
         .map(|result| result.attempts_used)
         .sum();
@@ -407,12 +445,21 @@ async fn ensure_suite_compiled<P: Program>(
                 .count(),
             train_total_cases: train_cases.len(),
             train_attempts_used,
+            acceptance_score: Some(
+                selected_acceptance_results
+                    .iter()
+                    .filter(|result| result.passed)
+                    .count(),
+            ),
+            acceptance_total_cases: Some(acceptance_cases.len()),
+            acceptance_attempts_used: Some(acceptance_attempts_used),
             dev_score: selected_dev_results
                 .iter()
                 .filter(|result| result.passed)
                 .count(),
-            dev_total_cases: dev_cases.len(),
+            dev_total_cases: ranking_cases.len(),
             dev_attempts_used,
+            ranking_label: Some(ranking_label.to_string()),
             selected_extra_instructions: best_tuning.extra_instructions.clone(),
             selected_example_titles: best_tuning
                 .examples
@@ -446,6 +493,9 @@ struct CandidateCaseEvaluation<O: Clone> {
 #[derive(Clone)]
 struct CandidateEvaluation<O: Clone> {
     candidate: CandidateConfig<O>,
+    acceptance_score: usize,
+    acceptance_total_cases: usize,
+    acceptance_attempts_used: usize,
     score: usize,
     attempts_used: usize,
     judge_wins: usize,
@@ -460,7 +510,8 @@ async fn evaluate_candidates<P: Program>(
     renderer: &OpenAIToolRenderer,
     program: &P,
     suite_name: &str,
-    dev_cases: &[EvalCase<P::Output>],
+    acceptance_cases: &[EvalCase<P::Output>],
+    ranking_cases: &[EvalCase<P::Output>],
     candidates: Vec<CandidateConfig<P::Output>>,
     suite_index: usize,
     total_suites: usize,
@@ -477,14 +528,15 @@ async fn evaluate_candidates<P: Program>(
             total_candidates,
             candidate.name
         );
+        let mut acceptance_score = 0usize;
+        let mut acceptance_attempts_used = 0usize;
         let mut score = 0usize;
         let mut attempts_used = 0usize;
         let mut failed_cases = Vec::new();
         let mut case_results = Vec::new();
 
-        for case in clone_eval_cases(dev_cases) {
+        for case in clone_eval_cases(acceptance_cases) {
             let case_name = case.name.to_string();
-            let case_context = render_case_context(&case.ir);
             let result = match execute_program_with_ir_report(
                 context.llm.as_ref(),
                 context,
@@ -497,53 +549,102 @@ async fn evaluate_candidates<P: Program>(
             .await
             {
                 Ok(outcome) => {
-                    attempts_used += outcome.attempts_used;
+                    acceptance_attempts_used += outcome.attempts_used;
                     match case.check.as_ref()(&outcome.output) {
                         Ok(()) => {
-                            score += 1;
-                            CandidateCaseEvaluation {
-                                case_name,
-                                case_context,
-                                output: Some(outcome.output),
-                                passed: true,
-                            }
+                            acceptance_score += 1;
+                            true
                         }
                         Err(err) => {
-                            let detail = format!("metric failed: {err}");
                             failed_cases.push(CompiledFailureCaseReport {
-                                case_name: case_name.clone(),
-                                detail: detail.clone(),
-                            });
-                            CandidateCaseEvaluation {
                                 case_name,
-                                case_context,
-                                output: Some(outcome.output),
-                                passed: false,
-                            }
+                                detail: format!("acceptance metric failed: {err}"),
+                            });
+                            false
                         }
                     }
                 }
                 Err(err) => {
-                    let detail = format!("program failed: {err}");
-                    attempts_used += 2;
+                    acceptance_attempts_used += 2;
                     failed_cases.push(CompiledFailureCaseReport {
-                        case_name: case_name.clone(),
-                        detail: detail.clone(),
-                    });
-                    CandidateCaseEvaluation {
                         case_name,
-                        case_context,
-                        output: None,
-                        passed: false,
-                    }
+                        detail: format!("acceptance program failed: {err}"),
+                    });
+                    false
                 }
             };
-            case_results.push(result);
+            if !result {
+                break;
+            }
+        }
+
+        if acceptance_score == acceptance_cases.len() {
+            for case in clone_eval_cases(ranking_cases) {
+                let case_name = case.name.to_string();
+                let case_context = render_case_context(&case.ir);
+                let result = match execute_program_with_ir_report(
+                    context.llm.as_ref(),
+                    context,
+                    renderer,
+                    program,
+                    case.ir,
+                    &candidate.config,
+                    TraceOrigin::Compile,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        attempts_used += outcome.attempts_used;
+                        match case.check.as_ref()(&outcome.output) {
+                            Ok(()) => {
+                                score += 1;
+                                CandidateCaseEvaluation {
+                                    case_name,
+                                    case_context,
+                                    output: Some(outcome.output),
+                                    passed: true,
+                                }
+                            }
+                            Err(err) => {
+                                let detail = format!("stress metric failed: {err}");
+                                failed_cases.push(CompiledFailureCaseReport {
+                                    case_name: case_name.clone(),
+                                    detail,
+                                });
+                                CandidateCaseEvaluation {
+                                    case_name,
+                                    case_context,
+                                    output: Some(outcome.output),
+                                    passed: false,
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let detail = format!("stress program failed: {err}");
+                        attempts_used += 2;
+                        failed_cases.push(CompiledFailureCaseReport {
+                            case_name: case_name.clone(),
+                            detail,
+                        });
+                        CandidateCaseEvaluation {
+                            case_name,
+                            case_context,
+                            output: None,
+                            passed: false,
+                        }
+                    }
+                };
+                case_results.push(result);
+            }
         }
         evaluations.push(CandidateEvaluation {
             candidate,
+            acceptance_score,
+            acceptance_total_cases: acceptance_cases.len(),
+            acceptance_attempts_used,
             score,
-            attempts_used,
+            attempts_used: acceptance_attempts_used + attempts_used,
             judge_wins: 0,
             judge_losses: 0,
             judge_ties: 0,
@@ -559,12 +660,18 @@ fn compare_candidate_evaluations<O: Clone>(
     right: &CandidateEvaluation<O>,
 ) -> std::cmp::Ordering {
     right
+        .acceptance_score
+        .cmp(&left.acceptance_score)
+        .then(right.acceptance_total_cases.cmp(&left.acceptance_total_cases))
+        .then(left.acceptance_attempts_used.cmp(&right.acceptance_attempts_used))
+        .then(
+    right
         .score
         .cmp(&left.score)
         .then(right.judge_wins.cmp(&left.judge_wins))
         .then(left.judge_losses.cmp(&right.judge_losses))
         .then(left.attempts_used.cmp(&right.attempts_used))
-        .then(left.candidate.name.cmp(&right.candidate.name))
+        .then(left.candidate.name.cmp(&right.candidate.name)))
 }
 
 async fn apply_judge_tiebreak<P: Program>(
@@ -578,14 +685,23 @@ async fn apply_judge_tiebreak<P: Program>(
         return Ok(());
     }
 
-    let Some(best_score) = evaluations.iter().map(|evaluation| evaluation.score).max() else {
+    let Some(best_score) = evaluations
+        .iter()
+        .filter(|evaluation| evaluation.acceptance_score == evaluation.acceptance_total_cases)
+        .map(|evaluation| evaluation.score)
+        .max()
+    else {
         return Ok(());
     };
 
     let mut candidate_indexes = evaluations
         .iter()
         .enumerate()
-        .filter_map(|(index, evaluation)| (evaluation.score == best_score).then_some(index))
+        .filter_map(|(index, evaluation)| {
+            (evaluation.acceptance_score == evaluation.acceptance_total_cases
+                && evaluation.score == best_score)
+                .then_some(index)
+        })
         .collect::<Vec<_>>();
     if candidate_indexes.len() < 2 {
         return Ok(());
@@ -727,15 +843,10 @@ fn build_search_candidates<O: Clone + Serialize>(
     evaluations: &[CandidateEvaluation<O>],
 ) -> Result<Vec<CandidateConfig<O>>> {
     let mut ranked = evaluations.to_vec();
-    ranked.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then(left.attempts_used.cmp(&right.attempts_used))
-            .then(left.candidate.name.cmp(&right.candidate.name))
-    });
+    ranked.sort_by(compare_candidate_evaluations);
     let seeds = ranked
         .into_iter()
+        .filter(|evaluation| evaluation.acceptance_score == evaluation.acceptance_total_cases)
         .filter(|evaluation| evaluation.candidate.name != "baseline")
         .take(SEARCH_SEED_LIMIT)
         .collect::<Vec<_>>();
@@ -818,7 +929,9 @@ fn build_compile_key<P: Program>(
     program: &P,
     suite_name: &str,
     train_cases: &[EvalCase<P::Output>],
-    dev_cases: &[EvalCase<P::Output>],
+    acceptance_cases: &[EvalCase<P::Output>],
+    ranking_label: &str,
+    ranking_cases: &[EvalCase<P::Output>],
     candidates: &[CandidateConfig<P::Output>],
 ) -> Result<String> {
     #[derive(Serialize)]
@@ -857,7 +970,9 @@ fn build_compile_key<P: Program>(
         judge: JudgeFingerprint<'a>,
         base_tuning: PromptTuningConfig<O>,
         train_cases: Vec<EvalCaseFingerprint<'a>>,
-        dev_cases: Vec<EvalCaseFingerprint<'a>>,
+        acceptance_cases: Vec<EvalCaseFingerprint<'a>>,
+        ranking_label: &'a str,
+        ranking_cases: Vec<EvalCaseFingerprint<'a>>,
         candidates: Vec<CandidateFingerprint<'a, O>>,
     }
 
@@ -890,7 +1005,15 @@ fn build_compile_key<P: Program>(
                 ir: &case.ir,
             })
             .collect(),
-        dev_cases: dev_cases
+        acceptance_cases: acceptance_cases
+            .iter()
+            .map(|case| EvalCaseFingerprint {
+                name: case.name,
+                ir: &case.ir,
+            })
+            .collect(),
+        ranking_label,
+        ranking_cases: ranking_cases
             .iter()
             .map(|case| EvalCaseFingerprint {
                 name: case.name,

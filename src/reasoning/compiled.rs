@@ -46,9 +46,17 @@ pub struct CompiledProgramReport {
     pub train_score: usize,
     pub train_total_cases: usize,
     pub train_attempts_used: usize,
+    #[serde(default)]
+    pub acceptance_score: Option<usize>,
+    #[serde(default)]
+    pub acceptance_total_cases: Option<usize>,
+    #[serde(default)]
+    pub acceptance_attempts_used: Option<usize>,
     pub dev_score: usize,
     pub dev_total_cases: usize,
     pub dev_attempts_used: usize,
+    #[serde(default)]
+    pub ranking_label: Option<String>,
     pub selected_extra_instructions: Vec<String>,
     pub selected_example_titles: Vec<String>,
     pub candidates: Vec<CompiledCandidateReport>,
@@ -57,6 +65,12 @@ pub struct CompiledProgramReport {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CompiledCandidateReport {
     pub name: String,
+    #[serde(default)]
+    pub acceptance_score: Option<usize>,
+    #[serde(default)]
+    pub acceptance_total_cases: Option<usize>,
+    #[serde(default)]
+    pub acceptance_attempts_used: Option<usize>,
     pub score: usize,
     pub total_cases: usize,
     pub attempts_used: usize,

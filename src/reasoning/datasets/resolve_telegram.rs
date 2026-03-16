@@ -22,7 +22,8 @@ const DATASET_JSON: &str = include_str!("resolve_telegram.json");
 struct ResolveTelegramDataset {
     examples: Vec<ResolveTelegramExample>,
     train_cases: Vec<ResolveTelegramEvalCase>,
-    dev_cases: Vec<ResolveTelegramEvalCase>,
+    acceptance_cases: Vec<ResolveTelegramEvalCase>,
+    stress_cases: Vec<ResolveTelegramEvalCase>,
 }
 
 #[derive(Deserialize)]
@@ -82,7 +83,22 @@ pub fn train_eval_cases(
 pub fn dev_eval_cases(
     program: &ResolveTelegramChatProgram,
 ) -> Vec<EvalCase<ResolveTelegramProgramOutput>> {
-    to_eval_cases(program, load_dataset().dev_cases)
+    let dataset = load_dataset();
+    let mut cases = dataset.acceptance_cases;
+    cases.extend(dataset.stress_cases);
+    to_eval_cases(program, cases)
+}
+
+pub fn acceptance_eval_cases(
+    program: &ResolveTelegramChatProgram,
+) -> Vec<EvalCase<ResolveTelegramProgramOutput>> {
+    to_eval_cases(program, load_dataset().acceptance_cases)
+}
+
+pub fn stress_eval_cases(
+    program: &ResolveTelegramChatProgram,
+) -> Vec<EvalCase<ResolveTelegramProgramOutput>> {
+    to_eval_cases(program, load_dataset().stress_cases)
 }
 
 pub fn bootstrap_examples(

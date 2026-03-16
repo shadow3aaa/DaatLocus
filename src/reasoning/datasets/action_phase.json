@@ -38,7 +38,7 @@
         }
       }
     ],
-    "dev_cases": [
+    "acceptance_cases": [
       {
         "name": "attend_notifications_focuses_telegram_first_variant",
         "device_context": "当前前景设备是 Terminal。\n\n后台设备提醒：\n- Telegram 在后台：shadow3 发来 2 条新消息，请尽快查看并回复。",
@@ -46,7 +46,9 @@
         "expectation": {
           "kind": "focus_telegram"
         }
-      },
+      }
+    ],
+    "stress_cases": [
       {
         "name": "attend_notifications_focuses_telegram_even_with_active_terminal_task_variant",
         "device_context": "当前前景设备是 Terminal。\n\n后台设备提醒：\n- Telegram 在后台：owner 发来 1 条新消息，需要尽快查看。\nTerminal 当前停在 shell 提示符，可继续输入命令。",
@@ -144,7 +146,7 @@
         }
       }
     ],
-    "dev_cases": [
+    "acceptance_cases": [
       {
         "name": "execute_task_selects_existing_task_before_running_variant",
         "device_context": "当前前景设备是 Terminal。",
@@ -161,7 +163,9 @@
         "expectation": {
           "kind": "cancel_interactive_prompt"
         }
-      },
+      }
+    ],
+    "stress_cases": [
       {
         "name": "execute_task_selects_single_remaining_task_even_with_project_context_variant",
         "device_context": "当前前景设备是 Terminal。",
@@ -222,7 +226,7 @@
         }
       }
     ],
-    "dev_cases": [
+    "acceptance_cases": [
       {
         "name": "plan_from_project_creates_project_scoped_task_variant",
         "device_context": "当前没有前景设备。",
@@ -230,6 +234,17 @@
         "expectation": {
           "kind": "add_project_task",
           "project_id": "44444444-4444-4444-4444-444444444444"
+        }
+      }
+    ],
+    "stress_cases": [
+      {
+        "name": "plan_from_project_creates_project_scoped_task_even_with_unscoped_backlog_variant",
+        "device_context": "当前没有前景设备。",
+        "snapshot_text": "项目列表：\n- id=77777777-7777-7777-7777-777777777777 title=分析 webide-termux JS 加密方式 status=Active\n下一步动作列表：\n- id=88888888-8888-8888-8888-888888888888 描述=整理上周未分类的临时笔记 [project=none]",
+        "expectation": {
+          "kind": "add_project_task",
+          "project_id": "77777777-7777-7777-7777-777777777777"
         }
       }
     ]
@@ -305,7 +320,7 @@
         }
       }
     ],
-    "dev_cases": [
+    "acceptance_cases": [
       {
         "name": "explore_focuses_terminal_when_idle_variant",
         "device_context": "当前没有任何前景设备。",
@@ -313,11 +328,21 @@
         "expectation": {
           "kind": "focus_terminal"
         }
-      },
+      }
+    ],
+    "stress_cases": [
       {
         "name": "explore_uses_silent_wait_when_completely_idle_variant",
         "device_context": "当前前景设备是 Telegram。\nTelegram 在前景，当前没有未读、待判断或待回复消息。",
         "snapshot_text": "义务列表为空。\n项目列表为空。\n下一步动作列表为空。",
+        "expectation": {
+          "kind": "silent_wait"
+        }
+      },
+      {
+        "name": "explore_uses_silent_wait_when_terminal_is_available_but_nothing_is_pending_variant",
+        "device_context": "当前前景设备是 Terminal。\n终端处于 shell 提示符，没有正在运行的命令。",
+        "snapshot_text": "义务列表为空。\n项目列表为空。\n下一步动作列表为空。\nTelegram 后台也没有提醒。",
         "expectation": {
           "kind": "silent_wait"
         }

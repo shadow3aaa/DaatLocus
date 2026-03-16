@@ -29,7 +29,8 @@ struct ActionPhaseDataset {
 struct ActionPhaseSection {
     examples: Vec<ProgramExample<Output>>,
     train_cases: Vec<ActionPhaseEvalCase>,
-    dev_cases: Vec<ActionPhaseEvalCase>,
+    acceptance_cases: Vec<ActionPhaseEvalCase>,
+    stress_cases: Vec<ActionPhaseEvalCase>,
 }
 
 #[derive(Deserialize)]
@@ -70,9 +71,23 @@ pub fn train_eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
 }
 
 pub fn dev_eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
+    let section = section_for_phase(load_dataset(), program.phase());
+    let mut cases = section.acceptance_cases;
+    cases.extend(section.stress_cases);
+    to_eval_cases(program, cases)
+}
+
+pub fn acceptance_eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
     to_eval_cases(
         program,
-        section_for_phase(load_dataset(), program.phase()).dev_cases,
+        section_for_phase(load_dataset(), program.phase()).acceptance_cases,
+    )
+}
+
+pub fn stress_eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
+    to_eval_cases(
+        program,
+        section_for_phase(load_dataset(), program.phase()).stress_cases,
     )
 }
 

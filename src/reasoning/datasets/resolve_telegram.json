@@ -284,7 +284,7 @@
       }
     }
   ],
-  "dev_cases": [
+  "acceptance_cases": [
     {
       "name": "resolve_telegram_focuses_app_before_reading_variant",
       "pending_text": "- owner (999999)",
@@ -322,7 +322,9 @@
       "expectation": {
         "kind": "reply_in_current_chat"
       }
-    },
+    }
+  ],
+  "stress_cases": [
     {
       "name": "resolve_telegram_uses_reply_only_for_status_question_variant",
       "pending_text": "- shadow3 (123456)",
