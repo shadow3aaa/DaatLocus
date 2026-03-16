@@ -913,6 +913,20 @@ fn build_action_phase_candidates(
                 bootstrap_case_name: Some("execute_task_cancels_interactive_auth_prompt"),
                 bootstrap_examples: bootstrap_execute_task_examples,
             },
+            ProposalSpec {
+                candidate_name: "auto_quit_pager",
+                when: action_phase_quit_pager_failure,
+                instruction: "如果终端停在 less、man 等分页器，而当前目标只是回到 shell，应优先发送安全、短小、确定的输入 `q` 退出。",
+                bootstrap_case_name: Some("execute_task_quits_less_pager_to_return_to_shell"),
+                bootstrap_examples: bootstrap_execute_task_examples,
+            },
+            ProposalSpec {
+                candidate_name: "auto_wait_streaming_output",
+                when: action_phase_wait_streaming_failure,
+                instruction: "如果终端只是持续输出普通命令结果，且没有出现输入提示，不要误判成交互式界面；此时应优先 Wait。",
+                bootstrap_case_name: Some("execute_task_waits_for_streaming_test_output"),
+                bootstrap_examples: bootstrap_execute_task_examples,
+            },
         ],
         ActionPhase::PlanFromProject => vec![ProposalSpec {
             candidate_name: "auto_add_project_task",
@@ -1040,6 +1054,20 @@ fn action_phase_cancel_interactive_failure(
 ) -> bool {
     !result.passed
         && (result.case_name.contains("cancels_interactive") || result.detail.contains("Ctrl+C"))
+}
+
+fn action_phase_quit_pager_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed
+        && (result.case_name.contains("quits_less")
+            || result.case_name.contains("quits_manual_pager")
+            || result.detail.contains("TerminalInput containing \"q\"")
+            || result.detail.contains("TerminalInput containing 'q'"))
+}
+
+fn action_phase_wait_streaming_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed
+        && (result.case_name.contains("waits_for_streaming")
+            || result.detail.contains("expected Wait"))
 }
 
 fn action_phase_add_project_task_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {

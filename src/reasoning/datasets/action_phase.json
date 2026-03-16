@@ -112,6 +112,42 @@
             }
           }
         }
+      },
+      {
+        "title": "终端停在分页器且当前目标只是返回 shell 时，应发送 q 安全退出。",
+        "inputs": [
+          { "name": "阶段", "value": "执行下一步动作" },
+          { "name": "设备上下文", "value": "当前前景设备是 Terminal。" },
+          { "name": "完整快照", "value": "已选中的下一步动作要求查看命令输出后回到 shell 继续。终端当前停在 less 的 (END) 页面。" }
+        ],
+        "output": {
+          "observation": "终端当前停在分页器的 (END) 界面，这不是新的 shell 提示，也不是需要账号授权的登录向导。",
+          "description": "当前目标只是退出分页器并回到 shell，发送 q 是短小、安全且确定的交互动作。",
+          "current_doing": "退出分页器以回到 shell 继续执行任务",
+          "action": {
+            "type": "DeviceAction",
+            "action": {
+              "type": "TerminalInput",
+              "text": "q"
+            }
+          }
+        }
+      },
+      {
+        "title": "终端仅在持续输出测试结果时，应等待而不是误发输入。",
+        "inputs": [
+          { "name": "阶段", "value": "执行下一步动作" },
+          { "name": "设备上下文", "value": "当前前景设备是 Terminal。" },
+          { "name": "完整快照", "value": "已选中的下一步动作要求等待 cargo test 完成。终端当前持续输出测试进度，没有回到 shell，也没有出现输入提示。" }
+        ],
+        "output": {
+          "observation": "终端当前只是持续输出普通测试进度，没有 shell prompt，也没有交互式提问。",
+          "description": "此时最合理的动作是等待命令自然完成，而不是发送多余输入或误判成交互式界面。",
+          "current_doing": "等待非交互命令继续运行并产出结果",
+          "action": {
+            "type": "Wait"
+          }
+        }
       }
     ],
     "train_cases": [
@@ -152,6 +188,43 @@
         "expectation": {
           "kind": "cancel_interactive_prompt"
         }
+      },
+      {
+        "name": "execute_task_quits_less_pager_to_return_to_shell",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "下一步动作列表：\n- id=eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee 描述=查看输出后回到 shell 继续分析\n当前 working_task 已选中。\n终端显示：Cargo.lock\n...\n(END)",
+        "bootstrap_output": {
+          "observation": "终端当前停在分页器的 (END) 界面，这不是新的 shell 提示，也不是需要账号授权的登录向导。",
+          "description": "当前目标只是退出分页器并回到 shell，发送 q 是短小、安全且确定的交互动作。",
+          "current_doing": "退出分页器以回到 shell 继续执行任务",
+          "action": {
+            "type": "DeviceAction",
+            "action": {
+              "type": "TerminalInput",
+              "text": "q"
+            }
+          }
+        },
+        "expectation": {
+          "kind": "terminal_input_contains",
+          "text_substring": "q"
+        }
+      },
+      {
+        "name": "execute_task_waits_for_streaming_test_output",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "下一步动作列表：\n- id=ffffffff-ffff-ffff-ffff-ffffffffffff 描述=等待 cargo test 完成并观察结果\n当前 working_task 已选中。\n终端显示：running 12 tests\ntest pty::tests::test_pty_interactive ... ok\ntest reasoning::tests::judge_pairwise ...",
+        "bootstrap_output": {
+          "observation": "终端当前只是持续输出普通测试进度，没有 shell prompt，也没有交互式提问。",
+          "description": "此时最合理的动作是等待命令自然完成，而不是发送多余输入或误判成交互式界面。",
+          "current_doing": "等待非交互命令继续运行并产出结果",
+          "action": {
+            "type": "Wait"
+          }
+        },
+        "expectation": {
+          "kind": "wait"
+        }
       }
     ],
     "acceptance_cases": [
@@ -170,6 +243,14 @@
         "snapshot_text": "下一步动作列表：\n- id=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb 描述=拉取公开开源资料\n当前 working_task 已选中。\n终端显示：docker login\nUsername:",
         "expectation": {
           "kind": "cancel_interactive_prompt"
+        }
+      },
+      {
+        "name": "execute_task_waits_for_streaming_output_variant",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "下一步动作列表：\n- id=12121212-3434-5656-7878-909090909090 描述=等待 apt install 完成\n当前 working_task 已选中。\n终端显示：Setting up gh (2.45.0-1ubuntu0-3) ...\nProcessing triggers for man-db (2.12.0-4build2) ...",
+        "expectation": {
+          "kind": "wait"
         }
       }
     ],
@@ -197,6 +278,23 @@
         "snapshot_text": "下一步动作列表：\n- id=dddddddd-dddd-dddd-dddd-dddddddddddd 描述=检索 GitHub 和开源社区资料\n当前 working_task 已选中。\n终端显示：gh auth login\n? Authenticate Git with your GitHub credentials? (Y/n)",
         "expectation": {
           "kind": "cancel_interactive_prompt"
+        }
+      },
+      {
+        "name": "execute_task_quits_manual_pager_with_q_variant",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "下一步动作列表：\n- id=abababab-abab-abab-abab-abababababab 描述=关闭 man 页面并回到 shell\n当前 working_task 已选中。\n终端显示：GIT(1)\n...\nManual page git(1) line 1 (press h for help or q to quit)",
+        "expectation": {
+          "kind": "terminal_input_contains",
+          "text_substring": "q"
+        }
+      },
+      {
+        "name": "execute_task_waits_for_streaming_test_output_variant",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "下一步动作列表：\n- id=cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd 描述=等待 cargo test 完成\n当前 working_task 已选中。\n终端显示：running 12 tests\ntest pty::tests::test_pty_interactive ... ok\ntest reasoning::tests::judge_pairwise ...",
+        "expectation": {
+          "kind": "wait"
         }
       }
     ]

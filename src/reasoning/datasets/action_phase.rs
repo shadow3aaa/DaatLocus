@@ -53,8 +53,12 @@ enum ActionPhaseExpectation {
     AddProjectTask { project_id: String },
     #[serde(rename = "cancel_interactive_prompt")]
     CancelInteractivePrompt,
+    #[serde(rename = "terminal_input_contains")]
+    TerminalInputContains { text_substring: String },
     #[serde(rename = "focus_terminal")]
     FocusTerminal,
+    #[serde(rename = "wait")]
+    Wait,
     #[serde(rename = "silent_wait")]
     SilentWait,
 }
@@ -164,7 +168,11 @@ fn to_eval_cases(
                     ActionPhaseExpectation::CancelInteractivePrompt => {
                         Arc::new(check_cancel_interactive_prompt)
                     }
+                    ActionPhaseExpectation::TerminalInputContains { text_substring } => {
+                        register_terminal_input_contains_check(text_substring)
+                    }
                     ActionPhaseExpectation::FocusTerminal => Arc::new(check_focus_terminal),
+                    ActionPhaseExpectation::Wait => Arc::new(check_wait),
                     ActionPhaseExpectation::SilentWait => Arc::new(check_silent_wait),
                 },
             }
@@ -206,6 +214,13 @@ fn check_silent_wait(output: &Output) -> Result<()> {
     }
 }
 
+fn check_wait(output: &Output) -> Result<()> {
+    match &output.action {
+        Action::Wait => Ok(()),
+        other => Err(miette!("expected Wait, got {:?}", other)),
+    }
+}
+
 fn check_cancel_interactive_prompt(output: &Output) -> Result<()> {
     match &output.action {
         Action::DeviceAction {
@@ -242,6 +257,21 @@ fn register_add_project_task_check(
         other => Err(miette!(
             "expected TaskAdd with project_id={}, got {:?}",
             expected_project_id,
+            other
+        )),
+    })
+}
+
+fn register_terminal_input_contains_check(
+    expected_substring: String,
+) -> Arc<dyn Fn(&Output) -> Result<()> + Send + Sync> {
+    Arc::new(move |output: &Output| match &output.action {
+        Action::DeviceAction {
+            action: crate::device::DeviceAction::TerminalInput { text },
+        } if text.contains(&expected_substring) => Ok(()),
+        other => Err(miette!(
+            "expected TerminalInput containing {:?}, got {:?}",
+            expected_substring,
             other
         )),
     })
