@@ -5,7 +5,7 @@ use miette::{Result, miette};
 use serde_json::json;
 
 use crate::{
-    config::Config,
+    config::{Config, MainModelConfig},
     context::Context,
     core::LLM,
     reasoning::runtime::{PromptRequest, PromptRole},
@@ -15,19 +15,26 @@ pub struct OpenAIClient {
     api_key: String,
     base_url: String,
     model: String,
+    temperature: f64,
 }
 
 impl OpenAIClient {
     pub fn new(config: &Config) -> Self {
+        Self::from_model_config(&config.main_model)
+    }
+
+    pub fn from_model_config(model_config: &MainModelConfig) -> Self {
         let client = reqwest::Client::new();
-        let api_key = config.main_model.api_key.clone();
-        let base_url = config.main_model.base_url.clone();
-        let model = config.main_model.model_name.clone();
+        let api_key = model_config.api_key.clone();
+        let base_url = model_config.base_url.clone();
+        let model = model_config.model_name.clone();
+        let temperature = model_config.temperature;
         Self {
             client,
             api_key,
             base_url,
             model,
+            temperature,
         }
     }
 
@@ -38,11 +45,7 @@ impl OpenAIClient {
         )
     }
 
-    async fn call_tool_json(
-        &self,
-        request: PromptRequest,
-        temperature: f64,
-    ) -> Result<serde_json::Value> {
+    async fn call_tool_json(&self, request: PromptRequest) -> Result<serde_json::Value> {
         let url = self.url();
         let tool_name = request.tool_name.clone();
         let tool_description = request.tool_description.clone();
@@ -78,7 +81,7 @@ impl OpenAIClient {
                 "type": "function",
                 "function": { "name": request.tool_name }
             },
-            "temperature": temperature
+            "temperature": self.temperature
         });
         let response = self
             .client
@@ -151,11 +154,10 @@ impl OpenAIClient {
 impl LLM for OpenAIClient {
     async fn run_json(
         &self,
-        context: &Context,
+        _context: &Context,
         request: PromptRequest,
     ) -> Result<serde_json::Value> {
-        let temperature = context.config.main_model.temperature;
-        self.call_tool_json(request, temperature).await
+        self.call_tool_json(request).await
     }
 }
 

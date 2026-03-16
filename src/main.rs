@@ -224,9 +224,12 @@ async fn main() {
     } else {
         None
     };
+    let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
+    let judge_client = OpenAIClient::from_model_config(&judge_model);
     let mut context = Context {
         llm: Box::new(client),
+        judge_llm: Box::new(judge_client),
         config,
         memory,
         obligations,
@@ -325,6 +328,7 @@ fn is_bench_optimize_continuity_command(args: &[String]) -> bool {
 async fn run_mem_reset() -> Result<()> {
     let home = get_spinova_home().await;
     let config = crate::config::Config::default();
+    let judge_model = config.judge.resolved_model(&config.main_model);
     let telegram = TelegramDevice::empty();
     let telegram_handle = telegram.handle();
     let devices = DeviceManager::new(None, vec![Box::new(telegram)])
@@ -332,6 +336,7 @@ async fn run_mem_reset() -> Result<()> {
         .map_err(|err| miette!("failed to construct default devices for mem-reset: {err}"))?;
     let context = Context {
         llm: Box::new(OpenAIClient::new(&config)),
+        judge_llm: Box::new(OpenAIClient::from_model_config(&judge_model)),
         config,
         memory: Memory::empty().await,
         obligations: Obligations::default(),
@@ -418,10 +423,13 @@ async fn build_eval_context(config: crate::config::Config) -> Context {
     )
     .await
     .unwrap();
+    let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
+    let judge_client = OpenAIClient::from_model_config(&judge_model);
 
     Context {
         llm: Box::new(client),
+        judge_llm: Box::new(judge_client),
         config,
         memory,
         obligations,

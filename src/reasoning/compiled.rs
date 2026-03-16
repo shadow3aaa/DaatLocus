@@ -60,6 +60,12 @@ pub struct CompiledCandidateReport {
     pub score: usize,
     pub total_cases: usize,
     pub attempts_used: usize,
+    #[serde(default)]
+    pub judge_wins: usize,
+    #[serde(default)]
+    pub judge_losses: usize,
+    #[serde(default)]
+    pub judge_ties: usize,
     pub extra_instructions: Vec<String>,
     pub example_titles: Vec<String>,
     pub failed_cases: Vec<CompiledFailureCaseReport>,

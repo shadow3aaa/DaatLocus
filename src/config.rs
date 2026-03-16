@@ -10,6 +10,7 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 #[serde(default)]
 pub struct Config {
     pub main_model: MainModelConfig,
+    pub judge: JudgeConfig,
     pub telegram: TelegramConfig,
     // pub embedding_model: EmbeddingModelConfig, // 目前使用内置的模型
 }
@@ -18,6 +19,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             main_model: MainModelConfig::default(),
+            judge: JudgeConfig::default(),
             telegram: TelegramConfig::default(),
             /* embedding_model: EmbeddingModelConfig {
                 base_url: "https://api.openai.com/v1".to_string(),
@@ -44,6 +46,63 @@ impl Default for MainModelConfig {
             model_name: "gpt-4.1".to_string(),
             api_key: "your-api-key".to_string(),
             temperature: 1.0,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JudgeConfig {
+    pub enabled: bool,
+    pub use_main_model: bool,
+    pub base_url: String,
+    pub model_name: String,
+    pub api_key: String,
+    pub temperature: f64,
+    pub max_pairwise_candidates: usize,
+    pub max_pairwise_cases: usize,
+}
+
+impl Default for JudgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            use_main_model: true,
+            base_url: String::new(),
+            model_name: String::new(),
+            api_key: String::new(),
+            temperature: 1.0,
+            max_pairwise_candidates: 4,
+            max_pairwise_cases: 4,
+        }
+    }
+}
+
+impl JudgeConfig {
+    pub fn resolved_model(&self, main_model: &MainModelConfig) -> MainModelConfig {
+        if self.use_main_model {
+            let mut resolved = main_model.clone();
+            resolved.temperature = self.temperature;
+            return resolved;
+        }
+
+        MainModelConfig {
+            base_url: if self.base_url.trim().is_empty() {
+                main_model.base_url.clone()
+            } else {
+                self.base_url.clone()
+            },
+            model_name: if self.model_name.trim().is_empty() {
+                main_model.model_name.clone()
+            } else {
+                self.model_name.clone()
+            },
+            api_key: if self.api_key.trim().is_empty() {
+                main_model.api_key.clone()
+            } else {
+                self.api_key.clone()
+            },
+            temperature: self.temperature,
         }
     }
 }

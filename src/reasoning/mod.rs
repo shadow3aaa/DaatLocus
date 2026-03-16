@@ -5,6 +5,7 @@ pub mod datasets;
 pub mod eval;
 pub mod examples;
 pub mod ir;
+pub mod judge;
 pub mod optimize;
 pub mod optimizer;
 pub mod program;

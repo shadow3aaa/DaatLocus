@@ -8,6 +8,7 @@ use crate::{
 
 pub struct Context {
     pub llm: Box<dyn LLM + Send + Sync>,
+    pub judge_llm: Box<dyn LLM + Send + Sync>,
     pub config: Config,
     pub memory: Memory,
     pub obligations: Obligations,
