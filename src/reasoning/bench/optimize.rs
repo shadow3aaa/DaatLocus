@@ -3,7 +3,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::programs::{
-    continuity_guard::ContinuityGuardProgram, memory_recall::MemoryRecallProgram,
+    continuity_guard::ContinuityGuardProgram,
+    interactive_cli_policy::InteractiveCliPolicyProgram,
+    memory_recall::MemoryRecallProgram,
+    terminal_completion::TerminalCompletionProgram,
 };
 use crate::{
     config::Config,
@@ -48,6 +51,30 @@ pub async fn run_bench_optimize_continuity(context: &Context) -> Result<Vec<Opti
     }])
 }
 
+pub async fn run_bench_optimize_terminal_completion(
+    context: &Context,
+) -> Result<Vec<OptimizationResult>> {
+    let compiled = ensure_bench_terminal_completion_compiled(context).await?;
+    Ok(vec![OptimizationResult {
+        suite: compiled.suite,
+        best_candidate: compiled.best_candidate,
+        score: compiled.score,
+        total_cases: compiled.total_cases,
+    }])
+}
+
+pub async fn run_bench_optimize_interactive_cli(
+    context: &Context,
+) -> Result<Vec<OptimizationResult>> {
+    let compiled = ensure_bench_interactive_cli_compiled(context).await?;
+    Ok(vec![OptimizationResult {
+        suite: compiled.suite,
+        best_candidate: compiled.best_candidate,
+        score: compiled.score,
+        total_cases: compiled.total_cases,
+    }])
+}
+
 pub async fn load_or_compile_bench_memory_tuning(
     context: &Context,
 ) -> Result<PromptTuningConfig<crate::reasoning::bench::programs::memory_recall::MemoryRecallOutput>>
@@ -62,6 +89,28 @@ pub async fn load_or_compile_bench_continuity_tuning(
     PromptTuningConfig<crate::reasoning::bench::programs::continuity_guard::ContinuityGuardOutput>,
 > {
     let compiled = ensure_bench_continuity_compiled(context).await?;
+    compiled.tuning.to_typed()
+}
+
+pub async fn load_or_compile_bench_terminal_completion_tuning(
+    context: &Context,
+) -> Result<
+    PromptTuningConfig<
+        crate::reasoning::bench::programs::terminal_completion::TerminalCompletionOutput,
+    >,
+> {
+    let compiled = ensure_bench_terminal_completion_compiled(context).await?;
+    compiled.tuning.to_typed()
+}
+
+pub async fn load_or_compile_bench_interactive_cli_tuning(
+    context: &Context,
+) -> Result<
+    PromptTuningConfig<
+        crate::reasoning::bench::programs::interactive_cli_policy::InteractiveCliPolicyOutput,
+    >,
+> {
+    let compiled = ensure_bench_interactive_cli_compiled(context).await?;
     compiled.tuning.to_typed()
 }
 
@@ -222,6 +271,171 @@ async fn ensure_bench_continuity_compiled(context: &Context) -> Result<CompiledP
             instruction: "如果没有活跃项目、长期承诺或未完成调查，不要因为等待和轻量聊天而虚构连续性。",
             bootstrap_case_name: Some("no_project_no_forced_continuity"),
             bootstrap_examples: datasets::continuity_guard::bootstrap_examples,
+        },
+    ];
+    candidates.extend(propose_candidates(
+        &base,
+        &baseline_results,
+        &proposal_specs,
+    ));
+    ensure_suite_compiled(
+        context,
+        &renderer,
+        &program,
+        program.suite_name(),
+        dev_cases,
+        candidates,
+    )
+    .await
+}
+
+async fn ensure_bench_terminal_completion_compiled(context: &Context) -> Result<CompiledProgram> {
+    let renderer = OpenAIToolRenderer;
+    let program = TerminalCompletionProgram;
+    let base = program.default_tuning();
+    let train_cases = program.train_eval_cases();
+    let dev_cases = program.dev_eval_cases();
+    let baseline_results = run_suite_with_tuning(
+        context,
+        &renderer,
+        &program,
+        program.suite_name(),
+        clone_eval_cases(&train_cases),
+        &base,
+        TraceOrigin::BenchCompile,
+    )
+    .await;
+    let mut candidates = vec![
+        CandidateConfig {
+            name: "baseline".to_string(),
+            config: base.clone(),
+        },
+        CandidateConfig {
+            name: "minimal_examples".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: base.extra_instructions.clone(),
+                examples: base.examples.iter().take(1).cloned().collect(),
+            },
+        },
+        CandidateConfig {
+            name: "prompt_return_bias".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: vec![
+                    "一旦终端底部已经回到 shell prompt，应优先判断为 finished 或 viewport_truncated，而不是 still_running。".to_string(),
+                ],
+                examples: base.examples.clone(),
+            },
+        },
+        CandidateConfig {
+            name: "interactive_prompt_bias".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: vec![
+                    "如果看到问答式提示、>>>、(END) 或登录向导提问，应优先判断为 interactive_prompt。".to_string(),
+                ],
+                examples: base.examples.clone(),
+            },
+        },
+    ];
+    let proposal_specs = [
+        ProposalSpec {
+            candidate_name: "auto_prompt_return_bias",
+            when: terminal_completion_prompt_failure,
+            instruction: "只要底部已经回到 shell prompt，就不要误判为 still_running；如果只是窗口看不全，优先考虑 viewport_truncated。",
+            bootstrap_case_name: None,
+            bootstrap_examples: datasets::terminal_completion::bootstrap_examples,
+        },
+        ProposalSpec {
+            candidate_name: "auto_interactive_prompt_bias",
+            when: terminal_completion_interactive_failure,
+            instruction: "看到 REPL 提示符、问答式向导或登录提问时，应优先判断为 interactive_prompt。",
+            bootstrap_case_name: None,
+            bootstrap_examples: datasets::terminal_completion::bootstrap_examples,
+        },
+    ];
+    candidates.extend(propose_candidates(
+        &base,
+        &baseline_results,
+        &proposal_specs,
+    ));
+    ensure_suite_compiled(
+        context,
+        &renderer,
+        &program,
+        program.suite_name(),
+        dev_cases,
+        candidates,
+    )
+    .await
+}
+
+async fn ensure_bench_interactive_cli_compiled(context: &Context) -> Result<CompiledProgram> {
+    let renderer = OpenAIToolRenderer;
+    let program = InteractiveCliPolicyProgram;
+    let base = program.default_tuning();
+    let train_cases = program.train_eval_cases();
+    let dev_cases = program.dev_eval_cases();
+    let baseline_results = run_suite_with_tuning(
+        context,
+        &renderer,
+        &program,
+        program.suite_name(),
+        clone_eval_cases(&train_cases),
+        &base,
+        TraceOrigin::BenchCompile,
+    )
+    .await;
+    let mut candidates = vec![
+        CandidateConfig {
+            name: "baseline".to_string(),
+            config: base.clone(),
+        },
+        CandidateConfig {
+            name: "minimal_examples".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: base.extra_instructions.clone(),
+                examples: base.examples.iter().take(1).cloned().collect(),
+            },
+        },
+        CandidateConfig {
+            name: "interrupt_bias".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: vec![
+                    "对于与当前任务无关的登录向导、REPL 和授权流程，优先选择 interrupt_and_switch_noninteractive。".to_string(),
+                ],
+                examples: base.examples.clone(),
+            },
+        },
+        CandidateConfig {
+            name: "safe_continue_bias".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: vec![
+                    "只有在下一次输入是短小、确定、安全且直接服务于当前任务时，才选择 continue_interaction。".to_string(),
+                ],
+                examples: base.examples.clone(),
+            },
+        },
+    ];
+    let proposal_specs = [
+        ProposalSpec {
+            candidate_name: "auto_interrupt_bias",
+            when: interactive_cli_interrupt_failure,
+            instruction: "与当前任务无关的登录向导、授权向导和 REPL 应优先中断，并切回非交互方案。",
+            bootstrap_case_name: None,
+            bootstrap_examples: datasets::interactive_cli_policy::bootstrap_examples,
+        },
+        ProposalSpec {
+            candidate_name: "auto_safe_continue_bias",
+            when: interactive_cli_continue_failure,
+            instruction: "只有在当前目标就是退出交互式工具、且下一步输入短小确定时，才继续交互。",
+            bootstrap_case_name: None,
+            bootstrap_examples: datasets::interactive_cli_policy::bootstrap_examples,
+        },
+        ProposalSpec {
+            candidate_name: "auto_wait_bias",
+            when: interactive_cli_wait_failure,
+            instruction: "如果终端只是继续自然输出，且没有出现输入提示，不要抢着中断或输入，优先选择 wait。",
+            bootstrap_case_name: None,
+            bootstrap_examples: datasets::interactive_cli_policy::bootstrap_examples,
         },
     ];
     candidates.extend(propose_candidates(
@@ -423,4 +637,30 @@ fn continuity_no_project_failure(result: &crate::reasoning::eval::EvalCaseResult
     !result.passed
         && result.case_name.contains("no_project")
         && result.detail.contains("expected empty project_title")
+}
+
+fn terminal_completion_prompt_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed
+        && (result.case_name.contains("prompt") || result.detail.contains("expected status ViewportTruncated"))
+}
+
+fn terminal_completion_interactive_failure(
+    result: &crate::reasoning::eval::EvalCaseResult,
+) -> bool {
+    !result.passed && result.case_name.contains("interactive")
+}
+
+fn interactive_cli_interrupt_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed
+        && (result.case_name.contains("interrupt") || result.detail.contains("expected policy InterruptAndSwitchNoninteractive"))
+}
+
+fn interactive_cli_continue_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed
+        && (result.case_name.contains("continue") || result.detail.contains("expected next_input"))
+}
+
+fn interactive_cli_wait_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed
+        && (result.case_name.contains("wait") || result.detail.contains("expected policy Wait"))
 }

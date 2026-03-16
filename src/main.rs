@@ -39,8 +39,14 @@ use crate::{
     providers::OpenAIClient,
     reasoning::{
         bench::{
-            eval::{run_bench_eval_continuity, run_bench_eval_memory},
-            optimize::{run_bench_optimize_continuity, run_bench_optimize_memory},
+            eval::{
+                run_bench_eval_continuity, run_bench_eval_interactive_cli,
+                run_bench_eval_memory, run_bench_eval_terminal_completion,
+            },
+            optimize::{
+                run_bench_optimize_continuity, run_bench_optimize_interactive_cli,
+                run_bench_optimize_memory, run_bench_optimize_terminal_completion,
+            },
         },
         compiled::{BENCH_COMPILED_DIR_NAME, COMPILED_DIR_NAME, CompiledPromptStore},
         eval::run_reasoning_eval,
@@ -154,6 +160,38 @@ async fn main() {
         }
     }
 
+    if is_bench_eval_terminal_completion_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_bench_eval_terminal_completion(&context).await {
+            Ok(results) => {
+                print_bench_eval_results("terminal-completion", &results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if is_bench_eval_interactive_cli_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_bench_eval_interactive_cli(&context).await {
+            Ok(results) => {
+                print_bench_eval_results("interactive-cli", &results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
     if is_bench_optimize_memory_command(&args) {
         let context = build_eval_context(config).await;
         match run_bench_optimize_memory(&context).await {
@@ -175,6 +213,38 @@ async fn main() {
         match run_bench_optimize_continuity(&context).await {
             Ok(results) => {
                 print_bench_optimization_results("continuity", &results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if is_bench_optimize_terminal_completion_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_bench_optimize_terminal_completion(&context).await {
+            Ok(results) => {
+                print_bench_optimization_results("terminal-completion", &results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if is_bench_optimize_interactive_cli_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_bench_optimize_interactive_cli(&context).await {
+            Ok(results) => {
+                print_bench_optimization_results("interactive-cli", &results);
                 context.shutdown().await;
                 return;
             }
@@ -323,6 +393,26 @@ fn is_bench_optimize_memory_command(args: &[String]) -> bool {
 fn is_bench_optimize_continuity_command(args: &[String]) -> bool {
     matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "continuity")
         || matches!(args, [command] if command == "optimize-bench-continuity")
+}
+
+fn is_bench_eval_terminal_completion_command(args: &[String]) -> bool {
+    matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "terminal-completion")
+        || matches!(args, [command] if command == "eval-bench-terminal-completion")
+}
+
+fn is_bench_eval_interactive_cli_command(args: &[String]) -> bool {
+    matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "interactive-cli")
+        || matches!(args, [command] if command == "eval-bench-interactive-cli")
+}
+
+fn is_bench_optimize_terminal_completion_command(args: &[String]) -> bool {
+    matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "terminal-completion")
+        || matches!(args, [command] if command == "optimize-bench-terminal-completion")
+}
+
+fn is_bench_optimize_interactive_cli_command(args: &[String]) -> bool {
+    matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "interactive-cli")
+        || matches!(args, [command] if command == "optimize-bench-interactive-cli")
 }
 
 async fn run_mem_reset() -> Result<()> {
