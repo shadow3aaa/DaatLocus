@@ -404,6 +404,35 @@
         "kind": "decline",
         "chat_id": "123456"
       }
+    },
+    {
+      "name": "resolve_telegram_reply_only_for_small_followup_on_existing_commitment_variant",
+      "pending_text": "- shadow3 (123456)",
+      "focus": "Telegram",
+      "snapshot_text": "当前会话是 shadow3。\n待判断：是。\n最新消息：那你先继续，我晚点再看。\n上文里你已经接受了一个持续项目，但这条最新消息只是轻量跟进，不要求新承诺。",
+      "expectation": {
+        "kind": "reply_only",
+        "chat_id": "123456"
+      }
+    },
+    {
+      "name": "resolve_telegram_ask_clarification_for_compare_request_without_targets_variant",
+      "pending_text": "- shadow3 (123456)",
+      "focus": "Telegram",
+      "snapshot_text": "当前会话是 shadow3。\n待判断：是。\n最新消息：帮我比较一下哪个方案更适合，但没有给出候选方案、仓库链接或比较标准。",
+      "expectation": {
+        "kind": "ask_clarification",
+        "chat_id": "123456"
+      }
+    },
+    {
+      "name": "resolve_telegram_reply_current_chat_instead_of_reclassifying_variant",
+      "pending_text": "当前没有待判断的 Telegram 会话。",
+      "focus": "Telegram",
+      "snapshot_text": "当前会话是 shadow3。\n待判断：否。\n待回复：是。\n上一轮已经决定是 ReplyOnly，只差把那句简短回复真正发出去。",
+      "expectation": {
+        "kind": "reply_in_current_chat"
+      }
     }
   ]
 }

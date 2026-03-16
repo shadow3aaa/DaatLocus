@@ -64,6 +64,14 @@
         "expectation": {
           "kind": "focus_telegram"
         }
+      },
+      {
+        "name": "attend_notifications_focuses_telegram_even_with_selected_working_task_variant",
+        "device_context": "当前前景设备是 Terminal。\n\n后台设备提醒：\n- Telegram 在后台：owner 发来 1 条新消息，请优先查看。\nTerminal 当前没有正在运行的命令。",
+        "snapshot_text": "项目列表：\n- 调查开源皮套直播 LLM 方案 status=Active\n下一步动作列表：\n- id=99999999-9999-9999-9999-999999999999 描述=检索 GitHub 项目资料\n当前 working_task 已选中。",
+        "expectation": {
+          "kind": "focus_telegram"
+        }
       }
     ]
   },
@@ -182,6 +190,14 @@
         "expectation": {
           "kind": "cancel_interactive_prompt"
         }
+      },
+      {
+        "name": "execute_task_cancels_gh_auth_prompt_with_helpful_text_variant",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "下一步动作列表：\n- id=dddddddd-dddd-dddd-dddd-dddddddddddd 描述=检索 GitHub 和开源社区资料\n当前 working_task 已选中。\n终端显示：gh auth login\n? Authenticate Git with your GitHub credentials? (Y/n)",
+        "expectation": {
+          "kind": "cancel_interactive_prompt"
+        }
       }
     ]
   },
@@ -245,6 +261,15 @@
         "expectation": {
           "kind": "add_project_task",
           "project_id": "77777777-7777-7777-7777-777777777777"
+        }
+      },
+      {
+        "name": "plan_from_project_creates_project_scoped_task_even_with_foreground_telegram_variant",
+        "device_context": "当前前景设备是 Telegram。\nTelegram 当前没有待判断、待回复或未读消息。",
+        "snapshot_text": "项目列表：\n- id=aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb title=调查开源皮套直播 LLM 方案 status=Active\n下一步动作列表为空。",
+        "expectation": {
+          "kind": "add_project_task",
+          "project_id": "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
         }
       }
     ]
@@ -345,6 +370,14 @@
         "snapshot_text": "义务列表为空。\n项目列表为空。\n下一步动作列表为空。\nTelegram 后台也没有提醒。",
         "expectation": {
           "kind": "silent_wait"
+        }
+      },
+      {
+        "name": "explore_focuses_terminal_when_no_foreground_and_no_work_variant",
+        "device_context": "当前没有任何前景设备。\nTelegram 后台没有提醒。",
+        "snapshot_text": "义务列表为空。\n项目列表为空。\n下一步动作列表为空。\n当前也没有 working_task。",
+        "expectation": {
+          "kind": "focus_terminal"
         }
       }
     ]
