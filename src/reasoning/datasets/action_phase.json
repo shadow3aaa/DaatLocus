@@ -46,6 +46,22 @@
         "expectation": {
           "kind": "focus_telegram"
         }
+      },
+      {
+        "name": "attend_notifications_focuses_telegram_even_with_active_terminal_task_variant",
+        "device_context": "当前前景设备是 Terminal。\n\n后台设备提醒：\n- Telegram 在后台：owner 发来 1 条新消息，需要尽快查看。\nTerminal 当前停在 shell 提示符，可继续输入命令。",
+        "snapshot_text": "项目列表：\n- 调查开源皮套直播 LLM 方案 status=Active\n下一步动作列表：\n- 已有一条终端探索动作正在进行中。",
+        "expectation": {
+          "kind": "focus_telegram"
+        }
+      },
+      {
+        "name": "attend_notifications_focuses_telegram_even_when_projects_exist_variant",
+        "device_context": "当前前景设备是 Terminal。\n\n后台设备提醒：\n- Telegram 在后台：shadow3 发来 1 条新消息。\n- Terminal 当前无阻塞。",
+        "snapshot_text": "义务列表为空。\n项目列表：\n- 分析 webide-termux JS 加密方式 status=Active\n下一步动作列表：\n- 查看 assets/js 目录",
+        "expectation": {
+          "kind": "focus_telegram"
+        }
       }
     ]
   },
@@ -142,6 +158,23 @@
         "name": "execute_task_cancels_interactive_auth_prompt_variant",
         "device_context": "当前前景设备是 Terminal。",
         "snapshot_text": "下一步动作列表：\n- id=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb 描述=拉取公开开源资料\n当前 working_task 已选中。\n终端显示：docker login\nUsername:",
+        "expectation": {
+          "kind": "cancel_interactive_prompt"
+        }
+      },
+      {
+        "name": "execute_task_selects_single_remaining_task_even_with_project_context_variant",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "项目列表：\n- id=55555555-5555-5555-5555-555555555555 title=调查开源皮套直播 LLM 方案 status=Active\n下一步动作列表：\n- id=66666666-6666-6666-6666-666666666666 描述=检索 GitHub 和开源社区项目资料 [project=55555555-5555-5555-5555-555555555555]\n当前没有 working_task。",
+        "expectation": {
+          "kind": "select_task",
+          "task_id": "66666666-6666-6666-6666-666666666666"
+        }
+      },
+      {
+        "name": "execute_task_cancels_npm_login_prompt_variant",
+        "device_context": "当前前景设备是 Terminal。",
+        "snapshot_text": "下一步动作列表：\n- id=cccccccc-cccc-cccc-cccc-cccccccccccc 描述=验证某个开源项目的发布信息\n当前 working_task 已选中。\n终端显示：npm login\nEmail: (this IS public)",
         "expectation": {
           "kind": "cancel_interactive_prompt"
         }
