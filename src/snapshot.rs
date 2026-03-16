@@ -82,6 +82,7 @@ struct CurrentMemory {
     current_doing: Option<String>,
     trail: Vec<String>,
     associated_memories: Vec<String>,
+    learned_experiences: Vec<String>,
 }
 
 impl CurrentMemory {
@@ -89,6 +90,7 @@ impl CurrentMemory {
         current_doing: None,
         trail: Vec::new(),
         associated_memories: Vec::new(),
+        learned_experiences: Vec::new(),
     };
 
     async fn new(memory: &mut Memory) -> Self {
@@ -102,10 +104,12 @@ impl CurrentMemory {
             trail.last().unwrap()
         );
         let associated_memories = memory.search_mem(&query, 5).await;
+        let learned_experiences = memory.search_l3(&query, 3);
         Self {
             current_doing: Some(current_doing),
             trail,
             associated_memories,
+            learned_experiences,
         }
     }
 }
@@ -129,6 +133,17 @@ impl Display for CurrentMemory {
                 writeln!(f, "{mem}")?;
             } else {
                 write!(f, "{mem}")?;
+            }
+        }
+        if !self.learned_experiences.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "习得经验：")?;
+            for (i, lesson) in self.learned_experiences.iter().enumerate() {
+                if i + 1 < self.learned_experiences.len() {
+                    writeln!(f, "{lesson}")?;
+                } else {
+                    write!(f, "{lesson}")?;
+                }
             }
         }
         Ok(())

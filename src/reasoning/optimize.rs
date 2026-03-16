@@ -1,5 +1,6 @@
 use miette::{Result, miette};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -28,6 +29,7 @@ use super::{
         compare_candidate_evaluations, render_case_context,
     },
     signature::Signature,
+    sleep_artifacts::{SleepArtifactsSnapshot, SleepArtifactsStore},
     teleprompter::{build_bootstrap_demo_candidates, build_teleprompter_candidates},
     trace::TraceOrigin,
     trace_mining::{derive_resolve_telegram_eval_cases, propose_resolve_telegram_candidates},
@@ -55,13 +57,19 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
     let renderer = OpenAIToolRenderer;
     let mut compiled = Vec::new();
     let total_suites = 5usize;
+    let sleep_snapshot = load_sleep_artifacts_snapshot().await?;
 
     let resolve_program = ResolveTelegramChatProgram;
     let resolve_base = resolve_program.default_tuning();
+    let resolve_sleep = sleep_snapshot.filter_suite("resolve_telegram_chat");
     let mut resolve_train_cases = resolve_program.train_eval_cases();
     resolve_train_cases.extend(derive_resolve_telegram_eval_cases(&resolve_program));
     let resolve_acceptance_cases = resolve_program.acceptance_eval_cases();
-    let resolve_stress_cases = resolve_program.stress_eval_cases();
+    let mut resolve_stress_cases = resolve_program.stress_eval_cases();
+    resolve_stress_cases.extend(datasets::resolve_telegram::stress_eval_cases_by_names(
+        &resolve_program,
+        &sleep_reference_case_names(&resolve_sleep),
+    ));
     let resolve_baseline_results = run_suite_with_tuning(
         context,
         &renderer,
@@ -113,6 +121,16 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
             "如果当前只剩待回复，不要重新语义判定；如果请求需要长期推进，优先识别为项目而不是礼貌确认。",
         ],
         datasets::resolve_telegram::all_bootstrap_examples(),
+    ));
+    resolve_candidates.extend(build_sleep_artifact_candidates(
+        &resolve_base,
+        &resolve_sleep,
+        datasets::resolve_telegram::bootstrap_examples_by_names(&sleep_reference_case_names(
+            &resolve_sleep,
+        )),
+        sleep_examples_to_program_examples::<
+            crate::reasoning::programs::resolve_telegram::ResolveTelegramProgramOutput,
+        >(&resolve_sleep),
     ));
     let resolve_proposal_specs = [
         ProposalSpec {
@@ -197,9 +215,14 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
     ] {
         let action_program = ActionPhaseProgram::new(phase);
         let action_base = action_program.default_tuning();
+        let action_sleep = sleep_snapshot.filter_suite(&action_program.tuning_key());
         let action_train_cases = action_program.train_eval_cases();
         let action_acceptance_cases = action_program.acceptance_eval_cases();
-        let action_stress_cases = action_program.stress_eval_cases();
+        let mut action_stress_cases = action_program.stress_eval_cases();
+        action_stress_cases.extend(datasets::action_phase::stress_eval_cases_by_names(
+            &action_program,
+            &sleep_reference_case_names(&action_sleep),
+        ));
         let action_baseline_results = run_suite_with_tuning(
             context,
             &renderer,
@@ -210,8 +233,17 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
             TraceOrigin::Compile,
         )
         .await;
-        let action_candidates =
+        let mut action_candidates =
             build_action_phase_candidates(&action_program, &action_base, &action_baseline_results);
+        action_candidates.extend(build_sleep_artifact_candidates(
+            &action_base,
+            &action_sleep,
+            datasets::action_phase::bootstrap_examples_by_names(
+                action_program.phase(),
+                &sleep_reference_case_names(&action_sleep),
+            ),
+            sleep_examples_to_program_examples::<crate::core::Output>(&action_sleep),
+        ));
         compiled.push(
             ensure_suite_compiled(
                 context,
@@ -231,6 +263,80 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
     }
 
     Ok(compiled)
+}
+
+async fn load_sleep_artifacts_snapshot() -> Result<SleepArtifactsSnapshot> {
+    let store = SleepArtifactsStore::open().await?;
+    store.load_snapshot().await
+}
+
+fn sleep_reference_case_names(snapshot: &SleepArtifactsSnapshot) -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for demo in &snapshot.bootstrap_demos {
+        for name in &demo.reference_case_names {
+            names.insert(name.clone());
+        }
+    }
+    for case in &snapshot.stress_cases {
+        for name in &case.reference_case_names {
+            names.insert(name.clone());
+        }
+    }
+    names.into_iter().collect()
+}
+
+fn build_sleep_artifact_candidates<O: Clone>(
+    base: &PromptTuningConfig<O>,
+    snapshot: &SleepArtifactsSnapshot,
+    bootstrap_examples: Vec<crate::reasoning::examples::ProgramExample<O>>,
+    direct_sleep_examples: Vec<crate::reasoning::examples::ProgramExample<O>>,
+) -> Vec<CandidateConfig<O>> {
+    let mut candidates = Vec::new();
+    let sleep_instructions = snapshot
+        .instruction_hypotheses
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>();
+
+    if !sleep_instructions.is_empty() {
+        candidates.extend(build_teleprompter_candidates(
+            base,
+            "sleep_instruction_hypotheses",
+            &sleep_instructions,
+        ));
+    }
+
+    let mut all_examples = bootstrap_examples;
+    all_examples.extend(direct_sleep_examples);
+
+    if !all_examples.is_empty() {
+        candidates.extend(build_bootstrap_demo_candidates(
+            base,
+            "sleep_bootstrap_demos",
+            "sleep_bootstrap_combo",
+            &sleep_instructions,
+            all_examples,
+        ));
+    }
+
+    candidates
+}
+
+fn sleep_examples_to_program_examples<O: Clone + Serialize + DeserializeOwned>(
+    snapshot: &SleepArtifactsSnapshot,
+) -> Vec<crate::reasoning::examples::ProgramExample<O>> {
+    snapshot
+        .bootstrap_demos
+        .iter()
+        .filter_map(|artifact| {
+            let output = serde_json::from_value::<O>(artifact.expected_output.clone()).ok()?;
+            Some(crate::reasoning::examples::ProgramExample {
+                title: artifact.title.clone(),
+                inputs: artifact.inputs.clone(),
+                output,
+            })
+        })
+        .collect()
 }
 
 async fn ensure_suite_compiled<P: Program>(
@@ -315,8 +421,7 @@ async fn ensure_suite_compiled<P: Program>(
         );
     }
 
-    apply_pairwise_judge_tiebreak(context, renderer, program, suite_name, &mut evaluations)
-        .await?;
+    apply_pairwise_judge_tiebreak(context, renderer, program, suite_name, &mut evaluations).await?;
     evaluations.sort_by(compare_candidate_evaluations);
 
     let mut best: Option<(

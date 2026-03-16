@@ -142,6 +142,35 @@ pub fn all_bootstrap_examples(phase: ActionPhase) -> Vec<ProgramExample<Output>>
         .collect()
 }
 
+pub fn bootstrap_examples_by_names(
+    phase: ActionPhase,
+    case_names: &[String],
+) -> Vec<ProgramExample<Output>> {
+    let refs = case_names.iter().map(String::as_str).collect::<Vec<_>>();
+    bootstrap_examples(phase, &refs)
+}
+
+pub fn stress_eval_cases_by_names(
+    program: &ActionPhaseProgram,
+    case_names: &[String],
+) -> Vec<EvalCase<Output>> {
+    let cases = section_for_phase(load_dataset(), program.phase())
+        .stress_cases
+        .into_iter()
+        .filter(|case| case_names.iter().any(|name| name == &case.name))
+        .collect::<Vec<_>>();
+    to_eval_cases(program, cases)
+}
+
+pub fn all_case_names(phase: ActionPhase) -> Vec<String> {
+    let section = section_for_phase(load_dataset(), phase);
+    let mut names = Vec::new();
+    names.extend(section.train_cases.into_iter().map(|case| case.name));
+    names.extend(section.acceptance_cases.into_iter().map(|case| case.name));
+    names.extend(section.stress_cases.into_iter().map(|case| case.name));
+    names
+}
+
 fn load_dataset() -> ActionPhaseDataset {
     decode_dataset_json(DATASET_FILE, DATASET_JSON).expect("action_phase dataset must be valid")
 }
