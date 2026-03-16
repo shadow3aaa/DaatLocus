@@ -79,7 +79,7 @@ impl Display for Sensory {
 }
 
 struct CurrentMemory {
-    current_doing: Option<String>,
+    thread_focus: Option<String>,
     trail: Vec<String>,
     associated_memories: Vec<String>,
     learned_experiences: Vec<String>,
@@ -87,26 +87,26 @@ struct CurrentMemory {
 
 impl CurrentMemory {
     const EMPTY: Self = Self {
-        current_doing: None,
+        thread_focus: None,
         trail: Vec::new(),
         associated_memories: Vec::new(),
         learned_experiences: Vec::new(),
     };
 
     async fn new(memory: &mut Memory) -> Self {
-        let Some(current_doing) = memory.current_doing() else {
+        let Some(thread_focus) = memory.current_thread_focus() else {
             return Self::EMPTY;
         };
         let trail = memory.trail();
         let query = format!(
-            "在【{}】时，发生：【{}】",
-            current_doing,
+            "当前主线：{}\n最近事件：{}",
+            thread_focus,
             trail.last().unwrap()
         );
         let associated_memories = memory.search_mem(&query, 5).await;
         let learned_experiences = memory.search_l3(&query, 3);
         Self {
-            current_doing: Some(current_doing),
+            thread_focus: Some(thread_focus),
             trail,
             associated_memories,
             learned_experiences,
@@ -116,12 +116,12 @@ impl CurrentMemory {
 
 impl Display for CurrentMemory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(current_doing) = &self.current_doing {
-            writeln!(f, "当前正在：{}", current_doing)?;
+        if let Some(thread_focus) = &self.thread_focus {
+            writeln!(f, "当前主线：{}", thread_focus)?;
         } else {
-            writeln!(f, "当前没有在干什么")?;
+            writeln!(f, "当前没有连续主线")?;
         }
-        writeln!(f, "近期经历：")?;
+        writeln!(f, "近期事件：")?;
         for event in self.trail.iter() {
             writeln!(f, "{event}")?;
             writeln!(f, "然后")?;

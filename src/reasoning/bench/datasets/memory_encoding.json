@@ -1,0 +1,95 @@
+{
+  "examples": [
+    {
+      "title": "Preserve download link and file anchor when blocked",
+      "inputs": [
+        { "name": "当前主线", "value": "分析闭源 release 中 opt 参数的实现" },
+        { "name": "观察与结论", "value": "尝试下载 Telegram 提供的闭源 zip 时返回 404，当前无法继续逆向分析。" },
+        { "name": "采取动作", "value": "向 shadow3 说明下载失败，并请求确认有效链接或直接发送文件。" },
+        { "name": "证据", "value": "Telegram 提供链接：https://github.com/nakixii/Magisk_AsoulOpt/releases/download/Evil/Magisk_AsoulOpt_Evil.zip\n文件名：Magisk_AsoulOpt_Evil.zip\n终端实际输入：wget -O Magisk_AsoulOpt_Evil.zip \"https://github.com/nakixii/Magisk_AsoulOpt/releases/download/Evil/Magisk_AsoulOpt_Evil.zip\"" }
+      ],
+      "output": {
+        "thread_focus": "继续推进闭源 release 的下载与逆向分析，以明确 opt 参数的具体作用。",
+        "event_summary": "本轮尝试下载 shadow3 提供的闭源 zip 链接，但返回 404，因此已请求对方确认有效链接或直接发送文件。",
+        "anchors": [
+          "https://github.com/nakixii/Magisk_AsoulOpt/releases/download/Evil/Magisk_AsoulOpt_Evil.zip",
+          "Magisk_AsoulOpt_Evil.zip",
+          "wget -O Magisk_AsoulOpt_Evil.zip"
+        ],
+        "thread_effect": "blocked"
+      }
+    }
+  ],
+  "train_cases": [
+    {
+      "name": "memory_encoding_preserves_release_url_anchor",
+      "thread_focus": "分析闭源 release 中 opt 参数的实现",
+      "observation": "尝试下载 Telegram 提供的闭源 zip 时返回 404，当前无法继续逆向分析。",
+      "action_description": "向 shadow3 说明下载失败，并请求确认有效链接或直接发送文件。",
+      "evidence": "Telegram 提供链接：https://github.com/nakixii/Magisk_AsoulOpt/releases/download/Evil/Magisk_AsoulOpt_Evil.zip\n文件名：Magisk_AsoulOpt_Evil.zip\n终端实际输入：wget -O Magisk_AsoulOpt_Evil.zip \"https://github.com/nakixii/Magisk_AsoulOpt/releases/download/Evil/Magisk_AsoulOpt_Evil.zip\"",
+      "expected_thread_effect": "blocked",
+      "thread_focus_must_include": ["opt 参数", "闭源"],
+      "event_must_include": ["404", "shadow3"],
+      "required_anchors": [
+        "https://github.com/nakixii/Magisk_AsoulOpt/releases/download/Evil/Magisk_AsoulOpt_Evil.zip",
+        "Magisk_AsoulOpt_Evil.zip",
+        "wget -O Magisk_AsoulOpt_Evil.zip"
+      ],
+      "forbidden_anchors": ["example.com"]
+    },
+    {
+      "name": "memory_encoding_keeps_interactive_auth_abort_anchor",
+      "thread_focus": "在 Terminal 检索 GitHub 项目资料",
+      "observation": "终端误进入 gh auth login 的交互式认证向导，不适合继续自动执行。",
+      "action_description": "发送 Ctrl+C 中断认证向导，准备改用非交互查询方案。",
+      "evidence": "终端实际输入：\u0003\n界面提示：gh auth login\n目标对象：GitHub 项目检索",
+      "expected_thread_effect": "switched",
+      "thread_focus_must_include": ["GitHub", "检索"],
+      "event_must_include": ["认证向导", "Ctrl+C"],
+      "required_anchors": ["gh auth login", "Ctrl+C"],
+      "forbidden_anchors": []
+    }
+  ],
+  "dev_cases": [
+    {
+      "name": "memory_encoding_variant_preserves_release_url_anchor",
+      "thread_focus": "继续定位闭源 release 里 opt 参数的真正实现",
+      "observation": "根据 Telegram 的补充说明去下载 Evil 版 zip，但请求返回 404，当前缺少可分析的 release 文件。",
+      "action_description": "回复 shadow3，说明链接仍然失效，并请求提供可下载的文件或新地址。",
+      "evidence": "补充链接：https://github.com/nakixii/Magisk_AsoulOpt/releases/download/Evil/Magisk_AsoulOpt_Evil.zip\n目标文件：Magisk_AsoulOpt_Evil.zip\n终端实际输入：wget -O Magisk_AsoulOpt_Evil.zip \"https://github.com/nakixii/Magisk_AsoulOpt/releases/download/Evil/Magisk_AsoulOpt_Evil.zip\"",
+      "expected_thread_effect": "blocked",
+      "thread_focus_must_include": ["opt 参数", "闭源"],
+      "event_must_include": ["404", "shadow3"],
+      "required_anchors": [
+        "https://github.com/nakixii/Magisk_AsoulOpt/releases/download/Evil/Magisk_AsoulOpt_Evil.zip",
+        "Magisk_AsoulOpt_Evil.zip",
+        "wget -O Magisk_AsoulOpt_Evil.zip"
+      ],
+      "forbidden_anchors": ["example.com"]
+    },
+    {
+      "name": "memory_encoding_variant_preserves_python_repl_abort",
+      "thread_focus": "用 Terminal 查找项目需要的环境信息",
+      "observation": "终端停在 Python 解释器的 >>> 提示符，已经进入交互式 REPL，不能继续自动推进当前任务。",
+      "action_description": "发送 Ctrl+C 退出 REPL，恢复 shell 后再改用非交互命令。",
+      "evidence": "终端实际输入：\u0003\n界面提示：Python 3.12.3\n>>> \n当前目标：继续自动收集环境信息",
+      "expected_thread_effect": "switched",
+      "thread_focus_must_include": ["Terminal", "环境信息"],
+      "event_must_include": [">>>", "Ctrl+C"],
+      "required_anchors": ["Python 3.12.3", ">>>", "Ctrl+C"],
+      "forbidden_anchors": []
+    },
+    {
+      "name": "memory_encoding_variant_keeps_clarification_anchor",
+      "thread_focus": "确认用户要比较的具体方案并继续调查",
+      "observation": "用户只说“帮我比较哪个方案更适合”，但没有给出待比较对象和标准，当前信息不足。",
+      "action_description": "发送澄清问题，要求对方补充要比较的方案和关注指标。",
+      "evidence": "会话对象：shadow3\n实际发送消息：你想比较哪几个具体方案？你更在意性能、兼容性还是维护成本？",
+      "expected_thread_effect": "clarified",
+      "thread_focus_must_include": ["比较", "调查"],
+      "event_must_include": ["信息不足", "澄清"],
+      "required_anchors": ["shadow3", "性能", "兼容性", "维护成本"],
+      "forbidden_anchors": []
+    }
+  ]
+}

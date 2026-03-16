@@ -41,11 +41,12 @@ use crate::{
         bench::{
             eval::{
                 run_bench_eval_continuity, run_bench_eval_interactive_cli, run_bench_eval_memory,
-                run_bench_eval_terminal_completion,
+                run_bench_eval_memory_encoding, run_bench_eval_terminal_completion,
             },
             optimize::{
                 run_bench_optimize_continuity, run_bench_optimize_interactive_cli,
-                run_bench_optimize_memory, run_bench_optimize_terminal_completion,
+                run_bench_optimize_memory, run_bench_optimize_memory_encoding,
+                run_bench_optimize_terminal_completion,
             },
         },
         compiled::{
@@ -55,6 +56,7 @@ use crate::{
         eval::run_reasoning_eval,
         optimize::run_reasoning_optimize,
         programs::action_phase::{ActionPhase, ActionPhaseProgram},
+        programs::memory_encoding::{MemoryEncodingOutput, MemoryEncodingProgram},
         programs::resolve_telegram::{
             ResolveTelegramChatProgram, ResolveTelegramProgramAction, ResolveTelegramProgramOutput,
         },
@@ -174,6 +176,22 @@ async fn main() {
         }
     }
 
+    if is_bench_eval_memory_encoding_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_bench_eval_memory_encoding(&context).await {
+            Ok(results) => {
+                print_bench_eval_results("memory-encoding", &results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
     if is_bench_eval_continuity_command(&args) {
         let context = build_eval_context(config).await;
         match run_bench_eval_continuity(&context).await {
@@ -227,6 +245,22 @@ async fn main() {
         match run_bench_optimize_memory(&context).await {
             Ok(results) => {
                 print_bench_optimization_results("memory", &results);
+                context.shutdown().await;
+                return;
+            }
+            Err(err) => {
+                eprintln!("{err:?}");
+                context.shutdown().await;
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if is_bench_optimize_memory_encoding_command(&args) {
+        let context = build_eval_context(config).await;
+        match run_bench_optimize_memory_encoding(&context).await {
+            Ok(results) => {
+                print_bench_optimization_results("memory-encoding", &results);
                 context.shutdown().await;
                 return;
             }
@@ -426,6 +460,11 @@ fn is_bench_eval_memory_command(args: &[String]) -> bool {
         || matches!(args, [command] if command == "eval-bench-memory")
 }
 
+fn is_bench_eval_memory_encoding_command(args: &[String]) -> bool {
+    matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "memory-encoding")
+        || matches!(args, [command] if command == "eval-bench-memory-encoding")
+}
+
 fn is_bench_eval_continuity_command(args: &[String]) -> bool {
     matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "continuity")
         || matches!(args, [command] if command == "eval-bench-continuity")
@@ -434,6 +473,11 @@ fn is_bench_eval_continuity_command(args: &[String]) -> bool {
 fn is_bench_optimize_memory_command(args: &[String]) -> bool {
     matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "memory")
         || matches!(args, [command] if command == "optimize-bench-memory")
+}
+
+fn is_bench_optimize_memory_encoding_command(args: &[String]) -> bool {
+    matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "memory-encoding")
+        || matches!(args, [command] if command == "optimize-bench-memory-encoding")
 }
 
 fn is_bench_optimize_continuity_command(args: &[String]) -> bool {
@@ -802,12 +846,26 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
         }
     };
     if should_record_action(&output.action) {
+        let mut evidence = collect_memory_evidence(&output.action);
+        evidence.extend(collect_contextual_memory_evidence(context, &output.action));
+        let memory_entry = encode_memory_entry(
+            context,
+            &snapshot,
+            &renderer,
+            &output.current_doing,
+            &output.observation,
+            &output.description,
+            &evidence,
+        )
+        .await
+        .unwrap_or_else(|_| fallback_memory_encoding(&output, &evidence));
         context
             .memory
-            .record(
-                output.current_doing.clone(),
-                output.observation.clone(),
-                output.description.clone(),
+            .record_encoded(
+                memory_entry.thread_focus,
+                memory_entry.event_summary,
+                memory_entry.anchors,
+                memory_entry.thread_effect,
             )
             .await;
     }
@@ -849,6 +907,193 @@ fn translate_resolve_telegram_output(
 
 fn should_record_action(action: &Action) -> bool {
     !matches!(action, Action::SilentWait)
+}
+
+fn collect_memory_evidence(action: &Action) -> Vec<String> {
+    match action {
+        Action::TaskAdd {
+            description,
+            project_id,
+        } => {
+            let mut evidence = vec![format!("新增任务：{description}")];
+            if let Some(project_id) = project_id {
+                evidence.push(format!("关联项目引用：{project_id}"));
+            }
+            evidence
+        }
+        Action::TaskDelete { task_id } => vec![format!("删除任务引用：{task_id}")],
+        Action::TaskSelect { task_id } => vec![format!("选中任务引用：{task_id}")],
+        Action::ResolveTelegramChat {
+            chat_id,
+            resolution,
+        } => {
+            let mut evidence = vec![format!("处理 Telegram 会话：{chat_id}")];
+            match resolution {
+                TelegramResolution::ReplyOnly { reply }
+                | TelegramResolution::AskClarification { reply }
+                | TelegramResolution::Decline { reply } => {
+                    evidence.push(format!("回复内容：{reply}"));
+                }
+                TelegramResolution::AcceptAsProject {
+                    reply,
+                    project_title,
+                    success_criteria,
+                    first_next_action,
+                } => {
+                    evidence.push(format!("项目标题：{project_title}"));
+                    evidence.push(format!("成功标准：{success_criteria}"));
+                    if let Some(reply) = reply {
+                        evidence.push(format!("回复内容：{reply}"));
+                    }
+                    if let Some(first_next_action) = first_next_action {
+                        evidence.push(format!("首个下一步动作：{first_next_action}"));
+                    }
+                }
+                TelegramResolution::NoReplyNeeded => {}
+            }
+            evidence
+        }
+        Action::ObligationSatisfy { obligation_id } => {
+            vec![format!("完成义务引用：{obligation_id}")]
+        }
+        Action::CommitToProject {
+            obligation_id,
+            title,
+            success_criteria,
+            initial_next_action,
+            acknowledgment,
+        } => {
+            let mut evidence = vec![
+                format!("承诺义务引用：{obligation_id}"),
+                format!("项目标题：{title}"),
+                format!("成功标准：{success_criteria}"),
+            ];
+            if let Some(initial_next_action) = initial_next_action {
+                evidence.push(format!("初始下一步动作：{initial_next_action}"));
+            }
+            if let Some(acknowledgment) = acknowledgment {
+                evidence.push(format!("承诺回复：{acknowledgment}"));
+            }
+            evidence
+        }
+        Action::ProjectComplete {
+            project_id,
+            summary,
+        } => {
+            vec![
+                format!("完成项目引用：{project_id}"),
+                format!("完成总结：{summary}"),
+            ]
+        }
+        Action::FocusDevice { device } => vec![format!("切换前景设备：{device}")],
+        Action::PutAwayDevice => vec!["收起当前前景设备".to_string()],
+        Action::DeviceAction { action } => match action {
+            crate::device::DeviceAction::TerminalInput { text } => {
+                vec![format!("终端实际输入：{}", text.trim_end())]
+            }
+            crate::device::DeviceAction::TelegramSelectChat { chat_id } => {
+                vec![format!("打开 Telegram 会话：{chat_id}")]
+            }
+            crate::device::DeviceAction::TelegramSendMessage { text } => {
+                vec![format!("实际发送消息：{text}")]
+            }
+        },
+        Action::Wait => vec!["本轮选择等待".to_string()],
+        Action::SilentWait => Vec::new(),
+    }
+}
+
+fn collect_contextual_memory_evidence(context: &Context, action: &Action) -> Vec<String> {
+    let include_selected_chat = matches!(
+        action,
+        Action::ResolveTelegramChat { .. }
+            | Action::FocusDevice {
+                device: DeviceId::Telegram
+            }
+            | Action::DeviceAction {
+                action: crate::device::DeviceAction::TelegramSelectChat { .. }
+            }
+            | Action::DeviceAction {
+                action: crate::device::DeviceAction::TelegramSendMessage { .. }
+            }
+            | Action::Wait
+            | Action::SilentWait
+            | Action::TaskAdd { .. }
+            | Action::TaskSelect { .. }
+    );
+
+    if include_selected_chat {
+        context.telegram.selected_chat_memory_evidence()
+    } else {
+        Vec::new()
+    }
+}
+
+async fn encode_memory_entry(
+    context: &Context,
+    snapshot: &Snapshot,
+    renderer: &OpenAIToolRenderer,
+    thread_focus: &str,
+    observation: &str,
+    action_description: &str,
+    evidence: &[String],
+) -> miette::Result<MemoryEncodingOutput> {
+    let program = MemoryEncodingProgram {
+        thread_focus: thread_focus.to_string(),
+        observation: observation.to_string(),
+        action_description: action_description.to_string(),
+        evidence: if evidence.is_empty() {
+            "无额外证据".to_string()
+        } else {
+            evidence.join("\n")
+        },
+    };
+    execute_program(context.llm.as_ref(), context, snapshot, renderer, &program).await
+}
+
+fn fallback_memory_encoding(
+    output: &crate::core::Output,
+    evidence: &[String],
+) -> MemoryEncodingOutput {
+    MemoryEncodingOutput {
+        thread_focus: output.current_doing.clone(),
+        event_summary: format!(
+            "观察与结论：{}\n采取动作：{}",
+            output.observation.trim(),
+            output.description.trim()
+        ),
+        anchors: evidence.to_vec(),
+        thread_effect: infer_memory_thread_effect(&output.observation, &output.description),
+    }
+}
+
+fn infer_memory_thread_effect(observation: &str, action_description: &str) -> String {
+    let text = format!("{observation}\n{action_description}");
+    if ["完成", "已完成", "结束", "成功标准已达到"]
+        .iter()
+        .any(|needle| text.contains(needle))
+    {
+        "completed".to_string()
+    } else if [
+        "失败", "404", "无法", "无效", "受阻", "报错", "中断", "卡住",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+    {
+        "blocked".to_string()
+    } else if ["补充说明", "澄清", "确认", "请确认", "请求提供"]
+        .iter()
+        .any(|needle| text.contains(needle))
+    {
+        "clarified".to_string()
+    } else if ["切换", "转到", "改为", "聚焦到"]
+        .iter()
+        .any(|needle| text.contains(needle))
+    {
+        "switched".to_string()
+    } else {
+        "continue".to_string()
+    }
 }
 
 async fn execute_action(context: &mut Context, action: Action) {

@@ -240,6 +240,44 @@ impl TelegramDeviceHandle {
         Ok(())
     }
 
+    pub fn selected_chat_memory_evidence(&self) -> Vec<String> {
+        let state = self.inner.state.lock();
+        let Some(selected_chat) = state.selected_chat.as_deref() else {
+            return Vec::new();
+        };
+        let Some(chat) = state.chats.get(selected_chat) else {
+            return Vec::new();
+        };
+
+        let mut evidence = vec![
+            format!("当前 Telegram 会话：{} ({})", chat.title, chat.id),
+            format!("会话待判断：{}", yes_no(chat.pending_resolution)),
+            format!("会话待回复：{}", yes_no(chat.needs_reply)),
+        ];
+
+        for message in chat
+            .messages
+            .iter()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            evidence.push(format!(
+                "会话消息 / {} / {}: {}",
+                match message.direction {
+                    MessageDirection::Incoming => "incoming",
+                    MessageDirection::Outgoing => "outgoing",
+                },
+                message.sender,
+                message.text
+            ));
+        }
+
+        evidence
+    }
+
     fn with_message_mut(
         &self,
         local_message_id: &str,

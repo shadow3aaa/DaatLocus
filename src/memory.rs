@@ -124,16 +124,65 @@ impl Memory {
 
     pub async fn record(
         &mut self,
-        current_doing: String,
+        thread_focus: String,
         observation: String,
         action_description: String,
+        evidence_lines: Vec<String>,
     ) {
-        let event_description = format!(
+        let event_summary = format!(
             "观察与结论：{}\n采取动作：{}",
             observation.trim(),
             action_description.trim()
         );
-        if let Some(l1_drop) = self.l1.update(current_doing, event_description) {
+        let anchor_source = if evidence_lines.is_empty() {
+            format!(
+                "{}\n{}\n{}",
+                thread_focus.trim(),
+                observation.trim(),
+                action_description.trim()
+            )
+        } else {
+            format!(
+                "{}\n{}\n{}\n{}",
+                thread_focus.trim(),
+                observation.trim(),
+                action_description.trim(),
+                evidence_lines.join("\n")
+            )
+        };
+        let anchors = extract_memory_anchors(&anchor_source);
+        let thread_effect = infer_thread_effect(&observation, &action_description);
+        self.ingest_l1_item(thread_focus, event_summary, anchors, thread_effect)
+            .await;
+    }
+
+    pub async fn record_encoded(
+        &mut self,
+        thread_focus: String,
+        event_summary: String,
+        anchors: Vec<String>,
+        thread_effect: String,
+    ) {
+        let anchors = anchors
+            .into_iter()
+            .filter_map(|anchor| parse_memory_anchor(anchor))
+            .collect::<Vec<_>>();
+        let thread_effect = parse_thread_effect(&thread_effect);
+        self.ingest_l1_item(thread_focus, event_summary, anchors, thread_effect)
+            .await;
+    }
+
+    async fn ingest_l1_item(
+        &mut self,
+        thread_focus: String,
+        event_summary: String,
+        anchors: Vec<MemoryAnchor>,
+        thread_effect: L1ThreadEffect,
+    ) {
+        if let Some(l1_drop) = self
+            .l1
+            .update(thread_focus, event_summary, anchors, thread_effect)
+        {
             let mut sandwich_payload = String::new();
             // 之前在做什么，最多取2条
             if !self.last_2_l1drop.is_empty() {
@@ -178,8 +227,8 @@ impl Memory {
         self.l3.upsert(&mut self.embeder, drafts);
     }
 
-    pub fn current_doing(&self) -> Option<String> {
-        self.l1.trail.back().map(|item| item.current_doing.clone())
+    pub fn current_thread_focus(&self) -> Option<String> {
+        self.l1.trail.back().map(|item| item.thread_focus.clone())
     }
 
     pub fn trail(&self) -> Vec<String> {
@@ -187,7 +236,7 @@ impl Memory {
             .trail
             .clone()
             .into_iter()
-            .map(|item| item.description)
+            .map(|item| item.render_event())
             .collect()
     }
 
@@ -204,17 +253,81 @@ pub struct L1Memory {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct L1Item {
-    current_doing: String,
-    description: String,
+    thread_focus: String,
+    event_summary: String,
+    anchors: Vec<MemoryAnchor>,
+    thread_effect: L1ThreadEffect,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct MemoryAnchor {
+    kind: MemoryAnchorKind,
+    value: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+enum MemoryAnchorKind {
+    Url,
+    FileName,
+    Uuid,
+    Command,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+enum L1ThreadEffect {
+    #[default]
+    Continue,
+    Blocked,
+    Clarified,
+    Switched,
+    Completed,
 }
 
 impl Display for L1Item {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "在【{}】时，发生：【{}】",
-            self.current_doing, self.description
-        )
+        write!(f, "{}", self.render_for_memory())
+    }
+}
+
+impl Display for L1ThreadEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Continue => write!(f, "继续"),
+            Self::Blocked => write!(f, "受阻"),
+            Self::Clarified => write!(f, "澄清"),
+            Self::Switched => write!(f, "切换"),
+            Self::Completed => write!(f, "完成"),
+        }
+    }
+}
+
+impl L1Item {
+    fn render_for_memory(&self) -> String {
+        let mut rendered = format!(
+            "主线：【{}】\n本轮事件：【{}】\n对主线影响：【{}】",
+            self.thread_focus, self.event_summary, self.thread_effect
+        );
+        if !self.anchors.is_empty() {
+            rendered.push_str("\n关键锚点：");
+            for anchor in &self.anchors {
+                rendered.push_str(&format!("\n- {:?}: {}", anchor.kind, anchor.value));
+            }
+        }
+        rendered
+    }
+
+    fn render_event(&self) -> String {
+        let mut rendered = format!("{}\n主线影响：{}", self.event_summary, self.thread_effect);
+        if !self.anchors.is_empty() {
+            let anchors = self
+                .anchors
+                .iter()
+                .map(|anchor| anchor.value.clone())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            rendered.push_str(&format!("\n关键锚点：{anchors}"));
+        }
+        rendered
     }
 }
 
@@ -231,10 +344,18 @@ impl L1Memory {
             .unwrap_or_else(|| Self::default())
     }
 
-    fn update(&mut self, current_doing: String, action_description: String) -> Option<L1Item> {
+    fn update(
+        &mut self,
+        thread_focus: String,
+        event_summary: String,
+        anchors: Vec<MemoryAnchor>,
+        thread_effect: L1ThreadEffect,
+    ) -> Option<L1Item> {
         let item = L1Item {
-            current_doing: current_doing.clone(),
-            description: action_description.clone(),
+            thread_focus,
+            event_summary,
+            anchors,
+            thread_effect,
         };
         self.trail.push_back(item);
         if self.trail.len() >= Self::MAX_CAPACITY {
@@ -313,8 +434,9 @@ impl L2Memory {
 
         let id_col = StringArray::from(vec![id]);
         let ts_col = Int64Array::from(vec![timestamp]);
-        let doing_col = StringArray::from(vec![l1_drop.current_doing]);
-        let desc_col = StringArray::from(vec![l1_drop.description]);
+        let event_render = l1_drop.render_event();
+        let doing_col = StringArray::from(vec![l1_drop.thread_focus]);
+        let desc_col = StringArray::from(vec![event_render]);
         let sandwich_col = StringArray::from(vec![sandwich_payload]);
 
         // 向量列比较特殊：它是一个 512 维的 FixedSizeList
@@ -471,4 +593,155 @@ fn max_stability(current: &L3EntryStability, incoming: &L3EntryStability) -> L3E
         (Stable, _) | (_, Stable) => Stable,
         _ => Tentative,
     }
+}
+
+fn infer_thread_effect(observation: &str, action_description: &str) -> L1ThreadEffect {
+    let text = format!("{observation}\n{action_description}");
+    if contains_any(&text, &["完成", "已完成", "结束", "成功标准已达到"]) {
+        L1ThreadEffect::Completed
+    } else if contains_any(
+        &text,
+        &[
+            "失败", "404", "无法", "无效", "受阻", "报错", "中断", "卡住",
+        ],
+    ) {
+        L1ThreadEffect::Blocked
+    } else if contains_any(&text, &["补充说明", "澄清", "确认", "请确认", "请求提供"])
+    {
+        L1ThreadEffect::Clarified
+    } else if contains_any(&text, &["切换", "转到", "改为", "聚焦到"]) {
+        L1ThreadEffect::Switched
+    } else {
+        L1ThreadEffect::Continue
+    }
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn extract_memory_anchors(text: &str) -> Vec<MemoryAnchor> {
+    let mut anchors = Vec::new();
+
+    for token in text.split_whitespace() {
+        let cleaned = token
+            .trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '。' | '，'
+                        | ','
+                        | ';'
+                        | '；'
+                        | ')'
+                        | '('
+                        | ']'
+                        | '['
+                        | '"'
+                        | '\''
+                        | '：'
+                        | ':'
+                )
+            })
+            .to_string();
+        if cleaned.is_empty() {
+            continue;
+        }
+
+        if (cleaned.starts_with("http://") || cleaned.starts_with("https://"))
+            && !anchors
+                .iter()
+                .any(|anchor: &MemoryAnchor| anchor.value == cleaned)
+        {
+            anchors.push(MemoryAnchor {
+                kind: MemoryAnchorKind::Url,
+                value: cleaned,
+            });
+            continue;
+        }
+
+        if Uuid::parse_str(&cleaned).is_ok()
+            && !anchors
+                .iter()
+                .any(|anchor: &MemoryAnchor| anchor.value == cleaned)
+        {
+            anchors.push(MemoryAnchor {
+                kind: MemoryAnchorKind::Uuid,
+                value: cleaned,
+            });
+            continue;
+        }
+
+        let lower = cleaned.to_ascii_lowercase();
+        if [
+            ".zip", ".tar", ".tgz", ".gz", ".rar", ".7z", ".apk", ".so", ".dll",
+        ]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+            && !anchors
+                .iter()
+                .any(|anchor: &MemoryAnchor| anchor.value == cleaned)
+        {
+            anchors.push(MemoryAnchor {
+                kind: MemoryAnchorKind::FileName,
+                value: cleaned,
+            });
+        }
+    }
+
+    if let Some(command_line) = text
+        .lines()
+        .find(|line| line.contains("TerminalInput") || line.contains("终端实际输入："))
+        .map(|line| line.trim().to_string())
+    {
+        anchors.push(MemoryAnchor {
+            kind: MemoryAnchorKind::Command,
+            value: command_line,
+        });
+    }
+
+    anchors
+}
+
+fn parse_thread_effect(value: &str) -> L1ThreadEffect {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "blocked" => L1ThreadEffect::Blocked,
+        "clarified" => L1ThreadEffect::Clarified,
+        "switched" => L1ThreadEffect::Switched,
+        "completed" => L1ThreadEffect::Completed,
+        _ => L1ThreadEffect::Continue,
+    }
+}
+
+fn parse_memory_anchor(value: String) -> Option<MemoryAnchor> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let kind = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        MemoryAnchorKind::Url
+    } else if Uuid::parse_str(&trimmed).is_ok() {
+        MemoryAnchorKind::Uuid
+    } else if [
+        ".zip", ".tar", ".tgz", ".gz", ".rar", ".7z", ".apk", ".so", ".dll",
+    ]
+    .iter()
+    .any(|suffix| lower.ends_with(suffix))
+    {
+        MemoryAnchorKind::FileName
+    } else if trimmed.contains("TerminalInput")
+        || trimmed.contains("终端实际输入")
+        || trimmed.contains("wget ")
+        || trimmed.contains("curl ")
+        || trimmed.contains("git ")
+        || trimmed.contains("cargo ")
+    {
+        MemoryAnchorKind::Command
+    } else {
+        MemoryAnchorKind::Command
+    };
+    Some(MemoryAnchor {
+        kind,
+        value: trimmed,
+    })
 }

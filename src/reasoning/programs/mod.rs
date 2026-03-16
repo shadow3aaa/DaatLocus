@@ -1,4 +1,5 @@
 pub mod action_phase;
+pub mod memory_encoding;
 pub mod pairwise_judge;
 pub mod resolve_telegram;
 pub mod sleep_artifact_builder;

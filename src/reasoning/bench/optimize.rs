@@ -4,7 +4,8 @@ use sha2::{Digest, Sha256};
 
 use super::programs::{
     continuity_guard::ContinuityGuardProgram, interactive_cli_policy::InteractiveCliPolicyProgram,
-    memory_recall::MemoryRecallProgram, terminal_completion::TerminalCompletionProgram,
+    memory_encoding::MemoryEncodingProgram, memory_recall::MemoryRecallProgram,
+    terminal_completion::TerminalCompletionProgram,
 };
 use crate::{
     config::Config,
@@ -38,6 +39,18 @@ const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_bench_optimize_memory(context: &Context) -> Result<Vec<OptimizationResult>> {
     let compiled = ensure_bench_memory_compiled(context).await?;
+    Ok(vec![OptimizationResult {
+        suite: compiled.suite,
+        best_candidate: compiled.best_candidate,
+        score: compiled.score,
+        total_cases: compiled.total_cases,
+    }])
+}
+
+pub async fn run_bench_optimize_memory_encoding(
+    context: &Context,
+) -> Result<Vec<OptimizationResult>> {
+    let compiled = ensure_bench_memory_encoding_compiled(context).await?;
     Ok(vec![OptimizationResult {
         suite: compiled.suite,
         best_candidate: compiled.best_candidate,
@@ -85,6 +98,15 @@ pub async fn load_or_compile_bench_memory_tuning(
 ) -> Result<PromptTuningConfig<crate::reasoning::bench::programs::memory_recall::MemoryRecallOutput>>
 {
     let compiled = ensure_bench_memory_compiled(context).await?;
+    compiled.tuning.to_typed()
+}
+
+pub async fn load_or_compile_bench_memory_encoding_tuning(
+    context: &Context,
+) -> Result<
+    PromptTuningConfig<crate::reasoning::bench::programs::memory_encoding::MemoryEncodingOutput>,
+> {
+    let compiled = ensure_bench_memory_encoding_compiled(context).await?;
     compiled.tuning.to_typed()
 }
 
@@ -188,6 +210,85 @@ async fn ensure_bench_memory_compiled(context: &Context) -> Result<CompiledProgr
             instruction: "如果你已经选中了事件性记忆(T*)，还要补上支撑它的联想回忆(M*)，尤其是能解释后续推进路径的那条。",
             bootstrap_case_name: Some("remember_blocker_not_idle_waits"),
             bootstrap_examples: datasets::memory_recall::bootstrap_examples,
+        },
+    ];
+    candidates.extend(propose_candidates(
+        &base,
+        &baseline_results,
+        &proposal_specs,
+    ));
+    ensure_suite_compiled(
+        context,
+        &renderer,
+        &program,
+        program.suite_name(),
+        dev_cases,
+        candidates,
+    )
+    .await
+}
+
+async fn ensure_bench_memory_encoding_compiled(context: &Context) -> Result<CompiledProgram> {
+    let renderer = OpenAIToolRenderer;
+    let program = MemoryEncodingProgram;
+    let base = program.default_tuning();
+    let train_cases = program.train_eval_cases();
+    let dev_cases = program.dev_eval_cases();
+    let baseline_results = run_suite_with_tuning(
+        context,
+        &renderer,
+        &program,
+        program.suite_name(),
+        clone_eval_cases(&train_cases),
+        &base,
+        TraceOrigin::BenchCompile,
+    )
+    .await;
+    let mut candidates = vec![
+        CandidateConfig {
+            name: "baseline".to_string(),
+            config: base.clone(),
+        },
+        CandidateConfig {
+            name: "minimal_examples".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: base.extra_instructions.clone(),
+                examples: base.examples.iter().take(1).cloned().collect(),
+            },
+        },
+        CandidateConfig {
+            name: "anchor_first_bias".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: vec![
+                    "先保住 URL、文件名、命令和对象引用这些关键锚点，再组织摘要。".to_string(),
+                ],
+                examples: base.examples.clone(),
+            },
+        },
+        CandidateConfig {
+            name: "thread_split_bias".to_string(),
+            config: PromptTuningConfig {
+                extra_instructions: vec![
+                    "把持续主线和本轮事件明确拆开：thread_focus 负责连续目标，event_summary 只写本轮新增事实。".to_string(),
+                ],
+                examples: base.examples.clone(),
+            },
+        },
+    ];
+    let proposal_specs = [
+        ProposalSpec {
+            candidate_name: "auto_anchor_bias",
+            when: memory_encoding_anchor_failure,
+            instruction: "如果输入里有 URL、文件名、命令或对象引用，这些字面锚点必须进入 anchors，不要只保留抽象结论。",
+            bootstrap_case_name: None,
+            bootstrap_examples: datasets::memory_encoding::bootstrap_examples,
+        },
+        ProposalSpec {
+            candidate_name: "auto_thread_effect_bias",
+            when: memory_encoding_effect_failure,
+            instruction: "thread_effect 要反映这轮事件对主线的真实影响；链接失效和报错通常是 blocked，进入交互式界面后主动退出更像 switched。",
+            bootstrap_case_name: None,
+            bootstrap_examples: datasets::memory_encoding::bootstrap_examples,
         },
     ];
     candidates.extend(propose_candidates(
@@ -778,6 +879,14 @@ fn terminal_completion_interactive_failure(
     result: &crate::reasoning::eval::EvalCaseResult,
 ) -> bool {
     !result.passed && result.case_name.contains("interactive")
+}
+
+fn memory_encoding_anchor_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed && result.detail.contains("expected anchors")
+}
+
+fn memory_encoding_effect_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
+    !result.passed && result.detail.contains("expected thread_effect")
 }
 
 fn interactive_cli_interrupt_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {
