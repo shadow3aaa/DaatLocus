@@ -869,17 +869,17 @@ async fn run_train_source_learn(
     }
     let batch_size = batch_size.max(1);
     let session_root = prepare_learning_session_root(path).await?;
-    let shared_home = session_root.join("spinova_home");
-    let home_override = SpinovaHomeOverride::set(shared_home.clone());
+    let shared_learning_home = get_spinova_home().await;
     let mut state = TrainSourceLearnState::new(path.to_string(), tasks.len(), batch_size);
     save_train_source_learn_state(&session_root, &state).await?;
 
     println!(
-        "train source learn: path={} total_tasks={} batch_size={} session={}",
+        "train source learn: path={} total_tasks={} batch_size={} session={} learning_home={}",
         path,
         tasks.len(),
         batch_size,
-        session_root.display()
+        session_root.display(),
+        shared_learning_home.display()
     );
 
     let mut cursor = 0usize;
@@ -917,6 +917,7 @@ async fn run_train_source_learn(
                 task,
                 compiled_prompts.clone(),
                 &episode_root,
+                true,
             )
             .await?;
 
@@ -981,7 +982,6 @@ async fn run_train_source_learn(
     }
 
     print_train_source_learn_summary(&session_root, &state);
-    drop(home_override);
     Ok(())
 }
 
@@ -1360,6 +1360,7 @@ async fn run_train_source_variant(
                 task,
                 variant.compiled_prompts.clone(),
                 &episode_root,
+                false,
             )
             .await?,
         );
@@ -1372,14 +1373,20 @@ async fn execute_train_source_task(
     task: &EpisodeTask,
     compiled_prompts: CompiledPromptStore,
     episode_root: &Path,
+    use_shared_learning_home: bool,
 ) -> Result<EpisodeOutcome> {
     let episode_home = episode_root.join("spinova_home");
     let workspace_dir = episode_root.join("workspace");
-    let home_override = SpinovaHomeOverride::set(episode_home);
+    let home_override = (!use_shared_learning_home).then(|| SpinovaHomeOverride::set(episode_home));
     println!(
-        "        episode setup: id={} workspace={}",
+        "        episode setup: id={} workspace={} home_mode={}",
         task.id,
-        workspace_dir.display()
+        workspace_dir.display(),
+        if use_shared_learning_home {
+            "shared"
+        } else {
+            "isolated"
+        }
     );
     provision_episode_workspace(task, &workspace_dir).await?;
 
