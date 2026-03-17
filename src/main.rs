@@ -888,19 +888,22 @@ async fn run_train_source_learn(
         let batch_end = (cursor + batch_size).min(tasks.len());
         let batch_tasks = &tasks[cursor..batch_end];
         println!(
-            "  batch {} preview starting (tasks {}..{}, count={})",
+            "  batch {} running (tasks {}..{}, count={})",
             batch_index + 1,
             cursor + 1,
             batch_end,
             batch_tasks.len()
         );
-        let selection =
-            select_train_source_variant_for_batch(&config, batch_tasks, &session_root, batch_index)
-                .await?;
+        let compiled_prompts = load_compiled_prompts_only().await?;
+        let active_variant = if compiled_prompts.is_empty() {
+            "baseline".to_string()
+        } else {
+            "compiled".to_string()
+        };
         println!(
-            "  batch {} selected_variant={} (tasks {}..{})",
+            "  batch {} active_variant={} (tasks {}..{})",
             batch_index + 1,
-            selection.variant.variant_name(),
+            active_variant,
             cursor + 1,
             batch_end
         );
@@ -912,7 +915,7 @@ async fn run_train_source_learn(
             let outcome = execute_train_source_task(
                 &config,
                 task,
-                selection.variant.compiled_prompts.clone(),
+                compiled_prompts.clone(),
                 &episode_root,
             )
             .await?;
@@ -946,12 +949,7 @@ async fn run_train_source_learn(
         state.last_compiled_prompt_count = load_compiled_prompts_only().await?.len();
         state.batch_reports.push(TrainSourceLearnBatchReport {
             completed_tasks: state.completed_tasks,
-            selected_variant: selection.variant.variant_name().to_string(),
-            selection_scores: selection
-                .all_summaries
-                .iter()
-                .map(TrainSourceLearnVariantScore::from_summary)
-                .collect(),
+            active_variant,
             sleep_failure_patterns: sleep_summary.failure_patterns.len(),
             sleep_bootstrap_demos: sleep_summary.bootstrap_demos,
             sleep_stress_cases: sleep_summary.stress_cases,
@@ -963,9 +961,13 @@ async fn run_train_source_learn(
         save_train_source_learn_state(&session_root, &state).await?;
 
         println!(
-            "  batch update: completed={} selected_variant={} sleep_patterns={} demos={} stress={} instructions={} l3={} compiled_suites={}",
+            "  batch update: completed={} active_variant={} sleep_patterns={} demos={} stress={} instructions={} l3={} compiled_suites={}",
             state.completed_tasks,
-            selection.variant.variant_name(),
+            state
+                .batch_reports
+                .last()
+                .map(|report| report.active_variant.as_str())
+                .unwrap_or("baseline"),
             sleep_summary.failure_patterns.len(),
             sleep_summary.bootstrap_demos,
             sleep_summary.stress_cases,
@@ -1342,71 +1344,6 @@ fn compiled_store_with_suite_override(
     CompiledPromptStore::from_entries(entries)
 }
 
-async fn select_train_source_variant_for_batch(
-    config: &crate::config::Config,
-    tasks: &[EpisodeTask],
-    session_root: &Path,
-    batch_index: usize,
-) -> Result<SelectedTrainSourceVariant> {
-    let variants = build_train_source_policy_variants().await?;
-    let mut all_summaries = Vec::new();
-
-    for variant in variants {
-        println!(
-            "    preview variant={} batch={} tasks={}",
-            variant.variant_name(),
-            batch_index + 1,
-            tasks.len()
-        );
-        let mut outcomes = Vec::new();
-        for (task_index, task) in tasks.iter().enumerate() {
-            println!(
-                "      preview task {}/{} id={}",
-                task_index + 1,
-                tasks.len(),
-                task.id
-            );
-            let preview_root = prepare_learning_selection_episode_root(
-                session_root,
-                batch_index,
-                variant.variant_name(),
-                task,
-                task_index,
-            )
-            .await?;
-            let preview_outcome = execute_train_source_task(
-                config,
-                task,
-                variant.compiled_prompts.clone(),
-                &preview_root,
-            )
-            .await?;
-            outcomes.push(preview_outcome);
-        }
-        all_summaries.push(TrainSourceVariantSummary {
-            variant_name: variant.variant_name().to_string(),
-            outcomes,
-        });
-    }
-
-    let selected_name = all_summaries
-        .iter()
-        .max_by(|left, right| compare_variant_summaries(left, right))
-        .map(|summary| summary.variant_name.clone())
-        .ok_or_else(|| miette!("no policy variants available for batch selection"))?;
-
-    let selected_variant = build_train_source_policy_variants()
-        .await?
-        .into_iter()
-        .find(|variant| variant.variant_name() == selected_name)
-        .ok_or_else(|| miette!("selected variant `{selected_name}` missing after rebuild"))?;
-
-    Ok(SelectedTrainSourceVariant {
-        variant: selected_variant,
-        all_summaries,
-    })
-}
-
 async fn run_train_source_variant(
     config: &crate::config::Config,
     tasks: &[EpisodeTask],
@@ -1595,7 +1532,6 @@ async fn rollout_runtime_policy_episode(
     workspace_dir: &Path,
 ) -> Result<EpisodeOutcome> {
     let renderer = OpenAIToolRenderer;
-    let runtime_policy = RuntimePolicyProgram;
     let mut steps = Vec::new();
     let task_understanding = understand_episode_task(context, &task, &renderer).await?;
     task.task_goal = Some(task_understanding.task_goal.clone());
@@ -1625,11 +1561,9 @@ async fn rollout_runtime_policy_episode(
     let mut work_phase = "investigate".to_string();
 
     for index in 0..task.max_steps {
-        let snapshot = Snapshot::new(context).await;
-        let outcome = runtime_policy
-            .run_once(context, &snapshot, &renderer, &work_phase)
-            .await;
-        let output = outcome.output;
+        context.tasks.set_working_task_phase(work_phase.clone());
+        let step_execution = execute_runtime_policy_step(context, &renderer).await;
+        let output = step_execution.output;
         let effect = output.effect.clone();
         let should_stop = matches!(effect, Effect::Wait | Effect::SilentWait)
             && steps.last().is_some_and(|previous: &EpisodeStep| {
@@ -1647,7 +1581,7 @@ async fn rollout_runtime_policy_episode(
             context,
             &task,
             &steps,
-            &snapshot.to_string(),
+            &step_execution.snapshot_text,
             &renderer,
         )
         .await?;
@@ -1663,14 +1597,9 @@ async fn rollout_runtime_policy_episode(
             module: "runtime_policy".to_string(),
             effect: effect.clone(),
             observation_summary: output.observation,
-            snapshot_text: snapshot.to_string(),
+            snapshot_text: step_execution.snapshot_text,
             metadata,
         });
-
-        apply_effect(context, effect).await;
-        if outcome.touched_working_task {
-            context.tasks.touch_working_task();
-        }
 
         work_phase = next_work_phase;
         context.tasks.set_working_task_phase(work_phase.clone());
@@ -2107,11 +2036,6 @@ impl TrainSourcePolicyVariant {
     }
 }
 
-struct SelectedTrainSourceVariant {
-    variant: TrainSourcePolicyVariant,
-    all_summaries: Vec<TrainSourceVariantSummary>,
-}
-
 #[derive(Clone)]
 struct TrainSourceVariantSummary {
     variant_name: String,
@@ -2177,8 +2101,7 @@ impl TrainSourceLearnOutcomeSummary {
 #[derive(serde::Serialize)]
 struct TrainSourceLearnBatchReport {
     completed_tasks: usize,
-    selected_variant: String,
-    selection_scores: Vec<TrainSourceLearnVariantScore>,
+    active_variant: String,
     sleep_failure_patterns: usize,
     sleep_bootstrap_demos: usize,
     sleep_stress_cases: usize,
@@ -2186,45 +2109,6 @@ struct TrainSourceLearnBatchReport {
     promoted_l3_entries: usize,
     compiled_prompt_count: usize,
     optimized_suites: usize,
-}
-
-#[derive(serde::Serialize)]
-struct TrainSourceLearnVariantScore {
-    variant_name: String,
-    succeeded: usize,
-    failed: usize,
-    avg_score: f32,
-}
-
-impl TrainSourceLearnVariantScore {
-    fn from_summary(summary: &TrainSourceVariantSummary) -> Self {
-        let succeeded = summary
-            .outcomes
-            .iter()
-            .filter(|outcome| outcome.status == EpisodeStatus::Succeeded)
-            .count();
-        let failed = summary
-            .outcomes
-            .iter()
-            .filter(|outcome| outcome.status == EpisodeStatus::Failed)
-            .count();
-        let avg_score = if summary.outcomes.is_empty() {
-            0.0
-        } else {
-            summary
-                .outcomes
-                .iter()
-                .map(|outcome| outcome.metric.score)
-                .sum::<f32>()
-                / summary.outcomes.len() as f32
-        };
-        Self {
-            variant_name: summary.variant_name.clone(),
-            succeeded,
-            failed,
-            avg_score,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -2380,29 +2264,6 @@ async fn prepare_learning_episode_root(
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|err| miette!("failed to create learn episode root {}: {err}", root.display()))?;
-    Ok(root)
-}
-
-async fn prepare_learning_selection_episode_root(
-    session_root: &Path,
-    batch_index: usize,
-    variant_name: &str,
-    task: &EpisodeTask,
-    task_index: usize,
-) -> Result<PathBuf> {
-    let root = session_root
-        .join("selection")
-        .join(format!("batch-{:04}", batch_index))
-        .join(slugify(variant_name))
-        .join(format!("{:04}-{}", task_index, slugify(&task.id)));
-    if root.exists() {
-        tokio::fs::remove_dir_all(&root)
-            .await
-            .map_err(|err| miette!("failed to clear selection episode root {}: {err}", root.display()))?;
-    }
-    tokio::fs::create_dir_all(&root)
-        .await
-        .map_err(|err| miette!("failed to create selection episode root {}: {err}", root.display()))?;
     Ok(root)
 }
 
@@ -2565,6 +2426,62 @@ async fn enter_episode_workspace(context: &mut Context, workspace_dir: &Path) ->
     Ok(())
 }
 
+struct RuntimePolicyStepExecution {
+    output: Output,
+    snapshot_text: String,
+}
+
+async fn execute_runtime_policy_step(
+    context: &mut Context,
+    renderer: &OpenAIToolRenderer,
+) -> RuntimePolicyStepExecution {
+    let snapshot = Snapshot::new(context).await;
+    let snapshot_text = snapshot.to_string();
+    let runtime_policy = RuntimePolicyProgram;
+    let work_phase = context
+        .tasks
+        .working_task_phase()
+        .unwrap_or("investigate")
+        .to_string();
+    let outcome = runtime_policy
+        .run_once(context, &snapshot, renderer, &work_phase)
+        .await;
+    let output = outcome.output;
+    if should_record_effect(&output.effect) {
+        let mut evidence = collect_memory_evidence(&output.effect);
+        evidence.extend(collect_contextual_memory_evidence(context, &output.effect));
+        let memory_entry = encode_memory_entry(
+            context,
+            &snapshot,
+            renderer,
+            &output.current_doing,
+            &output.observation,
+            &output.description,
+            &evidence,
+        )
+        .await
+        .unwrap_or_else(|_| fallback_memory_encoding(&output, &evidence));
+        context
+            .memory
+            .record_encoded(
+                memory_entry.thread_focus,
+                memory_entry.event_summary,
+                memory_entry.anchors,
+                memory_entry.thread_effect,
+            )
+            .await;
+    }
+    let effect = output.effect.clone();
+    apply_effect(context, effect).await;
+    if outcome.touched_working_task {
+        context.tasks.touch_working_task();
+    }
+    RuntimePolicyStepExecution {
+        output,
+        snapshot_text,
+    }
+}
+
 fn slugify(value: &str) -> String {
     let mut slug = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -2583,46 +2500,8 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
         .devices
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
         .await;
-    let snapshot = Snapshot::new(context).await;
     let renderer = OpenAIToolRenderer;
-    let runtime_policy = RuntimePolicyProgram;
-    let work_phase = context
-        .tasks
-        .working_task_phase()
-        .unwrap_or("investigate")
-        .to_string();
-    let outcome = runtime_policy
-        .run_once(context, &snapshot, &renderer, &work_phase)
-        .await;
-    let output = outcome.output;
-    if should_record_effect(&output.effect) {
-        let mut evidence = collect_memory_evidence(&output.effect);
-        evidence.extend(collect_contextual_memory_evidence(context, &output.effect));
-        let memory_entry = encode_memory_entry(
-            context,
-            &snapshot,
-            &renderer,
-            &output.current_doing,
-            &output.observation,
-            &output.description,
-            &evidence,
-        )
-        .await
-        .unwrap_or_else(|_| fallback_memory_encoding(&output, &evidence));
-        context
-            .memory
-            .record_encoded(
-                memory_entry.thread_focus,
-                memory_entry.event_summary,
-                memory_entry.anchors,
-                memory_entry.thread_effect,
-            )
-            .await;
-    }
-    apply_effect(context, output.effect).await;
-    if outcome.touched_working_task {
-        context.tasks.touch_working_task();
-    }
+    let _step = execute_runtime_policy_step(context, &renderer).await;
     sync_dashboard_state(context, tx, Some(cycle_started_at.elapsed().as_millis()));
 }
 
