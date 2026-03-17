@@ -22,6 +22,10 @@ pub struct Task {
     #[serde(default)]
     pub work_phase: Option<String>,
     #[serde(default)]
+    pub key_anchors: Vec<String>,
+    #[serde(default)]
+    pub investigation_plan: Vec<String>,
+    #[serde(default)]
     pub last_touched_at_ms: Option<i64>,
 }
 
@@ -57,6 +61,8 @@ impl Tasks {
                 description,
                 project_id,
                 work_phase: None,
+                key_anchors: Vec::new(),
+                investigation_plan: Vec::new(),
                 last_touched_at_ms: None,
             },
         );
@@ -131,6 +137,29 @@ impl Tasks {
         task.work_phase = Some(work_phase.into());
         self.touch_task(id);
         true
+    }
+
+    pub fn set_working_task_guidance(
+        &mut self,
+        key_anchors: Vec<String>,
+        investigation_plan: Vec<String>,
+    ) -> bool {
+        let Some(id) = self.working_task else {
+            return false;
+        };
+        let Some(task) = self.tasks.get_mut(&id) else {
+            return false;
+        };
+        task.key_anchors = key_anchors;
+        task.investigation_plan = investigation_plan;
+        self.touch_task(id);
+        true
+    }
+
+    pub fn working_task_guidance(&self) -> Option<(Vec<String>, Vec<String>)> {
+        self.working_task
+            .and_then(|id| self.tasks.get(&id))
+            .map(|task| (task.key_anchors.clone(), task.investigation_plan.clone()))
     }
 
     pub fn touch_working_task(&mut self) {

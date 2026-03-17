@@ -20,6 +20,8 @@ pub struct CompletionJudgeOutput {
 pub struct CompletionJudgeProgram {
     pub task_goal: String,
     pub done_criteria: Vec<String>,
+    pub key_anchors: Vec<String>,
+    pub investigation_plan: Vec<String>,
     pub recent_steps: Vec<String>,
     pub current_terminal: String,
     pub validation_summary: String,
@@ -40,6 +42,8 @@ impl Program for CompletionJudgeProgram {
         Signature::new("判断训练任务当前所处的完成阶段。")
             .input("任务目标", "压缩后的任务目标。")
             .input("完成标准", "done criteria。")
+            .input("关键锚点", "已知的路径、函数、参数、报错、协议等关键信号。")
+            .input("调查计划", "优先调查步骤。")
             .input("最近步骤", "最近几步做了什么。")
             .input("当前终端状态", "终端当前显示与最近观察。")
             .input("验证摘要", "已有 validation 结果；若没有则写 none。")
@@ -55,9 +59,16 @@ impl Program for CompletionJudgeProgram {
         let mut ir = PromptIR::with_system(SYSTEM_PROMPT);
         ir.push_instruction("保守判断，不要因为看到了可疑代码就直接判 finish。");
         ir.push_instruction("使用通用工作阶段，不要输出领域专用术语。investigate 表示继续调查，change 表示开始做实质修改，verify 表示应进入验证，finish 表示可以收尾。");
-        ir.push_instruction("如果最近步骤只是重复阅读/grep，应优先判断是否已到 change。");
+        ir.push_instruction("如果最近步骤已经定位到明确文件、函数、参数逻辑，且后续只是在同一片区域重复 grep/head/cat，应优先判为 change，而不是继续 investigate。");
+        ir.push_instruction("done criteria 用于判断 finish，不应用来阻止进入 change。只要修改点和修改条件已经足够清楚，即可进入 change。");
         ir.push_section("任务目标", self.task_goal.clone());
         ir.push_section("完成标准", self.done_criteria.join("\n"));
+        if !self.key_anchors.is_empty() {
+            ir.push_section("关键锚点", self.key_anchors.join("\n"));
+        }
+        if !self.investigation_plan.is_empty() {
+            ir.push_section("调查计划", self.investigation_plan.join("\n"));
+        }
         ir.push_section("最近步骤", self.recent_steps.join("\n"));
         ir.push_section("当前终端状态", self.current_terminal.clone());
         ir.push_section("验证摘要", self.validation_summary.clone());

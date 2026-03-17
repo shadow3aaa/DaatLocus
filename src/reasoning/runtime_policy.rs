@@ -126,8 +126,12 @@ impl RuntimePolicyProgram {
         work_phase: &str,
     ) -> Output {
         if context.devices.focused() == Some(DeviceId::Terminal) {
+            let (key_anchors, investigation_plan) =
+                context.tasks.working_task_guidance().unwrap_or_default();
             let program = TerminalNextStepProgram {
                 work_phase: work_phase.to_string(),
+                key_anchors,
+                investigation_plan,
             };
             execute_program(context.llm.as_ref(), context, snapshot, renderer, &program)
                 .await

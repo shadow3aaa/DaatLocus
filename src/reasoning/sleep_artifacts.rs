@@ -145,53 +145,6 @@ impl SleepArtifactsStore {
         })
     }
 
-    pub async fn save_failure_pattern(
-        &self,
-        artifact: &SleepArtifactFailurePattern,
-    ) -> Result<PathBuf> {
-        save_artifact(
-            &self.root.join(FAILURE_PATTERNS_DIR),
-            &artifact.pattern_id,
-            artifact,
-        )
-        .await
-    }
-
-    pub async fn save_bootstrap_demo(
-        &self,
-        artifact: &SleepArtifactBootstrapDemo,
-    ) -> Result<PathBuf> {
-        let slug = slugify(&artifact.title);
-        save_artifact(
-            &self.root.join(BOOTSTRAP_DEMOS_DIR),
-            &format!("{}-{}", artifact.suite, slug),
-            artifact,
-        )
-        .await
-    }
-
-    pub async fn save_stress_case(&self, artifact: &SleepArtifactStressCase) -> Result<PathBuf> {
-        save_artifact(
-            &self.root.join(STRESS_CASES_DIR),
-            &format!("{}-{}", artifact.suite, artifact.name),
-            artifact,
-        )
-        .await
-    }
-
-    pub async fn save_instruction_hypothesis(
-        &self,
-        artifact: &SleepArtifactInstructionHypothesis,
-    ) -> Result<PathBuf> {
-        let slug = slugify(&artifact.text);
-        save_artifact(
-            &self.root.join(INSTRUCTION_HYPOTHESES_DIR),
-            &format!("{}-{}", artifact.suite, slug),
-            artifact,
-        )
-        .await
-    }
-
     pub async fn replace_failure_patterns(
         &self,
         artifacts: &[SleepArtifactFailurePattern],

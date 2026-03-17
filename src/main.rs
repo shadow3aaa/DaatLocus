@@ -1264,6 +1264,8 @@ fn build_terminal_next_step_candidate_variants(
 
     let program = TerminalNextStepProgram {
         work_phase: "investigate".to_string(),
+        key_anchors: Vec::new(),
+        investigation_plan: Vec::new(),
     };
     let base = program.default_tuning();
     let mut candidates = vec![
@@ -1549,6 +1551,10 @@ async fn rollout_runtime_policy_episode(
     context
         .tasks
         .set_working_task_description(compressed_task);
+    context.tasks.set_working_task_guidance(
+        task_understanding.key_anchors.clone(),
+        task_understanding.investigation_plan.clone(),
+    );
     context
         .tasks
         .set_working_task_phase("investigate".to_string());
@@ -1698,6 +1704,8 @@ async fn judge_episode_completion(
         } else {
             task.done_criteria.clone()
         },
+        key_anchors: task.key_anchors.clone(),
+        investigation_plan: task.investigation_plan.clone(),
         recent_steps,
         current_terminal: snapshot_text.to_string(),
         validation_summary: if task.validation_commands.is_empty() {
@@ -1763,7 +1771,7 @@ fn build_episode_metric(
     rollout_status: EpisodeStatus,
     validation_results: &[ValidationCommandResult],
 ) -> EpisodeMetric {
-    let repeated_effects = steps
+    let repeated_waits = steps
         .windows(2)
         .filter(|pair| {
             matches!(
@@ -1773,6 +1781,8 @@ fn build_episode_metric(
             )
         })
         .count();
+    let repeated_investigation = count_repeated_investigation_effects(steps);
+    let repeated_effects = repeated_waits + repeated_investigation;
 
     let success = matches!(status, EpisodeStatus::Succeeded);
     let score = if success {
@@ -1794,9 +1804,61 @@ fn build_episode_metric(
         score,
         steps_used: steps.len(),
         repeated_effects,
-        stagnation_events: repeated_effects,
+        stagnation_events: repeated_investigation,
         notes,
     }
+}
+
+fn count_repeated_investigation_effects(steps: &[EpisodeStep]) -> usize {
+    let mut seen = std::collections::HashMap::<String, usize>::new();
+    let mut repeated = 0;
+    for step in steps {
+        if step
+            .metadata
+            .get("work_phase")
+            .map(String::as_str)
+            != Some("investigate")
+        {
+            continue;
+        }
+        let Some(signature) = investigation_effect_signature(&step.effect) else {
+            continue;
+        };
+        let count = seen.entry(signature).or_insert(0);
+        *count += 1;
+        if *count > 1 {
+            repeated += 1;
+        }
+    }
+    repeated
+}
+
+fn investigation_effect_signature(effect: &Effect) -> Option<String> {
+    let Effect::DeviceAction {
+        action: crate::device::DeviceAction::TerminalInput { text },
+    } = effect
+    else {
+        return None;
+    };
+    let trimmed = text.trim();
+    let prefixes = [
+        "grep -i version ",
+        "grep -i opensearch ",
+        "grep -i opensearch -r ",
+        "grep -i all ",
+        "grep '^def ' ",
+        "grep 'def stats_for_version' ",
+        "head -40 ",
+        "head -80 ",
+        "head -120 ",
+        "ls ",
+        "ls -l ",
+        "cat ",
+        "sed -n ",
+    ];
+    prefixes
+        .iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix).map(|rest| format!("{prefix}{rest}")))
 }
 
 fn final_episode_summary(
@@ -2028,12 +2090,6 @@ fn compare_variant_summaries(
 struct TrainSourcePolicyVariant {
     name: String,
     compiled_prompts: CompiledPromptStore,
-}
-
-impl TrainSourcePolicyVariant {
-    fn variant_name(&self) -> &str {
-        &self.name
-    }
 }
 
 #[derive(Clone)]
