@@ -2362,9 +2362,22 @@ async fn provision_episode_workspace(task: &EpisodeTask, workspace_dir: &Path) -
 
     if let Some(repo) = task.metadata.get("repo") {
         let remote = infer_repo_remote(repo);
-        println!("          clone repo={} from {}", repo, remote);
+        let cache_root = prepare_train_source_repo_cache_root().await?;
+        let cache_repo = cache_root.join(format!("{}.git", slugify(repo)));
+        ensure_cached_repo(repo, &remote, &cache_repo).await?;
+        println!(
+            "          clone repo={} from local cache {}",
+            repo,
+            cache_repo.display()
+        );
         run_host_command(
-            &["git", "clone", remote.as_str(), workspace_dir.to_string_lossy().as_ref()],
+            &[
+                "git",
+                "clone",
+                "--shared",
+                cache_repo.to_string_lossy().as_ref(),
+                workspace_dir.to_string_lossy().as_ref(),
+            ],
             None,
         )
         .await?;
@@ -2393,6 +2406,37 @@ fn infer_repo_remote(repo: &str) -> String {
     } else {
         format!("https://github.com/{repo}.git")
     }
+}
+
+async fn prepare_train_source_repo_cache_root() -> Result<PathBuf> {
+    let root = env::current_dir()
+        .map_err(|err| miette!("failed to get current dir for train-source repo cache: {err}"))?
+        .join("tmp")
+        .join("train_source_repo_cache");
+    tokio::fs::create_dir_all(&root)
+        .await
+        .map_err(|err| miette!("failed to create train-source repo cache root {}: {err}", root.display()))?;
+    Ok(root)
+}
+
+async fn ensure_cached_repo(repo: &str, remote: &str, cache_repo: &Path) -> Result<()> {
+    if cache_repo.exists() {
+        println!("          repo cache hit for {} at {}", repo, cache_repo.display());
+        return Ok(());
+    }
+
+    println!("          repo cache miss for {} -> {}", repo, cache_repo.display());
+    run_host_command(
+        &[
+            "git",
+            "clone",
+            "--mirror",
+            remote,
+            cache_repo.to_string_lossy().as_ref(),
+        ],
+        None,
+    )
+    .await
 }
 
 async fn run_host_command(args: &[&str], cwd: Option<&Path>) -> Result<()> {
