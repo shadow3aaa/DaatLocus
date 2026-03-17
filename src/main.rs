@@ -63,10 +63,12 @@ use crate::{
         program::Program,
         programs::action_phase_common::ActionPhaseProgramSpec,
         programs::attend_notifications::AttendNotificationsProgram,
+        programs::completion_judge::{CompletionJudgeOutput, CompletionJudgeProgram},
         programs::memory_encoding::{MemoryEncodingOutput, MemoryEncodingProgram},
         programs::execute_task::ExecuteTaskProgram,
         programs::explore_new_tasks::ExploreNewTasksProgram,
         programs::plan_from_project::PlanFromProjectProgram,
+        programs::task_understanding::{TaskUnderstandingOutput, TaskUnderstandingProgram},
         programs::terminal_next_step::TerminalNextStepProgram,
         render::openai_tools::OpenAIToolRenderer,
         runtime::execute_program,
@@ -1587,12 +1589,21 @@ fn print_episode_batch_summary(
 
 async fn rollout_runtime_policy_episode(
     context: &mut Context,
-    task: EpisodeTask,
+    mut task: EpisodeTask,
     workspace_dir: &Path,
 ) -> Result<EpisodeOutcome> {
     let renderer = OpenAIToolRenderer;
     let runtime_policy = RuntimePolicyProgram;
     let mut steps = Vec::new();
+    let task_understanding = understand_episode_task(context, &task, &renderer).await?;
+    task.task_goal = Some(task_understanding.task_goal.clone());
+    task.investigation_plan = task_understanding.investigation_plan.clone();
+    task.done_criteria = task_understanding.done_criteria.clone();
+    task.key_anchors = task_understanding.key_anchors.clone();
+    task.metadata.insert(
+        "thread_focus".to_string(),
+        task_understanding.thread_focus.clone(),
+    );
     let initial_snapshot = Snapshot::new(context).await.to_string();
     let initial_observation = EpisodeObservation {
         summary: format!("task seeded: {}", task.title),
@@ -1617,6 +1628,19 @@ async fn rollout_runtime_policy_episode(
         let mut metadata = std::collections::BTreeMap::new();
         metadata.insert("description".to_string(), output.description.clone());
         metadata.insert("current_doing".to_string(), output.current_doing.clone());
+        let completion = judge_episode_completion(
+            context,
+            &task,
+            &steps,
+            &snapshot.to_string(),
+            &renderer,
+        )
+        .await?;
+        metadata.insert("completion_state".to_string(), completion.state.clone());
+        metadata.insert("completion_reason".to_string(), completion.reason.clone());
+        if let Some(next_check) = completion.next_check.clone() {
+            metadata.insert("completion_next_check".to_string(), next_check);
+        }
         steps.push(EpisodeStep {
             index,
             module: "runtime_policy".to_string(),
@@ -1631,12 +1655,93 @@ async fn rollout_runtime_policy_episode(
             context.tasks.touch_working_task();
         }
 
+        if matches!(completion.state.as_str(), "done") {
+            return finalize_runtime_episode(
+                context,
+                task,
+                workspace_dir,
+                initial_observation,
+                steps,
+            )
+            .await;
+        }
+
         if context.tasks.is_empty() || context.tasks.working_task().is_none() || should_stop {
             return finalize_runtime_episode(context, task, workspace_dir, initial_observation, steps).await;
         }
     }
 
     finalize_runtime_episode(context, task, workspace_dir, initial_observation, steps).await
+}
+
+async fn understand_episode_task(
+    context: &mut Context,
+    task: &EpisodeTask,
+    renderer: &OpenAIToolRenderer,
+) -> Result<TaskUnderstandingOutput> {
+    let program = TaskUnderstandingProgram {
+        title: task.title.clone(),
+        instruction: task.instruction.clone(),
+        success_criteria: task.success_criteria.clone(),
+        metadata: task
+            .metadata
+            .iter()
+            .map(|(key, value)| format!("{key}: {value}"))
+            .collect(),
+    };
+    let snapshot = Snapshot::new(context).await;
+    execute_program(context.llm.as_ref(), context, &snapshot, renderer, &program).await
+}
+
+async fn judge_episode_completion(
+    context: &mut Context,
+    task: &EpisodeTask,
+    steps: &[EpisodeStep],
+    snapshot_text: &str,
+    renderer: &OpenAIToolRenderer,
+) -> Result<CompletionJudgeOutput> {
+    let recent_steps = steps
+        .iter()
+        .rev()
+        .take(4)
+        .rev()
+        .map(|step| {
+            format!(
+                "step={} effect={:?} doing={} reason={}",
+                step.index,
+                step.effect,
+                step.metadata
+                    .get("current_doing")
+                    .map(String::as_str)
+                    .unwrap_or("-"),
+                step.metadata
+                    .get("description")
+                    .map(String::as_str)
+                    .unwrap_or("-")
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let program = CompletionJudgeProgram {
+        task_goal: task
+            .task_goal
+            .clone()
+            .unwrap_or_else(|| task.title.clone()),
+        done_criteria: if task.done_criteria.is_empty() {
+            task.success_criteria.clone()
+        } else {
+            task.done_criteria.clone()
+        },
+        recent_steps,
+        current_terminal: snapshot_text.to_string(),
+        validation_summary: if task.validation_commands.is_empty() {
+            "none".to_string()
+        } else {
+            task.validation_commands.join("\n")
+        },
+    };
+    let snapshot = Snapshot::new(context).await;
+    execute_program(context.judge_llm.as_ref(), context, &snapshot, renderer, &program).await
 }
 
 async fn finalize_runtime_episode(
