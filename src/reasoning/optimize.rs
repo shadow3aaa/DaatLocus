@@ -1,4 +1,7 @@
+use std::{collections::HashMap, env, path::PathBuf};
+
 use miette::{Result, miette};
+use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
@@ -18,8 +21,12 @@ use super::{
     optimizer::{CandidateConfig, OptimizationResult, PromptTuningConfig},
     program::Program,
     programs::{
-        action_phase::{ActionPhase, ActionPhaseProgram},
+        action_phase_common::ActionPhaseProgramSpec,
+        attend_notifications::AttendNotificationsProgram,
+        execute_task::ExecuteTaskProgram,
+        explore_new_tasks::ExploreNewTasksProgram,
         pairwise_judge::PairwiseJudgeProgram,
+        plan_from_project::PlanFromProjectProgram,
         resolve_telegram::ResolveTelegramChatProgram,
     },
     proposer::{ProposalSpec, propose_candidates},
@@ -35,10 +42,34 @@ use super::{
     trace_mining::{derive_resolve_telegram_eval_cases, propose_resolve_telegram_candidates},
 };
 
-const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v10";
+const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v11";
 const RENDERER_NAME: &str = "openai_tools";
 const SEARCH_SEED_LIMIT: usize = 4;
 const SEARCH_PAIR_LIMIT: usize = 6;
+
+#[derive(Deserialize, Serialize)]
+struct LearnStateSnapshot {
+    batch_reports: Vec<LearnBatchReportSnapshot>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct LearnBatchReportSnapshot {
+    selected_variant: String,
+    selection_scores: Vec<LearnVariantScoreSnapshot>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct LearnVariantScoreSnapshot {
+    variant_name: String,
+    succeeded: usize,
+    failed: usize,
+    avg_score: f32,
+}
+
+#[derive(Default)]
+struct LearnSelectionBias {
+    by_candidate: HashMap<String, (usize, usize, usize)>,
+}
 
 pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<OptimizationResult>> {
     let compiled = ensure_reasoning_compiled(context).await?;
@@ -207,62 +238,107 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
         .await?,
     );
 
-    for phase in [
-        ActionPhase::AttendNotifications,
-        ActionPhase::ExecuteTask,
-        ActionPhase::PlanFromProject,
-        ActionPhase::ExploreNewTasks,
-    ] {
-        let action_program = ActionPhaseProgram::new(phase);
-        let action_base = action_program.default_tuning();
-        let action_sleep = sleep_snapshot.filter_suite(&action_program.tuning_key());
-        let action_train_cases = action_program.train_eval_cases();
-        let action_acceptance_cases = action_program.acceptance_eval_cases();
-        let mut action_stress_cases = action_program.stress_eval_cases();
-        action_stress_cases.extend(datasets::action_phase::stress_eval_cases_by_names(
-            &action_program,
-            &sleep_reference_case_names(&action_sleep),
-        ));
-        let action_baseline_results = run_suite_with_tuning(
+    compiled.push(
+        ensure_action_phase_compiled(
             context,
             &renderer,
-            &action_program,
-            &format!("{}.train", action_program.tuning_key()),
-            clone_eval_cases(&action_train_cases),
-            &action_base,
-            TraceOrigin::Compile,
+            &sleep_snapshot,
+            AttendNotificationsProgram,
+            compiled.len() + 1,
+            total_suites,
         )
-        .await;
-        let mut action_candidates =
-            build_action_phase_candidates(&action_program, &action_base, &action_baseline_results);
-        action_candidates.extend(build_sleep_artifact_candidates(
-            &action_base,
-            &action_sleep,
-            datasets::action_phase::bootstrap_examples_by_names(
-                action_program.phase(),
-                &sleep_reference_case_names(&action_sleep),
-            ),
-            sleep_examples_to_program_examples::<crate::core::Output>(&action_sleep),
-        ));
-        compiled.push(
-            ensure_suite_compiled(
-                context,
-                &renderer,
-                &action_program,
-                &action_program.tuning_key(),
-                action_train_cases,
-                action_acceptance_cases,
-                action_stress_cases,
-                "stress",
-                action_candidates,
-                compiled.len() + 1,
-                total_suites,
-            )
-            .await?,
-        );
-    }
+        .await?,
+    );
+    compiled.push(
+        ensure_action_phase_compiled(
+            context,
+            &renderer,
+            &sleep_snapshot,
+            ExecuteTaskProgram,
+            compiled.len() + 1,
+            total_suites,
+        )
+        .await?,
+    );
+    compiled.push(
+        ensure_action_phase_compiled(
+            context,
+            &renderer,
+            &sleep_snapshot,
+            PlanFromProjectProgram,
+            compiled.len() + 1,
+            total_suites,
+        )
+        .await?,
+    );
+    compiled.push(
+        ensure_action_phase_compiled(
+            context,
+            &renderer,
+            &sleep_snapshot,
+            ExploreNewTasksProgram,
+            compiled.len() + 1,
+            total_suites,
+        )
+        .await?,
+    );
 
     Ok(compiled)
+}
+
+async fn ensure_action_phase_compiled<P: ActionPhaseProgramSpec>(
+    context: &Context,
+    renderer: &OpenAIToolRenderer,
+    sleep_snapshot: &SleepArtifactsSnapshot,
+    action_program: P,
+    suite_index: usize,
+    total_suites: usize,
+) -> Result<CompiledProgram> {
+    let action_base = action_program.default_tuning();
+    let action_sleep = sleep_snapshot.filter_suite(&action_program.tuning_key());
+    let action_train_cases = action_program.train_eval_cases();
+    let action_acceptance_cases = action_program.acceptance_eval_cases();
+    let mut action_stress_cases = action_program.stress_eval_cases();
+    action_stress_cases.extend(datasets::action_phase::stress_eval_cases_by_names(
+        &action_program,
+        &sleep_reference_case_names(&action_sleep),
+    ));
+    let action_baseline_results = run_suite_with_tuning(
+        context,
+        renderer,
+        &action_program,
+        &format!("{}.train", action_program.tuning_key()),
+        clone_eval_cases(&action_train_cases),
+        &action_base,
+        TraceOrigin::Compile,
+    )
+    .await;
+    let mut action_candidates =
+        build_action_phase_candidates(&action_program, &action_base, &action_baseline_results);
+    action_candidates.extend(build_sleep_artifact_candidates(
+        &action_base,
+        &action_sleep,
+        datasets::action_phase::bootstrap_examples_by_names_for_suite(
+            action_program.suite_name(),
+            &sleep_reference_case_names(&action_sleep),
+        ),
+        sleep_examples_to_program_examples::<crate::core::Output>(&action_sleep),
+    ));
+
+    ensure_suite_compiled(
+        context,
+        renderer,
+        &action_program,
+        &action_program.tuning_key(),
+        action_train_cases,
+        action_acceptance_cases,
+        action_stress_cases,
+        "stress",
+        action_candidates,
+        suite_index,
+        total_suites,
+    )
+    .await
 }
 
 async fn load_sleep_artifacts_snapshot() -> Result<SleepArtifactsSnapshot> {
@@ -352,6 +428,7 @@ async fn ensure_suite_compiled<P: Program>(
     suite_index: usize,
     total_suites: usize,
 ) -> Result<CompiledProgram> {
+    let learn_bias = load_learn_selection_bias_for_suite(suite_name).await?;
     let compile_key = build_compile_key(
         &context.config,
         program,
@@ -361,6 +438,7 @@ async fn ensure_suite_compiled<P: Program>(
         ranking_label,
         &ranking_cases,
         &candidates,
+        &learn_bias,
     )?;
     if let Some(compiled) = load_compiled_program(&compile_key).await? {
         eprintln!(
@@ -400,25 +478,26 @@ async fn ensure_suite_compiled<P: Program>(
         total_candidates,
     )
     .await;
+    apply_learn_selection_bias(&mut evaluations, &learn_bias);
 
     let search_candidates = build_search_candidates(&evaluations)?;
     if !search_candidates.is_empty() {
         let search_total = search_candidates.len();
-        evaluations.extend(
-            evaluate_candidates(
-                context,
-                renderer,
-                program,
-                suite_name,
-                &acceptance_cases,
-                &ranking_cases,
-                search_candidates,
-                suite_index,
-                total_suites,
-                search_total,
-            )
-            .await,
-        );
+        let mut search_evaluations = evaluate_candidates(
+            context,
+            renderer,
+            program,
+            suite_name,
+            &acceptance_cases,
+            &ranking_cases,
+            search_candidates,
+            suite_index,
+            total_suites,
+            search_total,
+        )
+        .await;
+        apply_learn_selection_bias(&mut search_evaluations, &learn_bias);
+        evaluations.extend(search_evaluations);
     }
 
     apply_pairwise_judge_tiebreak(context, renderer, program, suite_name, &mut evaluations).await?;
@@ -427,6 +506,8 @@ async fn ensure_suite_compiled<P: Program>(
     let mut best: Option<(
         String,
         PromptTuningConfig<P::Output>,
+        usize,
+        usize,
         usize,
         usize,
         usize,
@@ -443,6 +524,9 @@ async fn ensure_suite_compiled<P: Program>(
             score: evaluation.score,
             total_cases,
             attempts_used: evaluation.attempts_used,
+            episode_wins: evaluation.episode_wins,
+            episode_losses: evaluation.episode_losses,
+            episode_ties: evaluation.episode_ties,
             judge_wins: evaluation.judge_wins,
             judge_losses: evaluation.judge_losses,
             judge_ties: evaluation.judge_ties,
@@ -460,14 +544,30 @@ async fn ensure_suite_compiled<P: Program>(
             continue;
         }
         if best.as_ref().is_none_or(
-            |(_, _, best_score, best_attempts, best_judge_wins, best_judge_losses, _)| {
+            |(
+                _,
+                _,
+                best_score,
+                best_attempts,
+                best_episode_wins,
+                best_episode_losses,
+                best_judge_wins,
+                best_judge_losses,
+                _,
+            )| {
                 evaluation.score > *best_score
                     || (evaluation.score == *best_score
-                        && (evaluation.judge_wins > *best_judge_wins
-                            || (evaluation.judge_wins == *best_judge_wins
-                                && (evaluation.judge_losses < *best_judge_losses
-                                    || (evaluation.judge_losses == *best_judge_losses
-                                        && evaluation.attempts_used < *best_attempts)))))
+                        && (evaluation.episode_wins > *best_episode_wins
+                            || (evaluation.episode_wins == *best_episode_wins
+                                && (evaluation.episode_losses < *best_episode_losses
+                                    || (evaluation.episode_losses == *best_episode_losses
+                                        && (evaluation.judge_wins > *best_judge_wins
+                                            || (evaluation.judge_wins == *best_judge_wins
+                                                && (evaluation.judge_losses < *best_judge_losses
+                                                    || (evaluation.judge_losses
+                                                        == *best_judge_losses
+                                                        && evaluation.attempts_used
+                                                            < *best_attempts)))))))))
             },
         ) {
             best = Some((
@@ -475,6 +575,8 @@ async fn ensure_suite_compiled<P: Program>(
                 evaluation.candidate.config.clone(),
                 evaluation.score,
                 evaluation.attempts_used,
+                evaluation.episode_wins,
+                evaluation.episode_losses,
                 evaluation.judge_wins,
                 evaluation.judge_losses,
                 evaluation.judge_ties,
@@ -487,6 +589,8 @@ async fn ensure_suite_compiled<P: Program>(
         best_tuning,
         score,
         _attempts_used,
+        _episode_wins,
+        _episode_losses,
         _judge_wins,
         _judge_losses,
         _judge_ties,
@@ -731,6 +835,9 @@ async fn evaluate_candidates<P: Program>(
             acceptance_attempts_used: Some(acceptance_attempts_used),
             score,
             attempts_used: acceptance_attempts_used + attempts_used,
+            episode_wins: 0,
+            episode_losses: 0,
+            episode_ties: 0,
             judge_wins: 0,
             judge_losses: 0,
             judge_ties: 0,
@@ -776,6 +883,134 @@ fn build_search_candidates<O: Clone + Serialize>(
         }
     }
     Ok(combos)
+}
+
+fn apply_learn_selection_bias<O: Clone>(
+    evaluations: &mut [CandidateEvaluation<O>],
+    bias: &LearnSelectionBias,
+) {
+    for evaluation in evaluations {
+        if let Some((wins, losses, ties)) = bias.by_candidate.get(&evaluation.candidate.name) {
+            evaluation.episode_wins += *wins;
+            evaluation.episode_losses += *losses;
+            evaluation.episode_ties += *ties;
+        }
+    }
+}
+
+async fn load_learn_selection_bias_for_suite(suite_name: &str) -> Result<LearnSelectionBias> {
+    let Some(state) = load_recent_learn_state().await? else {
+        return Ok(LearnSelectionBias::default());
+    };
+
+    let mut bias = LearnSelectionBias::default();
+    for report in state.batch_reports {
+        let Some((candidate_suite, candidate_name)) =
+            parse_candidate_variant_name(&report.selected_variant)
+        else {
+            continue;
+        };
+        if candidate_suite != suite_name {
+            continue;
+        }
+        let selected = report
+            .selection_scores
+            .iter()
+            .find(|score| score.variant_name == report.selected_variant);
+        let baseline = report
+            .selection_scores
+            .iter()
+            .find(|score| score.variant_name == "baseline");
+        let entry = bias
+            .by_candidate
+            .entry(candidate_name.to_string())
+            .or_insert((0, 0, 0));
+        entry.0 += 1;
+        if let (Some(selected), Some(baseline)) = (selected, baseline) {
+            if selected.avg_score > baseline.avg_score {
+                entry.0 += 1;
+            } else if selected.avg_score < baseline.avg_score {
+                entry.1 += 1;
+            } else {
+                entry.2 += 1;
+            }
+        }
+    }
+
+    Ok(bias)
+}
+
+async fn load_recent_learn_state() -> Result<Option<LearnStateSnapshot>> {
+    let Some(session_root) = latest_train_source_learn_session_root().await? else {
+        return Ok(None);
+    };
+    let path = session_root.join("learn_state.json");
+    let payload = match tokio::fs::read_to_string(&path).await {
+        Ok(payload) => payload,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(miette!(
+                "failed to read learn state {}: {err}",
+                path.display()
+            ));
+        }
+    };
+    let state = serde_json::from_str::<LearnStateSnapshot>(&payload)
+        .map_err(|err| miette!("failed to parse learn state {}: {err}", path.display()))?;
+    Ok(Some(state))
+}
+
+async fn latest_train_source_learn_session_root() -> Result<Option<PathBuf>> {
+    let train_root = env::current_dir()
+        .map_err(|err| miette!("failed to get current dir for learn state: {err}"))?
+        .join("tmp")
+        .join("train_source_learn");
+    if !train_root.exists() {
+        return Ok(None);
+    }
+
+    let mut latest_session: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut entries = tokio::fs::read_dir(&train_root)
+        .await
+        .map_err(|err| miette!("failed to read train_source_learn dir {}: {err}", train_root.display()))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|err| miette!("failed to read train_source_learn entry: {err}"))?
+    {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if latest_session
+            .as_ref()
+            .is_none_or(|(latest_modified, _)| modified > *latest_modified)
+        {
+            latest_session = Some((modified, path));
+        }
+    }
+
+    Ok(latest_session.map(|(_, path)| path))
+}
+
+fn parse_candidate_variant_name(variant_name: &str) -> Option<(&'static str, &str)> {
+    let rest = variant_name.strip_prefix("candidate.")?;
+    let (target, candidate_name) = rest.rsplit_once('.')?;
+    let suite = match target {
+        "execute_task" => "action_phase.execute_task",
+        "terminal_next_step" => "terminal_next_step",
+        "plan_from_project" => "action_phase.plan_from_project",
+        "explore_new_tasks" => "action_phase.explore_new_tasks",
+        "attend_notifications" => "action_phase.attend_notifications",
+        _ => return None,
+    };
+    Some((suite, candidate_name))
 }
 
 fn merge_tuning_configs<O: Clone + Serialize>(
@@ -835,6 +1070,7 @@ fn build_compile_key<P: Program>(
     ranking_label: &str,
     ranking_cases: &[EvalCase<P::Output>],
     candidates: &[CandidateConfig<P::Output>],
+    learn_bias: &LearnSelectionBias,
 ) -> Result<String> {
     #[derive(Serialize)]
     struct EvalCaseFingerprint<'a> {
@@ -876,6 +1112,7 @@ fn build_compile_key<P: Program>(
         ranking_label: &'a str,
         ranking_cases: Vec<EvalCaseFingerprint<'a>>,
         candidates: Vec<CandidateFingerprint<'a, O>>,
+        learn_bias: &'a HashMap<String, (usize, usize, usize)>,
     }
 
     let resolved_judge_model = config.judge.resolved_model(&config.main_model);
@@ -929,6 +1166,7 @@ fn build_compile_key<P: Program>(
                 config: &candidate.config,
             })
             .collect(),
+        learn_bias: &learn_bias.by_candidate,
     };
 
     let bytes = serde_json::to_vec(&payload)
@@ -938,7 +1176,7 @@ fn build_compile_key<P: Program>(
 }
 
 fn build_action_phase_candidates(
-    program: &ActionPhaseProgram,
+    program: &impl ActionPhaseProgramSpec,
     base: &PromptTuningConfig<crate::core::Output>,
     baseline_results: &[crate::reasoning::eval::EvalCaseResult],
 ) -> Vec<CandidateConfig<crate::core::Output>> {
@@ -956,7 +1194,7 @@ fn build_action_phase_candidates(
         },
     ];
 
-    let phase_bias = match program.eval_suite_name() {
+    let phase_bias = match program.suite_name() {
         "action_phase.attend_notifications" => {
             Some("当 Telegram 后台有提醒时，优先切去 Telegram，而不是继续终端工作。")
         }
@@ -985,25 +1223,25 @@ fn build_action_phase_candidates(
     candidates.extend(build_teleprompter_candidates(
         base,
         "teleprompt_instruction",
-        action_phase_teleprompter_instructions(program.phase()),
+        action_phase_teleprompter_instructions(program.suite_name()),
     ));
     candidates.extend(build_bootstrap_demo_candidates(
         base,
         "bootstrap_train_demos",
         "bootstrap_train_combo",
-        action_phase_teleprompter_instructions(program.phase()),
-        datasets::action_phase::all_bootstrap_examples(program.phase()),
+        action_phase_teleprompter_instructions(program.suite_name()),
+        datasets::action_phase::all_bootstrap_examples_by_suite(program.suite_name()),
     ));
 
-    let proposal_specs = match program.phase() {
-        ActionPhase::AttendNotifications => vec![ProposalSpec {
+    let proposal_specs = match program.suite_name() {
+        "action_phase.attend_notifications" => vec![ProposalSpec {
             candidate_name: "auto_focus_telegram",
             when: action_phase_focus_telegram_failure,
             instruction: "提醒处理阶段只要 Telegram 在后台有待处理消息，就应先切到 Telegram，而不是继续终端工作。",
             bootstrap_case_name: Some("attend_notifications_focuses_telegram_first"),
             bootstrap_examples: bootstrap_attend_notifications_examples,
         }],
-        ActionPhase::ExecuteTask => vec![
+        "action_phase.execute_task" => vec![
             ProposalSpec {
                 candidate_name: "auto_select_task",
                 when: action_phase_select_task_failure,
@@ -1033,14 +1271,14 @@ fn build_action_phase_candidates(
                 bootstrap_examples: bootstrap_execute_task_examples,
             },
         ],
-        ActionPhase::PlanFromProject => vec![ProposalSpec {
+        "action_phase.plan_from_project" => vec![ProposalSpec {
             candidate_name: "auto_add_project_task",
             when: action_phase_add_project_task_failure,
             instruction: "项目规划阶段应优先补出挂到该项目上的下一步动作，而不是转去探索别的方向。",
             bootstrap_case_name: Some("plan_from_project_creates_project_scoped_task"),
             bootstrap_examples: bootstrap_plan_from_project_examples,
         }],
-        ActionPhase::ExploreNewTasks => vec![
+        "action_phase.explore_new_tasks" => vec![
             ProposalSpec {
                 candidate_name: "auto_focus_terminal",
                 when: action_phase_focus_terminal_failure,
@@ -1056,6 +1294,7 @@ fn build_action_phase_candidates(
                 bootstrap_examples: bootstrap_explore_examples,
             },
         ],
+        _ => Vec::new(),
     };
 
     candidates.extend(propose_candidates(base, baseline_results, &proposal_specs));
@@ -1063,45 +1302,55 @@ fn build_action_phase_candidates(
     candidates
 }
 
-fn action_phase_teleprompter_instructions(phase: ActionPhase) -> &'static [&'static str] {
-    match phase {
-        ActionPhase::AttendNotifications => &[
+fn action_phase_teleprompter_instructions(suite_name: &str) -> &'static [&'static str] {
+    match suite_name {
+        "action_phase.attend_notifications" => &[
             "提醒处理阶段优先按照训练边界行动：先处理 Telegram 与 Pending 义务，再考虑其他设备或探索。",
         ],
-        ActionPhase::ExecuteTask => &[
+        "action_phase.execute_task" => &[
             "执行阶段优先按照训练边界行动：先选中已有动作、保持正确设备前景、误入交互式认证时先中断。",
         ],
-        ActionPhase::PlanFromProject => &[
+        "action_phase.plan_from_project" => &[
             "项目规划阶段优先按照训练边界行动：为 Active 项目补出 project-scoped 的具体下一步动作，而不是偏离项目。",
         ],
-        ActionPhase::ExploreNewTasks => &[
+        "action_phase.explore_new_tasks" => &[
             "探索阶段优先按照训练边界行动：无前景设备时先 FocusTerminal，完全空闲时用 SilentWait。",
         ],
+        _ => &[],
     }
 }
 
 fn bootstrap_attend_notifications_examples(
     case_names: &[&str],
 ) -> Vec<crate::reasoning::examples::ProgramExample<crate::core::Output>> {
-    datasets::action_phase::bootstrap_examples(ActionPhase::AttendNotifications, case_names)
+    datasets::action_phase::bootstrap_examples_by_suite(
+        "action_phase.attend_notifications",
+        case_names,
+    )
 }
 
 fn bootstrap_execute_task_examples(
     case_names: &[&str],
 ) -> Vec<crate::reasoning::examples::ProgramExample<crate::core::Output>> {
-    datasets::action_phase::bootstrap_examples(ActionPhase::ExecuteTask, case_names)
+    datasets::action_phase::bootstrap_examples_by_suite("action_phase.execute_task", case_names)
 }
 
 fn bootstrap_plan_from_project_examples(
     case_names: &[&str],
 ) -> Vec<crate::reasoning::examples::ProgramExample<crate::core::Output>> {
-    datasets::action_phase::bootstrap_examples(ActionPhase::PlanFromProject, case_names)
+    datasets::action_phase::bootstrap_examples_by_suite(
+        "action_phase.plan_from_project",
+        case_names,
+    )
 }
 
 fn bootstrap_explore_examples(
     case_names: &[&str],
 ) -> Vec<crate::reasoning::examples::ProgramExample<crate::core::Output>> {
-    datasets::action_phase::bootstrap_examples(ActionPhase::ExploreNewTasks, case_names)
+    datasets::action_phase::bootstrap_examples_by_suite(
+        "action_phase.explore_new_tasks",
+        case_names,
+    )
 }
 
 fn resolve_focus_failure(result: &crate::reasoning::eval::EvalCaseResult) -> bool {

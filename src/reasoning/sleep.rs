@@ -1,12 +1,16 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, env, path::PathBuf};
 
 use miette::{Result, miette};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
     context::Context,
+    device::DeviceAction,
+    core::{Effect, Output},
     memory::L3EntryDraft,
     reasoning::{
+        episode::{EpisodeOutcome, EpisodeStatus, EpisodeStep},
         examples::ExampleField,
         runtime::{PromptRequest, PromptRole},
     },
@@ -40,15 +44,48 @@ pub struct SleepSummary {
     pub promoted_l3_entries: usize,
 }
 
+#[derive(Deserialize)]
+struct LearnStateSnapshot {
+    batch_reports: Vec<LearnBatchReportSnapshot>,
+}
+
+#[derive(Deserialize)]
+struct LearnBatchReportSnapshot {
+    selected_variant: String,
+    selection_scores: Vec<LearnVariantScoreSnapshot>,
+}
+
+#[derive(Deserialize)]
+struct LearnVariantScoreSnapshot {
+    variant_name: String,
+    succeeded: usize,
+    failed: usize,
+    avg_score: f32,
+}
+
 pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let records = load_runtime_trace_records().await?;
-    let failure_patterns = derive_failure_patterns(&records);
+    let mut failure_patterns = derive_failure_patterns(&records);
+    let episode_outcomes = load_recent_learn_episode_outcomes().await?;
+    failure_patterns.extend(derive_episode_failure_patterns(&episode_outcomes));
     let store = SleepArtifactsStore::open().await?;
     store.replace_failure_patterns(&failure_patterns).await?;
     let mut derived = derive_sleep_artifacts(context, &failure_patterns).await?;
     derived
         .bootstrap_demos
         .extend(derive_success_bootstrap_demos(&records));
+    derived
+        .bootstrap_demos
+        .extend(derive_episode_bootstrap_demos(&episode_outcomes));
+    derived
+        .stress_cases
+        .extend(derive_episode_stress_cases(&episode_outcomes));
+    derived
+        .instruction_hypotheses
+        .extend(derive_episode_instruction_hypotheses(&episode_outcomes));
+    derived
+        .instruction_hypotheses
+        .extend(derive_learn_selection_instruction_hypotheses().await?);
     store
         .replace_bootstrap_demos(&derived.bootstrap_demos)
         .await?;
@@ -112,6 +149,106 @@ async fn load_runtime_trace_records() -> Result<Vec<ProgramTraceRecord>> {
     Ok(records)
 }
 
+async fn latest_train_source_learn_session_root() -> Result<Option<PathBuf>> {
+    let train_root = env::current_dir()
+        .map_err(|err| miette!("failed to get current dir for learn outcomes: {err}"))?
+        .join("tmp")
+        .join("train_source_learn");
+    if !train_root.exists() {
+        return Ok(None);
+    }
+
+    let mut latest_session: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut entries = tokio::fs::read_dir(&train_root)
+        .await
+        .map_err(|err| miette!("failed to read train_source_learn dir {}: {err}", train_root.display()))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|err| miette!("failed to read train_source_learn entry: {err}"))?
+    {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if latest_session
+            .as_ref()
+            .is_none_or(|(latest_modified, _)| modified > *latest_modified)
+        {
+            latest_session = Some((modified, path));
+        }
+    }
+
+    Ok(latest_session.map(|(_, path)| path))
+}
+
+async fn load_recent_learn_episode_outcomes() -> Result<Vec<EpisodeOutcome>> {
+    let Some(session_root) = latest_train_source_learn_session_root().await? else {
+        return Ok(Vec::new());
+    };
+    let episodes_root = session_root.join("episodes");
+    if !episodes_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut outcomes = Vec::new();
+    let mut episode_dirs = tokio::fs::read_dir(&episodes_root)
+        .await
+        .map_err(|err| miette!("failed to read learn episodes dir {}: {err}", episodes_root.display()))?;
+    while let Some(entry) = episode_dirs
+        .next_entry()
+        .await
+        .map_err(|err| miette!("failed to read learn episode entry: {err}"))?
+    {
+        let outcome_path = entry.path().join("episode_outcome.json");
+        let payload = match tokio::fs::read_to_string(&outcome_path).await {
+            Ok(payload) => payload,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(miette!(
+                    "failed to read episode outcome {}: {err}",
+                    outcome_path.display()
+                ));
+            }
+        };
+        let outcome = serde_json::from_str::<EpisodeOutcome>(&payload).map_err(|err| {
+            miette!(
+                "failed to parse episode outcome {}: {err}",
+                outcome_path.display()
+            )
+        })?;
+        outcomes.push(outcome);
+    }
+
+    Ok(outcomes)
+}
+
+async fn load_recent_learn_state() -> Result<Option<LearnStateSnapshot>> {
+    let Some(session_root) = latest_train_source_learn_session_root().await? else {
+        return Ok(None);
+    };
+    let path = session_root.join("learn_state.json");
+    let payload = match tokio::fs::read_to_string(&path).await {
+        Ok(payload) => payload,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(miette!(
+                "failed to read learn state {}: {err}",
+                path.display()
+            ));
+        }
+    };
+    let state = serde_json::from_str::<LearnStateSnapshot>(&payload)
+        .map_err(|err| miette!("failed to parse learn state {}: {err}", path.display()))?;
+    Ok(Some(state))
+}
+
 fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<SleepArtifactFailurePattern> {
     let mut buckets: HashMap<(String, String), PatternAccumulator> = HashMap::new();
 
@@ -169,6 +306,439 @@ fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<SleepArtifactF
     });
 
     patterns
+}
+
+fn derive_episode_failure_patterns(
+    outcomes: &[EpisodeOutcome],
+) -> Vec<SleepArtifactFailurePattern> {
+    let mut patterns = Vec::new();
+
+    for outcome in outcomes {
+        if !matches!(
+            outcome.status,
+            EpisodeStatus::Failed | EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded
+        ) {
+            continue;
+        }
+
+        let suites = infer_episode_failure_suites(outcome);
+        let summary = summarize_episode_failure(outcome);
+        let severity = match outcome.status {
+            EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded => 4,
+            EpisodeStatus::Failed => 3,
+            EpisodeStatus::InProgress | EpisodeStatus::Succeeded => 2,
+        };
+        let suggested_fix_kind = if outcome.metric.repeated_effects > 0
+            || outcome.metric.stagnation_events > 0
+        {
+            SleepArtifactSuggestedFixKind::StressCase
+        } else {
+            SleepArtifactSuggestedFixKind::Instruction
+        };
+
+        for suite in suites {
+            patterns.push(SleepArtifactFailurePattern {
+                suite: suite.clone(),
+                pattern_id: format!(
+                    "episode:{}:{}",
+                    slugify(&suite),
+                    slugify(&outcome.task.id)
+                ),
+                description: summary.clone(),
+                supporting_trace_ids: vec![format!("episode:{}", outcome.task.id)],
+                frequency: outcome.metric.repeated_effects.max(1),
+                severity,
+                suggested_fix_kind,
+            });
+        }
+    }
+
+    patterns
+}
+
+fn derive_episode_bootstrap_demos(
+    outcomes: &[EpisodeOutcome],
+) -> Vec<SleepArtifactBootstrapDemo> {
+    let mut demos = Vec::new();
+    let mut per_suite = HashMap::<String, usize>::new();
+
+    for outcome in outcomes {
+        if outcome.status != EpisodeStatus::Succeeded {
+            continue;
+        }
+        let Some(step) = outcome
+            .steps
+            .iter()
+            .rev()
+            .find(|step| infer_episode_suite_from_step(step).is_some())
+        else {
+            continue;
+        };
+        let Some(suite) = infer_episode_suite_from_step(step) else {
+            continue;
+        };
+        let count = per_suite.entry(suite.to_string()).or_insert(0);
+        if *count >= 3 {
+            continue;
+        }
+        *count += 1;
+        demos.push(SleepArtifactBootstrapDemo {
+            suite: suite.to_string(),
+            title: format!("Learn outcome {} #{}", outcome.task.id, count),
+            input_summary: render_episode_input_summary(outcome, step),
+            inputs: episode_example_inputs(outcome, step),
+            expected_output: serde_json::to_value(step_to_output(step)).unwrap_or_else(|_| json!({})),
+            reference_case_names: Vec::new(),
+            source_trace_ids: vec![format!("episode:{}", outcome.task.id)],
+            confidence: 0.75,
+        });
+    }
+
+    demos
+}
+
+fn derive_episode_stress_cases(outcomes: &[EpisodeOutcome]) -> Vec<SleepArtifactStressCase> {
+    let mut cases = Vec::new();
+
+    for outcome in outcomes {
+        if !matches!(
+            outcome.status,
+            EpisodeStatus::Failed | EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded
+        ) {
+            continue;
+        }
+        let Some(step) = outcome.steps.last() else {
+            continue;
+        };
+        let Some(suite) = infer_episode_suite_from_step(step) else {
+            continue;
+        };
+        let constraints = episode_failure_constraints(outcome, step);
+        if constraints.is_empty() {
+            continue;
+        }
+        cases.push(SleepArtifactStressCase {
+            suite: suite.to_string(),
+            name: format!("learn-{}", slugify(&outcome.task.id)),
+            input_ir: json!({
+                "task_title": outcome.task.title,
+                "instruction": outcome.task.instruction,
+                "snapshot_text": step.snapshot_text,
+                "last_effect": format!("{:?}", step.effect),
+                "notes": outcome.metric.notes,
+            }),
+            expected_constraints: constraints,
+            reference_case_names: Vec::new(),
+            source_pattern_id: format!("episode:{}", outcome.task.id),
+            repeat: outcome.metric.repeated_effects.max(2),
+            weight: usize::from(matches!(outcome.status, EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded)) + 1,
+        });
+    }
+
+    cases
+}
+
+fn derive_episode_instruction_hypotheses(
+    outcomes: &[EpisodeOutcome],
+) -> Vec<SleepArtifactInstructionHypothesis> {
+    let mut items = Vec::new();
+
+    for outcome in outcomes {
+        if !matches!(
+            outcome.status,
+            EpisodeStatus::Failed | EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded
+        ) {
+            continue;
+        }
+        let Some(step) = outcome.steps.last() else {
+            continue;
+        };
+        let Some(suite) = infer_episode_suite_from_step(step) else {
+            continue;
+        };
+        let Some(text) = episode_instruction_text(outcome, step) else {
+            continue;
+        };
+        items.push(SleepArtifactInstructionHypothesis {
+            suite: suite.to_string(),
+            text,
+            justification: summarize_episode_failure(outcome),
+            source_pattern_ids: vec![format!("episode:{}", outcome.task.id)],
+        });
+    }
+
+    items
+}
+
+async fn derive_learn_selection_instruction_hypotheses(
+) -> Result<Vec<SleepArtifactInstructionHypothesis>> {
+    let Some(state) = load_recent_learn_state().await? else {
+        return Ok(Vec::new());
+    };
+
+    let mut items = Vec::new();
+    for (batch_index, report) in state.batch_reports.iter().enumerate() {
+        let Some((suite, candidate_name)) = parse_candidate_variant_name(&report.selected_variant)
+        else {
+            continue;
+        };
+        let Some(text) = candidate_instruction_hint(suite, candidate_name) else {
+            continue;
+        };
+        let selected = report
+            .selection_scores
+            .iter()
+            .find(|score| score.variant_name == report.selected_variant);
+        let baseline = report
+            .selection_scores
+            .iter()
+            .find(|score| score.variant_name == "baseline");
+        items.push(SleepArtifactInstructionHypothesis {
+            suite: suite.to_string(),
+            text: text.to_string(),
+            justification: format_learn_selection_justification(
+                &report.selected_variant,
+                selected,
+                baseline,
+                batch_index,
+            ),
+            source_pattern_ids: vec![format!("learn-batch:{batch_index}")],
+        });
+    }
+
+    Ok(items)
+}
+
+fn infer_episode_failure_suites(outcome: &EpisodeOutcome) -> Vec<String> {
+    let mut suites = vec!["action_phase.execute_task".to_string()];
+
+    let touched_terminal = outcome.steps.iter().any(|step| {
+        matches!(
+            &step.effect,
+            Effect::DeviceAction {
+                action: DeviceAction::TerminalInput { .. }
+            }
+        ) || matches!(step.effect, Effect::Wait | Effect::SilentWait)
+    });
+    if touched_terminal {
+        suites.push("terminal_next_step".to_string());
+    }
+
+    suites
+}
+
+fn infer_episode_suite_from_step(step: &EpisodeStep) -> Option<&'static str> {
+    match &step.effect {
+        Effect::FocusDevice {
+            device: crate::device::DeviceId::Telegram,
+        } => Some("action_phase.attend_notifications"),
+        Effect::TaskSelect { .. } => Some("action_phase.execute_task"),
+        Effect::TaskAdd {
+            project_id: Some(_),
+            ..
+        } => Some("action_phase.plan_from_project"),
+        Effect::TaskAdd {
+            project_id: None, ..
+        } => Some("action_phase.explore_new_tasks"),
+        Effect::DeviceAction {
+            action: DeviceAction::TerminalInput { .. },
+        }
+        | Effect::Wait
+        | Effect::SilentWait => Some("terminal_next_step"),
+        Effect::FocusDevice {
+            device: crate::device::DeviceId::Terminal,
+        } => Some("action_phase.execute_task"),
+        _ => None,
+    }
+}
+
+fn parse_candidate_variant_name(variant_name: &str) -> Option<(&'static str, &str)> {
+    let rest = variant_name.strip_prefix("candidate.")?;
+    let (target, candidate_name) = rest.rsplit_once('.')?;
+    let suite = match target {
+        "execute_task" => "action_phase.execute_task",
+        "terminal_next_step" => "terminal_next_step",
+        "plan_from_project" => "action_phase.plan_from_project",
+        "explore_new_tasks" => "action_phase.explore_new_tasks",
+        "attend_notifications" => "action_phase.attend_notifications",
+        _ => return None,
+    };
+    Some((suite, candidate_name))
+}
+
+fn candidate_instruction_hint(suite: &str, candidate_name: &str) -> Option<&'static str> {
+    match (suite, candidate_name) {
+        ("terminal_next_step", "prompt_return_bias") => {
+            Some("当 shell prompt 已返回时，应优先视为当前命令已结束，不要误判为仍在加载。")
+        }
+        ("terminal_next_step", "interactive_prompt_bias") => {
+            Some("遇到 REPL、认证向导或交互式提示时，应优先中断或改走非交互方案。")
+        }
+        ("terminal_next_step", "minimal_examples") => {
+            Some("终端下一步判断应依赖少量高信号示例，避免被冗长上下文干扰。")
+        }
+        ("action_phase.execute_task", "phase_bias") => {
+            Some("执行任务阶段应持续沿当前任务推进，不要在缺少新信息时重复同一动作或过早切走。")
+        }
+        ("action_phase.execute_task", "minimal_examples") => {
+            Some("执行任务阶段应优先保留最关键的 few-shot 行为模式，减少无关示例噪声。")
+        }
+        ("action_phase.plan_from_project", "phase_bias") => {
+            Some("为项目规划下一步时，应优先产出直接推进项目的下一动作，而不是跳回探索。")
+        }
+        ("action_phase.explore_new_tasks", "phase_bias") => {
+            Some("探索新任务阶段应聚焦发现和收敛新任务，不要混入已有任务执行动作。")
+        }
+        ("action_phase.attend_notifications", "phase_bias") => {
+            Some("处理提醒阶段应优先响应需要注意的设备或消息，不要被当前终端上下文带偏。")
+        }
+        _ if candidate_name.starts_with("teleprompt_") => {
+            Some("在该子程序上保留由训练数据提炼出的 instruction 线索，优先遵循其判别性规则。")
+        }
+        _ if candidate_name.starts_with("bootstrap_") => {
+            Some("在该子程序上保留由成功轨迹蒸馏出的 demo 模式，优先复用成功行为模板。")
+        }
+        _ => None,
+    }
+}
+
+fn format_learn_selection_justification(
+    variant_name: &str,
+    selected: Option<&LearnVariantScoreSnapshot>,
+    baseline: Option<&LearnVariantScoreSnapshot>,
+    batch_index: usize,
+) -> String {
+    match (selected, baseline) {
+        (Some(selected), Some(baseline)) => format!(
+            "learn batch {} selected {} over baseline; selected succeeded={} failed={} avg_score={:.3}, baseline succeeded={} failed={} avg_score={:.3}",
+            batch_index,
+            variant_name,
+            selected.succeeded,
+            selected.failed,
+            selected.avg_score,
+            baseline.succeeded,
+            baseline.failed,
+            baseline.avg_score,
+        ),
+        (Some(selected), None) => format!(
+            "learn batch {} selected {}; succeeded={} failed={} avg_score={:.3}",
+            batch_index, variant_name, selected.succeeded, selected.failed, selected.avg_score
+        ),
+        _ => format!("learn batch {} selected {}", batch_index, variant_name),
+    }
+}
+
+fn render_episode_input_summary(outcome: &EpisodeOutcome, step: &EpisodeStep) -> String {
+    format!(
+        "task: {}\ninstruction: {}\nlast_effect: {:?}\nsnapshot:\n{}",
+        outcome.task.title.trim(),
+        outcome.task.instruction.trim(),
+        step.effect,
+        step.snapshot_text.trim()
+    )
+}
+
+fn episode_example_inputs(outcome: &EpisodeOutcome, step: &EpisodeStep) -> Vec<ExampleField> {
+    vec![
+        ExampleField {
+            name: "训练任务".to_string(),
+            value: outcome.task.instruction.clone(),
+        },
+        ExampleField {
+            name: "完整快照".to_string(),
+            value: step.snapshot_text.clone(),
+        },
+    ]
+}
+
+fn step_to_output(step: &EpisodeStep) -> Output {
+    Output {
+        observation: step.observation_summary.clone(),
+        description: step
+            .metadata
+            .get("description")
+            .cloned()
+            .unwrap_or_default(),
+        current_doing: step
+            .metadata
+            .get("current_doing")
+            .cloned()
+            .unwrap_or_default(),
+        effect: step.effect.clone(),
+    }
+}
+
+fn episode_failure_constraints(outcome: &EpisodeOutcome, step: &EpisodeStep) -> Vec<String> {
+    let mut constraints = Vec::new();
+    if outcome.metric.repeated_effects > 0 {
+        constraints.push("不应重复最近已经执行过且未产生新信息的相同 effect".to_string());
+    }
+    if matches!(
+        step.effect,
+        Effect::DeviceAction {
+            action: DeviceAction::TerminalInput { .. }
+        }
+    ) {
+        constraints.push("终端输出不足以得出新结论时，应更换查看策略而不是重跑同一命令".to_string());
+    }
+    if matches!(outcome.status, EpisodeStatus::MaxStepsExceeded | EpisodeStatus::Aborted) {
+        constraints.push("应在任务停滞前收敛到新的分析动作或明确失败结论".to_string());
+    }
+    constraints
+}
+
+fn episode_instruction_text(outcome: &EpisodeOutcome, step: &EpisodeStep) -> Option<String> {
+    if outcome.metric.repeated_effects > 0 {
+        return Some(
+            "当最近一步与上一轮 effect 重复且没有新增信息时，不要再次执行同一动作；应切换到更窄的查看、定位或验证策略。"
+                .to_string(),
+        );
+    }
+    if matches!(
+        step.effect,
+        Effect::DeviceAction {
+            action: DeviceAction::TerminalInput { .. }
+        }
+    ) && matches!(outcome.status, EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded)
+    {
+        return Some(
+            "终端分析任务在多步后仍无结果时，应停止重复输入并改用更聚焦的命令、验证命令或结束判定。"
+                .to_string(),
+        );
+    }
+    None
+}
+
+fn summarize_episode_failure(outcome: &EpisodeOutcome) -> String {
+    let mut parts = vec![
+        format!("训练任务失败: {}", outcome.task.title.trim()),
+        format!("status={:?}", outcome.status),
+    ];
+    if outcome.metric.repeated_effects > 0 {
+        parts.push(format!("repeated_effects={}", outcome.metric.repeated_effects));
+    }
+    if outcome.metric.stagnation_events > 0 {
+        parts.push(format!(
+            "stagnation_events={}",
+            outcome.metric.stagnation_events
+        ));
+    }
+    if let Some(last_step) = outcome.steps.last() {
+        parts.push(format!("last_effect={:?}", last_step.effect));
+        if let Some(description) = last_step.metadata.get("description") {
+            let description = description.trim();
+            if !description.is_empty() {
+                parts.push(format!("last_description={description}"));
+            }
+        }
+    }
+    if !outcome.metric.notes.is_empty() {
+        parts.push(format!(
+            "notes={}",
+            outcome.metric.notes.join(" | ").trim()
+        ));
+    }
+    parts.join("; ")
 }
 
 struct PatternAccumulator {
@@ -381,23 +951,11 @@ fn render_input_summary(
 fn suite_reference_case_names(suite: &str) -> Vec<String> {
     match suite {
         "resolve_telegram_chat" => crate::reasoning::datasets::resolve_telegram::all_case_names(),
-        "action_phase.attend_notifications" => {
-            crate::reasoning::datasets::action_phase::all_case_names(
-                crate::reasoning::programs::action_phase::ActionPhase::AttendNotifications,
-            )
-        }
-        "action_phase.execute_task" => crate::reasoning::datasets::action_phase::all_case_names(
-            crate::reasoning::programs::action_phase::ActionPhase::ExecuteTask,
-        ),
-        "action_phase.plan_from_project" => {
-            crate::reasoning::datasets::action_phase::all_case_names(
-                crate::reasoning::programs::action_phase::ActionPhase::PlanFromProject,
-            )
-        }
-        "action_phase.explore_new_tasks" => {
-            crate::reasoning::datasets::action_phase::all_case_names(
-                crate::reasoning::programs::action_phase::ActionPhase::ExploreNewTasks,
-            )
+        "action_phase.attend_notifications"
+        | "action_phase.execute_task"
+        | "action_phase.plan_from_project"
+        | "action_phase.explore_new_tasks" => {
+            crate::reasoning::datasets::action_phase::all_case_names_for_suite(suite)
         }
         _ => Vec::new(),
     }
