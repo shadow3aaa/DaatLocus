@@ -16,6 +16,7 @@ pub struct EmbeddingModel {
 
 impl EmbeddingModel {
     const MODEL_DIMENSION: usize = 512;
+    const MAX_SEQUENCE_LENGTH: usize = 512;
     const QUERY_INSTRUCTION_FOR_RETRIEVAL: &str = "为这个句子生成表示以用于检索相关文章："; // 见<https://huggingface.co/BAAI/bge-large-zh-v1.5#model-list>
 
     pub fn new() -> Self {
@@ -57,13 +58,22 @@ impl EmbeddingModel {
     pub fn encode(&mut self, text: &str) -> Vec<f32> {
         let encoding = self.tokenizer.encode(text, true).unwrap();
 
-        let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&i| i as i64).collect();
-        let attention_mask: Vec<i64> = encoding
+        let mut input_ids: Vec<i64> = encoding.get_ids().iter().map(|&i| i as i64).collect();
+        let mut attention_mask: Vec<i64> = encoding
             .get_attention_mask()
             .iter()
             .map(|&i| i as i64)
             .collect();
-        let token_type_ids: Vec<i64> = encoding.get_type_ids().iter().map(|&i| i as i64).collect();
+        let mut token_type_ids: Vec<i64> =
+            encoding.get_type_ids().iter().map(|&i| i as i64).collect();
+
+        // BGE small uses a 512-token context window. Long traces/snapshots must be
+        // truncated before ONNX inference, otherwise positional embeddings fail.
+        if input_ids.len() > Self::MAX_SEQUENCE_LENGTH {
+            input_ids.truncate(Self::MAX_SEQUENCE_LENGTH);
+            attention_mask.truncate(Self::MAX_SEQUENCE_LENGTH);
+            token_type_ids.truncate(Self::MAX_SEQUENCE_LENGTH);
+        }
 
         let seq_len = input_ids.len();
 
