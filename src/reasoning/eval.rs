@@ -9,7 +9,11 @@ use super::{
     optimizer::PromptTuningConfig,
     program::Program,
     programs::{
-        action_phase::{ActionPhase, ActionPhaseProgram},
+        action_phase_common::ActionPhaseProgramSpec,
+        attend_notifications::AttendNotificationsProgram,
+        execute_task::ExecuteTaskProgram,
+        explore_new_tasks::ExploreNewTasksProgram,
+        plan_from_project::PlanFromProjectProgram,
         resolve_telegram::ResolveTelegramChatProgram,
     },
     runtime::execute_program_with_ir_report,
@@ -46,17 +50,43 @@ pub async fn run_reasoning_eval(context: &Context) -> Result<Vec<EvalCaseResult>
         .await,
     );
 
-    for phase in [
-        ActionPhase::AttendNotifications,
-        ActionPhase::ExecuteTask,
-        ActionPhase::PlanFromProject,
-        ActionPhase::ExploreNewTasks,
-    ] {
-        let program = ActionPhaseProgram::new(phase);
-        let suite_name = program.eval_suite_name();
-        let cases = program.dev_eval_cases();
-        results.extend(run_suite(context, &renderer, &program, suite_name, cases).await);
-    }
+    let attend = AttendNotificationsProgram;
+    results.extend(
+        run_suite(
+            context,
+            &renderer,
+            &attend,
+            attend.suite_name(),
+            attend.dev_eval_cases(),
+        )
+        .await,
+    );
+    let execute = ExecuteTaskProgram;
+    results.extend(
+        run_suite(
+            context,
+            &renderer,
+            &execute,
+            execute.suite_name(),
+            execute.dev_eval_cases(),
+        )
+        .await,
+    );
+    let plan = PlanFromProjectProgram;
+    results.extend(
+        run_suite(context, &renderer, &plan, plan.suite_name(), plan.dev_eval_cases()).await,
+    );
+    let explore = ExploreNewTasksProgram;
+    results.extend(
+        run_suite(
+            context,
+            &renderer,
+            &explore,
+            explore.suite_name(),
+            explore.dev_eval_cases(),
+        )
+        .await,
+    );
 
     Ok(results)
 }

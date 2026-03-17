@@ -4,13 +4,13 @@ use miette::{Result, miette};
 use serde::Deserialize;
 
 use crate::{
-    core::{Action, Output},
+    core::{Effect, Output},
     device::DeviceId,
     reasoning::{
         dataset_store::decode_dataset_json,
         eval::EvalCase,
         examples::ProgramExample,
-        programs::action_phase::{ActionPhase, ActionPhaseProgram},
+        programs::action_phase_common::ActionPhaseProgramSpec,
     },
 };
 
@@ -63,40 +63,45 @@ enum ActionPhaseExpectation {
     SilentWait,
 }
 
-pub fn examples(phase: ActionPhase) -> Vec<ProgramExample<Output>> {
-    section_for_phase(load_dataset(), phase).examples
+pub fn examples<P: ActionPhaseProgramSpec + ?Sized>(program: &P) -> Vec<ProgramExample<Output>> {
+    section_for_suite(load_dataset(), program.suite_name()).examples
 }
 
-pub fn train_eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
+pub fn train_eval_cases<P: ActionPhaseProgramSpec + ?Sized>(program: &P) -> Vec<EvalCase<Output>> {
     to_eval_cases(
         program,
-        section_for_phase(load_dataset(), program.phase()).train_cases,
+        section_for_suite(load_dataset(), program.suite_name()).train_cases,
     )
 }
 
-pub fn dev_eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
-    let section = section_for_phase(load_dataset(), program.phase());
+pub fn dev_eval_cases<P: ActionPhaseProgramSpec + ?Sized>(program: &P) -> Vec<EvalCase<Output>> {
+    let section = section_for_suite(load_dataset(), program.suite_name());
     let mut cases = section.acceptance_cases;
     cases.extend(section.stress_cases);
     to_eval_cases(program, cases)
 }
 
-pub fn acceptance_eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
+pub fn acceptance_eval_cases<P: ActionPhaseProgramSpec + ?Sized>(
+    program: &P,
+) -> Vec<EvalCase<Output>> {
     to_eval_cases(
         program,
-        section_for_phase(load_dataset(), program.phase()).acceptance_cases,
+        section_for_suite(load_dataset(), program.suite_name()).acceptance_cases,
     )
 }
 
-pub fn stress_eval_cases(program: &ActionPhaseProgram) -> Vec<EvalCase<Output>> {
+pub fn stress_eval_cases<P: ActionPhaseProgramSpec + ?Sized>(program: &P) -> Vec<EvalCase<Output>> {
     to_eval_cases(
         program,
-        section_for_phase(load_dataset(), program.phase()).stress_cases,
+        section_for_suite(load_dataset(), program.suite_name()).stress_cases,
     )
 }
 
-pub fn bootstrap_examples(phase: ActionPhase, case_names: &[&str]) -> Vec<ProgramExample<Output>> {
-    section_for_phase(load_dataset(), phase)
+pub fn bootstrap_examples_by_suite(
+    suite_name: &str,
+    case_names: &[&str],
+) -> Vec<ProgramExample<Output>> {
+    section_for_suite(load_dataset(), suite_name)
         .train_cases
         .into_iter()
         .filter(|case| case_names.iter().any(|name| *name == case.name))
@@ -119,8 +124,8 @@ pub fn bootstrap_examples(phase: ActionPhase, case_names: &[&str]) -> Vec<Progra
         .collect()
 }
 
-pub fn all_bootstrap_examples(phase: ActionPhase) -> Vec<ProgramExample<Output>> {
-    section_for_phase(load_dataset(), phase)
+pub fn all_bootstrap_examples_by_suite(suite_name: &str) -> Vec<ProgramExample<Output>> {
+    section_for_suite(load_dataset(), suite_name)
         .train_cases
         .into_iter()
         .filter_map(|case| {
@@ -142,19 +147,19 @@ pub fn all_bootstrap_examples(phase: ActionPhase) -> Vec<ProgramExample<Output>>
         .collect()
 }
 
-pub fn bootstrap_examples_by_names(
-    phase: ActionPhase,
+pub fn bootstrap_examples_by_names_for_suite(
+    suite_name: &str,
     case_names: &[String],
 ) -> Vec<ProgramExample<Output>> {
     let refs = case_names.iter().map(String::as_str).collect::<Vec<_>>();
-    bootstrap_examples(phase, &refs)
+    bootstrap_examples_by_suite(suite_name, &refs)
 }
 
-pub fn stress_eval_cases_by_names(
-    program: &ActionPhaseProgram,
+pub fn stress_eval_cases_by_names<P: ActionPhaseProgramSpec + ?Sized>(
+    program: &P,
     case_names: &[String],
 ) -> Vec<EvalCase<Output>> {
-    let cases = section_for_phase(load_dataset(), program.phase())
+    let cases = section_for_suite(load_dataset(), program.suite_name())
         .stress_cases
         .into_iter()
         .filter(|case| case_names.iter().any(|name| name == &case.name))
@@ -162,8 +167,8 @@ pub fn stress_eval_cases_by_names(
     to_eval_cases(program, cases)
 }
 
-pub fn all_case_names(phase: ActionPhase) -> Vec<String> {
-    let section = section_for_phase(load_dataset(), phase);
+pub fn all_case_names_for_suite(suite_name: &str) -> Vec<String> {
+    let section = section_for_suite(load_dataset(), suite_name);
     let mut names = Vec::new();
     names.extend(section.train_cases.into_iter().map(|case| case.name));
     names.extend(section.acceptance_cases.into_iter().map(|case| case.name));
@@ -176,7 +181,7 @@ fn load_dataset() -> ActionPhaseDataset {
 }
 
 fn to_eval_cases(
-    program: &ActionPhaseProgram,
+    program: &(impl ActionPhaseProgramSpec + ?Sized),
     cases: Vec<ActionPhaseEvalCase>,
 ) -> Vec<EvalCase<Output>> {
     cases
@@ -209,18 +214,19 @@ fn to_eval_cases(
         .collect()
 }
 
-fn section_for_phase(dataset: ActionPhaseDataset, phase: ActionPhase) -> ActionPhaseSection {
-    match phase {
-        ActionPhase::AttendNotifications => dataset.attend_notifications,
-        ActionPhase::ExecuteTask => dataset.execute_task,
-        ActionPhase::PlanFromProject => dataset.plan_from_project,
-        ActionPhase::ExploreNewTasks => dataset.explore_new_tasks,
+fn section_for_suite(dataset: ActionPhaseDataset, suite_name: &str) -> ActionPhaseSection {
+    match suite_name {
+        "action_phase.attend_notifications" => dataset.attend_notifications,
+        "action_phase.execute_task" => dataset.execute_task,
+        "action_phase.plan_from_project" => dataset.plan_from_project,
+        "action_phase.explore_new_tasks" => dataset.explore_new_tasks,
+        _ => panic!("unknown action phase suite: {suite_name}"),
     }
 }
 
 fn check_focus_telegram(output: &Output) -> Result<()> {
-    match &output.action {
-        Action::FocusDevice {
+    match &output.effect {
+        Effect::FocusDevice {
             device: DeviceId::Telegram,
         } => Ok(()),
         other => Err(miette!("expected FocusDevice(Telegram), got {:?}", other)),
@@ -228,8 +234,8 @@ fn check_focus_telegram(output: &Output) -> Result<()> {
 }
 
 fn check_focus_terminal(output: &Output) -> Result<()> {
-    match &output.action {
-        Action::FocusDevice {
+    match &output.effect {
+        Effect::FocusDevice {
             device: DeviceId::Terminal,
         } => Ok(()),
         other => Err(miette!("expected FocusDevice(Terminal), got {:?}", other)),
@@ -237,22 +243,22 @@ fn check_focus_terminal(output: &Output) -> Result<()> {
 }
 
 fn check_silent_wait(output: &Output) -> Result<()> {
-    match &output.action {
-        Action::SilentWait => Ok(()),
+    match &output.effect {
+        Effect::SilentWait => Ok(()),
         other => Err(miette!("expected SilentWait, got {:?}", other)),
     }
 }
 
 fn check_wait(output: &Output) -> Result<()> {
-    match &output.action {
-        Action::Wait => Ok(()),
+    match &output.effect {
+        Effect::Wait => Ok(()),
         other => Err(miette!("expected Wait, got {:?}", other)),
     }
 }
 
 fn check_cancel_interactive_prompt(output: &Output) -> Result<()> {
-    match &output.action {
-        Action::DeviceAction {
+    match &output.effect {
+        Effect::DeviceAction {
             action: crate::device::DeviceAction::TerminalInput { text },
         } if text.contains('\u{3}') => Ok(()),
         other => Err(miette!(
@@ -265,8 +271,8 @@ fn check_cancel_interactive_prompt(output: &Output) -> Result<()> {
 fn register_select_task_check(
     expected_task_id: String,
 ) -> Arc<dyn Fn(&Output) -> Result<()> + Send + Sync> {
-    Arc::new(move |output: &Output| match &output.action {
-        Action::TaskSelect { task_id } if task_id == &expected_task_id => Ok(()),
+    Arc::new(move |output: &Output| match &output.effect {
+        Effect::TaskSelect { task_id } if *task_id == expected_task_id => Ok(()),
         other => Err(miette!(
             "expected TaskSelect on task {}, got {:?}",
             expected_task_id,
@@ -278,11 +284,11 @@ fn register_select_task_check(
 fn register_add_project_task_check(
     expected_project_id: String,
 ) -> Arc<dyn Fn(&Output) -> Result<()> + Send + Sync> {
-    Arc::new(move |output: &Output| match &output.action {
-        Action::TaskAdd {
+    Arc::new(move |output: &Output| match &output.effect {
+        Effect::TaskAdd {
             description,
             project_id: Some(project_id),
-        } if project_id == &expected_project_id && !description.trim().is_empty() => Ok(()),
+        } if *project_id == expected_project_id && !description.trim().is_empty() => Ok(()),
         other => Err(miette!(
             "expected TaskAdd with project_id={}, got {:?}",
             expected_project_id,
@@ -294,8 +300,8 @@ fn register_add_project_task_check(
 fn register_terminal_input_contains_check(
     expected_substring: String,
 ) -> Arc<dyn Fn(&Output) -> Result<()> + Send + Sync> {
-    Arc::new(move |output: &Output| match &output.action {
-        Action::DeviceAction {
+    Arc::new(move |output: &Output| match &output.effect {
+        Effect::DeviceAction {
             action: crate::device::DeviceAction::TerminalInput { text },
         } if text.contains(&expected_substring) => Ok(()),
         other => Err(miette!(

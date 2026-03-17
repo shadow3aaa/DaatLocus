@@ -52,7 +52,7 @@ pub enum TelegramResolution {
 /// 10. DeviceAction
 /// 11. Wait
 /// 12. SilentWait
-pub enum Action {
+pub enum Effect {
     /// TaskAdd: 添加一个新的任务
     TaskAdd {
         /// 任务的描述
@@ -131,7 +131,7 @@ pub struct Output {
     /// 对当前正在进行的连续行为的描述。区别于description对单次行为的描述
     pub current_doing: String,
     /// 本次进行的动作
-    pub action: Action,
+    pub effect: Effect,
 }
 
 /// LLM 负责思考
