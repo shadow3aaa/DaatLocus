@@ -21,6 +21,14 @@ pub struct EpisodeTask {
     pub max_steps: usize,
     pub tags: Vec<String>,
     pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub task_goal: Option<String>,
+    #[serde(default)]
+    pub investigation_plan: Vec<String>,
+    #[serde(default)]
+    pub done_criteria: Vec<String>,
+    #[serde(default)]
+    pub key_anchors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

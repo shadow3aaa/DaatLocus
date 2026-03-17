@@ -151,6 +151,10 @@ pub fn episode_task_from_record(record: SweTrainTaskRecord, max_steps: usize) ->
         max_steps,
         tags: vec!["swe".to_string(), "code".to_string(), "terminal".to_string()],
         metadata,
+        task_goal: None,
+        investigation_plan: Vec::new(),
+        done_criteria: Vec::new(),
+        key_anchors: Vec::new(),
     }
 }
 

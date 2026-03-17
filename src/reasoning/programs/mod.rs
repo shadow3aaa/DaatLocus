@@ -1,5 +1,6 @@
 pub mod action_phase_common;
 pub mod attend_notifications;
+pub mod completion_judge;
 pub mod execute_task;
 pub mod explore_new_tasks;
 pub mod memory_encoding;
@@ -9,4 +10,5 @@ pub mod resolve_telegram;
 pub mod sleep_artifact_builder;
 pub mod sleep_l3_promoter;
 pub mod sleep_success_l3_promoter;
+pub mod task_understanding;
 pub mod terminal_next_step;
