@@ -1260,7 +1260,9 @@ fn build_terminal_next_step_candidate_variants(
         compiled_entries.to_vec()
     };
 
-    let program = TerminalNextStepProgram;
+    let program = TerminalNextStepProgram {
+        work_phase: "investigate".to_string(),
+    };
     let base = program.default_tuning();
     let mut candidates = vec![
         (
@@ -1604,16 +1606,29 @@ async fn rollout_runtime_policy_episode(
         "thread_focus".to_string(),
         task_understanding.thread_focus.clone(),
     );
+    let compressed_task = format!(
+        "{} | {}",
+        task_understanding.thread_focus, task_understanding.task_goal
+    );
+    context
+        .tasks
+        .set_working_task_description(compressed_task);
+    context
+        .tasks
+        .set_working_task_phase("investigate".to_string());
     let initial_snapshot = Snapshot::new(context).await.to_string();
     let initial_observation = EpisodeObservation {
         summary: format!("task seeded: {}", task.title),
         snapshot_text: initial_snapshot,
         metadata: std::collections::BTreeMap::new(),
     };
+    let mut work_phase = "investigate".to_string();
 
     for index in 0..task.max_steps {
         let snapshot = Snapshot::new(context).await;
-        let outcome = runtime_policy.run_once(context, &snapshot, &renderer).await;
+        let outcome = runtime_policy
+            .run_once(context, &snapshot, &renderer, &work_phase)
+            .await;
         let output = outcome.output;
         let effect = output.effect.clone();
         let should_stop = matches!(effect, Effect::Wait | Effect::SilentWait)
@@ -1641,6 +1656,8 @@ async fn rollout_runtime_policy_episode(
         if let Some(next_check) = completion.next_check.clone() {
             metadata.insert("completion_next_check".to_string(), next_check);
         }
+        let next_work_phase = normalize_work_phase(&completion.state);
+        metadata.insert("work_phase".to_string(), next_work_phase.clone());
         steps.push(EpisodeStep {
             index,
             module: "runtime_policy".to_string(),
@@ -1655,23 +1672,43 @@ async fn rollout_runtime_policy_episode(
             context.tasks.touch_working_task();
         }
 
-        if matches!(completion.state.as_str(), "done") {
+        work_phase = next_work_phase;
+        context.tasks.set_working_task_phase(work_phase.clone());
+
+        if matches!(work_phase.as_str(), "finish") {
             return finalize_runtime_episode(
                 context,
                 task,
                 workspace_dir,
                 initial_observation,
                 steps,
+                Some(EpisodeStatus::Succeeded),
             )
             .await;
         }
 
         if context.tasks.is_empty() || context.tasks.working_task().is_none() || should_stop {
-            return finalize_runtime_episode(context, task, workspace_dir, initial_observation, steps).await;
+            return finalize_runtime_episode(
+                context,
+                task,
+                workspace_dir,
+                initial_observation,
+                steps,
+                None,
+            )
+            .await;
         }
     }
 
-    finalize_runtime_episode(context, task, workspace_dir, initial_observation, steps).await
+    finalize_runtime_episode(
+        context,
+        task,
+        workspace_dir,
+        initial_observation,
+        steps,
+        None,
+    )
+    .await
 }
 
 async fn understand_episode_task(
@@ -1744,20 +1781,34 @@ async fn judge_episode_completion(
     execute_program(context.judge_llm.as_ref(), context, &snapshot, renderer, &program).await
 }
 
+fn normalize_work_phase(state: &str) -> String {
+    match state.trim().to_ascii_lowercase().as_str() {
+        "investigate" | "continue" => "investigate".to_string(),
+        "change" | "ready_to_patch" => "change".to_string(),
+        "verify" | "ready_to_validate" => "verify".to_string(),
+        "finish" | "done" => "finish".to_string(),
+        "blocked" => "blocked".to_string(),
+        _ => "investigate".to_string(),
+    }
+}
+
 async fn finalize_runtime_episode(
     context: &mut Context,
     task: EpisodeTask,
     workspace_dir: &Path,
     initial_observation: EpisodeObservation,
     steps: Vec<EpisodeStep>,
+    forced_rollout_status: Option<EpisodeStatus>,
 ) -> Result<EpisodeOutcome> {
-    let rollout_status = if context.tasks.is_empty() || context.tasks.working_task().is_none() {
-        EpisodeStatus::Succeeded
-    } else if steps.len() >= task.max_steps {
-        EpisodeStatus::MaxStepsExceeded
-    } else {
-        EpisodeStatus::Aborted
-    };
+    let rollout_status = forced_rollout_status.unwrap_or_else(|| {
+        if context.tasks.is_empty() || context.tasks.working_task().is_none() {
+            EpisodeStatus::Succeeded
+        } else if steps.len() >= task.max_steps {
+            EpisodeStatus::MaxStepsExceeded
+        } else {
+            EpisodeStatus::Aborted
+        }
+    });
     let validation_results = run_validation_commands(&task.validation_commands, workspace_dir).await?;
     let status = final_episode_status(rollout_status, &validation_results);
     let final_snapshot = Snapshot::new(context).await.to_string();
@@ -2535,7 +2586,14 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
     let snapshot = Snapshot::new(context).await;
     let renderer = OpenAIToolRenderer;
     let runtime_policy = RuntimePolicyProgram;
-    let outcome = runtime_policy.run_once(context, &snapshot, &renderer).await;
+    let work_phase = context
+        .tasks
+        .working_task_phase()
+        .unwrap_or("investigate")
+        .to_string();
+    let outcome = runtime_policy
+        .run_once(context, &snapshot, &renderer, &work_phase)
+        .await;
     let output = outcome.output;
     if should_record_effect(&output.effect) {
         let mut evidence = collect_memory_evidence(&output.effect);

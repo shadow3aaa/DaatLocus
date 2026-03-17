@@ -43,18 +43,19 @@ impl Program for CompletionJudgeProgram {
             .input("最近步骤", "最近几步做了什么。")
             .input("当前终端状态", "终端当前显示与最近观察。")
             .input("验证摘要", "已有 validation 结果；若没有则写 none。")
-            .output("state", "continue / ready_to_patch / ready_to_validate / done / blocked")
+            .output("state", "investigate / change / verify / finish / blocked")
             .output("reason", "为什么这样判断。")
             .output("next_check", "如果还不能完成，最值得做的下一项检查。")
-            .rule("只有在已经满足 done criteria 时才输出 done。")
-            .rule("如果只是理解清楚了修改点但还没修改，应输出 ready_to_patch。")
-            .rule("如果修改已完成且应跑测试/验证，应输出 ready_to_validate。")
+            .rule("只有在已经满足 done criteria 时才输出 finish。")
+            .rule("如果只是理解清楚了修改点但还没修改，应输出 change。")
+            .rule("如果修改已完成且应跑测试/验证，应输出 verify。")
     }
 
     fn build_ir(&self, _context: &Context, _snapshot: &Snapshot) -> PromptIR {
         let mut ir = PromptIR::with_system(SYSTEM_PROMPT);
-        ir.push_instruction("保守判断，不要因为看到了可疑代码就直接判 done。");
-        ir.push_instruction("如果最近步骤只是重复阅读/grep，应优先判断是否已到 ready_to_patch。");
+        ir.push_instruction("保守判断，不要因为看到了可疑代码就直接判 finish。");
+        ir.push_instruction("使用通用工作阶段，不要输出领域专用术语。investigate 表示继续调查，change 表示开始做实质修改，verify 表示应进入验证，finish 表示可以收尾。");
+        ir.push_instruction("如果最近步骤只是重复阅读/grep，应优先判断是否已到 change。");
         ir.push_section("任务目标", self.task_goal.clone());
         ir.push_section("完成标准", self.done_criteria.join("\n"));
         ir.push_section("最近步骤", self.recent_steps.join("\n"));

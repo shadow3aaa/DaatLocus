@@ -20,6 +20,8 @@ pub struct Task {
     #[serde(default)]
     pub project_id: Option<Uuid>,
     #[serde(default)]
+    pub work_phase: Option<String>,
+    #[serde(default)]
     pub last_touched_at_ms: Option<i64>,
 }
 
@@ -54,6 +56,7 @@ impl Tasks {
             Task {
                 description,
                 project_id,
+                work_phase: None,
                 last_touched_at_ms: None,
             },
         );
@@ -100,6 +103,36 @@ impl Tasks {
         self.working_task
     }
 
+    pub fn working_task_phase(&self) -> Option<&str> {
+        self.working_task
+            .and_then(|id| self.tasks.get(&id))
+            .and_then(|task| task.work_phase.as_deref())
+    }
+
+    pub fn set_working_task_description(&mut self, description: String) -> bool {
+        let Some(id) = self.working_task else {
+            return false;
+        };
+        let Some(task) = self.tasks.get_mut(&id) else {
+            return false;
+        };
+        task.description = description;
+        self.touch_task(id);
+        true
+    }
+
+    pub fn set_working_task_phase(&mut self, work_phase: impl Into<String>) -> bool {
+        let Some(id) = self.working_task else {
+            return false;
+        };
+        let Some(task) = self.tasks.get_mut(&id) else {
+            return false;
+        };
+        task.work_phase = Some(work_phase.into());
+        self.touch_task(id);
+        true
+    }
+
     pub fn touch_working_task(&mut self) {
         if let Some(id) = self.working_task {
             self.touch_task(id);
@@ -131,12 +164,17 @@ impl Display for Tasks {
                 .project_id
                 .map(|project_id| format!(" [project={project_id}]"))
                 .unwrap_or_default();
+            let phase_suffix = task
+                .work_phase
+                .as_ref()
+                .map(|work_phase| format!(" [phase={work_phase}]"))
+                .unwrap_or_default();
             if Some(id) == self.working_task.as_ref() {
                 writeln!(f, "--- 选中的下一步动作 ---")?;
-                writeln!(f, "{id}. {}{}", task.description, project_suffix)?;
+                writeln!(f, "{id}. {}{}{}", task.description, project_suffix, phase_suffix)?;
                 writeln!(f, "--- 选中的下一步动作 ---")?;
             } else {
-                writeln!(f, "{id}. {}{}", task.description, project_suffix)?;
+                writeln!(f, "{id}. {}{}{}", task.description, project_suffix, phase_suffix)?;
             }
         }
         Ok(())
