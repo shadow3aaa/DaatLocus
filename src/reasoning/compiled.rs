@@ -75,6 +75,12 @@ pub struct CompiledCandidateReport {
     pub total_cases: usize,
     pub attempts_used: usize,
     #[serde(default)]
+    pub episode_wins: usize,
+    #[serde(default)]
+    pub episode_losses: usize,
+    #[serde(default)]
+    pub episode_ties: usize,
+    #[serde(default)]
     pub judge_wins: usize,
     #[serde(default)]
     pub judge_losses: usize,
