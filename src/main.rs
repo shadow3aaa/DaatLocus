@@ -885,6 +885,13 @@ async fn run_train_source_learn(
     while cursor < tasks.len() {
         let batch_end = (cursor + batch_size).min(tasks.len());
         let batch_tasks = &tasks[cursor..batch_end];
+        println!(
+            "  batch {} preview starting (tasks {}..{}, count={})",
+            batch_index + 1,
+            cursor + 1,
+            batch_end,
+            batch_tasks.len()
+        );
         let selection =
             select_train_source_variant_for_batch(&config, batch_tasks, &session_root, batch_index)
                 .await?;
@@ -1341,8 +1348,20 @@ async fn select_train_source_variant_for_batch(
     let mut all_summaries = Vec::new();
 
     for variant in variants {
+        println!(
+            "    preview variant={} batch={} tasks={}",
+            variant.variant_name(),
+            batch_index + 1,
+            tasks.len()
+        );
         let mut outcomes = Vec::new();
         for (task_index, task) in tasks.iter().enumerate() {
+            println!(
+                "      preview task {}/{} id={}",
+                task_index + 1,
+                tasks.len(),
+                task.id
+            );
             let preview_root = prepare_learning_selection_episode_root(
                 session_root,
                 batch_index,
@@ -1414,6 +1433,11 @@ async fn execute_train_source_task(
     let episode_home = episode_root.join("spinova_home");
     let workspace_dir = episode_root.join("workspace");
     let home_override = SpinovaHomeOverride::set(episode_home);
+    println!(
+        "        episode setup: id={} workspace={}",
+        task.id,
+        workspace_dir.display()
+    );
     provision_episode_workspace(task, &workspace_dir).await?;
 
     let mut run_task = task.clone();
@@ -2060,6 +2084,7 @@ async fn run_validation_commands(
 ) -> Result<Vec<ValidationCommandResult>> {
     let mut results = Vec::new();
     for command in commands {
+        println!("        validation command: {}", command);
         let output = run_shell_line_capture(command, workspace_dir).await?;
         results.push(ValidationCommandResult {
             command: command.clone(),
@@ -2232,6 +2257,7 @@ async fn provision_episode_workspace(task: &EpisodeTask, workspace_dir: &Path) -
 
     if let Some(repo) = task.metadata.get("repo") {
         let remote = infer_repo_remote(repo);
+        println!("          clone repo={} from {}", repo, remote);
         run_host_command(
             &["git", "clone", remote.as_str(), workspace_dir.to_string_lossy().as_ref()],
             None,
@@ -2239,6 +2265,7 @@ async fn provision_episode_workspace(task: &EpisodeTask, workspace_dir: &Path) -
         .await?;
 
         if let Some(base_commit) = task.metadata.get("base_commit") {
+            println!("          checkout base_commit={}", base_commit);
             run_host_command(
                 &["git", "checkout", base_commit.as_str()],
                 Some(workspace_dir),
@@ -2248,6 +2275,7 @@ async fn provision_episode_workspace(task: &EpisodeTask, workspace_dir: &Path) -
     }
 
     for command in &task.setup_commands {
+        println!("          setup command: {}", command);
         run_shell_line(command, workspace_dir).await?;
     }
 
