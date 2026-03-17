@@ -137,7 +137,7 @@ impl Program for TerminalNextStepProgram {
                     observation: "终端已进入 gh auth login 的交互式认证向导，需要人工账号授权，不适合继续自动推进。".to_string(),
                     description: "当前应先中断错误进入的认证向导，再改用非交互替代方案，而不是继续回答登录问题。".to_string(),
                     current_doing: "中断交互式认证流程以恢复可自动执行状态".to_string(),
-                    action: crate::core::Action::DeviceAction {
+                    effect: crate::core::Effect::DeviceAction {
                         action: crate::device::DeviceAction::TerminalInput {
                             text: "\u{3}".to_string(),
                         },
@@ -164,7 +164,7 @@ impl Program for TerminalNextStepProgram {
                     observation: "终端当前停在分页器的 (END) 界面，这不是 shell prompt，也不是需要人工授权的交互式认证。".to_string(),
                     description: "当前目标只是退出分页器并回到 shell，发送 q 是短小、安全且确定的下一步。".to_string(),
                     current_doing: "退出分页器回到 shell 继续终端分析".to_string(),
-                    action: crate::core::Action::DeviceAction {
+                    effect: crate::core::Effect::DeviceAction {
                         action: crate::device::DeviceAction::TerminalInput {
                             text: "q".to_string(),
                         },
@@ -191,7 +191,7 @@ impl Program for TerminalNextStepProgram {
                     observation: "终端当前只是持续输出普通测试进度，还没有回到 shell prompt，也没有出现需要输入的提示。".to_string(),
                     description: "此时最合理的动作是等待命令自然完成，而不是发送多余输入或误判为命令已结束。".to_string(),
                     current_doing: "等待非交互命令继续运行并产出结果".to_string(),
-                    action: crate::core::Action::Wait,
+                    effect: crate::core::Effect::Wait,
                 },
             },
         ]

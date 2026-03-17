@@ -1,6 +1,10 @@
-pub mod action_phase;
+pub mod action_phase_common;
+pub mod attend_notifications;
+pub mod execute_task;
+pub mod explore_new_tasks;
 pub mod memory_encoding;
 pub mod pairwise_judge;
+pub mod plan_from_project;
 pub mod resolve_telegram;
 pub mod sleep_artifact_builder;
 pub mod sleep_l3_promoter;
