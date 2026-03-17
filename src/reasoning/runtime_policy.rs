@@ -35,6 +35,7 @@ impl RuntimePolicyProgram {
         context: &Context,
         snapshot: &Snapshot,
         renderer: &R,
+        work_phase: &str,
     ) -> RuntimePolicyOutcome {
         if context.devices.requires_attention() || context.obligations.has_pending() {
             return RuntimePolicyOutcome {
@@ -45,7 +46,9 @@ impl RuntimePolicyProgram {
 
         if !context.tasks.is_empty() && !self.should_explore_instead_of_execute(context) {
             return RuntimePolicyOutcome {
-                output: self.run_execute_task(context, snapshot, renderer).await,
+                output: self
+                    .run_execute_task(context, snapshot, renderer, work_phase)
+                    .await,
                 touched_working_task: true,
             };
         }
@@ -120,9 +123,12 @@ impl RuntimePolicyProgram {
         context: &Context,
         snapshot: &Snapshot,
         renderer: &R,
+        work_phase: &str,
     ) -> Output {
         if context.devices.focused() == Some(DeviceId::Terminal) {
-            let program = TerminalNextStepProgram;
+            let program = TerminalNextStepProgram {
+                work_phase: work_phase.to_string(),
+            };
             execute_program(context.llm.as_ref(), context, snapshot, renderer, &program)
                 .await
                 .unwrap_or_else(|err| Output {

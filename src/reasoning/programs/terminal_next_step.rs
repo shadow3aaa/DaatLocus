@@ -12,7 +12,9 @@ use crate::{
     snapshot::Snapshot,
 };
 
-pub struct TerminalNextStepProgram;
+pub struct TerminalNextStepProgram {
+    pub work_phase: String,
+}
 
 impl TerminalNextStepProgram {
     fn current_task_summary(context: &Context) -> String {
@@ -54,6 +56,7 @@ impl TerminalNextStepProgram {
     fn dataset_ir(
         &self,
         current_task: String,
+        work_phase: String,
         terminal_view: String,
         device_context: String,
         snapshot_text: String,
@@ -68,7 +71,11 @@ impl TerminalNextStepProgram {
         ir.push_instruction("如果终端进入交互式认证、登录向导、REPL 或不适合自动推进的交互界面，应优先发送 Ctrl+C 中断，并改走非交互方案。");
         ir.push_instruction("如果终端进入 less/man 等分页器，而当前目标只是退出它回到 shell，可发送安全、短小、确定的输入，例如 q。");
         ir.push_instruction("不要把同一条命令的重复执行当作默认答案；只有在你明确判断需要重试同一命令时，才再次发送它。");
+        ir.push_instruction("工作阶段 investigate 表示继续调查；change 表示应优先选择会改变环境或文件的动作，而不是继续纯 grep/cat；verify 表示应优先测试、检查结果或查看修改后的行为；finish 表示不要再继续修改，只做收尾。");
+        ir.push_instruction("当工作阶段是 change 且当前已经回到 shell prompt 时，优先选择能直接推进修改的下一步，例如编辑目标文件、构造非交互式替换命令，或查看最小必要上下文后立即修改。不要继续在同一片代码上反复 grep/head。");
+        ir.push_instruction("当工作阶段是 verify 时，优先运行最小验证命令、查看 diff 或检查目标行为，而不是继续搜代码。");
         ir.push_section("当前选中动作", current_task);
+        ir.push_section("当前工作阶段", work_phase);
         ir.push_section("前景 Terminal 画面", terminal_view);
         ir.push_section("设备上下文", device_context);
         ir.push_section("完整快照", snapshot_text);
@@ -94,6 +101,7 @@ impl Program for TerminalNextStepProgram {
     fn signature(&self) -> Signature {
         Signature::new("根据当前前景 Terminal 画面和任务目标，选择一条最合理的下一步终端动作。")
             .input("当前选中动作", "当前正在执行的任务描述。")
+            .input("当前工作阶段", "investigate / change / verify / finish / blocked。")
             .input("前景 Terminal 画面", "当前 PTY 终端画面。")
             .input(
                 "完整快照",
@@ -113,6 +121,8 @@ impl Program for TerminalNextStepProgram {
             .rule("如果命令仍在自然运行且没有输入提示，应优先 Wait。")
             .rule("如果已经回到 shell prompt，应把上一条命令视为结束，再决定下一步查看或分析策略。")
             .rule("如果进入认证向导、REPL 或不适合自动推进的交互式界面，应优先中断或退出。")
+            .rule("当工作阶段为 change 时，应优先推进修改，而不是继续纯观察。")
+            .rule("当工作阶段为 verify 时，应优先推进验证，而不是继续搜代码。")
     }
 
     fn examples(&self) -> Vec<ProgramExample<Self::Output>> {
@@ -200,6 +210,7 @@ impl Program for TerminalNextStepProgram {
     fn build_ir(&self, context: &Context, snapshot: &Snapshot) -> PromptIR {
         self.dataset_ir(
             Self::current_task_summary(context),
+            self.work_phase.clone(),
             Self::terminal_view(context),
             build_device_context_prompt(context),
             snapshot.to_string(),
