@@ -804,6 +804,8 @@ async fn run_train_source_learn(
     let batch_size = batch_size.max(1);
     let session_root = prepare_learning_session_root(path).await?;
     let shared_learning_home = get_spinova_home().await;
+    let session_learning_home = prepare_learning_home_root(&session_root).await?;
+    sync_learning_assets_to_session(&shared_learning_home, &session_learning_home).await?;
     let session = TrainSourceLearnSession::new(
         session_root,
         TrainSourceLearnState::new(path.to_string(), tasks.len(), batch_size),
@@ -811,20 +813,23 @@ async fn run_train_source_learn(
     .await?;
 
     println!(
-        "train source learn: path={} total_tasks={} batch_size={} session={} learning_home={}",
+        "train source learn: path={} total_tasks={} batch_size={} session={} learning_home={} shared_long_term_home={}",
         path,
         tasks.len(),
         batch_size,
         session.session_root().display(),
+        session_learning_home.display(),
         shared_learning_home.display()
     );
 
+    let home_override = SpinovaHomeOverride::set(session_learning_home.clone());
     let run_result = tokio::select! {
         result = run_train_source_learn_loop(
             config,
             tasks,
             batch_size,
             shared_learning_home,
+            session_learning_home,
             session.clone(),
         ) => result,
         _ = tokio::signal::ctrl_c() => {
@@ -832,6 +837,7 @@ async fn run_train_source_learn(
             return Ok(());
         }
     };
+    drop(home_override);
 
     session.shutdown(false).await?;
     run_result
@@ -841,7 +847,8 @@ async fn run_train_source_learn_loop(
     config: crate::config::Config,
     tasks: Vec<EpisodeTask>,
     batch_size: usize,
-    _shared_learning_home: PathBuf,
+    shared_learning_home: PathBuf,
+    session_learning_home: PathBuf,
     session: TrainSourceLearnSession,
 ) -> Result<()> {
     let mut cursor = 0usize;
@@ -942,10 +949,12 @@ async fn run_train_source_learn_loop(
             sleep_summary.instruction_hypotheses,
             sleep_summary.promoted_l3_entries
         );
+        sync_learning_assets_back_to_shared(&session_learning_home, &shared_learning_home).await?;
 
         println!("  batch {} optimize starting", batch_index + 1);
         let optimization_results = run_reasoning_optimize(&optimize_context).await?;
         optimize_context.shutdown().await;
+        sync_learning_assets_back_to_shared(&session_learning_home, &shared_learning_home).await?;
 
         let compiled_prompt_count = load_compiled_prompts_only().await?.len();
         session
@@ -1429,8 +1438,8 @@ fn build_episode_metric(
             )
         })
         .count();
-    let repeated_investigation = count_repeated_investigation_effects(steps);
-    let repeated_effects = repeated_waits + repeated_investigation;
+    let repeated_terminal_loops = count_repeated_terminal_loops(steps);
+    let repeated_effects = repeated_waits + repeated_terminal_loops;
 
     let success = matches!(status, EpisodeStatus::Succeeded);
     let score = if success {
@@ -1452,24 +1461,20 @@ fn build_episode_metric(
         score,
         steps_used: steps.len(),
         repeated_effects,
-        stagnation_events: repeated_investigation,
+        stagnation_events: repeated_terminal_loops,
         notes,
     }
 }
 
-fn count_repeated_investigation_effects(steps: &[EpisodeStep]) -> usize {
+fn count_repeated_terminal_loops(steps: &[EpisodeStep]) -> usize {
     let mut seen = std::collections::HashMap::<String, usize>::new();
     let mut repeated = 0;
     for step in steps {
-        if step
-            .metadata
-            .get("work_phase")
-            .map(String::as_str)
-            != Some("investigate")
-        {
+        let phase = step.metadata.get("work_phase").map(String::as_str);
+        if !matches!(phase, Some("investigate") | Some("verify")) {
             continue;
         }
-        let Some(signature) = investigation_effect_signature(&step.effect) else {
+        let Some(signature) = repeated_terminal_loop_signature(&step.effect) else {
             continue;
         };
         let count = seen.entry(signature).or_insert(0);
@@ -1481,7 +1486,7 @@ fn count_repeated_investigation_effects(steps: &[EpisodeStep]) -> usize {
     repeated
 }
 
-fn investigation_effect_signature(effect: &Effect) -> Option<String> {
+fn repeated_terminal_loop_signature(effect: &Effect) -> Option<String> {
     let Effect::DeviceAction {
         action: crate::device::DeviceAction::TerminalInput { text },
     } = effect
@@ -1489,6 +1494,20 @@ fn investigation_effect_signature(effect: &Effect) -> Option<String> {
         return None;
     };
     let trimmed = text.trim();
+    if trimmed.contains("pytest -v elastic/tests/") {
+        return Some("pytest:elastic/tests".to_string());
+    }
+    if trimmed.contains("elastic/tests/pytest.log") {
+        if trimmed.starts_with("tail ") {
+            return Some("log-tail:elastic/tests/pytest.log".to_string());
+        }
+        if trimmed.starts_with("grep ") {
+            return Some("log-grep:elastic/tests/pytest.log".to_string());
+        }
+        if trimmed.starts_with("cat ") {
+            return Some("log-cat:elastic/tests/pytest.log".to_string());
+        }
+    }
     let prefixes = [
         "grep -i version ",
         "grep -i opensearch ",
@@ -1885,6 +1904,87 @@ async fn prepare_learning_session_root(path: &str) -> Result<PathBuf> {
         .await
         .map_err(|err| miette!("failed to create learn session root {}: {err}", root.display()))?;
     Ok(root)
+}
+
+async fn prepare_learning_home_root(session_root: &Path) -> Result<PathBuf> {
+    let root = session_root.join("learning_home");
+    if root.exists() {
+        tokio::fs::remove_dir_all(&root)
+            .await
+            .map_err(|err| miette!("failed to clear learn session home {}: {err}", root.display()))?;
+    }
+    tokio::fs::create_dir_all(&root)
+        .await
+        .map_err(|err| miette!("failed to create learn session home {}: {err}", root.display()))?;
+    Ok(root)
+}
+
+async fn sync_learning_assets_to_session(shared_home: &Path, session_home: &Path) -> Result<()> {
+    for name in [COMPILED_DIR_NAME, "sleep_artifacts", "l3_memory"] {
+        sync_path_replace(&shared_home.join(name), &session_home.join(name)).await?;
+    }
+    Ok(())
+}
+
+async fn sync_learning_assets_back_to_shared(session_home: &Path, shared_home: &Path) -> Result<()> {
+    for name in [COMPILED_DIR_NAME, "sleep_artifacts", "l3_memory"] {
+        sync_path_replace(&session_home.join(name), &shared_home.join(name)).await?;
+    }
+    Ok(())
+}
+
+async fn sync_path_replace(src: &Path, dst: &Path) -> Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    if dst.exists() {
+        let metadata = tokio::fs::metadata(dst)
+            .await
+            .map_err(|err| miette!("failed to stat {}: {err}", dst.display()))?;
+        if metadata.is_dir() {
+            tokio::fs::remove_dir_all(dst)
+                .await
+                .map_err(|err| miette!("failed to clear {}: {err}", dst.display()))?;
+        } else {
+            tokio::fs::remove_file(dst)
+                .await
+                .map_err(|err| miette!("failed to clear {}: {err}", dst.display()))?;
+        }
+    }
+    copy_path_recursive(src, dst).await
+}
+
+async fn copy_path_recursive(src: &Path, dst: &Path) -> Result<()> {
+    let metadata = tokio::fs::metadata(src)
+        .await
+        .map_err(|err| miette!("failed to stat {}: {err}", src.display()))?;
+    if metadata.is_dir() {
+        tokio::fs::create_dir_all(dst)
+            .await
+            .map_err(|err| miette!("failed to create {}: {err}", dst.display()))?;
+        let mut entries = tokio::fs::read_dir(src)
+            .await
+            .map_err(|err| miette!("failed to read dir {}: {err}", src.display()))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|err| miette!("failed to iterate dir {}: {err}", src.display()))?
+        {
+            let child_src = entry.path();
+            let child_dst = dst.join(entry.file_name());
+            Box::pin(copy_path_recursive(&child_src, &child_dst)).await?;
+        }
+    } else {
+        if let Some(parent) = dst.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|err| miette!("failed to create parent {}: {err}", parent.display()))?;
+        }
+        tokio::fs::copy(src, dst)
+            .await
+            .map_err(|err| miette!("failed to copy {} -> {}: {err}", src.display(), dst.display()))?;
+    }
+    Ok(())
 }
 
 async fn prepare_learning_episode_root(
