@@ -1,7 +1,6 @@
 use std::{collections::HashMap, env, path::PathBuf};
 
 use miette::{Result, miette};
-use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
@@ -44,25 +43,6 @@ pub struct SleepSummary {
     pub promoted_l3_entries: usize,
 }
 
-#[derive(Deserialize)]
-struct LearnStateSnapshot {
-    batch_reports: Vec<LearnBatchReportSnapshot>,
-}
-
-#[derive(Deserialize)]
-struct LearnBatchReportSnapshot {
-    selected_variant: String,
-    selection_scores: Vec<LearnVariantScoreSnapshot>,
-}
-
-#[derive(Deserialize)]
-struct LearnVariantScoreSnapshot {
-    variant_name: String,
-    succeeded: usize,
-    failed: usize,
-    avg_score: f32,
-}
-
 pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let records = load_runtime_trace_records().await?;
     let mut failure_patterns = derive_failure_patterns(&records);
@@ -83,9 +63,6 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     derived
         .instruction_hypotheses
         .extend(derive_episode_instruction_hypotheses(&episode_outcomes));
-    derived
-        .instruction_hypotheses
-        .extend(derive_learn_selection_instruction_hypotheses().await?);
     store
         .replace_bootstrap_demos(&derived.bootstrap_demos)
         .await?;
@@ -95,7 +72,8 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
         .await?;
     let mut promoted = promote_failure_patterns_to_l3(context, &failure_patterns).await?;
     let promoted_failure_l3_entries = promoted.len();
-    let success_promoted = promote_success_patterns_to_l3(context, &records).await?;
+    let mut success_promoted = promote_success_patterns_to_l3(context, &records).await?;
+    success_promoted.extend(promote_episode_success_patterns_to_l3(context, &episode_outcomes).await?);
     let promoted_success_l3_entries = success_promoted.len();
     promoted.extend(success_promoted);
     if !promoted.is_empty() {
@@ -227,26 +205,6 @@ async fn load_recent_learn_episode_outcomes() -> Result<Vec<EpisodeOutcome>> {
     }
 
     Ok(outcomes)
-}
-
-async fn load_recent_learn_state() -> Result<Option<LearnStateSnapshot>> {
-    let Some(session_root) = latest_train_source_learn_session_root().await? else {
-        return Ok(None);
-    };
-    let path = session_root.join("learn_state.json");
-    let payload = match tokio::fs::read_to_string(&path).await {
-        Ok(payload) => payload,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(miette!(
-                "failed to read learn state {}: {err}",
-                path.display()
-            ));
-        }
-    };
-    let state = serde_json::from_str::<LearnStateSnapshot>(&payload)
-        .map_err(|err| miette!("failed to parse learn state {}: {err}", path.display()))?;
-    Ok(Some(state))
 }
 
 fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<SleepArtifactFailurePattern> {
@@ -470,45 +428,6 @@ fn derive_episode_instruction_hypotheses(
     items
 }
 
-async fn derive_learn_selection_instruction_hypotheses(
-) -> Result<Vec<SleepArtifactInstructionHypothesis>> {
-    let Some(state) = load_recent_learn_state().await? else {
-        return Ok(Vec::new());
-    };
-
-    let mut items = Vec::new();
-    for (batch_index, report) in state.batch_reports.iter().enumerate() {
-        let Some((suite, candidate_name)) = parse_candidate_variant_name(&report.selected_variant)
-        else {
-            continue;
-        };
-        let Some(text) = candidate_instruction_hint(suite, candidate_name) else {
-            continue;
-        };
-        let selected = report
-            .selection_scores
-            .iter()
-            .find(|score| score.variant_name == report.selected_variant);
-        let baseline = report
-            .selection_scores
-            .iter()
-            .find(|score| score.variant_name == "baseline");
-        items.push(SleepArtifactInstructionHypothesis {
-            suite: suite.to_string(),
-            text: text.to_string(),
-            justification: format_learn_selection_justification(
-                &report.selected_variant,
-                selected,
-                baseline,
-                batch_index,
-            ),
-            source_pattern_ids: vec![format!("learn-batch:{batch_index}")],
-        });
-    }
-
-    Ok(items)
-}
-
 fn infer_episode_failure_suites(outcome: &EpisodeOutcome) -> Vec<String> {
     let mut suites = vec!["action_phase.execute_task".to_string()];
 
@@ -549,82 +468,6 @@ fn infer_episode_suite_from_step(step: &EpisodeStep) -> Option<&'static str> {
             device: crate::device::DeviceId::Terminal,
         } => Some("action_phase.execute_task"),
         _ => None,
-    }
-}
-
-fn parse_candidate_variant_name(variant_name: &str) -> Option<(&'static str, &str)> {
-    let rest = variant_name.strip_prefix("candidate.")?;
-    let (target, candidate_name) = rest.rsplit_once('.')?;
-    let suite = match target {
-        "execute_task" => "action_phase.execute_task",
-        "terminal_next_step" => "terminal_next_step",
-        "plan_from_project" => "action_phase.plan_from_project",
-        "explore_new_tasks" => "action_phase.explore_new_tasks",
-        "attend_notifications" => "action_phase.attend_notifications",
-        _ => return None,
-    };
-    Some((suite, candidate_name))
-}
-
-fn candidate_instruction_hint(suite: &str, candidate_name: &str) -> Option<&'static str> {
-    match (suite, candidate_name) {
-        ("terminal_next_step", "prompt_return_bias") => {
-            Some("当 shell prompt 已返回时，应优先视为当前命令已结束，不要误判为仍在加载。")
-        }
-        ("terminal_next_step", "interactive_prompt_bias") => {
-            Some("遇到 REPL、认证向导或交互式提示时，应优先中断或改走非交互方案。")
-        }
-        ("terminal_next_step", "minimal_examples") => {
-            Some("终端下一步判断应依赖少量高信号示例，避免被冗长上下文干扰。")
-        }
-        ("action_phase.execute_task", "phase_bias") => {
-            Some("执行任务阶段应持续沿当前任务推进，不要在缺少新信息时重复同一动作或过早切走。")
-        }
-        ("action_phase.execute_task", "minimal_examples") => {
-            Some("执行任务阶段应优先保留最关键的 few-shot 行为模式，减少无关示例噪声。")
-        }
-        ("action_phase.plan_from_project", "phase_bias") => {
-            Some("为项目规划下一步时，应优先产出直接推进项目的下一动作，而不是跳回探索。")
-        }
-        ("action_phase.explore_new_tasks", "phase_bias") => {
-            Some("探索新任务阶段应聚焦发现和收敛新任务，不要混入已有任务执行动作。")
-        }
-        ("action_phase.attend_notifications", "phase_bias") => {
-            Some("处理提醒阶段应优先响应需要注意的设备或消息，不要被当前终端上下文带偏。")
-        }
-        _ if candidate_name.starts_with("teleprompt_") => {
-            Some("在该子程序上保留由训练数据提炼出的 instruction 线索，优先遵循其判别性规则。")
-        }
-        _ if candidate_name.starts_with("bootstrap_") => {
-            Some("在该子程序上保留由成功轨迹蒸馏出的 demo 模式，优先复用成功行为模板。")
-        }
-        _ => None,
-    }
-}
-
-fn format_learn_selection_justification(
-    variant_name: &str,
-    selected: Option<&LearnVariantScoreSnapshot>,
-    baseline: Option<&LearnVariantScoreSnapshot>,
-    batch_index: usize,
-) -> String {
-    match (selected, baseline) {
-        (Some(selected), Some(baseline)) => format!(
-            "learn batch {} selected {} over baseline; selected succeeded={} failed={} avg_score={:.3}, baseline succeeded={} failed={} avg_score={:.3}",
-            batch_index,
-            variant_name,
-            selected.succeeded,
-            selected.failed,
-            selected.avg_score,
-            baseline.succeeded,
-            baseline.failed,
-            baseline.avg_score,
-        ),
-        (Some(selected), None) => format!(
-            "learn batch {} selected {}; succeeded={} failed={} avg_score={:.3}",
-            batch_index, variant_name, selected.succeeded, selected.failed, selected.avg_score
-        ),
-        _ => format!("learn batch {} selected {}", batch_index, variant_name),
     }
 }
 
@@ -1268,6 +1111,64 @@ async fn promote_success_patterns_to_l3(
     Ok(entries)
 }
 
+async fn promote_episode_success_patterns_to_l3(
+    context: &mut Context,
+    outcomes: &[EpisodeOutcome],
+) -> Result<Vec<L3EntryDraft>> {
+    let renderer = OpenAIToolRenderer;
+    let program = SleepSuccessL3PromoterProgram;
+    let mut entries = Vec::new();
+    let mut per_suite = std::collections::HashMap::<String, usize>::new();
+
+    for outcome in outcomes {
+        if outcome.status != EpisodeStatus::Succeeded {
+            continue;
+        }
+        let Some(step) = outcome
+            .steps
+            .iter()
+            .rev()
+            .find(|step| infer_episode_suite_from_step(step).is_some())
+        else {
+            continue;
+        };
+        let Some(suite) = infer_episode_suite_from_step(step) else {
+            continue;
+        };
+        let count = per_suite.entry(suite.to_string()).or_insert(0);
+        if *count >= 2 {
+            continue;
+        }
+        let input_summary = render_episode_input_summary(outcome, step);
+        let output_summary = serde_json::to_string_pretty(&step_to_output(step))
+            .map_err(|err| miette!("failed to format parsed episode success output: {err}"))?;
+        let related_memories = context.memory.search_mem(&input_summary, 3).await;
+        let trace_id = format!("episode:{}", outcome.task.id);
+        let outcome = execute_program_with_ir_report(
+            context.judge_llm.as_ref(),
+            context,
+            &renderer,
+            &program,
+            program.dataset_ir(
+                suite.to_string(),
+                trace_id.clone(),
+                input_summary,
+                output_summary,
+                render_related_memories(&related_memories).unwrap_or_else(|| "无".to_string()),
+            ),
+            &program.default_tuning(),
+            TraceOrigin::Sleep,
+        )
+        .await?;
+        if let Some(entry) = to_episode_success_l3_entry(&trace_id, &outcome.output) {
+            *count += 1;
+            entries.push(entry);
+        }
+    }
+
+    Ok(entries)
+}
+
 fn to_l3_entry(
     pattern: &SleepArtifactFailurePattern,
     output: &SleepL3PromoterOutput,
@@ -1314,5 +1215,26 @@ fn to_success_l3_entry(
             "{}:{}:{}",
             record.program_name, record.timestamp_ms, record.attempt
         )],
+    })
+}
+
+fn to_episode_success_l3_entry(
+    trace_id: &str,
+    output: &SleepSuccessL3PromoterOutput,
+) -> Option<L3EntryDraft> {
+    if !output.promote {
+        return None;
+    }
+    if output.lesson.trim().is_empty() || output.retrieval_text.trim().is_empty() {
+        return None;
+    }
+    Some(L3EntryDraft {
+        kind: output.kind.clone(),
+        lesson: output.lesson.trim().to_string(),
+        evidence_summary: output.evidence_summary.trim().to_string(),
+        retrieval_text: output.retrieval_text.trim().to_string(),
+        confidence: output.confidence.clamp(0.0, 1.0) as f32,
+        stability: output.stability.clone(),
+        source_trace_ids: vec![trace_id.to_string()],
     })
 }

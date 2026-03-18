@@ -25,9 +25,6 @@ pub struct CandidateEvaluation<O: Clone> {
     pub acceptance_attempts_used: Option<usize>,
     pub score: usize,
     pub attempts_used: usize,
-    pub episode_wins: usize,
-    pub episode_losses: usize,
-    pub episode_ties: usize,
     pub judge_wins: usize,
     pub judge_losses: usize,
     pub judge_ties: usize,
@@ -183,8 +180,6 @@ pub fn compare_candidate_evaluations<O: Clone>(
         .acceptance_is_full()
         .cmp(&left.acceptance_is_full())
         .then_with(|| right.score.cmp(&left.score))
-        .then_with(|| right.episode_wins.cmp(&left.episode_wins))
-        .then_with(|| left.episode_losses.cmp(&right.episode_losses))
         .then_with(|| right.judge_wins.cmp(&left.judge_wins))
         .then_with(|| left.judge_losses.cmp(&right.judge_losses))
         .then_with(|| left.attempts_used.cmp(&right.attempts_used))
