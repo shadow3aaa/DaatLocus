@@ -753,7 +753,7 @@ async fn run_sleep_optimize(config: crate::config::Config) -> Result<()> {
 
 fn run_train_source_inspect_blocking(path: &str) -> Result<()> {
     let source = SweTrainSource::load_blocking(path)?;
-    let tasks = source.into_episode_tasks(32);
+    let tasks = source.into_episode_tasks(64);
     let summary = EpisodeHarness::summarize_tasks(&tasks, 5);
     print_episode_batch_summary(path, &summary);
     Ok(())
@@ -761,7 +761,7 @@ fn run_train_source_inspect_blocking(path: &str) -> Result<()> {
 
 async fn run_train_source_rollout(config: crate::config::Config, path: &str, task_index: usize) -> Result<()> {
     let source = SweTrainSource::load(path).await?;
-    let tasks = source.into_episode_tasks(32);
+    let tasks = source.into_episode_tasks(64);
     let Some(mut task) = tasks.get(task_index).cloned() else {
         return Err(miette!(
             "task index {} out of range for training source with {} tasks",
@@ -797,7 +797,7 @@ async fn run_train_source_learn(
     batch_size: usize,
 ) -> Result<()> {
     let source = SweTrainSource::load(path).await?;
-    let mut tasks = source.into_episode_tasks(32);
+    let mut tasks = source.into_episode_tasks(64);
     if limit > 0 && tasks.len() > limit {
         tasks.truncate(limit);
     }
