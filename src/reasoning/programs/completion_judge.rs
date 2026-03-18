@@ -53,6 +53,7 @@ impl Program for CompletionJudgeProgram {
             .rule("只有在已经满足 done criteria 时才输出 finish。")
             .rule("如果只是理解清楚了修改点但还没修改，应输出 change。")
             .rule("如果修改已完成且应跑测试/验证，应输出 verify。")
+            .rule("如果安装依赖、构建环境或运行测试的命令仍在自然执行，应保持 verify，而不是 blocked。")
     }
 
     fn build_ir(&self, _context: &Context, _snapshot: &Snapshot) -> PromptIR {
@@ -61,6 +62,10 @@ impl Program for CompletionJudgeProgram {
         ir.push_instruction("使用通用工作阶段，不要输出领域专用术语。investigate 表示继续调查，change 表示开始做实质修改，verify 表示应进入验证，finish 表示可以收尾。");
         ir.push_instruction("如果最近步骤已经定位到明确文件、函数、参数逻辑，且后续只是在同一片区域重复 grep/head/cat，应优先判为 change，而不是继续 investigate。");
         ir.push_instruction("done criteria 用于判断 finish，不应用来阻止进入 change。只要修改点和修改条件已经足够清楚，即可进入 change。");
+        ir.push_instruction("只有在当前终端或验证摘要明确显示不可恢复的错误、权限阻塞、缺失关键前提且没有合理下一步时，才输出 blocked。");
+        ir.push_instruction("如果最近步骤只是添加 TODO、注释、占位测试文件或其他不改变真实行为的伪修改，不应把它视为已完成修改；此时仍应保持 change，直到出现真实代码变更。");
+        ir.push_instruction("如果当前终端正在执行 apt-get、pip install、pytest、tox、nox、uv、poetry install、python -m venv 等安装/构建/测试命令，且还未回到 shell prompt，应优先输出 verify，并要求继续等待。");
+        ir.push_instruction("如果测试失败只是提示缺少依赖或环境未就绪，但已有明确补救动作正在执行，也应保持 verify，而不是 blocked。");
         ir.push_section("任务目标", self.task_goal.clone());
         ir.push_section("完成标准", self.done_criteria.join("\n"));
         if !self.key_anchors.is_empty() {
