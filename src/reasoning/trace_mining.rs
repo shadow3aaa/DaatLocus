@@ -7,8 +7,6 @@ use crate::core::TelegramResolution;
 
 use super::{
     eval::EvalCase,
-    examples::{ExampleField, ProgramExample},
-    optimizer::{CandidateConfig, PromptTuningConfig},
     programs::resolve_telegram::{
         ResolveTelegramChatProgram, ResolveTelegramProgramAction, ResolveTelegramProgramOutput,
     },
@@ -18,7 +16,6 @@ use super::{
 
 const TRACE_FILE_NAME: &str = "reasoning_traces.jsonl";
 const MAX_TRACE_EVAL_CASES: usize = 6;
-const MAX_TRACE_BOOTSTRAP_EXAMPLES: usize = 3;
 
 pub fn derive_resolve_telegram_eval_cases(
     program: &ResolveTelegramChatProgram,
@@ -50,98 +47,13 @@ pub fn derive_resolve_telegram_eval_cases(
     cases
 }
 
-pub fn propose_resolve_telegram_candidates(
-    base: &PromptTuningConfig<ResolveTelegramProgramOutput>,
-) -> Vec<CandidateConfig<ResolveTelegramProgramOutput>> {
-    let records = match load_trace_records() {
-        Ok(records) => records,
-        Err(_) => return Vec::new(),
-    };
-    let samples = trace_samples_from_records(records);
-    if samples.is_empty() {
-        return Vec::new();
-    }
-
-    let mut candidates = Vec::new();
-
-    let bootstrap_examples = samples
-        .iter()
-        .filter_map(|sample| sample.to_program_example())
-        .fold(
-            (HashSet::new(), Vec::new()),
-            |(mut seen, mut items), example| {
-                if items.len() < MAX_TRACE_BOOTSTRAP_EXAMPLES {
-                    let key = format!(
-                        "{}|{}",
-                        example.title,
-                        serde_json::to_string(&example.output).unwrap_or_default()
-                    );
-                    if seen.insert(key) {
-                        items.push(example);
-                    }
-                }
-                (seen, items)
-            },
-        )
-        .1;
-
-    if !bootstrap_examples.is_empty() {
-        let mut examples = base.examples.clone();
-        examples.extend(bootstrap_examples.clone());
-        candidates.push(CandidateConfig {
-            name: "trace_bootstrap_examples".to_string(),
-            config: PromptTuningConfig {
-                extra_instructions: base.extra_instructions.clone(),
-                examples,
-            },
-        });
-        candidates.push(CandidateConfig {
-            name: "trace_bootstrap_only".to_string(),
-            config: PromptTuningConfig {
-                extra_instructions: base.extra_instructions.clone(),
-                examples: bootstrap_examples,
-            },
-        });
-    }
-
-    let saw_reply_alias = samples.iter().any(|sample| sample.reply_alias);
-    let saw_content_fallback = samples.iter().any(|sample| sample.content_json_fallback);
-
-    if saw_reply_alias || saw_content_fallback {
-        let mut extra_instructions = base.extra_instructions.clone();
-        if saw_reply_alias {
-            extra_instructions.push(
-                "如果输出 `ReplyInCurrentChat`，字段名必须是 `text`，不要写成 `reply`。"
-                    .to_string(),
-            );
-        }
-        if saw_content_fallback {
-            extra_instructions.push(
-                "输出时保持单个干净 JSON 对象，不要夹带额外解释、markdown 或代码块。".to_string(),
-            );
-        }
-        candidates.push(CandidateConfig {
-            name: "trace_failure_bias".to_string(),
-            config: PromptTuningConfig {
-                extra_instructions,
-                examples: base.examples.clone(),
-            },
-        });
-    }
-
-    candidates
-}
-
 #[derive(Clone)]
 struct TraceResolveTelegramSample {
     pending_text: String,
     focus: String,
     snapshot_text: String,
     expectation: TraceExpectation,
-    output: ResolveTelegramProgramOutput,
     from_failure: bool,
-    content_json_fallback: bool,
-    reply_alias: bool,
 }
 
 #[derive(Clone)]
@@ -187,40 +99,6 @@ impl TraceResolveTelegramSample {
             },
         }
     }
-
-    fn to_program_example(&self) -> Option<ProgramExample<ResolveTelegramProgramOutput>> {
-        let mut example = ProgramExample {
-            title: trace_example_title(&self.expectation),
-            inputs: vec![
-                ExampleField {
-                    name: "待判断会话".to_string(),
-                    value: self.pending_text.clone(),
-                },
-                ExampleField {
-                    name: "当前前景设备".to_string(),
-                    value: self.focus.clone(),
-                },
-                ExampleField {
-                    name: "完整快照".to_string(),
-                    value: self.snapshot_text.clone(),
-                },
-            ],
-            output: self.output.clone(),
-        };
-
-        if example
-            .inputs
-            .iter()
-            .all(|field| field.value.trim().is_empty())
-        {
-            return None;
-        }
-
-        if self.from_failure {
-            example.title = format!("来自 trace 的恢复案例：{}", example.title);
-        }
-        Some(example)
-    }
 }
 
 fn trace_samples_from_records(records: Vec<ProgramTraceRecord>) -> Vec<TraceResolveTelegramSample> {
@@ -235,15 +113,6 @@ fn trace_samples_from_records(records: Vec<ProgramTraceRecord>) -> Vec<TraceReso
             continue;
         };
         let from_failure = record.deserialization_error.is_some();
-        let content_json_fallback = is_content_json_fallback(
-            &record.raw_response,
-            record.deserialization_error.as_deref(),
-        );
-        let reply_alias = uses_reply_alias(
-            &record.raw_response,
-            record.parsed_output.as_ref(),
-            record.deserialization_error.as_deref(),
-        );
         let Some(output) = extract_resolve_output(&record) else {
             continue;
         };
@@ -255,10 +124,7 @@ fn trace_samples_from_records(records: Vec<ProgramTraceRecord>) -> Vec<TraceReso
             focus,
             snapshot_text,
             expectation,
-            output,
             from_failure,
-            content_json_fallback,
-            reply_alias,
         });
     }
 
@@ -363,45 +229,6 @@ fn infer_expectation(output: &ResolveTelegramProgramOutput) -> Option<TraceExpec
             Some(TraceExpectation::ReplyInCurrentChat)
         }
         _ => None,
-    }
-}
-
-fn is_content_json_fallback(raw_response: &Value, error: Option<&str>) -> bool {
-    raw_response.get("provider_error").is_some()
-        && error
-            .unwrap_or_default()
-            .contains("llm response did not include tool_calls")
-}
-
-fn uses_reply_alias(
-    raw_response: &Value,
-    parsed_output: Option<&Value>,
-    error: Option<&str>,
-) -> bool {
-    if error.unwrap_or_default().contains("missing field `text`") {
-        return true;
-    }
-
-    let Some(action) = raw_response
-        .get("action")
-        .or_else(|| parsed_output.and_then(|value| value.get("action")))
-    else {
-        return false;
-    };
-
-    action.get("type").and_then(Value::as_str) == Some("ReplyInCurrentChat")
-        && action.get("reply").is_some()
-}
-
-fn trace_example_title(expectation: &TraceExpectation) -> String {
-    match expectation {
-        TraceExpectation::FocusTelegram => "待判断会话在后台时，先切到 Telegram。".to_string(),
-        TraceExpectation::AcceptAsProject { .. } => {
-            "明确要求持续工作的来信，应接受为项目。".to_string()
-        }
-        TraceExpectation::ReplyInCurrentChat => {
-            "语义已判断完且只差回复时，直接在当前会话发送消息。".to_string()
-        }
     }
 }
 
