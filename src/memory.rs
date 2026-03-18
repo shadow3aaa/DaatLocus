@@ -519,8 +519,14 @@ impl L3Memory {
             let updated_at_ms = Utc::now().timestamp_millis();
             let vector = embedder.encode_query(&draft.retrieval_text);
             if let Some(existing) = self.entries.iter_mut().find(|entry| {
-                entry.kind == draft.kind && entry.lesson.trim() == draft.lesson.trim()
+                entry.kind == draft.kind
+                    && (entry.lesson.trim() == draft.lesson.trim()
+                        || similarity(&vector, &entry.vector) >= 0.97)
             }) {
+                if draft.lesson.len() < existing.lesson.len() || draft.confidence >= existing.confidence
+                {
+                    existing.lesson = draft.lesson;
+                }
                 existing.evidence_summary = draft.evidence_summary;
                 existing.retrieval_text = draft.retrieval_text;
                 existing.confidence = existing.confidence.max(draft.confidence);

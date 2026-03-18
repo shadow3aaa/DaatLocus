@@ -10,6 +10,14 @@ use crate::{
 const SYSTEM_PROMPT: &str = r#"你正在判断一个训练任务当前是否还应继续探索、已经可以开始修改、应该进入验证、还是已经完成。
 你不能发明不存在的结果，只能基于当前步骤、终端状态和任务理解做保守判断。"#;
 
+fn trim_lines(text: &str, max_lines: usize) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() <= max_lines {
+        return text.to_string();
+    }
+    lines[lines.len().saturating_sub(max_lines)..].join("\n")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CompletionJudgeOutput {
     pub state: String,
@@ -74,8 +82,17 @@ impl Program for CompletionJudgeProgram {
         if !self.investigation_plan.is_empty() {
             ir.push_section("调查计划", self.investigation_plan.join("\n"));
         }
-        ir.push_section("最近步骤", self.recent_steps.join("\n"));
-        ir.push_section("当前终端状态", self.current_terminal.clone());
+        let recent_steps = self
+            .recent_steps
+            .iter()
+            .rev()
+            .take(3)
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        ir.push_section("最近步骤", recent_steps);
+        ir.push_section("当前终端状态", trim_lines(&self.current_terminal, 60));
         ir.push_section("验证摘要", self.validation_summary.clone());
         ir
     }

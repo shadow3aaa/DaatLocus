@@ -30,6 +30,28 @@ pub struct RuntimePolicyOutcome {
 impl RuntimePolicyProgram {
     const BOREDOM_THRESHOLD: f32 = 0.8;
 
+    fn terminal_ready_for_next_command(context: &Context) -> bool {
+        let Some(render) = context.devices.focused_render() else {
+            return false;
+        };
+        if context.devices.focused() != Some(DeviceId::Terminal) {
+            return false;
+        }
+        render
+            .content
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| {
+                let trimmed = line.trim();
+                trimmed.ends_with("$ <CURSOR>")
+                    || trimmed.ends_with("# <CURSOR>")
+                    || trimmed.ends_with("% <CURSOR>")
+                    || trimmed.ends_with("> <CURSOR>")
+            })
+            .unwrap_or(false)
+    }
+
     pub async fn run_once<R: Renderer>(
         &self,
         context: &Context,
@@ -126,6 +148,21 @@ impl RuntimePolicyProgram {
         work_phase: &str,
     ) -> Output {
         if context.devices.focused() == Some(DeviceId::Terminal) {
+            if work_phase == "verify"
+                && Self::terminal_ready_for_next_command(context)
+                && let Some(next_check) = context.tasks.working_task_verify_pending_check()
+            {
+                return Output {
+                    observation: "当前处于 verify 阶段，终端已回到 shell prompt，且已有明确待执行的验证命令。".to_string(),
+                    description: "应优先执行挂起的验证命令，避免无故回到 change 或继续搜索源码。".to_string(),
+                    current_doing: format!("执行挂起的验证命令：{next_check}"),
+                    effect: Effect::DeviceAction {
+                        action: crate::device::DeviceAction::TerminalInput {
+                            text: next_check,
+                        },
+                    },
+                };
+            }
             let (key_anchors, investigation_plan) =
                 context.tasks.working_task_guidance().unwrap_or_default();
             let program = TerminalNextStepProgram {

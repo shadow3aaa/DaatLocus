@@ -1212,6 +1212,13 @@ async fn rollout_runtime_policy_episode(
             metadata.insert("completion_next_check".to_string(), next_check);
         }
         let next_work_phase = normalize_work_phase(&completion.state);
+        if next_work_phase == "verify" {
+            context
+                .tasks
+                .set_working_task_verify_pending_check(completion.next_check.clone());
+        } else {
+            context.tasks.set_working_task_verify_pending_check(None);
+        }
         metadata.insert("work_phase".to_string(), next_work_phase.clone());
         let should_stop = should_abort_after_repeated_wait(
             steps.last(),

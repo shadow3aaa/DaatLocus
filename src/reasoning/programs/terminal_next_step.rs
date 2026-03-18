@@ -18,6 +18,14 @@ pub struct TerminalNextStepProgram {
     pub investigation_plan: Vec<String>,
 }
 
+fn trim_lines(text: &str, max_lines: usize) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() <= max_lines {
+        return text.to_string();
+    }
+    lines[lines.len().saturating_sub(max_lines)..].join("\n")
+}
+
 impl TerminalNextStepProgram {
     fn current_task_summary(context: &Context) -> String {
         let Some(working_task_id) = context.tasks.working_task() else {
@@ -92,9 +100,9 @@ impl TerminalNextStepProgram {
         if !investigation_plan.is_empty() {
             ir.push_section("调查计划", investigation_plan.join("\n"));
         }
-        ir.push_section("前景 Terminal 画面", terminal_view);
+        ir.push_section("前景 Terminal 画面", trim_lines(&terminal_view, 70));
         ir.push_section("设备上下文", device_context);
-        ir.push_section("完整快照", snapshot_text);
+        ir.push_section("完整快照", trim_lines(&snapshot_text, 80));
         ir
     }
 }

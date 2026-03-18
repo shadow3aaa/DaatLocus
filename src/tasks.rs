@@ -26,6 +26,8 @@ pub struct Task {
     #[serde(default)]
     pub investigation_plan: Vec<String>,
     #[serde(default)]
+    pub verify_pending_check: Option<String>,
+    #[serde(default)]
     pub last_touched_at_ms: Option<i64>,
 }
 
@@ -63,6 +65,7 @@ impl Tasks {
                 work_phase: None,
                 key_anchors: Vec::new(),
                 investigation_plan: Vec::new(),
+                verify_pending_check: None,
                 last_touched_at_ms: None,
             },
         );
@@ -156,10 +159,31 @@ impl Tasks {
         true
     }
 
+    pub fn set_working_task_verify_pending_check(
+        &mut self,
+        verify_pending_check: Option<String>,
+    ) -> bool {
+        let Some(id) = self.working_task else {
+            return false;
+        };
+        let Some(task) = self.tasks.get_mut(&id) else {
+            return false;
+        };
+        task.verify_pending_check = verify_pending_check;
+        self.touch_task(id);
+        true
+    }
+
     pub fn working_task_guidance(&self) -> Option<(Vec<String>, Vec<String>)> {
         self.working_task
             .and_then(|id| self.tasks.get(&id))
             .map(|task| (task.key_anchors.clone(), task.investigation_plan.clone()))
+    }
+
+    pub fn working_task_verify_pending_check(&self) -> Option<String> {
+        self.working_task
+            .and_then(|id| self.tasks.get(&id))
+            .and_then(|task| task.verify_pending_check.clone())
     }
 
     pub fn touch_working_task(&mut self) {
