@@ -281,29 +281,24 @@ fn derive_episode_failure_patterns(
         }
 
         let suites = infer_episode_failure_suites(outcome);
-        let summary = summarize_episode_failure(outcome);
-        let severity = match outcome.status {
+        let signal = infer_episode_failure_signal(outcome);
+        let severity = signal.severity.max(match outcome.status {
             EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded => 4,
             EpisodeStatus::Failed => 3,
             EpisodeStatus::InProgress | EpisodeStatus::Succeeded => 2,
-        };
-        let suggested_fix_kind = if outcome.metric.repeated_effects > 0
-            || outcome.metric.stagnation_events > 0
-        {
-            SleepArtifactSuggestedFixKind::StressCase
-        } else {
-            SleepArtifactSuggestedFixKind::Instruction
-        };
+        });
+        let suggested_fix_kind = signal.suggested_fix_kind;
 
         for suite in suites {
             patterns.push(SleepArtifactFailurePattern {
                 suite: suite.clone(),
                 pattern_id: format!(
-                    "episode:{}:{}",
+                    "episode:{}:{}:{}",
                     slugify(&suite),
+                    slugify(signal.label),
                     slugify(&outcome.task.id)
                 ),
-                description: summary.clone(),
+                description: signal.description.clone(),
                 supporting_trace_ids: vec![format!("episode:{}", outcome.task.id)],
                 frequency: outcome.metric.repeated_effects.max(1),
                 severity,
@@ -513,7 +508,17 @@ fn step_to_output(step: &EpisodeStep) -> Output {
 }
 
 fn episode_failure_constraints(outcome: &EpisodeOutcome, step: &EpisodeStep) -> Vec<String> {
+    let signal = infer_episode_failure_signal(outcome);
     let mut constraints = Vec::new();
+    if signal.label == "verify-explicit-import-or-path-error" {
+        constraints.push("验证阶段若已拿到明确导入或路径错误，应先检查缺失对象、工作目录、PYTHONPATH 与测试入口，而不是重复重跑 pytest 或继续刷日志。".to_string());
+    }
+    if signal.label == "verify-command-not-triggered" {
+        constraints.push("验证命令无输出或疑似未真正执行时，应先确认命令已触发、带换行并回到正确工作目录，再决定是否重跑。".to_string());
+    }
+    if signal.label == "verify-log-analysis-loop" {
+        constraints.push("验证阶段若已获得明确错误对象，不应继续重复 tail/grep/cat 同一日志，而应围绕错误对象收敛。".to_string());
+    }
     if outcome.metric.repeated_effects > 0 {
         constraints.push("不应重复最近已经执行过且未产生新信息的相同 effect".to_string());
     }
@@ -532,6 +537,19 @@ fn episode_failure_constraints(outcome: &EpisodeOutcome, step: &EpisodeStep) -> 
 }
 
 fn episode_instruction_text(outcome: &EpisodeOutcome, step: &EpisodeStep) -> Option<String> {
+    let signal = infer_episode_failure_signal(outcome);
+    match signal.label {
+        "verify-explicit-import-or-path-error" => {
+            return Some("当验证阶段已经拿到明确的 ModuleNotFound、ImportError、file not found 或入口路径错误时，应停止重复重跑 pytest 或刷日志，先检查缺失模块/文件是否存在、当前工作目录、PYTHONPATH 与测试入口范围。".to_string());
+        }
+        "verify-command-not-triggered" => {
+            return Some("当验证命令无输出或疑似未真正触发时，应先确认命令格式、换行触发、当前 shell prompt 与工作目录，再决定是否重跑，而不是盲目重复验证。".to_string());
+        }
+        "verify-log-analysis-loop" => {
+            return Some("验证阶段若已获得明确测试错误或日志锚点，应围绕该错误对象收敛处理；不要在同一份日志上反复 tail/grep/cat。".to_string());
+        }
+        _ => {}
+    }
     if outcome.metric.repeated_effects > 0 {
         return Some(
             "当最近一步与上一轮 effect 重复且没有新增信息时，不要再次执行同一动作；应切换到更窄的查看、定位或验证策略。"
@@ -554,9 +572,12 @@ fn episode_instruction_text(outcome: &EpisodeOutcome, step: &EpisodeStep) -> Opt
 }
 
 fn summarize_episode_failure(outcome: &EpisodeOutcome) -> String {
+    let signal = infer_episode_failure_signal(outcome);
     let mut parts = vec![
         format!("训练任务失败: {}", outcome.task.title.trim()),
         format!("status={:?}", outcome.status),
+        format!("failure_kind={}", signal.label),
+        format!("strategy={}", signal.description),
     ];
     if outcome.metric.repeated_effects > 0 {
         parts.push(format!("repeated_effects={}", outcome.metric.repeated_effects));
@@ -583,6 +604,73 @@ fn summarize_episode_failure(outcome: &EpisodeOutcome) -> String {
         ));
     }
     parts.join("; ")
+}
+
+struct EpisodeFailureSignal {
+    label: &'static str,
+    description: String,
+    suggested_fix_kind: SleepArtifactSuggestedFixKind,
+    severity: u8,
+}
+
+fn infer_episode_failure_signal(outcome: &EpisodeOutcome) -> EpisodeFailureSignal {
+    let text = format!(
+        "{}\n{}\n{}",
+        outcome.final_observation.summary,
+        outcome.final_observation.snapshot_text,
+        outcome.metric.notes.join("\n")
+    );
+    let text = text.to_lowercase();
+
+    if text.contains("modulenotfounderror")
+        || text.contains("importerror")
+        || text.contains("no module named")
+        || text.contains("conftest")
+        || text.contains("file not found")
+    {
+        return EpisodeFailureSignal {
+            label: "verify-explicit-import-or-path-error",
+            description: "验证阶段已得到明确的导入或路径错误。下一步应围绕缺失模块/文件、工作目录、PYTHONPATH 与测试入口收敛，而不是继续重复重跑 pytest 或反复查看同一日志。".to_string(),
+            suggested_fix_kind: SleepArtifactSuggestedFixKind::Instruction,
+            severity: 4,
+        };
+    }
+
+    if text.contains("没有任何测试输出")
+        || text.contains("尚未被执行")
+        || text.contains("未真正执行")
+        || text.contains("命令末尾有换行符")
+        || text.contains("输出被截断")
+    {
+        return EpisodeFailureSignal {
+            label: "verify-command-not-triggered",
+            description: "验证命令疑似未真正触发或未正确落到预期 shell/工作目录。应先确认命令已带换行并真正执行，再决定是否重跑验证。".to_string(),
+            suggested_fix_kind: SleepArtifactSuggestedFixKind::Instruction,
+            severity: 3,
+        };
+    }
+
+    if outcome.metric.repeated_effects > 0
+        && (text.contains("pytest.log") || text.contains("tail ") || text.contains("grep ") || text.contains("cat "))
+    {
+        return EpisodeFailureSignal {
+            label: "verify-log-analysis-loop",
+            description: "验证阶段已经进入日志分析循环。若已拿到明确错误对象，应停止在同一份日志上反复 tail/grep/cat，转为围绕错误对象收敛处理。".to_string(),
+            suggested_fix_kind: SleepArtifactSuggestedFixKind::StressCase,
+            severity: 3,
+        };
+    }
+
+    EpisodeFailureSignal {
+        label: "generic-episode-failure",
+        description: "训练任务在当前策略下未能及时收敛到新的分析、修改或验证动作，应更早形成明确的失败收敛策略。".to_string(),
+        suggested_fix_kind: if outcome.metric.repeated_effects > 0 || outcome.metric.stagnation_events > 0 {
+            SleepArtifactSuggestedFixKind::StressCase
+        } else {
+            SleepArtifactSuggestedFixKind::Instruction
+        },
+        severity: 2,
+    }
 }
 
 struct PatternAccumulator {

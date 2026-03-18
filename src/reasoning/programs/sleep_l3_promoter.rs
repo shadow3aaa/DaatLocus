@@ -94,6 +94,7 @@ impl SleepL3PromoterProgram {
         ir.push_instruction("优先提升可迁移、可复用、可指导未来动作的经验。");
         ir.push_instruction("如果只是一次性 provider 波动或偶然 parse 细节，就不要提升为 L3。");
         ir.push_instruction("lesson 和 retrieval_text 必须面向未来，不要停留在 case 名称级别。");
+        ir.push_instruction("如果失败已经给出明确错误对象（如导入错误、路径错误、入口错误、命令未触发），优先把经验抽象成“下一步如何围绕错误对象收敛”的策略，而不是复述具体报错文本。");
         ir.push_instruction("如果 failure pattern 来自训练任务或真实运行中非常明确的高质量失败，即使 frequency=1，也可以提升为 Tentative；不要机械地因为只出现一次就拒绝。");
         ir.push_instruction("对于依赖安装未完成就提前验证、交互式命令误判、重复低增益调查、错误环境准备这类明显可迁移的失败，应优先考虑提升到 L3。");
         ir.push_instruction("只有当 pattern 明显只是格式噪声、偶发反序列化抖动或无法指导未来动作时，才因为单次出现而拒绝提升。");
