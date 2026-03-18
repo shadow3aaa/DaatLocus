@@ -85,9 +85,9 @@ impl TerminalNextStepProgram {
         ir.push_instruction("不要把同一条命令的重复执行当作默认答案；只有在你明确判断需要重试同一命令时，才再次发送它。");
         ir.push_instruction("工作阶段 investigate 表示继续调查；change 表示应优先选择会改变环境或文件的动作，而不是继续纯 grep/cat；verify 表示应优先测试、检查结果或查看修改后的行为；finish 表示不要再继续修改，只做收尾。");
         ir.push_instruction("当工作阶段是 change 且当前已经回到 shell prompt 时，优先选择能直接推进修改的下一步，例如编辑目标文件、构造非交互式替换命令，或查看最小必要上下文后立即修改。不要继续在同一片代码上反复 grep/head。");
-        ir.push_instruction("当工作阶段是 change 时，优先输出内建 `EditFileReplace` 动作，对已有文件中的精确片段做局部替换。不要默认用 shell 文本拼接补丁。");
+        ir.push_instruction("当工作阶段是 change 且你已经定位到明确文件路径和待替换旧文本时，可以优先输出内建 `EditFileReplace` 动作，对已有文件中的精确片段做局部替换。不要默认用 shell 文本拼接补丁。");
         ir.push_instruction("当工作阶段是 change 时，禁止把 TODO 注释、占位注释、空测试文件或只写说明文字当成完成修改。应优先产出能真实改变行为的代码编辑。");
-        ir.push_instruction("只有在你已经定位到明确文件路径和待替换旧文本时，才使用 `EditFileReplace`；该动作应修改已有函数体或已有代码片段，而不是在文件尾追加伪代码。");
+        ir.push_instruction("只有在你已经定位到明确文件路径和待替换旧文本，且当前任务确实需要修改工作区文件时，才使用 `EditFileReplace`；该动作应修改已有函数体或已有代码片段，而不是在文件尾追加伪代码。");
         ir.push_instruction("当工作阶段是 verify 时，优先运行最小验证命令、查看 diff 或检查目标行为，而不是继续搜代码。");
         ir.push_instruction("当工作阶段是 verify 且终端正在执行 apt-get、pip install、pytest、tox、nox、python -m venv、poetry install、uv run 等安装/构建/测试命令，只要还没回到 shell prompt，就应优先 Wait。不要因为输出较慢就切成 blocked。");
         ir.push_instruction("只有在终端明确显示安装/测试命令已经失败并回到 prompt 时，才切换到下一步补救动作；如果命令尚在运行，不要重复发送相同命令。");
@@ -150,7 +150,7 @@ impl Program for TerminalNextStepProgram {
             .rule("如果已经回到 shell prompt，应把上一条命令视为结束，再决定下一步查看或分析策略。")
             .rule("如果进入认证向导、REPL 或不适合自动推进的交互式界面，应优先中断或退出。")
             .rule("当工作阶段为 change 时，应优先推进修改，而不是继续纯观察。")
-            .rule("当你已经定位到明确文件和旧片段时，应优先使用 EditFileReplace 做精确局部替换。")
+            .rule("只有当任务明确需要修改工作区文件，且你已经定位到明确文件和旧片段时，才应优先使用 EditFileReplace 做精确局部替换。")
             .rule("当任务理解已经给出明确锚点路径时，应优先命中锚点，不要做低增益目录探测。")
             .rule("当工作阶段为 verify 时，应优先推进验证，而不是继续搜代码。")
     }
@@ -182,6 +182,52 @@ impl Program for TerminalNextStepProgram {
                         old_text: "if version < [5, 0, 0]:\n                # version 5 errors out if the `all` parameter is set\n                stats_url += \"?all=true\"".to_string(),
                         new_text: "if version < [5, 0, 0] and distribution != 'opensearch':\n                # version 5 errors out if the `all` parameter is set\n                stats_url += \"?all=true\"".to_string(),
                     },
+                },
+            },
+            ProgramExample {
+                title: "资料搜集足够后直接收尾".to_string(),
+                inputs: vec![
+                    ExampleField {
+                        name: "当前选中动作".to_string(),
+                        value: "在 Terminal 收集项目构建方式并总结结论。".to_string(),
+                    },
+                    ExampleField {
+                        name: "前景 Terminal 画面".to_string(),
+                        value: "README.md\nMakefile\npyproject.toml\nubuntu@spinova-lab:~/repo$ <CURSOR>".to_string(),
+                    },
+                    ExampleField {
+                        name: "完整快照".to_string(),
+                        value: "当前主线：[phase=finish] 已确认仓库既支持 make 也支持 pyproject 构建，任务目标只是形成资料总结，并不需要修改文件。".to_string(),
+                    },
+                ],
+                output: Output {
+                    observation: "终端已回到 shell prompt，且当前任务只是资料搜集与总结，没有任何需要修改工作区文件的明确要求。".to_string(),
+                    description: "此时不应误用 EditFileReplace 或继续进入代码修改，应保持收尾或等待后续动作。".to_string(),
+                    current_doing: "结束资料搜集并准备收尾".to_string(),
+                    effect: crate::core::Effect::Wait,
+                },
+            },
+            ProgramExample {
+                title: "消息发送后的 verify 不是代码验证".to_string(),
+                inputs: vec![
+                    ExampleField {
+                        name: "当前选中动作".to_string(),
+                        value: "确认一条通过终端触发的外部通知已经发送成功。".to_string(),
+                    },
+                    ExampleField {
+                        name: "前景 Terminal 画面".to_string(),
+                        value: "notification queued successfully\nubuntu@spinova-lab:~/ops$ <CURSOR>".to_string(),
+                    },
+                    ExampleField {
+                        name: "完整快照".to_string(),
+                        value: "当前主线：[phase=verify] 已执行发送命令，目标只是确认结果并准备结束，不需要修改任何文件。".to_string(),
+                    },
+                ],
+                output: Output {
+                    observation: "终端已明确返回外部通知进入成功队列，且 shell prompt 已恢复，当前 verify 目标只是确认结果。".to_string(),
+                    description: "此时 verify 是结果确认而不是代码或文件修改，不应误用 EditFileReplace，而应准备结束当前动作。".to_string(),
+                    current_doing: "确认外部通知已成功发送".to_string(),
+                    effect: crate::core::Effect::Wait,
                 },
             },
             ProgramExample {

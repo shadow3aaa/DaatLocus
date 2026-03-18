@@ -70,6 +70,7 @@ impl Program for CompletionJudgeProgram {
         ir.push_instruction("使用通用工作阶段，不要输出领域专用术语。investigate 表示继续调查，change 表示开始做实质修改，verify 表示应进入验证，finish 表示可以收尾。");
         ir.push_instruction("如果最近步骤已经定位到明确文件、函数、参数逻辑，且后续只是在同一片区域重复 grep/head/cat，应优先判为 change，而不是继续 investigate。");
         ir.push_instruction("done criteria 用于判断 finish，不应用来阻止进入 change。只要修改点和修改条件已经足够清楚，即可进入 change。");
+        ir.push_instruction("不是所有任务都需要 change 或 verify。若任务目标本质上是资料搜集、判断、总结或回复，且当前证据已足够支撑最终结论，可以直接输出 finish。");
         ir.push_instruction("只有在当前终端或验证摘要明确显示不可恢复的错误、权限阻塞、缺失关键前提且没有合理下一步时，才输出 blocked。");
         ir.push_instruction("如果最近步骤只是添加 TODO、注释、占位测试文件或其他不改变真实行为的伪修改，不应把它视为已完成修改；此时仍应保持 change，直到出现真实代码变更。");
         ir.push_instruction("如果当前终端正在执行 apt-get、pip install、pytest、tox、nox、uv、poetry install、python -m venv 等安装/构建/测试命令，且还未回到 shell prompt，应优先输出 verify，并要求继续等待。");
