@@ -412,6 +412,7 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         devices,
         telegram: telegram_handle,
         compiled_prompts,
+        current_workspace: env::current_dir().ok(),
     };
 
     let (tx, mut rx) = tokio::sync::watch::channel(DashboardState {
@@ -622,6 +623,7 @@ async fn run_mem_reset() -> Result<()> {
         devices,
         telegram: telegram_handle,
         compiled_prompts: CompiledPromptStore::empty(),
+        current_workspace: env::current_dir().ok(),
     };
     context.shutdown().await;
 
@@ -722,6 +724,7 @@ async fn build_eval_context_with_compiled(
         devices,
         telegram: telegram_handle,
         compiled_prompts,
+        current_workspace: env::current_dir().ok(),
     }
 }
 
@@ -2148,6 +2151,7 @@ async fn run_shell_line_capture(command: &str, cwd: &Path) -> Result<std::proces
 }
 
 async fn enter_episode_workspace(context: &mut Context, workspace_dir: &Path) -> Result<()> {
+    context.current_workspace = Some(workspace_dir.to_path_buf());
     let cd_command = if cfg!(windows) {
         format!("Set-Location \"{}\"\r", workspace_dir.display())
     } else {
@@ -2337,6 +2341,15 @@ fn collect_memory_evidence(effect: &Effect) -> Vec<String> {
                 vec![format!("实际发送消息：{text}")]
             }
         },
+        Effect::EditFileReplace {
+            path,
+            old_text,
+            new_text,
+        } => vec![
+            format!("内建编辑文件：{path}"),
+            format!("替换旧文本摘要：{}", summarize_inline_text(old_text)),
+            format!("替换新文本摘要：{}", summarize_inline_text(new_text)),
+        ],
         Effect::Wait => vec!["本轮选择等待".to_string()],
         Effect::SilentWait => Vec::new(),
     }
@@ -2365,6 +2378,18 @@ fn collect_contextual_memory_evidence(context: &Context, effect: &Effect) -> Vec
         context.telegram.selected_chat_memory_evidence()
     } else {
         Vec::new()
+    }
+}
+
+fn summarize_inline_text(text: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let compact = text.replace('\n', "\\n");
+    let mut chars = compact.chars();
+    let summary = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{summary}...")
+    } else {
+        summary
     }
 }
 
@@ -2525,6 +2550,16 @@ async fn apply_effect(context: &mut Context, effect: Effect) {
                 eprintln!("{err:?}");
             }
         }
+        Effect::EditFileReplace {
+            path,
+            old_text,
+            new_text,
+        } => {
+            if let Err(err) = execute_edit_file_replace(context, &path, &old_text, &new_text).await
+            {
+                eprintln!("{err:?}");
+            }
+        }
         Effect::Wait => {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
@@ -2532,6 +2567,55 @@ async fn apply_effect(context: &mut Context, effect: Effect) {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     }
+}
+
+fn resolve_workspace_relative_path(context: &Context, relative_path: &str) -> miette::Result<PathBuf> {
+    let workspace = context
+        .current_workspace
+        .as_ref()
+        .ok_or_else(|| miette!("no active workspace is available for EditFileReplace"))?;
+    let candidate = Path::new(relative_path);
+    if candidate.is_absolute() {
+        return Err(miette!(
+            "EditFileReplace requires a workspace-relative path, got absolute path: {}",
+            candidate.display()
+        ));
+    }
+    if candidate
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(miette!(
+            "EditFileReplace path must not escape the workspace: {}",
+            candidate.display()
+        ));
+    }
+    Ok(workspace.join(candidate))
+}
+
+async fn execute_edit_file_replace(
+    context: &Context,
+    relative_path: &str,
+    old_text: &str,
+    new_text: &str,
+) -> miette::Result<()> {
+    let path = resolve_workspace_relative_path(context, relative_path)?;
+    let existing = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|err| miette!("failed to read {} for EditFileReplace: {err}", path.display()))?;
+    let matches = existing.match_indices(old_text).count();
+    if matches != 1 {
+        return Err(miette!(
+            "EditFileReplace expected exactly 1 match in {}, found {}",
+            path.display(),
+            matches
+        ));
+    }
+    let updated = existing.replacen(old_text, new_text, 1);
+    tokio::fs::write(&path, updated)
+        .await
+        .map_err(|err| miette!("failed to write {} for EditFileReplace: {err}", path.display()))?;
+    Ok(())
 }
 
 fn sync_dashboard_state(
