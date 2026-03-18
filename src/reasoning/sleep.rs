@@ -421,6 +421,8 @@ fn merge_episode_synthesis(
     related_memories: &[String],
     output: &SleepEpisodeSynthesizerOutput,
 ) {
+    let has_case_artifact = output.create_bootstrap_demo || output.create_stress_case;
+
     if output.create_failure_pattern
         && !output.failure_pattern_summary.trim().is_empty()
         && !matches!(outcome.status, EpisodeStatus::Succeeded)
@@ -480,7 +482,10 @@ fn merge_episode_synthesis(
         });
     }
 
-    if output.create_instruction_hypothesis && !output.instruction_text.trim().is_empty() {
+    if output.create_instruction_hypothesis
+        && !output.instruction_text.trim().is_empty()
+        && !has_case_artifact
+    {
         synthesized
             .instruction_hypotheses
             .push(SleepArtifactInstructionHypothesis {
@@ -494,6 +499,7 @@ fn merge_episode_synthesis(
     if output.promote_to_l3
         && !output.l3_lesson.trim().is_empty()
         && !output.l3_retrieval_text.trim().is_empty()
+        && (!has_case_artifact || output.l3_confidence >= 0.95)
     {
         synthesized.l3_entries.push(L3EntryDraft {
             kind: output.l3_kind.clone(),

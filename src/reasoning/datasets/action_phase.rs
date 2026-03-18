@@ -39,7 +39,6 @@ struct ActionPhaseEvalCase {
     device_context: String,
     snapshot_text: String,
     expectation: ActionPhaseExpectation,
-    bootstrap_output: Option<Output>,
 }
 
 #[derive(Deserialize)]
@@ -95,64 +94,6 @@ pub fn stress_eval_cases<P: ActionPhaseProgramSpec + ?Sized>(program: &P) -> Vec
         program,
         section_for_suite(load_dataset(), program.suite_name()).stress_cases,
     )
-}
-
-pub fn bootstrap_examples_by_suite(
-    suite_name: &str,
-    case_names: &[&str],
-) -> Vec<ProgramExample<Output>> {
-    section_for_suite(load_dataset(), suite_name)
-        .train_cases
-        .into_iter()
-        .filter(|case| case_names.iter().any(|name| *name == case.name))
-        .filter_map(|case| {
-            case.bootstrap_output.map(|output| ProgramExample {
-                title: format!("Bootstrap from {}", case.name),
-                inputs: vec![
-                    crate::reasoning::examples::ExampleField {
-                        name: "设备上下文".to_string(),
-                        value: case.device_context,
-                    },
-                    crate::reasoning::examples::ExampleField {
-                        name: "完整快照".to_string(),
-                        value: case.snapshot_text,
-                    },
-                ],
-                output,
-            })
-        })
-        .collect()
-}
-
-pub fn all_bootstrap_examples_by_suite(suite_name: &str) -> Vec<ProgramExample<Output>> {
-    section_for_suite(load_dataset(), suite_name)
-        .train_cases
-        .into_iter()
-        .filter_map(|case| {
-            case.bootstrap_output.map(|output| ProgramExample {
-                title: format!("Bootstrap from {}", case.name),
-                inputs: vec![
-                    crate::reasoning::examples::ExampleField {
-                        name: "设备上下文".to_string(),
-                        value: case.device_context,
-                    },
-                    crate::reasoning::examples::ExampleField {
-                        name: "完整快照".to_string(),
-                        value: case.snapshot_text,
-                    },
-                ],
-                output,
-            })
-        })
-        .collect()
-}
-
-pub fn bootstrap_examples_by_names_for_suite(
-    suite_name: &str,
-    case_names: &[String],
-) -> Vec<ProgramExample<Output>> {
-    let refs = case_names.iter().map(String::as_str).collect::<Vec<_>>();
-    bootstrap_examples_by_suite(suite_name, &refs)
 }
 
 pub fn stress_eval_cases_by_names<P: ActionPhaseProgramSpec + ?Sized>(
