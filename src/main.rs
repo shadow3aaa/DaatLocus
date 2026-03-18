@@ -19,7 +19,7 @@ mod telegram_device;
 mod telegram_transport;
 mod terminal_device;
 
-use std::{env, path::{Path, PathBuf}, time::Duration};
+use std::{env, path::{Path, PathBuf}, sync::Arc, time::Duration};
 
 use chrono::{Local, TimeZone};
 use miette::{Result, miette};
@@ -870,18 +870,46 @@ async fn run_train_source_learn(
     let batch_size = batch_size.max(1);
     let session_root = prepare_learning_session_root(path).await?;
     let shared_learning_home = get_spinova_home().await;
-    let mut state = TrainSourceLearnState::new(path.to_string(), tasks.len(), batch_size);
-    save_train_source_learn_state(&session_root, &state).await?;
+    let session = TrainSourceLearnSession::new(
+        session_root,
+        TrainSourceLearnState::new(path.to_string(), tasks.len(), batch_size),
+    )
+    .await?;
 
     println!(
         "train source learn: path={} total_tasks={} batch_size={} session={} learning_home={}",
         path,
         tasks.len(),
         batch_size,
-        session_root.display(),
+        session.session_root().display(),
         shared_learning_home.display()
     );
 
+    let run_result = tokio::select! {
+        result = run_train_source_learn_loop(
+            config,
+            tasks,
+            batch_size,
+            shared_learning_home,
+            session.clone(),
+        ) => result,
+        _ = tokio::signal::ctrl_c() => {
+            session.shutdown(true).await?;
+            return Ok(());
+        }
+    };
+
+    session.shutdown(false).await?;
+    run_result
+}
+
+async fn run_train_source_learn_loop(
+    config: crate::config::Config,
+    tasks: Vec<EpisodeTask>,
+    batch_size: usize,
+    _shared_learning_home: PathBuf,
+    session: TrainSourceLearnSession,
+) -> Result<()> {
     let mut cursor = 0usize;
     let mut batch_index = 0usize;
     while cursor < tasks.len() {
@@ -911,7 +939,7 @@ async fn run_train_source_learn(
         for (offset, task) in batch_tasks.iter().enumerate() {
             let absolute_index = cursor + offset;
             let episode_root =
-                prepare_learning_episode_root(&session_root, task, absolute_index).await?;
+                prepare_learning_episode_root(session.session_root(), task, absolute_index).await?;
             let outcome = execute_train_source_task(
                 &config,
                 task,
@@ -921,67 +949,104 @@ async fn run_train_source_learn(
             )
             .await?;
 
-            state.completed_tasks += 1;
-            state.last_task_id = Some(outcome.task.id.clone());
-            state.last_task_status = Some(format!("{:?}", outcome.status));
-            state.last_score = Some(outcome.metric.score);
-            state.outcomes.push(TrainSourceLearnOutcomeSummary::from_episode(&outcome));
-            save_train_source_learn_state(&session_root, &state).await?;
+            session
+                .update(|state| {
+                    state.completed_tasks += 1;
+                    state.last_task_id = Some(outcome.task.id.clone());
+                    state.last_task_status = Some(format!("{:?}", outcome.status));
+                    state.last_score = Some(outcome.metric.score);
+                    state
+                        .outcomes
+                        .push(TrainSourceLearnOutcomeSummary::from_episode(&outcome));
+                })
+                .await?;
 
+            let snapshot = session.snapshot().await;
             println!(
                 "- learn task {}/{} id={} status={:?} score={:.2}",
-                state.completed_tasks,
-                state.total_tasks,
+                snapshot.completed_tasks,
+                snapshot.total_tasks,
                 outcome.task.id,
                 outcome.status,
                 outcome.metric.score
             );
         }
 
+        let completed_tasks = session.snapshot().await.completed_tasks;
+        println!(
+            "  batch {} sleep starting (completed_tasks={})",
+            batch_index + 1,
+            completed_tasks
+        );
         let mut optimize_context =
             build_eval_context_with_compiled(config.clone(), load_compiled_prompts_only().await?)
                 .await;
         let sleep_summary = run_sleep(&mut optimize_context).await?;
+        let current_compiled_count = load_compiled_prompts_only().await?.len();
+        session
+            .update(|state| {
+                state.sleep_runs += 1;
+                state.batch_reports.push(TrainSourceLearnBatchReport {
+                    completed_tasks: state.completed_tasks,
+                    active_variant: active_variant.clone(),
+                    sleep_failure_patterns: sleep_summary.failure_patterns.len(),
+                    sleep_bootstrap_demos: sleep_summary.bootstrap_demos,
+                    sleep_stress_cases: sleep_summary.stress_cases,
+                    sleep_instruction_hypotheses: sleep_summary.instruction_hypotheses,
+                    promoted_l3_entries: sleep_summary.promoted_l3_entries,
+                    compiled_prompt_count: current_compiled_count,
+                    optimized_suites: 0,
+                });
+            })
+            .await?;
+        println!(
+            "  batch {} sleep finished: patterns={} demos={} stress={} instructions={} l3={}",
+            batch_index + 1,
+            sleep_summary.failure_patterns.len(),
+            sleep_summary.bootstrap_demos,
+            sleep_summary.stress_cases,
+            sleep_summary.instruction_hypotheses,
+            sleep_summary.promoted_l3_entries
+        );
+
+        println!("  batch {} optimize starting", batch_index + 1);
         let optimization_results = run_reasoning_optimize(&optimize_context).await?;
         optimize_context.shutdown().await;
 
-        state.sleep_runs += 1;
-        state.optimize_runs += 1;
-        state.last_compiled_prompt_count = load_compiled_prompts_only().await?.len();
-        state.batch_reports.push(TrainSourceLearnBatchReport {
-            completed_tasks: state.completed_tasks,
-            active_variant,
-            sleep_failure_patterns: sleep_summary.failure_patterns.len(),
-            sleep_bootstrap_demos: sleep_summary.bootstrap_demos,
-            sleep_stress_cases: sleep_summary.stress_cases,
-            sleep_instruction_hypotheses: sleep_summary.instruction_hypotheses,
-            promoted_l3_entries: sleep_summary.promoted_l3_entries,
-            compiled_prompt_count: state.last_compiled_prompt_count,
-            optimized_suites: optimization_results.len(),
-        });
-        save_train_source_learn_state(&session_root, &state).await?;
+        let compiled_prompt_count = load_compiled_prompts_only().await?.len();
+        session
+            .update(|state| {
+                state.optimize_runs += 1;
+                state.last_compiled_prompt_count = compiled_prompt_count;
+                if let Some(last_report) = state.batch_reports.last_mut() {
+                    last_report.compiled_prompt_count = compiled_prompt_count;
+                    last_report.optimized_suites = optimization_results.len();
+                }
+            })
+            .await?;
+        println!(
+            "  batch {} optimize finished: compiled_suites={} compiled_prompt_count={}",
+            batch_index + 1,
+            optimization_results.len(),
+            compiled_prompt_count
+        );
 
         println!(
             "  batch update: completed={} active_variant={} sleep_patterns={} demos={} stress={} instructions={} l3={} compiled_suites={}",
-            state.completed_tasks,
-            state
-                .batch_reports
-                .last()
-                .map(|report| report.active_variant.as_str())
-                .unwrap_or("baseline"),
+            session.snapshot().await.completed_tasks,
+            active_variant,
             sleep_summary.failure_patterns.len(),
             sleep_summary.bootstrap_demos,
             sleep_summary.stress_cases,
             sleep_summary.instruction_hypotheses,
             sleep_summary.promoted_l3_entries,
-            state.last_compiled_prompt_count
+            compiled_prompt_count
         );
 
         cursor = batch_end;
         batch_index += 1;
     }
 
-    print_train_source_learn_summary(&session_root, &state);
     Ok(())
 }
 
@@ -1930,19 +1995,6 @@ async fn save_episode_outcome(episode_root: &Path, outcome: &EpisodeOutcome) -> 
     Ok(())
 }
 
-async fn save_train_source_learn_state(
-    session_root: &Path,
-    state: &TrainSourceLearnState,
-) -> Result<()> {
-    let path = session_root.join("learn_state.json");
-    let payload = serde_json::to_vec_pretty(state)
-        .map_err(|err| miette!("failed to serialize learn state: {err}"))?;
-    tokio::fs::write(&path, payload)
-        .await
-        .map_err(|err| miette!("failed to write learn state {}: {err}", path.display()))?;
-    Ok(())
-}
-
 fn print_train_source_optimization_summary(path: &str, summaries: &[TrainSourceVariantSummary]) {
     println!(
         "train source optimize: path={} variants={}",
@@ -2105,7 +2157,7 @@ struct TrainSourceVariantSummary {
     outcomes: Vec<EpisodeOutcome>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 struct TrainSourceLearnState {
     path: String,
     total_tasks: usize,
@@ -2140,7 +2192,7 @@ impl TrainSourceLearnState {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 struct TrainSourceLearnOutcomeSummary {
     task_id: String,
     status: String,
@@ -2161,7 +2213,7 @@ impl TrainSourceLearnOutcomeSummary {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Clone)]
 struct TrainSourceLearnBatchReport {
     completed_tasks: usize,
     active_variant: String,
@@ -2172,6 +2224,74 @@ struct TrainSourceLearnBatchReport {
     promoted_l3_entries: usize,
     compiled_prompt_count: usize,
     optimized_suites: usize,
+}
+
+#[derive(Clone)]
+struct TrainSourceLearnSession {
+    session_root: PathBuf,
+    state: Arc<tokio::sync::Mutex<TrainSourceLearnState>>,
+}
+
+impl TrainSourceLearnSession {
+    async fn new(session_root: PathBuf, state: TrainSourceLearnState) -> Result<Self> {
+        let session = Self {
+            session_root,
+            state: Arc::new(tokio::sync::Mutex::new(state)),
+        };
+        session.save().await?;
+        Ok(session)
+    }
+
+    fn session_root(&self) -> &Path {
+        &self.session_root
+    }
+
+    async fn snapshot(&self) -> TrainSourceLearnState {
+        self.state.lock().await.clone()
+    }
+
+    async fn update<F>(&self, mutate: F) -> Result<()>
+    where
+        F: FnOnce(&mut TrainSourceLearnState),
+    {
+        let payload = {
+            let mut state = self.state.lock().await;
+            mutate(&mut state);
+            serde_json::to_vec_pretty(&*state)
+                .map_err(|err| miette!("failed to serialize learn state: {err}"))?
+        };
+        let path = self.session_root.join("learn_state.json");
+        tokio::fs::write(&path, payload)
+            .await
+            .map_err(|err| miette!("failed to write learn state {}: {err}", path.display()))?;
+        Ok(())
+    }
+
+    async fn save(&self) -> Result<()> {
+        let payload = {
+            let state = self.state.lock().await;
+            serde_json::to_vec_pretty(&*state)
+                .map_err(|err| miette!("failed to serialize learn state: {err}"))?
+        };
+        let path = self.session_root.join("learn_state.json");
+        tokio::fs::write(&path, payload)
+            .await
+            .map_err(|err| miette!("failed to write learn state {}: {err}", path.display()))?;
+        Ok(())
+    }
+
+    async fn shutdown(&self, interrupted: bool) -> Result<()> {
+        self.save().await?;
+        let state = self.snapshot().await;
+        if interrupted {
+            println!(
+                "train source learn interrupted: session state saved to {}",
+                self.session_root.display()
+            );
+        }
+        print_train_source_learn_summary(&self.session_root, &state);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
