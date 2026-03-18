@@ -63,6 +63,7 @@ impl ActionPhaseProgramSpec for ExecuteTaskProgram {
             "如果终端只是持续输出普通命令结果，且没有出现需要输入的提示，应优先 `Wait`，不要抢着发送输入。",
             "如果终端当前停在交互式认证、登录向导、密码提示或需要人工授权的提问界面，不要继续回答这些问题；应优先输出 `DeviceAction` -> `TerminalInput` 发送 Ctrl+C（`\\u0003`）中断，再改用非交互替代方案。",
             "如果终端进入 `less`、`man` 等分页器，而当前目标只是退出它回到 shell，可发送安全、短小、确定的输入，例如 `q`。",
+            "如果已经定位到明确文件路径和待替换旧片段，优先输出 `EditFileReplace` 做精确局部替换，而不是继续用 shell 命令拼接补丁。",
             "不要主动启动 `gh auth login`、`docker login`、`npm login` 这类需要外部账号或浏览器授权的命令。",
             "如果你发现还缺少别的下一步动作，而且它明确属于某个项目，请用 `TaskAdd` 并填入 `project_id`。",
             "当你判断某个项目的成功标准已经满足时，应优先输出 `ProjectComplete`。",
