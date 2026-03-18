@@ -50,32 +50,22 @@ use crate::{
             },
         },
         compiled::{
-            BENCH_COMPILED_DIR_NAME, COMPILED_DIR_NAME, CompiledProgram, CompiledPromptStore,
-            StoredPromptTuningConfig,
+            BENCH_COMPILED_DIR_NAME, COMPILED_DIR_NAME, CompiledPromptStore,
             load_all_compiled_programs,
         },
         environment::EpisodeObservation,
         episode::{EpisodeMetric, EpisodeOutcome, EpisodeStatus, EpisodeStep, EpisodeTask},
         episode_harness::EpisodeHarness,
         eval::run_reasoning_eval,
-        optimizer::PromptTuningConfig,
         optimize::run_reasoning_optimize,
-        program::Program,
-        programs::action_phase_common::ActionPhaseProgramSpec,
-        programs::attend_notifications::AttendNotificationsProgram,
         programs::completion_judge::{CompletionJudgeOutput, CompletionJudgeProgram},
         programs::memory_encoding::{MemoryEncodingOutput, MemoryEncodingProgram},
-        programs::execute_task::ExecuteTaskProgram,
-        programs::explore_new_tasks::ExploreNewTasksProgram,
-        programs::plan_from_project::PlanFromProjectProgram,
         programs::task_understanding::{TaskUnderstandingOutput, TaskUnderstandingProgram},
-        programs::terminal_next_step::TerminalNextStepProgram,
         render::openai_tools::OpenAIToolRenderer,
         runtime::execute_program,
         runtime_policy::RuntimePolicyProgram,
         sleep::run_sleep,
         sleep_artifacts::SleepArtifactSuggestedFixKind,
-        teleprompter::{build_bootstrap_demo_candidates, build_teleprompter_candidates},
     },
     snapshot::Snapshot,
     tasks::Tasks,
@@ -151,16 +141,6 @@ async fn async_main(args: Vec<String>) -> Result<()> {
 
     if let Some((path, limit, batch_size)) = train_source_learn_args(&args) {
         match run_train_source_learn(config, path, limit, batch_size).await {
-            Ok(()) => return Ok(()),
-            Err(err) => {
-                eprintln!("{err:?}");
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if let Some((path, limit)) = train_source_optimize_args(&args) {
-        match run_train_source_optimize(config, path, limit).await {
             Ok(()) => return Ok(()),
             Err(err) => {
                 eprintln!("{err:?}");
@@ -539,26 +519,6 @@ fn train_source_rollout_args(args: &[String]) -> Option<(&str, usize)> {
     }
 }
 
-fn train_source_optimize_args(args: &[String]) -> Option<(&str, usize)> {
-    match args {
-        [command, subcommand, path] if command == "train-source" && subcommand == "optimize" => {
-            Some((path.as_str(), 5))
-        }
-        [command, subcommand, path, limit]
-            if command == "train-source" && subcommand == "optimize" =>
-        {
-            let limit = limit.parse::<usize>().ok()?;
-            Some((path.as_str(), limit))
-        }
-        [command, path] if command == "optimize-train-source" => Some((path.as_str(), 5)),
-        [command, path, limit] if command == "optimize-train-source" => {
-            let limit = limit.parse::<usize>().ok()?;
-            Some((path.as_str(), limit))
-        }
-        _ => None,
-    }
-}
-
 fn train_source_learn_args(args: &[String]) -> Option<(&str, usize, usize)> {
     match args {
         [command, subcommand, path] if command == "train-source" && subcommand == "learn" => {
@@ -830,32 +790,6 @@ async fn run_train_source_rollout(config: crate::config::Config, path: &str, tas
     Ok(())
 }
 
-async fn run_train_source_optimize(
-    config: crate::config::Config,
-    path: &str,
-    limit: usize,
-) -> Result<()> {
-    let source = SweTrainSource::load(path).await?;
-    let mut tasks = source.into_episode_tasks(32);
-    if limit > 0 && tasks.len() > limit {
-        tasks.truncate(limit);
-    }
-
-    let variants = build_train_source_policy_variants().await?;
-
-    let mut summaries = Vec::new();
-    for variant in variants {
-        let outcomes = run_train_source_variant(&config, &tasks, &variant).await?;
-        summaries.push(TrainSourceVariantSummary {
-            variant_name: variant.name,
-            outcomes,
-        });
-    }
-
-    print_train_source_optimization_summary(path, &summaries);
-    Ok(())
-}
-
 async fn run_train_source_learn(
     config: crate::config::Config,
     path: &str,
@@ -1048,389 +982,6 @@ async fn run_train_source_learn_loop(
     }
 
     Ok(())
-}
-
-async fn build_train_source_policy_variants() -> Result<Vec<TrainSourcePolicyVariant>> {
-    let compiled_entries = load_all_compiled_programs().await?;
-    let mut variants = vec![TrainSourcePolicyVariant {
-        name: "baseline".to_string(),
-        compiled_prompts: CompiledPromptStore::empty(),
-    }];
-
-    if compiled_entries.is_empty() {
-        return Ok(variants);
-    }
-
-    variants.push(TrainSourcePolicyVariant {
-        name: "compiled".to_string(),
-        compiled_prompts: CompiledPromptStore::from_entries(compiled_entries.clone()),
-    });
-
-    let execute_only = filter_compiled_entries(
-        &compiled_entries,
-        &["action_phase.execute_task"],
-    );
-    if !execute_only.is_empty() {
-        variants.push(TrainSourcePolicyVariant {
-            name: "execute-only".to_string(),
-            compiled_prompts: CompiledPromptStore::from_entries(execute_only),
-        });
-    }
-
-    let task_chain = filter_compiled_entries(
-        &compiled_entries,
-        &[
-            "action_phase.execute_task",
-            "action_phase.plan_from_project",
-            "action_phase.explore_new_tasks",
-        ],
-    );
-    if !task_chain.is_empty() {
-        variants.push(TrainSourcePolicyVariant {
-            name: "task-chain".to_string(),
-            compiled_prompts: CompiledPromptStore::from_entries(task_chain),
-        });
-    }
-
-    variants.extend(build_execute_task_candidate_variants(&compiled_entries));
-    variants.extend(build_terminal_next_step_candidate_variants(&compiled_entries));
-    variants.extend(build_attend_notifications_candidate_variants(&compiled_entries));
-    variants.extend(build_plan_from_project_candidate_variants(&compiled_entries));
-    variants.extend(build_explore_new_tasks_candidate_variants(&compiled_entries));
-
-    Ok(variants)
-}
-
-fn filter_compiled_entries(
-    entries: &[crate::reasoning::compiled::CompiledProgram],
-    allowed_suites: &[&str],
-) -> Vec<crate::reasoning::compiled::CompiledProgram> {
-    entries
-        .iter()
-        .filter(|entry| allowed_suites.iter().any(|suite| *suite == entry.suite))
-        .cloned()
-        .collect()
-}
-
-fn build_execute_task_candidate_variants(
-    compiled_entries: &[CompiledProgram],
-) -> Vec<TrainSourcePolicyVariant> {
-    let base_entries = {
-        let task_chain = filter_compiled_entries(
-            compiled_entries,
-            &[
-                "action_phase.execute_task",
-                "action_phase.plan_from_project",
-                "action_phase.explore_new_tasks",
-            ],
-        );
-        if task_chain.is_empty() {
-            compiled_entries.to_vec()
-        } else {
-            task_chain
-        }
-    };
-
-    let program = ExecuteTaskProgram;
-    let base = program.default_tuning();
-    let mut candidates = vec![
-        (
-            "candidate.execute_task.minimal_examples",
-            PromptTuningConfig {
-                extra_instructions: base.extra_instructions.clone(),
-                examples: base.examples.iter().take(1).cloned().collect(),
-            },
-        ),
-        (
-            "candidate.execute_task.phase_bias",
-            PromptTuningConfig {
-                extra_instructions: vec![
-                    "执行阶段优先推进当前已存在的下一步动作，不要绕回探索。".to_string(),
-                ],
-                examples: base.examples.clone(),
-            },
-        ),
-    ];
-
-    let teleprompt = build_teleprompter_candidates(
-        &base,
-        "teleprompt_instruction",
-        &["执行阶段优先按照训练边界行动：先选中已有动作、保持正确设备前景、误入交互式认证时先中断。"],
-    );
-    for candidate in teleprompt {
-        candidates.push((
-            &*Box::leak(
-                format!("candidate.execute_task.{}", candidate.name)
-                    .into_boxed_str(),
-            ),
-            candidate.config,
-        ));
-    }
-
-    let bootstrap = build_bootstrap_demo_candidates(
-        &base,
-        "bootstrap_train_demos",
-        "bootstrap_train_combo",
-        &["执行阶段优先按照训练边界行动：先选中已有动作、保持正确设备前景、误入交互式认证时先中断。"],
-        crate::reasoning::datasets::action_phase::all_bootstrap_examples_by_suite(
-            "action_phase.execute_task",
-        ),
-    );
-    for candidate in bootstrap {
-        candidates.push((
-            &*Box::leak(
-                format!("candidate.execute_task.{}", candidate.name)
-                    .into_boxed_str(),
-            ),
-            candidate.config,
-        ));
-    }
-
-    candidates
-        .into_iter()
-        .map(|(variant_name, tuning)| TrainSourcePolicyVariant {
-            name: variant_name.to_string(),
-            compiled_prompts: compiled_store_with_suite_override(
-                &base_entries,
-                "action_phase.execute_task",
-                variant_name,
-                tuning,
-            ),
-        })
-        .collect()
-}
-
-fn build_plan_from_project_candidate_variants(
-    compiled_entries: &[CompiledProgram],
-) -> Vec<TrainSourcePolicyVariant> {
-    build_action_phase_program_candidate_variants(
-        compiled_entries,
-        PlanFromProjectProgram,
-        "candidate.plan_from_project",
-        Some("项目规划阶段应优先补出挂到该项目上的下一步动作，而不是转去探索别的方向。"),
-        &["项目规划阶段优先按照训练边界行动：为 Active 项目补出 project-scoped 的具体下一步动作，而不是偏离项目。"],
-    )
-}
-
-fn build_attend_notifications_candidate_variants(
-    compiled_entries: &[CompiledProgram],
-) -> Vec<TrainSourcePolicyVariant> {
-    build_action_phase_program_candidate_variants(
-        compiled_entries,
-        AttendNotificationsProgram,
-        "candidate.attend_notifications",
-        Some("提醒处理阶段只要 Telegram 在后台有待处理消息，就应先切到 Telegram，而不是继续终端工作。"),
-        &["提醒处理阶段优先按照训练边界行动：先处理 Telegram 与 Pending 义务，再考虑其他设备或探索。"],
-    )
-}
-
-fn build_explore_new_tasks_candidate_variants(
-    compiled_entries: &[CompiledProgram],
-) -> Vec<TrainSourcePolicyVariant> {
-    build_action_phase_program_candidate_variants(
-        compiled_entries,
-        ExploreNewTasksProgram,
-        "candidate.explore_new_tasks",
-        Some("探索阶段在完全空闲且没有前景设备时，应先切到 Terminal 获取可操作环境。"),
-        &["探索阶段优先按照训练边界行动：无前景设备时先 FocusTerminal，完全空闲时用 SilentWait。"],
-    )
-}
-
-fn build_action_phase_program_candidate_variants<P: ActionPhaseProgramSpec + Copy>(
-    compiled_entries: &[CompiledProgram],
-    program: P,
-    variant_prefix: &str,
-    phase_bias_instruction: Option<&str>,
-    teleprompt_instructions: &[&str],
-) -> Vec<TrainSourcePolicyVariant> {
-    let base_entries = {
-        let task_chain = filter_compiled_entries(
-            compiled_entries,
-            &[
-                "action_phase.execute_task",
-                "action_phase.plan_from_project",
-                "action_phase.explore_new_tasks",
-            ],
-        );
-        if task_chain.is_empty() {
-            compiled_entries.to_vec()
-        } else {
-            task_chain
-        }
-    };
-
-    let base = program.default_tuning();
-    let mut candidates = vec![(
-        format!("{variant_prefix}.minimal_examples"),
-        PromptTuningConfig {
-            extra_instructions: base.extra_instructions.clone(),
-            examples: base.examples.iter().take(1).cloned().collect(),
-        },
-    )];
-
-    if let Some(instruction) = phase_bias_instruction {
-        candidates.push((
-            format!("{variant_prefix}.phase_bias"),
-            PromptTuningConfig {
-                extra_instructions: vec![instruction.to_string()],
-                examples: base.examples.clone(),
-            },
-        ));
-    }
-
-    for candidate in build_teleprompter_candidates(
-        &base,
-        "teleprompt_instruction",
-        teleprompt_instructions,
-    ) {
-        candidates.push((
-            format!("{variant_prefix}.{}", candidate.name),
-            candidate.config,
-        ));
-    }
-
-    for candidate in build_bootstrap_demo_candidates(
-        &base,
-        "bootstrap_train_demos",
-        "bootstrap_train_combo",
-        teleprompt_instructions,
-        crate::reasoning::datasets::action_phase::all_bootstrap_examples_by_suite(
-            program.suite_name(),
-        ),
-    ) {
-        candidates.push((
-            format!("{variant_prefix}.{}", candidate.name),
-            candidate.config,
-        ));
-    }
-
-    candidates
-        .into_iter()
-        .map(|(variant_name, tuning)| TrainSourcePolicyVariant {
-            name: variant_name.clone(),
-            compiled_prompts: compiled_store_with_suite_override(
-                &base_entries,
-                program.suite_name(),
-                &variant_name,
-                tuning,
-            ),
-        })
-        .collect()
-}
-
-fn build_terminal_next_step_candidate_variants(
-    compiled_entries: &[CompiledProgram],
-) -> Vec<TrainSourcePolicyVariant> {
-    let base_entries = if compiled_entries.is_empty() {
-        Vec::new()
-    } else {
-        compiled_entries.to_vec()
-    };
-
-    let program = TerminalNextStepProgram {
-        work_phase: "investigate".to_string(),
-        key_anchors: Vec::new(),
-        investigation_plan: Vec::new(),
-    };
-    let base = program.default_tuning();
-    let mut candidates = vec![
-        (
-            "candidate.terminal_next_step.minimal_examples",
-            PromptTuningConfig {
-                extra_instructions: base.extra_instructions.clone(),
-                examples: base.examples.iter().take(1).cloned().collect(),
-            },
-        ),
-        (
-            "candidate.terminal_next_step.prompt_return_bias",
-            PromptTuningConfig {
-                extra_instructions: vec![
-                    "一旦终端底部已经回到 shell prompt，应把上一条命令视为结束；如果只是窗口不够高，优先换查看策略，不要重跑同一命令。".to_string(),
-                ],
-                examples: base.examples.clone(),
-            },
-        ),
-        (
-            "candidate.terminal_next_step.interactive_prompt_bias",
-            PromptTuningConfig {
-                extra_instructions: vec![
-                    "如果看到 REPL 提示符、问答式登录向导、密码提示或 (END) 这类交互/分页信号，不要当作普通静态输出；应优先退出、中断或给出明确安全输入。".to_string(),
-                ],
-                examples: base.examples.clone(),
-            },
-        ),
-    ];
-
-    let teleprompt = build_teleprompter_candidates(
-        &base,
-        "teleprompt_instruction",
-        &[
-            "优先正确理解 PTY：prompt 返回说明命令已结束，交互式提示与分页器不等于 still running，流式输出才应 Wait。",
-        ],
-    );
-    for candidate in teleprompt {
-        candidates.push((
-            &*Box::leak(
-                format!("candidate.terminal_next_step.{}", candidate.name).into_boxed_str(),
-            ),
-            candidate.config,
-        ));
-    }
-
-    candidates
-        .into_iter()
-        .map(|(variant_name, tuning)| TrainSourcePolicyVariant {
-            name: variant_name.to_string(),
-            compiled_prompts: compiled_store_with_suite_override(
-                &base_entries,
-                "terminal_next_step",
-                variant_name,
-                tuning,
-            ),
-        })
-        .collect()
-}
-
-fn compiled_store_with_suite_override(
-    base_entries: &[CompiledProgram],
-    suite: &str,
-    candidate_name: &str,
-    tuning: PromptTuningConfig<Output>,
-) -> CompiledPromptStore {
-    let mut entries = base_entries.to_vec();
-    entries.retain(|entry| entry.suite != suite);
-    entries.push(CompiledProgram {
-        suite: suite.to_string(),
-        compile_key: format!("learn-preview-{candidate_name}"),
-        best_candidate: candidate_name.to_string(),
-        score: 0,
-        total_cases: 0,
-        tuning: StoredPromptTuningConfig::from_typed(&tuning),
-        report: None,
-    });
-    CompiledPromptStore::from_entries(entries)
-}
-
-async fn run_train_source_variant(
-    config: &crate::config::Config,
-    tasks: &[EpisodeTask],
-    variant: &TrainSourcePolicyVariant,
-) -> Result<Vec<EpisodeOutcome>> {
-    let mut outcomes = Vec::new();
-    for task in tasks {
-        let episode_root = prepare_isolated_episode_root(task, &variant.name).await?;
-        outcomes.push(
-            execute_train_source_task(
-                config,
-                task,
-                variant.compiled_prompts.clone(),
-                &episode_root,
-                false,
-            )
-            .await?,
-        );
-    }
-    Ok(outcomes)
 }
 
 async fn execute_train_source_task(
@@ -1995,73 +1546,6 @@ async fn save_episode_outcome(episode_root: &Path, outcome: &EpisodeOutcome) -> 
     Ok(())
 }
 
-fn print_train_source_optimization_summary(path: &str, summaries: &[TrainSourceVariantSummary]) {
-    println!(
-        "train source optimize: path={} variants={}",
-        path,
-        summaries.len()
-    );
-    for summary in summaries {
-        let total = summary.outcomes.len();
-        let succeeded = summary
-            .outcomes
-            .iter()
-            .filter(|outcome| outcome.status == EpisodeStatus::Succeeded)
-            .count();
-        let failed = summary
-            .outcomes
-            .iter()
-            .filter(|outcome| outcome.status == EpisodeStatus::Failed)
-            .count();
-        let aborted = summary
-            .outcomes
-            .iter()
-            .filter(|outcome| outcome.status == EpisodeStatus::Aborted)
-            .count();
-        let max_steps = summary
-            .outcomes
-            .iter()
-            .filter(|outcome| outcome.status == EpisodeStatus::MaxStepsExceeded)
-            .count();
-        let avg_score = if total == 0 {
-            0.0
-        } else {
-            summary
-                .outcomes
-                .iter()
-                .map(|outcome| outcome.metric.score)
-                .sum::<f32>()
-                / total as f32
-        };
-        println!(
-            "- variant={} total={} succeeded={} failed={} aborted={} max_steps={} avg_score={:.2}",
-            summary.variant_name,
-            total,
-            succeeded,
-            failed,
-            aborted,
-            max_steps,
-            avg_score
-        );
-        for outcome in &summary.outcomes {
-            println!(
-                "  id={} status={:?} score={:.2} steps={} repeated_effects={}",
-                outcome.task.id,
-                outcome.status,
-                outcome.metric.score,
-                outcome.metric.steps_used,
-                outcome.metric.repeated_effects
-            );
-        }
-    }
-
-    if let Some(best) = summaries.iter().max_by(|left, right| {
-        compare_variant_summaries(left, right)
-    }) {
-        println!("selected_variant={}", best.variant_name);
-    }
-}
-
 fn print_train_source_learn_summary(session_root: &Path, state: &TrainSourceLearnState) {
     let succeeded = state
         .outcomes
@@ -2102,59 +1586,6 @@ fn print_train_source_learn_summary(session_root: &Path, state: &TrainSourceLear
         state.optimize_runs,
         state.last_compiled_prompt_count
     );
-}
-
-fn compare_variant_summaries(
-    left: &TrainSourceVariantSummary,
-    right: &TrainSourceVariantSummary,
-) -> std::cmp::Ordering {
-    let left_successes = left
-        .outcomes
-        .iter()
-        .filter(|outcome| outcome.status == EpisodeStatus::Succeeded)
-        .count();
-    let right_successes = right
-        .outcomes
-        .iter()
-        .filter(|outcome| outcome.status == EpisodeStatus::Succeeded)
-        .count();
-    left_successes
-        .cmp(&right_successes)
-        .then_with(|| {
-            let left_avg = if left.outcomes.is_empty() {
-                0.0
-            } else {
-                left.outcomes
-                    .iter()
-                    .map(|outcome| outcome.metric.score)
-                    .sum::<f32>()
-                    / left.outcomes.len() as f32
-            };
-            let right_avg = if right.outcomes.is_empty() {
-                0.0
-            } else {
-                right.outcomes
-                    .iter()
-                    .map(|outcome| outcome.metric.score)
-                    .sum::<f32>()
-                    / right.outcomes.len() as f32
-            };
-            left_avg
-                .partial_cmp(&right_avg)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-}
-
-#[derive(Clone)]
-struct TrainSourcePolicyVariant {
-    name: String,
-    compiled_prompts: CompiledPromptStore,
-}
-
-#[derive(Clone)]
-struct TrainSourceVariantSummary {
-    variant_name: String,
-    outcomes: Vec<EpisodeOutcome>,
 }
 
 #[derive(serde::Serialize, Clone)]

@@ -1,7 +1,4 @@
-use std::{collections::HashMap, env, path::PathBuf};
-
 use miette::{Result, miette};
-use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
@@ -46,30 +43,6 @@ const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v11";
 const RENDERER_NAME: &str = "openai_tools";
 const SEARCH_SEED_LIMIT: usize = 4;
 const SEARCH_PAIR_LIMIT: usize = 6;
-
-#[derive(Deserialize, Serialize)]
-struct LearnStateSnapshot {
-    batch_reports: Vec<LearnBatchReportSnapshot>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct LearnBatchReportSnapshot {
-    selected_variant: String,
-    selection_scores: Vec<LearnVariantScoreSnapshot>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-struct LearnVariantScoreSnapshot {
-    variant_name: String,
-    succeeded: usize,
-    failed: usize,
-    avg_score: f32,
-}
-
-#[derive(Default)]
-struct LearnSelectionBias {
-    by_candidate: HashMap<String, (usize, usize, usize)>,
-}
 
 pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<OptimizationResult>> {
     let compiled = ensure_reasoning_compiled(context).await?;
@@ -428,7 +401,6 @@ async fn ensure_suite_compiled<P: Program>(
     suite_index: usize,
     total_suites: usize,
 ) -> Result<CompiledProgram> {
-    let learn_bias = load_learn_selection_bias_for_suite(suite_name).await?;
     let compile_key = build_compile_key(
         &context.config,
         program,
@@ -438,7 +410,6 @@ async fn ensure_suite_compiled<P: Program>(
         ranking_label,
         &ranking_cases,
         &candidates,
-        &learn_bias,
     )?;
     if let Some(compiled) = load_compiled_program(&compile_key).await? {
         eprintln!(
@@ -478,12 +449,10 @@ async fn ensure_suite_compiled<P: Program>(
         total_candidates,
     )
     .await;
-    apply_learn_selection_bias(&mut evaluations, &learn_bias);
-
     let search_candidates = build_search_candidates(&evaluations)?;
     if !search_candidates.is_empty() {
         let search_total = search_candidates.len();
-        let mut search_evaluations = evaluate_candidates(
+        let search_evaluations = evaluate_candidates(
             context,
             renderer,
             program,
@@ -496,7 +465,6 @@ async fn ensure_suite_compiled<P: Program>(
             search_total,
         )
         .await;
-        apply_learn_selection_bias(&mut search_evaluations, &learn_bias);
         evaluations.extend(search_evaluations);
     }
 
@@ -506,8 +474,6 @@ async fn ensure_suite_compiled<P: Program>(
     let mut best: Option<(
         String,
         PromptTuningConfig<P::Output>,
-        usize,
-        usize,
         usize,
         usize,
         usize,
@@ -524,9 +490,6 @@ async fn ensure_suite_compiled<P: Program>(
             score: evaluation.score,
             total_cases,
             attempts_used: evaluation.attempts_used,
-            episode_wins: evaluation.episode_wins,
-            episode_losses: evaluation.episode_losses,
-            episode_ties: evaluation.episode_ties,
             judge_wins: evaluation.judge_wins,
             judge_losses: evaluation.judge_losses,
             judge_ties: evaluation.judge_ties,
@@ -549,25 +512,17 @@ async fn ensure_suite_compiled<P: Program>(
                 _,
                 best_score,
                 best_attempts,
-                best_episode_wins,
-                best_episode_losses,
                 best_judge_wins,
                 best_judge_losses,
                 _,
             )| {
                 evaluation.score > *best_score
                     || (evaluation.score == *best_score
-                        && (evaluation.episode_wins > *best_episode_wins
-                            || (evaluation.episode_wins == *best_episode_wins
-                                && (evaluation.episode_losses < *best_episode_losses
-                                    || (evaluation.episode_losses == *best_episode_losses
-                                        && (evaluation.judge_wins > *best_judge_wins
-                                            || (evaluation.judge_wins == *best_judge_wins
-                                                && (evaluation.judge_losses < *best_judge_losses
-                                                    || (evaluation.judge_losses
-                                                        == *best_judge_losses
-                                                        && evaluation.attempts_used
-                                                            < *best_attempts)))))))))
+                        && (evaluation.judge_wins > *best_judge_wins
+                            || (evaluation.judge_wins == *best_judge_wins
+                                && (evaluation.judge_losses < *best_judge_losses
+                                    || (evaluation.judge_losses == *best_judge_losses
+                                        && evaluation.attempts_used < *best_attempts)))))
             },
         ) {
             best = Some((
@@ -575,8 +530,6 @@ async fn ensure_suite_compiled<P: Program>(
                 evaluation.candidate.config.clone(),
                 evaluation.score,
                 evaluation.attempts_used,
-                evaluation.episode_wins,
-                evaluation.episode_losses,
                 evaluation.judge_wins,
                 evaluation.judge_losses,
                 evaluation.judge_ties,
@@ -589,8 +542,6 @@ async fn ensure_suite_compiled<P: Program>(
         best_tuning,
         score,
         _attempts_used,
-        _episode_wins,
-        _episode_losses,
         _judge_wins,
         _judge_losses,
         _judge_ties,
@@ -835,9 +786,6 @@ async fn evaluate_candidates<P: Program>(
             acceptance_attempts_used: Some(acceptance_attempts_used),
             score,
             attempts_used: acceptance_attempts_used + attempts_used,
-            episode_wins: 0,
-            episode_losses: 0,
-            episode_ties: 0,
             judge_wins: 0,
             judge_losses: 0,
             judge_ties: 0,
@@ -883,134 +831,6 @@ fn build_search_candidates<O: Clone + Serialize>(
         }
     }
     Ok(combos)
-}
-
-fn apply_learn_selection_bias<O: Clone>(
-    evaluations: &mut [CandidateEvaluation<O>],
-    bias: &LearnSelectionBias,
-) {
-    for evaluation in evaluations {
-        if let Some((wins, losses, ties)) = bias.by_candidate.get(&evaluation.candidate.name) {
-            evaluation.episode_wins += *wins;
-            evaluation.episode_losses += *losses;
-            evaluation.episode_ties += *ties;
-        }
-    }
-}
-
-async fn load_learn_selection_bias_for_suite(suite_name: &str) -> Result<LearnSelectionBias> {
-    let Some(state) = load_recent_learn_state().await? else {
-        return Ok(LearnSelectionBias::default());
-    };
-
-    let mut bias = LearnSelectionBias::default();
-    for report in state.batch_reports {
-        let Some((candidate_suite, candidate_name)) =
-            parse_candidate_variant_name(&report.selected_variant)
-        else {
-            continue;
-        };
-        if candidate_suite != suite_name {
-            continue;
-        }
-        let selected = report
-            .selection_scores
-            .iter()
-            .find(|score| score.variant_name == report.selected_variant);
-        let baseline = report
-            .selection_scores
-            .iter()
-            .find(|score| score.variant_name == "baseline");
-        let entry = bias
-            .by_candidate
-            .entry(candidate_name.to_string())
-            .or_insert((0, 0, 0));
-        entry.0 += 1;
-        if let (Some(selected), Some(baseline)) = (selected, baseline) {
-            if selected.avg_score > baseline.avg_score {
-                entry.0 += 1;
-            } else if selected.avg_score < baseline.avg_score {
-                entry.1 += 1;
-            } else {
-                entry.2 += 1;
-            }
-        }
-    }
-
-    Ok(bias)
-}
-
-async fn load_recent_learn_state() -> Result<Option<LearnStateSnapshot>> {
-    let Some(session_root) = latest_train_source_learn_session_root().await? else {
-        return Ok(None);
-    };
-    let path = session_root.join("learn_state.json");
-    let payload = match tokio::fs::read_to_string(&path).await {
-        Ok(payload) => payload,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(miette!(
-                "failed to read learn state {}: {err}",
-                path.display()
-            ));
-        }
-    };
-    let state = serde_json::from_str::<LearnStateSnapshot>(&payload)
-        .map_err(|err| miette!("failed to parse learn state {}: {err}", path.display()))?;
-    Ok(Some(state))
-}
-
-async fn latest_train_source_learn_session_root() -> Result<Option<PathBuf>> {
-    let train_root = env::current_dir()
-        .map_err(|err| miette!("failed to get current dir for learn state: {err}"))?
-        .join("tmp")
-        .join("train_source_learn");
-    if !train_root.exists() {
-        return Ok(None);
-    }
-
-    let mut latest_session: Option<(std::time::SystemTime, PathBuf)> = None;
-    let mut entries = tokio::fs::read_dir(&train_root)
-        .await
-        .map_err(|err| miette!("failed to read train_source_learn dir {}: {err}", train_root.display()))?;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|err| miette!("failed to read train_source_learn entry: {err}"))?
-    {
-        let path = entry.path();
-        let Ok(metadata) = entry.metadata().await else {
-            continue;
-        };
-        if !metadata.is_dir() {
-            continue;
-        }
-        let Ok(modified) = metadata.modified() else {
-            continue;
-        };
-        if latest_session
-            .as_ref()
-            .is_none_or(|(latest_modified, _)| modified > *latest_modified)
-        {
-            latest_session = Some((modified, path));
-        }
-    }
-
-    Ok(latest_session.map(|(_, path)| path))
-}
-
-fn parse_candidate_variant_name(variant_name: &str) -> Option<(&'static str, &str)> {
-    let rest = variant_name.strip_prefix("candidate.")?;
-    let (target, candidate_name) = rest.rsplit_once('.')?;
-    let suite = match target {
-        "execute_task" => "action_phase.execute_task",
-        "terminal_next_step" => "terminal_next_step",
-        "plan_from_project" => "action_phase.plan_from_project",
-        "explore_new_tasks" => "action_phase.explore_new_tasks",
-        "attend_notifications" => "action_phase.attend_notifications",
-        _ => return None,
-    };
-    Some((suite, candidate_name))
 }
 
 fn merge_tuning_configs<O: Clone + Serialize>(
@@ -1070,7 +890,6 @@ fn build_compile_key<P: Program>(
     ranking_label: &str,
     ranking_cases: &[EvalCase<P::Output>],
     candidates: &[CandidateConfig<P::Output>],
-    learn_bias: &LearnSelectionBias,
 ) -> Result<String> {
     #[derive(Serialize)]
     struct EvalCaseFingerprint<'a> {
@@ -1112,7 +931,6 @@ fn build_compile_key<P: Program>(
         ranking_label: &'a str,
         ranking_cases: Vec<EvalCaseFingerprint<'a>>,
         candidates: Vec<CandidateFingerprint<'a, O>>,
-        learn_bias: &'a HashMap<String, (usize, usize, usize)>,
     }
 
     let resolved_judge_model = config.judge.resolved_model(&config.main_model);
@@ -1166,7 +984,6 @@ fn build_compile_key<P: Program>(
                 config: &candidate.config,
             })
             .collect(),
-        learn_bias: &learn_bias.by_candidate,
     };
 
     let bytes = serde_json::to_vec(&payload)
