@@ -18,6 +18,9 @@ use crate::{
 use super::{
     program::Program,
     programs::sleep_artifact_builder::{SleepArtifactBuilderOutput, SleepArtifactBuilderProgram},
+    programs::sleep_episode_synthesizer::{
+        SleepEpisodeSynthesizerOutput, SleepEpisodeSynthesizerProgram,
+    },
     programs::sleep_l3_promoter::{SleepL3PromoterOutput, SleepL3PromoterProgram},
     programs::sleep_success_l3_promoter::{
         SleepSuccessL3PromoterOutput, SleepSuccessL3PromoterProgram,
@@ -47,7 +50,8 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let records = load_runtime_trace_records().await?;
     let mut failure_patterns = derive_failure_patterns(&records);
     let episode_outcomes = load_recent_learn_episode_outcomes().await?;
-    failure_patterns.extend(derive_episode_failure_patterns(&episode_outcomes));
+    let episode_synthesis = synthesize_episode_outcomes(context, &episode_outcomes).await?;
+    failure_patterns.extend(episode_synthesis.failure_patterns.clone());
     let store = SleepArtifactsStore::open().await?;
     store.replace_failure_patterns(&failure_patterns).await?;
     let mut derived = derive_sleep_artifacts(context, &failure_patterns).await?;
@@ -56,13 +60,11 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
         .extend(derive_success_bootstrap_demos(&records));
     derived
         .bootstrap_demos
-        .extend(derive_episode_bootstrap_demos(&episode_outcomes));
-    derived
-        .stress_cases
-        .extend(derive_episode_stress_cases(&episode_outcomes));
+        .extend(episode_synthesis.bootstrap_demos.clone());
+    derived.stress_cases.extend(episode_synthesis.stress_cases.clone());
     derived
         .instruction_hypotheses
-        .extend(derive_episode_instruction_hypotheses(&episode_outcomes));
+        .extend(episode_synthesis.instruction_hypotheses.clone());
     store
         .replace_bootstrap_demos(&derived.bootstrap_demos)
         .await?;
@@ -73,7 +75,7 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let mut promoted = promote_failure_patterns_to_l3(context, &failure_patterns).await?;
     let promoted_failure_l3_entries = promoted.len();
     let mut success_promoted = promote_success_patterns_to_l3(context, &records).await?;
-    success_promoted.extend(promote_episode_success_patterns_to_l3(context, &episode_outcomes).await?);
+    success_promoted.extend(episode_synthesis.l3_entries.clone());
     let promoted_success_l3_entries = success_promoted.len();
     promoted.extend(success_promoted);
     if !promoted.is_empty() {
@@ -208,6 +210,90 @@ async fn load_recent_learn_episode_outcomes() -> Result<Vec<EpisodeOutcome>> {
     Ok(outcomes)
 }
 
+#[derive(Default)]
+struct EpisodeSleepSynthesis {
+    failure_patterns: Vec<SleepArtifactFailurePattern>,
+    bootstrap_demos: Vec<SleepArtifactBootstrapDemo>,
+    stress_cases: Vec<SleepArtifactStressCase>,
+    instruction_hypotheses: Vec<SleepArtifactInstructionHypothesis>,
+    l3_entries: Vec<L3EntryDraft>,
+}
+
+async fn synthesize_episode_outcomes(
+    context: &mut Context,
+    outcomes: &[EpisodeOutcome],
+) -> Result<EpisodeSleepSynthesis> {
+    let renderer = OpenAIToolRenderer;
+    let program = SleepEpisodeSynthesizerProgram;
+    let mut synthesized = EpisodeSleepSynthesis::default();
+
+    for outcome in outcomes {
+        let Some(step) = outcome
+            .steps
+            .iter()
+            .rev()
+            .find(|step| infer_episode_suite_from_step(step).is_some())
+        else {
+            continue;
+        };
+        let Some(suite) = infer_episode_suite_from_step(step) else {
+            continue;
+        };
+
+        let episode_id = format!("episode:{}", outcome.task.id);
+        let recent_steps = render_recent_episode_steps(outcome);
+        let task_goal = outcome
+            .task
+            .task_goal
+            .clone()
+            .unwrap_or_else(|| outcome.task.title.clone());
+        let final_observation = format!(
+            "{}\n\n{}",
+            outcome.final_observation.summary.trim(),
+            outcome.final_observation.snapshot_text.trim()
+        );
+        let memory_query = format!(
+            "{}\n{}\n{}",
+            task_goal.trim(),
+            outcome.final_observation.summary.trim(),
+            recent_steps.trim()
+        );
+        let related_memories = context.memory.search_mem(&memory_query, 3).await;
+        let outcome_ir = program.dataset_ir(
+            suite.to_string(),
+            episode_id.clone(),
+            format!("{:?}", outcome.status),
+            task_goal,
+            outcome.task.done_criteria.join("\n"),
+            recent_steps.clone(),
+            final_observation.clone(),
+            render_related_memories(&related_memories).unwrap_or_else(|| "无".to_string()),
+        );
+        let synthesized_outcome = execute_program_with_ir_report(
+            context.judge_llm.as_ref(),
+            context,
+            &renderer,
+            &program,
+            outcome_ir,
+            &program.default_tuning(),
+            TraceOrigin::Sleep,
+        )
+        .await?;
+
+        merge_episode_synthesis(
+            &mut synthesized,
+            outcome,
+            suite,
+            step,
+            &episode_id,
+            &related_memories,
+            &synthesized_outcome.output,
+        );
+    }
+
+    Ok(synthesized)
+}
+
 fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<SleepArtifactFailurePattern> {
     let mut buckets: HashMap<(String, String), PatternAccumulator> = HashMap::new();
 
@@ -267,181 +353,6 @@ fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<SleepArtifactF
     patterns
 }
 
-fn derive_episode_failure_patterns(
-    outcomes: &[EpisodeOutcome],
-) -> Vec<SleepArtifactFailurePattern> {
-    let mut patterns = Vec::new();
-
-    for outcome in outcomes {
-        if !matches!(
-            outcome.status,
-            EpisodeStatus::Failed | EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded
-        ) {
-            continue;
-        }
-
-        let suites = infer_episode_failure_suites(outcome);
-        let signal = infer_episode_failure_signal(outcome);
-        let severity = signal.severity.max(match outcome.status {
-            EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded => 4,
-            EpisodeStatus::Failed => 3,
-            EpisodeStatus::InProgress | EpisodeStatus::Succeeded => 2,
-        });
-        let suggested_fix_kind = signal.suggested_fix_kind;
-
-        for suite in suites {
-            patterns.push(SleepArtifactFailurePattern {
-                suite: suite.clone(),
-                pattern_id: format!(
-                    "episode:{}:{}:{}",
-                    slugify(&suite),
-                    slugify(signal.label),
-                    slugify(&outcome.task.id)
-                ),
-                description: signal.description.clone(),
-                supporting_trace_ids: vec![format!("episode:{}", outcome.task.id)],
-                frequency: outcome.metric.repeated_effects.max(1),
-                severity,
-                suggested_fix_kind,
-            });
-        }
-    }
-
-    patterns
-}
-
-fn derive_episode_bootstrap_demos(
-    outcomes: &[EpisodeOutcome],
-) -> Vec<SleepArtifactBootstrapDemo> {
-    let mut demos = Vec::new();
-    let mut per_suite = HashMap::<String, usize>::new();
-
-    for outcome in outcomes {
-        if outcome.status != EpisodeStatus::Succeeded {
-            continue;
-        }
-        let Some(step) = outcome
-            .steps
-            .iter()
-            .rev()
-            .find(|step| infer_episode_suite_from_step(step).is_some())
-        else {
-            continue;
-        };
-        let Some(suite) = infer_episode_suite_from_step(step) else {
-            continue;
-        };
-        let count = per_suite.entry(suite.to_string()).or_insert(0);
-        if *count >= 3 {
-            continue;
-        }
-        *count += 1;
-        demos.push(SleepArtifactBootstrapDemo {
-            suite: suite.to_string(),
-            title: format!("Learn outcome {} #{}", outcome.task.id, count),
-            input_summary: render_episode_input_summary(outcome, step),
-            inputs: episode_example_inputs(outcome, step),
-            expected_output: serde_json::to_value(step_to_output(step)).unwrap_or_else(|_| json!({})),
-            reference_case_names: Vec::new(),
-            source_trace_ids: vec![format!("episode:{}", outcome.task.id)],
-            confidence: 0.75,
-        });
-    }
-
-    demos
-}
-
-fn derive_episode_stress_cases(outcomes: &[EpisodeOutcome]) -> Vec<SleepArtifactStressCase> {
-    let mut cases = Vec::new();
-
-    for outcome in outcomes {
-        if !matches!(
-            outcome.status,
-            EpisodeStatus::Failed | EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded
-        ) {
-            continue;
-        }
-        let Some(step) = outcome.steps.last() else {
-            continue;
-        };
-        let Some(suite) = infer_episode_suite_from_step(step) else {
-            continue;
-        };
-        let constraints = episode_failure_constraints(outcome, step);
-        if constraints.is_empty() {
-            continue;
-        }
-        cases.push(SleepArtifactStressCase {
-            suite: suite.to_string(),
-            name: format!("learn-{}", slugify(&outcome.task.id)),
-            input_ir: json!({
-                "task_title": outcome.task.title,
-                "instruction": outcome.task.instruction,
-                "snapshot_text": step.snapshot_text,
-                "last_effect": format!("{:?}", step.effect),
-                "notes": outcome.metric.notes,
-            }),
-            expected_constraints: constraints,
-            reference_case_names: Vec::new(),
-            source_pattern_id: format!("episode:{}", outcome.task.id),
-            repeat: outcome.metric.repeated_effects.max(2),
-            weight: usize::from(matches!(outcome.status, EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded)) + 1,
-        });
-    }
-
-    cases
-}
-
-fn derive_episode_instruction_hypotheses(
-    outcomes: &[EpisodeOutcome],
-) -> Vec<SleepArtifactInstructionHypothesis> {
-    let mut items = Vec::new();
-
-    for outcome in outcomes {
-        if !matches!(
-            outcome.status,
-            EpisodeStatus::Failed | EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded
-        ) {
-            continue;
-        }
-        let Some(step) = outcome.steps.last() else {
-            continue;
-        };
-        let Some(suite) = infer_episode_suite_from_step(step) else {
-            continue;
-        };
-        let Some(text) = episode_instruction_text(outcome, step) else {
-            continue;
-        };
-        items.push(SleepArtifactInstructionHypothesis {
-            suite: suite.to_string(),
-            text,
-            justification: summarize_episode_failure(outcome),
-            source_pattern_ids: vec![format!("episode:{}", outcome.task.id)],
-        });
-    }
-
-    items
-}
-
-fn infer_episode_failure_suites(outcome: &EpisodeOutcome) -> Vec<String> {
-    let mut suites = vec!["action_phase.execute_task".to_string()];
-
-    let touched_terminal = outcome.steps.iter().any(|step| {
-        matches!(
-            &step.effect,
-            Effect::DeviceAction {
-                action: DeviceAction::TerminalInput { .. }
-            }
-        ) || matches!(step.effect, Effect::Wait | Effect::SilentWait)
-    });
-    if touched_terminal {
-        suites.push("terminal_next_step".to_string());
-    }
-
-    suites
-}
-
 fn infer_episode_suite_from_step(step: &EpisodeStep) -> Option<&'static str> {
     match &step.effect {
         Effect::FocusDevice {
@@ -467,14 +378,133 @@ fn infer_episode_suite_from_step(step: &EpisodeStep) -> Option<&'static str> {
     }
 }
 
-fn render_episode_input_summary(outcome: &EpisodeOutcome, step: &EpisodeStep) -> String {
-    format!(
-        "task: {}\ninstruction: {}\nlast_effect: {:?}\nsnapshot:\n{}",
-        outcome.task.title.trim(),
-        outcome.task.instruction.trim(),
-        step.effect,
-        step.snapshot_text.trim()
-    )
+fn render_recent_episode_steps(outcome: &EpisodeOutcome) -> String {
+    outcome
+        .steps
+        .iter()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .enumerate()
+        .map(|(index, step)| {
+            let phase = step
+                .metadata
+                .get("work_phase")
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            let reason = step
+                .metadata
+                .get("completion_reason")
+                .cloned()
+                .unwrap_or_default();
+            format!(
+                "{}. phase={} effect={:?} observation={} reason={}",
+                index + 1,
+                phase,
+                step.effect,
+                step.observation_summary.trim(),
+                reason.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn merge_episode_synthesis(
+    synthesized: &mut EpisodeSleepSynthesis,
+    outcome: &EpisodeOutcome,
+    suite: &str,
+    step: &EpisodeStep,
+    episode_id: &str,
+    related_memories: &[String],
+    output: &SleepEpisodeSynthesizerOutput,
+) {
+    if output.create_failure_pattern
+        && !output.failure_pattern_summary.trim().is_empty()
+        && !matches!(outcome.status, EpisodeStatus::Succeeded)
+    {
+        synthesized.failure_patterns.push(SleepArtifactFailurePattern {
+            suite: suite.to_string(),
+            pattern_id: format!(
+                "episode:{}:{}:{}",
+                slugify(suite),
+                slugify(output.failure_pattern_summary.trim()),
+                slugify(&outcome.task.id)
+            ),
+            description: output.failure_pattern_summary.trim().to_string(),
+            supporting_trace_ids: vec![episode_id.to_string()],
+            frequency: outcome.metric.repeated_effects.max(1),
+            severity: 4,
+            suggested_fix_kind: match output.suggested_fix_kind.trim().to_ascii_lowercase().as_str() {
+                "demo" => SleepArtifactSuggestedFixKind::Demo,
+                "stress" | "stress_case" | "stresscase" => SleepArtifactSuggestedFixKind::StressCase,
+                _ => SleepArtifactSuggestedFixKind::Instruction,
+            },
+        });
+    }
+
+    if output.create_bootstrap_demo
+        && !output.bootstrap_demo_title.trim().is_empty()
+        && !output.bootstrap_demo_summary.trim().is_empty()
+    {
+        synthesized.bootstrap_demos.push(SleepArtifactBootstrapDemo {
+            suite: suite.to_string(),
+            title: output.bootstrap_demo_title.trim().to_string(),
+            input_summary: output.synthesized_summary.trim().to_string(),
+            inputs: episode_example_inputs(outcome, step),
+            expected_output: serde_json::to_value(step_to_output(step)).unwrap_or_else(|_| json!({})),
+            reference_case_names: Vec::new(),
+            source_trace_ids: vec![episode_id.to_string()],
+            confidence: output.l3_confidence.clamp(0.0, 1.0) as f32,
+        });
+    }
+
+    if output.create_stress_case && !output.stress_case_name.trim().is_empty() {
+        synthesized.stress_cases.push(SleepArtifactStressCase {
+            suite: suite.to_string(),
+            name: output.stress_case_name.trim().to_string(),
+            input_ir: json!({
+                "task_title": outcome.task.title,
+                "task_goal": outcome.task.task_goal,
+                "summary": output.synthesized_summary,
+                "last_effect": format!("{:?}", step.effect),
+                "related_memories": related_memories,
+            }),
+            expected_constraints: output.stress_constraints.clone(),
+            reference_case_names: Vec::new(),
+            source_pattern_id: episode_id.to_string(),
+            repeat: outcome.metric.repeated_effects.max(2),
+            weight: 2,
+        });
+    }
+
+    if output.create_instruction_hypothesis && !output.instruction_text.trim().is_empty() {
+        synthesized
+            .instruction_hypotheses
+            .push(SleepArtifactInstructionHypothesis {
+                suite: suite.to_string(),
+                text: output.instruction_text.trim().to_string(),
+                justification: output.reason.trim().to_string(),
+                source_pattern_ids: vec![episode_id.to_string()],
+            });
+    }
+
+    if output.promote_to_l3
+        && !output.l3_lesson.trim().is_empty()
+        && !output.l3_retrieval_text.trim().is_empty()
+    {
+        synthesized.l3_entries.push(L3EntryDraft {
+            kind: output.l3_kind.clone(),
+            lesson: output.l3_lesson.trim().to_string(),
+            evidence_summary: output.l3_evidence_summary.trim().to_string(),
+            retrieval_text: output.l3_retrieval_text.trim().to_string(),
+            confidence: output.l3_confidence.clamp(0.0, 1.0) as f32,
+            stability: output.l3_stability.clone(),
+            source_trace_ids: vec![episode_id.to_string()],
+        });
+    }
 }
 
 fn episode_example_inputs(outcome: &EpisodeOutcome, step: &EpisodeStep) -> Vec<ExampleField> {
@@ -504,172 +534,6 @@ fn step_to_output(step: &EpisodeStep) -> Output {
             .cloned()
             .unwrap_or_default(),
         effect: step.effect.clone(),
-    }
-}
-
-fn episode_failure_constraints(outcome: &EpisodeOutcome, step: &EpisodeStep) -> Vec<String> {
-    let signal = infer_episode_failure_signal(outcome);
-    let mut constraints = Vec::new();
-    if signal.label == "verify-explicit-import-or-path-error" {
-        constraints.push("验证阶段若已拿到明确导入或路径错误，应先检查缺失对象、工作目录、PYTHONPATH 与测试入口，而不是重复重跑 pytest 或继续刷日志。".to_string());
-    }
-    if signal.label == "verify-command-not-triggered" {
-        constraints.push("验证命令无输出或疑似未真正执行时，应先确认命令已触发、带换行并回到正确工作目录，再决定是否重跑。".to_string());
-    }
-    if signal.label == "verify-log-analysis-loop" {
-        constraints.push("验证阶段若已获得明确错误对象，不应继续重复 tail/grep/cat 同一日志，而应围绕错误对象收敛。".to_string());
-    }
-    if outcome.metric.repeated_effects > 0 {
-        constraints.push("不应重复最近已经执行过且未产生新信息的相同 effect".to_string());
-    }
-    if matches!(
-        step.effect,
-        Effect::DeviceAction {
-            action: DeviceAction::TerminalInput { .. }
-        }
-    ) {
-        constraints.push("终端输出不足以得出新结论时，应更换查看策略而不是重跑同一命令".to_string());
-    }
-    if matches!(outcome.status, EpisodeStatus::MaxStepsExceeded | EpisodeStatus::Aborted) {
-        constraints.push("应在任务停滞前收敛到新的分析动作或明确失败结论".to_string());
-    }
-    constraints
-}
-
-fn episode_instruction_text(outcome: &EpisodeOutcome, step: &EpisodeStep) -> Option<String> {
-    let signal = infer_episode_failure_signal(outcome);
-    match signal.label {
-        "verify-explicit-import-or-path-error" => {
-            return Some("当验证阶段已经拿到明确的 ModuleNotFound、ImportError、file not found 或入口路径错误时，应停止重复重跑 pytest 或刷日志，先检查缺失模块/文件是否存在、当前工作目录、PYTHONPATH 与测试入口范围。".to_string());
-        }
-        "verify-command-not-triggered" => {
-            return Some("当验证命令无输出或疑似未真正触发时，应先确认命令格式、换行触发、当前 shell prompt 与工作目录，再决定是否重跑，而不是盲目重复验证。".to_string());
-        }
-        "verify-log-analysis-loop" => {
-            return Some("验证阶段若已获得明确测试错误或日志锚点，应围绕该错误对象收敛处理；不要在同一份日志上反复 tail/grep/cat。".to_string());
-        }
-        _ => {}
-    }
-    if outcome.metric.repeated_effects > 0 {
-        return Some(
-            "当最近一步与上一轮 effect 重复且没有新增信息时，不要再次执行同一动作；应切换到更窄的查看、定位或验证策略。"
-                .to_string(),
-        );
-    }
-    if matches!(
-        step.effect,
-        Effect::DeviceAction {
-            action: DeviceAction::TerminalInput { .. }
-        }
-    ) && matches!(outcome.status, EpisodeStatus::Aborted | EpisodeStatus::MaxStepsExceeded)
-    {
-        return Some(
-            "终端分析任务在多步后仍无结果时，应停止重复输入并改用更聚焦的命令、验证命令或结束判定。"
-                .to_string(),
-        );
-    }
-    None
-}
-
-fn summarize_episode_failure(outcome: &EpisodeOutcome) -> String {
-    let signal = infer_episode_failure_signal(outcome);
-    let mut parts = vec![
-        format!("训练任务失败: {}", outcome.task.title.trim()),
-        format!("status={:?}", outcome.status),
-        format!("failure_kind={}", signal.label),
-        format!("strategy={}", signal.description),
-    ];
-    if outcome.metric.repeated_effects > 0 {
-        parts.push(format!("repeated_effects={}", outcome.metric.repeated_effects));
-    }
-    if outcome.metric.stagnation_events > 0 {
-        parts.push(format!(
-            "stagnation_events={}",
-            outcome.metric.stagnation_events
-        ));
-    }
-    if let Some(last_step) = outcome.steps.last() {
-        parts.push(format!("last_effect={:?}", last_step.effect));
-        if let Some(description) = last_step.metadata.get("description") {
-            let description = description.trim();
-            if !description.is_empty() {
-                parts.push(format!("last_description={description}"));
-            }
-        }
-    }
-    if !outcome.metric.notes.is_empty() {
-        parts.push(format!(
-            "notes={}",
-            outcome.metric.notes.join(" | ").trim()
-        ));
-    }
-    parts.join("; ")
-}
-
-struct EpisodeFailureSignal {
-    label: &'static str,
-    description: String,
-    suggested_fix_kind: SleepArtifactSuggestedFixKind,
-    severity: u8,
-}
-
-fn infer_episode_failure_signal(outcome: &EpisodeOutcome) -> EpisodeFailureSignal {
-    let text = format!(
-        "{}\n{}\n{}",
-        outcome.final_observation.summary,
-        outcome.final_observation.snapshot_text,
-        outcome.metric.notes.join("\n")
-    );
-    let text = text.to_lowercase();
-
-    if text.contains("modulenotfounderror")
-        || text.contains("importerror")
-        || text.contains("no module named")
-        || text.contains("conftest")
-        || text.contains("file not found")
-    {
-        return EpisodeFailureSignal {
-            label: "verify-explicit-import-or-path-error",
-            description: "验证阶段已得到明确的导入或路径错误。下一步应围绕缺失模块/文件、工作目录、PYTHONPATH 与测试入口收敛，而不是继续重复重跑 pytest 或反复查看同一日志。".to_string(),
-            suggested_fix_kind: SleepArtifactSuggestedFixKind::Instruction,
-            severity: 4,
-        };
-    }
-
-    if text.contains("没有任何测试输出")
-        || text.contains("尚未被执行")
-        || text.contains("未真正执行")
-        || text.contains("命令末尾有换行符")
-        || text.contains("输出被截断")
-    {
-        return EpisodeFailureSignal {
-            label: "verify-command-not-triggered",
-            description: "验证命令疑似未真正触发或未正确落到预期 shell/工作目录。应先确认命令已带换行并真正执行，再决定是否重跑验证。".to_string(),
-            suggested_fix_kind: SleepArtifactSuggestedFixKind::Instruction,
-            severity: 3,
-        };
-    }
-
-    if outcome.metric.repeated_effects > 0
-        && (text.contains("pytest.log") || text.contains("tail ") || text.contains("grep ") || text.contains("cat "))
-    {
-        return EpisodeFailureSignal {
-            label: "verify-log-analysis-loop",
-            description: "验证阶段已经进入日志分析循环。若已拿到明确错误对象，应停止在同一份日志上反复 tail/grep/cat，转为围绕错误对象收敛处理。".to_string(),
-            suggested_fix_kind: SleepArtifactSuggestedFixKind::StressCase,
-            severity: 3,
-        };
-    }
-
-    EpisodeFailureSignal {
-        label: "generic-episode-failure",
-        description: "训练任务在当前策略下未能及时收敛到新的分析、修改或验证动作，应更早形成明确的失败收敛策略。".to_string(),
-        suggested_fix_kind: if outcome.metric.repeated_effects > 0 || outcome.metric.stagnation_events > 0 {
-            SleepArtifactSuggestedFixKind::StressCase
-        } else {
-            SleepArtifactSuggestedFixKind::Instruction
-        },
-        severity: 2,
     }
 }
 
@@ -1200,64 +1064,6 @@ async fn promote_success_patterns_to_l3(
     Ok(entries)
 }
 
-async fn promote_episode_success_patterns_to_l3(
-    context: &mut Context,
-    outcomes: &[EpisodeOutcome],
-) -> Result<Vec<L3EntryDraft>> {
-    let renderer = OpenAIToolRenderer;
-    let program = SleepSuccessL3PromoterProgram;
-    let mut entries = Vec::new();
-    let mut per_suite = std::collections::HashMap::<String, usize>::new();
-
-    for outcome in outcomes {
-        if outcome.status != EpisodeStatus::Succeeded {
-            continue;
-        }
-        let Some(step) = outcome
-            .steps
-            .iter()
-            .rev()
-            .find(|step| infer_episode_suite_from_step(step).is_some())
-        else {
-            continue;
-        };
-        let Some(suite) = infer_episode_suite_from_step(step) else {
-            continue;
-        };
-        let count = per_suite.entry(suite.to_string()).or_insert(0);
-        if *count >= 2 {
-            continue;
-        }
-        let input_summary = render_episode_input_summary(outcome, step);
-        let output_summary = serde_json::to_string_pretty(&step_to_output(step))
-            .map_err(|err| miette!("failed to format parsed episode success output: {err}"))?;
-        let related_memories = context.memory.search_mem(&input_summary, 3).await;
-        let trace_id = format!("episode:{}", outcome.task.id);
-        let outcome = execute_program_with_ir_report(
-            context.judge_llm.as_ref(),
-            context,
-            &renderer,
-            &program,
-            program.dataset_ir(
-                suite.to_string(),
-                trace_id.clone(),
-                input_summary,
-                output_summary,
-                render_related_memories(&related_memories).unwrap_or_else(|| "无".to_string()),
-            ),
-            &program.default_tuning(),
-            TraceOrigin::Sleep,
-        )
-        .await?;
-        if let Some(entry) = to_episode_success_l3_entry(&trace_id, &outcome.output) {
-            *count += 1;
-            entries.push(entry);
-        }
-    }
-
-    Ok(entries)
-}
-
 fn to_l3_entry(
     pattern: &SleepArtifactFailurePattern,
     output: &SleepL3PromoterOutput,
@@ -1304,26 +1110,5 @@ fn to_success_l3_entry(
             "{}:{}:{}",
             record.program_name, record.timestamp_ms, record.attempt
         )],
-    })
-}
-
-fn to_episode_success_l3_entry(
-    trace_id: &str,
-    output: &SleepSuccessL3PromoterOutput,
-) -> Option<L3EntryDraft> {
-    if !output.promote {
-        return None;
-    }
-    if output.lesson.trim().is_empty() || output.retrieval_text.trim().is_empty() {
-        return None;
-    }
-    Some(L3EntryDraft {
-        kind: output.kind.clone(),
-        lesson: output.lesson.trim().to_string(),
-        evidence_summary: output.evidence_summary.trim().to_string(),
-        retrieval_text: output.retrieval_text.trim().to_string(),
-        confidence: output.confidence.clamp(0.0, 1.0) as f32,
-        stability: output.stability.clone(),
-        source_trace_ids: vec![trace_id.to_string()],
     })
 }

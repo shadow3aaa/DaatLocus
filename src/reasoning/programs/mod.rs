@@ -8,6 +8,7 @@ pub mod pairwise_judge;
 pub mod plan_from_project;
 pub mod resolve_telegram;
 pub mod sleep_artifact_builder;
+pub mod sleep_episode_synthesizer;
 pub mod sleep_l3_promoter;
 pub mod sleep_success_l3_promoter;
 pub mod task_understanding;
