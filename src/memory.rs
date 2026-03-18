@@ -193,6 +193,10 @@ impl Memory {
         self.l3.upsert(&mut self.embeder, drafts);
     }
 
+    pub async fn sync_l3_to_disk(&self) {
+        self.l3.sync_to_disk().await;
+    }
+
     pub fn current_thread_focus(&self) -> Option<String> {
         self.l1.trail.back().map(|item| item.thread_focus.clone())
     }

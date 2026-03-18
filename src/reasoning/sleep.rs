@@ -78,6 +78,7 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     promoted.extend(success_promoted);
     if !promoted.is_empty() {
         context.memory.upsert_l3_entries(promoted.clone());
+        context.memory.sync_l3_to_disk().await;
     }
     Ok(SleepSummary {
         failure_patterns,
