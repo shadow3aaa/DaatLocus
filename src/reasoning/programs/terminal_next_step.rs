@@ -77,7 +77,11 @@ impl TerminalNextStepProgram {
         ir.push_instruction("不要把同一条命令的重复执行当作默认答案；只有在你明确判断需要重试同一命令时，才再次发送它。");
         ir.push_instruction("工作阶段 investigate 表示继续调查；change 表示应优先选择会改变环境或文件的动作，而不是继续纯 grep/cat；verify 表示应优先测试、检查结果或查看修改后的行为；finish 表示不要再继续修改，只做收尾。");
         ir.push_instruction("当工作阶段是 change 且当前已经回到 shell prompt 时，优先选择能直接推进修改的下一步，例如编辑目标文件、构造非交互式替换命令，或查看最小必要上下文后立即修改。不要继续在同一片代码上反复 grep/head。");
+        ir.push_instruction("当工作阶段是 change 时，禁止把 TODO 注释、占位注释、空测试文件或只写说明文字当成完成修改。应优先产出能真实改变行为的代码编辑。");
         ir.push_instruction("当工作阶段是 verify 时，优先运行最小验证命令、查看 diff 或检查目标行为，而不是继续搜代码。");
+        ir.push_instruction("当工作阶段是 verify 且终端正在执行 apt-get、pip install、pytest、tox、nox、python -m venv、poetry install、uv run 等安装/构建/测试命令，只要还没回到 shell prompt，就应优先 Wait。不要因为输出较慢就切成 blocked。");
+        ir.push_instruction("只有在终端明确显示安装/测试命令已经失败并回到 prompt 时，才切换到下一步补救动作；如果命令尚在运行，不要重复发送相同命令。");
+        ir.push_instruction("如果测试失败提示缺依赖，先判断仓库已有的测试/构建入口和依赖文件，再选择最小补救动作；不要默认用注释或空文件回避验证。");
         ir.push_instruction("如果任务理解已经给出明确的关键锚点路径、函数、参数或调查计划，应优先直接命中这些锚点。不要先从仓库根目录做层层 ls。");
         ir.push_instruction("在 investigate 阶段，若已经知道目标文件路径，应优先查看该文件最小必要上下文；只有在锚点不足时才扩展搜索范围。");
         ir.push_section("当前选中动作", current_task);

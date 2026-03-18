@@ -1194,14 +1194,6 @@ async fn rollout_runtime_policy_episode(
         let step_execution = execute_runtime_policy_step(context, &renderer).await;
         let output = step_execution.output;
         let effect = output.effect.clone();
-        let should_stop = matches!(effect, Effect::Wait | Effect::SilentWait)
-            && steps.last().is_some_and(|previous: &EpisodeStep| {
-                matches!(
-                    (&previous.effect, &effect),
-                    (Effect::Wait, Effect::Wait)
-                        | (Effect::SilentWait, Effect::SilentWait)
-                )
-            });
 
         let mut metadata = std::collections::BTreeMap::new();
         metadata.insert("description".to_string(), output.description.clone());
@@ -1221,6 +1213,11 @@ async fn rollout_runtime_policy_episode(
         }
         let next_work_phase = normalize_work_phase(&completion.state);
         metadata.insert("work_phase".to_string(), next_work_phase.clone());
+        let should_stop = should_abort_after_repeated_wait(
+            steps.last(),
+            &effect,
+            &next_work_phase,
+        );
         steps.push(EpisodeStep {
             index,
             module: "runtime_policy".to_string(),
@@ -1350,6 +1347,27 @@ fn normalize_work_phase(state: &str) -> String {
         "blocked" => "blocked".to_string(),
         _ => "investigate".to_string(),
     }
+}
+
+fn should_abort_after_repeated_wait(
+    previous: Option<&EpisodeStep>,
+    current_effect: &Effect,
+    next_work_phase: &str,
+) -> bool {
+    if !matches!(current_effect, Effect::Wait | Effect::SilentWait) {
+        return false;
+    }
+    let Some(previous) = previous else {
+        return false;
+    };
+    let repeated_wait = matches!(
+        (&previous.effect, current_effect),
+        (Effect::Wait, Effect::Wait) | (Effect::SilentWait, Effect::SilentWait)
+    );
+    if !repeated_wait {
+        return false;
+    }
+    matches!(next_work_phase, "investigate" | "blocked")
 }
 
 async fn finalize_runtime_episode(
