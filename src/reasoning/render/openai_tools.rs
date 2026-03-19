@@ -1,5 +1,6 @@
 use schemars::schema_for;
 
+use crate::context::Context;
 use crate::reasoning::{
     examples::ProgramExample,
     ir::PromptIR,
@@ -16,11 +17,11 @@ pub struct OpenAIToolRenderer;
 impl Renderer for OpenAIToolRenderer {
     fn render<P: Program>(
         &self,
+        context: &Context,
         program: &P,
         mut ir: PromptIR,
         tuning: &PromptTuningConfig<P::Output>,
     ) -> PromptRequest {
-        let mut messages = Vec::new();
         let signature = program.signature();
         let examples = if tuning.examples.is_empty() {
             program.examples()
@@ -30,10 +31,6 @@ impl Renderer for OpenAIToolRenderer {
 
         for instruction in &tuning.extra_instructions {
             ir.instructions.push(instruction.clone());
-        }
-
-        if !ir.system.is_empty() {
-            messages.push(PromptMessage::system(ir.system.join("\n\n")));
         }
 
         let mut user_sections = Vec::new();
@@ -47,17 +44,32 @@ impl Renderer for OpenAIToolRenderer {
         for section in ir.sections {
             user_sections.push(format!("## {}\n{}", section.title, section.body));
         }
-        if !user_sections.is_empty() {
-            messages.push(PromptMessage::user(user_sections.join("\n\n")));
-        }
 
         PromptRequest {
             tool_name: program.name().to_string(),
             tool_description: program.description().to_string(),
             output_schema: serde_json::to_value(schema_for!(P::Output)).unwrap(),
-            messages,
+            system_messages: ir.system,
+            long_term_memory_messages: build_long_term_memory_messages(context),
+            history_messages: context.memory.prompt_messages(),
+            current_user_message: user_sections.join("\n\n"),
+            retry_messages: Vec::new(),
         }
     }
+}
+
+fn build_long_term_memory_messages(context: &Context) -> Vec<PromptMessage> {
+    let mut messages = Vec::new();
+    if !context.prompt_memory.recalled_memories.is_empty() {
+        messages.push(PromptMessage::system(format!(
+            "相关长期记忆：\n{}",
+            context.prompt_memory.recalled_memories.join("\n")
+        )));
+    }
+    if let Some(reflection) = &context.prompt_memory.reflected_strategy {
+        messages.push(PromptMessage::system(format!("相关长期反思：\n{reflection}")));
+    }
+    messages
 }
 
 fn render_signature_block(signature: &Signature) -> String {

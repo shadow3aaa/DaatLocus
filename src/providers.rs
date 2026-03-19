@@ -51,16 +51,48 @@ impl OpenAIClient {
         let tool_description = request.tool_description.clone();
         let output_schema = request.output_schema.clone();
         let messages = request
-            .messages
+            .system_messages
             .into_iter()
-            .map(|message| {
+            .map(|message| json!({"role": "system", "content": message}))
+            .chain(request.long_term_memory_messages.into_iter().map(|message| {
                 json!({
                     "role": match message.role {
                         PromptRole::System => "system",
                         PromptRole::User => "user",
+                        PromptRole::Assistant => "assistant",
+                        PromptRole::Tool => "tool",
                     },
                     "content": message.content,
                 })
+            }))
+            .chain(request.history_messages.into_iter().map(|message| {
+                json!({
+                    "role": match message.role {
+                        PromptRole::System => "system",
+                        PromptRole::User => "user",
+                        PromptRole::Assistant => "assistant",
+                        PromptRole::Tool => "tool",
+                    },
+                    "content": message.content,
+                })
+            }))
+            .chain(std::iter::once(json!({
+                "role": "user",
+                "content": request.current_user_message,
+            })))
+            .chain(request.retry_messages.into_iter().map(|message| {
+                json!({
+                    "role": match message.role {
+                        PromptRole::System => "system",
+                        PromptRole::User => "user",
+                        PromptRole::Assistant => "assistant",
+                        PromptRole::Tool => "tool",
+                    },
+                    "content": message.content,
+                })
+            }))
+            .map(|message| {
+                message
             })
             .collect::<Vec<_>>();
         let payload = json!({

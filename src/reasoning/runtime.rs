@@ -21,7 +21,18 @@ pub struct PromptRequest {
     pub tool_name: String,
     pub tool_description: String,
     pub output_schema: Value,
-    pub messages: Vec<PromptMessage>,
+    pub system_messages: Vec<String>,
+    pub long_term_memory_messages: Vec<PromptMessage>,
+    pub history_messages: Vec<PromptMessage>,
+    pub current_user_message: String,
+    #[serde(default)]
+    pub retry_messages: Vec<PromptMessage>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct PromptMemoryContext {
+    pub recalled_memories: Vec<String>,
+    pub reflected_strategy: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -34,6 +45,8 @@ pub struct PromptMessage {
 pub enum PromptRole {
     System,
     User,
+    Assistant,
+    Tool,
 }
 
 impl PromptMessage {
@@ -50,16 +63,38 @@ impl PromptMessage {
             content: content.into(),
         }
     }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: PromptRole::Assistant,
+            content: content.into(),
+        }
+    }
+
 }
 
 impl PromptRequest {
     fn with_retry_note(&self, note: impl Into<String>) -> Self {
         let mut request = self.clone();
-        request.messages.push(PromptMessage::user(format!(
+        request.retry_messages.push(PromptMessage::user(format!(
             "上一次输出未通过类型校验，请只修正输出结构并重试。\n错误：{}",
             note.into()
         )));
         request
+    }
+
+    pub fn all_messages(&self) -> Vec<PromptMessage> {
+        let mut messages = self
+            .system_messages
+            .iter()
+            .cloned()
+            .map(PromptMessage::system)
+            .collect::<Vec<_>>();
+        messages.extend(self.long_term_memory_messages.clone());
+        messages.extend(self.history_messages.clone());
+        messages.push(PromptMessage::user(self.current_user_message.clone()));
+        messages.extend(self.retry_messages.clone());
+        messages
     }
 }
 
@@ -108,7 +143,7 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
     tuning: &PromptTuningConfig<P::Output>,
     trace_origin: TraceOrigin,
 ) -> Result<ProgramExecutionOutcome<P::Output>> {
-    let mut request = renderer.render(program, ir, tuning);
+    let mut request = renderer.render(context, program, ir, tuning);
     let mut last_error = None;
     let signature = program.signature();
 

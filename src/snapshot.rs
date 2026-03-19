@@ -5,7 +5,6 @@ use std::fmt::Display;
 use crate::{
     context::Context,
     device::{DeviceId, FocusedRender, PeripheralRender},
-    memory::Memory,
     obligations::Obligations,
     projects::Projects,
     system_info::SystemInfo,
@@ -17,7 +16,6 @@ use crate::{
 /// 这包括记忆、义务、项目、下一步动作和感官输入。
 pub struct Snapshot {
     sensory: Sensory,
-    current_memory: CurrentMemory,
     obligations: Obligations,
     projects: Projects,
     next_actions: Tasks,
@@ -26,13 +24,13 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub async fn new(context: &mut Context) -> Self {
+        let devices = DeviceSnapshot::new(context);
         Self {
             sensory: Sensory::new(),
-            current_memory: CurrentMemory::new(&mut context.memory).await,
             obligations: context.obligations.clone(),
             projects: context.projects.clone(),
             next_actions: context.tasks.clone(),
-            devices: DeviceSnapshot::new(context),
+            devices,
         }
     }
 }
@@ -41,8 +39,6 @@ impl Display for Snapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "感官：")?;
         writeln!(f, "{}", self.sensory)?;
-        writeln!(f, "记忆：")?;
-        writeln!(f, "{}", self.current_memory)?;
         writeln!(f, "义务列表：")?;
         writeln!(f, "{}", self.obligations)?;
         writeln!(f, "项目列表：")?;
@@ -78,78 +74,6 @@ impl Display for Sensory {
     }
 }
 
-struct CurrentMemory {
-    thread_focus: Option<String>,
-    trail: Vec<String>,
-    associated_memories: Vec<String>,
-    learned_experiences: Vec<String>,
-}
-
-impl CurrentMemory {
-    const EMPTY: Self = Self {
-        thread_focus: None,
-        trail: Vec::new(),
-        associated_memories: Vec::new(),
-        learned_experiences: Vec::new(),
-    };
-
-    async fn new(memory: &mut Memory) -> Self {
-        let Some(thread_focus) = memory.current_thread_focus() else {
-            return Self::EMPTY;
-        };
-        let trail = memory.trail();
-        let query = format!(
-            "当前主线：{}\n最近事件：{}",
-            thread_focus,
-            trail.last().unwrap()
-        );
-        let associated_memories = memory.search_mem(&query, 5).await;
-        let learned_experiences = memory.search_l3(&query, 3);
-        Self {
-            thread_focus: Some(thread_focus),
-            trail,
-            associated_memories,
-            learned_experiences,
-        }
-    }
-}
-
-impl Display for CurrentMemory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(thread_focus) = &self.thread_focus {
-            writeln!(f, "当前主线：{}", thread_focus)?;
-        } else {
-            writeln!(f, "当前没有连续主线")?;
-        }
-        writeln!(f, "近期事件：")?;
-        for event in self.trail.iter() {
-            writeln!(f, "{event}")?;
-            writeln!(f, "然后")?;
-        }
-        writeln!(f, "联想回忆：")?;
-        let len = self.associated_memories.len();
-        for (i, mem) in self.associated_memories.iter().enumerate() {
-            if i != len - 1 {
-                writeln!(f, "{mem}")?;
-            } else {
-                write!(f, "{mem}")?;
-            }
-        }
-        if !self.learned_experiences.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "习得经验：")?;
-            for (i, lesson) in self.learned_experiences.iter().enumerate() {
-                if i + 1 < self.learned_experiences.len() {
-                    writeln!(f, "{lesson}")?;
-                } else {
-                    write!(f, "{lesson}")?;
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 struct DeviceSnapshot {
     focused_device: Option<DeviceId>,
     peripheral: Vec<(DeviceId, PeripheralRender)>,
@@ -164,6 +88,60 @@ impl DeviceSnapshot {
             focused_view: context.devices.focused_render(),
         }
     }
+}
+
+pub fn summarize_terminal_screen(content: &str) -> String {
+    let lower = content.to_ascii_lowercase();
+    let prompt_visible = lower.contains("<cursor>")
+        && (lower.contains("ps>")
+            || lower.contains("ps ")
+            || lower.contains(">")
+            || lower.contains("$")
+            || lower.contains("#"));
+    let interactive_prompt = lower.contains("username:")
+        || lower.contains("password:")
+        || lower.contains("passphrase")
+        || lower.contains("would you like")
+        || lower.contains("[y/n]")
+        || lower.contains("(y/n)")
+        || lower.contains("press enter to continue")
+        || lower.contains("login")
+        || lower.contains("authorize")
+        || lower.contains("otp")
+        || lower.contains("verification code")
+        || lower.contains(">>>")
+        || lower.contains("... ");
+    let terminal_mode = if lower.contains("(end)")
+        || lower.contains("press h for help or q to quit")
+        || lower.contains("manual page")
+    {
+        "pager"
+    } else if interactive_prompt {
+        "interactive_prompt"
+    } else if prompt_visible {
+        "shell"
+    } else if lower.contains("cursor") {
+        "running"
+    } else {
+        "unknown"
+    };
+    let command_completed = matches!(terminal_mode, "shell");
+    let mut lines = vec![
+        format!("mode={terminal_mode}"),
+        format!("prompt_visible={prompt_visible}"),
+        format!("interactive_prompt={interactive_prompt}"),
+        format!("command_completed={command_completed}"),
+    ];
+    match terminal_mode {
+        "pager" => lines.push("建议：若目标只是返回 shell，可优先考虑 q。".to_string()),
+        "interactive_prompt" => {
+            lines.push("建议：终端已进入交互式提示，不要把它误判成普通 shell 输出。".to_string())
+        }
+        "running" => lines.push("建议：终端可能仍在输出或等待，先确认是否真的回到 prompt。".to_string()),
+        "shell" => lines.push("上一条命令大概率已结束，可基于当前 prompt 决定下一步。".to_string()),
+        _ => {}
+    }
+    lines.join("\n")
 }
 
 impl Display for DeviceSnapshot {

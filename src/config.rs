@@ -11,6 +11,7 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 pub struct Config {
     pub main_model: MainModelConfig,
     pub judge: JudgeConfig,
+    pub hindsight: HindsightConfig,
     pub telegram: TelegramConfig,
     // pub embedding_model: EmbeddingModelConfig, // 目前使用内置的模型
 }
@@ -20,6 +21,7 @@ impl Default for Config {
         Self {
             main_model: MainModelConfig::default(),
             judge: JudgeConfig::default(),
+            hindsight: HindsightConfig::default(),
             telegram: TelegramConfig::default(),
             /* embedding_model: EmbeddingModelConfig {
                 base_url: "https://api.openai.com/v1".to_string(),
@@ -27,6 +29,42 @@ impl Default for Config {
                 api_key: "your-api-key".to_string(),
             }, */
         }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HindsightConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    pub api_key: String,
+    pub namespace: String,
+    pub bank_id: String,
+    pub request_timeout_secs: u64,
+    pub default_recall_budget: String,
+    pub default_reflect_budget: String,
+    pub retain_async: bool,
+}
+
+impl Default for HindsightConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: "http://localhost:8888".to_string(),
+            api_key: String::new(),
+            namespace: "default".to_string(),
+            bank_id: "spinova".to_string(),
+            request_timeout_secs: 30,
+            default_recall_budget: "mid".to_string(),
+            default_reflect_budget: "low".to_string(),
+            retain_async: true,
+        }
+    }
+}
+
+impl HindsightConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled && !self.base_url.trim().is_empty() && !self.bank_id.trim().is_empty()
     }
 }
 

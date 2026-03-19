@@ -1,204 +1,69 @@
 //! 此模块定义记忆
 //!
-//! 记忆分为4层:
+//! 记忆当前只保留一层近场 working memory:
 //!
-//! - L0: 印象 TODO
-//!   - 一个LRU关键词set，次数越多，权重越大（越“有印象”）。用于提示LLM大概率有相关记忆
-//! - L1: 工作记忆
-//!   - 一个基于极短FIFO队列的最近行为描述，淘汰后进入L2
-//!   - 对当前正在进行的连续行为的描述。每次都由llm重写。
-//! - L2: 海马体记忆
-//!   - 一个向量搜索记忆库
-//! - L3: 固化记忆 TODO
-//!   - 目前搁置，理论上它应该在长期空闲时整理L2记忆进入L3
-use std::{collections::VecDeque, fmt::Display, sync::Arc};
+//! - L1: 最近几步的原始输入/输出消息流
+//!   - 每一步直接记录当时给模型看的 snapshot_text
+//!   - 以及模型原始输出中的 observation/description/current_doing/effect
+//!   - 不再淘汰进本地 L2/L3
+use std::{collections::VecDeque, fmt::Display};
 
-use arrow_array::{
-    Array, Int64Array, RecordBatch, RecordBatchIterator, StringArray,
-    builder::{FixedSizeListBuilder, PrimitiveBuilder},
-    types::Float32Type,
-};
-use chrono::Utc;
-use futures::StreamExt;
-use lancedb::{
-    arrow::arrow_schema::{ArrowError, DataType, Field, Schema},
-    query::{ExecutableQuery, QueryBase, Select},
-};
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    embeding::{EmbeddingModel, similarity},
+    core::Output,
     get_spinova_home,
+    hindsight::{HindsightRetainItem, HindsightRetainJob},
+    reasoning::runtime::PromptMessage,
 };
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
-pub enum L3EntryKind {
-    TerminalPolicy,
-    InteractionBoundary,
-    ProjectContinuity,
-    ToolUsage,
-    FailureAvoidance,
-    General,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
-pub enum L3EntryStability {
-    Tentative,
-    Stable,
-    Canonical,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct L3EntryDraft {
-    pub kind: L3EntryKind,
-    pub lesson: String,
-    pub evidence_summary: String,
-    pub retrieval_text: String,
-    pub confidence: f32,
-    pub stability: L3EntryStability,
-    pub source_trace_ids: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct L3Entry {
-    pub id: String,
-    pub kind: L3EntryKind,
-    pub lesson: String,
-    pub evidence_summary: String,
-    pub retrieval_text: String,
-    pub confidence: f32,
-    pub stability: L3EntryStability,
-    pub source_trace_ids: Vec<String>,
-    pub updated_at_ms: i64,
-    pub vector: Vec<f32>,
-}
-
-impl L3Entry {
-    fn render(&self) -> String {
-        format!(
-            "习得经验【{:?}/{:?}，置信度 {:.2}】：{}\n依据：{}",
-            self.kind, self.stability, self.confidence, self.lesson, self.evidence_summary
-        )
-    }
-}
 
 pub struct Memory {
     l1: L1Memory,
-    l2: L2Memory,
-    l3: L3Memory,
-    embeder: EmbeddingModel,
-    last_2_l1drop: VecDeque<L1Item>, // 记录最近两次L1淘汰的内容
+    queued_retain_ids: std::collections::HashSet<Uuid>,
+    retained_ids: std::collections::HashSet<Uuid>,
+}
+
+pub struct MemoryRetainPlan {
+    pub jobs: Vec<HindsightRetainJob>,
+    pub must_flush_before_continue: bool,
 }
 
 impl Memory {
     pub async fn new() -> Self {
         let l1 = L1Memory::new().await;
-        let embeder = EmbeddingModel::new();
-        let l2 = L2Memory::new(&embeder).await;
-        let l3 = L3Memory::new().await;
-        let last_2_l1drop = VecDeque::new();
-
+        let retained_ids = l1.trail.iter().map(|item| item.id).collect();
         Self {
             l1,
-            l2,
-            l3,
-            embeder,
-            last_2_l1drop,
+            queued_retain_ids: std::collections::HashSet::new(),
+            retained_ids,
         }
     }
 
     pub async fn empty() -> Self {
-        let embeder = EmbeddingModel::new();
-        let l2 = L2Memory::reset(&embeder).await;
-
         Self {
             l1: L1Memory::default(),
-            l2,
-            l3: L3Memory::default(),
-            embeder,
-            last_2_l1drop: VecDeque::new(),
+            queued_retain_ids: std::collections::HashSet::new(),
+            retained_ids: std::collections::HashSet::new(),
         }
     }
 
-    pub async fn record_encoded(
+    pub async fn record_runtime_step(
         &mut self,
-        thread_focus: String,
-        event_summary: String,
-        anchors: Vec<String>,
-        thread_effect: String,
-    ) {
-        let anchors = anchors
-            .into_iter()
-            .filter_map(|anchor| parse_memory_anchor(anchor))
-            .collect::<Vec<_>>();
-        let thread_effect = parse_thread_effect(&thread_effect);
-        self.ingest_l1_item(thread_focus, event_summary, anchors, thread_effect)
-            .await;
-    }
-
-    async fn ingest_l1_item(
-        &mut self,
-        thread_focus: String,
-        event_summary: String,
-        anchors: Vec<MemoryAnchor>,
-        thread_effect: L1ThreadEffect,
-    ) {
-        if let Some(l1_drop) = self
-            .l1
-            .update(thread_focus, event_summary, anchors, thread_effect)
-        {
-            let mut sandwich_payload = String::new();
-            // 之前在做什么，最多取2条
-            if !self.last_2_l1drop.is_empty() {
-                sandwich_payload.push_str("在这之前：\n");
-                for drop in &self.last_2_l1drop {
-                    sandwich_payload.push_str(&drop.to_string());
-                    sandwich_payload.push_str("然后\n");
-                }
-                if self.last_2_l1drop.len() == 2 {
-                    self.last_2_l1drop.pop_front();
-                }
-            }
-            self.last_2_l1drop.push_back(l1_drop.clone());
-            // 当时在做什么
-            sandwich_payload.push_str("当时：\n");
-            sandwich_payload.push_str(&l1_drop.to_string());
-            sandwich_payload.push_str("\n");
-            // 之后在做什么，最多取3条
-            if !self.l1.trail.is_empty() {
-                sandwich_payload.push_str("后来：\n");
-                for item in self.l1.trail.iter().take(3) {
-                    sandwich_payload.push_str(&item.to_string());
-                    sandwich_payload.push_str("然后\n");
-                }
-            }
-
-            self.l2
-                .ingest(&mut self.embeder, l1_drop, sandwich_payload)
-                .await;
+        snapshot_text: String,
+        output: &Output,
+    ) -> MemoryRetainPlan {
+        let _ = self.l1.update(snapshot_text, output);
+        let jobs = self.collect_retain_jobs();
+        let must_flush_before_continue = self.front_is_pending_retain();
+        MemoryRetainPlan {
+            jobs,
+            must_flush_before_continue,
         }
-    }
-
-    pub async fn search_mem(&mut self, query: &str, top_k: usize) -> Vec<String> {
-        self.l2.search(&mut self.embeder, query, top_k).await
-    }
-
-    pub fn search_l3(&mut self, query: &str, top_k: usize) -> Vec<String> {
-        self.l3.search(&mut self.embeder, query, top_k)
-    }
-
-    pub fn upsert_l3_entries(&mut self, drafts: Vec<L3EntryDraft>) {
-        self.l3.upsert(&mut self.embeder, drafts);
-    }
-
-    pub async fn sync_l3_to_disk(&self) {
-        self.l3.sync_to_disk().await;
     }
 
     pub fn current_thread_focus(&self) -> Option<String> {
-        self.l1.trail.back().map(|item| item.thread_focus.clone())
+        self.l1.trail.back().map(|item| item.current_doing.clone())
     }
 
     pub fn trail(&self) -> Vec<String> {
@@ -206,13 +71,68 @@ impl Memory {
             .trail
             .clone()
             .into_iter()
-            .map(|item| item.render_event())
+            .flat_map(|item| item.render_messages())
             .collect()
     }
 
-    pub async fn shutdown(self) {
+    pub fn prompt_messages(&self) -> Vec<PromptMessage> {
+        self.l1
+            .trail
+            .iter()
+            .flat_map(|item| item.prompt_messages())
+            .collect()
+    }
+
+    pub fn mark_pending_retained(&mut self) {
+        self.retained_ids.extend(self.queued_retain_ids.drain());
+        self.compact_l1();
+    }
+
+    pub async fn shutdown(mut self) {
+        self.mark_pending_retained();
         self.l1.sync_to_disk().await;
-        self.l3.sync_to_disk().await;
+    }
+
+    fn collect_retain_jobs(&mut self) -> Vec<HindsightRetainJob> {
+        let mut jobs = Vec::new();
+        for item in self.l1.retention_candidates() {
+            if self.retained_ids.contains(&item.id) || self.queued_retain_ids.contains(&item.id) {
+                continue;
+            }
+            self.queued_retain_ids.insert(item.id);
+            jobs.push(HindsightRetainJob {
+                items: vec![item.to_hindsight_item()],
+                document_id: Some(format!("l1-step:{}", item.id)),
+                document_tags: vec!["spinova".to_string(), "l1-step".to_string()],
+            });
+        }
+        jobs
+    }
+
+    fn front_is_pending_retain(&self) -> bool {
+        self.l1
+            .trail
+            .front()
+            .map(|item| self.queued_retain_ids.contains(&item.id) && !self.retained_ids.contains(&item.id))
+            .unwrap_or(false)
+    }
+
+    fn compact_l1(&mut self) {
+        while self.l1.trail.len() > L1Memory::MAX_CAPACITY {
+            let can_drop = self
+                .l1
+                .trail
+                .front()
+                .map(|item| self.retained_ids.contains(&item.id))
+                .unwrap_or(true);
+            if !can_drop {
+                break;
+            }
+            if let Some(item) = self.l1.trail.pop_front() {
+                self.retained_ids.remove(&item.id);
+                self.queued_retain_ids.remove(&item.id);
+            }
+        }
     }
 }
 
@@ -223,34 +143,29 @@ pub struct L1Memory {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct L1Item {
-    thread_focus: String,
-    event_summary: String,
-    anchors: Vec<MemoryAnchor>,
-    thread_effect: L1ThreadEffect,
+    id: Uuid,
+    snapshot_text: String,
+    observation: String,
+    description: String,
+    current_doing: String,
+    effect: String,
+    #[serde(default)]
+    messages: Vec<L1Message>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct MemoryAnchor {
-    kind: MemoryAnchorKind,
-    value: String,
+struct L1Message {
+    role: L1MessageRole,
+    content: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-enum MemoryAnchorKind {
-    Url,
-    FileName,
-    Uuid,
-    Command,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
-enum L1ThreadEffect {
-    #[default]
-    Continue,
-    Blocked,
-    Clarified,
-    Switched,
-    Completed,
+enum L1MessageRole {
+    Snapshot,
+    Observation,
+    Description,
+    Doing,
+    Effect,
 }
 
 impl Display for L1Item {
@@ -259,51 +174,116 @@ impl Display for L1Item {
     }
 }
 
-impl Display for L1ThreadEffect {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Continue => write!(f, "继续"),
-            Self::Blocked => write!(f, "受阻"),
-            Self::Clarified => write!(f, "澄清"),
-            Self::Switched => write!(f, "切换"),
-            Self::Completed => write!(f, "完成"),
-        }
-    }
-}
-
 impl L1Item {
-    fn render_for_memory(&self) -> String {
-        let mut rendered = format!(
-            "主线：【{}】\n本轮事件：【{}】\n对主线影响：【{}】",
-            self.thread_focus, self.event_summary, self.thread_effect
-        );
-        if !self.anchors.is_empty() {
-            rendered.push_str("\n关键锚点：");
-            for anchor in &self.anchors {
-                rendered.push_str(&format!("\n- {:?}: {}", anchor.kind, anchor.value));
-            }
-        }
-        rendered
+    const SNAPSHOT_PREVIEW_LIMIT: usize = 1200;
+    const TEXT_PREVIEW_LIMIT: usize = 600;
+
+    fn build_messages(snapshot_text: &str, output: &Output, effect: &str) -> Vec<L1Message> {
+        vec![
+            L1Message {
+                role: L1MessageRole::Snapshot,
+                content: format!(
+                    "输入快照：\n{}",
+                    Self::truncate(snapshot_text, Self::SNAPSHOT_PREVIEW_LIMIT)
+                ),
+            },
+            L1Message {
+                role: L1MessageRole::Observation,
+                content: format!(
+                    "模型观察：\n{}",
+                    Self::truncate(&output.observation, Self::TEXT_PREVIEW_LIMIT)
+                ),
+            },
+            L1Message {
+                role: L1MessageRole::Description,
+                content: format!(
+                    "模型说明：\n{}",
+                    Self::truncate(&output.description, Self::TEXT_PREVIEW_LIMIT)
+                ),
+            },
+            L1Message {
+                role: L1MessageRole::Doing,
+                content: format!(
+                    "当前进行：\n{}",
+                    Self::truncate(&output.current_doing, Self::TEXT_PREVIEW_LIMIT)
+                ),
+            },
+            L1Message {
+                role: L1MessageRole::Effect,
+                content: format!("动作：\n{}", Self::truncate(effect, Self::TEXT_PREVIEW_LIMIT)),
+            },
+        ]
     }
 
-    fn render_event(&self) -> String {
-        let mut rendered = format!("{}\n主线影响：{}", self.event_summary, self.thread_effect);
-        if !self.anchors.is_empty() {
-            let anchors = self
-                .anchors
-                .iter()
-                .map(|anchor| anchor.value.clone())
-                .collect::<Vec<_>>()
-                .join(" | ");
-            rendered.push_str(&format!("\n关键锚点：{anchors}"));
+    fn truncate(text: &str, max_chars: usize) -> String {
+        let mut chars = text.chars();
+        let preview = chars.by_ref().take(max_chars).collect::<String>();
+        if chars.next().is_some() {
+            format!("{preview}...")
+        } else {
+            preview
         }
-        rendered
+    }
+
+    fn render_for_memory(&self) -> String {
+        self.messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn render_messages(&self) -> Vec<String> {
+        self.messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect()
+    }
+
+    fn prompt_messages(&self) -> Vec<PromptMessage> {
+        vec![
+            PromptMessage::user(self.snapshot_text.clone()),
+            PromptMessage::assistant(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "observation": self.observation,
+                    "description": self.description,
+                    "current_doing": self.current_doing,
+                    "effect": serde_json::from_str::<serde_json::Value>(&self.effect)
+                        .unwrap_or_else(|_| serde_json::Value::String(self.effect.clone())),
+                }))
+                .unwrap(),
+            ),
+        ]
+    }
+
+    fn to_hindsight_item(&self) -> HindsightRetainItem {
+        HindsightRetainItem {
+            content: format!(
+                "L1 raw runtime step\nCurrent doing:\n{}\n\nInput snapshot:\n{}\n\nObservation:\n{}\n\nDescription:\n{}\n\nEffect:\n{}",
+                self.current_doing,
+                self.snapshot_text,
+                self.observation,
+                self.description,
+                self.effect
+            ),
+            timestamp: None,
+            context: Some("runtime raw l1 step".to_string()),
+            metadata: Some(std::collections::HashMap::from([
+                ("current_doing".to_string(), self.current_doing.clone()),
+                ("entry_id".to_string(), self.id.to_string()),
+            ])),
+            document_id: Some(format!("l1-step:{}", self.id)),
+            tags: Some(vec!["spinova".to_string(), "l1-step".to_string()]),
+        }
     }
 }
 
 impl L1Memory {
-    /// 队列最大长度
-    const MAX_CAPACITY: usize = 10; // TODO: 考虑按实际的token长度来限制而不是元素数量?未验证哪种更合理
+    // Raw step-level history needs a wider working window than the old
+    // summarized memory entries, otherwise recently relevant context
+    // rolls out before the long-term retain queue can absorb it smoothly.
+    const MAX_CAPACITY: usize = 24;
+    const RETAIN_GUARD_REGION: usize = 8;
 
     async fn new() -> Self {
         let l1_persistence_path = get_spinova_home().await.join("l1_memory");
@@ -311,28 +291,24 @@ impl L1Memory {
             .await
             .ok()
             .and_then(|data| postcard::from_bytes::<Self>(&data).ok())
-            .unwrap_or_else(|| Self::default())
+            .unwrap_or_default()
     }
 
-    fn update(
-        &mut self,
-        thread_focus: String,
-        event_summary: String,
-        anchors: Vec<MemoryAnchor>,
-        thread_effect: L1ThreadEffect,
-    ) -> Option<L1Item> {
+    fn update(&mut self, snapshot_text: String, output: &Output) -> Option<L1Item> {
+        let effect = serde_json::to_string(&output.effect)
+            .unwrap_or_else(|_| format!("{:?}", output.effect));
+        let messages = L1Item::build_messages(&snapshot_text, output, &effect);
         let item = L1Item {
-            thread_focus,
-            event_summary,
-            anchors,
-            thread_effect,
+            id: Uuid::new_v4(),
+            snapshot_text,
+            observation: output.observation.clone(),
+            description: output.description.clone(),
+            current_doing: output.current_doing.clone(),
+            effect,
+            messages,
         };
         self.trail.push_back(item);
-        if self.trail.len() >= Self::MAX_CAPACITY {
-            self.trail.pop_front()
-        } else {
-            None
-        }
+        None
     }
 
     async fn sync_to_disk(&self) {
@@ -340,277 +316,9 @@ impl L1Memory {
         let data = postcard::to_allocvec(self).unwrap();
         tokio::fs::write(l1_persistence_path, data).await.unwrap();
     }
-}
 
-pub struct L2Memory {
-    table: lancedb::Table,
-}
-
-impl L2Memory {
-    async fn new(embedder: &EmbeddingModel) -> Self {
-        let db_path = get_spinova_home().await.join("l2_memory.lancedb");
-        Self::open_or_create(db_path, embedder).await
+    fn retention_candidates(&self) -> Vec<&L1Item> {
+        let retention_cutoff = self.trail.len().saturating_sub(Self::RETAIN_GUARD_REGION);
+        self.trail.iter().take(retention_cutoff).collect()
     }
-
-    async fn reset(embedder: &EmbeddingModel) -> Self {
-        let db_path = get_spinova_home().await.join("l2_memory.lancedb");
-        if db_path.exists() {
-            let _ = tokio::fs::remove_dir_all(&db_path).await;
-        }
-        Self::open_or_create(db_path, embedder).await
-    }
-
-    async fn open_or_create(db_path: std::path::PathBuf, embedder: &EmbeddingModel) -> Self {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Utf8, false),
-            Field::new("timestamp", DataType::Int64, false),
-            Field::new("current_doing", DataType::Utf8, false),
-            Field::new("description", DataType::Utf8, false),
-            Field::new("sandwich_payload", DataType::Utf8, false),
-            Field::new(
-                "vector",
-                DataType::FixedSizeList(
-                    Arc::new(Field::new("item", DataType::Float32, true)),
-                    embedder.dimension() as i32,
-                ),
-                false,
-            ),
-        ]));
-        let conn = lancedb::connect(db_path.to_str().unwrap())
-            .execute()
-            .await
-            .unwrap();
-        let table = match conn.open_table("memories").execute().await {
-            Ok(t) => t,
-            Err(_) => conn
-                .create_empty_table("memories", schema)
-                .execute()
-                .await
-                .unwrap(),
-        };
-        Self { table }
-    }
-
-    async fn ingest(
-        &mut self,
-        embedder: &mut EmbeddingModel,
-        l1_drop: L1Item,
-        sandwich_payload: String,
-    ) {
-        let vector_data = embedder.encode(&l1_drop.to_string());
-
-        let id = Uuid::new_v4().to_string();
-        let timestamp = Utc::now().timestamp_millis();
-
-        let id_col = StringArray::from(vec![id]);
-        let ts_col = Int64Array::from(vec![timestamp]);
-        let event_render = l1_drop.render_event();
-        let doing_col = StringArray::from(vec![l1_drop.thread_focus]);
-        let desc_col = StringArray::from(vec![event_render]);
-        let sandwich_col = StringArray::from(vec![sandwich_payload]);
-
-        // 向量列比较特殊：它是一个 512 维的 FixedSizeList
-        let mut vector_builder = FixedSizeListBuilder::new(
-            PrimitiveBuilder::<Float32Type>::new(),
-            embedder.dimension() as i32,
-        );
-        vector_builder.values().append_slice(&vector_data);
-        vector_builder.append(true);
-        let vector_col = vector_builder.finish();
-
-        let schema_ref = self.table.schema().await.unwrap();
-        let batch = RecordBatch::try_new(
-            schema_ref.clone(),
-            vec![
-                Arc::new(id_col),
-                Arc::new(ts_col),
-                Arc::new(doing_col),
-                Arc::new(desc_col),
-                Arc::new(sandwich_col),
-                Arc::new(vector_col),
-            ],
-        )
-        .unwrap();
-        let batches = RecordBatchIterator::new(vec![Ok::<_, ArrowError>(batch)], schema_ref);
-
-        self.table.add(batches).execute().await.unwrap();
-    }
-
-    async fn search(
-        &mut self,
-        embedder: &mut EmbeddingModel,
-        query: &str,
-        top_k: usize,
-    ) -> Vec<String> {
-        let query_vector = embedder.encode_query(query);
-        let mut results = self
-            .table
-            .vector_search(query_vector.as_slice())
-            .unwrap()
-            .limit(top_k)
-            .select(Select::Columns(vec!["sandwich_payload".to_string()]))
-            .execute()
-            .await
-            .unwrap();
-
-        let mut retrieved_payloads = Vec::new();
-
-        while let Some(batch_result) = results.next().await {
-            let batch = batch_result.unwrap();
-
-            let payload_col = batch
-                .column_by_name("sandwich_payload")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-
-            for i in 0..payload_col.len() {
-                if !payload_col.is_null(i) {
-                    retrieved_payloads.push(payload_col.value(i).to_string());
-                }
-            }
-        }
-
-        retrieved_payloads
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize, Default)]
-struct L3Memory {
-    entries: Vec<L3Entry>,
-}
-
-impl L3Memory {
-    async fn new() -> Self {
-        let persistence_path = get_spinova_home().await.join("l3_memory");
-        tokio::fs::read(persistence_path)
-            .await
-            .ok()
-            .and_then(|data| postcard::from_bytes::<Self>(&data).ok())
-            .unwrap_or_default()
-    }
-
-    fn search(&mut self, embedder: &mut EmbeddingModel, query: &str, top_k: usize) -> Vec<String> {
-        if self.entries.is_empty() {
-            return Vec::new();
-        }
-        let query_vector = embedder.encode_query(query);
-        let mut ranked = self
-            .entries
-            .iter()
-            .map(|entry| (similarity(&query_vector, &entry.vector), entry))
-            .collect::<Vec<_>>();
-        ranked.sort_by(|left, right| {
-            right
-                .0
-                .partial_cmp(&left.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        ranked
-            .into_iter()
-            .take(top_k)
-            .map(|(_, entry)| entry.render())
-            .collect()
-    }
-
-    fn upsert(&mut self, embedder: &mut EmbeddingModel, drafts: Vec<L3EntryDraft>) {
-        for draft in drafts {
-            let updated_at_ms = Utc::now().timestamp_millis();
-            let vector = embedder.encode_query(&draft.retrieval_text);
-            if let Some(existing) = self.entries.iter_mut().find(|entry| {
-                entry.kind == draft.kind
-                    && (entry.lesson.trim() == draft.lesson.trim()
-                        || similarity(&vector, &entry.vector) >= 0.97)
-            }) {
-                if draft.lesson.len() < existing.lesson.len() || draft.confidence >= existing.confidence
-                {
-                    existing.lesson = draft.lesson;
-                }
-                existing.evidence_summary = draft.evidence_summary;
-                existing.retrieval_text = draft.retrieval_text;
-                existing.confidence = existing.confidence.max(draft.confidence);
-                existing.stability = max_stability(&existing.stability, &draft.stability);
-                for trace_id in draft.source_trace_ids {
-                    if !existing.source_trace_ids.iter().any(|id| id == &trace_id) {
-                        existing.source_trace_ids.push(trace_id);
-                    }
-                }
-                existing.updated_at_ms = updated_at_ms;
-                existing.vector = vector;
-            } else {
-                self.entries.push(L3Entry {
-                    id: Uuid::new_v4().to_string(),
-                    kind: draft.kind,
-                    lesson: draft.lesson,
-                    evidence_summary: draft.evidence_summary,
-                    retrieval_text: draft.retrieval_text,
-                    confidence: draft.confidence,
-                    stability: draft.stability,
-                    source_trace_ids: draft.source_trace_ids,
-                    updated_at_ms,
-                    vector,
-                });
-            }
-        }
-    }
-
-    async fn sync_to_disk(&self) {
-        let persistence_path = get_spinova_home().await.join("l3_memory");
-        let data = postcard::to_allocvec(self).unwrap();
-        tokio::fs::write(persistence_path, data).await.unwrap();
-    }
-}
-
-fn max_stability(current: &L3EntryStability, incoming: &L3EntryStability) -> L3EntryStability {
-    use L3EntryStability::*;
-    match (current, incoming) {
-        (Canonical, _) | (_, Canonical) => Canonical,
-        (Stable, _) | (_, Stable) => Stable,
-        _ => Tentative,
-    }
-}
-
-fn parse_thread_effect(value: &str) -> L1ThreadEffect {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "blocked" => L1ThreadEffect::Blocked,
-        "clarified" => L1ThreadEffect::Clarified,
-        "switched" => L1ThreadEffect::Switched,
-        "completed" => L1ThreadEffect::Completed,
-        _ => L1ThreadEffect::Continue,
-    }
-}
-
-fn parse_memory_anchor(value: String) -> Option<MemoryAnchor> {
-    let trimmed = value.trim().to_string();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    let kind = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        MemoryAnchorKind::Url
-    } else if Uuid::parse_str(&trimmed).is_ok() {
-        MemoryAnchorKind::Uuid
-    } else if [
-        ".zip", ".tar", ".tgz", ".gz", ".rar", ".7z", ".apk", ".so", ".dll",
-    ]
-    .iter()
-    .any(|suffix| lower.ends_with(suffix))
-    {
-        MemoryAnchorKind::FileName
-    } else if trimmed.contains("TerminalInput")
-        || trimmed.contains("终端实际输入")
-        || trimmed.contains("wget ")
-        || trimmed.contains("curl ")
-        || trimmed.contains("git ")
-        || trimmed.contains("cargo ")
-    {
-        MemoryAnchorKind::Command
-    } else {
-        MemoryAnchorKind::Command
-    };
-    Some(MemoryAnchor {
-        kind,
-        value: trimmed,
-    })
 }

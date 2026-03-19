@@ -164,8 +164,8 @@ fn trace_file_path() -> Result<PathBuf> {
 
 fn extract_resolve_sections(request: &PromptRequest) -> Option<(String, String, String)> {
     let user_content = request
-        .messages
-        .iter()
+        .all_messages()
+        .into_iter()
         .find(|message| {
             matches!(message.role, PromptRole::User)
                 && message.content.contains("## 待判断会话")
