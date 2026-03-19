@@ -5,6 +5,7 @@ mod dashboard;
 mod device;
 mod embeding;
 mod emotion;
+mod hindsight;
 mod memory;
 mod obligations;
 mod projects;
@@ -38,6 +39,7 @@ use crate::{
     dashboard::{DashboardState, DashboardTaskEntry, run_tui_dashboard},
     device::{DeviceId, DeviceManager},
     emotion::Emotion,
+    hindsight::{HindsightClient, HindsightRecallOptions, HindsightReflectOptions},
     memory::Memory,
     obligations::{ObligationSource, ObligationStatus, Obligations},
     projects::{ProjectOrigin, Projects},
@@ -46,12 +48,11 @@ use crate::{
         adapters::swe_train_source::SweTrainSource,
         bench::{
             eval::{
-                run_bench_eval_continuity, run_bench_eval_interactive_cli, run_bench_eval_memory,
-                run_bench_eval_memory_encoding, run_bench_eval_terminal_completion,
+                run_bench_eval_continuity, run_bench_eval_interactive_cli,
+                run_bench_eval_terminal_completion,
             },
             optimize::{
                 run_bench_optimize_continuity, run_bench_optimize_interactive_cli,
-                run_bench_optimize_memory, run_bench_optimize_memory_encoding,
                 run_bench_optimize_terminal_completion,
             },
         },
@@ -65,15 +66,14 @@ use crate::{
         eval::run_reasoning_eval,
         optimize::run_reasoning_optimize,
         programs::completion_judge::{CompletionJudgeOutput, CompletionJudgeProgram},
-        programs::memory_encoding::{MemoryEncodingOutput, MemoryEncodingProgram},
         programs::task_understanding::{TaskUnderstandingOutput, TaskUnderstandingProgram},
         render::openai_tools::OpenAIToolRenderer,
-        runtime::execute_program,
+        runtime::{PromptMemoryContext, execute_program},
         runtime_policy::RuntimePolicyProgram,
         sleep::run_sleep,
         sleep_artifacts::SleepArtifactSuggestedFixKind,
     },
-    snapshot::Snapshot,
+    snapshot::{Snapshot, summarize_terminal_screen},
     tasks::Tasks,
     telegram_acl::TelegramAclHandle,
     telegram_device::TelegramDevice,
@@ -202,38 +202,6 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         }
     }
 
-    if is_bench_eval_memory_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_bench_eval_memory(&context).await {
-            Ok(results) => {
-                print_bench_eval_results("memory", &results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if is_bench_eval_memory_encoding_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_bench_eval_memory_encoding(&context).await {
-            Ok(results) => {
-                print_bench_eval_results("memory-encoding", &results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
-    }
-
     if is_bench_eval_continuity_command(&args) {
         let context = build_eval_context(config).await;
         match run_bench_eval_continuity(&context).await {
@@ -271,38 +239,6 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         match run_bench_eval_interactive_cli(&context).await {
             Ok(results) => {
                 print_bench_eval_results("interactive-cli", &results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if is_bench_optimize_memory_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_bench_optimize_memory(&context).await {
-            Ok(results) => {
-                print_bench_optimization_results("memory", &results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if is_bench_optimize_memory_encoding_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_bench_optimize_memory_encoding(&context).await {
-            Ok(results) => {
-                print_bench_optimization_results("memory-encoding", &results);
                 context.shutdown().await;
                 return Ok(());
             }
@@ -411,11 +347,16 @@ async fn async_main(args: Vec<String>) -> Result<()> {
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
+    let hindsight = HindsightClient::from_config(&config.hindsight);
+    let hindsight_retain = hindsight.as_ref().map(HindsightClient::spawn_retain_worker);
     let mut context = Context {
         llm: Box::new(client),
         judge_llm: Box::new(judge_client),
         config,
+        hindsight,
+        hindsight_retain,
         memory,
+        prompt_memory: PromptMemoryContext::default(),
         obligations,
         projects,
         tasks,
@@ -563,29 +504,9 @@ fn train_source_learn_args(args: &[String]) -> Option<(&str, usize, usize)> {
     }
 }
 
-fn is_bench_eval_memory_command(args: &[String]) -> bool {
-    matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "memory")
-        || matches!(args, [command] if command == "eval-bench-memory")
-}
-
-fn is_bench_eval_memory_encoding_command(args: &[String]) -> bool {
-    matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "memory-encoding")
-        || matches!(args, [command] if command == "eval-bench-memory-encoding")
-}
-
 fn is_bench_eval_continuity_command(args: &[String]) -> bool {
     matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "continuity")
         || matches!(args, [command] if command == "eval-bench-continuity")
-}
-
-fn is_bench_optimize_memory_command(args: &[String]) -> bool {
-    matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "memory")
-        || matches!(args, [command] if command == "optimize-bench-memory")
-}
-
-fn is_bench_optimize_memory_encoding_command(args: &[String]) -> bool {
-    matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "memory-encoding")
-        || matches!(args, [command] if command == "optimize-bench-memory-encoding")
 }
 
 fn is_bench_optimize_continuity_command(args: &[String]) -> bool {
@@ -622,11 +543,16 @@ async fn run_mem_reset() -> Result<()> {
     let devices = DeviceManager::new(None, vec![Box::new(telegram)])
         .await
         .map_err(|err| miette!("failed to construct default devices for mem-reset: {err}"))?;
+    let hindsight = HindsightClient::from_config(&config.hindsight);
+    let hindsight_retain = hindsight.as_ref().map(HindsightClient::spawn_retain_worker);
     let context = Context {
         llm: Box::new(OpenAIClient::new(&config)),
         judge_llm: Box::new(OpenAIClient::from_model_config(&judge_model)),
         config,
+        hindsight,
+        hindsight_retain,
         memory: Memory::empty().await,
+        prompt_memory: PromptMemoryContext::default(),
         obligations: Obligations::default(),
         projects: Projects::default(),
         tasks: Tasks::default(),
@@ -649,7 +575,7 @@ async fn run_mem_reset() -> Result<()> {
         home.display()
     );
     println!(
-        "[mem-reset] cleared via empty context shutdown: l1_memory, l2_memory.lancedb, tasks, projects, obligations, emotion"
+        "[mem-reset] cleared via empty context shutdown: l1_memory, tasks, projects, obligations, emotion"
     );
     println!("[mem-reset] cleared: reasoning_traces.jsonl");
     println!("[mem-reset] preserved: config.toml, reasoning_compiled/, telegram_acl.json");
@@ -721,12 +647,17 @@ async fn build_eval_context_with_compiled(
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
+    let hindsight = HindsightClient::from_config(&config.hindsight);
+    let hindsight_retain = hindsight.as_ref().map(HindsightClient::spawn_retain_worker);
 
     let mut context = Context {
         llm: Box::new(client),
         judge_llm: Box::new(judge_client),
         config,
+        hindsight,
+        hindsight_retain,
         memory,
+        prompt_memory: PromptMemoryContext::default(),
         obligations,
         projects,
         tasks,
@@ -950,20 +881,20 @@ async fn run_train_source_learn_loop(
                     sleep_bootstrap_demos: sleep_summary.bootstrap_demos,
                     sleep_stress_cases: sleep_summary.stress_cases,
                     sleep_instruction_hypotheses: sleep_summary.instruction_hypotheses,
-                    promoted_l3_entries: sleep_summary.promoted_l3_entries,
+                    retained_reflections: sleep_summary.retained_reflections,
                     compiled_prompt_count: current_compiled_count,
                     optimized_suites: 0,
                 });
             })
             .await?;
         println!(
-            "  batch {} sleep finished: patterns={} demos={} stress={} instructions={} l3={}",
+            "  batch {} sleep finished: patterns={} demos={} stress={} instructions={} reflections={}",
             batch_index + 1,
             sleep_summary.failure_patterns.len(),
             sleep_summary.bootstrap_demos,
             sleep_summary.stress_cases,
             sleep_summary.instruction_hypotheses,
-            sleep_summary.promoted_l3_entries
+            sleep_summary.retained_reflections
         );
         sync_learning_assets_back_to_shared(&session_learning_home, &shared_learning_home).await?;
 
@@ -991,14 +922,14 @@ async fn run_train_source_learn_loop(
         );
 
         println!(
-            "  batch update: completed={} active_variant={} sleep_patterns={} demos={} stress={} instructions={} l3={} compiled_suites={}",
+            "  batch update: completed={} active_variant={} sleep_patterns={} demos={} stress={} instructions={} reflections={} compiled_suites={}",
             session.snapshot().await.completed_tasks,
             active_variant,
             sleep_summary.failure_patterns.len(),
             sleep_summary.bootstrap_demos,
             sleep_summary.stress_cases,
             sleep_summary.instruction_hypotheses,
-            sleep_summary.promoted_l3_entries,
+            sleep_summary.retained_reflections,
             compiled_prompt_count
         );
 
@@ -1113,14 +1044,12 @@ fn print_bench_optimization_results(
 
 fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
     println!(
-        "sleep: derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, promoted {} l3 entries (failure={}, success={})",
+        "sleep: derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, retained {} hindsight reflections",
         summary.failure_patterns.len(),
         summary.bootstrap_demos,
         summary.stress_cases,
         summary.instruction_hypotheses,
-        summary.promoted_l3_entries,
-        summary.promoted_failure_l3_entries,
-        summary.promoted_success_l3_entries
+        summary.retained_reflections
     );
     for pattern in &summary.failure_patterns {
         let kind = match pattern.suggested_fix_kind {
@@ -1206,7 +1135,9 @@ async fn rollout_runtime_policy_episode(
     context
         .tasks
         .set_working_task_phase("investigate".to_string());
-    let initial_snapshot = Snapshot::new(context).await.to_string();
+    let initial_snapshot = Snapshot::new(context)
+        .await
+        .to_string();
     let initial_observation = EpisodeObservation {
         summary: format!("task seeded: {}", task.title),
         snapshot_text: initial_snapshot,
@@ -1258,7 +1189,6 @@ async fn rollout_runtime_policy_episode(
             snapshot_text: step_execution.snapshot_text,
             metadata,
         });
-
         work_phase = next_work_phase;
         context.tasks.set_working_task_phase(work_phase.clone());
 
@@ -1421,9 +1351,11 @@ async fn finalize_runtime_episode(
     });
     let validation_results = run_validation_commands(&task.validation_commands, workspace_dir).await?;
     let status = final_episode_status(rollout_status, &validation_results);
-    let final_snapshot = Snapshot::new(context).await.to_string();
+    let final_snapshot = Snapshot::new(context)
+        .await
+        .to_string();
     let metric = build_episode_metric(&steps, status, rollout_status, &validation_results);
-    Ok(EpisodeOutcome {
+    let outcome = EpisodeOutcome {
         task,
         environment_name: "runtime_policy_rollout".to_string(),
         initial_observation,
@@ -1435,7 +1367,8 @@ async fn finalize_runtime_episode(
         status,
         steps,
         metric,
-    })
+    };
+    Ok(outcome)
 }
 
 fn build_episode_metric(
@@ -1712,7 +1645,7 @@ struct TrainSourceLearnBatchReport {
     sleep_bootstrap_demos: usize,
     sleep_stress_cases: usize,
     sleep_instruction_hypotheses: usize,
-    promoted_l3_entries: usize,
+    retained_reflections: usize,
     compiled_prompt_count: usize,
     optimized_suites: usize,
 }
@@ -1936,14 +1869,14 @@ async fn prepare_learning_home_root(session_root: &Path) -> Result<PathBuf> {
 }
 
 async fn sync_learning_assets_to_session(shared_home: &Path, session_home: &Path) -> Result<()> {
-    for name in [COMPILED_DIR_NAME, "sleep_artifacts", "l3_memory"] {
+    for name in [COMPILED_DIR_NAME, "sleep_artifacts"] {
         sync_path_replace(&shared_home.join(name), &session_home.join(name)).await?;
     }
     Ok(())
 }
 
 async fn sync_learning_assets_back_to_shared(session_home: &Path, shared_home: &Path) -> Result<()> {
-    for name in [COMPILED_DIR_NAME, "sleep_artifacts", "l3_memory"] {
+    for name in [COMPILED_DIR_NAME, "sleep_artifacts"] {
         sync_path_replace(&session_home.join(name), &shared_home.join(name)).await?;
     }
     Ok(())
@@ -2515,6 +2448,7 @@ async fn execute_runtime_policy_step(
     context: &mut Context,
     renderer: &OpenAIToolRenderer,
 ) -> RuntimePolicyStepExecution {
+    context.prompt_memory = build_hindsight_memory_context(context).await;
     let snapshot = Snapshot::new(context).await;
     let snapshot_text = snapshot.to_string();
     let runtime_policy = RuntimePolicyProgram;
@@ -2528,28 +2462,27 @@ async fn execute_runtime_policy_step(
         .await;
     let output = outcome.output;
     if should_record_effect(&output.effect) {
-        let mut evidence = collect_memory_evidence(&output.effect);
-        evidence.extend(collect_contextual_memory_evidence(context, &output.effect));
-        let memory_entry = encode_memory_entry(
-            context,
-            &snapshot,
-            renderer,
-            &output.current_doing,
-            &output.observation,
-            &output.description,
-            &evidence,
-        )
-        .await
-        .unwrap_or_else(|_| fallback_memory_encoding(&output, &evidence));
-        context
+        let retain_plan = context
             .memory
-            .record_encoded(
-                memory_entry.thread_focus,
-                memory_entry.event_summary,
-                memory_entry.anchors,
-                memory_entry.thread_effect,
-            )
+            .record_runtime_step(snapshot_text.clone(), &output)
             .await;
+        if let Some(handle) = &context.hindsight_retain {
+            for job in retain_plan.jobs {
+                if let Err(err) = handle.enqueue(job) {
+                    eprintln!("{err:?}");
+                    context.memory.mark_pending_retained();
+                    break;
+                }
+            }
+            if retain_plan.must_flush_before_continue {
+                if let Err(err) = handle.flush().await {
+                    eprintln!("{err:?}");
+                }
+                context.memory.mark_pending_retained();
+            }
+        } else {
+            context.memory.mark_pending_retained();
+        }
     }
     let effect = output.effect.clone();
     apply_effect(context, effect).await;
@@ -2560,6 +2493,101 @@ async fn execute_runtime_policy_step(
         output,
         snapshot_text,
     }
+}
+
+async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryContext {
+    let Some(hindsight) = context.hindsight.clone() else {
+        return PromptMemoryContext::default();
+    };
+
+    let phase = context
+        .tasks
+        .working_task_phase()
+        .unwrap_or("investigate")
+        .to_string();
+    let task_description = context
+        .tasks
+        .working_task()
+        .and_then(|id| context.tasks.tasks().find(|(task_id, _)| *task_id == id))
+        .map(|(_, task)| task.description.clone())
+        .unwrap_or_else(|| "当前没有工作任务".to_string());
+    let recent_messages = context
+        .memory
+        .trail()
+        .into_iter()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>();
+    let terminal_summary = summarize_terminal_for_hindsight(context);
+    let thread_focus = context
+        .memory
+        .current_thread_focus()
+        .unwrap_or_else(|| "当前没有连续主线".to_string());
+    let query = format!(
+        "任务：{task_description}\n阶段：{phase}\n主线：{thread_focus}\n终端摘要：\n{}\n近期消息：\n{}",
+        terminal_summary.unwrap_or_else(|| "无".to_string()),
+        if recent_messages.is_empty() {
+            "无".to_string()
+        } else {
+            recent_messages.join("\n")
+        }
+    );
+
+    let recall = hindsight
+        .recall(
+            &query,
+            HindsightRecallOptions {
+                max_tokens: 1800,
+                budget: None,
+                include_chunks: false,
+                max_chunk_tokens: 0,
+                include_source_facts: true,
+                max_source_facts_tokens: 1600,
+                ..Default::default()
+            },
+        )
+        .await;
+    let reflect = hindsight
+        .reflect(
+            &query,
+            HindsightReflectOptions {
+                budget: None,
+                context: Some(format!("当前阶段：{phase}")),
+                max_tokens: Some(500),
+                include_facts: false,
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let recalled_memories = recall
+        .ok()
+        .map(|response| {
+            response
+                .results
+                .into_iter()
+                .take(5)
+                .map(|item| item.text)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let reflected_strategy = reflect.ok().map(|response| response.text);
+
+    PromptMemoryContext {
+        recalled_memories,
+        reflected_strategy,
+    }
+}
+
+fn summarize_terminal_for_hindsight(context: &Context) -> Option<String> {
+    if context.devices.focused() != Some(crate::device::DeviceId::Terminal) {
+        return None;
+    }
+    let view = context.devices.focused_render()?;
+    Some(summarize_terminal_screen(&view.content))
 }
 
 fn slugify(value: &str) -> String {
@@ -2589,126 +2617,6 @@ fn should_record_effect(effect: &Effect) -> bool {
     !matches!(effect, Effect::SilentWait)
 }
 
-fn collect_memory_evidence(effect: &Effect) -> Vec<String> {
-    match effect {
-        Effect::TaskAdd {
-            description,
-            project_id,
-        } => {
-            let mut evidence = vec![format!("新增任务：{description}")];
-            if let Some(project_id) = project_id {
-                evidence.push(format!("关联项目引用：{project_id}"));
-            }
-            evidence
-        }
-        Effect::TaskDelete { task_id } => vec![format!("删除任务引用：{task_id}")],
-        Effect::TaskSelect { task_id } => vec![format!("选中任务引用：{task_id}")],
-        Effect::ResolveTelegramChat {
-            chat_id,
-            resolution,
-        } => {
-            let mut evidence = vec![format!("处理 Telegram 会话：{chat_id}")];
-            match resolution {
-                TelegramResolution::ReplyOnly { reply }
-                | TelegramResolution::AskClarification { reply }
-                | TelegramResolution::Decline { reply } => {
-                    evidence.push(format!("回复内容：{reply}"));
-                }
-                TelegramResolution::AcceptAsProject {
-                    reply,
-                    project_title,
-                    success_criteria,
-                    first_next_action,
-                } => {
-                    evidence.push(format!("项目标题：{project_title}"));
-                    evidence.push(format!("成功标准：{success_criteria}"));
-                    if let Some(reply) = reply {
-                        evidence.push(format!("回复内容：{reply}"));
-                    }
-                    if let Some(first_next_action) = first_next_action {
-                        evidence.push(format!("首个下一步动作：{first_next_action}"));
-                    }
-                }
-                TelegramResolution::NoReplyNeeded => {}
-            }
-            evidence
-        }
-        Effect::ObligationSatisfy { obligation_id } => {
-            vec![format!("完成义务引用：{obligation_id}")]
-        }
-        Effect::CommitToProject {
-            obligation_id,
-            title,
-            success_criteria,
-            initial_next_action,
-            acknowledgment,
-        } => {
-            let mut evidence = vec![
-                format!("承诺义务引用：{obligation_id}"),
-                format!("项目标题：{title}"),
-                format!("成功标准：{success_criteria}"),
-            ];
-            if let Some(initial_next_action) = initial_next_action {
-                evidence.push(format!("初始下一步动作：{initial_next_action}"));
-            }
-            if let Some(acknowledgment) = acknowledgment {
-                evidence.push(format!("承诺回复：{acknowledgment}"));
-            }
-            evidence
-        }
-        Effect::ProjectComplete {
-            project_id,
-            summary,
-        } => {
-            vec![
-                format!("完成项目引用：{project_id}"),
-                format!("完成总结：{summary}"),
-            ]
-        }
-        Effect::FocusDevice { device } => vec![format!("切换前景设备：{device}")],
-        Effect::PutAwayDevice => vec!["收起当前前景设备".to_string()],
-        Effect::DeviceAction { action } => match action {
-            crate::device::DeviceAction::TerminalInput { text } => {
-                vec![format!("终端实际输入：{}", text.trim_end())]
-            }
-            crate::device::DeviceAction::TelegramSelectChat { chat_id } => {
-                vec![format!("打开 Telegram 会话：{chat_id}")]
-            }
-            crate::device::DeviceAction::TelegramSendMessage { text } => {
-                vec![format!("实际发送消息：{text}")]
-            }
-        },
-        Effect::Wait => vec!["本轮选择等待".to_string()],
-        Effect::SilentWait => Vec::new(),
-    }
-}
-
-fn collect_contextual_memory_evidence(context: &Context, effect: &Effect) -> Vec<String> {
-    let include_selected_chat = matches!(
-        effect,
-        Effect::ResolveTelegramChat { .. }
-            | Effect::FocusDevice {
-                device: DeviceId::Telegram
-            }
-            | Effect::DeviceAction {
-                action: crate::device::DeviceAction::TelegramSelectChat { .. }
-            }
-            | Effect::DeviceAction {
-                action: crate::device::DeviceAction::TelegramSendMessage { .. }
-            }
-            | Effect::Wait
-            | Effect::SilentWait
-            | Effect::TaskAdd { .. }
-            | Effect::TaskSelect { .. }
-    );
-
-    if include_selected_chat {
-        context.telegram.selected_chat_memory_evidence()
-    } else {
-        Vec::new()
-    }
-}
-
 fn summarize_inline_text(text: &str) -> String {
     const MAX_CHARS: usize = 120;
     let compact = text.replace('\n', "\\n");
@@ -2718,73 +2626,6 @@ fn summarize_inline_text(text: &str) -> String {
         format!("{summary}...")
     } else {
         summary
-    }
-}
-
-async fn encode_memory_entry(
-    context: &Context,
-    snapshot: &Snapshot,
-    renderer: &OpenAIToolRenderer,
-    thread_focus: &str,
-    observation: &str,
-    action_description: &str,
-    evidence: &[String],
-) -> miette::Result<MemoryEncodingOutput> {
-    let program = MemoryEncodingProgram {
-        thread_focus: thread_focus.to_string(),
-        observation: observation.to_string(),
-        action_description: action_description.to_string(),
-        evidence: if evidence.is_empty() {
-            "无额外证据".to_string()
-        } else {
-            evidence.join("\n")
-        },
-    };
-    execute_program(context.llm.as_ref(), context, snapshot, renderer, &program).await
-}
-
-fn fallback_memory_encoding(
-    output: &crate::core::Output,
-    evidence: &[String],
-) -> MemoryEncodingOutput {
-    MemoryEncodingOutput {
-        thread_focus: output.current_doing.clone(),
-        event_summary: format!(
-            "观察与结论：{}\n采取动作：{}",
-            output.observation.trim(),
-            output.description.trim()
-        ),
-        anchors: evidence.to_vec(),
-        thread_effect: infer_memory_thread_effect(&output.observation, &output.description),
-    }
-}
-
-fn infer_memory_thread_effect(observation: &str, action_description: &str) -> String {
-    let text = format!("{observation}\n{action_description}");
-    if ["完成", "已完成", "结束", "成功标准已达到"]
-        .iter()
-        .any(|needle| text.contains(needle))
-    {
-        "completed".to_string()
-    } else if [
-        "失败", "404", "无法", "无效", "受阻", "报错", "中断", "卡住",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
-    {
-        "blocked".to_string()
-    } else if ["补充说明", "澄清", "确认", "请确认", "请求提供"]
-        .iter()
-        .any(|needle| text.contains(needle))
-    {
-        "clarified".to_string()
-    } else if ["切换", "转到", "改为", "聚焦到"]
-        .iter()
-        .any(|needle| text.contains(needle))
-    {
-        "switched".to_string()
-    } else {
-        "continue".to_string()
     }
 }
 

@@ -7,7 +7,7 @@ use crate::{
     context::Context,
     device::DeviceAction,
     core::{Effect, Output},
-    memory::L3EntryDraft,
+    hindsight::{HindsightRecallOptions, HindsightRetainItem},
     reasoning::{
         episode::{EpisodeOutcome, EpisodeStatus, EpisodeStep},
         examples::ExampleField,
@@ -20,10 +20,6 @@ use super::{
     programs::sleep_artifact_builder::{SleepArtifactBuilderOutput, SleepArtifactBuilderProgram},
     programs::sleep_episode_synthesizer::{
         SleepEpisodeSynthesizerOutput, SleepEpisodeSynthesizerProgram,
-    },
-    programs::sleep_l3_promoter::{SleepL3PromoterOutput, SleepL3PromoterProgram},
-    programs::sleep_success_l3_promoter::{
-        SleepSuccessL3PromoterOutput, SleepSuccessL3PromoterProgram,
     },
     render::openai_tools::OpenAIToolRenderer,
     runtime::execute_program_with_ir_report,
@@ -41,9 +37,7 @@ pub struct SleepSummary {
     pub bootstrap_demos: usize,
     pub stress_cases: usize,
     pub instruction_hypotheses: usize,
-    pub promoted_success_l3_entries: usize,
-    pub promoted_failure_l3_entries: usize,
-    pub promoted_l3_entries: usize,
+    pub retained_reflections: usize,
 }
 
 pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
@@ -72,24 +66,13 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     store
         .replace_instruction_hypotheses(&derived.instruction_hypotheses)
         .await?;
-    let mut promoted = promote_failure_patterns_to_l3(context, &failure_patterns).await?;
-    let promoted_failure_l3_entries = promoted.len();
-    let mut success_promoted = promote_success_patterns_to_l3(context, &records).await?;
-    success_promoted.extend(episode_synthesis.l3_entries.clone());
-    let promoted_success_l3_entries = success_promoted.len();
-    promoted.extend(success_promoted);
-    if !promoted.is_empty() {
-        context.memory.upsert_l3_entries(promoted.clone());
-        context.memory.sync_l3_to_disk().await;
-    }
+    let retained_reflections = retain_sleep_reflections(context, &episode_synthesis.reflections).await?;
     Ok(SleepSummary {
         failure_patterns,
         bootstrap_demos: derived.bootstrap_demos.len(),
         stress_cases: derived.stress_cases.len(),
         instruction_hypotheses: derived.instruction_hypotheses.len(),
-        promoted_success_l3_entries,
-        promoted_failure_l3_entries,
-        promoted_l3_entries: promoted.len(),
+        retained_reflections,
     })
 }
 
@@ -216,7 +199,14 @@ struct EpisodeSleepSynthesis {
     bootstrap_demos: Vec<SleepArtifactBootstrapDemo>,
     stress_cases: Vec<SleepArtifactStressCase>,
     instruction_hypotheses: Vec<SleepArtifactInstructionHypothesis>,
-    l3_entries: Vec<L3EntryDraft>,
+    reflections: Vec<SleepReflectionRecord>,
+}
+
+#[derive(Clone)]
+struct SleepReflectionRecord {
+    document_id: String,
+    content: String,
+    tags: Vec<String>,
 }
 
 async fn synthesize_episode_outcomes(
@@ -258,7 +248,7 @@ async fn synthesize_episode_outcomes(
             outcome.final_observation.summary.trim(),
             recent_steps.trim()
         );
-        let related_memories = context.memory.search_mem(&memory_query, 3).await;
+        let related_memories = recall_related_memories(context, &memory_query, 3).await;
         let outcome_ir = program.dataset_ir(
             suite.to_string(),
             episode_id.clone(),
@@ -459,7 +449,7 @@ fn merge_episode_synthesis(
             expected_output: serde_json::to_value(step_to_output(step)).unwrap_or_else(|_| json!({})),
             reference_case_names: Vec::new(),
             source_trace_ids: vec![episode_id.to_string()],
-            confidence: output.l3_confidence.clamp(0.0, 1.0) as f32,
+            confidence: output.reflection_confidence.clamp(0.0, 1.0) as f32,
         });
     }
 
@@ -496,19 +486,23 @@ fn merge_episode_synthesis(
             });
     }
 
-    if output.promote_to_l3
-        && !output.l3_lesson.trim().is_empty()
-        && !output.l3_retrieval_text.trim().is_empty()
-        && (!has_case_artifact || output.l3_confidence >= 0.95)
-    {
-        synthesized.l3_entries.push(L3EntryDraft {
-            kind: output.l3_kind.clone(),
-            lesson: output.l3_lesson.trim().to_string(),
-            evidence_summary: output.l3_evidence_summary.trim().to_string(),
-            retrieval_text: output.l3_retrieval_text.trim().to_string(),
-            confidence: output.l3_confidence.clamp(0.0, 1.0) as f32,
-            stability: output.l3_stability.clone(),
-            source_trace_ids: vec![episode_id.to_string()],
+    if !output.synthesized_summary.trim().is_empty() || !output.strategy_lesson.trim().is_empty() {
+        synthesized.reflections.push(SleepReflectionRecord {
+            document_id: format!("sleep-reflection:{}", slugify(episode_id)),
+            content: format!(
+                "Episode: {}\nSuite: {}\nStatus: {:?}\nSummary: {}\nStrategy lesson: {}\nReason: {}",
+                outcome.task.id,
+                suite,
+                outcome.status,
+                output.synthesized_summary.trim(),
+                output.strategy_lesson.trim(),
+                output.reason.trim(),
+            ),
+            tags: vec![
+                "sleep-reflection".to_string(),
+                format!("suite:{}", suite),
+                format!("status:{:?}", outcome.status).to_ascii_lowercase(),
+            ],
         });
     }
 }
@@ -675,7 +669,7 @@ async fn derive_sleep_artifacts(
     let mut instruction_hypotheses = Vec::new();
 
     for pattern in patterns {
-        let related_memories = context.memory.search_mem(&pattern.description, 3).await;
+        let related_memories = recall_related_memories(context, &pattern.description, 3).await;
         let evidence_summary = render_related_memories(&related_memories);
         let available_canonical_cases = suite_reference_case_names(&pattern.suite);
         let outcome = execute_program_with_ir_report(
@@ -909,7 +903,7 @@ fn infer_runtime_suite(record: &ProgramTraceRecord) -> Option<String> {
 
 fn extract_inputs_from_request(request: &PromptRequest) -> Vec<ExampleField> {
     let mut inputs = Vec::new();
-    for message in &request.messages {
+    for message in request.all_messages() {
         if !matches!(message.role, PromptRole::User) {
             continue;
         }
@@ -964,157 +958,63 @@ fn flush_section(
     current_body.clear();
 }
 
-async fn promote_failure_patterns_to_l3(
+async fn retain_sleep_reflections(
     context: &Context,
-    patterns: &[SleepArtifactFailurePattern],
-) -> Result<Vec<L3EntryDraft>> {
-    if patterns.is_empty() {
-        return Ok(Vec::new());
+    reflections: &[SleepReflectionRecord],
+) -> Result<usize> {
+    let Some(retain_handle) = context.hindsight_retain.as_ref() else {
+        return Ok(0);
+    };
+    if reflections.is_empty() {
+        return Ok(0);
     }
 
-    let renderer = OpenAIToolRenderer;
-    let program = SleepL3PromoterProgram;
-    let mut entries = Vec::new();
+    let items = reflections
+        .iter()
+        .map(|reflection| HindsightRetainItem {
+            content: reflection.content.clone(),
+            timestamp: None,
+            context: Some("sleep reflection".to_string()),
+            metadata: None,
+            document_id: Some(reflection.document_id.clone()),
+            tags: Some(reflection.tags.clone()),
+        })
+        .collect::<Vec<_>>();
+    retain_handle.enqueue(crate::hindsight::HindsightRetainJob {
+        items,
+        document_id: None,
+        document_tags: Vec::new(),
+    })?;
+    Ok(reflections.len())
+}
 
-    for pattern in patterns {
-        let ir = program.dataset_ir(
-            pattern.suite.clone(),
-            pattern.pattern_id.clone(),
-            pattern.description.clone(),
-            pattern.frequency,
-            pattern.severity,
-            format!("{:?}", pattern.suggested_fix_kind),
-            pattern.supporting_trace_ids.join("\n"),
-        );
-        let outcome = execute_program_with_ir_report(
-            context.judge_llm.as_ref(),
-            context,
-            &renderer,
-            &program,
-            ir,
-            &program.default_tuning(),
-            TraceOrigin::Sleep,
+async fn recall_related_memories(
+    context: &Context,
+    query: &str,
+    top_k: usize,
+) -> Vec<String> {
+    let Some(hindsight) = context.hindsight.as_ref() else {
+        return Vec::new();
+    };
+    let response = hindsight
+        .recall(
+            query,
+            HindsightRecallOptions {
+                max_tokens: 1200,
+                budget: Some("low".to_string()),
+                include_source_facts: true,
+                max_source_facts_tokens: 1200,
+                ..Default::default()
+            },
         )
-        .await?;
-
-        if let Some(entry) = to_l3_entry(pattern, &outcome.output) {
-            entries.push(entry);
-        }
-    }
-
-    Ok(entries)
-}
-
-async fn promote_success_patterns_to_l3(
-    context: &mut Context,
-    records: &[ProgramTraceRecord],
-) -> Result<Vec<L3EntryDraft>> {
-    let renderer = OpenAIToolRenderer;
-    let program = SleepSuccessL3PromoterProgram;
-    let mut entries = Vec::new();
-    let mut per_suite = std::collections::HashMap::<String, usize>::new();
-
-    for record in records {
-        if record.deserialization_error.is_some() || record.attempt != 1 {
-            continue;
-        }
-        let Some(suite) = infer_runtime_suite(record) else {
-            continue;
-        };
-        let count = per_suite.entry(suite.clone()).or_insert(0);
-        if *count >= 2 {
-            continue;
-        }
-        let inputs = extract_inputs_from_request(&record.request);
-        if inputs.is_empty() {
-            continue;
-        }
-        let input_summary = inputs
-            .iter()
-            .map(|field| format!("{}: {}", field.name, field.value))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let output_summary = record
-            .parsed_output
-            .as_ref()
-            .map(serde_json::to_string_pretty)
-            .transpose()
-            .map_err(|err| miette!("failed to format parsed success output: {err}"))?
-            .unwrap_or_else(|| "无".to_string());
-        let related_memories = context.memory.search_mem(&input_summary, 3).await;
-        let outcome = execute_program_with_ir_report(
-            context.judge_llm.as_ref(),
-            context,
-            &renderer,
-            &program,
-            program.dataset_ir(
-                suite.clone(),
-                format!(
-                    "{}:{}:{}",
-                    record.program_name, record.timestamp_ms, record.attempt
-                ),
-                input_summary,
-                output_summary,
-                render_related_memories(&related_memories).unwrap_or_else(|| "无".to_string()),
-            ),
-            &program.default_tuning(),
-            TraceOrigin::Sleep,
-        )
-        .await?;
-        if let Some(entry) = to_success_l3_entry(record, &outcome.output) {
-            *count += 1;
-            entries.push(entry);
-        }
-    }
-
-    Ok(entries)
-}
-
-fn to_l3_entry(
-    pattern: &SleepArtifactFailurePattern,
-    output: &SleepL3PromoterOutput,
-) -> Option<L3EntryDraft> {
-    if !output.promote {
-        return None;
-    }
-    if output.lesson.trim().is_empty() || output.retrieval_text.trim().is_empty() {
-        return None;
-    }
-    Some(L3EntryDraft {
-        kind: output.kind.clone(),
-        lesson: output.lesson.trim().to_string(),
-        evidence_summary: if output.evidence_summary.trim().is_empty() {
-            pattern.description.clone()
-        } else {
-            output.evidence_summary.trim().to_string()
-        },
-        retrieval_text: output.retrieval_text.trim().to_string(),
-        confidence: output.confidence.clamp(0.0, 1.0) as f32,
-        stability: output.stability.clone(),
-        source_trace_ids: pattern.supporting_trace_ids.clone(),
-    })
-}
-
-fn to_success_l3_entry(
-    record: &ProgramTraceRecord,
-    output: &SleepSuccessL3PromoterOutput,
-) -> Option<L3EntryDraft> {
-    if !output.promote {
-        return None;
-    }
-    if output.lesson.trim().is_empty() || output.retrieval_text.trim().is_empty() {
-        return None;
-    }
-    Some(L3EntryDraft {
-        kind: output.kind.clone(),
-        lesson: output.lesson.trim().to_string(),
-        evidence_summary: output.evidence_summary.trim().to_string(),
-        retrieval_text: output.retrieval_text.trim().to_string(),
-        confidence: output.confidence.clamp(0.0, 1.0) as f32,
-        stability: output.stability.clone(),
-        source_trace_ids: vec![format!(
-            "{}:{}:{}",
-            record.program_name, record.timestamp_ms, record.attempt
-        )],
-    })
+        .await;
+    let Ok(response) = response else {
+        return Vec::new();
+    };
+    response
+        .results
+        .into_iter()
+        .take(top_k)
+        .map(|item| item.text)
+        .collect()
 }
