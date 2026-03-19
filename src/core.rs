@@ -50,9 +50,8 @@ pub enum TelegramResolution {
 /// 8. FocusDevice
 /// 9. PutAwayDevice
 /// 10. DeviceAction
-/// 11. EditFileReplace
-/// 12. Wait
-/// 13. SilentWait
+/// 11. Wait
+/// 12. SilentWait
 pub enum Effect {
     /// TaskAdd: 添加一个新的任务
     TaskAdd {
@@ -114,15 +113,6 @@ pub enum Effect {
     DeviceAction {
         /// 设备动作
         action: DeviceAction,
-    },
-    /// EditFileReplace: 使用内建编辑原语，对工作区内文件做一次精确替换
-    EditFileReplace {
-        /// 相对于当前工作区根目录的文件路径
-        path: String,
-        /// 必须在文件中精确出现且仅出现一次的旧文本
-        old_text: String,
-        /// 将旧文本替换成的新文本
-        new_text: String,
     },
     /// Wait: 不进行操作，不思观望
     Wait,

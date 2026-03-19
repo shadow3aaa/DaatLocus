@@ -19,10 +19,16 @@ mod telegram_device;
 mod telegram_transport;
 mod terminal_device;
 
-use std::{env, path::{Path, PathBuf}, sync::Arc, time::Duration};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::{Local, TimeZone};
 use miette::{Result, miette};
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
@@ -100,6 +106,11 @@ fn main() {
 }
 
 async fn async_main(args: Vec<String>) -> Result<()> {
+    if is_internal_cli_command(&args) {
+        run_internal_cli(&args).await?;
+        return Ok(());
+    }
+
     if is_mem_reset_command(&args) {
         run_mem_reset().await?;
         return Ok(());
@@ -412,8 +423,8 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         devices,
         telegram: telegram_handle,
         compiled_prompts,
-        current_workspace: env::current_dir().ok(),
     };
+    initialize_injected_cli_tools(&mut context).await?;
 
     let (tx, mut rx) = tokio::sync::watch::channel(DashboardState {
         pty_parser: terminal_parser,
@@ -623,7 +634,6 @@ async fn run_mem_reset() -> Result<()> {
         devices,
         telegram: telegram_handle,
         compiled_prompts: CompiledPromptStore::empty(),
-        current_workspace: env::current_dir().ok(),
     };
     context.shutdown().await;
 
@@ -712,7 +722,7 @@ async fn build_eval_context_with_compiled(
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
 
-    Context {
+    let mut context = Context {
         llm: Box::new(client),
         judge_llm: Box::new(judge_client),
         config,
@@ -724,8 +734,11 @@ async fn build_eval_context_with_compiled(
         devices,
         telegram: telegram_handle,
         compiled_prompts,
-        current_workspace: env::current_dir().ok(),
+    };
+    if let Err(err) = initialize_injected_cli_tools(&mut context).await {
+        eprintln!("{err:?}");
     }
+    context
 }
 
 fn bootstrap_telegram_device_from_acl(
@@ -2151,7 +2164,6 @@ async fn run_shell_line_capture(command: &str, cwd: &Path) -> Result<std::proces
 }
 
 async fn enter_episode_workspace(context: &mut Context, workspace_dir: &Path) -> Result<()> {
-    context.current_workspace = Some(workspace_dir.to_path_buf());
     let cd_command = if cfg!(windows) {
         format!("Set-Location \"{}\"\r", workspace_dir.display())
     } else {
@@ -2165,6 +2177,331 @@ async fn enter_episode_workspace(context: &mut Context, workspace_dir: &Path) ->
     context
         .devices
         .wait_until_settled(Duration::from_millis(300), Duration::from_secs(2))
+        .await;
+    Ok(())
+}
+
+fn is_internal_cli_command(args: &[String]) -> bool {
+    matches!(args, [command, subcommand, ..] if command == "internal-cli" && subcommand == "edit")
+}
+
+async fn run_internal_cli(args: &[String]) -> Result<()> {
+    match args {
+        [_, edit, subcommand, rest @ ..] if edit == "edit" && subcommand == "patch" => {
+            run_internal_cli_edit_patch(rest).await
+        }
+        [_, edit, subcommand, rest @ ..] if edit == "edit" && subcommand == "replace" => {
+            run_internal_cli_edit_replace(rest).await
+        }
+        [_, edit, subcommand, rest @ ..] if edit == "edit" && subcommand == "show" => {
+            run_internal_cli_edit_show(rest).await
+        }
+        [_, edit, subcommand, ..] if edit == "edit" => Err(miette!(
+            "unknown internal edit subcommand: {subcommand}"
+        )),
+        _ => Err(miette!("unsupported internal-cli invocation")),
+    }
+}
+
+async fn run_internal_cli_edit_patch(args: &[String]) -> Result<()> {
+    let mut patch_file: Option<PathBuf> = None;
+    let mut use_stdin = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--patch-file" => {
+                i += 1;
+                patch_file = args.get(i).map(PathBuf::from);
+            }
+            "--stdin" => {
+                use_stdin = true;
+            }
+            flag => return Err(miette!("unknown spin-edit patch flag: {flag}")),
+        }
+        i += 1;
+    }
+
+    if use_stdin && patch_file.is_some() {
+        return Err(miette!(
+            "spin-edit patch accepts either --stdin or --patch-file, not both"
+        ));
+    }
+    let patch_text = if use_stdin {
+        read_stdin_to_string().await?
+    } else {
+        let patch_file =
+            patch_file.ok_or_else(|| miette!("spin-edit patch requires --stdin or --patch-file"))?;
+        tokio::fs::read_to_string(&patch_file)
+            .await
+            .map_err(|err| miette!("failed to read patch file {}: {err}", patch_file.display()))?
+    };
+    let cwd = env::current_dir().map_err(|err| miette!("failed to read current directory: {err}"))?;
+    let summary = apply_spin_edit_patch(&cwd, &patch_text).await?;
+    println!("changed_files={}", summary.changed_files);
+    println!("added_files={}", summary.added_files);
+    println!("deleted_files={}", summary.deleted_files);
+    println!("updated_files={}", summary.updated_files);
+    for path in summary.paths {
+        println!("path={path}");
+    }
+    Ok(())
+}
+
+async fn run_internal_cli_edit_replace(args: &[String]) -> Result<()> {
+    let mut file: Option<String> = None;
+    let mut old_text: Option<String> = None;
+    let mut new_text: Option<String> = None;
+    let mut old_file: Option<PathBuf> = None;
+    let mut new_file: Option<PathBuf> = None;
+    let mut spec_stdin = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--file" => {
+                i += 1;
+                file = args.get(i).cloned();
+            }
+            "--old" => {
+                i += 1;
+                old_text = args.get(i).cloned();
+            }
+            "--new" => {
+                i += 1;
+                new_text = args.get(i).cloned();
+            }
+            "--old-file" => {
+                i += 1;
+                old_file = args.get(i).map(PathBuf::from);
+            }
+            "--new-file" => {
+                i += 1;
+                new_file = args.get(i).map(PathBuf::from);
+            }
+            "--spec-stdin" => {
+                spec_stdin = true;
+            }
+            flag => {
+                return Err(miette!("unknown spin-edit replace flag: {flag}"));
+            }
+        }
+        i += 1;
+    }
+
+    #[derive(Deserialize)]
+    struct ReplaceSpec {
+        file: String,
+        old_text: String,
+        new_text: String,
+    }
+
+    let (file, old_text, new_text) = if spec_stdin {
+        if file.is_some() || old_text.is_some() || new_text.is_some() || old_file.is_some() || new_file.is_some() {
+            return Err(miette!(
+                "spin-edit replace --spec-stdin must not be combined with --file/--old/--new/--old-file/--new-file"
+            ));
+        }
+        let raw = read_stdin_to_string().await?;
+        let spec: ReplaceSpec = serde_json::from_str(&raw)
+            .map_err(|err| miette!("invalid spin-edit replace JSON on stdin: {err}"))?;
+        (spec.file, spec.old_text, spec.new_text)
+    } else {
+        let file = file.ok_or_else(|| miette!("spin-edit replace requires --file or --spec-stdin"))?;
+        let old_text = match (old_text, old_file) {
+            (Some(text), None) => text,
+            (None, Some(path)) => tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|err| miette!("failed to read --old-file {}: {err}", path.display()))?,
+            (Some(_), Some(_)) => {
+                return Err(miette!(
+                    "spin-edit replace accepts either --old or --old-file, not both"
+                ));
+            }
+            (None, None) => return Err(miette!("spin-edit replace requires --old or --old-file")),
+        };
+        let new_text = match (new_text, new_file) {
+            (Some(text), None) => text,
+            (None, Some(path)) => tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|err| miette!("failed to read --new-file {}: {err}", path.display()))?,
+            (Some(_), Some(_)) => {
+                return Err(miette!(
+                    "spin-edit replace accepts either --new or --new-file, not both"
+                ));
+            }
+            (None, None) => return Err(miette!("spin-edit replace requires --new or --new-file")),
+        };
+        (file, old_text, new_text)
+    };
+
+    let cwd = env::current_dir().map_err(|err| miette!("failed to read current directory: {err}"))?;
+    let path = resolve_relative_path_within_root(&cwd, &file, "spin-edit replace")?;
+    let report = execute_precise_file_replace(&path, &old_text, &new_text, "spin-edit replace").await?;
+    print_precise_edit_report(&file, &report);
+    Ok(())
+}
+
+async fn read_stdin_to_string() -> Result<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut stdin = tokio::io::stdin();
+    let mut content = String::new();
+    stdin
+        .read_to_string(&mut content)
+        .await
+        .map_err(|err| miette!("failed to read stdin: {err}"))?;
+    Ok(content)
+}
+
+async fn run_internal_cli_edit_show(args: &[String]) -> Result<()> {
+    let mut file: Option<String> = None;
+    let mut start: Option<usize> = None;
+    let mut end: Option<usize> = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--file" => {
+                i += 1;
+                file = args.get(i).cloned();
+            }
+            "--start" => {
+                i += 1;
+                start = args
+                    .get(i)
+                    .ok_or_else(|| miette!("missing value for --start"))?
+                    .parse::<usize>()
+                    .map(Some)
+                    .map_err(|err| miette!("invalid --start value: {err}"))?;
+            }
+            "--end" => {
+                i += 1;
+                end = args
+                    .get(i)
+                    .ok_or_else(|| miette!("missing value for --end"))?
+                    .parse::<usize>()
+                    .map(Some)
+                    .map_err(|err| miette!("invalid --end value: {err}"))?;
+            }
+            flag => return Err(miette!("unknown spin-edit show flag: {flag}")),
+        }
+        i += 1;
+    }
+
+    let file = file.ok_or_else(|| miette!("spin-edit show requires --file"))?;
+    let cwd = env::current_dir().map_err(|err| miette!("failed to read current directory: {err}"))?;
+    let path = resolve_relative_path_within_root(&cwd, &file, "spin-edit show")?;
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|err| miette!("failed to read {}: {err}", path.display()))?;
+    let lines = content.lines().collect::<Vec<_>>();
+    let start_line = start.unwrap_or(1).max(1);
+    let end_line = end.unwrap_or_else(|| lines.len()).max(start_line);
+
+    for line_no in start_line..=end_line.min(lines.len()) {
+        println!("{line_no:>6} {}", lines[line_no - 1]);
+    }
+    Ok(())
+}
+
+async fn initialize_injected_cli_tools(context: &mut Context) -> Result<()> {
+    let bin_dir = ensure_global_cli_tool_dir().await?;
+    prepend_cli_tool_dir_to_terminal(context, &bin_dir).await?;
+    Ok(())
+}
+
+async fn ensure_global_cli_tool_dir() -> Result<PathBuf> {
+    let spinova_home = get_spinova_home().await;
+    let bin_dir = spinova_home.join("bin");
+    tokio::fs::create_dir_all(&bin_dir)
+        .await
+        .map_err(|err| miette!("failed to create CLI bin dir {}: {err}", bin_dir.display()))?;
+
+    let current_exe =
+        env::current_exe().map_err(|err| miette!("failed to resolve current executable: {err}"))?;
+    let copied_exe = if cfg!(windows) {
+        bin_dir.join("spinova-tool.exe")
+    } else {
+        bin_dir.join("spinova-tool")
+    };
+    let needs_copy = match tokio::fs::metadata(&copied_exe).await {
+        Ok(meta) => {
+            let current_meta = tokio::fs::metadata(&current_exe)
+                .await
+                .map_err(|err| miette!("failed to stat current executable: {err}"))?;
+            meta.len() != current_meta.len()
+        }
+        Err(_) => true,
+    };
+    if needs_copy {
+        tokio::fs::copy(&current_exe, &copied_exe)
+            .await
+            .map_err(|err| {
+                miette!(
+                    "failed to copy {} to {}: {err}",
+                    current_exe.display(),
+                    copied_exe.display()
+                )
+            })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        tokio::fs::set_permissions(&copied_exe, perms)
+            .await
+            .map_err(|err| miette!("failed to chmod {}: {err}", copied_exe.display()))?;
+    }
+
+    if cfg!(windows) {
+        let wrapper = bin_dir.join("spin-edit.cmd");
+        let script = format!(
+            "@echo off\r\n\"{}\" internal-cli edit %*\r\n",
+            copied_exe.display()
+        );
+        tokio::fs::write(&wrapper, script)
+            .await
+            .map_err(|err| miette!("failed to write {}: {err}", wrapper.display()))?;
+    } else {
+        let wrapper = bin_dir.join("spin-edit");
+        let script = format!(
+            "#!/usr/bin/env sh\nexec \"{}\" internal-cli edit \"$@\"\n",
+            copied_exe.display()
+        );
+        tokio::fs::write(&wrapper, script)
+            .await
+            .map_err(|err| miette!("failed to write {}: {err}", wrapper.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            tokio::fs::set_permissions(&wrapper, perms)
+                .await
+                .map_err(|err| miette!("failed to chmod {}: {err}", wrapper.display()))?;
+        }
+    }
+
+    Ok(bin_dir)
+}
+
+async fn prepend_cli_tool_dir_to_terminal(context: &mut Context, bin_dir: &Path) -> Result<()> {
+    let command = if cfg!(windows) {
+        format!(
+            "$env:PATH=\"{};\" + $env:PATH\r",
+            bin_dir.display().to_string().replace('"', "`\"")
+        )
+    } else {
+        format!("export PATH=\"{}:$PATH\"\n", bin_dir.display())
+    };
+    context
+        .devices
+        .execute_focused(crate::device::DeviceAction::TerminalInput { text: command })
+        .await
+        .map_err(|err| miette!("failed to inject CLI tool PATH into terminal: {err}"))?;
+    context
+        .devices
+        .wait_until_settled(Duration::from_millis(150), Duration::from_secs(2))
         .await;
     Ok(())
 }
@@ -2341,15 +2678,6 @@ fn collect_memory_evidence(effect: &Effect) -> Vec<String> {
                 vec![format!("实际发送消息：{text}")]
             }
         },
-        Effect::EditFileReplace {
-            path,
-            old_text,
-            new_text,
-        } => vec![
-            format!("内建编辑文件：{path}"),
-            format!("替换旧文本摘要：{}", summarize_inline_text(old_text)),
-            format!("替换新文本摘要：{}", summarize_inline_text(new_text)),
-        ],
         Effect::Wait => vec!["本轮选择等待".to_string()],
         Effect::SilentWait => Vec::new(),
     }
@@ -2550,16 +2878,6 @@ async fn apply_effect(context: &mut Context, effect: Effect) {
                 eprintln!("{err:?}");
             }
         }
-        Effect::EditFileReplace {
-            path,
-            old_text,
-            new_text,
-        } => {
-            if let Err(err) = execute_edit_file_replace(context, &path, &old_text, &new_text).await
-            {
-                eprintln!("{err:?}");
-            }
-        }
         Effect::Wait => {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
@@ -2569,16 +2887,16 @@ async fn apply_effect(context: &mut Context, effect: Effect) {
     }
 }
 
-fn resolve_workspace_relative_path(context: &Context, relative_path: &str) -> miette::Result<PathBuf> {
-    let workspace = context
-        .current_workspace
-        .as_ref()
-        .ok_or_else(|| miette!("no active workspace is available for EditFileReplace"))?;
+fn resolve_relative_path_within_root(
+    root: &Path,
+    relative_path: &str,
+    caller: &str,
+) -> miette::Result<PathBuf> {
     let candidate = Path::new(relative_path);
     if candidate.is_absolute() {
         return Err(miette!(
-            "EditFileReplace requires a workspace-relative path, got absolute path: {}",
-            candidate.display()
+            "{caller} requires a workspace-relative path, got absolute path: {}",
+            candidate.display(),
         ));
     }
     if candidate
@@ -2586,36 +2904,296 @@ fn resolve_workspace_relative_path(context: &Context, relative_path: &str) -> mi
         .any(|component| matches!(component, std::path::Component::ParentDir))
     {
         return Err(miette!(
-            "EditFileReplace path must not escape the workspace: {}",
-            candidate.display()
+            "{caller} path must not escape the workspace: {}",
+            candidate.display(),
         ));
     }
-    Ok(workspace.join(candidate))
+    Ok(root.join(candidate))
 }
 
-async fn execute_edit_file_replace(
-    context: &Context,
-    relative_path: &str,
+struct PreciseEditReport {
+    matches_before: usize,
+    changed: bool,
+    before_excerpt: String,
+    after_excerpt: String,
+}
+
+fn build_excerpt(text: &str) -> String {
+    summarize_inline_text(text)
+}
+
+fn print_precise_edit_report(relative_path: &str, report: &PreciseEditReport) {
+    println!("changed={}", if report.changed { 1 } else { 0 });
+    println!("matches_before={}", report.matches_before);
+    println!("path={relative_path}");
+    println!("before_excerpt={}", report.before_excerpt);
+    println!("after_excerpt={}", report.after_excerpt);
+}
+
+async fn execute_precise_file_replace(
+    path: &Path,
     old_text: &str,
     new_text: &str,
-) -> miette::Result<()> {
-    let path = resolve_workspace_relative_path(context, relative_path)?;
-    let existing = tokio::fs::read_to_string(&path)
+    caller: &str,
+) -> miette::Result<PreciseEditReport> {
+    let existing = tokio::fs::read_to_string(path)
         .await
-        .map_err(|err| miette!("failed to read {} for EditFileReplace: {err}", path.display()))?;
+        .map_err(|err| miette!("failed to read {} for {caller}: {err}", path.display()))?;
     let matches = existing.match_indices(old_text).count();
     if matches != 1 {
         return Err(miette!(
-            "EditFileReplace expected exactly 1 match in {}, found {}",
+            "{caller} expected exactly 1 match in {}, found {}",
             path.display(),
             matches
         ));
     }
     let updated = existing.replacen(old_text, new_text, 1);
-    tokio::fs::write(&path, updated)
+    tokio::fs::write(path, &updated)
         .await
-        .map_err(|err| miette!("failed to write {} for EditFileReplace: {err}", path.display()))?;
-    Ok(())
+        .map_err(|err| miette!("failed to write {} for {caller}: {err}", path.display()))?;
+    Ok(PreciseEditReport {
+        matches_before: matches,
+        changed: true,
+        before_excerpt: build_excerpt(old_text),
+        after_excerpt: build_excerpt(new_text),
+    })
+}
+
+#[derive(Default)]
+struct SpinEditPatchSummary {
+    changed_files: usize,
+    added_files: usize,
+    deleted_files: usize,
+    updated_files: usize,
+    paths: Vec<String>,
+}
+
+enum PatchOp {
+    Add {
+        path: String,
+        lines: Vec<String>,
+    },
+    Delete {
+        path: String,
+    },
+    Update {
+        path: String,
+        hunks: Vec<PatchHunk>,
+    },
+}
+
+#[derive(Default)]
+struct PatchHunk {
+    old_lines: Vec<String>,
+    new_lines: Vec<String>,
+}
+
+fn parse_spin_edit_patch(patch_text: &str) -> miette::Result<Vec<PatchOp>> {
+    let lines = patch_text.lines().collect::<Vec<_>>();
+    if lines.first().copied() != Some("*** Begin Patch") {
+        return Err(miette!("spin-edit patch must start with `*** Begin Patch`"));
+    }
+    if lines.last().copied() != Some("*** End Patch") {
+        return Err(miette!("spin-edit patch must end with `*** End Patch`"));
+    }
+
+    let mut ops = Vec::new();
+    let mut i = 1;
+    while i + 1 < lines.len() {
+        let line = lines[i];
+        if let Some(path) = line.strip_prefix("*** Add File: ") {
+            i += 1;
+            let mut added = Vec::new();
+            while i < lines.len() && !lines[i].starts_with("*** ") {
+                let raw = lines[i];
+                let Some(content) = raw.strip_prefix('+') else {
+                    return Err(miette!(
+                        "add file lines must start with `+`, got `{}`",
+                        raw
+                    ));
+                };
+                added.push(content.to_string());
+                i += 1;
+            }
+            ops.push(PatchOp::Add {
+                path: path.to_string(),
+                lines: added,
+            });
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("*** Delete File: ") {
+            ops.push(PatchOp::Delete {
+                path: path.to_string(),
+            });
+            i += 1;
+            continue;
+        }
+
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
+            i += 1;
+            let mut hunks = Vec::new();
+            let mut current = PatchHunk::default();
+            let mut saw_change_line = false;
+            while i < lines.len() && !lines[i].starts_with("*** ") {
+                let raw = lines[i];
+                if raw == "@@" || raw.starts_with("@@ ") {
+                    if saw_change_line {
+                        hunks.push(current);
+                        current = PatchHunk::default();
+                        saw_change_line = false;
+                    }
+                    i += 1;
+                    continue;
+                }
+                let (prefix, body) = raw.split_at(1);
+                match prefix {
+                    " " => {
+                        current.old_lines.push(body.to_string());
+                        current.new_lines.push(body.to_string());
+                        saw_change_line = true;
+                    }
+                    "-" => {
+                        current.old_lines.push(body.to_string());
+                        saw_change_line = true;
+                    }
+                    "+" => {
+                        current.new_lines.push(body.to_string());
+                        saw_change_line = true;
+                    }
+                    _ => {
+                        return Err(miette!(
+                            "update file hunk lines must start with space/+/- or @@, got `{}`",
+                            raw
+                        ));
+                    }
+                }
+                i += 1;
+            }
+            if saw_change_line {
+                hunks.push(current);
+            }
+            if hunks.is_empty() {
+                return Err(miette!("update file `{path}` contains no hunks"));
+            }
+            ops.push(PatchOp::Update {
+                path: path.to_string(),
+                hunks,
+            });
+            continue;
+        }
+
+        return Err(miette!("unknown patch directive: {line}"));
+    }
+
+    Ok(ops)
+}
+
+fn find_unique_hunk_start(
+    haystack: &[String],
+    needle: &[String],
+    offset: usize,
+) -> miette::Result<usize> {
+    if needle.is_empty() {
+        return Ok(offset.min(haystack.len()));
+    }
+    let mut matches = Vec::new();
+    for start in offset..=haystack.len().saturating_sub(needle.len()) {
+        if haystack[start..start + needle.len()] == *needle {
+            matches.push(start);
+        }
+    }
+    if matches.len() == 1 {
+        return Ok(matches[0]);
+    }
+    if matches.is_empty() {
+        for start in 0..=haystack.len().saturating_sub(needle.len()) {
+            if haystack[start..start + needle.len()] == *needle {
+                matches.push(start);
+            }
+        }
+        if matches.len() == 1 {
+            return Ok(matches[0]);
+        }
+    }
+    match matches.len() {
+        0 => Err(miette!("patch hunk old text not found uniquely in target file")),
+        n => Err(miette!(
+            "patch hunk old text matched {} locations in target file; provide more context",
+            n
+        )),
+    }
+}
+
+async fn apply_spin_edit_patch(root: &Path, patch_text: &str) -> miette::Result<SpinEditPatchSummary> {
+    let ops = parse_spin_edit_patch(patch_text)?;
+    let mut summary = SpinEditPatchSummary::default();
+
+    for op in ops {
+        match op {
+            PatchOp::Add { path, lines } => {
+                let file_path = resolve_relative_path_within_root(root, &path, "spin-edit patch add")?;
+                if tokio::fs::try_exists(&file_path)
+                    .await
+                    .map_err(|err| miette!("failed to stat {}: {err}", file_path.display()))?
+                {
+                    return Err(miette!("spin-edit patch cannot add existing file {}", path));
+                }
+                if let Some(parent) = file_path.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|err| miette!("failed to create {}: {err}", parent.display()))?;
+                }
+                let mut content = lines.join("\n");
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                tokio::fs::write(&file_path, content)
+                    .await
+                    .map_err(|err| miette!("failed to write {}: {err}", file_path.display()))?;
+                summary.changed_files += 1;
+                summary.added_files += 1;
+                summary.paths.push(path);
+            }
+            PatchOp::Delete { path } => {
+                let file_path =
+                    resolve_relative_path_within_root(root, &path, "spin-edit patch delete")?;
+                tokio::fs::remove_file(&file_path)
+                    .await
+                    .map_err(|err| miette!("failed to delete {}: {err}", file_path.display()))?;
+                summary.changed_files += 1;
+                summary.deleted_files += 1;
+                summary.paths.push(path);
+            }
+            PatchOp::Update { path, hunks } => {
+                let file_path =
+                    resolve_relative_path_within_root(root, &path, "spin-edit patch update")?;
+                let original = tokio::fs::read_to_string(&file_path)
+                    .await
+                    .map_err(|err| miette!("failed to read {}: {err}", file_path.display()))?;
+                let mut lines = original.lines().map(ToString::to_string).collect::<Vec<_>>();
+                let mut offset = 0usize;
+                for hunk in hunks {
+                    let start = find_unique_hunk_start(&lines, &hunk.old_lines, offset)?;
+                    let end = start + hunk.old_lines.len();
+                    lines.splice(start..end, hunk.new_lines.clone());
+                    offset = start + hunk.new_lines.len();
+                }
+                let mut updated = lines.join("\n");
+                if original.ends_with('\n') || !updated.is_empty() {
+                    updated.push('\n');
+                }
+                tokio::fs::write(&file_path, updated)
+                    .await
+                    .map_err(|err| miette!("failed to write {}: {err}", file_path.display()))?;
+                summary.changed_files += 1;
+                summary.updated_files += 1;
+                summary.paths.push(path);
+            }
+        }
+    }
+
+    Ok(summary)
 }
 
 fn sync_dashboard_state(

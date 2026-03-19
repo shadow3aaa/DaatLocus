@@ -1,7 +1,5 @@
 //! 本模块包含context，它是spinova自旋循环中承载状态的结构体
 
-use std::path::PathBuf;
-
 use crate::{
     config::Config, core::LLM, device::DeviceManager, emotion::Emotion, memory::Memory,
     obligations::Obligations, projects::Projects, reasoning::compiled::CompiledPromptStore,
@@ -20,7 +18,6 @@ pub struct Context {
     pub devices: DeviceManager,
     pub telegram: TelegramDeviceHandle,
     pub compiled_prompts: CompiledPromptStore,
-    pub current_workspace: Option<PathBuf>,
 }
 
 impl Context {
