@@ -33,7 +33,7 @@ struct InteractiveCliPolicyExample {
 struct InteractiveCliPolicyEvalCase {
     name: String,
     task: String,
-    terminal_view: String,
+    terminal_session_state: String,
     question: String,
     expected_policy: InteractiveCliPolicy,
     expected_next_input: Option<String>,
@@ -80,7 +80,7 @@ fn to_eval_cases(
             let reason_must_include = case.reason_must_include;
             EvalCase {
                 name: Box::leak(case.name.into_boxed_str()),
-                ir: program.dataset_ir(case.task, case.terminal_view, case.question),
+                ir: program.dataset_ir(case.task, case.terminal_session_state, case.question),
                 check: Arc::new(move |output| {
                     check_policy(output, &expected_policy)?;
                     check_next_input(output, expected_next_input.as_deref())?;

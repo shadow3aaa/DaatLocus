@@ -50,8 +50,16 @@ impl Renderer for OpenAIToolRenderer {
             tool_description: program.description().to_string(),
             output_schema: serde_json::to_value(schema_for!(P::Output)).unwrap(),
             system_messages: ir.system,
-            long_term_memory_messages: build_long_term_memory_messages(context),
-            history_messages: context.memory.prompt_messages(),
+            long_term_memory_messages: if program.include_long_term_memory_messages() {
+                build_long_term_memory_messages(context)
+            } else {
+                Vec::new()
+            },
+            history_messages: if program.include_history_messages() {
+                context.memory.prompt_messages()
+            } else {
+                Vec::new()
+            },
             current_user_message: user_sections.join("\n\n"),
             retry_messages: Vec::new(),
         }
@@ -67,7 +75,9 @@ fn build_long_term_memory_messages(context: &Context) -> Vec<PromptMessage> {
         )));
     }
     if let Some(reflection) = &context.prompt_memory.reflected_strategy {
-        messages.push(PromptMessage::system(format!("相关长期反思：\n{reflection}")));
+        messages.push(PromptMessage::system(format!(
+            "相关长期反思：\n{reflection}"
+        )));
     }
     messages
 }

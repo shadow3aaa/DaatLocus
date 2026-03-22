@@ -5,19 +5,9 @@ use miette::Result;
 use crate::{context::Context, reasoning::render::openai_tools::OpenAIToolRenderer};
 
 use super::{
-    ir::PromptIR,
-    optimizer::PromptTuningConfig,
-    program::Program,
-    programs::{
-        action_phase_common::ActionPhaseProgramSpec,
-        attend_notifications::AttendNotificationsProgram,
-        execute_task::ExecuteTaskProgram,
-        explore_new_tasks::ExploreNewTasksProgram,
-        plan_from_project::PlanFromProjectProgram,
-        resolve_telegram::ResolveTelegramChatProgram,
-    },
-    runtime::execute_program_with_ir_report,
-    trace::TraceOrigin,
+    ir::PromptIR, optimizer::PromptTuningConfig, program::Program,
+    programs::resolve_telegram::ResolveTelegramChatProgram,
+    runtime::execute_program_with_ir_report, trace::TraceOrigin,
 };
 
 pub struct EvalCase<O> {
@@ -46,44 +36,6 @@ pub async fn run_reasoning_eval(context: &Context) -> Result<Vec<EvalCaseResult>
             &resolve_program,
             "resolve_telegram_chat",
             resolve_program.dev_eval_cases(),
-        )
-        .await,
-    );
-
-    let attend = AttendNotificationsProgram;
-    results.extend(
-        run_suite(
-            context,
-            &renderer,
-            &attend,
-            attend.suite_name(),
-            attend.dev_eval_cases(),
-        )
-        .await,
-    );
-    let execute = ExecuteTaskProgram;
-    results.extend(
-        run_suite(
-            context,
-            &renderer,
-            &execute,
-            execute.suite_name(),
-            execute.dev_eval_cases(),
-        )
-        .await,
-    );
-    let plan = PlanFromProjectProgram;
-    results.extend(
-        run_suite(context, &renderer, &plan, plan.suite_name(), plan.dev_eval_cases()).await,
-    );
-    let explore = ExploreNewTasksProgram;
-    results.extend(
-        run_suite(
-            context,
-            &renderer,
-            &explore,
-            explore.suite_name(),
-            explore.dev_eval_cases(),
         )
         .await,
     );

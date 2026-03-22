@@ -15,7 +15,7 @@ impl Emotion {
             .await
             .ok()
             .and_then(|data| postcard::from_bytes::<Self>(&data).ok())
-            .unwrap_or_else(|| Self::default())
+            .unwrap_or_else(Self::default)
     }
 
     pub async fn shutdown(self) {

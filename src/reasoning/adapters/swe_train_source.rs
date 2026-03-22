@@ -33,16 +33,23 @@ pub struct SweTrainSource {
 impl SweTrainSource {
     pub async fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let raw = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|err| miette!("failed to read SWE-style training source {}: {err}", path.display()))?;
+        let raw = tokio::fs::read_to_string(path).await.map_err(|err| {
+            miette!(
+                "failed to read SWE-style training source {}: {err}",
+                path.display()
+            )
+        })?;
         Self::from_raw(path, &raw)
     }
 
     pub fn load_blocking(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let raw = std::fs::read_to_string(path)
-            .map_err(|err| miette!("failed to read SWE-style training source {}: {err}", path.display()))?;
+        let raw = std::fs::read_to_string(path).map_err(|err| {
+            miette!(
+                "failed to read SWE-style training source {}: {err}",
+                path.display()
+            )
+        })?;
         Self::from_raw(path, &raw)
     }
 
@@ -60,10 +67,6 @@ impl SweTrainSource {
         Ok(Self { tasks })
     }
 
-    pub fn tasks(&self) -> &[SweTrainTaskRecord] {
-        &self.tasks
-    }
-
     pub fn into_episode_tasks(self, max_steps: usize) -> Vec<EpisodeTask> {
         self.tasks
             .into_iter()
@@ -73,8 +76,7 @@ impl SweTrainSource {
 }
 
 fn parse_json(raw: &str) -> Result<Vec<SweTrainTaskRecord>> {
-    serde_json::from_str(raw)
-        .map_err(|err| miette!("failed to parse SWE-style task json: {err}"))
+    serde_json::from_str(raw).map_err(|err| miette!("failed to parse SWE-style task json: {err}"))
 }
 
 fn parse_jsonl(raw: &str) -> Result<Vec<SweTrainTaskRecord>> {
@@ -85,7 +87,10 @@ fn parse_jsonl(raw: &str) -> Result<Vec<SweTrainTaskRecord>> {
             continue;
         }
         let task = serde_json::from_str::<SweTrainTaskRecord>(line).map_err(|err| {
-            miette!("failed to parse SWE-style task jsonl line {}: {err}", index + 1)
+            miette!(
+                "failed to parse SWE-style task jsonl line {}: {err}",
+                index + 1
+            )
         })?;
         tasks.push(task);
     }
@@ -125,7 +130,8 @@ pub fn episode_task_from_record(record: SweTrainTaskRecord, max_steps: usize) ->
         );
     }
     if success_criteria.is_empty() {
-        success_criteria.push("produce a repository state that satisfies the task statement".to_string());
+        success_criteria
+            .push("produce a repository state that satisfies the task statement".to_string());
     }
     let validation_commands = derive_validation_commands(
         record.fail_to_pass.as_deref(),
@@ -134,7 +140,11 @@ pub fn episode_task_from_record(record: SweTrainTaskRecord, max_steps: usize) ->
 
     let instruction = match &record.hints_text {
         Some(hints) if !hints.trim().is_empty() => {
-            format!("{}\n\nHints:\n{}", record.problem_statement.trim(), hints.trim())
+            format!(
+                "{}\n\nHints:\n{}",
+                record.problem_statement.trim(),
+                hints.trim()
+            )
         }
         _ => record.problem_statement.trim().to_string(),
     };
@@ -149,7 +159,11 @@ pub fn episode_task_from_record(record: SweTrainTaskRecord, max_steps: usize) ->
         validation_commands,
         success_criteria,
         max_steps,
-        tags: vec!["swe".to_string(), "code".to_string(), "terminal".to_string()],
+        tags: vec![
+            "swe".to_string(),
+            "code".to_string(),
+            "terminal".to_string(),
+        ],
         metadata,
         task_goal: None,
         investigation_plan: Vec::new(),

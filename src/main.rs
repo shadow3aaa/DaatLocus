@@ -1,24 +1,26 @@
+mod apply_patch;
 mod config;
 mod context;
 mod core;
 mod dashboard;
 mod device;
-mod embeding;
 mod emotion;
 mod hindsight;
 mod memory;
 mod obligations;
 mod projects;
 mod providers;
-mod pty;
 mod reasoning;
+mod runtime_tools;
 mod snapshot;
 mod system_info;
-mod tasks;
 mod telegram_acl;
 mod telegram_device;
 mod telegram_transport;
 mod terminal_device;
+mod terminal_process;
+mod tool_ui;
+mod work_state;
 
 use std::{
     env,
@@ -27,59 +29,66 @@ use std::{
     time::Duration,
 };
 
-use chrono::{Local, TimeZone};
-use miette::{Result, miette};
-use serde::Deserialize;
-use uuid::Uuid;
-
 use crate::{
+    apply_patch::{PatchOperationKind, apply_patch_in_root},
     config::load_config,
     context::Context,
-    core::{Effect, Output, TelegramResolution},
-    dashboard::{DashboardState, DashboardTaskEntry, run_tui_dashboard},
+    core::TelegramResolution,
+    dashboard::{
+        DashboardActivityEvent, DashboardState, apply_activity_event,
+        render_activity_from_messages, run_tui_dashboard,
+    },
     device::{DeviceId, DeviceManager},
     emotion::Emotion,
     hindsight::{HindsightClient, HindsightRecallOptions, HindsightReflectOptions},
     memory::Memory,
-    obligations::{ObligationSource, ObligationStatus, Obligations},
-    projects::{ProjectOrigin, Projects},
+    obligations::Obligations,
+    projects::{ProjectStatus, Projects},
     providers::OpenAIClient,
     reasoning::{
         adapters::swe_train_source::SweTrainSource,
         bench::{
-            eval::{
-                run_bench_eval_continuity, run_bench_eval_interactive_cli,
-                run_bench_eval_terminal_completion,
-            },
-            optimize::{
-                run_bench_optimize_continuity, run_bench_optimize_interactive_cli,
-                run_bench_optimize_terminal_completion,
-            },
+            eval::{run_bench_eval_continuity, run_bench_eval_interactive_cli},
+            optimize::{run_bench_optimize_continuity, run_bench_optimize_interactive_cli},
         },
         compiled::{
             BENCH_COMPILED_DIR_NAME, COMPILED_DIR_NAME, CompiledPromptStore,
             load_all_compiled_programs,
         },
         environment::EpisodeObservation,
-        episode::{EpisodeMetric, EpisodeOutcome, EpisodeStatus, EpisodeStep, EpisodeTask},
+        episode::{
+            EpisodeActionRecord, EpisodeMetric, EpisodeOutcome, EpisodeStatus, EpisodeStep,
+            EpisodeTask,
+        },
         episode_harness::EpisodeHarness,
         eval::run_reasoning_eval,
         optimize::run_reasoning_optimize,
         programs::completion_judge::{CompletionJudgeOutput, CompletionJudgeProgram},
         programs::task_understanding::{TaskUnderstandingOutput, TaskUnderstandingProgram},
+        prompts::{SYSTEM_PROMPT, build_device_context_prompt},
         render::openai_tools::OpenAIToolRenderer,
-        runtime::{PromptMemoryContext, execute_program},
-        runtime_policy::RuntimePolicyProgram,
+        runtime::{
+            AgentMessage, AgentTurnRequest, AgentTurnResponse, PromptMemoryContext, PromptMessage,
+            PromptRole, execute_program,
+        },
         sleep::run_sleep,
         sleep_artifacts::SleepArtifactSuggestedFixKind,
     },
-    snapshot::{Snapshot, summarize_terminal_screen},
-    tasks::Tasks,
+    runtime_tools::{
+        ToolExecutionResult, build_runtime_tool_specs, execute_agent_tool_call,
+        render_tool_call_ui_event, summarize_primary_action_from_tool_call,
+    },
+    snapshot::Snapshot,
     telegram_acl::TelegramAclHandle,
     telegram_device::TelegramDevice,
     telegram_transport::TelegramTransport,
     terminal_device::TerminalDevice,
+    tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
+    work_state::WorkState,
 };
+use chrono::{Local, TimeZone};
+use miette::{Result, miette};
+use serde_json::json;
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -106,11 +115,6 @@ fn main() {
 }
 
 async fn async_main(args: Vec<String>) -> Result<()> {
-    if is_internal_cli_command(&args) {
-        run_internal_cli(&args).await?;
-        return Ok(());
-    }
-
     if is_mem_reset_command(&args) {
         run_mem_reset().await?;
         return Ok(());
@@ -218,22 +222,6 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         }
     }
 
-    if is_bench_eval_terminal_completion_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_bench_eval_terminal_completion(&context).await {
-            Ok(results) => {
-                print_bench_eval_results("terminal-completion", &results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
-    }
-
     if is_bench_eval_interactive_cli_command(&args) {
         let context = build_eval_context(config).await;
         match run_bench_eval_interactive_cli(&context).await {
@@ -255,22 +243,6 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         match run_bench_optimize_continuity(&context).await {
             Ok(results) => {
                 print_bench_optimization_results("continuity", &results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if is_bench_optimize_terminal_completion_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_bench_optimize_terminal_completion(&context).await {
-            Ok(results) => {
-                print_bench_optimization_results("terminal-completion", &results);
                 context.shutdown().await;
                 return Ok(());
             }
@@ -318,14 +290,13 @@ async fn async_main(args: Vec<String>) -> Result<()> {
     let memory = Memory::new().await;
     let obligations = Obligations::new().await;
     let projects = Projects::new().await;
-    let tasks = Tasks::new().await;
+    let work_state = WorkState::new().await;
     let emotion = Emotion::new().await;
     let telegram_acl = TelegramAclHandle::load().await;
     let terminal = TerminalDevice::new();
     let telegram = TelegramDevice::new();
     let telegram_handle = telegram.handle();
     bootstrap_telegram_device_from_acl(&telegram_handle, &telegram_acl);
-    let terminal_parser = terminal.parser();
     let devices = DeviceManager::new(
         Some(DeviceId::Terminal),
         vec![Box::new(terminal), Box::new(telegram)],
@@ -359,38 +330,29 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         prompt_memory: PromptMemoryContext::default(),
         obligations,
         projects,
-        tasks,
+        work_state,
         emotion,
         devices,
         telegram: telegram_handle,
         compiled_prompts,
+        dashboard_tx: None,
     };
-    initialize_injected_cli_tools(&mut context).await?;
+    let device_renders = context.devices.state_renders();
 
     let (tx, mut rx) = tokio::sync::watch::channel(DashboardState {
-        pty_parser: terminal_parser,
         focused_device: context.devices.focused(),
-        focused_title: context
-            .devices
-            .focused_render()
-            .as_ref()
-            .map(|view| view.title.clone()),
-        focused_content: context
-            .devices
-            .focused_render()
-            .as_ref()
-            .map(|view| view.content.clone()),
-        obligations: render_obligations_for_dashboard(&context),
-        projects: render_projects_for_dashboard(&context),
-        tasks: context
-            .tasks
-            .tasks()
-            .map(|(id, task)| (id, render_task_for_dashboard(task, &context)))
-            .collect(),
-        working_task: context.tasks.working_task(),
-        latest_trail: context.memory.trail().last().cloned(),
+        status_output: render_status_command_output_for_dashboard(&context, &device_renders),
+        inspect_telegram_output: render_inspect_output_for_dashboard(
+            &context,
+            &device_renders,
+            DeviceId::Telegram,
+        ),
+        activity_cells: render_activity_for_dashboard(&context),
+        live_activity_cells: Vec::new(),
         last_cycle_elapsed_ms: None,
+        runtime_status: None,
     });
+    context.dashboard_tx = Some(tx.clone());
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 
     let agent_handle = tokio::spawn(async move {
@@ -442,9 +404,7 @@ fn is_sleep_optimize_command(args: &[String]) -> bool {
 
 fn train_source_inspect_path(args: &[String]) -> Option<&str> {
     match args {
-        [command, subcommand, path]
-            if command == "train-source" && subcommand == "inspect" =>
-        {
+        [command, subcommand, path] if command == "train-source" && subcommand == "inspect" => {
             Some(path.as_str())
         }
         [command, path] if command == "inspect-train-source" => Some(path.as_str()),
@@ -514,19 +474,9 @@ fn is_bench_optimize_continuity_command(args: &[String]) -> bool {
         || matches!(args, [command] if command == "optimize-bench-continuity")
 }
 
-fn is_bench_eval_terminal_completion_command(args: &[String]) -> bool {
-    matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "terminal-completion")
-        || matches!(args, [command] if command == "eval-bench-terminal-completion")
-}
-
 fn is_bench_eval_interactive_cli_command(args: &[String]) -> bool {
     matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "interactive-cli")
         || matches!(args, [command] if command == "eval-bench-interactive-cli")
-}
-
-fn is_bench_optimize_terminal_completion_command(args: &[String]) -> bool {
-    matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "terminal-completion")
-        || matches!(args, [command] if command == "optimize-bench-terminal-completion")
 }
 
 fn is_bench_optimize_interactive_cli_command(args: &[String]) -> bool {
@@ -536,30 +486,38 @@ fn is_bench_optimize_interactive_cli_command(args: &[String]) -> bool {
 
 async fn run_mem_reset() -> Result<()> {
     let home = get_spinova_home().await;
-    let config = crate::config::Config::default();
+    let config = load_config()
+        .await
+        .map_err(|err| miette!("failed to load config for mem-reset: {err}"))?;
+    let hindsight = HindsightClient::from_config(&config.hindsight);
+    let hindsight_cleared = if let Some(client) = &hindsight {
+        client.delete_bank().await?;
+        true
+    } else {
+        false
+    };
     let judge_model = config.judge.resolved_model(&config.main_model);
     let telegram = TelegramDevice::empty();
     let telegram_handle = telegram.handle();
     let devices = DeviceManager::new(None, vec![Box::new(telegram)])
         .await
         .map_err(|err| miette!("failed to construct default devices for mem-reset: {err}"))?;
-    let hindsight = HindsightClient::from_config(&config.hindsight);
-    let hindsight_retain = hindsight.as_ref().map(HindsightClient::spawn_retain_worker);
     let context = Context {
         llm: Box::new(OpenAIClient::new(&config)),
         judge_llm: Box::new(OpenAIClient::from_model_config(&judge_model)),
         config,
-        hindsight,
-        hindsight_retain,
+        hindsight: None,
+        hindsight_retain: None,
         memory: Memory::empty().await,
         prompt_memory: PromptMemoryContext::default(),
         obligations: Obligations::default(),
         projects: Projects::default(),
-        tasks: Tasks::default(),
+        work_state: WorkState::default(),
         emotion: Emotion::default(),
         devices,
         telegram: telegram_handle,
         compiled_prompts: CompiledPromptStore::empty(),
+        dashboard_tx: None,
     };
     context.shutdown().await;
 
@@ -575,9 +533,14 @@ async fn run_mem_reset() -> Result<()> {
         home.display()
     );
     println!(
-        "[mem-reset] cleared via empty context shutdown: l1_memory, tasks, projects, obligations, emotion"
+        "[mem-reset] cleared via empty context shutdown: l1_memory, projects, obligations, work_state, emotion"
     );
     println!("[mem-reset] cleared: reasoning_traces.jsonl");
+    if hindsight_cleared {
+        println!("[mem-reset] cleared: hindsight bank");
+    } else {
+        println!("[mem-reset] skipped: hindsight bank (disabled in config)");
+    }
     println!("[mem-reset] preserved: config.toml, reasoning_compiled/, telegram_acl.json");
 
     Ok(())
@@ -633,7 +596,7 @@ async fn build_eval_context_with_compiled(
     let memory = Memory::new().await;
     let obligations = Obligations::new().await;
     let projects = Projects::new().await;
-    let tasks = Tasks::new().await;
+    let work_state = WorkState::new().await;
     let emotion = Emotion::new().await;
     let terminal = TerminalDevice::new();
     let telegram = TelegramDevice::new();
@@ -650,7 +613,7 @@ async fn build_eval_context_with_compiled(
     let hindsight = HindsightClient::from_config(&config.hindsight);
     let hindsight_retain = hindsight.as_ref().map(HindsightClient::spawn_retain_worker);
 
-    let mut context = Context {
+    Context {
         llm: Box::new(client),
         judge_llm: Box::new(judge_client),
         config,
@@ -660,16 +623,13 @@ async fn build_eval_context_with_compiled(
         prompt_memory: PromptMemoryContext::default(),
         obligations,
         projects,
-        tasks,
+        work_state,
         emotion,
         devices,
         telegram: telegram_handle,
         compiled_prompts,
-    };
-    if let Err(err) = initialize_injected_cli_tools(&mut context).await {
-        eprintln!("{err:?}");
+        dashboard_tx: None,
     }
-    context
 }
 
 fn bootstrap_telegram_device_from_acl(
@@ -706,7 +666,11 @@ fn run_train_source_inspect_blocking(path: &str) -> Result<()> {
     Ok(())
 }
 
-async fn run_train_source_rollout(config: crate::config::Config, path: &str, task_index: usize) -> Result<()> {
+async fn run_train_source_rollout(
+    config: crate::config::Config,
+    path: &str,
+    task_index: usize,
+) -> Result<()> {
     let source = SweTrainSource::load(path).await?;
     let tasks = source.into_episode_tasks(64);
     let Some(mut task) = tasks.get(task_index).cloned() else {
@@ -727,10 +691,11 @@ async fn run_train_source_rollout(config: crate::config::Config, path: &str, tas
     let mut context = build_eval_context(config).await;
     context.devices.focus(DeviceId::Terminal).await?;
     enter_episode_workspace(&mut context, &workspace_dir).await?;
-    let seeded_task_id = context.tasks.add_task(task.instruction.clone());
-    context.tasks.select_working_task(seeded_task_id);
+    context
+        .work_state
+        .set_objective(task.instruction.clone(), None);
 
-    let outcome = rollout_runtime_policy_episode(&mut context, task, &workspace_dir).await?;
+    let outcome = rollout_agent_loop_episode(&mut context, task, &workspace_dir).await?;
     print_episode_rollout(&outcome, &episode_home);
     context.shutdown().await;
     drop(home_override);
@@ -967,10 +932,11 @@ async fn execute_train_source_task(
     let mut context = build_eval_context_with_compiled(config.clone(), compiled_prompts).await;
     context.devices.focus(DeviceId::Terminal).await?;
     enter_episode_workspace(&mut context, &workspace_dir).await?;
-    let seeded_task_id = context.tasks.add_task(run_task.instruction.clone());
-    context.tasks.select_working_task(seeded_task_id);
+    context
+        .work_state
+        .set_objective(run_task.instruction.clone(), None);
 
-    let outcome = rollout_runtime_policy_episode(&mut context, run_task, &workspace_dir).await?;
+    let outcome = rollout_agent_loop_episode(&mut context, run_task, &workspace_dir).await?;
     save_episode_outcome(episode_root, &outcome).await?;
     context.shutdown().await;
     drop(home_override);
@@ -1105,7 +1071,7 @@ fn print_episode_batch_summary(
     }
 }
 
-async fn rollout_runtime_policy_episode(
+async fn rollout_agent_loop_episode(
     context: &mut Context,
     mut task: EpisodeTask,
     workspace_dir: &Path,
@@ -1125,19 +1091,13 @@ async fn rollout_runtime_policy_episode(
         "{} | {}",
         task_understanding.thread_focus, task_understanding.task_goal
     );
-    context
-        .tasks
-        .set_working_task_description(compressed_task);
-    context.tasks.set_working_task_guidance(
+    context.work_state.set_objective(compressed_task, None);
+    context.work_state.set_guidance(
         task_understanding.key_anchors.clone(),
         task_understanding.investigation_plan.clone(),
     );
-    context
-        .tasks
-        .set_working_task_phase("investigate".to_string());
-    let initial_snapshot = Snapshot::new(context)
-        .await
-        .to_string();
+    context.work_state.set_phase("investigate".to_string());
+    let initial_snapshot = Snapshot::new(context).await.to_string();
     let initial_observation = EpisodeObservation {
         summary: format!("task seeded: {}", task.title),
         snapshot_text: initial_snapshot,
@@ -1146,10 +1106,10 @@ async fn rollout_runtime_policy_episode(
     let mut work_phase = "investigate".to_string();
 
     for index in 0..task.max_steps {
-        context.tasks.set_working_task_phase(work_phase.clone());
-        let step_execution = execute_runtime_policy_step(context, &renderer).await;
+        context.work_state.set_phase(work_phase.clone());
+        let step_execution = execute_agent_loop_step(context, None).await;
         let output = step_execution.output;
-        let effect = output.effect.clone();
+        let action = output.primary_action.clone();
 
         let mut metadata = std::collections::BTreeMap::new();
         metadata.insert("description".to_string(), output.description.clone());
@@ -1170,27 +1130,22 @@ async fn rollout_runtime_policy_episode(
         let next_work_phase = normalize_work_phase(&completion.state);
         if next_work_phase == "verify" {
             context
-                .tasks
-                .set_working_task_verify_pending_check(completion.next_check.clone());
+                .work_state
+                .set_verify_pending_check(completion.next_check.clone());
         } else {
-            context.tasks.set_working_task_verify_pending_check(None);
+            context.work_state.set_verify_pending_check(None);
         }
         metadata.insert("work_phase".to_string(), next_work_phase.clone());
-        let should_stop = should_abort_after_repeated_wait(
-            steps.last(),
-            &effect,
-            &next_work_phase,
-        );
         steps.push(EpisodeStep {
             index,
-            module: "runtime_policy".to_string(),
-            effect: effect.clone(),
+            module: "agent_loop".to_string(),
+            action,
             observation_summary: output.observation,
             snapshot_text: step_execution.snapshot_text,
             metadata,
         });
         work_phase = next_work_phase;
-        context.tasks.set_working_task_phase(work_phase.clone());
+        context.work_state.set_phase(work_phase.clone());
 
         if matches!(work_phase.as_str(), "finish") {
             return finalize_runtime_episode(
@@ -1204,7 +1159,7 @@ async fn rollout_runtime_policy_episode(
             .await;
         }
 
-        if context.tasks.is_empty() || context.tasks.working_task().is_none() || should_stop {
+        if !context.work_state.has_objective() {
             return finalize_runtime_episode(
                 context,
                 task,
@@ -1261,9 +1216,10 @@ async fn judge_episode_completion(
         .rev()
         .map(|step| {
             format!(
-                "step={} effect={:?} doing={} reason={}",
+                "step={} action={} ({}) doing={} reason={}",
                 step.index,
-                step.effect,
+                step.action.kind,
+                step.action.summary,
                 step.metadata
                     .get("current_doing")
                     .map(String::as_str)
@@ -1277,10 +1233,7 @@ async fn judge_episode_completion(
         .collect::<Vec<_>>();
 
     let program = CompletionJudgeProgram {
-        task_goal: task
-            .task_goal
-            .clone()
-            .unwrap_or_else(|| task.title.clone()),
+        task_goal: task.task_goal.clone().unwrap_or_else(|| task.title.clone()),
         done_criteria: if task.done_criteria.is_empty() {
             task.success_criteria.clone()
         } else {
@@ -1297,7 +1250,14 @@ async fn judge_episode_completion(
         },
     };
     let snapshot = Snapshot::new(context).await;
-    execute_program(context.judge_llm.as_ref(), context, &snapshot, renderer, &program).await
+    execute_program(
+        context.judge_llm.as_ref(),
+        context,
+        &snapshot,
+        renderer,
+        &program,
+    )
+    .await
 }
 
 fn normalize_work_phase(state: &str) -> String {
@@ -1311,27 +1271,6 @@ fn normalize_work_phase(state: &str) -> String {
     }
 }
 
-fn should_abort_after_repeated_wait(
-    previous: Option<&EpisodeStep>,
-    current_effect: &Effect,
-    next_work_phase: &str,
-) -> bool {
-    if !matches!(current_effect, Effect::Wait | Effect::SilentWait) {
-        return false;
-    }
-    let Some(previous) = previous else {
-        return false;
-    };
-    let repeated_wait = matches!(
-        (&previous.effect, current_effect),
-        (Effect::Wait, Effect::Wait) | (Effect::SilentWait, Effect::SilentWait)
-    );
-    if !repeated_wait {
-        return false;
-    }
-    matches!(next_work_phase, "investigate" | "blocked")
-}
-
 async fn finalize_runtime_episode(
     context: &mut Context,
     task: EpisodeTask,
@@ -1341,7 +1280,7 @@ async fn finalize_runtime_episode(
     forced_rollout_status: Option<EpisodeStatus>,
 ) -> Result<EpisodeOutcome> {
     let rollout_status = forced_rollout_status.unwrap_or_else(|| {
-        if context.tasks.is_empty() || context.tasks.working_task().is_none() {
+        if !context.work_state.has_objective() {
             EpisodeStatus::Succeeded
         } else if steps.len() >= task.max_steps {
             EpisodeStatus::MaxStepsExceeded
@@ -1349,15 +1288,14 @@ async fn finalize_runtime_episode(
             EpisodeStatus::Aborted
         }
     });
-    let validation_results = run_validation_commands(&task.validation_commands, workspace_dir).await?;
+    let validation_results =
+        run_validation_commands(&task.validation_commands, workspace_dir).await?;
     let status = final_episode_status(rollout_status, &validation_results);
-    let final_snapshot = Snapshot::new(context)
-        .await
-        .to_string();
+    let final_snapshot = Snapshot::new(context).await.to_string();
     let metric = build_episode_metric(&steps, status, rollout_status, &validation_results);
     let outcome = EpisodeOutcome {
         task,
-        environment_name: "runtime_policy_rollout".to_string(),
+        environment_name: "agent_loop_rollout".to_string(),
         initial_observation,
         final_observation: EpisodeObservation {
             summary: final_episode_summary(status, &steps, &validation_results),
@@ -1377,22 +1315,12 @@ fn build_episode_metric(
     rollout_status: EpisodeStatus,
     validation_results: &[ValidationCommandResult],
 ) -> EpisodeMetric {
-    let repeated_waits = steps
-        .windows(2)
-        .filter(|pair| {
-            matches!(
-                (&pair[0].effect, &pair[1].effect),
-                (Effect::Wait, Effect::Wait)
-                    | (Effect::SilentWait, Effect::SilentWait)
-            )
-        })
-        .count();
     let repeated_terminal_loops = count_repeated_terminal_loops(steps);
-    let repeated_effects = repeated_waits + repeated_terminal_loops;
+    let repeated_actions = repeated_terminal_loops;
 
     let success = matches!(status, EpisodeStatus::Succeeded);
     let score = if success {
-        (1.0 - (steps.len() as f32 * 0.01) - (repeated_effects as f32 * 0.05)).max(0.0)
+        (1.0 - (steps.len() as f32 * 0.01) - (repeated_actions as f32 * 0.05)).max(0.0)
     } else {
         0.0
     };
@@ -1409,7 +1337,7 @@ fn build_episode_metric(
         success,
         score,
         steps_used: steps.len(),
-        repeated_effects,
+        repeated_actions,
         stagnation_events: repeated_terminal_loops,
         notes,
     }
@@ -1423,7 +1351,7 @@ fn count_repeated_terminal_loops(steps: &[EpisodeStep]) -> usize {
         if !matches!(phase, Some("investigate") | Some("verify")) {
             continue;
         }
-        let Some(signature) = repeated_terminal_loop_signature(&step.effect) else {
+        let Some(signature) = repeated_terminal_loop_signature(&step.action) else {
             continue;
         };
         let count = seen.entry(signature).or_insert(0);
@@ -1435,14 +1363,15 @@ fn count_repeated_terminal_loops(steps: &[EpisodeStep]) -> usize {
     repeated
 }
 
-fn repeated_terminal_loop_signature(effect: &Effect) -> Option<String> {
-    let Effect::DeviceAction {
-        action: crate::device::DeviceAction::TerminalInput { text },
-    } = effect
-    else {
-        return None;
+fn repeated_terminal_loop_signature(action: &EpisodeActionRecord) -> Option<String> {
+    let text = match action.kind.as_str() {
+        "terminal_exec" | "terminal_write_stdin" => action.summary.as_str(),
+        _ => return None,
     };
     let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
     if trimmed.contains("pytest -v elastic/tests/") {
         return Some("pytest:elastic/tests".to_string());
     }
@@ -1472,9 +1401,11 @@ fn repeated_terminal_loop_signature(effect: &Effect) -> Option<String> {
         "cat ",
         "sed -n ",
     ];
-    prefixes
-        .iter()
-        .find_map(|prefix| trimmed.strip_prefix(prefix).map(|rest| format!("{prefix}{rest}")))
+    prefixes.iter().find_map(|prefix| {
+        trimmed
+            .strip_prefix(prefix)
+            .map(|rest| format!("{prefix}{rest}"))
+    })
 }
 
 fn final_episode_summary(
@@ -1491,7 +1422,10 @@ fn final_episode_summary(
     } else {
         format!(
             "validation={}/{}",
-            validation_results.iter().filter(|result| result.success).count(),
+            validation_results
+                .iter()
+                .filter(|result| result.success)
+                .count(),
             validation_results.len()
         )
     };
@@ -1510,13 +1444,20 @@ fn print_episode_rollout(outcome: &EpisodeOutcome, episode_home: &PathBuf) {
     );
     for step in &outcome.steps {
         println!(
-            "- step={} module={} effect={:?}\n  observation={}\n  doing={}\n  description={}",
+            "- step={} module={} action={} ({})\n  observation={}\n  doing={}\n  description={}",
             step.index,
             step.module,
-            step.effect,
+            step.action.kind,
+            step.action.summary,
             step.observation_summary,
-            step.metadata.get("current_doing").map(String::as_str).unwrap_or("-"),
-            step.metadata.get("description").map(String::as_str).unwrap_or("-")
+            step.metadata
+                .get("current_doing")
+                .map(String::as_str)
+                .unwrap_or("-"),
+            step.metadata
+                .get("description")
+                .map(String::as_str)
+                .unwrap_or("-")
         );
     }
     println!("final snapshot:");
@@ -1531,8 +1472,12 @@ fn print_episode_rollout(outcome: &EpisodeOutcome, episode_home: &PathBuf) {
 
 async fn save_episode_outcome(episode_root: &Path, outcome: &EpisodeOutcome) -> Result<()> {
     let path = episode_root.join("episode_outcome.json");
-    let payload = serde_json::to_vec_pretty(outcome)
-        .map_err(|err| miette!("failed to serialize episode outcome {}: {err}", outcome.task.id))?;
+    let payload = serde_json::to_vec_pretty(outcome).map_err(|err| {
+        miette!(
+            "failed to serialize episode outcome {}: {err}",
+            outcome.task.id
+        )
+    })?;
     tokio::fs::write(&path, payload)
         .await
         .map_err(|err| miette!("failed to write episode outcome {}: {err}", path.display()))?;
@@ -1563,7 +1508,12 @@ fn print_train_source_learn_summary(session_root: &Path, state: &TrainSourceLear
     let avg_score = if state.outcomes.is_empty() {
         0.0
     } else {
-        state.outcomes.iter().map(|outcome| outcome.score).sum::<f32>() / state.outcomes.len() as f32
+        state
+            .outcomes
+            .iter()
+            .map(|outcome| outcome.score)
+            .sum::<f32>()
+            / state.outcomes.len() as f32
     };
     println!(
         "train source learn summary: session={} completed={}/{} succeeded={} failed={} aborted={} max_steps={} avg_score={:.2} sleep_runs={} optimize_runs={} compiled_suites={}",
@@ -1622,7 +1572,7 @@ struct TrainSourceLearnOutcomeSummary {
     status: String,
     score: f32,
     steps_used: usize,
-    repeated_effects: usize,
+    repeated_actions: usize,
 }
 
 impl TrainSourceLearnOutcomeSummary {
@@ -1632,7 +1582,7 @@ impl TrainSourceLearnOutcomeSummary {
             status: format!("{:?}", outcome.status),
             score: outcome.metric.score,
             steps_used: outcome.metric.steps_used,
-            repeated_effects: outcome.metric.repeated_effects,
+            repeated_actions: outcome.metric.repeated_actions,
         }
     }
 }
@@ -1828,13 +1778,19 @@ async fn prepare_isolated_episode_root(task: &EpisodeTask, variant_name: &str) -
         .join(slugify(variant_name));
 
     if path.exists() {
-        tokio::fs::remove_dir_all(&path)
-            .await
-            .map_err(|err| miette!("failed to clear isolated episode root {}: {err}", path.display()))?;
+        tokio::fs::remove_dir_all(&path).await.map_err(|err| {
+            miette!(
+                "failed to clear isolated episode root {}: {err}",
+                path.display()
+            )
+        })?;
     }
-    tokio::fs::create_dir_all(&path)
-        .await
-        .map_err(|err| miette!("failed to create isolated episode root {}: {err}", path.display()))?;
+    tokio::fs::create_dir_all(&path).await.map_err(|err| {
+        miette!(
+            "failed to create isolated episode root {}: {err}",
+            path.display()
+        )
+    })?;
     Ok(path)
 }
 
@@ -1849,22 +1805,31 @@ async fn prepare_learning_session_root(path: &str) -> Result<PathBuf> {
         .join("tmp")
         .join("train_source_learn")
         .join(session_id);
-    tokio::fs::create_dir_all(&root)
-        .await
-        .map_err(|err| miette!("failed to create learn session root {}: {err}", root.display()))?;
+    tokio::fs::create_dir_all(&root).await.map_err(|err| {
+        miette!(
+            "failed to create learn session root {}: {err}",
+            root.display()
+        )
+    })?;
     Ok(root)
 }
 
 async fn prepare_learning_home_root(session_root: &Path) -> Result<PathBuf> {
     let root = session_root.join("learning_home");
     if root.exists() {
-        tokio::fs::remove_dir_all(&root)
-            .await
-            .map_err(|err| miette!("failed to clear learn session home {}: {err}", root.display()))?;
+        tokio::fs::remove_dir_all(&root).await.map_err(|err| {
+            miette!(
+                "failed to clear learn session home {}: {err}",
+                root.display()
+            )
+        })?;
     }
-    tokio::fs::create_dir_all(&root)
-        .await
-        .map_err(|err| miette!("failed to create learn session home {}: {err}", root.display()))?;
+    tokio::fs::create_dir_all(&root).await.map_err(|err| {
+        miette!(
+            "failed to create learn session home {}: {err}",
+            root.display()
+        )
+    })?;
     Ok(root)
 }
 
@@ -1875,7 +1840,10 @@ async fn sync_learning_assets_to_session(shared_home: &Path, session_home: &Path
     Ok(())
 }
 
-async fn sync_learning_assets_back_to_shared(session_home: &Path, shared_home: &Path) -> Result<()> {
+async fn sync_learning_assets_back_to_shared(
+    session_home: &Path,
+    shared_home: &Path,
+) -> Result<()> {
     for name in [COMPILED_DIR_NAME, "sleep_artifacts"] {
         sync_path_replace(&session_home.join(name), &shared_home.join(name)).await?;
     }
@@ -1929,9 +1897,13 @@ async fn copy_path_recursive(src: &Path, dst: &Path) -> Result<()> {
                 .await
                 .map_err(|err| miette!("failed to create parent {}: {err}", parent.display()))?;
         }
-        tokio::fs::copy(src, dst)
-            .await
-            .map_err(|err| miette!("failed to copy {} -> {}: {err}", src.display(), dst.display()))?;
+        tokio::fs::copy(src, dst).await.map_err(|err| {
+            miette!(
+                "failed to copy {} -> {}: {err}",
+                src.display(),
+                dst.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -1945,20 +1917,31 @@ async fn prepare_learning_episode_root(
         .join("episodes")
         .join(format!("{:04}-{}", index, slugify(&task.id)));
     if root.exists() {
-        tokio::fs::remove_dir_all(&root)
-            .await
-            .map_err(|err| miette!("failed to clear learn episode root {}: {err}", root.display()))?;
+        tokio::fs::remove_dir_all(&root).await.map_err(|err| {
+            miette!(
+                "failed to clear learn episode root {}: {err}",
+                root.display()
+            )
+        })?;
     }
-    tokio::fs::create_dir_all(&root)
-        .await
-        .map_err(|err| miette!("failed to create learn episode root {}: {err}", root.display()))?;
+    tokio::fs::create_dir_all(&root).await.map_err(|err| {
+        miette!(
+            "failed to create learn episode root {}: {err}",
+            root.display()
+        )
+    })?;
     Ok(root)
 }
 
 async fn provision_episode_workspace(task: &EpisodeTask, workspace_dir: &Path) -> Result<()> {
     tokio::fs::create_dir_all(workspace_dir)
         .await
-        .map_err(|err| miette!("failed to create episode workspace {}: {err}", workspace_dir.display()))?;
+        .map_err(|err| {
+            miette!(
+                "failed to create episode workspace {}: {err}",
+                workspace_dir.display()
+            )
+        })?;
 
     if let Some(repo) = task.metadata.get("repo") {
         let remote = infer_repo_remote(repo);
@@ -2013,19 +1996,30 @@ async fn prepare_train_source_repo_cache_root() -> Result<PathBuf> {
         .map_err(|err| miette!("failed to get current dir for train-source repo cache: {err}"))?
         .join("tmp")
         .join("train_source_repo_cache");
-    tokio::fs::create_dir_all(&root)
-        .await
-        .map_err(|err| miette!("failed to create train-source repo cache root {}: {err}", root.display()))?;
+    tokio::fs::create_dir_all(&root).await.map_err(|err| {
+        miette!(
+            "failed to create train-source repo cache root {}: {err}",
+            root.display()
+        )
+    })?;
     Ok(root)
 }
 
 async fn ensure_cached_repo(repo: &str, remote: &str, cache_repo: &Path) -> Result<()> {
     if cache_repo.exists() {
-        println!("          repo cache hit for {} at {}", repo, cache_repo.display());
+        println!(
+            "          repo cache hit for {} at {}",
+            repo,
+            cache_repo.display()
+        );
         return Ok(());
     }
 
-    println!("          repo cache miss for {} -> {}", repo, cache_repo.display());
+    println!(
+        "          repo cache miss for {} -> {}",
+        repo,
+        cache_repo.display()
+    );
     run_host_command(
         &[
             "git",
@@ -2104,7 +2098,7 @@ async fn enter_episode_workspace(context: &mut Context, workspace_dir: &Path) ->
     };
     context
         .devices
-        .execute_focused(crate::device::DeviceAction::TerminalInput { text: cd_command })
+        .send_terminal_input(cd_command)
         .await
         .map_err(|err| miette!("failed to enter episode workspace in terminal: {err}"))?;
     context
@@ -2114,384 +2108,393 @@ async fn enter_episode_workspace(context: &mut Context, workspace_dir: &Path) ->
     Ok(())
 }
 
-fn is_internal_cli_command(args: &[String]) -> bool {
-    matches!(args, [command, subcommand, ..] if command == "internal-cli" && subcommand == "edit")
-}
-
-async fn run_internal_cli(args: &[String]) -> Result<()> {
-    match args {
-        [_, edit, subcommand, rest @ ..] if edit == "edit" && subcommand == "patch" => {
-            run_internal_cli_edit_patch(rest).await
-        }
-        [_, edit, subcommand, rest @ ..] if edit == "edit" && subcommand == "replace" => {
-            run_internal_cli_edit_replace(rest).await
-        }
-        [_, edit, subcommand, rest @ ..] if edit == "edit" && subcommand == "show" => {
-            run_internal_cli_edit_show(rest).await
-        }
-        [_, edit, subcommand, ..] if edit == "edit" => Err(miette!(
-            "unknown internal edit subcommand: {subcommand}"
-        )),
-        _ => Err(miette!("unsupported internal-cli invocation")),
-    }
-}
-
-async fn run_internal_cli_edit_patch(args: &[String]) -> Result<()> {
-    let mut patch_file: Option<PathBuf> = None;
-    let mut use_stdin = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--patch-file" => {
-                i += 1;
-                patch_file = args.get(i).map(PathBuf::from);
-            }
-            "--stdin" => {
-                use_stdin = true;
-            }
-            flag => return Err(miette!("unknown spin-edit patch flag: {flag}")),
-        }
-        i += 1;
-    }
-
-    if use_stdin && patch_file.is_some() {
-        return Err(miette!(
-            "spin-edit patch accepts either --stdin or --patch-file, not both"
-        ));
-    }
-    let patch_text = if use_stdin {
-        read_stdin_to_string().await?
-    } else {
-        let patch_file =
-            patch_file.ok_or_else(|| miette!("spin-edit patch requires --stdin or --patch-file"))?;
-        tokio::fs::read_to_string(&patch_file)
-            .await
-            .map_err(|err| miette!("failed to read patch file {}: {err}", patch_file.display()))?
-    };
-    let cwd = env::current_dir().map_err(|err| miette!("failed to read current directory: {err}"))?;
-    let summary = apply_spin_edit_patch(&cwd, &patch_text).await?;
-    println!("changed_files={}", summary.changed_files);
-    println!("added_files={}", summary.added_files);
-    println!("deleted_files={}", summary.deleted_files);
-    println!("updated_files={}", summary.updated_files);
-    for path in summary.paths {
-        println!("path={path}");
-    }
-    Ok(())
-}
-
-async fn run_internal_cli_edit_replace(args: &[String]) -> Result<()> {
-    let mut file: Option<String> = None;
-    let mut old_text: Option<String> = None;
-    let mut new_text: Option<String> = None;
-    let mut old_file: Option<PathBuf> = None;
-    let mut new_file: Option<PathBuf> = None;
-    let mut spec_stdin = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--file" => {
-                i += 1;
-                file = args.get(i).cloned();
-            }
-            "--old" => {
-                i += 1;
-                old_text = args.get(i).cloned();
-            }
-            "--new" => {
-                i += 1;
-                new_text = args.get(i).cloned();
-            }
-            "--old-file" => {
-                i += 1;
-                old_file = args.get(i).map(PathBuf::from);
-            }
-            "--new-file" => {
-                i += 1;
-                new_file = args.get(i).map(PathBuf::from);
-            }
-            "--spec-stdin" => {
-                spec_stdin = true;
-            }
-            flag => {
-                return Err(miette!("unknown spin-edit replace flag: {flag}"));
-            }
-        }
-        i += 1;
-    }
-
-    #[derive(Deserialize)]
-    struct ReplaceSpec {
-        file: String,
-        old_text: String,
-        new_text: String,
-    }
-
-    let (file, old_text, new_text) = if spec_stdin {
-        if file.is_some() || old_text.is_some() || new_text.is_some() || old_file.is_some() || new_file.is_some() {
-            return Err(miette!(
-                "spin-edit replace --spec-stdin must not be combined with --file/--old/--new/--old-file/--new-file"
-            ));
-        }
-        let raw = read_stdin_to_string().await?;
-        let spec: ReplaceSpec = serde_json::from_str(&raw)
-            .map_err(|err| miette!("invalid spin-edit replace JSON on stdin: {err}"))?;
-        (spec.file, spec.old_text, spec.new_text)
-    } else {
-        let file = file.ok_or_else(|| miette!("spin-edit replace requires --file or --spec-stdin"))?;
-        let old_text = match (old_text, old_file) {
-            (Some(text), None) => text,
-            (None, Some(path)) => tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|err| miette!("failed to read --old-file {}: {err}", path.display()))?,
-            (Some(_), Some(_)) => {
-                return Err(miette!(
-                    "spin-edit replace accepts either --old or --old-file, not both"
-                ));
-            }
-            (None, None) => return Err(miette!("spin-edit replace requires --old or --old-file")),
-        };
-        let new_text = match (new_text, new_file) {
-            (Some(text), None) => text,
-            (None, Some(path)) => tokio::fs::read_to_string(&path)
-                .await
-                .map_err(|err| miette!("failed to read --new-file {}: {err}", path.display()))?,
-            (Some(_), Some(_)) => {
-                return Err(miette!(
-                    "spin-edit replace accepts either --new or --new-file, not both"
-                ));
-            }
-            (None, None) => return Err(miette!("spin-edit replace requires --new or --new-file")),
-        };
-        (file, old_text, new_text)
-    };
-
-    let cwd = env::current_dir().map_err(|err| miette!("failed to read current directory: {err}"))?;
-    let path = resolve_relative_path_within_root(&cwd, &file, "spin-edit replace")?;
-    let report = execute_precise_file_replace(&path, &old_text, &new_text, "spin-edit replace").await?;
-    print_precise_edit_report(&file, &report);
-    Ok(())
-}
-
-async fn read_stdin_to_string() -> Result<String> {
-    use tokio::io::AsyncReadExt;
-
-    let mut stdin = tokio::io::stdin();
-    let mut content = String::new();
-    stdin
-        .read_to_string(&mut content)
-        .await
-        .map_err(|err| miette!("failed to read stdin: {err}"))?;
-    Ok(content)
-}
-
-async fn run_internal_cli_edit_show(args: &[String]) -> Result<()> {
-    let mut file: Option<String> = None;
-    let mut start: Option<usize> = None;
-    let mut end: Option<usize> = None;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--file" => {
-                i += 1;
-                file = args.get(i).cloned();
-            }
-            "--start" => {
-                i += 1;
-                start = args
-                    .get(i)
-                    .ok_or_else(|| miette!("missing value for --start"))?
-                    .parse::<usize>()
-                    .map(Some)
-                    .map_err(|err| miette!("invalid --start value: {err}"))?;
-            }
-            "--end" => {
-                i += 1;
-                end = args
-                    .get(i)
-                    .ok_or_else(|| miette!("missing value for --end"))?
-                    .parse::<usize>()
-                    .map(Some)
-                    .map_err(|err| miette!("invalid --end value: {err}"))?;
-            }
-            flag => return Err(miette!("unknown spin-edit show flag: {flag}")),
-        }
-        i += 1;
-    }
-
-    let file = file.ok_or_else(|| miette!("spin-edit show requires --file"))?;
-    let cwd = env::current_dir().map_err(|err| miette!("failed to read current directory: {err}"))?;
-    let path = resolve_relative_path_within_root(&cwd, &file, "spin-edit show")?;
-    let content = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|err| miette!("failed to read {}: {err}", path.display()))?;
-    let lines = content.lines().collect::<Vec<_>>();
-    let start_line = start.unwrap_or(1).max(1);
-    let end_line = end.unwrap_or_else(|| lines.len()).max(start_line);
-
-    for line_no in start_line..=end_line.min(lines.len()) {
-        println!("{line_no:>6} {}", lines[line_no - 1]);
-    }
-    Ok(())
-}
-
-async fn initialize_injected_cli_tools(context: &mut Context) -> Result<()> {
-    let bin_dir = ensure_global_cli_tool_dir().await?;
-    prepend_cli_tool_dir_to_terminal(context, &bin_dir).await?;
-    Ok(())
-}
-
-async fn ensure_global_cli_tool_dir() -> Result<PathBuf> {
-    let spinova_home = get_spinova_home().await;
-    let bin_dir = spinova_home.join("bin");
-    tokio::fs::create_dir_all(&bin_dir)
-        .await
-        .map_err(|err| miette!("failed to create CLI bin dir {}: {err}", bin_dir.display()))?;
-
-    let current_exe =
-        env::current_exe().map_err(|err| miette!("failed to resolve current executable: {err}"))?;
-    let copied_exe = if cfg!(windows) {
-        bin_dir.join("spinova-tool.exe")
-    } else {
-        bin_dir.join("spinova-tool")
-    };
-    let needs_copy = match tokio::fs::metadata(&copied_exe).await {
-        Ok(meta) => {
-            let current_meta = tokio::fs::metadata(&current_exe)
-                .await
-                .map_err(|err| miette!("failed to stat current executable: {err}"))?;
-            meta.len() != current_meta.len()
-        }
-        Err(_) => true,
-    };
-    if needs_copy {
-        tokio::fs::copy(&current_exe, &copied_exe)
-            .await
-            .map_err(|err| {
-                miette!(
-                    "failed to copy {} to {}: {err}",
-                    current_exe.display(),
-                    copied_exe.display()
-                )
-            })?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o755);
-        tokio::fs::set_permissions(&copied_exe, perms)
-            .await
-            .map_err(|err| miette!("failed to chmod {}: {err}", copied_exe.display()))?;
-    }
-
-    if cfg!(windows) {
-        let wrapper = bin_dir.join("spin-edit.cmd");
-        let script = format!(
-            "@echo off\r\n\"{}\" internal-cli edit %*\r\n",
-            copied_exe.display()
-        );
-        tokio::fs::write(&wrapper, script)
-            .await
-            .map_err(|err| miette!("failed to write {}: {err}", wrapper.display()))?;
-    } else {
-        let wrapper = bin_dir.join("spin-edit");
-        let script = format!(
-            "#!/usr/bin/env sh\nexec \"{}\" internal-cli edit \"$@\"\n",
-            copied_exe.display()
-        );
-        tokio::fs::write(&wrapper, script)
-            .await
-            .map_err(|err| miette!("failed to write {}: {err}", wrapper.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o755);
-            tokio::fs::set_permissions(&wrapper, perms)
-                .await
-                .map_err(|err| miette!("failed to chmod {}: {err}", wrapper.display()))?;
-        }
-    }
-
-    Ok(bin_dir)
-}
-
-async fn prepend_cli_tool_dir_to_terminal(context: &mut Context, bin_dir: &Path) -> Result<()> {
-    let command = if cfg!(windows) {
-        format!(
-            "$env:PATH=\"{};\" + $env:PATH\r",
-            bin_dir.display().to_string().replace('"', "`\"")
-        )
-    } else {
-        format!("export PATH=\"{}:$PATH\"\n", bin_dir.display())
-    };
-    context
-        .devices
-        .execute_focused(crate::device::DeviceAction::TerminalInput { text: command })
-        .await
-        .map_err(|err| miette!("failed to inject CLI tool PATH into terminal: {err}"))?;
-    context
-        .devices
-        .wait_until_settled(Duration::from_millis(150), Duration::from_secs(2))
-        .await;
-    Ok(())
-}
-
-struct RuntimePolicyStepExecution {
-    output: Output,
+struct AgentLoopStepExecution {
+    output: AgentLoopStepOutput,
     snapshot_text: String,
 }
 
-async fn execute_runtime_policy_step(
+struct AgentLoopStepOutput {
+    observation: String,
+    description: String,
+    current_doing: String,
+    primary_action: EpisodeActionRecord,
+}
+
+fn prompt_message_to_agent_message(message: PromptMessage) -> AgentMessage {
+    match message.role {
+        PromptRole::System => AgentMessage::system(message.content),
+        PromptRole::User => AgentMessage::user(message.content),
+        PromptRole::Assistant => AgentMessage::assistant(message.content),
+        PromptRole::Tool => {
+            AgentMessage::tool("historical-tool", "historical_tool", message.content)
+        }
+    }
+}
+
+fn build_runtime_agent_messages(context: &Context, snapshot_text: &str) -> Vec<AgentMessage> {
+    let mut messages = vec![
+        AgentMessage::system(SYSTEM_PROMPT),
+        AgentMessage::system("动作必须通过调用提供的 tools 表达；不要输出结构化动作对象。"),
+        AgentMessage::system(build_device_context_prompt(context)),
+    ];
+    if !context.prompt_memory.recalled_memories.is_empty() {
+        messages.push(AgentMessage::system(format!(
+            "相关长期记忆：\n{}",
+            context.prompt_memory.recalled_memories.join("\n")
+        )));
+    }
+    if let Some(reflection) = &context.prompt_memory.reflected_strategy {
+        messages.push(AgentMessage::system(format!(
+            "相关长期反思：\n{reflection}"
+        )));
+    }
+    messages.extend(
+        context
+            .memory
+            .prompt_messages()
+            .into_iter()
+            .map(prompt_message_to_agent_message),
+    );
+    messages.push(AgentMessage::user(snapshot_text.to_string()));
+    messages
+}
+
+async fn record_runtime_history_messages(
     context: &mut Context,
-    renderer: &OpenAIToolRenderer,
-) -> RuntimePolicyStepExecution {
+    current_doing: String,
+    messages: Vec<PromptMessage>,
+    retain_text: String,
+) {
+    let retain_plan = context
+        .memory
+        .record_agent_turn(current_doing, messages, retain_text)
+        .await;
+    if let Some(handle) = &context.hindsight_retain {
+        for job in retain_plan.jobs {
+            if let Err(err) = handle.enqueue(job) {
+                eprintln!("{err:?}");
+                context.memory.mark_pending_retained();
+                return;
+            }
+        }
+        if retain_plan.must_flush_before_continue {
+            if let Err(err) = handle.flush().await {
+                eprintln!("{err:?}");
+            }
+            context.memory.mark_pending_retained();
+        }
+    } else {
+        context.memory.mark_pending_retained();
+    }
+}
+
+async fn execute_agent_loop_step(
+    context: &mut Context,
+    tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+) -> AgentLoopStepExecution {
     context.prompt_memory = build_hindsight_memory_context(context).await;
     let snapshot = Snapshot::new(context).await;
     let snapshot_text = snapshot.to_string();
-    let runtime_policy = RuntimePolicyProgram;
-    let work_phase = context
-        .tasks
-        .working_task_phase()
-        .unwrap_or("investigate")
-        .to_string();
-    let outcome = runtime_policy
-        .run_once(context, &snapshot, renderer, &work_phase)
-        .await;
-    let output = outcome.output;
-    if should_record_effect(&output.effect) {
-        let retain_plan = context
-            .memory
-            .record_runtime_step(snapshot_text.clone(), &output)
-            .await;
-        if let Some(handle) = &context.hindsight_retain {
-            for job in retain_plan.jobs {
-                if let Err(err) = handle.enqueue(job) {
-                    eprintln!("{err:?}");
-                    context.memory.mark_pending_retained();
-                    break;
+    let mut messages = build_runtime_agent_messages(context, &snapshot_text);
+    let mut history_messages = Vec::new();
+    let mut tool_results = Vec::new();
+    let mut primary_action = None;
+    let mut telegram_tool_nudges = 0usize;
+
+    let output = 'agent_loop: loop {
+        let request = AgentTurnRequest {
+            messages: messages.clone(),
+            tools: build_runtime_tool_specs(context),
+        };
+        let response = run_agent_turn_with_retry(context, request, tx).await;
+        match response {
+            AgentTurnResponse::ToolCalls { content, calls } if !calls.is_empty() => {
+                let assistant_text = content.unwrap_or_else(|| {
+                    format!(
+                        "tool_calls={}",
+                        calls
+                            .iter()
+                            .map(|call| call.name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                });
+                let tool_call_ui_events = calls
+                    .iter()
+                    .map(|call| {
+                        render_tool_call_ui_event(call).unwrap_or_else(|_| {
+                            ToolCallUiEvent::error(
+                                call.name.clone(),
+                                vec![call.arguments.to_string()],
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let (agent_message, history_message) =
+                    AgentMessage::assistant_tool_calls_with_history(
+                        if assistant_text.trim().is_empty() {
+                            None
+                        } else {
+                            Some(assistant_text.clone())
+                        },
+                        calls.clone(),
+                        tool_call_ui_events.clone(),
+                    );
+                messages.push(agent_message);
+                let suppress_assistant_history = assistant_text.starts_with("tool_calls=")
+                    || tool_call_ui_events.iter().all(|event| {
+                        matches!(
+                            event,
+                            ToolCallUiEvent::Terminal(event)
+                                if matches!(event.action, crate::tool_ui::TerminalUiAction::Poll)
+                        )
+                    });
+                history_messages.push(if suppress_assistant_history {
+                    PromptMessage {
+                        content: String::new(),
+                        ..history_message
+                    }
+                } else {
+                    history_message
+                });
+                if primary_action.is_none() {
+                    primary_action = Some(
+                        summarize_primary_action_from_tool_call(&calls[0]).unwrap_or_else(|_| {
+                            EpisodeActionRecord {
+                                kind: "tool_call".to_string(),
+                                summary: calls[0].name.clone(),
+                            }
+                        }),
+                    );
+                }
+                for (call, call_ui_event) in calls.iter().zip(tool_call_ui_events.iter()) {
+                    if let Some(tx) = tx {
+                        match call_ui_event.clone() {
+                            ToolCallUiEvent::Exec(event) => {
+                                tx.send_modify(|state| {
+                                    apply_activity_event(
+                                        state,
+                                        DashboardActivityEvent::ExecBegin {
+                                            key: call.id.clone(),
+                                            title: event.title,
+                                            call_lines: event.body_lines,
+                                        },
+                                    );
+                                });
+                            }
+                            ToolCallUiEvent::Terminal(event)
+                                if matches!(
+                                    event.action,
+                                    crate::tool_ui::TerminalUiAction::Execute
+                                        | crate::tool_ui::TerminalUiAction::Continue
+                                ) =>
+                            {
+                                tx.send_modify(|state| {
+                                    apply_activity_event(
+                                        state,
+                                        DashboardActivityEvent::ExecBegin {
+                                            key: call.id.clone(),
+                                            title: event.title,
+                                            call_lines: event.body_lines,
+                                        },
+                                    );
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    let result = match execute_agent_tool_call(context, call).await {
+                        Ok(result) => result,
+                        Err(err) => {
+                            let error_text = err.to_string();
+                            ToolExecutionResult::new(
+                                format!("{} failed", call.name),
+                                json!({
+                                    "error": error_text,
+                                }),
+                                ToolUiEvent::error(
+                                    format!("{} failed", call.name),
+                                    compact_body_lines(&error_text, 12),
+                                ),
+                            )
+                        }
+                    };
+                    if let Some(tx) = tx {
+                        tx.send_modify(|state| {
+                            apply_activity_event(
+                                state,
+                                DashboardActivityEvent::ExecEnd {
+                                    key: call.id.clone(),
+                                },
+                            );
+                        });
+                    }
+                    messages.push(AgentMessage::tool(
+                        call.id.clone(),
+                        call.name.clone(),
+                        result.model_content(),
+                    ));
+                    history_messages.push(PromptMessage::tool_with_ui(
+                        result.history_content(&call.id, &call.name),
+                        result.ui_event.clone(),
+                    ));
+                    tool_results.push(format!("{} => {}", call.name, result.summary));
                 }
             }
-            if retain_plan.must_flush_before_continue {
-                if let Err(err) = handle.flush().await {
-                    eprintln!("{err:?}");
+            AgentTurnResponse::Assistant { content } => {
+                if telegram_requires_tool_action(context) && telegram_tool_nudges < 2 {
+                    telegram_tool_nudges += 1;
+                    messages.push(AgentMessage::user(
+                        "Telegram 仍有待处理信号。不要只描述“继续等待”；请立即使用 Telegram 相关 tool 推进。先读取会话，再根据最新 incoming 决定 resolve 或 send。outgoing 是你自己已经发出的消息，不是新的外部输入。".to_string(),
+                    ));
+                    continue 'agent_loop;
                 }
-                context.memory.mark_pending_retained();
+                let current_doing = content
+                    .lines()
+                    .next()
+                    .filter(|line| !line.trim().is_empty())
+                    .unwrap_or("等待下一轮工具决策")
+                    .to_string();
+                history_messages.push(PromptMessage::assistant(content.clone()));
+                break 'agent_loop AgentLoopStepOutput {
+                    observation: if tool_results.is_empty() {
+                        content.clone()
+                    } else {
+                        tool_results.join("\n")
+                    },
+                    description: if tool_results.is_empty() {
+                        "模型返回了 assistant 文本，但没有调用 tool。".to_string()
+                    } else {
+                        content
+                    },
+                    current_doing,
+                    primary_action: primary_action.clone().unwrap_or(EpisodeActionRecord {
+                        kind: "assistant_message".to_string(),
+                        summary: "assistant-only turn without tool call".to_string(),
+                    }),
+                };
             }
-        } else {
-            context.memory.mark_pending_retained();
+            AgentTurnResponse::ToolCalls { .. } => {
+                if telegram_requires_tool_action(context) && telegram_tool_nudges < 2 {
+                    telegram_tool_nudges += 1;
+                    messages.push(AgentMessage::user(
+                        "Telegram 仍有待处理信号。不要返回空 tool call；请立即使用 Telegram 相关 tool 推进。".to_string(),
+                    ));
+                    continue 'agent_loop;
+                }
+                let observation = "模型返回了空 tool call 列表。".to_string();
+                history_messages.push(PromptMessage::assistant(observation.clone()));
+                break 'agent_loop AgentLoopStepOutput {
+                    observation,
+                    description: "没有可执行动作。".to_string(),
+                    current_doing: "等待下一轮工具决策".to_string(),
+                    primary_action: primary_action.clone().unwrap_or(EpisodeActionRecord {
+                        kind: "empty_tool_calls".to_string(),
+                        summary: "empty tool call list".to_string(),
+                    }),
+                };
+            }
         }
+    };
+    if !history_messages.is_empty() {
+        let retain_text = if tool_results.is_empty() {
+            format!(
+                "runtime agent turn\nassistant/tool history:\n{}",
+                history_messages
+                    .iter()
+                    .map(|message| format!(
+                        "{}:\n{}",
+                        match message.role {
+                            PromptRole::System => "system",
+                            PromptRole::User => "user",
+                            PromptRole::Assistant => "assistant",
+                            PromptRole::Tool => "tool",
+                        },
+                        message.content
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            )
+        } else {
+            format!(
+                "runtime agent turn\nassistant/tool history:\n{}\n\ntool_results:\n{}",
+                history_messages
+                    .iter()
+                    .map(|message| format!(
+                        "{}:\n{}",
+                        match message.role {
+                            PromptRole::System => "system",
+                            PromptRole::User => "user",
+                            PromptRole::Assistant => "assistant",
+                            PromptRole::Tool => "tool",
+                        },
+                        message.content
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+                tool_results.join("\n")
+            )
+        };
+        record_runtime_history_messages(
+            context,
+            output.current_doing.clone(),
+            history_messages,
+            retain_text,
+        )
+        .await;
     }
-    let effect = output.effect.clone();
-    apply_effect(context, effect).await;
-    if outcome.touched_working_task {
-        context.tasks.touch_working_task();
+    if !matches!(
+        output.primary_action.kind.as_str(),
+        "assistant_message" | "empty_tool_calls"
+    ) {
+        context.work_state.touch();
     }
-    RuntimePolicyStepExecution {
+    AgentLoopStepExecution {
         output,
         snapshot_text,
+    }
+}
+
+fn telegram_requires_tool_action(context: &Context) -> bool {
+    context
+        .devices
+        .state_renders()
+        .into_iter()
+        .any(|(device_id, render)| {
+            matches!(device_id, DeviceId::Telegram)
+                && matches!(render.attention, crate::device::AttentionLevel::Notice)
+        })
+}
+
+async fn run_agent_turn_with_retry(
+    context: &Context,
+    request: AgentTurnRequest,
+    tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+) -> AgentTurnResponse {
+    let mut attempt = 1usize;
+    loop {
+        match context.llm.run_agent_turn(context, request.clone()).await {
+            Ok(response) => {
+                if let Some(tx) = tx {
+                    tx.send_modify(|state| state.runtime_status = None);
+                }
+                return response;
+            }
+            Err(err) => {
+                let capped_shift = (attempt.saturating_sub(1)).min(6) as u32;
+                let backoff_ms = 300u64.saturating_mul(1u64 << capped_shift).min(30_000);
+                let summary = format!(
+                    "请求失败，重试 #{attempt}，等待 {:.1}s",
+                    backoff_ms as f64 / 1000.0
+                );
+                if let Some(tx) = tx {
+                    tx.send_modify(|state| state.runtime_status = Some(summary));
+                }
+                eprintln!("run_agent_turn retry #{attempt} after {backoff_ms}ms:\n{err}");
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                attempt += 1;
+            }
+        }
     }
 }
 
@@ -2501,16 +2504,11 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
     };
 
     let phase = context
-        .tasks
-        .working_task_phase()
+        .work_state
+        .work_phase()
         .unwrap_or("investigate")
         .to_string();
-    let task_description = context
-        .tasks
-        .working_task()
-        .and_then(|id| context.tasks.tasks().find(|(task_id, _)| *task_id == id))
-        .map(|(_, task)| task.description.clone())
-        .unwrap_or_else(|| "当前没有工作任务".to_string());
+    let task_description = context.work_state.objective().map(str::to_string);
     let recent_messages = context
         .memory
         .trail()
@@ -2522,19 +2520,27 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
         .rev()
         .collect::<Vec<_>>();
     let terminal_summary = summarize_terminal_for_hindsight(context);
-    let thread_focus = context
-        .memory
-        .current_thread_focus()
-        .unwrap_or_else(|| "当前没有连续主线".to_string());
-    let query = format!(
-        "任务：{task_description}\n阶段：{phase}\n主线：{thread_focus}\n终端摘要：\n{}\n近期消息：\n{}",
-        terminal_summary.unwrap_or_else(|| "无".to_string()),
-        if recent_messages.is_empty() {
-            "无".to_string()
-        } else {
-            recent_messages.join("\n")
-        }
-    );
+    let thread_focus = context.memory.current_thread_focus();
+    let mut query_sections = vec![format!("阶段：{phase}")];
+    if let Some(task_description) = task_description
+        && !task_description.trim().is_empty()
+    {
+        query_sections.insert(0, format!("目标：{task_description}"));
+    }
+    if let Some(thread_focus) = thread_focus
+        && !thread_focus.trim().is_empty()
+    {
+        query_sections.push(format!("主线：{thread_focus}"));
+    }
+    if let Some(terminal_summary) = terminal_summary
+        && !terminal_summary.trim().is_empty()
+    {
+        query_sections.push(format!("终端摘要：\n{terminal_summary}"));
+    }
+    if !recent_messages.is_empty() {
+        query_sections.push(format!("近期消息：\n{}", recent_messages.join("\n")));
+    }
+    let query = query_sections.join("\n");
 
     let recall = hindsight
         .recall(
@@ -2586,8 +2592,12 @@ fn summarize_terminal_for_hindsight(context: &Context) -> Option<String> {
     if context.devices.focused() != Some(crate::device::DeviceId::Terminal) {
         return None;
     }
-    let view = context.devices.focused_render()?;
-    Some(summarize_terminal_screen(&view.content))
+    let (_, render) = context
+        .devices
+        .state_renders()
+        .into_iter()
+        .find(|(_, render)| render.is_focused)?;
+    Some(render.lines.join("\n"))
 }
 
 fn slugify(value: &str) -> String {
@@ -2604,437 +2614,112 @@ fn slugify(value: &str) -> String {
 
 async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<DashboardState>) {
     let cycle_started_at = std::time::Instant::now();
+    let trigger_reasons = runtime_trigger_reasons(context);
+    if trigger_reasons.is_empty() {
+        tx.send_modify(|state| {
+            state.runtime_status =
+                Some("空闲中：没有待处理的工作、义务、项目或设备信号".to_string())
+        });
+        sync_dashboard_state(context, tx, Some(cycle_started_at.elapsed().as_millis()));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        return;
+    }
+    tx.send_modify(|state| {
+        state.runtime_status = Some(format!("处理中：{}", trigger_reasons.join(" | ")))
+    });
     context
         .devices
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
         .await;
-    let renderer = OpenAIToolRenderer;
-    let _step = execute_runtime_policy_step(context, &renderer).await;
+    let _step = execute_agent_loop_step(context, Some(tx)).await;
     sync_dashboard_state(context, tx, Some(cycle_started_at.elapsed().as_millis()));
 }
 
-fn should_record_effect(effect: &Effect) -> bool {
-    !matches!(effect, Effect::SilentWait)
-}
+fn runtime_trigger_reasons(context: &Context) -> Vec<String> {
+    let mut reasons = Vec::new();
 
-fn summarize_inline_text(text: &str) -> String {
-    const MAX_CHARS: usize = 120;
-    let compact = text.replace('\n', "\\n");
-    let mut chars = compact.chars();
-    let summary = chars.by_ref().take(MAX_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        format!("{summary}...")
-    } else {
-        summary
+    if context.work_state.has_objective() {
+        reasons.push("存在当前工作目标".to_string());
     }
-}
 
-async fn apply_effect(context: &mut Context, effect: Effect) {
-    match effect {
-        Effect::TaskAdd {
-            description,
-            project_id,
-        } => {
-            let project_id = project_id
-                .as_deref()
-                .map(|project_id| resolve_project_reference(context, project_id))
-                .transpose();
-            match project_id {
-                Ok(project_id) => {
-                    context.tasks.add_task_with_project(description, project_id);
-                }
-                Err(err) => eprintln!("{err:?}"),
-            }
-        }
-        Effect::TaskDelete { task_id } => match resolve_task_reference(context, &task_id) {
-            Ok(id) => {
-                context.tasks.delete_task(id);
-            }
-            Err(err) => eprintln!("{err:?}"),
-        },
-        Effect::TaskSelect { task_id } => match resolve_task_reference(context, &task_id) {
-            Ok(id) => {
-                context.tasks.select_working_task(id);
-            }
-            Err(err) => eprintln!("{err:?}"),
-        },
-        Effect::ResolveTelegramChat {
-            chat_id,
-            resolution,
-        } => {
-            if let Err(err) = execute_resolve_telegram_chat(context, &chat_id, resolution).await {
-                eprintln!("{err:?}");
-            }
-        }
-        Effect::ObligationSatisfy { obligation_id } => {
-            match resolve_obligation_reference(context, &obligation_id) {
-                Ok(id) => {
-                    context
-                        .obligations
-                        .set_status(id, ObligationStatus::Satisfied);
-                }
-                Err(err) => eprintln!("{err:?}"),
-            }
-        }
-        Effect::CommitToProject {
-            obligation_id,
-            title,
-            success_criteria,
-            initial_next_action,
-            acknowledgment,
-        } => {
-            if let Err(err) = execute_commit_to_project(
-                context,
-                &obligation_id,
-                title,
-                success_criteria,
-                initial_next_action,
-                acknowledgment,
+    let active_obligation_count = context.obligations.active_obligations().count();
+    if active_obligation_count > 0 {
+        reasons.push(format!("存在 {active_obligation_count} 条待处理义务"));
+    }
+
+    let active_project_count = context
+        .projects
+        .projects()
+        .filter(|(_, project)| {
+            matches!(
+                project.status,
+                ProjectStatus::Active | ProjectStatus::Blocked
             )
-            .await
-            {
-                eprintln!("{err:?}");
-            }
-        }
-        Effect::ProjectComplete {
-            project_id,
-            summary,
-        } => {
-            if let Err(err) = execute_project_complete(context, &project_id, summary) {
-                eprintln!("{err:?}");
-            }
-        }
-        Effect::FocusDevice { device } => {
-            if let Err(err) = context.devices.focus(device).await {
-                eprintln!("{err:?}");
-            }
-        }
-        Effect::PutAwayDevice => {
-            if let Err(err) = context.devices.put_away().await {
-                eprintln!("{err:?}");
-            }
-        }
-        Effect::DeviceAction { action } => {
-            if let Err(err) = context.devices.execute_focused(action).await {
-                eprintln!("{err:?}");
-            }
-        }
-        Effect::Wait => {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-        Effect::SilentWait => {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-    }
-}
-
-fn resolve_relative_path_within_root(
-    root: &Path,
-    relative_path: &str,
-    caller: &str,
-) -> miette::Result<PathBuf> {
-    let candidate = Path::new(relative_path);
-    if candidate.is_absolute() {
-        return Err(miette!(
-            "{caller} requires a workspace-relative path, got absolute path: {}",
-            candidate.display(),
-        ));
-    }
-    if candidate
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(miette!(
-            "{caller} path must not escape the workspace: {}",
-            candidate.display(),
-        ));
-    }
-    Ok(root.join(candidate))
-}
-
-struct PreciseEditReport {
-    matches_before: usize,
-    changed: bool,
-    before_excerpt: String,
-    after_excerpt: String,
-}
-
-fn build_excerpt(text: &str) -> String {
-    summarize_inline_text(text)
-}
-
-fn print_precise_edit_report(relative_path: &str, report: &PreciseEditReport) {
-    println!("changed={}", if report.changed { 1 } else { 0 });
-    println!("matches_before={}", report.matches_before);
-    println!("path={relative_path}");
-    println!("before_excerpt={}", report.before_excerpt);
-    println!("after_excerpt={}", report.after_excerpt);
-}
-
-async fn execute_precise_file_replace(
-    path: &Path,
-    old_text: &str,
-    new_text: &str,
-    caller: &str,
-) -> miette::Result<PreciseEditReport> {
-    let existing = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|err| miette!("failed to read {} for {caller}: {err}", path.display()))?;
-    let matches = existing.match_indices(old_text).count();
-    if matches != 1 {
-        return Err(miette!(
-            "{caller} expected exactly 1 match in {}, found {}",
-            path.display(),
-            matches
-        ));
-    }
-    let updated = existing.replacen(old_text, new_text, 1);
-    tokio::fs::write(path, &updated)
-        .await
-        .map_err(|err| miette!("failed to write {} for {caller}: {err}", path.display()))?;
-    Ok(PreciseEditReport {
-        matches_before: matches,
-        changed: true,
-        before_excerpt: build_excerpt(old_text),
-        after_excerpt: build_excerpt(new_text),
-    })
-}
-
-#[derive(Default)]
-struct SpinEditPatchSummary {
-    changed_files: usize,
-    added_files: usize,
-    deleted_files: usize,
-    updated_files: usize,
-    paths: Vec<String>,
-}
-
-enum PatchOp {
-    Add {
-        path: String,
-        lines: Vec<String>,
-    },
-    Delete {
-        path: String,
-    },
-    Update {
-        path: String,
-        hunks: Vec<PatchHunk>,
-    },
-}
-
-#[derive(Default)]
-struct PatchHunk {
-    old_lines: Vec<String>,
-    new_lines: Vec<String>,
-}
-
-fn parse_spin_edit_patch(patch_text: &str) -> miette::Result<Vec<PatchOp>> {
-    let lines = patch_text.lines().collect::<Vec<_>>();
-    if lines.first().copied() != Some("*** Begin Patch") {
-        return Err(miette!("spin-edit patch must start with `*** Begin Patch`"));
-    }
-    if lines.last().copied() != Some("*** End Patch") {
-        return Err(miette!("spin-edit patch must end with `*** End Patch`"));
+        })
+        .count();
+    if active_project_count > 0 {
+        reasons.push(format!("存在 {active_project_count} 个进行中项目"));
     }
 
-    let mut ops = Vec::new();
-    let mut i = 1;
-    while i + 1 < lines.len() {
-        let line = lines[i];
-        if let Some(path) = line.strip_prefix("*** Add File: ") {
-            i += 1;
-            let mut added = Vec::new();
-            while i < lines.len() && !lines[i].starts_with("*** ") {
-                let raw = lines[i];
-                let Some(content) = raw.strip_prefix('+') else {
-                    return Err(miette!(
-                        "add file lines must start with `+`, got `{}`",
-                        raw
-                    ));
-                };
-                added.push(content.to_string());
-                i += 1;
-            }
-            ops.push(PatchOp::Add {
-                path: path.to_string(),
-                lines: added,
-            });
+    for (device_id, render) in context.devices.state_renders() {
+        if !matches!(render.attention, crate::device::AttentionLevel::Notice) {
             continue;
         }
-
-        if let Some(path) = line.strip_prefix("*** Delete File: ") {
-            ops.push(PatchOp::Delete {
-                path: path.to_string(),
-            });
-            i += 1;
-            continue;
-        }
-
-        if let Some(path) = line.strip_prefix("*** Update File: ") {
-            i += 1;
-            let mut hunks = Vec::new();
-            let mut current = PatchHunk::default();
-            let mut saw_change_line = false;
-            while i < lines.len() && !lines[i].starts_with("*** ") {
-                let raw = lines[i];
-                if raw == "@@" || raw.starts_with("@@ ") {
-                    if saw_change_line {
-                        hunks.push(current);
-                        current = PatchHunk::default();
-                        saw_change_line = false;
-                    }
-                    i += 1;
-                    continue;
-                }
-                let (prefix, body) = raw.split_at(1);
-                match prefix {
-                    " " => {
-                        current.old_lines.push(body.to_string());
-                        current.new_lines.push(body.to_string());
-                        saw_change_line = true;
-                    }
-                    "-" => {
-                        current.old_lines.push(body.to_string());
-                        saw_change_line = true;
-                    }
-                    "+" => {
-                        current.new_lines.push(body.to_string());
-                        saw_change_line = true;
-                    }
-                    _ => {
-                        return Err(miette!(
-                            "update file hunk lines must start with space/+/- or @@, got `{}`",
-                            raw
-                        ));
-                    }
-                }
-                i += 1;
-            }
-            if saw_change_line {
-                hunks.push(current);
-            }
-            if hunks.is_empty() {
-                return Err(miette!("update file `{path}` contains no hunks"));
-            }
-            ops.push(PatchOp::Update {
-                path: path.to_string(),
-                hunks,
-            });
-            continue;
-        }
-
-        return Err(miette!("unknown patch directive: {line}"));
+        reasons.push(format!("{device_id} 有待处理信号"));
     }
 
-    Ok(ops)
+    reasons
 }
 
-fn find_unique_hunk_start(
-    haystack: &[String],
-    needle: &[String],
-    offset: usize,
-) -> miette::Result<usize> {
-    if needle.is_empty() {
-        return Ok(offset.min(haystack.len()));
-    }
-    let mut matches = Vec::new();
-    for start in offset..=haystack.len().saturating_sub(needle.len()) {
-        if haystack[start..start + needle.len()] == *needle {
-            matches.push(start);
-        }
-    }
-    if matches.len() == 1 {
-        return Ok(matches[0]);
-    }
-    if matches.is_empty() {
-        for start in 0..=haystack.len().saturating_sub(needle.len()) {
-            if haystack[start..start + needle.len()] == *needle {
-                matches.push(start);
-            }
-        }
-        if matches.len() == 1 {
-            return Ok(matches[0]);
-        }
-    }
-    match matches.len() {
-        0 => Err(miette!("patch hunk old text not found uniquely in target file")),
-        n => Err(miette!(
-            "patch hunk old text matched {} locations in target file; provide more context",
-            n
-        )),
-    }
-}
-
-async fn apply_spin_edit_patch(root: &Path, patch_text: &str) -> miette::Result<SpinEditPatchSummary> {
-    let ops = parse_spin_edit_patch(patch_text)?;
-    let mut summary = SpinEditPatchSummary::default();
-
-    for op in ops {
-        match op {
-            PatchOp::Add { path, lines } => {
-                let file_path = resolve_relative_path_within_root(root, &path, "spin-edit patch add")?;
-                if tokio::fs::try_exists(&file_path)
-                    .await
-                    .map_err(|err| miette!("failed to stat {}: {err}", file_path.display()))?
-                {
-                    return Err(miette!("spin-edit patch cannot add existing file {}", path));
-                }
-                if let Some(parent) = file_path.parent() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .map_err(|err| miette!("failed to create {}: {err}", parent.display()))?;
-                }
-                let mut content = lines.join("\n");
-                if !content.is_empty() {
-                    content.push('\n');
-                }
-                tokio::fs::write(&file_path, content)
-                    .await
-                    .map_err(|err| miette!("failed to write {}: {err}", file_path.display()))?;
-                summary.changed_files += 1;
-                summary.added_files += 1;
-                summary.paths.push(path);
-            }
-            PatchOp::Delete { path } => {
-                let file_path =
-                    resolve_relative_path_within_root(root, &path, "spin-edit patch delete")?;
-                tokio::fs::remove_file(&file_path)
-                    .await
-                    .map_err(|err| miette!("failed to delete {}: {err}", file_path.display()))?;
-                summary.changed_files += 1;
-                summary.deleted_files += 1;
-                summary.paths.push(path);
-            }
-            PatchOp::Update { path, hunks } => {
-                let file_path =
-                    resolve_relative_path_within_root(root, &path, "spin-edit patch update")?;
-                let original = tokio::fs::read_to_string(&file_path)
-                    .await
-                    .map_err(|err| miette!("failed to read {}: {err}", file_path.display()))?;
-                let mut lines = original.lines().map(ToString::to_string).collect::<Vec<_>>();
-                let mut offset = 0usize;
-                for hunk in hunks {
-                    let start = find_unique_hunk_start(&lines, &hunk.old_lines, offset)?;
-                    let end = start + hunk.old_lines.len();
-                    lines.splice(start..end, hunk.new_lines.clone());
-                    offset = start + hunk.new_lines.len();
-                }
-                let mut updated = lines.join("\n");
-                if original.ends_with('\n') || !updated.is_empty() {
-                    updated.push('\n');
-                }
-                tokio::fs::write(&file_path, updated)
-                    .await
-                    .map_err(|err| miette!("failed to write {}: {err}", file_path.display()))?;
-                summary.changed_files += 1;
-                summary.updated_files += 1;
-                summary.paths.push(path);
-            }
-        }
-    }
-
-    Ok(summary)
+async fn execute_apply_patch_tool(patch_text: &str) -> miette::Result<ToolExecutionResult> {
+    let cwd =
+        env::current_dir().map_err(|err| miette!("failed to read current directory: {err}"))?;
+    let summary = apply_patch_in_root(&cwd, patch_text).await?;
+    Ok(ToolExecutionResult::new(
+        format!("patched {} file(s)", summary.changed_files),
+        json!({
+            "changed_files": summary.changed_files,
+            "added_files": summary.added_files,
+            "deleted_files": summary.deleted_files,
+            "updated_files": summary.updated_files,
+            "added_lines": summary.added_lines,
+            "removed_lines": summary.removed_lines,
+            "files": summary.files.iter().map(|file| {
+                json!({
+                    "path": file.path,
+                    "operation": match file.operation {
+                        PatchOperationKind::Add => "add",
+                        PatchOperationKind::Delete => "delete",
+                        PatchOperationKind::Update => "update",
+                    },
+                    "added_lines": file.added_lines,
+                    "removed_lines": file.removed_lines,
+                })
+            }).collect::<Vec<_>>(),
+        }),
+        ToolUiEvent::patch(
+            format!("patched {} file(s)", summary.changed_files),
+            format!(
+                "{} file(s) changed (+{} -{})",
+                summary.changed_files, summary.added_lines, summary.removed_lines
+            ),
+            summary
+                .files
+                .iter()
+                .cloned()
+                .map(|file| crate::tool_ui::PatchFileUiData {
+                    path: file.path,
+                    operation: match file.operation {
+                        PatchOperationKind::Add => "add".to_string(),
+                        PatchOperationKind::Delete => "delete".to_string(),
+                        PatchOperationKind::Update => "update".to_string(),
+                    },
+                    added_lines: file.added_lines,
+                    removed_lines: file.removed_lines,
+                })
+                .collect(),
+        ),
+    ))
 }
 
 fn sync_dashboard_state(
@@ -3043,82 +2728,200 @@ fn sync_dashboard_state(
     last_cycle_elapsed_ms: Option<u128>,
 ) {
     tx.send_modify(|state| {
-        let focused_render = context.devices.focused_render();
+        let device_renders = context.devices.state_renders();
         state.focused_device = context.devices.focused();
-        state.focused_title = focused_render.as_ref().map(|view| view.title.clone());
-        state.focused_content = focused_render.as_ref().map(|view| view.content.clone());
-        state.obligations = render_obligations_for_dashboard(context);
-        state.projects = render_projects_for_dashboard(context);
-        state.tasks = context
-            .tasks
-            .tasks()
-            .map(|(id, task)| (id, render_task_for_dashboard(task, context)))
-            .collect();
-        state.working_task = context.tasks.working_task();
-        state.latest_trail = context.memory.trail().last().cloned();
+        state.status_output = render_status_command_output_for_dashboard(context, &device_renders);
+        state.inspect_telegram_output =
+            render_inspect_output_for_dashboard(context, &device_renders, DeviceId::Telegram);
+        state.activity_cells = render_activity_for_dashboard(context);
         state.last_cycle_elapsed_ms = last_cycle_elapsed_ms;
     });
 }
 
-fn render_obligations_for_dashboard(context: &Context) -> Vec<String> {
+fn render_status_command_output_for_dashboard(
+    context: &Context,
+    _renders: &[(DeviceId, crate::device::DeviceStateRender)],
+) -> String {
+    let mut sections = Vec::new();
+
+    let focused = context
+        .devices
+        .focused()
+        .map(|device| device.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let active_projects = context.projects.projects().count();
+    let active_obligations = context.obligations.active_obligations().count();
+    sections.push(format!(
+        "Overview\nFocused device: {focused}\nProjects: {active_projects}\nObligations: {active_obligations}"
+    ));
+
+    sections.push(format!(
+        "Work\n{}",
+        render_work_state_for_dashboard(context).unwrap_or_else(|| "No active work.".to_string())
+    ));
+
+    let project_lines = render_status_project_lines(context);
+    sections.push(format!("Projects\n{}", project_lines.join("\n")));
+
+    let obligation_lines = render_status_obligation_lines(context);
+    sections.push(format!("Obligations\n{}", obligation_lines.join("\n")));
+
+    sections.join("\n\n")
+}
+
+fn render_status_project_lines(context: &Context) -> Vec<String> {
+    let mut projects = context.projects.projects().collect::<Vec<_>>();
+    projects.sort_by_key(|(id, _)| id.to_string());
+    if projects.is_empty() {
+        return vec!["No active projects.".to_string()];
+    }
+    projects
+        .into_iter()
+        .take(6)
+        .map(|(_, project)| {
+            format!(
+                "• {}  [{} / {}]",
+                project.title, project.status, project.origin
+            )
+        })
+        .collect()
+}
+
+fn render_status_obligation_lines(context: &Context) -> Vec<String> {
     let mut obligations = context.obligations.active_obligations().collect::<Vec<_>>();
     obligations.sort_by_key(|(id, _)| id.to_string());
+    if obligations.is_empty() {
+        return vec!["No active obligations.".to_string()];
+    }
     obligations
         .into_iter()
+        .take(6)
         .map(|(_, obligation)| {
             format!(
-                "[{} / {} / reply={}] {}",
+                "• {}  [{} / {}{}]",
+                obligation.summary,
                 obligation.status,
                 obligation.urgency,
                 if obligation.requires_reply {
-                    "yes"
+                    " / reply"
                 } else {
-                    "no"
-                },
-                obligation.summary
+                    ""
+                }
             )
         })
         .collect()
 }
 
-fn render_projects_for_dashboard(context: &Context) -> Vec<String> {
-    let mut projects = context.projects.projects().collect::<Vec<_>>();
-    projects.sort_by_key(|(id, _)| id.to_string());
-    projects
-        .into_iter()
-        .map(|(_, project)| {
-            format!(
-                "[{} / {}] {}",
-                project.status, project.origin, project.title
-            )
-        })
-        .collect()
-}
-
-fn render_task_for_dashboard(task: &crate::tasks::Task, context: &Context) -> DashboardTaskEntry {
-    let description_tail = truncate_from_left(&task.description, 42);
-    let last_touched = format_last_touched(task.last_touched_at_ms);
-
-    let display = match task.project_id {
-        Some(project_id) => {
-            let project_title = context
-                .projects
-                .projects()
-                .find(|(id, _)| *id == project_id)
-                .map(|(_, project)| project.title.clone())
-                .unwrap_or_else(|| project_id.to_string());
-            format!(
-                "{description_tail}\n  上次处理: {last_touched} | 项目: {}",
-                truncate_from_left(&project_title, 18)
-            )
-        }
-        None => format!("{description_tail}\n  上次处理: {last_touched}"),
-    };
-
-    DashboardTaskEntry {
-        display,
-        last_touched_at_ms: task.last_touched_at_ms,
+fn render_inspect_output_for_dashboard(
+    context: &Context,
+    renders: &[(DeviceId, crate::device::DeviceStateRender)],
+    target: DeviceId,
+) -> String {
+    match target {
+        DeviceId::Terminal => "unknown inspect target: Terminal".to_string(),
+        DeviceId::Telegram => render_telegram_status_for_dashboard(context, renders),
     }
+}
+
+fn render_telegram_status_for_dashboard(
+    context: &Context,
+    renders: &[(DeviceId, crate::device::DeviceStateRender)],
+) -> String {
+    let focused = renders
+        .iter()
+        .find(|(device_id, _)| *device_id == DeviceId::Telegram)
+        .map(|(_, render)| render.is_focused)
+        .unwrap_or(false);
+    let chats = context.telegram.chat_summaries_view();
+    let selected = context.telegram.selected_chat_view(8);
+
+    let mut lines = vec![format!(
+        "Telegram\nState: {}",
+        if focused { "focused" } else { "background" }
+    )];
+
+    if chats.is_empty() {
+        lines.push(String::new());
+        lines.push("No chats.".to_string());
+        return lines.join("\n");
+    }
+
+    lines.push(String::new());
+    lines.push("Chats".to_string());
+    lines.extend(chats.iter().take(8).map(|chat| {
+        let mut flags = Vec::new();
+        if chat.unread > 0 {
+            flags.push(format!("{} unread", chat.unread));
+        }
+        if chat.pending_resolution {
+            flags.push("needs resolution".to_string());
+        }
+        if chat.needs_reply {
+            flags.push("needs reply".to_string());
+        }
+        let suffix = if flags.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", flags.join(", "))
+        };
+        format!("• {} ({}){}", chat.title, chat.chat_id, suffix)
+    }));
+
+    if let Some(chat) = selected {
+        lines.push(String::new());
+        lines.push(format!("Selected: {} ({})", chat.title, chat.chat_id));
+        let mut flags = Vec::new();
+        if chat.unread > 0 {
+            flags.push(format!("{} unread", chat.unread));
+        }
+        if chat.pending_resolution {
+            flags.push("needs resolution".to_string());
+        }
+        if chat.needs_reply {
+            flags.push("needs reply".to_string());
+        }
+        if !flags.is_empty() {
+            lines.push(format!("Status: {}", flags.join(", ")));
+        }
+        lines.push(String::new());
+        lines.push("Recent messages".to_string());
+        if chat.messages.is_empty() {
+            lines.push("• No messages".to_string());
+        } else {
+            lines.extend(chat.messages.into_iter().map(|message| {
+                format!(
+                    "• [{}|{}] {}: {}",
+                    message.direction, message.delivery, message.sender, message.text
+                )
+            }));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn render_activity_for_dashboard(context: &Context) -> Vec<crate::dashboard::ActivityCell> {
+    render_activity_from_messages(context.memory.prompt_messages())
+}
+
+fn render_work_state_for_dashboard(context: &Context) -> Option<String> {
+    let objective = context.work_state.objective()?;
+    let objective = truncate_from_left(objective, 56);
+    let last_touched = format_last_touched(context.work_state.last_touched_at_ms);
+    let mut lines = vec![objective, format!("上次处理: {last_touched}")];
+    if let Some(project_id) = context.work_state.project_id {
+        let project_title = context
+            .projects
+            .projects()
+            .find(|(id, _)| *id == project_id)
+            .map(|(_, project)| project.title.clone())
+            .unwrap_or_else(|| project_id.to_string());
+        lines.push(format!("项目: {}", truncate_from_left(&project_title, 24)));
+    }
+    if let Some(phase) = context.work_state.work_phase() {
+        lines.push(format!("阶段: {phase}"));
+    }
+    Some(lines.join("\n"))
 }
 
 fn format_last_touched(last_touched_at_ms: Option<i64>) -> String {
@@ -3148,393 +2951,6 @@ fn truncate_from_left(text: &str, max_chars: usize) -> String {
         .iter()
         .collect::<String>();
     format!("…{tail}")
-}
-
-fn normalize_reference(reference: &str) -> String {
-    reference.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn resolve_reference(
-    kind: &str,
-    reference: &str,
-    candidates: Vec<(Uuid, String)>,
-) -> miette::Result<Uuid> {
-    let reference = reference.trim();
-    if reference.is_empty() {
-        return Err(miette!("{kind} reference is empty"));
-    }
-
-    if let Ok(id) = Uuid::parse_str(reference) {
-        if candidates
-            .iter()
-            .any(|(candidate_id, _)| *candidate_id == id)
-        {
-            return Ok(id);
-        }
-        return Err(miette!("unknown {kind} id: {reference}"));
-    }
-
-    let normalized_reference = normalize_reference(reference);
-    let exact_matches = candidates
-        .iter()
-        .filter_map(|(id, label)| {
-            (normalize_reference(label) == normalized_reference).then_some(*id)
-        })
-        .collect::<Vec<_>>();
-    if exact_matches.len() == 1 {
-        return Ok(exact_matches[0]);
-    }
-    if exact_matches.len() > 1 {
-        return Err(miette!(
-            "ambiguous {kind} reference `{reference}`: matched {} items by exact description/title",
-            exact_matches.len()
-        ));
-    }
-
-    let fuzzy_matches = candidates
-        .iter()
-        .filter_map(|(id, label)| {
-            let normalized_label = normalize_reference(label);
-            (normalized_label.contains(&normalized_reference)
-                || normalized_reference.contains(&normalized_label))
-            .then_some(*id)
-        })
-        .collect::<Vec<_>>();
-    if fuzzy_matches.len() == 1 {
-        return Ok(fuzzy_matches[0]);
-    }
-    if fuzzy_matches.len() > 1 {
-        return Err(miette!(
-            "ambiguous {kind} reference `{reference}`: matched {} items fuzzily",
-            fuzzy_matches.len()
-        ));
-    }
-
-    Err(miette!(
-        "invalid {kind} reference `{reference}`: expected a UUID from the snapshot, or a unique matching title/summary"
-    ))
-}
-
-fn resolve_string_reference(
-    kind: &str,
-    reference: &str,
-    candidates: Vec<(String, String)>,
-) -> miette::Result<String> {
-    let reference = reference.trim();
-    if reference.is_empty() {
-        return Err(miette!("{kind} reference is empty"));
-    }
-
-    if let Some((id, _)) = candidates
-        .iter()
-        .find(|(candidate_id, _)| candidate_id == reference)
-    {
-        return Ok(id.clone());
-    }
-
-    let normalized_reference = normalize_reference(reference);
-    let exact_matches = candidates
-        .iter()
-        .filter_map(|(id, label)| {
-            (normalize_reference(label) == normalized_reference).then_some(id.clone())
-        })
-        .collect::<Vec<_>>();
-    if exact_matches.len() == 1 {
-        return Ok(exact_matches[0].clone());
-    }
-    if exact_matches.len() > 1 {
-        return Err(miette!(
-            "ambiguous {kind} reference `{reference}`: matched {} items by exact description/title",
-            exact_matches.len()
-        ));
-    }
-
-    let fuzzy_matches = candidates
-        .iter()
-        .filter_map(|(id, label)| {
-            let normalized_label = normalize_reference(label);
-            (normalized_label.contains(&normalized_reference)
-                || normalized_reference.contains(&normalized_label))
-            .then_some(id.clone())
-        })
-        .collect::<Vec<_>>();
-    if fuzzy_matches.len() == 1 {
-        return Ok(fuzzy_matches[0].clone());
-    }
-    if fuzzy_matches.len() > 1 {
-        return Err(miette!(
-            "ambiguous {kind} reference `{reference}`: matched {} items fuzzily",
-            fuzzy_matches.len()
-        ));
-    }
-
-    Err(miette!(
-        "invalid {kind} reference `{reference}`: expected a chat id from the device view, or a unique matching title"
-    ))
-}
-
-fn resolve_task_reference(context: &Context, reference: &str) -> miette::Result<Uuid> {
-    resolve_reference(
-        "task",
-        reference,
-        context
-            .tasks
-            .tasks()
-            .map(|(id, task)| (id, task.description.clone()))
-            .collect(),
-    )
-}
-
-fn resolve_obligation_reference(context: &Context, reference: &str) -> miette::Result<Uuid> {
-    resolve_reference(
-        "obligation",
-        reference,
-        context
-            .obligations
-            .obligations()
-            .map(|(id, obligation)| (id, obligation.summary.clone()))
-            .collect(),
-    )
-}
-
-fn resolve_project_reference(context: &Context, reference: &str) -> miette::Result<Uuid> {
-    resolve_reference(
-        "project",
-        reference,
-        context
-            .projects
-            .projects()
-            .map(|(id, project)| (id, project.title.clone()))
-            .collect(),
-    )
-}
-
-fn resolve_telegram_chat_reference(context: &Context, reference: &str) -> miette::Result<String> {
-    resolve_string_reference("telegram chat", reference, context.telegram.chat_refs())
-}
-
-fn trim_optional_field(value: Option<String>) -> Option<String> {
-    value.and_then(trim_required_field)
-}
-
-fn trim_required_field(value: String) -> Option<String> {
-    let trimmed = value.trim().to_string();
-    (!trimmed.is_empty()).then_some(trimmed)
-}
-
-fn require_field(value: String, field_name: &str) -> miette::Result<String> {
-    trim_required_field(value).ok_or_else(|| miette!("missing required field: {field_name}"))
-}
-
-async fn send_telegram_message(
-    context: &mut Context,
-    chat_id: &str,
-    text: String,
-) -> miette::Result<()> {
-    context.devices.focus(DeviceId::Telegram).await?;
-    context
-        .devices
-        .execute_focused(crate::device::DeviceAction::TelegramSelectChat {
-            chat_id: chat_id.to_string(),
-        })
-        .await?;
-    context
-        .devices
-        .execute_focused(crate::device::DeviceAction::TelegramSendMessage { text })
-        .await?;
-    Ok(())
-}
-
-async fn execute_resolve_telegram_chat(
-    context: &mut Context,
-    chat_reference: &str,
-    resolution: TelegramResolution,
-) -> miette::Result<()> {
-    let chat_id = resolve_telegram_chat_reference(context, chat_reference)?;
-
-    match resolution {
-        TelegramResolution::ReplyOnly { reply } => {
-            let reply = require_field(reply, "reply")?;
-            send_telegram_message(context, &chat_id, reply).await?;
-            context.telegram.resolve_chat(&chat_id, Some(false))?;
-        }
-        TelegramResolution::AskClarification { reply } => {
-            let reply = require_field(reply, "reply")?;
-            send_telegram_message(context, &chat_id, reply).await?;
-            context.telegram.resolve_chat(&chat_id, Some(false))?;
-        }
-        TelegramResolution::Decline { reply } => {
-            let reply = require_field(reply, "reply")?;
-            send_telegram_message(context, &chat_id, reply).await?;
-            context.telegram.resolve_chat(&chat_id, Some(false))?;
-        }
-        TelegramResolution::NoReplyNeeded => {
-            context.telegram.resolve_chat(&chat_id, Some(false))?;
-        }
-        TelegramResolution::AcceptAsProject {
-            reply,
-            project_title,
-            success_criteria,
-            first_next_action,
-        } => {
-            let project_title = require_field(project_title, "project_title")?;
-            let success_criteria = require_field(success_criteria, "success_criteria")?;
-            let project_id = context.projects.add(
-                project_title,
-                ProjectOrigin::Telegram,
-                success_criteria,
-                Some(crate::projects::ReportTarget {
-                    device: DeviceId::Telegram,
-                    target: chat_id.clone(),
-                }),
-            );
-
-            if let Some(next_action) = trim_optional_field(first_next_action) {
-                let task_id = context
-                    .tasks
-                    .add_task_with_project(next_action, Some(project_id));
-                context.tasks.select_working_task(task_id);
-            }
-
-            if let Some(reply) = trim_optional_field(reply) {
-                send_telegram_message(context, &chat_id, reply).await?;
-                context.telegram.resolve_chat(&chat_id, Some(false))?;
-            } else {
-                context.telegram.resolve_chat(&chat_id, None)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn execute_commit_to_project(
-    context: &mut Context,
-    obligation_id: &str,
-    title: String,
-    success_criteria: String,
-    initial_next_action: Option<String>,
-    acknowledgment: Option<String>,
-) -> miette::Result<()> {
-    let obligation_id = resolve_obligation_reference(context, obligation_id)?;
-    let Some(obligation) = context.obligations.get(obligation_id).cloned() else {
-        return Err(miette!("unknown obligation: {obligation_id}"));
-    };
-
-    let project_id = context.projects.add(
-        title,
-        project_origin_from(obligation.source),
-        success_criteria,
-        obligation.reply_target.clone(),
-    );
-    context.obligations.link_project(obligation_id, project_id);
-
-    if let Some(next_action) = initial_next_action.map(|s| s.trim().to_string()) {
-        if !next_action.is_empty() {
-            let task_id = context
-                .tasks
-                .add_task_with_project(next_action, Some(project_id));
-            context.tasks.select_working_task(task_id);
-        }
-    }
-
-    if let Some(ack) = acknowledgment.map(|s| s.trim().to_string()) {
-        if !ack.is_empty() {
-            enqueue_obligation_acknowledgment(context, obligation_id, &obligation, ack).await?;
-            return Ok(());
-        }
-    }
-
-    if obligation.requires_reply {
-        context
-            .obligations
-            .set_status(obligation_id, ObligationStatus::Seen);
-    } else {
-        context
-            .obligations
-            .set_status(obligation_id, ObligationStatus::Satisfied);
-    }
-    Ok(())
-}
-
-async fn enqueue_obligation_acknowledgment(
-    context: &mut Context,
-    obligation_id: Uuid,
-    obligation: &crate::obligations::Obligation,
-    acknowledgment: String,
-) -> miette::Result<()> {
-    let Some(target) = obligation.reply_target.clone() else {
-        return Err(miette!("obligation {obligation_id} has no reply target"));
-    };
-
-    match target.device {
-        DeviceId::Telegram => {
-            context.devices.focus(DeviceId::Telegram).await?;
-            context
-                .devices
-                .execute_focused(crate::device::DeviceAction::TelegramSelectChat {
-                    chat_id: target.target,
-                })
-                .await?;
-            context
-                .devices
-                .execute_focused(crate::device::DeviceAction::TelegramSendMessage {
-                    text: acknowledgment,
-                })
-                .await?;
-            context
-                .obligations
-                .set_status(obligation_id, ObligationStatus::Seen);
-            Ok(())
-        }
-        DeviceId::Terminal => Err(miette!(
-            "terminal obligations do not support external acknowledgment"
-        )),
-    }
-}
-
-fn project_origin_from(source: ObligationSource) -> ProjectOrigin {
-    match source {
-        ObligationSource::Telegram => ProjectOrigin::Telegram,
-        ObligationSource::Terminal => ProjectOrigin::Terminal,
-        ObligationSource::System => ProjectOrigin::System,
-    }
-}
-
-fn execute_project_complete(
-    context: &mut Context,
-    project_id: &str,
-    summary: String,
-) -> miette::Result<()> {
-    let project_id = resolve_project_reference(context, project_id)?;
-    let Some(project) = context.projects.get(project_id).cloned() else {
-        return Err(miette!("unknown project: {project_id}"));
-    };
-
-    context
-        .projects
-        .set_status(project_id, crate::projects::ProjectStatus::Completed);
-    context.tasks.delete_tasks_for_project(project_id);
-
-    if let Some(target) = project.report_back_to {
-        context.obligations.add(
-            match target.device {
-                DeviceId::Telegram => ObligationSource::Telegram,
-                DeviceId::Terminal => ObligationSource::Terminal,
-            },
-            format!(
-                "把项目《{}》的结果回复给对方：{}",
-                project.title,
-                summary.trim()
-            ),
-            true,
-            crate::obligations::Urgency::High,
-            Some(project_id),
-            Some(target),
-        );
-    }
-
-    Ok(())
 }
 
 pub async fn get_spinova_home() -> PathBuf {

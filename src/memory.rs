@@ -2,17 +2,14 @@
 //!
 //! 记忆当前只保留一层近场 working memory:
 //!
-//! - L1: 最近几步的原始输入/输出消息流
-//!   - 每一步直接记录当时给模型看的 snapshot_text
-//!   - 以及模型原始输出中的 observation/description/current_doing/effect
-//!   - 不再淘汰进本地 L2/L3
+//! - L1: 最近几步的输入/输出消息流
+//!   - 每一步只记录 assistant/tool 历史消息
 use std::{collections::VecDeque, fmt::Display};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    core::Output,
     get_spinova_home,
     hindsight::{HindsightRetainItem, HindsightRetainJob},
     reasoning::runtime::PromptMessage,
@@ -48,12 +45,15 @@ impl Memory {
         }
     }
 
-    pub async fn record_runtime_step(
+    pub async fn record_agent_turn(
         &mut self,
-        snapshot_text: String,
-        output: &Output,
+        current_doing: String,
+        messages: Vec<PromptMessage>,
+        retain_text: String,
     ) -> MemoryRetainPlan {
-        let _ = self.l1.update(snapshot_text, output);
+        let _ = self
+            .l1
+            .update_messages(current_doing, messages, retain_text);
         let jobs = self.collect_retain_jobs();
         let must_flush_before_continue = self.front_is_pending_retain();
         MemoryRetainPlan {
@@ -113,7 +113,9 @@ impl Memory {
         self.l1
             .trail
             .front()
-            .map(|item| self.queued_retain_ids.contains(&item.id) && !self.retained_ids.contains(&item.id))
+            .map(|item| {
+                self.queued_retain_ids.contains(&item.id) && !self.retained_ids.contains(&item.id)
+            })
             .unwrap_or(false)
     }
 
@@ -144,28 +146,9 @@ pub struct L1Memory {
 #[derive(Clone, Serialize, Deserialize)]
 struct L1Item {
     id: Uuid,
-    snapshot_text: String,
-    observation: String,
-    description: String,
     current_doing: String,
-    effect: String,
-    #[serde(default)]
-    messages: Vec<L1Message>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct L1Message {
-    role: L1MessageRole,
-    content: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-enum L1MessageRole {
-    Snapshot,
-    Observation,
-    Description,
-    Doing,
-    Effect,
+    retain_text: String,
+    messages: Vec<PromptMessage>,
 }
 
 impl Display for L1Item {
@@ -175,60 +158,10 @@ impl Display for L1Item {
 }
 
 impl L1Item {
-    const SNAPSHOT_PREVIEW_LIMIT: usize = 1200;
-    const TEXT_PREVIEW_LIMIT: usize = 600;
-
-    fn build_messages(snapshot_text: &str, output: &Output, effect: &str) -> Vec<L1Message> {
-        vec![
-            L1Message {
-                role: L1MessageRole::Snapshot,
-                content: format!(
-                    "输入快照：\n{}",
-                    Self::truncate(snapshot_text, Self::SNAPSHOT_PREVIEW_LIMIT)
-                ),
-            },
-            L1Message {
-                role: L1MessageRole::Observation,
-                content: format!(
-                    "模型观察：\n{}",
-                    Self::truncate(&output.observation, Self::TEXT_PREVIEW_LIMIT)
-                ),
-            },
-            L1Message {
-                role: L1MessageRole::Description,
-                content: format!(
-                    "模型说明：\n{}",
-                    Self::truncate(&output.description, Self::TEXT_PREVIEW_LIMIT)
-                ),
-            },
-            L1Message {
-                role: L1MessageRole::Doing,
-                content: format!(
-                    "当前进行：\n{}",
-                    Self::truncate(&output.current_doing, Self::TEXT_PREVIEW_LIMIT)
-                ),
-            },
-            L1Message {
-                role: L1MessageRole::Effect,
-                content: format!("动作：\n{}", Self::truncate(effect, Self::TEXT_PREVIEW_LIMIT)),
-            },
-        ]
-    }
-
-    fn truncate(text: &str, max_chars: usize) -> String {
-        let mut chars = text.chars();
-        let preview = chars.by_ref().take(max_chars).collect::<String>();
-        if chars.next().is_some() {
-            format!("{preview}...")
-        } else {
-            preview
-        }
-    }
-
     fn render_for_memory(&self) -> String {
         self.messages
             .iter()
-            .map(|message| message.content.clone())
+            .map(format_message_for_memory)
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -236,36 +169,17 @@ impl L1Item {
     fn render_messages(&self) -> Vec<String> {
         self.messages
             .iter()
-            .map(|message| message.content.clone())
+            .map(format_message_for_memory)
             .collect()
     }
 
     fn prompt_messages(&self) -> Vec<PromptMessage> {
-        vec![
-            PromptMessage::user(self.snapshot_text.clone()),
-            PromptMessage::assistant(
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "observation": self.observation,
-                    "description": self.description,
-                    "current_doing": self.current_doing,
-                    "effect": serde_json::from_str::<serde_json::Value>(&self.effect)
-                        .unwrap_or_else(|_| serde_json::Value::String(self.effect.clone())),
-                }))
-                .unwrap(),
-            ),
-        ]
+        self.messages.clone()
     }
 
     fn to_hindsight_item(&self) -> HindsightRetainItem {
         HindsightRetainItem {
-            content: format!(
-                "L1 raw runtime step\nCurrent doing:\n{}\n\nInput snapshot:\n{}\n\nObservation:\n{}\n\nDescription:\n{}\n\nEffect:\n{}",
-                self.current_doing,
-                self.snapshot_text,
-                self.observation,
-                self.description,
-                self.effect
-            ),
+            content: self.retain_text.clone(),
             timestamp: None,
             context: Some("runtime raw l1 step".to_string()),
             metadata: Some(std::collections::HashMap::from([
@@ -294,23 +208,21 @@ impl L1Memory {
             .unwrap_or_default()
     }
 
-    fn update(&mut self, snapshot_text: String, output: &Output) -> Option<L1Item> {
-        let effect = serde_json::to_string(&output.effect)
-            .unwrap_or_else(|_| format!("{:?}", output.effect));
-        let messages = L1Item::build_messages(&snapshot_text, output, &effect);
+    fn update_messages(
+        &mut self,
+        current_doing: String,
+        messages: Vec<PromptMessage>,
+        retain_text: String,
+    ) -> Option<L1Item> {
         let item = L1Item {
             id: Uuid::new_v4(),
-            snapshot_text,
-            observation: output.observation.clone(),
-            description: output.description.clone(),
-            current_doing: output.current_doing.clone(),
-            effect,
+            current_doing,
+            retain_text,
             messages,
         };
         self.trail.push_back(item);
         None
     }
-
     async fn sync_to_disk(&self) {
         let l1_persistence_path = get_spinova_home().await.join("l1_memory");
         let data = postcard::to_allocvec(self).unwrap();
@@ -320,5 +232,70 @@ impl L1Memory {
     fn retention_candidates(&self) -> Vec<&L1Item> {
         let retention_cutoff = self.trail.len().saturating_sub(Self::RETAIN_GUARD_REGION);
         self.trail.iter().take(retention_cutoff).collect()
+    }
+}
+
+fn format_message_for_memory(message: &PromptMessage) -> String {
+    let role = match message.role {
+        crate::reasoning::runtime::PromptRole::System => "system",
+        crate::reasoning::runtime::PromptRole::User => "user",
+        crate::reasoning::runtime::PromptRole::Assistant => "assistant",
+        crate::reasoning::runtime::PromptRole::Tool => "tool",
+    };
+    let mut parts = Vec::new();
+    if !message.content.trim().is_empty() {
+        parts.push(message.content.clone());
+    }
+    if !message.tool_call_ui_events.is_empty() {
+        let rendered = message
+            .tool_call_ui_events
+            .iter()
+            .map(format_tool_call_ui_event_for_memory)
+            .collect::<Vec<_>>()
+            .join("\n");
+        parts.push(rendered);
+    }
+    format!("{role}:\n{}", parts.join("\n"))
+}
+
+fn format_tool_call_ui_event_for_memory(event: &crate::tool_ui::ToolCallUiEvent) -> String {
+    match event {
+        crate::tool_ui::ToolCallUiEvent::Exec(data)
+        | crate::tool_ui::ToolCallUiEvent::Work(data)
+        | crate::tool_ui::ToolCallUiEvent::Device(data)
+        | crate::tool_ui::ToolCallUiEvent::Error(data) => {
+            let mut lines = vec![format!("tool_call: {}", data.title)];
+            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
+            lines.join("\n")
+        }
+        crate::tool_ui::ToolCallUiEvent::Telegram(data) => {
+            let mut lines = vec![format!("tool_call: {}", data.title)];
+            lines.extend(data.detail_lines.iter().map(|line| format!("  {line}")));
+            lines.extend(data.message_lines.iter().map(|line| format!("  {line}")));
+            lines.join("\n")
+        }
+        crate::tool_ui::ToolCallUiEvent::Terminal(data) => {
+            let mut lines = vec![format!("tool_call: {}", data.title)];
+            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
+            lines.join("\n")
+        }
+        crate::tool_ui::ToolCallUiEvent::Patch(data) => {
+            let mut lines = vec![
+                format!("tool_call: {}", data.title),
+                format!("  {}", data.summary_line),
+            ];
+            lines.extend(data.files.iter().map(|file| {
+                let marker = match file.operation.as_str() {
+                    "add" => "+",
+                    "delete" => "-",
+                    _ => "~",
+                };
+                format!(
+                    "  {marker} {} (+{} -{})",
+                    file.path, file.added_lines, file.removed_lines
+                )
+            }));
+            lines.join("\n")
+        }
     }
 }

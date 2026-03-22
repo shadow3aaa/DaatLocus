@@ -112,7 +112,7 @@ impl TelegramTransport {
                     text.clone(),
                 );
             }
-            AccessDecision::Blocked => return,
+            AccessDecision::Blocked => (),
             AccessDecision::Unknown => {
                 if let Err(err) = self.acl.register_pending(
                     message.chat.id,

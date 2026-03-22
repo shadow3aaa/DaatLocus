@@ -18,13 +18,7 @@ use super::{
     optimizer::{CandidateConfig, OptimizationResult, PromptTuningConfig},
     program::Program,
     programs::{
-        action_phase_common::ActionPhaseProgramSpec,
-        attend_notifications::AttendNotificationsProgram,
-        execute_task::ExecuteTaskProgram,
-        explore_new_tasks::ExploreNewTasksProgram,
-        pairwise_judge::PairwiseJudgeProgram,
-        plan_from_project::PlanFromProjectProgram,
-        resolve_telegram::ResolveTelegramChatProgram,
+        pairwise_judge::PairwiseJudgeProgram, resolve_telegram::ResolveTelegramChatProgram,
     },
     runtime::execute_program_with_ir_report,
     selection::{
@@ -37,7 +31,7 @@ use super::{
     trace_mining::derive_resolve_telegram_eval_cases,
 };
 
-const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v11";
+const OPTIMIZER_VERSION: &str = "reasoning-optimizer-v12";
 const RENDERER_NAME: &str = "openai_tools";
 
 pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<OptimizationResult>> {
@@ -56,7 +50,7 @@ pub async fn run_reasoning_optimize(context: &Context) -> Result<Vec<Optimizatio
 pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<CompiledProgram>> {
     let renderer = OpenAIToolRenderer;
     let mut compiled = Vec::new();
-    let total_suites = 5usize;
+    let total_suites = 1usize;
     let sleep_snapshot = load_sleep_artifacts_snapshot().await?;
 
     let resolve_program = ResolveTelegramChatProgram;
@@ -98,95 +92,7 @@ pub async fn ensure_reasoning_compiled(context: &Context) -> Result<Vec<Compiled
         .await?,
     );
 
-    compiled.push(
-        ensure_action_phase_compiled(
-            context,
-            &renderer,
-            &sleep_snapshot,
-            AttendNotificationsProgram,
-            compiled.len() + 1,
-            total_suites,
-        )
-        .await?,
-    );
-    compiled.push(
-        ensure_action_phase_compiled(
-            context,
-            &renderer,
-            &sleep_snapshot,
-            ExecuteTaskProgram,
-            compiled.len() + 1,
-            total_suites,
-        )
-        .await?,
-    );
-    compiled.push(
-        ensure_action_phase_compiled(
-            context,
-            &renderer,
-            &sleep_snapshot,
-            PlanFromProjectProgram,
-            compiled.len() + 1,
-            total_suites,
-        )
-        .await?,
-    );
-    compiled.push(
-        ensure_action_phase_compiled(
-            context,
-            &renderer,
-            &sleep_snapshot,
-            ExploreNewTasksProgram,
-            compiled.len() + 1,
-            total_suites,
-        )
-        .await?,
-    );
-
     Ok(compiled)
-}
-
-async fn ensure_action_phase_compiled<P: ActionPhaseProgramSpec>(
-    context: &Context,
-    renderer: &OpenAIToolRenderer,
-    sleep_snapshot: &SleepArtifactsSnapshot,
-    action_program: P,
-    suite_index: usize,
-    total_suites: usize,
-) -> Result<CompiledProgram> {
-    let action_base = action_program.default_tuning();
-    let action_sleep = sleep_snapshot.filter_suite(&action_program.tuning_key());
-    let action_train_cases = action_program.train_eval_cases();
-    let action_acceptance_cases = action_program.acceptance_eval_cases();
-    let mut action_stress_cases = action_program.stress_eval_cases();
-    action_stress_cases.extend(datasets::action_phase::stress_eval_cases_by_names(
-        &action_program,
-        &sleep_reference_case_names(&action_sleep),
-    ));
-    let mut action_candidates = vec![CandidateConfig {
-        name: "baseline".to_string(),
-        config: action_base.clone(),
-    }];
-    action_candidates.extend(build_sleep_artifact_candidates(
-        &action_base,
-        &action_sleep,
-        sleep_examples_to_program_examples::<crate::core::Output>(&action_sleep),
-    ));
-
-    ensure_suite_compiled(
-        context,
-        renderer,
-        &action_program,
-        &action_program.tuning_key(),
-        action_train_cases,
-        action_acceptance_cases,
-        action_stress_cases,
-        "stress",
-        action_candidates,
-        suite_index,
-        total_suites,
-    )
-    .await
 }
 
 async fn load_sleep_artifacts_snapshot() -> Result<SleepArtifactsSnapshot> {
@@ -358,15 +264,7 @@ async fn ensure_suite_compiled<P: Program>(
             continue;
         }
         if best.as_ref().is_none_or(
-            |(
-                _,
-                _,
-                best_score,
-                best_attempts,
-                best_judge_wins,
-                best_judge_losses,
-                _,
-            )| {
+            |(_, _, best_score, best_attempts, best_judge_wins, best_judge_losses, _)| {
                 evaluation.score > *best_score
                     || (evaluation.score == *best_score
                         && (evaluation.judge_wins > *best_judge_wins

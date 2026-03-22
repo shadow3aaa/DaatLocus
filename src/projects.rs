@@ -93,12 +93,6 @@ impl Projects {
         self.projects.iter().map(|(id, project)| (*id, project))
     }
 
-    pub fn has_active(&self) -> bool {
-        self.projects
-            .values()
-            .any(|project| matches!(project.status, ProjectStatus::Active))
-    }
-
     pub async fn shutdown(self) {
         let persistence_path = get_spinova_home().await.join("projects");
         let data = postcard::to_allocvec(&self).unwrap();

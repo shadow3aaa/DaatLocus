@@ -109,10 +109,6 @@ impl CompiledPromptStore {
         Self { entries }
     }
 
-    pub fn insert(&mut self, entry: CompiledProgram) {
-        self.entries.insert(entry.suite.clone(), entry);
-    }
-
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -260,10 +256,6 @@ pub async fn save_compiled_program_to_dir(
         .await
         .map_err(|err| miette!("failed to write compiled prompt config: {err}"))?;
     Ok(())
-}
-
-async fn compiled_dir() -> PathBuf {
-    compiled_dir_named(COMPILED_DIR_NAME).await
 }
 
 async fn compiled_dir_named(dir_name: &str) -> PathBuf {

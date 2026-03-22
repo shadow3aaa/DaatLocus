@@ -2,8 +2,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::Effect;
-
 use super::environment::EpisodeObservation;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,10 +29,16 @@ pub struct EpisodeTask {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpisodeActionRecord {
+    pub kind: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpisodeStep {
     pub index: usize,
     pub module: String,
-    pub effect: Effect,
+    pub action: EpisodeActionRecord,
     pub observation_summary: String,
     pub snapshot_text: String,
     pub metadata: BTreeMap<String, String>,
@@ -54,7 +58,8 @@ pub struct EpisodeMetric {
     pub success: bool,
     pub score: f32,
     pub steps_used: usize,
-    pub repeated_effects: usize,
+    #[serde(default)]
+    pub repeated_actions: usize,
     pub stagnation_events: usize,
     pub notes: Vec<String>,
 }

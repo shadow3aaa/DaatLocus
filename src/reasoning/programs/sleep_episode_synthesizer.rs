@@ -145,8 +145,12 @@ impl SleepEpisodeSynthesizerProgram {
     ) -> PromptIR {
         let mut ir = PromptIR::with_system(SLEEP_EPISODE_SYNTHESIZER_SYSTEM_PROMPT);
         ir.push_instruction("优先提炼高层策略，避免只记录 tail/grep/cat/pytest 这类表面命令。");
-        ir.push_instruction("如果成功只是常规完成，不必保留为长期复盘；成功只有在明显可迁移时才 retain。");
-        ir.push_instruction("优先生成可比较效果的 demo/stress；只有无法 case 化时才生成 instruction。");
+        ir.push_instruction(
+            "如果成功只是常规完成，不必保留为长期复盘；成功只有在明显可迁移时才 retain。",
+        );
+        ir.push_instruction(
+            "优先生成可比较效果的 demo/stress；只有无法 case 化时才生成 instruction。",
+        );
         ir.push_section("target suite", target_suite);
         ir.push_section("episode id", episode_id);
         ir.push_section("outcome status", outcome_status);

@@ -1,10 +1,19 @@
 //! 本模块包含context，它是spinova自旋循环中承载状态的结构体
 
 use crate::{
-    config::Config, core::LLM, device::DeviceManager, emotion::Emotion,
-    hindsight::{HindsightClient, HindsightRetainHandle}, memory::Memory,
-    obligations::Obligations, projects::Projects, reasoning::compiled::CompiledPromptStore,
-    reasoning::runtime::PromptMemoryContext, tasks::Tasks, telegram_device::TelegramDeviceHandle,
+    config::Config,
+    core::LLM,
+    dashboard::DashboardState,
+    device::DeviceManager,
+    emotion::Emotion,
+    hindsight::{HindsightClient, HindsightRetainHandle},
+    memory::Memory,
+    obligations::Obligations,
+    projects::Projects,
+    reasoning::compiled::CompiledPromptStore,
+    reasoning::runtime::PromptMemoryContext,
+    telegram_device::TelegramDeviceHandle,
+    work_state::WorkState,
 };
 
 pub struct Context {
@@ -17,11 +26,12 @@ pub struct Context {
     pub prompt_memory: PromptMemoryContext,
     pub obligations: Obligations,
     pub projects: Projects,
-    pub tasks: Tasks,
+    pub work_state: WorkState,
     pub emotion: Emotion,
     pub devices: DeviceManager,
     pub telegram: TelegramDeviceHandle,
     pub compiled_prompts: CompiledPromptStore,
+    pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
 }
 
 impl Context {
@@ -33,7 +43,7 @@ impl Context {
         self.memory.shutdown().await;
         self.obligations.shutdown().await;
         self.projects.shutdown().await;
-        self.tasks.shutdown().await;
+        self.work_state.shutdown().await;
         self.emotion.shutdown().await;
         let _ = self.devices.shutdown().await;
     }

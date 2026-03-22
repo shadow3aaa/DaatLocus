@@ -68,14 +68,14 @@ fn build_case_rubric<P: Program>(program: &P, suite_name: &str) -> String {
     }
     if suite_name.contains("execute_task") {
         return String::from(
-            "选择更能直接推进当前下一步动作、且不引入额外绕路或错误设备切换的候选。",
+            "选择更能直接推进当前工作目标、且不引入额外绕路或错误设备切换的候选。",
         );
     }
     if suite_name.contains("attend_notifications") {
         return String::from("选择更能优先处理提醒来源、且更少无关切换或拖延的候选。");
     }
     if suite_name.contains("plan_from_project") {
-        return String::from("选择更能围绕当前项目补出具体下一步动作，而不是偏离项目主题的候选。");
+        return String::from("选择更能围绕当前项目补出具体工作目标，而不是偏离项目主题的候选。");
     }
     if suite_name.contains("explore_new_tasks") {
         return String::from("选择更符合探索阶段边界、且更少无效等待或不必要切换的候选。");

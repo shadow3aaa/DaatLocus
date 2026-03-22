@@ -22,12 +22,8 @@ pub struct HindsightRetainHandle {
 #[derive(Debug)]
 enum RetainWorkerMessage {
     Retain(HindsightRetainJob),
-    Flush {
-        reply: oneshot::Sender<Result<()>>,
-    },
-    Shutdown {
-        reply: oneshot::Sender<()>,
-    },
+    Flush { reply: oneshot::Sender<Result<()>> },
+    Shutdown { reply: oneshot::Sender<()> },
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +71,7 @@ pub struct HindsightReflectOptions {
     pub include_facts: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 pub struct HindsightRetainResponse {
     #[serde(default)]
@@ -93,6 +90,7 @@ pub struct HindsightRecallResponse {
     pub results: Vec<HindsightRecallResult>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 pub struct HindsightRecallResult {
     pub id: String,
@@ -107,6 +105,7 @@ pub struct HindsightRecallResult {
     pub tags: Vec<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 pub struct HindsightReflectResponse {
     pub text: String,
@@ -121,18 +120,11 @@ impl HindsightClient {
         }
 
         let timeout = Duration::from_secs(config.request_timeout_secs.max(1));
-        let http = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .ok()?;
+        let http = reqwest::Client::builder().timeout(timeout).build().ok()?;
         Some(Self {
             http,
             config: config.clone(),
         })
-    }
-
-    pub fn config(&self) -> &HindsightConfig {
-        &self.config
     }
 
     pub fn spawn_retain_worker(&self) -> HindsightRetainHandle {
@@ -174,6 +166,22 @@ impl HindsightClient {
         Ok(())
     }
 
+    pub async fn delete_bank(&self) -> Result<()> {
+        let url = self.bank_url();
+        let response = self.authorized(self.http.delete(url)).send().await;
+        match self.expect_success(response, "delete hindsight bank").await {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let message = err.to_string();
+                if message.contains("404") {
+                    Ok(())
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
     pub async fn retain(
         &self,
         items: Vec<HindsightRetainItem>,
@@ -195,7 +203,11 @@ impl HindsightClient {
             "async": self.config.retain_async,
             "document_tags": if document_tags.is_empty() { serde_json::Value::Null } else { json!(document_tags) },
         });
-        let response = self.authorized(self.http.post(url)).json(&body).send().await;
+        let response = self
+            .authorized(self.http.post(url))
+            .json(&body)
+            .send()
+            .await;
         self.expect_json_success(response, "retain hindsight memories")
             .await
     }
@@ -226,7 +238,11 @@ impl HindsightClient {
             "tags": if options.tags.is_empty() { serde_json::Value::Null } else { json!(options.tags) },
             "tags_match": options.tags_match.unwrap_or_else(|| "any".to_string()),
         });
-        let response = self.authorized(self.http.post(url)).json(&body).send().await;
+        let response = self
+            .authorized(self.http.post(url))
+            .json(&body)
+            .send()
+            .await;
         self.expect_json_success(response, "recall hindsight memories")
             .await
     }
@@ -246,7 +262,11 @@ impl HindsightClient {
             "tags_match": options.tags_match.unwrap_or_else(|| "any".to_string()),
             "include": if options.include_facts { json!({ "facts": {} }) } else { serde_json::Value::Null }
         });
-        let response = self.authorized(self.http.post(url)).json(&body).send().await;
+        let response = self
+            .authorized(self.http.post(url))
+            .json(&body)
+            .send()
+            .await;
         self.expect_json_success(response, "reflect hindsight memories")
             .await
     }

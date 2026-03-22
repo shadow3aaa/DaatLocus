@@ -8,28 +8,12 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub main_model: MainModelConfig,
     pub judge: JudgeConfig,
     pub hindsight: HindsightConfig,
     pub telegram: TelegramConfig,
-    // pub embedding_model: EmbeddingModelConfig, // 目前使用内置的模型
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            main_model: MainModelConfig::default(),
-            judge: JudgeConfig::default(),
-            hindsight: HindsightConfig::default(),
-            telegram: TelegramConfig::default(),
-            /* embedding_model: EmbeddingModelConfig {
-                base_url: "https://api.openai.com/v1".to_string(),
-                model_name: "text-embedding-3-small".to_string(),
-                api_key: "your-api-key".to_string(),
-            }, */
-        }
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -169,13 +153,6 @@ impl TelegramConfig {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct EmbeddingModelConfig {
-    pub base_url: String,
-    pub model_name: String,
-    pub api_key: String,
-}
-
 #[derive(Error, Debug, Diagnostic)]
 pub enum ConfigError {
     #[error("配置文件读取失败: {0}")]
@@ -196,7 +173,7 @@ pub async fn load_config() -> Result<Config, ConfigError> {
 
     let content = tokio::fs::read_to_string(config_path)
         .await
-        .map_err(|e| ConfigError::IO(e))?;
+        .map_err(ConfigError::IO)?;
 
     let ret: Config = toml::from_str(&content).map_err(|e| ConfigError::Syntax(e.to_string()))?;
     Ok(ret)

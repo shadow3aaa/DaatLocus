@@ -4,21 +4,21 @@ use std::fmt::Display;
 
 use crate::{
     context::Context,
-    device::{DeviceId, FocusedRender, PeripheralRender},
+    device::{AttentionLevel, DeviceId, DeviceStateRender},
     obligations::Obligations,
     projects::Projects,
     system_info::SystemInfo,
-    tasks::Tasks,
+    work_state::WorkState,
 };
 
 /// 快照保存着当前agent的大脑状态
 ///
-/// 这包括记忆、义务、项目、下一步动作和感官输入。
+/// 这包括义务、项目、当前工作状态和感官输入。
 pub struct Snapshot {
     sensory: Sensory,
     obligations: Obligations,
     projects: Projects,
-    next_actions: Tasks,
+    work_state: WorkState,
     devices: DeviceSnapshot,
 }
 
@@ -29,7 +29,7 @@ impl Snapshot {
             sensory: Sensory::new(),
             obligations: context.obligations.clone(),
             projects: context.projects.clone(),
-            next_actions: context.tasks.clone(),
+            work_state: context.work_state.clone(),
             devices,
         }
     }
@@ -43,8 +43,8 @@ impl Display for Snapshot {
         writeln!(f, "{}", self.obligations)?;
         writeln!(f, "项目列表：")?;
         writeln!(f, "{}", self.projects)?;
-        writeln!(f, "下一步动作列表：")?;
-        writeln!(f, "{}", self.next_actions)?;
+        writeln!(f, "当前工作状态：")?;
+        writeln!(f, "{}", self.work_state)?;
         writeln!(f, "设备：")?;
         write!(f, "{}", self.devices)
     }
@@ -76,72 +76,16 @@ impl Display for Sensory {
 
 struct DeviceSnapshot {
     focused_device: Option<DeviceId>,
-    peripheral: Vec<(DeviceId, PeripheralRender)>,
-    focused_view: Option<FocusedRender>,
+    states: Vec<(DeviceId, DeviceStateRender)>,
 }
 
 impl DeviceSnapshot {
     fn new(context: &Context) -> Self {
         Self {
             focused_device: context.devices.focused(),
-            peripheral: context.devices.peripheral_renders(),
-            focused_view: context.devices.focused_render(),
+            states: context.devices.state_renders(),
         }
     }
-}
-
-pub fn summarize_terminal_screen(content: &str) -> String {
-    let lower = content.to_ascii_lowercase();
-    let prompt_visible = lower.contains("<cursor>")
-        && (lower.contains("ps>")
-            || lower.contains("ps ")
-            || lower.contains(">")
-            || lower.contains("$")
-            || lower.contains("#"));
-    let interactive_prompt = lower.contains("username:")
-        || lower.contains("password:")
-        || lower.contains("passphrase")
-        || lower.contains("would you like")
-        || lower.contains("[y/n]")
-        || lower.contains("(y/n)")
-        || lower.contains("press enter to continue")
-        || lower.contains("login")
-        || lower.contains("authorize")
-        || lower.contains("otp")
-        || lower.contains("verification code")
-        || lower.contains(">>>")
-        || lower.contains("... ");
-    let terminal_mode = if lower.contains("(end)")
-        || lower.contains("press h for help or q to quit")
-        || lower.contains("manual page")
-    {
-        "pager"
-    } else if interactive_prompt {
-        "interactive_prompt"
-    } else if prompt_visible {
-        "shell"
-    } else if lower.contains("cursor") {
-        "running"
-    } else {
-        "unknown"
-    };
-    let command_completed = matches!(terminal_mode, "shell");
-    let mut lines = vec![
-        format!("mode={terminal_mode}"),
-        format!("prompt_visible={prompt_visible}"),
-        format!("interactive_prompt={interactive_prompt}"),
-        format!("command_completed={command_completed}"),
-    ];
-    match terminal_mode {
-        "pager" => lines.push("建议：若目标只是返回 shell，可优先考虑 q。".to_string()),
-        "interactive_prompt" => {
-            lines.push("建议：终端已进入交互式提示，不要把它误判成普通 shell 输出。".to_string())
-        }
-        "running" => lines.push("建议：终端可能仍在输出或等待，先确认是否真的回到 prompt。".to_string()),
-        "shell" => lines.push("上一条命令大概率已结束，可基于当前 prompt 决定下一步。".to_string()),
-        _ => {}
-    }
-    lines.join("\n")
 }
 
 impl Display for DeviceSnapshot {
@@ -151,39 +95,75 @@ impl Display for DeviceSnapshot {
             None => writeln!(f, "当前前景设备：无")?,
         }
 
-        writeln!(f, "设备外围感知：")?;
-        for (id, render) in &self.peripheral {
-            let focus_state = if render.is_focused {
-                "前景"
-            } else {
-                "后台"
-            };
-            let action_state = if render.interactive {
-                "可操作"
-            } else {
-                "只读"
-            };
-            writeln!(
-                f,
-                "- {id} / {}：{}，{}，注意力等级={}",
-                render.title, focus_state, action_state, render.attention
-            )?;
-            writeln!(f, "  {}", render.summary)?;
+        let attention_hints = self
+            .states
+            .iter()
+            .filter(|(_, state)| !state.is_focused)
+            .filter_map(|(id, state)| device_attention_hint(*id, state));
+        let attention_hints = attention_hints.collect::<Vec<_>>();
+        if !attention_hints.is_empty() {
+            writeln!(f, "后台设备提醒：")?;
+            for hint in attention_hints {
+                writeln!(f, "- {hint}")?;
+            }
         }
 
-        if let Some(view) = &self.focused_view {
-            let action_state = if view.interactive {
-                "可操作"
-            } else {
-                "只读"
-            };
-            writeln!(f, "前景设备画面：")?;
-            writeln!(f, "--- {} / {} ---", view.title, action_state)?;
-            writeln!(f, "{}", view.content)?;
-            write!(f, "--- {} / {} ---", view.title, action_state)?;
-        } else {
-            write!(f, "当前没有设备处于前景，因此看不到任何设备的完整画面。")?;
+        writeln!(f, "设备结构状态：")?;
+        for (id, state) in &self.states {
+            let focus_state = if state.is_focused { "前景" } else { "后台" };
+            writeln!(
+                f,
+                "- {id} / {}：{}，注意力等级={}",
+                state.title, focus_state, state.attention
+            )?;
+            for line in &state.lines {
+                writeln!(f, "  {line}")?;
+            }
         }
         Ok(())
     }
+}
+
+fn device_attention_hint(device_id: DeviceId, state: &DeviceStateRender) -> Option<String> {
+    match device_id {
+        DeviceId::Terminal
+            if !state.is_focused && matches!(state.attention, AttentionLevel::Notice) =>
+        {
+            let session_id = state
+                .lines
+                .iter()
+                .find_map(|line| line.strip_prefix("active_session="))
+                .unwrap_or("unknown");
+            if numeric_field(&state.lines, "sessions_with_unread_output") > 0 {
+                Some(format!("Terminal 会话 {session_id} 有未读输出"))
+            } else {
+                Some(format!("Terminal 会话 {session_id} 需要注意"))
+            }
+        }
+        DeviceId::Telegram
+            if !state.is_focused && matches!(state.attention, AttentionLevel::Notice) =>
+        {
+            let pending_resolution = numeric_field(&state.lines, "pending_resolution");
+            let pending_reply = numeric_field(&state.lines, "pending_reply");
+            let unread_messages = numeric_field(&state.lines, "unread_messages");
+            if pending_resolution > 0 {
+                Some(format!("Telegram 有 {pending_resolution} 个会话待判断"))
+            } else if pending_reply > 0 {
+                Some(format!("Telegram 有 {pending_reply} 个会话待回复"))
+            } else if unread_messages > 0 {
+                Some(format!("Telegram 有 {unread_messages} 条未读消息"))
+            } else {
+                Some("Telegram 有需要注意的状态变化".to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+fn numeric_field(lines: &[String], key: &str) -> usize {
+    lines
+        .iter()
+        .find_map(|line| line.strip_prefix(&format!("{key}=")))
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
 }

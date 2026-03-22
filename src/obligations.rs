@@ -91,55 +91,6 @@ impl Obligations {
         true
     }
 
-    pub fn upsert_existing(
-        &mut self,
-        id: Uuid,
-        summary: String,
-        requires_reply: bool,
-        urgency: Urgency,
-        linked_project: Option<Uuid>,
-        reply_target: Option<ReportTarget>,
-    ) -> bool {
-        let Some(obligation) = self.obligations.get_mut(&id) else {
-            return false;
-        };
-
-        let mut changed = false;
-        if obligation.summary != summary {
-            obligation.summary = summary;
-            changed = true;
-        }
-        if obligation.requires_reply != requires_reply {
-            obligation.requires_reply = requires_reply;
-            changed = true;
-        }
-        if obligation.urgency != urgency {
-            obligation.urgency = urgency;
-            changed = true;
-        }
-        if let Some(linked_project) = linked_project {
-            if obligation.linked_project != Some(linked_project) {
-                obligation.linked_project = Some(linked_project);
-                changed = true;
-            }
-        }
-        if let Some(reply_target) = reply_target {
-            if obligation.reply_target.as_ref() != Some(&reply_target) {
-                obligation.reply_target = Some(reply_target);
-                changed = true;
-            }
-        }
-        if obligation.status != ObligationStatus::Pending {
-            obligation.status = ObligationStatus::Pending;
-            changed = true;
-        }
-        changed
-    }
-
-    pub fn contains(&self, id: Uuid) -> bool {
-        self.obligations.contains_key(&id)
-    }
-
     pub fn get(&self, id: Uuid) -> Option<&Obligation> {
         self.obligations.get(&id)
     }
@@ -168,12 +119,6 @@ impl Obligations {
                 ObligationStatus::Satisfied | ObligationStatus::Dropped
             )
         })
-    }
-
-    pub fn has_pending(&self) -> bool {
-        self.obligations
-            .values()
-            .any(|obligation| obligation.status == ObligationStatus::Pending)
     }
 
     pub async fn shutdown(self) {

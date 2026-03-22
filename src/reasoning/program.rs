@@ -31,5 +31,13 @@ pub trait Program {
         }
     }
 
+    fn include_history_messages(&self) -> bool {
+        false
+    }
+
+    fn include_long_term_memory_messages(&self) -> bool {
+        false
+    }
+
     fn build_ir(&self, context: &Context, snapshot: &Snapshot) -> PromptIR;
 }

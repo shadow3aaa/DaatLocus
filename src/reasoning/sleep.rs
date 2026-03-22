@@ -5,8 +5,6 @@ use serde_json::json;
 
 use crate::{
     context::Context,
-    device::DeviceAction,
-    core::{Effect, Output},
     hindsight::{HindsightRecallOptions, HindsightRetainItem},
     reasoning::{
         episode::{EpisodeOutcome, EpisodeStatus, EpisodeStep},
@@ -40,6 +38,15 @@ pub struct SleepSummary {
     pub retained_reflections: usize,
 }
 
+#[derive(serde::Serialize)]
+struct SleepActionOutput {
+    observation: String,
+    description: String,
+    current_doing: String,
+    action_kind: String,
+    action_summary: String,
+}
+
 pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let records = load_runtime_trace_records().await?;
     let mut failure_patterns = derive_failure_patterns(&records);
@@ -55,7 +62,9 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     derived
         .bootstrap_demos
         .extend(episode_synthesis.bootstrap_demos.clone());
-    derived.stress_cases.extend(episode_synthesis.stress_cases.clone());
+    derived
+        .stress_cases
+        .extend(episode_synthesis.stress_cases.clone());
     derived
         .instruction_hypotheses
         .extend(episode_synthesis.instruction_hypotheses.clone());
@@ -66,7 +75,8 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     store
         .replace_instruction_hypotheses(&derived.instruction_hypotheses)
         .await?;
-    let retained_reflections = retain_sleep_reflections(context, &episode_synthesis.reflections).await?;
+    let retained_reflections =
+        retain_sleep_reflections(context, &episode_synthesis.reflections).await?;
     Ok(SleepSummary {
         failure_patterns,
         bootstrap_demos: derived.bootstrap_demos.len(),
@@ -103,10 +113,10 @@ async fn load_runtime_trace_records() -> Result<Vec<ProgramTraceRecord>> {
         if line.is_empty() {
             continue;
         }
-        if let Ok(record) = serde_json::from_str::<ProgramTraceRecord>(line) {
-            if record.origin == TraceOrigin::Runtime {
-                records.push(record);
-            }
+        if let Ok(record) = serde_json::from_str::<ProgramTraceRecord>(line)
+            && record.origin == TraceOrigin::Runtime
+        {
+            records.push(record);
         }
     }
 
@@ -123,9 +133,12 @@ async fn latest_train_source_learn_session_root() -> Result<Option<PathBuf>> {
     }
 
     let mut latest_session: Option<(std::time::SystemTime, PathBuf)> = None;
-    let mut entries = tokio::fs::read_dir(&train_root)
-        .await
-        .map_err(|err| miette!("failed to read train_source_learn dir {}: {err}", train_root.display()))?;
+    let mut entries = tokio::fs::read_dir(&train_root).await.map_err(|err| {
+        miette!(
+            "failed to read train_source_learn dir {}: {err}",
+            train_root.display()
+        )
+    })?;
     while let Some(entry) = entries
         .next_entry()
         .await
@@ -162,9 +175,12 @@ async fn load_recent_learn_episode_outcomes() -> Result<Vec<EpisodeOutcome>> {
     }
 
     let mut outcomes = Vec::new();
-    let mut episode_dirs = tokio::fs::read_dir(&episodes_root)
-        .await
-        .map_err(|err| miette!("failed to read learn episodes dir {}: {err}", episodes_root.display()))?;
+    let mut episode_dirs = tokio::fs::read_dir(&episodes_root).await.map_err(|err| {
+        miette!(
+            "failed to read learn episodes dir {}: {err}",
+            episodes_root.display()
+        )
+    })?;
     while let Some(entry) = episode_dirs
         .next_entry()
         .await
@@ -344,26 +360,8 @@ fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<SleepArtifactF
 }
 
 fn infer_episode_suite_from_step(step: &EpisodeStep) -> Option<&'static str> {
-    match &step.effect {
-        Effect::FocusDevice {
-            device: crate::device::DeviceId::Telegram,
-        } => Some("action_phase.attend_notifications"),
-        Effect::TaskSelect { .. } => Some("action_phase.execute_task"),
-        Effect::TaskAdd {
-            project_id: Some(_),
-            ..
-        } => Some("action_phase.plan_from_project"),
-        Effect::TaskAdd {
-            project_id: None, ..
-        } => Some("action_phase.explore_new_tasks"),
-        Effect::DeviceAction {
-            action: DeviceAction::TerminalInput { .. },
-        }
-        | Effect::Wait
-        | Effect::SilentWait => Some("terminal_next_step"),
-        Effect::FocusDevice {
-            device: crate::device::DeviceId::Terminal,
-        } => Some("action_phase.execute_task"),
+    match step.action.kind.as_str() {
+        "resolve_telegram_chat" => Some("resolve_telegram_chat"),
         _ => None,
     }
 }
@@ -390,10 +388,11 @@ fn render_recent_episode_steps(outcome: &EpisodeOutcome) -> String {
                 .cloned()
                 .unwrap_or_default();
             format!(
-                "{}. phase={} effect={:?} observation={} reason={}",
+                "{}. phase={} action={} ({}) observation={} reason={}",
                 index + 1,
                 phase,
-                step.effect,
+                step.action.kind,
+                step.action.summary,
                 step.observation_summary.trim(),
                 reason.trim()
             )
@@ -417,40 +416,52 @@ fn merge_episode_synthesis(
         && !output.failure_pattern_summary.trim().is_empty()
         && !matches!(outcome.status, EpisodeStatus::Succeeded)
     {
-        synthesized.failure_patterns.push(SleepArtifactFailurePattern {
-            suite: suite.to_string(),
-            pattern_id: format!(
-                "episode:{}:{}:{}",
-                slugify(suite),
-                slugify(output.failure_pattern_summary.trim()),
-                slugify(&outcome.task.id)
-            ),
-            description: output.failure_pattern_summary.trim().to_string(),
-            supporting_trace_ids: vec![episode_id.to_string()],
-            frequency: outcome.metric.repeated_effects.max(1),
-            severity: 4,
-            suggested_fix_kind: match output.suggested_fix_kind.trim().to_ascii_lowercase().as_str() {
-                "demo" => SleepArtifactSuggestedFixKind::Demo,
-                "stress" | "stress_case" | "stresscase" => SleepArtifactSuggestedFixKind::StressCase,
-                _ => SleepArtifactSuggestedFixKind::Instruction,
-            },
-        });
+        synthesized
+            .failure_patterns
+            .push(SleepArtifactFailurePattern {
+                suite: suite.to_string(),
+                pattern_id: format!(
+                    "episode:{}:{}:{}",
+                    slugify(suite),
+                    slugify(output.failure_pattern_summary.trim()),
+                    slugify(&outcome.task.id)
+                ),
+                description: output.failure_pattern_summary.trim().to_string(),
+                supporting_trace_ids: vec![episode_id.to_string()],
+                frequency: outcome.metric.repeated_actions.max(1),
+                severity: 4,
+                suggested_fix_kind: match output
+                    .suggested_fix_kind
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
+                    "demo" => SleepArtifactSuggestedFixKind::Demo,
+                    "stress" | "stress_case" | "stresscase" => {
+                        SleepArtifactSuggestedFixKind::StressCase
+                    }
+                    _ => SleepArtifactSuggestedFixKind::Instruction,
+                },
+            });
     }
 
     if output.create_bootstrap_demo
         && !output.bootstrap_demo_title.trim().is_empty()
         && !output.bootstrap_demo_summary.trim().is_empty()
     {
-        synthesized.bootstrap_demos.push(SleepArtifactBootstrapDemo {
-            suite: suite.to_string(),
-            title: output.bootstrap_demo_title.trim().to_string(),
-            input_summary: output.synthesized_summary.trim().to_string(),
-            inputs: episode_example_inputs(outcome, step),
-            expected_output: serde_json::to_value(step_to_output(step)).unwrap_or_else(|_| json!({})),
-            reference_case_names: Vec::new(),
-            source_trace_ids: vec![episode_id.to_string()],
-            confidence: output.reflection_confidence.clamp(0.0, 1.0) as f32,
-        });
+        synthesized
+            .bootstrap_demos
+            .push(SleepArtifactBootstrapDemo {
+                suite: suite.to_string(),
+                title: output.bootstrap_demo_title.trim().to_string(),
+                input_summary: output.synthesized_summary.trim().to_string(),
+                inputs: episode_example_inputs(outcome, step),
+                expected_output: serde_json::to_value(step_to_output(step))
+                    .unwrap_or_else(|_| json!({})),
+                reference_case_names: Vec::new(),
+                source_trace_ids: vec![episode_id.to_string()],
+                confidence: output.reflection_confidence.clamp(0.0, 1.0) as f32,
+            });
     }
 
     if output.create_stress_case && !output.stress_case_name.trim().is_empty() {
@@ -461,13 +472,13 @@ fn merge_episode_synthesis(
                 "task_title": outcome.task.title,
                 "task_goal": outcome.task.task_goal,
                 "summary": output.synthesized_summary,
-                "last_effect": format!("{:?}", step.effect),
+                "last_action": format!("{} ({})", step.action.kind, step.action.summary),
                 "related_memories": related_memories,
             }),
             expected_constraints: output.stress_constraints.clone(),
             reference_case_names: Vec::new(),
             source_pattern_id: episode_id.to_string(),
-            repeat: outcome.metric.repeated_effects.max(2),
+            repeat: outcome.metric.repeated_actions.max(2),
             weight: 2,
         });
     }
@@ -514,14 +525,14 @@ fn episode_example_inputs(outcome: &EpisodeOutcome, step: &EpisodeStep) -> Vec<E
             value: outcome.task.instruction.clone(),
         },
         ExampleField {
-            name: "完整快照".to_string(),
+            name: "当前状态".to_string(),
             value: step.snapshot_text.clone(),
         },
     ]
 }
 
-fn step_to_output(step: &EpisodeStep) -> Output {
-    Output {
+fn step_to_output(step: &EpisodeStep) -> SleepActionOutput {
+    SleepActionOutput {
         observation: step.observation_summary.clone(),
         description: step
             .metadata
@@ -533,7 +544,8 @@ fn step_to_output(step: &EpisodeStep) -> Output {
             .get("current_doing")
             .cloned()
             .unwrap_or_default(),
-        effect: step.effect.clone(),
+        action_kind: step.action.kind.clone(),
+        action_summary: step.action.summary.clone(),
     }
 }
 
@@ -747,12 +759,6 @@ fn render_input_summary(
 fn suite_reference_case_names(suite: &str) -> Vec<String> {
     match suite {
         "resolve_telegram_chat" => crate::reasoning::datasets::resolve_telegram::all_case_names(),
-        "action_phase.attend_notifications"
-        | "action_phase.execute_task"
-        | "action_phase.plan_from_project"
-        | "action_phase.explore_new_tasks" => {
-            crate::reasoning::datasets::action_phase::all_case_names_for_suite(suite)
-        }
         _ => Vec::new(),
     }
 }
@@ -884,21 +890,7 @@ fn infer_runtime_suite(record: &ProgramTraceRecord) -> Option<String> {
     if record.program_name == "resolve_telegram_chat" {
         return Some("resolve_telegram_chat".to_string());
     }
-    if record.program_name != "decide_next_action" {
-        return None;
-    }
-    let inputs = extract_inputs_from_request(&record.request);
-    let phase = inputs
-        .iter()
-        .find(|field| field.name.trim() == "阶段")
-        .map(|field| field.value.trim());
-    match phase {
-        Some("处理提醒") => Some("action_phase.attend_notifications".to_string()),
-        Some("执行下一步动作") => Some("action_phase.execute_task".to_string()),
-        Some("为项目规划下一步") => Some("action_phase.plan_from_project".to_string()),
-        Some("探索与规划新任务") => Some("action_phase.explore_new_tasks".to_string()),
-        _ => None,
-    }
+    None
 }
 
 fn extract_inputs_from_request(request: &PromptRequest) -> Vec<ExampleField> {
@@ -988,11 +980,7 @@ async fn retain_sleep_reflections(
     Ok(reflections.len())
 }
 
-async fn recall_related_memories(
-    context: &Context,
-    query: &str,
-    top_k: usize,
-) -> Vec<String> {
+async fn recall_related_memories(context: &Context, query: &str, top_k: usize) -> Vec<String> {
     let Some(hindsight) = context.hindsight.as_ref() else {
         return Vec::new();
     };

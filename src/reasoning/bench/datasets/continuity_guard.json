@@ -1,22 +1,22 @@
-{
+﻿{
   "examples": [
     {
       "title": "近期寒暄不应打断已有调查项目",
       "inputs": [
         {
-          "name": "活跃项目",
+          "name": "当前项目状态",
           "value": "[P1] 调查开源皮套直播 LLM 方案"
         },
         {
-          "name": "当前下一步动作",
+          "name": "当前工作状态",
           "value": "[A1] 在 Terminal 检索 github 和开源社区，收集皮套直播 LLM 相关项目资料。"
         },
         {
-          "name": "近期经历",
+          "name": "近期历史",
           "value": "[T1] 向对方承诺：我会调查开源皮套直播 LLM 方案并整理结果。\n[T2] 收到另一会话的“下午好”。\n[T3] 等待 Telegram 新消息。"
         },
         {
-          "name": "联想回忆",
+          "name": "召回记忆",
           "value": "[M1] 项目《调查开源皮套直播 LLM 方案》仍是 Active。\n[M2] owner 的请求需要持续调查，不应被寒暄打断。"
         },
         {
@@ -39,19 +39,19 @@
       "title": "无活跃项目时不要虚构连续性",
       "inputs": [
         {
-          "name": "活跃项目",
+          "name": "当前项目状态",
           "value": "无"
         },
         {
-          "name": "当前下一步动作",
+          "name": "当前工作状态",
           "value": "无"
         },
         {
-          "name": "近期经历",
+          "name": "近期历史",
           "value": "[T1] 等待 Telegram 新消息。\n[T2] 回复了一句“下午好”。"
         },
         {
-          "name": "联想回忆",
+          "name": "召回记忆",
           "value": "[M1] 当前没有任何 Active 项目或待推进承诺。"
         },
         {
@@ -72,10 +72,10 @@
   "train_cases": [
     {
       "name": "continue_owner_commitment_despite_small_talk",
-      "active_projects": "[P1] 调查开源皮套直播 LLM 方案",
-      "next_actions": "[A1] 在 Terminal 检索 github 和开源社区，收集皮套直播 LLM 相关项目资料。",
-      "recent_trail": "[T1] 向对方承诺：我会调查开源皮套直播 LLM 方案并整理结果。\n[T2] 收到另一会话的“下午好”。\n[T3] 等待 Telegram 新消息。",
-      "associated_memories": "[M1] 项目《调查开源皮套直播 LLM 方案》仍是 Active。\n[M2] owner 的请求需要持续调查，不应被寒暄打断。",
+      "current_projects": "[P1] 调查开源皮套直播 LLM 方案",
+      "current_work": "[A1] 在 Terminal 检索 github 和开源社区，收集皮套直播 LLM 相关项目资料。",
+      "recent_history": "[T1] 向对方承诺：我会调查开源皮套直播 LLM 方案并整理结果。\n[T2] 收到另一会话的“下午好”。\n[T3] 等待 Telegram 新消息。",
+      "recalled_memories": "[M1] 项目《调查开源皮套直播 LLM 方案》仍是 Active。\n[M2] owner 的请求需要持续调查，不应被寒暄打断。",
       "question": "当前最该继续推进什么？",
       "expected_should_continue": true,
       "expected_project_title": "调查开源皮套直播 LLM 方案",
@@ -104,10 +104,10 @@
     },
     {
       "name": "remember_blocker_instead_of_switching_goal",
-      "active_projects": "[P1] 调查开源皮套直播 LLM 方案",
-      "next_actions": "[A1] 在 Terminal 检索 github 和开源社区，收集皮套直播 LLM 相关项目资料。",
-      "recent_trail": "[T1] 执行 gh search repos 'vtuber llm'。\n[T2] 终端进入 gh auth login 交互式认证。\n[T3] 收到 Telegram 的一条无关问候。",
-      "associated_memories": "[M1] gh auth login 需要人工授权，不适合 agent，应改用非交互方案。\n[M2] 该项目仍未完成，当前真正的阻塞是 GitHub CLI 登录流程。",
+      "current_projects": "[P1] 调查开源皮套直播 LLM 方案",
+      "current_work": "[A1] 在 Terminal 检索 github 和开源社区，收集皮套直播 LLM 相关项目资料。",
+      "recent_history": "[T1] 执行 gh search repos 'vtuber llm'。\n[T2] 终端进入 gh auth login 交互式认证。\n[T3] 收到 Telegram 的一条无关问候。",
+      "recalled_memories": "[M1] gh auth login 需要人工授权，不适合 agent，应改用非交互方案。\n[M2] 该项目仍未完成，当前真正的阻塞是 GitHub CLI 登录流程。",
       "question": "当前是否应继续这个项目，还是转去别的事情？",
       "expected_should_continue": true,
       "expected_project_title": "调查开源皮套直播 LLM 方案",
@@ -136,10 +136,10 @@
     },
     {
       "name": "no_project_no_forced_continuity",
-      "active_projects": "无",
-      "next_actions": "无",
-      "recent_trail": "[T1] 等待 Telegram 新消息。\n[T2] 回复了一句“下午好”。",
-      "associated_memories": "[M1] 当前没有任何 Active 项目或待推进承诺。",
+      "current_projects": "无",
+      "current_work": "无",
+      "recent_history": "[T1] 等待 Telegram 新消息。\n[T2] 回复了一句“下午好”。",
+      "recalled_memories": "[M1] 当前没有任何 Active 项目或待推进承诺。",
       "question": "当前是否有必须继续推进的项目？",
       "expected_should_continue": false,
       "expected_project_title": null,
@@ -167,10 +167,10 @@
   "dev_cases": [
     {
       "name": "continue_owner_commitment_despite_small_talk_variant",
-      "active_projects": "[P1] 调查开源皮套直播 LLM 方案",
-      "next_actions": "[A1] 在 Terminal 检索 github 与开源社区，继续收集皮套直播 LLM 项目资料。",
-      "recent_trail": "[T1] 已向对方承诺：我会调查开源皮套直播 LLM 方案并汇总结论。\n[T2] 另一个会话发来“晚上好”。\n[T3] 静默等待新的 Telegram 输入。",
-      "associated_memories": "[M1] 项目《调查开源皮套直播 LLM 方案》仍是 Active。\n[M2] owner 的请求需要持续推进，不应被寒暄消息带偏。",
+      "current_projects": "[P1] 调查开源皮套直播 LLM 方案",
+      "current_work": "[A1] 在 Terminal 检索 github 与开源社区，继续收集皮套直播 LLM 项目资料。",
+      "recent_history": "[T1] 已向对方承诺：我会调查开源皮套直播 LLM 方案并汇总结论。\n[T2] 另一个会话发来“晚上好”。\n[T3] 静默等待新的 Telegram 输入。",
+      "recalled_memories": "[M1] 项目《调查开源皮套直播 LLM 方案》仍是 Active。\n[M2] owner 的请求需要持续推进，不应被寒暄消息带偏。",
       "question": "现在最该继续推进什么？",
       "expected_should_continue": true,
       "expected_project_title": "调查开源皮套直播 LLM 方案",
@@ -189,10 +189,10 @@
     },
     {
       "name": "remember_blocker_instead_of_switching_goal_variant",
-      "active_projects": "[P1] 调查开源皮套直播 LLM 方案",
-      "next_actions": "[A1] 在 Terminal 检索 github 和开源社区，继续收集皮套直播 LLM 相关项目资料。",
-      "recent_trail": "[T1] 执行 gh search repos 'vtuber llm'。\n[T2] 终端进入 gh auth login 的交互式认证。\n[T3] Telegram 收到一条无关问候。",
-      "associated_memories": "[M1] gh auth login 需要人工授权，不适合 agent，应改用非交互方案。\n[M2] 该项目仍未完成，当前真正的阻塞是 GitHub CLI 登录流程。",
+      "current_projects": "[P1] 调查开源皮套直播 LLM 方案",
+      "current_work": "[A1] 在 Terminal 检索 github 和开源社区，继续收集皮套直播 LLM 相关项目资料。",
+      "recent_history": "[T1] 执行 gh search repos 'vtuber llm'。\n[T2] 终端进入 gh auth login 的交互式认证。\n[T3] Telegram 收到一条无关问候。",
+      "recalled_memories": "[M1] gh auth login 需要人工授权，不适合 agent，应改用非交互方案。\n[M2] 该项目仍未完成，当前真正的阻塞是 GitHub CLI 登录流程。",
       "question": "现在应继续这个项目，还是切去别的事情？",
       "expected_should_continue": true,
       "expected_project_title": "调查开源皮套直播 LLM 方案",
@@ -211,10 +211,10 @@
     },
     {
       "name": "no_project_no_forced_continuity_variant",
-      "active_projects": "无",
-      "next_actions": "无",
-      "recent_trail": "[T1] 静默等待 Telegram 新消息。\n[T2] 回复了一句“晚上好”。",
-      "associated_memories": "[M1] 当前没有任何 Active 项目或需要继续推进的长期承诺。",
+      "current_projects": "无",
+      "current_work": "无",
+      "recent_history": "[T1] 静默等待 Telegram 新消息。\n[T2] 回复了一句“晚上好”。",
+      "recalled_memories": "[M1] 当前没有任何 Active 项目或需要继续推进的长期承诺。",
       "question": "当前是否存在必须继续推进的项目？",
       "expected_should_continue": false,
       "expected_project_title": null,
@@ -232,3 +232,4 @@
     }
   ]
 }
+

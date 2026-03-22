@@ -50,7 +50,10 @@ impl Program for TaskUnderstandingProgram {
             .input("任务元信息", "repo、base_commit 等环境信息。")
             .output("thread_focus", "持续推进的任务主线。")
             .output("task_goal", "用一两句话说明最终要达成什么。")
-            .output("key_anchors", "后续不能丢失的关键锚点，如路径、函数名、报错、参数。")
+            .output(
+                "key_anchors",
+                "后续不能丢失的关键锚点，如路径、函数名、报错、参数。",
+            )
             .output("investigation_plan", "优先执行的短步骤计划。")
             .output("done_criteria", "可操作的完成判定，而不是泛泛描述。")
             .rule("不要复述整段 issue。")

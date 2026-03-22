@@ -30,10 +30,10 @@ struct ContinuityGuardExample {
 #[derive(Deserialize)]
 struct ContinuityGuardEvalCase {
     name: String,
-    active_projects: String,
-    next_actions: String,
-    recent_trail: String,
-    associated_memories: String,
+    current_projects: String,
+    current_work: String,
+    recent_history: String,
+    recalled_memories: String,
     question: String,
     expected_should_continue: bool,
     expected_project_title: Option<String>,
@@ -78,10 +78,10 @@ fn to_eval_cases(
             EvalCase {
                 name: Box::leak(case.name.into_boxed_str()),
                 ir: program.dataset_ir(
-                    case.active_projects,
-                    case.next_actions,
-                    case.recent_trail,
-                    case.associated_memories,
+                    case.current_projects,
+                    case.current_work,
+                    case.recent_history,
+                    case.recalled_memories,
                     case.question,
                 ),
                 check: Arc::new(move |output| {
@@ -109,20 +109,20 @@ pub fn bootstrap_examples(case_names: &[&str]) -> Vec<ProgramExample<ContinuityG
                 title: format!("Bootstrap from {}", case.name),
                 inputs: vec![
                     ExampleField {
-                        name: "活跃项目".to_string(),
-                        value: case.active_projects,
+                        name: "当前项目状态".to_string(),
+                        value: case.current_projects,
                     },
                     ExampleField {
-                        name: "当前下一步动作".to_string(),
-                        value: case.next_actions,
+                        name: "当前工作状态".to_string(),
+                        value: case.current_work,
                     },
                     ExampleField {
-                        name: "近期经历".to_string(),
-                        value: case.recent_trail,
+                        name: "近期历史".to_string(),
+                        value: case.recent_history,
                     },
                     ExampleField {
-                        name: "联想回忆".to_string(),
-                        value: case.associated_memories,
+                        name: "召回记忆".to_string(),
+                        value: case.recalled_memories,
                     },
                     ExampleField {
                         name: "问题".to_string(),

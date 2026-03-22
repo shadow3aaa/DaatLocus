@@ -7,9 +7,7 @@ use crate::core::TelegramResolution;
 
 use super::{
     eval::EvalCase,
-    programs::resolve_telegram::{
-        ResolveTelegramChatProgram, ResolveTelegramProgramAction, ResolveTelegramProgramOutput,
-    },
+    programs::resolve_telegram::{ResolveTelegramChatProgram, ResolveTelegramProgramOutput},
     runtime::{PromptRequest, PromptRole},
     trace::{ProgramTraceRecord, TraceOrigin},
 };
@@ -170,14 +168,14 @@ fn extract_resolve_sections(request: &PromptRequest) -> Option<(String, String, 
             matches!(message.role, PromptRole::User)
                 && message.content.contains("## 待判断会话")
                 && message.content.contains("## 当前前景设备")
-                && message.content.contains("## 完整快照")
+                && message.content.contains("## 当前状态")
         })?
         .content
         .clone();
 
     let pending_text = extract_section(&user_content, "待判断会话")?;
     let focus = extract_section(&user_content, "当前前景设备")?;
-    let snapshot_text = extract_section(&user_content, "完整快照")?;
+    let snapshot_text = extract_section(&user_content, "当前状态")?;
     Some((pending_text, focus, snapshot_text))
 }
 
@@ -190,10 +188,10 @@ fn extract_section(content: &str, title: &str) -> Option<String> {
 }
 
 fn extract_resolve_output(record: &ProgramTraceRecord) -> Option<ResolveTelegramProgramOutput> {
-    if let Some(parsed) = &record.parsed_output {
-        if let Ok(output) = serde_json::from_value::<ResolveTelegramProgramOutput>(parsed.clone()) {
-            return Some(output);
-        }
+    if let Some(parsed) = &record.parsed_output
+        && let Ok(output) = serde_json::from_value::<ResolveTelegramProgramOutput>(parsed.clone())
+    {
+        return Some(output);
     }
 
     if let Ok(output) =
@@ -217,19 +215,27 @@ fn extract_json_from_provider_error(provider_error: &str) -> Option<Value> {
 }
 
 fn infer_expectation(output: &ResolveTelegramProgramOutput) -> Option<TraceExpectation> {
-    match &output.action {
-        ResolveTelegramProgramAction::FocusTelegram => Some(TraceExpectation::FocusTelegram),
-        ResolveTelegramProgramAction::ResolveChat {
-            chat_id,
-            resolution: TelegramResolution::AcceptAsProject { .. },
-        } => Some(TraceExpectation::AcceptAsProject {
-            chat_id: chat_id.clone(),
-        }),
-        ResolveTelegramProgramAction::ReplyInCurrentChat { text } if !text.trim().is_empty() => {
-            Some(TraceExpectation::ReplyInCurrentChat)
-        }
-        _ => None,
+    if output.action_kind == "focus_device" && output.action_summary.contains("Telegram") {
+        return Some(TraceExpectation::FocusTelegram);
     }
+    if output.action_kind == "resolve_telegram_chat"
+        && let (Some(chat_id), Some(TelegramResolution::AcceptAsProject { .. })) =
+            (&output.chat_id, &output.resolution)
+    {
+        return Some(TraceExpectation::AcceptAsProject {
+            chat_id: chat_id.clone(),
+        });
+    }
+    if output.action_kind == "telegram_send_message"
+        && output
+            .text
+            .as_deref()
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false)
+    {
+        return Some(TraceExpectation::ReplyInCurrentChat);
+    }
+    None
 }
 
 fn stable_case_suffix(pending_text: &str, focus: &str, snapshot_text: &str) -> String {
@@ -243,48 +249,60 @@ fn stable_case_suffix(pending_text: &str, focus: &str, snapshot_text: &str) -> S
 }
 
 fn check_focus_telegram(output: &ResolveTelegramProgramOutput) -> Result<()> {
-    match &output.action {
-        ResolveTelegramProgramAction::FocusTelegram => Ok(()),
-        other => Err(miette!("expected FocusTelegram, got {:?}", other)),
+    if output.action_kind == "focus_device" && output.action_summary.contains("Telegram") {
+        Ok(())
+    } else {
+        Err(miette!(
+            "expected focus_device(Telegram), got {} ({})",
+            output.action_kind,
+            output.action_summary
+        ))
     }
 }
 
 fn check_reply_in_current_chat(output: &ResolveTelegramProgramOutput) -> Result<()> {
-    match &output.action {
-        ResolveTelegramProgramAction::ReplyInCurrentChat { text } if !text.trim().is_empty() => {
-            Ok(())
-        }
-        other => Err(miette!(
-            "expected ReplyInCurrentChat with non-empty text, got {:?}",
-            other
-        )),
+    if output.action_kind == "telegram_send_message"
+        && output
+            .text
+            .as_deref()
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(miette!(
+            "expected telegram_send_message with non-empty text, got {} ({})",
+            output.action_kind,
+            output.action_summary
+        ))
     }
 }
 
 fn register_accept_project_check(
     expected_chat_id: String,
 ) -> Arc<dyn Fn(&ResolveTelegramProgramOutput) -> Result<()> + Send + Sync> {
-    Arc::new(
-        move |output: &ResolveTelegramProgramOutput| match &output.action {
-            ResolveTelegramProgramAction::ResolveChat {
-                chat_id,
-                resolution:
-                    TelegramResolution::AcceptAsProject {
-                        project_title,
-                        success_criteria,
-                        ..
-                    },
-            } if chat_id == &expected_chat_id
+    Arc::new(move |output: &ResolveTelegramProgramOutput| {
+        match (&output.chat_id, &output.resolution) {
+            (
+                Some(chat_id),
+                Some(TelegramResolution::AcceptAsProject {
+                    project_title,
+                    success_criteria,
+                    ..
+                }),
+            ) if output.action_kind == "resolve_telegram_chat"
+                && chat_id == &expected_chat_id
                 && !project_title.trim().is_empty()
                 && !success_criteria.trim().is_empty() =>
             {
                 Ok(())
             }
-            other => Err(miette!(
-                "expected ResolveChat with AcceptAsProject for chat {}, got {:?}",
+            _ => Err(miette!(
+                "expected resolve_telegram_chat with AcceptAsProject for chat {}, got {} ({})",
                 expected_chat_id,
-                other
+                output.action_kind,
+                output.action_summary
             )),
-        },
-    )
+        }
+    })
 }

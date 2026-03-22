@@ -1,9 +1,11 @@
-use std::{collections::HashMap, fmt::Display, time::Duration};
+use std::{any::Any, collections::HashMap, fmt::Display, time::Duration};
 
 use async_trait::async_trait;
 use miette::{Result, miette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::{telegram_device::TelegramDevice, terminal_device::TerminalDevice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
 pub enum DeviceId {
@@ -24,7 +26,6 @@ impl Display for DeviceId {
 pub enum AttentionLevel {
     Quiet,
     Notice,
-    Urgent,
 }
 
 impl Display for AttentionLevel {
@@ -32,48 +33,34 @@ impl Display for AttentionLevel {
         match self {
             Self::Quiet => write!(f, "Quiet"),
             Self::Notice => write!(f, "Notice"),
-            Self::Urgent => write!(f, "Urgent"),
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeviceToolScope {
+    Terminal,
+    Telegram,
+}
+
 #[derive(Debug, Clone)]
-pub struct PeripheralRender {
+pub struct DeviceStateRender {
     pub title: String,
-    pub summary: String,
+    pub lines: Vec<String>,
     pub attention: AttentionLevel,
     pub is_focused: bool,
-    pub interactive: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct FocusedRender {
-    pub title: String,
-    pub content: String,
-    pub interactive: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(tag = "type")]
-pub enum DeviceAction {
-    /// 将文本输入到终端并由 PTY 原样接收
-    TerminalInput { text: String },
-    /// 打开 Telegram 的某个会话
-    TelegramSelectChat { chat_id: String },
-    /// 向当前打开的 Telegram 会话发送一条消息
-    TelegramSendMessage { text: String },
 }
 
 #[async_trait]
 pub trait Device: Send + Sync {
     fn id(&self) -> DeviceId;
 
-    fn render_peripheral(&self, is_focused: bool) -> PeripheralRender;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 
-    fn render_focused(&self) -> FocusedRender;
+    fn render_state(&self, is_focused: bool) -> DeviceStateRender;
 
-    fn requires_attention(&self) -> bool {
-        false
+    fn focused_tool_scopes(&self) -> &'static [DeviceToolScope] {
+        &[]
     }
 
     async fn on_focus(&mut self) -> Result<()> {
@@ -91,8 +78,6 @@ pub trait Device: Send + Sync {
     async fn wait_until_settled(&self, _silence_duration: Duration, _timeout: Duration) -> bool {
         true
     }
-
-    async fn execute(&mut self, action: DeviceAction) -> Result<()>;
 }
 
 pub struct DeviceManager {
@@ -129,27 +114,26 @@ impl DeviceManager {
         self.focused
     }
 
-    pub fn peripheral_renders(&self) -> Vec<(DeviceId, PeripheralRender)> {
+    pub fn state_renders(&self) -> Vec<(DeviceId, DeviceStateRender)> {
         self.order
             .iter()
             .filter_map(|id| {
                 self.devices.get(id).map(|device| {
                     let is_focused = self.focused == Some(*id);
-                    (*id, device.render_peripheral(is_focused))
+                    (*id, device.render_state(is_focused))
                 })
             })
             .collect()
     }
 
-    pub fn focused_render(&self) -> Option<FocusedRender> {
-        self.focused
-            .and_then(|id| self.devices.get(&id).map(|device| device.render_focused()))
-    }
-
-    pub fn requires_attention(&self) -> bool {
+    pub fn focused_tool_scopes(&self) -> &'static [DeviceToolScope] {
+        let Some(focused) = self.focused else {
+            return &[];
+        };
         self.devices
-            .values()
-            .any(|device| device.requires_attention())
+            .get(&focused)
+            .map(|device| device.focused_tool_scopes())
+            .unwrap_or(&[])
     }
 
     pub async fn focus(&mut self, id: DeviceId) -> Result<()> {
@@ -161,10 +145,10 @@ impl DeviceManager {
             return Err(miette!("unknown device: {id}"));
         }
 
-        if let Some(current) = self.focused {
-            if let Some(device) = self.devices.get_mut(&current) {
-                device.on_blur().await?;
-            }
+        if let Some(current) = self.focused
+            && let Some(device) = self.devices.get_mut(&current)
+        {
+            device.on_blur().await?;
         }
 
         self.focused = Some(id);
@@ -194,14 +178,110 @@ impl DeviceManager {
         device.wait_until_settled(silence_duration, timeout).await
     }
 
-    pub async fn execute_focused(&mut self, action: DeviceAction) -> Result<()> {
+    fn focused_device_mut(&mut self) -> Result<&mut Box<dyn Device>> {
         let Some(focused) = self.focused else {
             return Err(miette!("no focused device"));
         };
-        let Some(device) = self.devices.get_mut(&focused) else {
-            return Err(miette!("focused device missing: {focused}"));
-        };
-        device.execute(action).await
+        self.devices
+            .get_mut(&focused)
+            .ok_or_else(|| miette!("focused device missing: {focused}"))
+    }
+
+    pub async fn send_terminal_input(&mut self, text: String) -> Result<()> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let terminal = device
+            .as_any_mut()
+            .downcast_mut::<TerminalDevice>()
+            .ok_or_else(|| miette!("focused device is not Terminal: {:?}", focused))?;
+        terminal.send_input(text).await
+    }
+
+    pub async fn terminal_exec_with_progress<F>(
+        &mut self,
+        command: String,
+        session_id: Option<String>,
+        create_new_session: bool,
+        workdir: Option<String>,
+        yield_time_ms: Option<u64>,
+        max_chars: Option<usize>,
+        on_progress: F,
+    ) -> Result<crate::terminal_device::TerminalToolResult>
+    where
+        F: FnMut(&crate::terminal_device::TerminalSessionState, &str) + Send,
+    {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let terminal = device
+            .as_any_mut()
+            .downcast_mut::<TerminalDevice>()
+            .ok_or_else(|| miette!("focused device is not Terminal: {:?}", focused))?;
+        terminal
+            .exec_command_with_progress(
+                command,
+                session_id,
+                create_new_session,
+                workdir,
+                yield_time_ms,
+                max_chars,
+                on_progress,
+            )
+            .await
+    }
+
+    pub async fn terminal_write_stdin_with_progress<F>(
+        &mut self,
+        session_id: &str,
+        text: String,
+        yield_time_ms: Option<u64>,
+        max_chars: Option<usize>,
+        on_progress: F,
+    ) -> Result<crate::terminal_device::TerminalToolResult>
+    where
+        F: FnMut(&crate::terminal_device::TerminalSessionState, &str) + Send,
+    {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let terminal = device
+            .as_any_mut()
+            .downcast_mut::<TerminalDevice>()
+            .ok_or_else(|| miette!("focused device is not Terminal: {:?}", focused))?;
+        terminal
+            .write_stdin_with_progress(session_id, text, yield_time_ms, max_chars, on_progress)
+            .await
+    }
+
+    pub async fn terminal_terminate(
+        &mut self,
+        session_id: &str,
+    ) -> Result<crate::terminal_device::TerminalSessionState> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let terminal = device
+            .as_any_mut()
+            .downcast_mut::<TerminalDevice>()
+            .ok_or_else(|| miette!("focused device is not Terminal: {:?}", focused))?;
+        terminal.terminate_session(session_id).await
+    }
+
+    pub async fn telegram_select_chat(&mut self, chat_id: String) -> Result<()> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let telegram = device
+            .as_any_mut()
+            .downcast_mut::<TelegramDevice>()
+            .ok_or_else(|| miette!("focused device is not Telegram: {:?}", focused))?;
+        telegram.select_chat(chat_id).await
+    }
+
+    pub async fn telegram_send_message(&mut self, text: String) -> Result<()> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let telegram = device
+            .as_any_mut()
+            .downcast_mut::<TelegramDevice>()
+            .ok_or_else(|| miette!("focused device is not Telegram: {:?}", focused))?;
+        telegram.send_message(text).await
     }
 
     pub async fn shutdown(mut self) -> Result<()> {

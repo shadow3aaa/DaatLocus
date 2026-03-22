@@ -2,7 +2,12 @@ use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{context::Context, core::LLM, snapshot::Snapshot};
+use crate::{
+    context::Context,
+    core::LLM,
+    snapshot::Snapshot,
+    tool_ui::{ToolCallUiEvent, ToolUiEvent},
+};
 
 use super::{
     optimizer::PromptTuningConfig,
@@ -29,6 +34,61 @@ pub struct PromptRequest {
     pub retry_messages: Vec<PromptMessage>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AgentToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AgentToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum AgentMessage {
+    System {
+        content: String,
+    },
+    User {
+        content: String,
+    },
+    Assistant {
+        content: String,
+    },
+    AssistantToolCalls {
+        content: Option<String>,
+        calls: Vec<AgentToolCall>,
+    },
+    Tool {
+        tool_call_id: String,
+        name: String,
+        content: String,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AgentTurnRequest {
+    pub messages: Vec<AgentMessage>,
+    pub tools: Vec<AgentToolSpec>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum AgentTurnResponse {
+    Assistant {
+        content: String,
+    },
+    ToolCalls {
+        content: Option<String>,
+        calls: Vec<AgentToolCall>,
+    },
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PromptMemoryContext {
     pub recalled_memories: Vec<String>,
@@ -39,6 +99,10 @@ pub struct PromptMemoryContext {
 pub struct PromptMessage {
     pub role: PromptRole,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_ui_event: Option<ToolUiEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_call_ui_events: Vec<ToolCallUiEvent>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -54,6 +118,8 @@ impl PromptMessage {
         Self {
             role: PromptRole::System,
             content: content.into(),
+            tool_ui_event: None,
+            tool_call_ui_events: Vec::new(),
         }
     }
 
@@ -61,6 +127,8 @@ impl PromptMessage {
         Self {
             role: PromptRole::User,
             content: content.into(),
+            tool_ui_event: None,
+            tool_call_ui_events: Vec::new(),
         }
     }
 
@@ -68,9 +136,31 @@ impl PromptMessage {
         Self {
             role: PromptRole::Assistant,
             content: content.into(),
+            tool_ui_event: None,
+            tool_call_ui_events: Vec::new(),
         }
     }
 
+    pub fn tool_with_ui(content: impl Into<String>, tool_ui_event: ToolUiEvent) -> Self {
+        Self {
+            role: PromptRole::Tool,
+            content: content.into(),
+            tool_ui_event: Some(tool_ui_event),
+            tool_call_ui_events: Vec::new(),
+        }
+    }
+
+    pub fn assistant_with_tool_calls(
+        content: impl Into<String>,
+        tool_call_ui_events: Vec<ToolCallUiEvent>,
+    ) -> Self {
+        Self {
+            role: PromptRole::Assistant,
+            content: content.into(),
+            tool_ui_event: None,
+            tool_call_ui_events,
+        }
+    }
 }
 
 impl PromptRequest {
@@ -95,6 +185,53 @@ impl PromptRequest {
         messages.push(PromptMessage::user(self.current_user_message.clone()));
         messages.extend(self.retry_messages.clone());
         messages
+    }
+}
+
+impl AgentMessage {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::System {
+            content: content.into(),
+        }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::User {
+            content: content.into(),
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::Assistant {
+            content: content.into(),
+        }
+    }
+
+    pub fn assistant_tool_calls_with_history(
+        content: Option<String>,
+        calls: Vec<AgentToolCall>,
+        tool_call_ui_events: Vec<ToolCallUiEvent>,
+    ) -> (Self, PromptMessage) {
+        let history_content = content
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_default();
+        (
+            Self::AssistantToolCalls { content, calls },
+            PromptMessage::assistant_with_tool_calls(history_content, tool_call_ui_events),
+        )
+    }
+
+    pub fn tool(
+        tool_call_id: impl Into<String>,
+        name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self::Tool {
+            tool_call_id: tool_call_id.into(),
+            name: name.into(),
+            content: content.into(),
+        }
     }
 }
 
