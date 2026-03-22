@@ -7,7 +7,7 @@ use crate::{
         examples::ProgramExample,
         ir::PromptIR,
         program::Program,
-        prompts::{SYSTEM_PROMPT, TELEGRAM_PROMPT},
+        prompts::{SYSTEM_PROMPT_KERNEL, TELEGRAM_PROMPT},
         signature::Signature,
     },
     snapshot::Snapshot,
@@ -143,7 +143,7 @@ impl ResolveTelegramChatProgram {
         focus: String,
         snapshot_text: String,
     ) -> PromptIR {
-        let mut ir = PromptIR::with_system(SYSTEM_PROMPT);
+        let mut ir = PromptIR::with_system(SYSTEM_PROMPT_KERNEL);
         ir.push_instruction(
             "你现在只负责处理 Telegram 原始来信，不要规划终端探索，也不要处理无关任务。",
         );

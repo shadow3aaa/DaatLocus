@@ -30,6 +30,11 @@ pub struct DashboardState {
     pub runtime_status: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub enum DashboardControlCommand {
+    RunSleep,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct LiveActivityCell {
     pub key: String,
@@ -482,6 +487,7 @@ struct DashboardCommandContext<'a> {
     requests: &'a [crate::telegram_acl::PendingAccessRequest],
     telegram_acl: &'a TelegramAclHandle,
     state: &'a DashboardState,
+    control_tx: &'a tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
 }
 
 #[derive(Clone)]
@@ -551,6 +557,7 @@ trait DashboardSubcommand: Sync {
 
 struct QuitCommand;
 struct StatusCommand;
+struct SleepCommand;
 struct TelegramCommand;
 struct TelegramStatusSubcommand;
 struct TelegramApproveSubcommand;
@@ -558,6 +565,7 @@ struct TelegramRejectSubcommand;
 
 static QUIT_COMMAND: QuitCommand = QuitCommand;
 static STATUS_COMMAND: StatusCommand = StatusCommand;
+static SLEEP_COMMAND: SleepCommand = SleepCommand;
 static TELEGRAM_COMMAND: TelegramCommand = TelegramCommand;
 static TELEGRAM_STATUS_SUBCOMMAND: TelegramStatusSubcommand = TelegramStatusSubcommand;
 static TELEGRAM_APPROVE_SUBCOMMAND: TelegramApproveSubcommand = TelegramApproveSubcommand;
@@ -568,8 +576,8 @@ static TELEGRAM_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
     &TELEGRAM_REJECT_SUBCOMMAND,
 ];
 
-static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 3] =
-    [&QUIT_COMMAND, &STATUS_COMMAND, &TELEGRAM_COMMAND];
+static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 4] =
+    [&QUIT_COMMAND, &STATUS_COMMAND, &SLEEP_COMMAND, &TELEGRAM_COMMAND];
 
 impl DashboardCommand for QuitCommand {
     fn usage(&self) -> &'static str {
@@ -612,6 +620,34 @@ impl DashboardCommand for StatusCommand {
         DashboardCommandResult::ShowOverlay {
             title: self.overlay_title(raw),
             text: fallback_output(&context.state.status_output),
+        }
+    }
+}
+
+impl DashboardCommand for SleepCommand {
+    fn usage(&self) -> &'static str {
+        "sleep"
+    }
+
+    fn description(&self) -> &'static str {
+        "run sleep now"
+    }
+
+    fn execute(
+        &self,
+        _parts: &[&str],
+        raw: &str,
+        context: &DashboardCommandContext<'_>,
+    ) -> DashboardCommandResult {
+        match context.control_tx.send(DashboardControlCommand::RunSleep) {
+            Ok(()) => DashboardCommandResult::ShowOverlay {
+                title: self.overlay_title(raw),
+                text: "queued sleep run".to_string(),
+            },
+            Err(err) => DashboardCommandResult::ShowOverlay {
+                title: self.overlay_title(raw),
+                text: format!("failed to queue sleep run: {err}"),
+            },
         }
     }
 }
@@ -781,6 +817,7 @@ fn execute_access_request_command(
 pub async fn run_tui_dashboard(
     rx: &mut tokio::sync::watch::Receiver<DashboardState>,
     telegram_acl: TelegramAclHandle,
+    control_tx: tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
 ) -> Result<(), std::io::Error> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -894,6 +931,7 @@ pub async fn run_tui_dashboard(
                             &pending_requests,
                             &telegram_acl,
                             &state,
+                            &control_tx,
                         ) {
                             DashboardCommandResult::ShowOverlay { title, text } => {
                                 command_overlay = Some(CommandOverlay {
@@ -959,6 +997,7 @@ fn execute_dashboard_command(
     requests: &[crate::telegram_acl::PendingAccessRequest],
     telegram_acl: &TelegramAclHandle,
     state: &DashboardState,
+    control_tx: &tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
 ) -> DashboardCommandResult {
     let parts = command.split_whitespace().collect::<Vec<_>>();
     if parts.is_empty() {
@@ -972,6 +1011,7 @@ fn execute_dashboard_command(
         requests,
         telegram_acl,
         state,
+        control_tx,
     };
 
     if let Some(command_impl) = dashboard_commands()

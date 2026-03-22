@@ -2,7 +2,7 @@
 
 自用通用agent。
 
-# 运行
+## 运行
 
 ```bash
 # ubuntu

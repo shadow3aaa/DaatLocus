@@ -7,6 +7,10 @@ use crate::{
     context::Context,
     hindsight::{HindsightRecallOptions, HindsightRetainItem},
     reasoning::{
+        compiled::{
+            RUNTIME_SYSTEM_PROMPT_COMPILE_KEY, load_previous_compiled_runtime_system_prompt,
+            save_compiled_runtime_system_prompt, save_previous_compiled_runtime_system_prompt,
+        },
         episode::{EpisodeOutcome, EpisodeStatus, EpisodeStep},
         examples::ExampleField,
         runtime::{PromptRequest, PromptRole},
@@ -16,6 +20,12 @@ use crate::{
 use super::{
     program::Program,
     programs::sleep_artifact_builder::{SleepArtifactBuilderOutput, SleepArtifactBuilderProgram},
+    programs::runtime_system_prompt_judge::{
+        RuntimeSystemPromptJudgeOutput, RuntimeSystemPromptJudgeProgram,
+    },
+    programs::runtime_system_prompt_patch_builder::{
+        RuntimeSystemPromptPatchBuilderOutput, RuntimeSystemPromptPatchBuilderProgram,
+    },
     programs::sleep_episode_synthesizer::{
         SleepEpisodeSynthesizerOutput, SleepEpisodeSynthesizerProgram,
     },
@@ -24,9 +34,15 @@ use super::{
     sleep_artifacts::{
         SleepArtifactBootstrapDemo, SleepArtifactFailurePattern,
         SleepArtifactInstructionHypothesis, SleepArtifactStressCase, SleepArtifactSuggestedFixKind,
-        SleepArtifactsStore,
+        SleepArtifactRuntimeDemo, SleepArtifactRuntimeDemoEvaluation,
+        SleepArtifactRuntimePromptCandidate, SleepArtifactRuntimePromptEvolutionReport,
+        SleepArtifactRuntimePromptEvolutionRound,
+        SleepArtifactRuntimePromptSuggestion, SleepArtifactsStore,
     },
-    trace::{ProgramTraceRecord, TraceOrigin},
+    trace::{
+        ProgramTraceRecord, RuntimeTraceBatch, TraceOrigin, compact_runtime_trace_file,
+        load_runtime_trace_batch,
+    },
 };
 
 #[derive(Clone)]
@@ -35,6 +51,15 @@ pub struct SleepSummary {
     pub bootstrap_demos: usize,
     pub stress_cases: usize,
     pub instruction_hypotheses: usize,
+    pub runtime_demos: usize,
+    pub runtime_prompt_suggestions: usize,
+    pub runtime_prompt_candidates: usize,
+    pub runtime_demo_evaluations: usize,
+    pub runtime_demo_passed: usize,
+    pub runtime_demo_regressions: usize,
+    pub runtime_prompt_rolled_back: bool,
+    pub runtime_prompt_evolution_rounds: usize,
+    pub runtime_prompt_accepted: bool,
     pub retained_reflections: usize,
 }
 
@@ -48,7 +73,8 @@ struct SleepActionOutput {
 }
 
 pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
-    let records = load_runtime_trace_records().await?;
+    let trace_batch = load_runtime_trace_records().await?;
+    let records = trace_batch.records;
     let mut failure_patterns = derive_failure_patterns(&records);
     let episode_outcomes = load_recent_learn_episode_outcomes().await?;
     let episode_synthesis = synthesize_episode_outcomes(context, &episode_outcomes).await?;
@@ -68,20 +94,50 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     derived
         .instruction_hypotheses
         .extend(episode_synthesis.instruction_hypotheses.clone());
-    store
-        .replace_bootstrap_demos(&derived.bootstrap_demos)
-        .await?;
+    derived
+        .runtime_demos
+        .extend(episode_synthesis.runtime_demos.clone());
+    store.replace_bootstrap_demos(&derived.bootstrap_demos).await?;
     store.replace_stress_cases(&derived.stress_cases).await?;
     store
         .replace_instruction_hypotheses(&derived.instruction_hypotheses)
         .await?;
+    store.replace_runtime_demos(&derived.runtime_demos).await?;
+    let runtime_evolution = evolve_runtime_system_prompt(
+        context,
+        &derived.runtime_demos,
+        &derived.instruction_hypotheses,
+    )
+    .await?;
+    store
+        .replace_runtime_demo_evaluations(&runtime_evolution.evaluations)
+        .await?;
+    store
+        .replace_runtime_prompt_suggestions(&runtime_evolution.suggestions)
+        .await?;
+    store
+        .replace_runtime_prompt_candidates(&runtime_evolution.candidates)
+        .await?;
+    store
+        .replace_runtime_prompt_evolution_reports(std::slice::from_ref(&runtime_evolution.report))
+        .await?;
     let retained_reflections =
         retain_sleep_reflections(context, &episode_synthesis.reflections).await?;
+    compact_runtime_trace_file(trace_batch.next_offset).await?;
     Ok(SleepSummary {
         failure_patterns,
         bootstrap_demos: derived.bootstrap_demos.len(),
         stress_cases: derived.stress_cases.len(),
         instruction_hypotheses: derived.instruction_hypotheses.len(),
+        runtime_demos: derived.runtime_demos.len(),
+        runtime_prompt_suggestions: runtime_evolution.suggestions.len(),
+        runtime_prompt_candidates: runtime_evolution.candidates.len(),
+        runtime_demo_evaluations: runtime_evolution.evaluations.len(),
+        runtime_demo_passed: runtime_evolution.passed,
+        runtime_demo_regressions: runtime_evolution.regressions,
+        runtime_prompt_rolled_back: runtime_evolution.rolled_back,
+        runtime_prompt_evolution_rounds: runtime_evolution.rounds,
+        runtime_prompt_accepted: runtime_evolution.accepted,
         retained_reflections,
     })
 }
@@ -90,37 +146,23 @@ struct DerivedSleepArtifacts {
     bootstrap_demos: Vec<SleepArtifactBootstrapDemo>,
     stress_cases: Vec<SleepArtifactStressCase>,
     instruction_hypotheses: Vec<SleepArtifactInstructionHypothesis>,
+    runtime_demos: Vec<SleepArtifactRuntimeDemo>,
 }
 
-async fn load_runtime_trace_records() -> Result<Vec<ProgramTraceRecord>> {
-    let path = crate::get_spinova_home()
-        .await
-        .join("reasoning_traces.jsonl");
-    let bytes = match tokio::fs::read_to_string(&path).await {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(miette!(
-                "failed to read reasoning trace file {}: {err}",
-                path.display()
-            ));
-        }
-    };
+struct RuntimePromptEvolutionResult {
+    evaluations: Vec<SleepArtifactRuntimeDemoEvaluation>,
+    suggestions: Vec<SleepArtifactRuntimePromptSuggestion>,
+    candidates: Vec<SleepArtifactRuntimePromptCandidate>,
+    report: SleepArtifactRuntimePromptEvolutionReport,
+    passed: usize,
+    regressions: usize,
+    rolled_back: bool,
+    accepted: bool,
+    rounds: usize,
+}
 
-    let mut records = Vec::new();
-    for line in bytes.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(record) = serde_json::from_str::<ProgramTraceRecord>(line)
-            && record.origin == TraceOrigin::Runtime
-        {
-            records.push(record);
-        }
-    }
-
-    Ok(records)
+async fn load_runtime_trace_records() -> Result<RuntimeTraceBatch> {
+    load_runtime_trace_batch().await
 }
 
 async fn latest_train_source_learn_session_root() -> Result<Option<PathBuf>> {
@@ -215,6 +257,7 @@ struct EpisodeSleepSynthesis {
     bootstrap_demos: Vec<SleepArtifactBootstrapDemo>,
     stress_cases: Vec<SleepArtifactStressCase>,
     instruction_hypotheses: Vec<SleepArtifactInstructionHypothesis>,
+    runtime_demos: Vec<SleepArtifactRuntimeDemo>,
     reflections: Vec<SleepReflectionRecord>,
 }
 
@@ -233,21 +276,22 @@ async fn synthesize_episode_outcomes(
     let program = SleepEpisodeSynthesizerProgram;
     let mut synthesized = EpisodeSleepSynthesis::default();
 
-    for outcome in outcomes {
+    for outcome in outcomes.iter().cloned() {
         let Some(step) = outcome
             .steps
             .iter()
             .rev()
             .find(|step| infer_episode_suite_from_step(step).is_some())
+            .cloned()
         else {
             continue;
         };
-        let Some(suite) = infer_episode_suite_from_step(step) else {
+        let Some(suite) = infer_episode_suite_from_step(&step).map(str::to_string) else {
             continue;
         };
 
         let episode_id = format!("episode:{}", outcome.task.id);
-        let recent_steps = render_recent_episode_steps(outcome);
+        let recent_steps = render_recent_episode_steps(&outcome);
         let task_goal = outcome
             .task
             .task_goal
@@ -288,9 +332,9 @@ async fn synthesize_episode_outcomes(
 
         merge_episode_synthesis(
             &mut synthesized,
-            outcome,
-            suite,
-            step,
+            &outcome,
+            &suite,
+            &step,
             &episode_id,
             &related_memories,
             &synthesized_outcome.output,
@@ -497,6 +541,10 @@ fn merge_episode_synthesis(
             });
     }
 
+    if let Some(runtime_demo) = episode_runtime_demo(outcome, step, episode_id, output) {
+        synthesized.runtime_demos.push(runtime_demo);
+    }
+
     if !output.synthesized_summary.trim().is_empty() || !output.strategy_lesson.trim().is_empty() {
         synthesized.reflections.push(SleepReflectionRecord {
             document_id: format!("sleep-reflection:{}", slugify(episode_id)),
@@ -671,6 +719,7 @@ async fn derive_sleep_artifacts(
             bootstrap_demos: Vec::new(),
             stress_cases: Vec::new(),
             instruction_hypotheses: Vec::new(),
+            runtime_demos: Vec::new(),
         });
     }
 
@@ -679,8 +728,9 @@ async fn derive_sleep_artifacts(
     let mut bootstrap_demos = Vec::new();
     let mut stress_cases = Vec::new();
     let mut instruction_hypotheses = Vec::new();
+    let mut runtime_demos = Vec::new();
 
-    for pattern in patterns {
+    for pattern in patterns.iter().cloned() {
         let related_memories = recall_related_memories(context, &pattern.description, 3).await;
         let evidence_summary = render_related_memories(&related_memories);
         let available_canonical_cases = suite_reference_case_names(&pattern.suite);
@@ -705,18 +755,26 @@ async fn derive_sleep_artifacts(
         )
         .await?;
 
-        if let Some(artifact) = to_instruction_hypothesis(pattern, &outcome.output) {
+        if let Some(artifact) = to_instruction_hypothesis(&pattern, &outcome.output) {
             instruction_hypotheses.push(artifact);
         }
         if let Some(artifact) = to_bootstrap_demo(
-            pattern,
+            &pattern,
             &related_memories,
             evidence_summary.as_deref(),
             &outcome.output,
         ) {
             bootstrap_demos.push(artifact);
         }
-        if let Some(artifact) = to_stress_case(pattern, &related_memories, &outcome.output) {
+        if let Some(artifact) = to_runtime_demo(
+            &pattern,
+            &related_memories,
+            evidence_summary.as_deref(),
+            &outcome.output,
+        ) {
+            runtime_demos.push(artifact);
+        }
+        if let Some(artifact) = to_stress_case(&pattern, &related_memories, &outcome.output) {
             stress_cases.push(artifact);
         }
     }
@@ -725,7 +783,453 @@ async fn derive_sleep_artifacts(
         bootstrap_demos,
         stress_cases,
         instruction_hypotheses,
+        runtime_demos,
     })
+}
+
+async fn evaluate_runtime_demos(
+    context: &mut Context,
+    runtime_demos: &[SleepArtifactRuntimeDemo],
+) -> Result<Vec<SleepArtifactRuntimeDemoEvaluation>> {
+    if runtime_demos.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let renderer = OpenAIToolRenderer;
+    let program = RuntimeSystemPromptJudgeProgram;
+    let current_system_prompt = current_runtime_system_prompt_text(context);
+    let previous_system_prompt = previous_runtime_system_prompt_text().await?;
+    let mut evaluations = Vec::with_capacity(runtime_demos.len());
+
+    for demo in runtime_demos.iter().cloned() {
+        let judge_focus = if demo.judge_focus.is_empty() {
+            String::from("none")
+        } else {
+            demo.judge_focus.join("\n")
+        };
+        let output = execute_program_with_ir_report(
+            context.judge_llm.as_ref(),
+            context,
+            &renderer,
+            &program,
+            program.dataset_ir(
+                current_system_prompt.clone(),
+                previous_system_prompt.clone(),
+                demo.title.clone(),
+                demo.scenario_summary.clone(),
+                demo.expected_behavior.clone(),
+                judge_focus,
+            ),
+            &program.default_tuning(),
+            TraceOrigin::Sleep,
+        )
+        .await?;
+
+        evaluations.push(runtime_demo_evaluation_from_output(&demo, &output.output));
+    }
+
+    Ok(evaluations)
+}
+
+const MAX_RUNTIME_PROMPT_EVOLUTION_ROUNDS: usize = 3;
+
+async fn evolve_runtime_system_prompt(
+    context: &mut Context,
+    runtime_demos: &[SleepArtifactRuntimeDemo],
+    instruction_hypotheses: &[SleepArtifactInstructionHypothesis],
+) -> Result<RuntimePromptEvolutionResult> {
+    if runtime_demos.is_empty() {
+        return Ok(RuntimePromptEvolutionResult {
+            evaluations: Vec::new(),
+            suggestions: Vec::new(),
+            candidates: Vec::new(),
+            report: SleepArtifactRuntimePromptEvolutionReport {
+                compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+                rounds: 0,
+                accepted: true,
+                rolled_back: false,
+                passed: 0,
+                total_demos: 0,
+                regressions: 0,
+                selected_candidate: "current".to_string(),
+                selected_demo_titles: Vec::new(),
+                final_system_additions: context.compiled_prompts.runtime_system_additions().to_vec(),
+                round_history: Vec::new(),
+            },
+            passed: 0,
+            regressions: 0,
+            rolled_back: false,
+            accepted: true,
+            rounds: 0,
+        });
+    }
+
+    let mut current_prompt = current_runtime_system_prompt_artifact(context);
+    let mut best_prompt = current_prompt.clone();
+    let mut best_passed = 0usize;
+    let mut rounds = 0usize;
+    let mut rolled_back = false;
+    let mut accepted = false;
+    let mut all_candidates = Vec::new();
+    let mut latest_evaluations = Vec::new();
+    let mut latest_suggestions = Vec::new();
+    let mut latest_regressions = 0usize;
+    let mut round_history = Vec::new();
+
+    save_compiled_runtime_system_prompt(&current_prompt).await?;
+    context.compiled_prompts = context
+        .compiled_prompts
+        .clone()
+        .with_runtime_system_prompt(Some(current_prompt.clone()));
+
+    for _ in 0..MAX_RUNTIME_PROMPT_EVOLUTION_ROUNDS {
+        rounds += 1;
+        latest_evaluations = evaluate_runtime_demos(context, runtime_demos).await?;
+        latest_suggestions = runtime_prompt_suggestions_from_evaluations(&latest_evaluations);
+        latest_regressions = latest_evaluations
+            .iter()
+            .filter(|item| item.regression_detected)
+            .count();
+        let passed = latest_evaluations.iter().filter(|item| item.passed).count();
+        let has_regression = latest_regressions > 0;
+
+        let round_accepted = is_acceptable_runtime_round(passed, latest_evaluations.len(), has_regression);
+        let (next_best_prompt, next_best_passed) =
+            choose_best_non_regressing_prompt(&best_prompt, best_passed, &current_prompt, passed, has_regression);
+        best_prompt = next_best_prompt;
+        best_passed = next_best_passed;
+
+        round_history.push(SleepArtifactRuntimePromptEvolutionRound {
+            round: rounds,
+            candidate: current_prompt.best_candidate.clone(),
+            passed,
+            total_demos: latest_evaluations.len(),
+            regressions: latest_regressions,
+            rolled_back,
+            accepted: round_accepted,
+            suggestion_titles: latest_suggestions
+                .iter()
+                .map(|item| item.title.clone())
+                .collect(),
+            candidate_titles: Vec::new(),
+        });
+
+        if round_accepted {
+            accepted = true;
+            best_prompt = current_prompt.clone();
+            break;
+        }
+
+        if has_regression
+            && rollback_runtime_system_prompt_if_regressed(context, &latest_evaluations).await?
+        {
+            rolled_back = true;
+            current_prompt = current_runtime_system_prompt_artifact(context);
+        }
+
+        let next_candidates = generate_runtime_prompt_candidates(
+            context,
+            &latest_evaluations,
+            instruction_hypotheses,
+        )
+        .await?;
+        if next_candidates.is_empty() {
+            break;
+        }
+        let candidate_titles = next_candidates
+            .iter()
+            .map(|item| item.title.clone())
+            .collect::<Vec<_>>();
+        all_candidates.extend(next_candidates.clone());
+        if let Some(last_round) = round_history.last_mut() {
+            last_round.candidate_titles = candidate_titles;
+        }
+
+        let next_prompt = apply_runtime_prompt_candidate(&current_prompt, &next_candidates[0]);
+        save_previous_compiled_runtime_system_prompt(&current_prompt).await?;
+        save_compiled_runtime_system_prompt(&next_prompt).await?;
+        context.compiled_prompts = context
+            .compiled_prompts
+            .clone()
+            .with_runtime_system_prompt(Some(next_prompt.clone()));
+        current_prompt = next_prompt;
+    }
+
+    save_compiled_runtime_system_prompt(&best_prompt).await?;
+    context.compiled_prompts = context
+        .compiled_prompts
+        .clone()
+        .with_runtime_system_prompt(Some(best_prompt.clone()));
+
+    Ok(RuntimePromptEvolutionResult {
+        evaluations: latest_evaluations,
+        suggestions: latest_suggestions,
+        candidates: all_candidates,
+        report: SleepArtifactRuntimePromptEvolutionReport {
+            compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+            rounds,
+            accepted,
+            rolled_back,
+            passed: best_passed,
+            total_demos: runtime_demos.len(),
+            regressions: latest_regressions,
+            selected_candidate: best_prompt.best_candidate.clone(),
+            selected_demo_titles: best_prompt.selected_demo_titles.clone(),
+            final_system_additions: best_prompt.system_additions.clone(),
+            round_history,
+        },
+        passed: best_passed,
+        regressions: latest_regressions,
+        rolled_back,
+        accepted,
+        rounds,
+    })
+}
+
+async fn generate_runtime_prompt_candidates(
+    context: &mut Context,
+    evaluations: &[SleepArtifactRuntimeDemoEvaluation],
+    instruction_hypotheses: &[SleepArtifactInstructionHypothesis],
+) -> Result<Vec<SleepArtifactRuntimePromptCandidate>> {
+    let failed = evaluations
+        .iter()
+        .filter(|item| !item.passed)
+        .cloned()
+        .collect::<Vec<_>>();
+    if failed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let renderer = OpenAIToolRenderer;
+    let program = RuntimeSystemPromptPatchBuilderProgram;
+    let current_system_prompt = current_runtime_system_prompt_text(context);
+    let output = execute_program_with_ir_report(
+        context.judge_llm.as_ref(),
+        context,
+        &renderer,
+        &program,
+        program.dataset_ir(
+            current_system_prompt,
+            render_failed_runtime_demos(&failed),
+            render_runtime_judge_feedback(&failed),
+            render_runtime_hypotheses(instruction_hypotheses),
+        ),
+        &program.default_tuning(),
+        TraceOrigin::Sleep,
+    )
+    .await?;
+
+    let Some(candidate) = runtime_prompt_candidate_from_output(&output.output, &failed, instruction_hypotheses) else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![candidate])
+}
+
+fn current_runtime_system_prompt_artifact(
+    context: &Context,
+) -> crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
+    crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
+        compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+        best_candidate: "current".to_string(),
+        system_additions: context.compiled_prompts.runtime_system_additions().to_vec(),
+        selected_demo_titles: Vec::new(),
+        report: None,
+    }
+}
+
+fn apply_runtime_prompt_candidate(
+    current: &crate::reasoning::compiled::CompiledRuntimeSystemPrompt,
+    candidate: &SleepArtifactRuntimePromptCandidate,
+) -> crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
+    let mut system_additions = current.system_additions.clone();
+    for patch in &candidate.prompt_patches {
+        if !patch.trim().is_empty() && !system_additions.iter().any(|line| line == patch) {
+            system_additions.push(patch.clone());
+        }
+    }
+    crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
+        compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+        best_candidate: candidate.title.clone(),
+        system_additions,
+        selected_demo_titles: candidate.source_demo_titles.clone(),
+        report: None,
+    }
+}
+
+fn is_acceptable_runtime_round(passed: usize, total: usize, has_regression: bool) -> bool {
+    !has_regression && passed == total
+}
+
+fn choose_best_non_regressing_prompt(
+    best_prompt: &crate::reasoning::compiled::CompiledRuntimeSystemPrompt,
+    best_passed: usize,
+    current_prompt: &crate::reasoning::compiled::CompiledRuntimeSystemPrompt,
+    current_passed: usize,
+    has_regression: bool,
+) -> (
+    crate::reasoning::compiled::CompiledRuntimeSystemPrompt,
+    usize,
+) {
+    if !has_regression && current_passed >= best_passed {
+        (current_prompt.clone(), current_passed)
+    } else {
+        (best_prompt.clone(), best_passed)
+    }
+}
+
+async fn previous_runtime_system_prompt_text() -> Result<String> {
+    let Some(previous) = load_previous_compiled_runtime_system_prompt().await? else {
+        return Ok(String::from("none"));
+    };
+    let mut lines = vec![
+        crate::reasoning::prompts::SYSTEM_PROMPT_KERNEL.to_string(),
+        crate::reasoning::prompts::TOOL_ACTION_PROMPT.to_string(),
+    ];
+    lines.extend(
+        previous
+            .system_additions
+            .into_iter()
+            .filter(|line| !line.trim().is_empty()),
+    );
+    Ok(lines.join("\n\n"))
+}
+
+fn current_runtime_system_prompt_text(context: &Context) -> String {
+    let mut lines = vec![
+        crate::reasoning::prompts::SYSTEM_PROMPT_KERNEL.to_string(),
+        crate::reasoning::prompts::TOOL_ACTION_PROMPT.to_string(),
+    ];
+    lines.extend(
+        context
+            .compiled_prompts
+            .runtime_system_additions()
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .cloned(),
+    );
+    lines.join("\n\n")
+}
+
+fn runtime_demo_evaluation_from_output(
+    demo: &SleepArtifactRuntimeDemo,
+    output: &RuntimeSystemPromptJudgeOutput,
+) -> SleepArtifactRuntimeDemoEvaluation {
+    SleepArtifactRuntimeDemoEvaluation {
+        compile_key: demo.compile_key.clone(),
+        demo_title: demo.title.clone(),
+        passed: output.passed,
+        regression_detected: output.regression_detected,
+        confidence: output.confidence,
+        needed_changes: output.needed_changes.clone(),
+        reason: output.reason.clone(),
+    }
+}
+
+fn runtime_prompt_suggestions_from_evaluations(
+    evaluations: &[SleepArtifactRuntimeDemoEvaluation],
+) -> Vec<SleepArtifactRuntimePromptSuggestion> {
+    evaluations
+        .iter()
+        .filter(|item| !item.passed)
+        .filter(|item| !item.needed_changes.is_empty())
+        .map(|item| SleepArtifactRuntimePromptSuggestion {
+            compile_key: item.compile_key.clone(),
+            title: format!("runtime prompt suggestion {}", item.demo_title),
+            rationale: item.reason.clone(),
+            suggested_additions: item.needed_changes.clone(),
+            source_demo_titles: vec![item.demo_title.clone()],
+            source_pattern_ids: Vec::new(),
+        })
+        .collect()
+}
+
+fn render_failed_runtime_demos(evaluations: &[SleepArtifactRuntimeDemoEvaluation]) -> String {
+    evaluations
+        .iter()
+        .map(|item| format!("- {}: {}", item.demo_title, item.reason.trim()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_runtime_judge_feedback(evaluations: &[SleepArtifactRuntimeDemoEvaluation]) -> String {
+    evaluations
+        .iter()
+        .map(|item| {
+            let changes = if item.needed_changes.is_empty() {
+                "none".to_string()
+            } else {
+                item.needed_changes.join(" | ")
+            };
+            format!(
+                "- {}: regression={} changes={}",
+                item.demo_title, item.regression_detected, changes
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_runtime_hypotheses(
+    instruction_hypotheses: &[SleepArtifactInstructionHypothesis],
+) -> String {
+    if instruction_hypotheses.is_empty() {
+        return String::from("none");
+    }
+    instruction_hypotheses
+        .iter()
+        .map(|item| format!("- {}: {}", item.suite, item.text.trim()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn runtime_prompt_candidate_from_output(
+    output: &RuntimeSystemPromptPatchBuilderOutput,
+    evaluations: &[SleepArtifactRuntimeDemoEvaluation],
+    instruction_hypotheses: &[SleepArtifactInstructionHypothesis],
+) -> Option<SleepArtifactRuntimePromptCandidate> {
+    if output.prompt_patches.is_empty() {
+        return None;
+    }
+    Some(SleepArtifactRuntimePromptCandidate {
+        compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+        title: if output.title.trim().is_empty() {
+            String::from("runtime prompt candidate")
+        } else {
+            output.title.trim().to_string()
+        },
+        rationale: output.rationale.trim().to_string(),
+        prompt_patches: output
+            .prompt_patches
+            .iter()
+            .filter(|item| !item.trim().is_empty())
+            .cloned()
+            .collect(),
+        source_demo_titles: evaluations.iter().map(|item| item.demo_title.clone()).collect(),
+        source_hypotheses: instruction_hypotheses
+            .iter()
+            .map(|item| item.text.clone())
+            .collect(),
+    })
+}
+
+async fn rollback_runtime_system_prompt_if_regressed(
+    context: &mut Context,
+    evaluations: &[SleepArtifactRuntimeDemoEvaluation],
+) -> Result<bool> {
+    if !evaluations.iter().any(|item| item.regression_detected) {
+        return Ok(false);
+    }
+    let Some(previous) = load_previous_compiled_runtime_system_prompt().await? else {
+        return Ok(false);
+    };
+    save_compiled_runtime_system_prompt(&previous).await?;
+    context.compiled_prompts = context
+        .compiled_prompts
+        .clone()
+        .with_runtime_system_prompt(Some(previous.with_compile_key(
+            RUNTIME_SYSTEM_PROMPT_COMPILE_KEY,
+        )));
+    Ok(true)
 }
 
 fn render_related_memories(related_memories: &[String]) -> Option<String> {
@@ -811,6 +1315,43 @@ fn to_bootstrap_demo(
     })
 }
 
+fn to_runtime_demo(
+    pattern: &SleepArtifactFailurePattern,
+    related_memories: &[String],
+    evidence_summary: Option<&str>,
+    output: &SleepArtifactBuilderOutput,
+) -> Option<SleepArtifactRuntimeDemo> {
+    if !output.create_bootstrap_demo
+        || output.bootstrap_demo_title.trim().is_empty()
+        || output.bootstrap_demo_summary.trim().is_empty()
+    {
+        return None;
+    }
+    Some(SleepArtifactRuntimeDemo {
+        compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+        title: output.bootstrap_demo_title.trim().to_string(),
+        scenario_summary: render_input_summary(pattern, evidence_summary),
+        inputs: vec![ExampleField {
+            name: "sleep target".to_string(),
+            value: render_input_summary(pattern, evidence_summary),
+        }],
+        expected_behavior: output.bootstrap_demo_summary.trim().to_string(),
+        judge_focus: output
+            .reference_case_names
+            .iter()
+            .map(|name| format!("align with canonical case `{name}`"))
+            .chain(
+                related_memories
+                    .iter()
+                    .take(1)
+                    .map(|memory| format!("use recalled precedent: {}", memory.trim())),
+            )
+            .collect(),
+        source_trace_ids: pattern.supporting_trace_ids.clone(),
+        confidence: output.confidence.clamp(0.0, 1.0) as f32,
+    })
+}
+
 fn to_stress_case(
     pattern: &SleepArtifactFailurePattern,
     related_memories: &[String],
@@ -838,6 +1379,50 @@ fn to_stress_case(
         weight: usize::from(pattern.severity.max(1)),
     })
 }
+
+fn episode_runtime_demo(
+    outcome: &EpisodeOutcome,
+    step: &EpisodeStep,
+    episode_id: &str,
+    output: &SleepEpisodeSynthesizerOutput,
+) -> Option<SleepArtifactRuntimeDemo> {
+    let expected_behavior = if !output.strategy_lesson.trim().is_empty() {
+        output.strategy_lesson.trim()
+    } else if !output.reflection_lesson.trim().is_empty() {
+        output.reflection_lesson.trim()
+    } else {
+        return None;
+    };
+    let task_goal = outcome
+        .task
+        .task_goal
+        .clone()
+        .unwrap_or_else(|| outcome.task.title.clone());
+    Some(SleepArtifactRuntimeDemo {
+        compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+        title: format!("runtime demo {}", outcome.task.id),
+        scenario_summary: format!(
+            "task: {}\noutcome: {:?}\nsummary: {}",
+            task_goal.trim(),
+            outcome.status,
+            output.synthesized_summary.trim()
+        ),
+        inputs: episode_example_inputs(outcome, step),
+        expected_behavior: expected_behavior.to_string(),
+        judge_focus: [
+            output.failure_pattern_summary.trim(),
+            output.reason.trim(),
+            output.reflection_evidence_summary.trim(),
+        ]
+        .into_iter()
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect(),
+        source_trace_ids: vec![episode_id.to_string()],
+        confidence: output.reflection_confidence.clamp(0.0, 1.0) as f32,
+    })
+}
+
 
 fn derive_success_bootstrap_demos(
     records: &[ProgramTraceRecord],
@@ -1005,4 +1590,87 @@ async fn recall_related_memories(context: &Context, query: &str, top_k: usize) -
         .take(top_k)
         .map(|item| item.text)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_prompt(best_candidate: &str, additions: &[&str]) -> crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
+        crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
+            compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+            best_candidate: best_candidate.to_string(),
+            system_additions: additions.iter().map(|item| item.to_string()).collect(),
+            selected_demo_titles: Vec::new(),
+            report: None,
+        }
+    }
+
+    #[test]
+    fn apply_runtime_prompt_candidate_appends_only_new_patches() {
+        let current = test_prompt("current", &["rule a", "rule b"]);
+        let candidate = SleepArtifactRuntimePromptCandidate {
+            compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+            title: "candidate".to_string(),
+            rationale: "test".to_string(),
+            prompt_patches: vec!["rule b".to_string(), "rule c".to_string()],
+            source_demo_titles: vec!["demo".to_string()],
+            source_hypotheses: Vec::new(),
+        };
+
+        let next = apply_runtime_prompt_candidate(&current, &candidate);
+        assert_eq!(next.best_candidate, "candidate");
+        assert_eq!(next.system_additions, vec!["rule a", "rule b", "rule c"]);
+    }
+
+    #[test]
+    fn runtime_prompt_suggestions_come_only_from_failed_evaluations_with_changes() {
+        let suggestions = runtime_prompt_suggestions_from_evaluations(&[
+            SleepArtifactRuntimeDemoEvaluation {
+                compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+                demo_title: "passed-demo".to_string(),
+                passed: true,
+                regression_detected: false,
+                confidence: 0.9,
+                needed_changes: vec!["unused".to_string()],
+                reason: "ok".to_string(),
+            },
+            SleepArtifactRuntimeDemoEvaluation {
+                compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+                demo_title: "failed-demo".to_string(),
+                passed: false,
+                regression_detected: false,
+                confidence: 0.6,
+                needed_changes: vec!["add rule".to_string()],
+                reason: "missing boundary".to_string(),
+            },
+        ]);
+
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].title, "runtime prompt suggestion failed-demo");
+        assert_eq!(suggestions[0].suggested_additions, vec!["add rule"]);
+    }
+
+    #[test]
+    fn acceptable_runtime_round_requires_full_pass_without_regression() {
+        assert!(is_acceptable_runtime_round(2, 2, false));
+        assert!(!is_acceptable_runtime_round(2, 2, true));
+        assert!(!is_acceptable_runtime_round(1, 2, false));
+    }
+
+    #[test]
+    fn choose_best_non_regressing_prompt_prefers_more_passed_without_regression() {
+        let best = test_prompt("best", &["rule a"]);
+        let current = test_prompt("current", &["rule a", "rule b"]);
+
+        let (selected, passed) =
+            choose_best_non_regressing_prompt(&best, 1, &current, 2, false);
+        assert_eq!(selected.best_candidate, "current");
+        assert_eq!(passed, 2);
+
+        let (selected, passed) =
+            choose_best_non_regressing_prompt(&best, 2, &current, 3, true);
+        assert_eq!(selected.best_candidate, "best");
+        assert_eq!(passed, 2);
+    }
 }

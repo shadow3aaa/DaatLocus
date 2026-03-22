@@ -15,6 +15,8 @@ use super::{
 
 pub const COMPILED_DIR_NAME: &str = "reasoning_compiled";
 pub const BENCH_COMPILED_DIR_NAME: &str = "reasoning_bench_compiled";
+pub const RUNTIME_SYSTEM_PROMPT_COMPILE_KEY: &str = "runtime_agent_system";
+pub const RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY: &str = "runtime_agent_system_previous";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredProgramExample {
@@ -94,6 +96,34 @@ pub struct CompiledFailureCaseReport {
 #[derive(Clone, Default)]
 pub struct CompiledPromptStore {
     entries: HashMap<String, CompiledProgram>,
+    runtime_system_prompt: Option<CompiledRuntimeSystemPrompt>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CompiledRuntimeSystemPrompt {
+    pub compile_key: String,
+    pub best_candidate: String,
+    #[serde(default)]
+    pub system_additions: Vec<String>,
+    #[serde(default)]
+    pub selected_demo_titles: Vec<String>,
+    #[serde(default)]
+    pub report: Option<CompiledRuntimeSystemPromptReport>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CompiledRuntimeSystemPromptReport {
+    pub score: usize,
+    pub total_cases: usize,
+    #[serde(default)]
+    pub judge_summary: Option<String>,
+}
+
+impl CompiledRuntimeSystemPrompt {
+    pub fn with_compile_key(mut self, compile_key: impl Into<String>) -> Self {
+        self.compile_key = compile_key.into();
+        self
+    }
 }
 
 impl CompiledPromptStore {
@@ -106,11 +136,22 @@ impl CompiledPromptStore {
             .into_iter()
             .map(|entry| (entry.suite.clone(), entry))
             .collect();
-        Self { entries }
+        Self {
+            entries,
+            runtime_system_prompt: None,
+        }
+    }
+
+    pub fn with_runtime_system_prompt(
+        mut self,
+        runtime_system_prompt: Option<CompiledRuntimeSystemPrompt>,
+    ) -> Self {
+        self.runtime_system_prompt = runtime_system_prompt;
+        self
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.len() + usize::from(self.runtime_system_prompt.is_some())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -121,6 +162,13 @@ impl CompiledPromptStore {
         self.entries
             .get(&program.tuning_key())
             .and_then(|entry| entry.tuning.to_typed::<P::Output>().ok())
+    }
+
+    pub fn runtime_system_additions(&self) -> &[String] {
+        self.runtime_system_prompt
+            .as_ref()
+            .map(|prompt| prompt.system_additions.as_slice())
+            .unwrap_or(&[])
     }
 }
 
@@ -255,6 +303,63 @@ pub async fn save_compiled_program_to_dir(
     fs::write(path, bytes)
         .await
         .map_err(|err| miette!("failed to write compiled prompt config: {err}"))?;
+    Ok(())
+}
+
+pub async fn load_compiled_runtime_system_prompt() -> Result<Option<CompiledRuntimeSystemPrompt>> {
+    load_compiled_runtime_system_prompt_by_key(RUNTIME_SYSTEM_PROMPT_COMPILE_KEY).await
+}
+
+pub async fn save_compiled_runtime_system_prompt(
+    compiled: &CompiledRuntimeSystemPrompt,
+) -> Result<()> {
+    save_compiled_runtime_system_prompt_by_key(RUNTIME_SYSTEM_PROMPT_COMPILE_KEY, compiled).await
+}
+
+pub async fn load_previous_compiled_runtime_system_prompt(
+) -> Result<Option<CompiledRuntimeSystemPrompt>> {
+    load_compiled_runtime_system_prompt_by_key(RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY).await
+}
+
+#[allow(dead_code)]
+pub async fn save_previous_compiled_runtime_system_prompt(
+    compiled: &CompiledRuntimeSystemPrompt,
+) -> Result<()> {
+    save_compiled_runtime_system_prompt_by_key(RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY, compiled)
+        .await
+}
+
+async fn load_compiled_runtime_system_prompt_by_key(
+    compile_key: &str,
+) -> Result<Option<CompiledRuntimeSystemPrompt>> {
+    let path = compiled_dir_named(COMPILED_DIR_NAME)
+        .await
+        .join(format!("{compile_key}.json"));
+    let Ok(bytes) = fs::read(path).await else {
+        return Ok(None);
+    };
+
+    let compiled = serde_json::from_slice::<CompiledRuntimeSystemPrompt>(&bytes)
+        .map_err(|err| miette!("failed to decode runtime system prompt config: {err}"))?;
+    Ok(Some(compiled))
+}
+
+async fn save_compiled_runtime_system_prompt_by_key(
+    compile_key: &str,
+    compiled: &CompiledRuntimeSystemPrompt,
+) -> Result<()> {
+    let dir = compiled_dir_named(COMPILED_DIR_NAME).await;
+    if !dir.exists() {
+        fs::create_dir_all(&dir)
+            .await
+            .map_err(|err| miette!("failed to create compiled prompt dir: {err}"))?;
+    }
+    let path = dir.join(format!("{compile_key}.json"));
+    let bytes = serde_json::to_vec_pretty(&compiled.clone().with_compile_key(compile_key))
+        .map_err(|err| miette!("failed to serialize runtime system prompt config: {err}"))?;
+    fs::write(path, bytes)
+        .await
+        .map_err(|err| miette!("failed to write runtime system prompt config: {err}"))?;
     Ok(())
 }
 

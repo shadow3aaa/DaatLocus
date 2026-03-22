@@ -35,7 +35,7 @@ use crate::{
     context::Context,
     core::TelegramResolution,
     dashboard::{
-        DashboardActivityEvent, DashboardState, apply_activity_event,
+        DashboardActivityEvent, DashboardControlCommand, DashboardState, apply_activity_event,
         render_activity_from_messages, run_tui_dashboard,
     },
     device::{DeviceId, DeviceManager},
@@ -53,7 +53,7 @@ use crate::{
         },
         compiled::{
             BENCH_COMPILED_DIR_NAME, COMPILED_DIR_NAME, CompiledPromptStore,
-            load_all_compiled_programs,
+            load_all_compiled_programs, load_compiled_runtime_system_prompt,
         },
         environment::EpisodeObservation,
         episode::{
@@ -65,7 +65,7 @@ use crate::{
         optimize::run_reasoning_optimize,
         programs::completion_judge::{CompletionJudgeOutput, CompletionJudgeProgram},
         programs::task_understanding::{TaskUnderstandingOutput, TaskUnderstandingProgram},
-        prompts::{SYSTEM_PROMPT, build_device_context_prompt},
+        prompts::{SYSTEM_PROMPT_KERNEL, build_device_context_prompt},
         render::openai_tools::OpenAIToolRenderer,
         runtime::{
             AgentMessage, AgentTurnRequest, AgentTurnResponse, PromptMemoryContext, PromptMessage,
@@ -73,6 +73,7 @@ use crate::{
         },
         sleep::run_sleep,
         sleep_artifacts::SleepArtifactSuggestedFixKind,
+        trace::unread_runtime_trace_count,
     },
     runtime_tools::{
         ToolExecutionResult, build_runtime_tool_specs, execute_agent_tool_call,
@@ -89,6 +90,20 @@ use crate::{
 use chrono::{Local, TimeZone};
 use miette::{Result, miette};
 use serde_json::json;
+
+const AUTO_SLEEP_IDLE_THRESHOLD: Duration = Duration::from_secs(300);
+const AUTO_SLEEP_MIN_INTERVAL: Duration = Duration::from_secs(300);
+const FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD: usize = 128;
+
+enum SleepTrigger {
+    Manual,
+    Idle,
+}
+
+struct SleepTaskResult {
+    trigger: SleepTrigger,
+    result: Result<crate::reasoning::sleep::SleepSummary>,
+}
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -336,6 +351,8 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         telegram: telegram_handle,
         compiled_prompts,
         dashboard_tx: None,
+        idle_since: None,
+        last_idle_sleep_at: None,
     };
     let device_renders = context.devices.state_renders();
 
@@ -354,11 +371,29 @@ async fn async_main(args: Vec<String>) -> Result<()> {
     });
     context.dashboard_tx = Some(tx.clone());
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let (dashboard_control_tx, mut dashboard_control_rx) =
+        tokio::sync::mpsc::unbounded_channel::<DashboardControlCommand>();
+    let (sleep_result_tx, mut sleep_result_rx) =
+        tokio::sync::mpsc::unbounded_channel::<SleepTaskResult>();
 
     let agent_handle = tokio::spawn(async move {
+        let mut sleep_running = false;
         loop {
             tokio::select! {
-                _ = spinova_loop(&mut context, &tx) => {}
+                _ = spinova_loop(&mut context, &tx, &sleep_result_tx, &mut sleep_running) => {}
+                Some(command) = dashboard_control_rx.recv() => {
+                    handle_dashboard_control_command(
+                        &mut context,
+                        &tx,
+                        &sleep_result_tx,
+                        &mut sleep_running,
+                        command,
+                    ).await;
+                }
+                Some(result) = sleep_result_rx.recv() => {
+                    sleep_running = false;
+                    handle_sleep_task_result(&mut context, &tx, result).await;
+                }
                 _ = &mut shutdown_rx => {
                     context.shutdown().await;
                     break;
@@ -366,7 +401,9 @@ async fn async_main(args: Vec<String>) -> Result<()> {
             }
         }
     });
-    run_tui_dashboard(&mut rx, telegram_acl).await.unwrap();
+    run_tui_dashboard(&mut rx, telegram_acl, dashboard_control_tx)
+        .await
+        .unwrap();
     if let Some(handle) = telegram_transport {
         handle.abort();
     }
@@ -518,6 +555,8 @@ async fn run_mem_reset() -> Result<()> {
         telegram: telegram_handle,
         compiled_prompts: CompiledPromptStore::empty(),
         dashboard_tx: None,
+        idle_since: None,
+        last_idle_sleep_at: None,
     };
     context.shutdown().await;
 
@@ -629,6 +668,8 @@ async fn build_eval_context_with_compiled(
         telegram: telegram_handle,
         compiled_prompts,
         dashboard_tx: None,
+        idle_since: None,
+        last_idle_sleep_at: None,
     }
 }
 
@@ -643,7 +684,8 @@ fn bootstrap_telegram_device_from_acl(
 
 async fn load_compiled_prompts_only() -> miette::Result<CompiledPromptStore> {
     let compiled = load_all_compiled_programs().await?;
-    Ok(CompiledPromptStore::from_entries(compiled))
+    let runtime_system_prompt = load_compiled_runtime_system_prompt().await?;
+    Ok(CompiledPromptStore::from_entries(compiled).with_runtime_system_prompt(runtime_system_prompt))
 }
 
 async fn run_sleep_optimize(config: crate::config::Config) -> Result<()> {
@@ -846,6 +888,16 @@ async fn run_train_source_learn_loop(
                     sleep_bootstrap_demos: sleep_summary.bootstrap_demos,
                     sleep_stress_cases: sleep_summary.stress_cases,
                     sleep_instruction_hypotheses: sleep_summary.instruction_hypotheses,
+                    sleep_runtime_demos: sleep_summary.runtime_demos,
+                    sleep_runtime_prompt_suggestions: sleep_summary.runtime_prompt_suggestions,
+                    sleep_runtime_prompt_candidates: sleep_summary.runtime_prompt_candidates,
+                    sleep_runtime_demo_evaluations: sleep_summary.runtime_demo_evaluations,
+                    sleep_runtime_demo_passed: sleep_summary.runtime_demo_passed,
+                    sleep_runtime_demo_regressions: sleep_summary.runtime_demo_regressions,
+                    sleep_runtime_prompt_rolled_back: sleep_summary.runtime_prompt_rolled_back,
+                    sleep_runtime_prompt_evolution_rounds: sleep_summary
+                        .runtime_prompt_evolution_rounds,
+                    sleep_runtime_prompt_accepted: sleep_summary.runtime_prompt_accepted,
                     retained_reflections: sleep_summary.retained_reflections,
                     compiled_prompt_count: current_compiled_count,
                     optimized_suites: 0,
@@ -853,12 +905,21 @@ async fn run_train_source_learn_loop(
             })
             .await?;
         println!(
-            "  batch {} sleep finished: patterns={} demos={} stress={} instructions={} reflections={}",
+            "  batch {} sleep finished: patterns={} demos={} stress={} instructions={} runtime_demos={} runtime_prompt_suggestions={} runtime_prompt_candidates={} runtime_demo_evals={} runtime_demo_passed={} runtime_demo_regressions={} rolled_back={} rounds={} accepted={} reflections={}",
             batch_index + 1,
             sleep_summary.failure_patterns.len(),
             sleep_summary.bootstrap_demos,
             sleep_summary.stress_cases,
             sleep_summary.instruction_hypotheses,
+            sleep_summary.runtime_demos,
+            sleep_summary.runtime_prompt_suggestions,
+            sleep_summary.runtime_prompt_candidates,
+            sleep_summary.runtime_demo_evaluations,
+            sleep_summary.runtime_demo_passed,
+            sleep_summary.runtime_demo_regressions,
+            sleep_summary.runtime_prompt_rolled_back,
+            sleep_summary.runtime_prompt_evolution_rounds,
+            sleep_summary.runtime_prompt_accepted,
             sleep_summary.retained_reflections
         );
         sync_learning_assets_back_to_shared(&session_learning_home, &shared_learning_home).await?;
@@ -887,13 +948,22 @@ async fn run_train_source_learn_loop(
         );
 
         println!(
-            "  batch update: completed={} active_variant={} sleep_patterns={} demos={} stress={} instructions={} reflections={} compiled_suites={}",
+            "  batch update: completed={} active_variant={} sleep_patterns={} demos={} stress={} instructions={} runtime_demos={} runtime_prompt_suggestions={} runtime_prompt_candidates={} runtime_demo_evals={} runtime_demo_passed={} runtime_demo_regressions={} rolled_back={} rounds={} accepted={} reflections={} compiled_suites={}",
             session.snapshot().await.completed_tasks,
             active_variant,
             sleep_summary.failure_patterns.len(),
             sleep_summary.bootstrap_demos,
             sleep_summary.stress_cases,
             sleep_summary.instruction_hypotheses,
+            sleep_summary.runtime_demos,
+            sleep_summary.runtime_prompt_suggestions,
+            sleep_summary.runtime_prompt_candidates,
+            sleep_summary.runtime_demo_evaluations,
+            sleep_summary.runtime_demo_passed,
+            sleep_summary.runtime_demo_regressions,
+            sleep_summary.runtime_prompt_rolled_back,
+            sleep_summary.runtime_prompt_evolution_rounds,
+            sleep_summary.runtime_prompt_accepted,
             sleep_summary.retained_reflections,
             compiled_prompt_count
         );
@@ -1010,11 +1080,20 @@ fn print_bench_optimization_results(
 
 fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
     println!(
-        "sleep: derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, retained {} hindsight reflections",
+        "sleep: derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, {} runtime demos, {} runtime prompt suggestions, {} runtime prompt candidates, {} runtime demo evaluations (passed {}, regressed {}, rolled_back {}, rounds {}, accepted {}), retained {} hindsight reflections",
         summary.failure_patterns.len(),
         summary.bootstrap_demos,
         summary.stress_cases,
         summary.instruction_hypotheses,
+        summary.runtime_demos,
+        summary.runtime_prompt_suggestions,
+        summary.runtime_prompt_candidates,
+        summary.runtime_demo_evaluations,
+        summary.runtime_demo_passed,
+        summary.runtime_demo_regressions,
+        summary.runtime_prompt_rolled_back,
+        summary.runtime_prompt_evolution_rounds,
+        summary.runtime_prompt_accepted,
         summary.retained_reflections
     );
     for pattern in &summary.failure_patterns {
@@ -1033,6 +1112,23 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
             pattern.supporting_trace_ids.len()
         );
     }
+}
+
+fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> String {
+    format!(
+        "sleep 完成：runtime demos {}，评估 {}（通过 {}，退化 {}），候选 {}，轮次 {}，accepted={}",
+        summary.runtime_demos,
+        summary.runtime_demo_evaluations,
+        summary.runtime_demo_passed,
+        summary.runtime_demo_regressions,
+        summary.runtime_prompt_candidates,
+        summary.runtime_prompt_evolution_rounds,
+        if summary.runtime_prompt_accepted {
+            "yes"
+        } else {
+            "no"
+        }
+    )
 }
 
 fn print_episode_batch_summary(
@@ -1595,6 +1691,15 @@ struct TrainSourceLearnBatchReport {
     sleep_bootstrap_demos: usize,
     sleep_stress_cases: usize,
     sleep_instruction_hypotheses: usize,
+    sleep_runtime_demos: usize,
+    sleep_runtime_prompt_suggestions: usize,
+    sleep_runtime_prompt_candidates: usize,
+    sleep_runtime_demo_evaluations: usize,
+    sleep_runtime_demo_passed: usize,
+    sleep_runtime_demo_regressions: usize,
+    sleep_runtime_prompt_rolled_back: bool,
+    sleep_runtime_prompt_evolution_rounds: usize,
+    sleep_runtime_prompt_accepted: bool,
     retained_reflections: usize,
     compiled_prompt_count: usize,
     optimized_suites: usize,
@@ -2133,10 +2238,19 @@ fn prompt_message_to_agent_message(message: PromptMessage) -> AgentMessage {
 
 fn build_runtime_agent_messages(context: &Context, snapshot_text: &str) -> Vec<AgentMessage> {
     let mut messages = vec![
-        AgentMessage::system(SYSTEM_PROMPT),
-        AgentMessage::system("动作必须通过调用提供的 tools 表达；不要输出结构化动作对象。"),
-        AgentMessage::system(build_device_context_prompt(context)),
+        AgentMessage::system(SYSTEM_PROMPT_KERNEL),
+        AgentMessage::system(crate::reasoning::prompts::TOOL_ACTION_PROMPT),
     ];
+    messages.extend(
+        context
+            .compiled_prompts
+            .runtime_system_additions()
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .cloned()
+            .map(AgentMessage::system),
+    );
+    messages.push(AgentMessage::system(build_device_context_prompt(context)));
     if !context.prompt_memory.recalled_memories.is_empty() {
         messages.push(AgentMessage::system(format!(
             "相关长期记忆：\n{}",
@@ -2612,20 +2726,44 @@ fn slugify(value: &str) -> String {
     slug.trim_matches('-').to_string()
 }
 
-async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<DashboardState>) {
+async fn spinova_loop(
+    context: &mut Context,
+    tx: &tokio::sync::watch::Sender<DashboardState>,
+    sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
+    sleep_running: &mut bool,
+) {
     let cycle_started_at = std::time::Instant::now();
+    let forced_sleep_status =
+        maybe_start_forced_sleep(context, tx, sleep_result_tx, sleep_running).await;
     let trigger_reasons = runtime_trigger_reasons(context);
     if trigger_reasons.is_empty() {
-        tx.send_modify(|state| {
-            state.runtime_status =
-                Some("空闲中：没有待处理的工作、义务、项目或设备信号".to_string())
-        });
+        if context.idle_since.is_none() {
+            context.idle_since = Some(std::time::Instant::now());
+        }
+        if let Some(status) =
+            maybe_start_idle_sleep(context, tx, sleep_result_tx, sleep_running).await
+        {
+            tx.send_modify(|state| state.runtime_status = Some(status));
+        } else if let Some(status) = forced_sleep_status {
+            tx.send_modify(|state| state.runtime_status = Some(status));
+        } else {
+            tx.send_modify(|state| {
+                state.runtime_status =
+                    Some("空闲中：没有待处理的工作、义务、项目或设备信号".to_string())
+            });
+        }
         sync_dashboard_state(context, tx, Some(cycle_started_at.elapsed().as_millis()));
         tokio::time::sleep(Duration::from_secs(2)).await;
         return;
     }
+    context.idle_since = None;
     tx.send_modify(|state| {
-        state.runtime_status = Some(format!("处理中：{}", trigger_reasons.join(" | ")))
+        let mut status = format!("处理中：{}", trigger_reasons.join(" | "));
+        if let Some(forced_sleep_status) = forced_sleep_status.as_deref() {
+            status.push_str(" | ");
+            status.push_str(forced_sleep_status);
+        }
+        state.runtime_status = Some(status)
     });
     context
         .devices
@@ -2633,6 +2771,143 @@ async fn spinova_loop(context: &mut Context, tx: &tokio::sync::watch::Sender<Das
         .await;
     let _step = execute_agent_loop_step(context, Some(tx)).await;
     sync_dashboard_state(context, tx, Some(cycle_started_at.elapsed().as_millis()));
+}
+
+async fn maybe_start_forced_sleep(
+    context: &mut Context,
+    tx: &tokio::sync::watch::Sender<DashboardState>,
+    sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
+    sleep_running: &mut bool,
+) -> Option<String> {
+    if *sleep_running {
+        return None;
+    }
+    let backlog = unread_runtime_trace_count().await.ok()?;
+    if backlog < FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD {
+        return None;
+    }
+    start_background_sleep(
+        context,
+        tx,
+        sleep_result_tx,
+        sleep_running,
+        SleepTrigger::Idle,
+        "trace backlog 过高：已启动后台 sleep",
+    )
+    .await;
+    Some(format!("trace backlog={}：后台 sleep 已启动", backlog))
+}
+
+async fn handle_dashboard_control_command(
+    context: &mut Context,
+    tx: &tokio::sync::watch::Sender<DashboardState>,
+    sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
+    sleep_running: &mut bool,
+    command: DashboardControlCommand,
+) {
+    match command {
+        DashboardControlCommand::RunSleep => {
+            if *sleep_running {
+                tx.send_modify(|state| state.runtime_status = Some("sleep 已在后台运行".to_string()));
+                sync_dashboard_state(context, tx, None);
+                return;
+            }
+            start_background_sleep(
+                context,
+                tx,
+                sleep_result_tx,
+                sleep_running,
+                SleepTrigger::Manual,
+                "正在后台执行 sleep",
+            )
+            .await;
+        }
+    }
+}
+
+async fn maybe_start_idle_sleep(
+    context: &mut Context,
+    tx: &tokio::sync::watch::Sender<DashboardState>,
+    sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
+    sleep_running: &mut bool,
+) -> Option<String> {
+    let Some(idle_since) = context.idle_since else {
+        return None;
+    };
+    if idle_since.elapsed() < AUTO_SLEEP_IDLE_THRESHOLD {
+        return None;
+    }
+    if context
+        .last_idle_sleep_at
+        .is_some_and(|last| last.elapsed() < AUTO_SLEEP_MIN_INTERVAL)
+    {
+        return None;
+    }
+    if *sleep_running {
+        return Some("空闲中：后台 sleep 正在运行".to_string());
+    }
+    context.last_idle_sleep_at = Some(std::time::Instant::now());
+    start_background_sleep(
+        context,
+        tx,
+        sleep_result_tx,
+        sleep_running,
+        SleepTrigger::Idle,
+        "空闲中：已启动后台 sleep",
+    )
+    .await;
+    Some("空闲中：已启动后台 sleep".to_string())
+}
+
+async fn start_background_sleep(
+    context: &mut Context,
+    tx: &tokio::sync::watch::Sender<DashboardState>,
+    sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
+    sleep_running: &mut bool,
+    trigger: SleepTrigger,
+    status: &str,
+) {
+    *sleep_running = true;
+    tx.send_modify(|state| state.runtime_status = Some(status.to_string()));
+    sync_dashboard_state(context, tx, None);
+    let config = context.config.clone();
+    let compiled_prompts = context.compiled_prompts.clone();
+    let sleep_result_tx = sleep_result_tx.clone();
+    tokio::spawn(async move {
+        let mut sleep_context = build_eval_context_with_compiled(config, compiled_prompts).await;
+        let result = run_sleep(&mut sleep_context).await;
+        sleep_context.shutdown().await;
+        let _ = sleep_result_tx.send(SleepTaskResult { trigger, result });
+    });
+}
+
+async fn handle_sleep_task_result(
+    context: &mut Context,
+    tx: &tokio::sync::watch::Sender<DashboardState>,
+    result: SleepTaskResult,
+) {
+    match result.result {
+        Ok(summary) => {
+            if let Ok(store) = load_compiled_prompts_only().await {
+                context.compiled_prompts = store;
+            }
+            let prefix = match result.trigger {
+                SleepTrigger::Manual => "sleep 完成",
+                SleepTrigger::Idle => "后台 sleep 完成",
+            };
+            tx.send_modify(|state| {
+                state.runtime_status = Some(format!("{prefix}：{}", summarize_sleep_summary(&summary)))
+            });
+        }
+        Err(err) => {
+            let prefix = match result.trigger {
+                SleepTrigger::Manual => "sleep 失败",
+                SleepTrigger::Idle => "后台 sleep 失败",
+            };
+            tx.send_modify(|state| state.runtime_status = Some(format!("{prefix}：{err}")));
+        }
+    }
+    sync_dashboard_state(context, tx, None);
 }
 
 fn runtime_trigger_reasons(context: &Context) -> Vec<String> {

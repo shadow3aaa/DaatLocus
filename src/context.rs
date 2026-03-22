@@ -1,5 +1,7 @@
 //! 本模块包含context，它是spinova自旋循环中承载状态的结构体
 
+use std::time::Instant;
+
 use crate::{
     config::Config,
     core::LLM,
@@ -32,6 +34,8 @@ pub struct Context {
     pub telegram: TelegramDeviceHandle,
     pub compiled_prompts: CompiledPromptStore,
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
+    pub idle_since: Option<Instant>,
+    pub last_idle_sleep_at: Option<Instant>,
 }
 
 impl Context {
