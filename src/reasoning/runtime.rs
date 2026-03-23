@@ -10,6 +10,7 @@ use crate::{
 };
 
 use super::{
+    compiled::seed_compiled_program_from_tuning,
     optimizer::PromptTuningConfig,
     program::Program,
     render::Renderer,
@@ -18,7 +19,6 @@ use super::{
 
 pub struct ProgramExecutionOutcome<O> {
     pub output: O,
-    pub attempts_used: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -243,11 +243,31 @@ pub async fn execute_program<P: Program, R: Renderer>(
     program: &P,
 ) -> Result<P::Output> {
     let ir = program.build_ir(context, snapshot);
-    let tuning = context
-        .compiled_prompts
-        .get_tuning(program)
-        .unwrap_or_else(|| program.default_tuning());
+    let tuning = resolve_program_tuning(context, program).await;
     execute_program_with_ir(llm, context, renderer, program, ir, &tuning).await
+}
+
+pub async fn resolve_program_tuning<P: Program>(
+    context: &Context,
+    program: &P,
+) -> PromptTuningConfig<P::Output> {
+    if let Some(tuning) = context.compiled_prompts.get_tuning(program) {
+        return tuning;
+    }
+
+    let tuning = program.default_tuning();
+    if let Err(err) = seed_compiled_program_from_tuning(program, &tuning).await {
+        eprintln!(
+            "[prompt-compile] failed to seed compiled tuning for {}: {err:?}",
+            program.tuning_key()
+        );
+    } else {
+        eprintln!(
+            "[prompt-compile] seeded compiled tuning for {}",
+            program.tuning_key()
+        );
+    }
+    tuning
 }
 
 pub async fn execute_program_with_ir<P: Program, R: Renderer>(
@@ -318,10 +338,7 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
                     None,
                 ))
                 .await;
-                return Ok(ProgramExecutionOutcome {
-                    output,
-                    attempts_used: attempt + 1,
-                });
+                return Ok(ProgramExecutionOutcome { output });
             }
             Err(err) => {
                 last_error = Some(err.to_string());

@@ -18,7 +18,6 @@ use crate::{
 };
 
 use super::{
-    program::Program,
     programs::sleep_artifact_builder::{SleepArtifactBuilderOutput, SleepArtifactBuilderProgram},
     programs::runtime_system_prompt_judge::{
         RuntimeSystemPromptJudgeOutput, RuntimeSystemPromptJudgeProgram,
@@ -30,7 +29,7 @@ use super::{
         SleepEpisodeSynthesizerOutput, SleepEpisodeSynthesizerProgram,
     },
     render::openai_tools::OpenAIToolRenderer,
-    runtime::execute_program_with_ir_report,
+    runtime::{execute_program_with_ir_report, resolve_program_tuning},
     sleep_artifacts::{
         SleepArtifactBootstrapDemo, SleepArtifactFailurePattern,
         SleepArtifactInstructionHypothesis, SleepArtifactStressCase, SleepArtifactSuggestedFixKind,
@@ -274,6 +273,7 @@ async fn synthesize_episode_outcomes(
 ) -> Result<EpisodeSleepSynthesis> {
     let renderer = OpenAIToolRenderer;
     let program = SleepEpisodeSynthesizerProgram;
+    let tuning = resolve_program_tuning(context, &program).await;
     let mut synthesized = EpisodeSleepSynthesis::default();
 
     for outcome in outcomes.iter().cloned() {
@@ -325,7 +325,7 @@ async fn synthesize_episode_outcomes(
             &renderer,
             &program,
             outcome_ir,
-            &program.default_tuning(),
+            &tuning,
             TraceOrigin::Sleep,
         )
         .await?;
@@ -725,6 +725,7 @@ async fn derive_sleep_artifacts(
 
     let renderer = OpenAIToolRenderer;
     let program = SleepArtifactBuilderProgram;
+    let tuning = resolve_program_tuning(context, &program).await;
     let mut bootstrap_demos = Vec::new();
     let mut stress_cases = Vec::new();
     let mut instruction_hypotheses = Vec::new();
@@ -750,7 +751,7 @@ async fn derive_sleep_artifacts(
                 evidence_summary.clone().unwrap_or_else(|| "无".to_string()),
                 available_canonical_cases.join("\n"),
             ),
-            &program.default_tuning(),
+            &tuning,
             TraceOrigin::Sleep,
         )
         .await?;
@@ -797,6 +798,7 @@ async fn evaluate_runtime_demos(
 
     let renderer = OpenAIToolRenderer;
     let program = RuntimeSystemPromptJudgeProgram;
+    let tuning = resolve_program_tuning(context, &program).await;
     let current_system_prompt = current_runtime_system_prompt_text(context);
     let previous_system_prompt = previous_runtime_system_prompt_text().await?;
     let mut evaluations = Vec::with_capacity(runtime_demos.len());
@@ -820,7 +822,7 @@ async fn evaluate_runtime_demos(
                 demo.expected_behavior.clone(),
                 judge_focus,
             ),
-            &program.default_tuning(),
+            &tuning,
             TraceOrigin::Sleep,
         )
         .await?;
@@ -1002,6 +1004,7 @@ async fn generate_runtime_prompt_candidates(
 
     let renderer = OpenAIToolRenderer;
     let program = RuntimeSystemPromptPatchBuilderProgram;
+    let tuning = resolve_program_tuning(context, &program).await;
     let current_system_prompt = current_runtime_system_prompt_text(context);
     let output = execute_program_with_ir_report(
         context.judge_llm.as_ref(),
@@ -1014,7 +1017,7 @@ async fn generate_runtime_prompt_candidates(
             render_runtime_judge_feedback(&failed),
             render_runtime_hypotheses(instruction_hypotheses),
         ),
-        &program.default_tuning(),
+        &tuning,
         TraceOrigin::Sleep,
     )
     .await?;
@@ -1261,10 +1264,8 @@ fn render_input_summary(
 }
 
 fn suite_reference_case_names(suite: &str) -> Vec<String> {
-    match suite {
-        "resolve_telegram_chat" => crate::reasoning::datasets::resolve_telegram::all_case_names(),
-        _ => Vec::new(),
-    }
+    let _ = suite;
+    Vec::new()
 }
 
 fn to_instruction_hypothesis(
