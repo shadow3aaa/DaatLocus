@@ -1,9 +1,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use miette::{Result, miette};
-use reqwest::StatusCode;
+use reqwest::{StatusCode, multipart};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::config::HindsightConfig;
@@ -12,11 +12,18 @@ use crate::config::HindsightConfig;
 pub struct HindsightClient {
     http: reqwest::Client,
     config: HindsightConfig,
+    retain_api: HindsightRetainApi,
 }
 
 #[derive(Clone)]
 pub struct HindsightRetainHandle {
     tx: mpsc::UnboundedSender<RetainWorkerMessage>,
+}
+
+#[derive(Clone, Debug)]
+enum HindsightRetainApi {
+    MemoriesEndpoint,
+    LegacyFilesEndpoint,
 }
 
 #[derive(Debug)]
@@ -76,6 +83,7 @@ pub struct HindsightRetainResponse {
     #[serde(default)]
     pub success: bool,
     #[serde(default)]
+    #[serde(alias = "items_count")]
     pub item_count: usize,
 }
 
@@ -108,8 +116,21 @@ pub struct HindsightReflectResponse {
     pub structured_output: Option<serde_json::Value>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct HindsightLegacyFileRetainResponse {
+    #[serde(default)]
+    operation_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct HindsightOperationStatusResponse {
+    status: String,
+    #[serde(default)]
+    error_message: Option<String>,
+}
+
 impl HindsightClient {
-    pub fn from_config(config: &HindsightConfig) -> Result<Self> {
+    pub async fn connect(config: &HindsightConfig) -> Result<Self> {
         if config.base_url.trim().is_empty() {
             return Err(miette!("hindsight base_url must not be empty"));
         }
@@ -121,9 +142,15 @@ impl HindsightClient {
             .timeout(timeout)
             .build()
             .map_err(|err| miette!("failed to build hindsight http client: {err}"))?;
-        Ok(Self {
+        let bootstrap = Self {
             http,
             config: config.clone(),
+            retain_api: HindsightRetainApi::MemoriesEndpoint,
+        };
+        let retain_api = bootstrap.detect_retain_api().await?;
+        Ok(Self {
+            retain_api,
+            ..bootstrap
         })
     }
 
@@ -136,7 +163,14 @@ impl HindsightClient {
             while let Some(message) = rx.recv().await {
                 match message {
                     RetainWorkerMessage::Retain(job) => {
-                        let _ = retain_job(&client, &bank_ready_for_task, job).await;
+                        match retain_job(&client, &bank_ready_for_task, job).await {
+                            Ok(()) => {}
+                            Err(err) => {
+                                let detail = err.to_string();
+                                eprintln!("[hindsight] retain failed: {detail}");
+                                std::process::exit(1);
+                            }
+                        }
                     }
                     RetainWorkerMessage::Flush { reply } => {
                         let _ = reply.send(Ok(()));
@@ -187,7 +221,6 @@ impl HindsightClient {
         items: Vec<HindsightRetainItem>,
         document_id: Option<&str>,
     ) -> Result<HindsightRetainResponse> {
-        let url = format!("{}/memories/retain", self.bank_url());
         let items = items
             .into_iter()
             .map(|mut item| {
@@ -197,17 +230,10 @@ impl HindsightClient {
                 item
             })
             .collect::<Vec<_>>();
-        let body = json!({
-            "items": items,
-            "async": false,
-        });
-        let response = self
-            .authorized(self.http.post(url))
-            .json(&body)
-            .send()
-            .await;
-        self.expect_json_success(response, "retain hindsight memories")
-            .await
+        match self.retain_api {
+            HindsightRetainApi::MemoriesEndpoint => self.retain_via_memories(items).await,
+            HindsightRetainApi::LegacyFilesEndpoint => self.retain_via_legacy_files(items).await,
+        }
     }
 
     pub async fn recall(
@@ -276,6 +302,131 @@ impl HindsightClient {
             self.config.namespace,
             self.config.bank_id
         )
+    }
+
+    async fn detect_retain_api(&self) -> Result<HindsightRetainApi> {
+        let url = format!("{}/openapi.json", self.config.base_url.trim_end_matches('/'));
+        let response = self
+            .authorized(self.http.get(url))
+            .send()
+            .await
+            .map_err(|err| miette!("probe hindsight openapi failed: {err}"))?;
+        let response = self
+            .expect_success(Ok(response), "probe hindsight openapi")
+            .await?;
+        let body = response
+            .text()
+            .await
+            .map_err(|err| miette!("read hindsight openapi failed: {err}"))?;
+        let value = serde_json::from_str::<Value>(&body)
+            .map_err(|err| miette!("parse hindsight openapi failed: {err}"))?;
+        let version = value
+            .get("info")
+            .and_then(|info| info.get("version"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let has_memories_post = path_has_post(&value, "/v1/default/banks/{bank_id}/memories");
+        let has_legacy_files_post = path_has_post(&value, "/v1/default/banks/{bank_id}/files/retain");
+        let has_operations_status = path_has_method(&value, "/v1/default/banks/{bank_id}/operations/{operation_id}", "get");
+        if has_memories_post {
+            return Ok(HindsightRetainApi::MemoriesEndpoint);
+        }
+        if has_legacy_files_post && has_operations_status {
+            return Ok(HindsightRetainApi::LegacyFilesEndpoint);
+        }
+        Err(miette!(
+            "unsupported hindsight API (version {version}): expected either POST /v1/default/banks/{{bank_id}}/memories or legacy POST /v1/default/banks/{{bank_id}}/files/retain + GET /operations/{{operation_id}}"
+        ))
+    }
+
+    async fn retain_via_memories(&self, items: Vec<HindsightRetainItem>) -> Result<HindsightRetainResponse> {
+        let url = format!("{}/memories", self.bank_url());
+        let body = json!({
+            "items": items,
+            "async": false,
+        });
+        let response = self
+            .authorized(self.http.post(url))
+            .json(&body)
+            .send()
+            .await;
+        self.expect_json_success(response, "retain hindsight memories").await
+    }
+
+    async fn retain_via_legacy_files(&self, items: Vec<HindsightRetainItem>) -> Result<HindsightRetainResponse> {
+        let url = format!("{}/files/retain", self.bank_url());
+        let files_metadata = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                json!({
+                    "document_id": item.document_id.clone().unwrap_or_else(|| format!("legacy-memory-{}", index + 1)),
+                    "context": item.context,
+                    "metadata": item.metadata,
+                    "tags": item.tags,
+                    "timestamp": item.timestamp,
+                })
+            })
+            .collect::<Vec<_>>();
+        let request_payload = json!({
+            "files_metadata": files_metadata,
+        });
+
+        let mut form = multipart::Form::new().text("request", request_payload.to_string());
+        for (index, item) in items.iter().enumerate() {
+            let file_name = item
+                .document_id
+                .clone()
+                .unwrap_or_else(|| format!("legacy-memory-{}", index + 1));
+            let part = multipart::Part::text(item.content.clone())
+                .file_name(format!("{file_name}.md"))
+                .mime_str("text/plain")
+                .map_err(|err| miette!("build hindsight legacy multipart part failed: {err}"))?;
+            form = form.part("files", part);
+        }
+
+        let response = self
+            .authorized(self.http.post(url))
+            .multipart(form)
+            .send()
+            .await;
+        let submit = self
+            .expect_json_success::<HindsightLegacyFileRetainResponse>(response, "retain hindsight memories (legacy files)")
+            .await?;
+        if submit.operation_ids.is_empty() {
+            return Err(miette!("legacy hindsight file retain returned no operation ids"));
+        }
+        for operation_id in &submit.operation_ids {
+            self.wait_for_operation(operation_id).await?;
+        }
+        Ok(HindsightRetainResponse {
+            success: true,
+            item_count: items.len(),
+        })
+    }
+
+    async fn wait_for_operation(&self, operation_id: &str) -> Result<()> {
+        let url = format!("{}/operations/{}", self.bank_url(), operation_id);
+        for _ in 0..120 {
+            let response = self.authorized(self.http.get(&url)).send().await;
+            let status = self
+                .expect_json_success::<HindsightOperationStatusResponse>(response, "poll hindsight operation")
+                .await?;
+            match status.status.as_str() {
+                "completed" | "not_found" => return Ok(()),
+                "failed" => {
+                    return Err(miette!(
+                        "hindsight legacy retain operation failed: {}",
+                        status.error_message.unwrap_or_else(|| "unknown failure".to_string())
+                    ));
+                }
+                "pending" => tokio::time::sleep(Duration::from_millis(500)).await,
+                other => {
+                    return Err(miette!("unknown hindsight operation status: {other}"));
+                }
+            }
+        }
+        Err(miette!("timed out waiting for hindsight retain operation {operation_id}"))
     }
 
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -354,6 +505,18 @@ impl HindsightRetainHandle {
             let _ = reply_rx.await;
         }
     }
+}
+
+fn path_has_post(openapi: &Value, path: &str) -> bool {
+    path_has_method(openapi, path, "post")
+}
+
+fn path_has_method(openapi: &Value, path: &str, method: &str) -> bool {
+    openapi
+        .get("paths")
+        .and_then(|paths| paths.get(path))
+        .and_then(|methods| methods.get(method))
+        .is_some()
 }
 
 async fn retain_job(
