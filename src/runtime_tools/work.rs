@@ -8,7 +8,8 @@ use crate::{
     context::Context,
     core::{
         ClearWorkObjectiveArgs, CommitToProjectArgs, FocusDeviceArgs, ObligationSatisfyArgs,
-        ProjectCompleteArgs, PutAwayDeviceArgs, ResolveTelegramChatArgs, SetWorkObjectiveArgs,
+        ProjectCompleteArgs, PutAwayDeviceArgs, ReportObligationArgs, ResolveTelegramChatArgs,
+        SetWorkObjectiveArgs,
     },
     device::DeviceId,
     obligations::{ObligationSource, ObligationStatus},
@@ -66,11 +67,19 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<ObligationSatisfyArgs>(
             "obligation_satisfy",
-            "将已妥善处理的义务标记为完成。",
+            "将不需要外部回复的义务标记为完成。",
             None,
             summarize_obligation_satisfy_tool,
             render_obligation_satisfy_call_ui,
             execute_obligation_satisfy_tool,
+        )),
+        Box::new(StaticRuntimeTool::new::<ReportObligationArgs>(
+            "report_obligation",
+            "向义务的回复目标发送结果，并在成功后将该义务标记为完成。",
+            None,
+            summarize_report_obligation_tool,
+            render_report_obligation_call_ui,
+            execute_report_obligation_tool,
         )),
         Box::new(StaticRuntimeTool::new::<CommitToProjectArgs>(
             "commit_to_project",
@@ -309,11 +318,31 @@ fn summarize_obligation_satisfy_tool(call: &AgentToolCall) -> Result<EpisodeActi
     })
 }
 
+fn summarize_report_obligation_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: ReportObligationArgs = parse_tool_args(call)?;
+    Ok(EpisodeActionRecord {
+        kind: "report_obligation".to_string(),
+        summary: format!(
+            "obligation_id={} reply={}",
+            args.obligation_id,
+            summarize_inline_text(&args.reply)
+        ),
+    })
+}
+
 fn render_obligation_satisfy_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: ObligationSatisfyArgs = parse_tool_args(call)?;
     Ok(ToolCallUiEvent::work(
         format!("obligation_satisfy {}", args.obligation_id),
         Vec::new(),
+    ))
+}
+
+fn render_report_obligation_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: ReportObligationArgs = parse_tool_args(call)?;
+    Ok(ToolCallUiEvent::work(
+        format!("report_obligation {}", args.obligation_id),
+        vec![summarize_inline_text(&args.reply)],
     ))
 }
 
@@ -324,6 +353,15 @@ fn execute_obligation_satisfy_tool<'a>(
     Box::pin(async move {
         let args: ObligationSatisfyArgs = parse_tool_args(call)?;
         let obligation_id = resolve_obligation_reference(context, &args.obligation_id)?;
+        let Some(obligation) = context.obligations.get(obligation_id).cloned() else {
+            return Err(miette::miette!("unknown obligation: {obligation_id}").into());
+        };
+        if obligation.requires_reply {
+            return Err(miette::miette!(
+                "obligation {obligation_id} requires an external reply; use report_obligation instead"
+            )
+            .into());
+        }
         context
             .obligations
             .set_status(obligation_id, ObligationStatus::Satisfied);
@@ -332,6 +370,28 @@ fn execute_obligation_satisfy_tool<'a>(
             json!({ "obligation_id": obligation_id.to_string() }),
             ToolUiEvent::work(
                 format!("satisfied obligation {}", obligation_id),
+                vec![obligation_id.to_string()],
+            ),
+        ))
+    })
+}
+
+fn execute_report_obligation_tool<'a>(
+    context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let args: ReportObligationArgs = parse_tool_args(call)?;
+        let obligation_id = resolve_obligation_reference(context, &args.obligation_id)?;
+        execute_report_obligation(context, obligation_id, args.reply.clone()).await?;
+        Ok(ToolExecutionResult::new(
+            format!("reported obligation {}", obligation_id),
+            json!({
+                "obligation_id": obligation_id.to_string(),
+                "reply": args.reply,
+            }),
+            ToolUiEvent::work(
+                format!("reported obligation {}", obligation_id),
                 vec![obligation_id.to_string()],
             ),
         ))
@@ -705,6 +765,39 @@ async fn enqueue_obligation_acknowledgment(
         }
         DeviceId::Terminal => Err(miette::miette!(
             "terminal obligations do not support external acknowledgment"
+        )),
+    }
+}
+
+async fn execute_report_obligation(
+    context: &mut Context,
+    obligation_id: Uuid,
+    reply: String,
+) -> miette::Result<()> {
+    let Some(obligation) = context.obligations.get(obligation_id).cloned() else {
+        return Err(miette::miette!("unknown obligation: {obligation_id}"));
+    };
+    if !obligation.requires_reply {
+        return Err(miette::miette!(
+            "obligation {obligation_id} does not require an external reply"
+        ));
+    }
+    let Some(target) = obligation.reply_target.clone() else {
+        return Err(miette::miette!(
+            "obligation {obligation_id} has no reply target"
+        ));
+    };
+
+    match target.device {
+        DeviceId::Telegram => {
+            send_telegram_message(context, &target.target, reply).await?;
+            context
+                .obligations
+                .set_status(obligation_id, ObligationStatus::Satisfied);
+            Ok(())
+        }
+        DeviceId::Terminal => Err(miette::miette!(
+            "terminal obligations do not support external reply reporting"
         )),
     }
 }

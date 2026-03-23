@@ -114,6 +114,12 @@ pub struct ObligationSatisfyArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ReportObligationArgs {
+    pub obligation_id: String,
+    pub reply: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct CommitToProjectArgs {
     pub obligation_id: String,
     pub title: String,
