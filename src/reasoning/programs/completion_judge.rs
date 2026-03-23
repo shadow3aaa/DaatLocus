@@ -64,7 +64,7 @@ impl Program for CompletionJudgeProgram {
             .rule("如果安装依赖、构建环境或运行测试的命令仍在自然执行，应保持 verify，而不是 blocked。")
     }
 
-    fn build_ir(&self, _context: &Context, _snapshot: &Snapshot) -> PromptIR {
+    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
         let mut ir = PromptIR::with_system(SYSTEM_PROMPT);
         ir.push_instruction("保守判断，不要因为看到了可疑代码就直接判 finish。");
         ir.push_instruction("使用通用工作阶段，不要输出领域专用术语。investigate 表示继续调查，change 表示开始做实质修改，verify 表示应进入验证，finish 表示可以收尾。");

@@ -101,6 +101,9 @@ pub enum ActivityCell {
 
 #[derive(Clone)]
 pub enum DashboardActivityEvent {
+    AppendCommittedCells {
+        cells: Vec<ActivityCell>,
+    },
     ExecBegin {
         key: String,
         title: String,
@@ -223,7 +226,7 @@ fn activity_cells_from_prompt_message(message: PromptMessage) -> Vec<ActivityCel
     }
 }
 
-fn activity_cells_from_tool_call_ui_event(ui_event: ToolCallUiEvent) -> Vec<ActivityCell> {
+pub fn activity_cells_from_tool_call_ui_event(ui_event: ToolCallUiEvent) -> Vec<ActivityCell> {
     match ui_event {
         ToolCallUiEvent::Exec(event) => {
             vec![ActivityCell::Exec(exec_call_cell_from_ui(ToolUiData {
@@ -257,6 +260,10 @@ fn activity_cells_from_tool_call_ui_event(ui_event: ToolCallUiEvent) -> Vec<Acti
 
 pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivityEvent) {
     match event {
+        DashboardActivityEvent::AppendCommittedCells { mut cells } => {
+            state.activity_cells.append(&mut cells);
+            state.activity_cells = coalesce_activity_cells(state.activity_cells.clone());
+        }
         DashboardActivityEvent::ExecBegin {
             key,
             title,
@@ -299,6 +306,22 @@ pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivity
     }
 }
 
+pub fn assistant_activity_cell(content: &str) -> Option<ActivityCell> {
+    if content.trim().is_empty() {
+        return None;
+    }
+    if content.starts_with("工具调用失败") || content.starts_with("tool loop 调用失败") {
+        return Some(ActivityCell::Error(text_cell(
+            first_line_or_fallback(content, "tool invocation error"),
+            remaining_lines_with_limit(content, 24),
+        )));
+    }
+    Some(ActivityCell::Assistant(text_cell(
+        first_line_or_fallback(content, "assistant"),
+        remaining_lines_with_limit(content, 8),
+    )))
+}
+
 fn upsert_live_activity_cell(cells: &mut Vec<LiveActivityCell>, incoming: LiveActivityCell) {
     if let Some(existing) = cells.iter_mut().find(|cell| cell.key == incoming.key) {
         match (&mut existing.cell, incoming.cell) {
@@ -327,7 +350,7 @@ fn upsert_live_activity_cell(cells: &mut Vec<LiveActivityCell>, incoming: LiveAc
     }
 }
 
-fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> ActivityCell {
+pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> ActivityCell {
     match ui_event {
         ToolUiEvent::Exec(event) => ActivityCell::Exec(exec_cell_from_ui(ToolUiData {
             title: event.title,
@@ -601,9 +624,9 @@ impl DashboardCommand for QuitCommand {
 
     fn execute(
         &self,
-        _parts: &[&str],
-        _raw: &str,
-        _context: &DashboardCommandContext<'_>,
+        _: &[&str],
+        _: &str,
+        _: &DashboardCommandContext<'_>,
     ) -> DashboardCommandResult {
         DashboardCommandResult::Quit
     }
@@ -620,7 +643,7 @@ impl DashboardCommand for StatusCommand {
 
     fn execute(
         &self,
-        _parts: &[&str],
+        _: &[&str],
         raw: &str,
         context: &DashboardCommandContext<'_>,
     ) -> DashboardCommandResult {
@@ -683,7 +706,7 @@ impl DashboardSubcommand for SleepRunSubcommand {
 
     fn execute(
         &self,
-        _parts: &[&str],
+        _: &[&str],
         raw: &str,
         context: &DashboardCommandContext<'_>,
     ) -> DashboardCommandResult {
@@ -1753,6 +1776,7 @@ fn render_command_bar(
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
+        Some("Working") => render_working_status_line(),
         Some(status) if !status.trim().is_empty() => Line::from(vec![Span::styled(
             status.to_string(),
             Style::default().fg(Color::DarkGray),
@@ -1764,6 +1788,31 @@ fn render_command_bar(
         ]),
     });
     f.render_widget(footer, footer_row);
+}
+
+fn render_working_status_line() -> Line<'static> {
+    let frame = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        / 200) as usize
+        % 4;
+    let glyph = ["•", "◦", "▪", "◦"][frame];
+    Line::from(vec![
+        Span::styled(
+            glyph,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "Working",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
 }
 
 fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {

@@ -116,7 +116,7 @@ impl Program for SleepEpisodeSynthesizerProgram {
             .rule("如果一个 lesson 可以稳定落成 demo 或 stress case，就不要只生成 instruction。")
     }
 
-    fn build_ir(&self, _context: &Context, _snapshot: &Snapshot) -> PromptIR {
+    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
         self.dataset_ir(
             String::new(),
             String::new(),

@@ -108,7 +108,7 @@ pub trait RuntimeTool: Send + Sync {
     fn description(&self) -> &'static str;
     fn input_schema(&self) -> Value;
 
-    fn is_available(&self, _context: &Context) -> bool {
+    fn is_available(&self, _: &Context) -> bool {
         true
     }
 

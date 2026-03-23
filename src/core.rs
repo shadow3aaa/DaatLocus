@@ -141,8 +141,8 @@ pub trait LLM {
     /// 执行一轮工具驱动的 agent turn，返回 assistant 文本或 tool calls。
     async fn run_agent_turn(
         &self,
-        _context: &Context,
-        _request: AgentTurnRequest,
+        _: &Context,
+        _: AgentTurnRequest,
     ) -> Result<AgentTurnResponse> {
         Err(miette!(
             "run_agent_turn is not implemented for this provider"

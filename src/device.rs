@@ -75,7 +75,7 @@ pub trait Device: Send + Sync {
         Ok(())
     }
 
-    async fn wait_until_settled(&self, _silence_duration: Duration, _timeout: Duration) -> bool {
+    async fn wait_until_settled(&self, _: Duration, _: Duration) -> bool {
         true
     }
 }

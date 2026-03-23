@@ -45,7 +45,7 @@ pub struct RuntimeTraceBatch {
 }
 
 pub async fn append_program_trace(record: ProgramTraceRecord) {
-    let _guard = trace_io_lock().lock().await;
+    let trace_io_guard = trace_io_lock().lock().await;
     let path = get_spinova_home().await.join(TRACE_FILE_NAME);
     let Ok(mut file) = OpenOptions::new()
         .create(true)
@@ -62,6 +62,7 @@ pub async fn append_program_trace(record: ProgramTraceRecord) {
     };
     line.push(b'\n');
     let _ = file.write_all(&line).await;
+    drop(trace_io_guard);
 }
 
 impl ProgramTraceRecord {
@@ -90,11 +91,12 @@ impl ProgramTraceRecord {
 }
 
 pub async fn load_runtime_trace_batch() -> miette::Result<RuntimeTraceBatch> {
-    let _guard = trace_io_lock().lock().await;
+    let trace_io_guard = trace_io_lock().lock().await;
     let trace_path = get_spinova_home().await.join(TRACE_FILE_NAME);
     let bytes = match fs::read(&trace_path).await {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            drop(trace_io_guard);
             return Ok(RuntimeTraceBatch {
                 records: Vec::new(),
                 unread_runtime_count: 0,
@@ -129,11 +131,13 @@ pub async fn load_runtime_trace_batch() -> miette::Result<RuntimeTraceBatch> {
         }
     }
 
-    Ok(RuntimeTraceBatch {
+    let batch = RuntimeTraceBatch {
         records,
         unread_runtime_count,
         next_offset: offset,
-    })
+    };
+    drop(trace_io_guard);
+    Ok(batch)
 }
 
 pub async fn unread_runtime_trace_count() -> miette::Result<usize> {
@@ -141,11 +145,14 @@ pub async fn unread_runtime_trace_count() -> miette::Result<usize> {
 }
 
 pub async fn compact_runtime_trace_file(consumed_offset: u64) -> miette::Result<()> {
-    let _guard = trace_io_lock().lock().await;
+    let trace_io_guard = trace_io_lock().lock().await;
     let trace_path = get_spinova_home().await.join(TRACE_FILE_NAME);
     let bytes = match fs::read(&trace_path).await {
         Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            drop(trace_io_guard);
+            return Ok(());
+        }
         Err(err) => {
             return Err(miette::miette!(
                 "failed to read reasoning trace file {} for compaction: {err}",
@@ -161,6 +168,7 @@ pub async fn compact_runtime_trace_file(consumed_offset: u64) -> miette::Result<
             trace_path.display()
         )
     })?;
+    drop(trace_io_guard);
     Ok(())
 }
 

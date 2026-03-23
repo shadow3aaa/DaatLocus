@@ -35,7 +35,8 @@ use crate::{
     context::Context,
     core::TelegramResolution,
     dashboard::{
-        DashboardActivityEvent, DashboardControlCommand, DashboardState, apply_activity_event,
+        DashboardActivityEvent, DashboardControlCommand, DashboardState, activity_cell_from_tool_ui_event,
+        activity_cells_from_tool_call_ui_event, apply_activity_event, assistant_activity_cell,
         render_activity_from_messages, run_tui_dashboard,
     },
     device::{DeviceId, DeviceManager},
@@ -2162,6 +2163,28 @@ async fn execute_agent_loop_step(
                 } else {
                     history_message
                 });
+                let mut committed_cells = Vec::new();
+                if !suppress_assistant_history
+                    && let Some(cell) = assistant_activity_cell(&assistant_text)
+                {
+                    committed_cells.push(cell);
+                }
+                committed_cells.extend(
+                    tool_call_ui_events
+                        .iter()
+                        .cloned()
+                        .filter(|event| match event {
+                            ToolCallUiEvent::Exec(_) => false,
+                            ToolCallUiEvent::Terminal(terminal_event) => !matches!(
+                                terminal_event.action,
+                                crate::tool_ui::TerminalUiAction::Execute
+                                    | crate::tool_ui::TerminalUiAction::Continue
+                            ),
+                            _ => true,
+                        })
+                        .flat_map(activity_cells_from_tool_call_ui_event),
+                );
+                append_committed_activity_cells(tx, committed_cells);
                 if primary_action.is_none() {
                     primary_action = Some(
                         summarize_primary_action_from_tool_call(&calls[0]).unwrap_or_else(|_| {
@@ -2243,6 +2266,10 @@ async fn execute_agent_loop_step(
                         result.history_content(&call.id, &call.name),
                         result.ui_event.clone(),
                     ));
+                    append_committed_activity_cells(
+                        tx,
+                        vec![activity_cell_from_tool_ui_event(result.ui_event.clone())],
+                    );
                     tool_results.push(format!("{} => {}", call.name, result.summary));
                 }
             }
@@ -2271,6 +2298,9 @@ async fn execute_agent_loop_step(
                     .unwrap_or("等待下一轮工具决策")
                     .to_string();
                 history_messages.push(PromptMessage::assistant(content.clone()));
+                if let Some(cell) = assistant_activity_cell(&content) {
+                    append_committed_activity_cells(tx, vec![cell]);
+                }
                 break 'agent_loop AgentLoopStepOutput {
                     observation: if tool_results.is_empty() {
                         content.clone()
@@ -2309,6 +2339,9 @@ async fn execute_agent_loop_step(
                 }
                 let observation = "模型返回了空 tool call 列表。".to_string();
                 history_messages.push(PromptMessage::assistant(observation.clone()));
+                if let Some(cell) = assistant_activity_cell(&observation) {
+                    append_committed_activity_cells(tx, vec![cell]);
+                }
                 break 'agent_loop AgentLoopStepOutput {
                     observation,
                     description: "没有可执行动作。".to_string(),
@@ -2395,6 +2428,20 @@ fn runtime_turn_requires_tool_progress(context: &Context) -> bool {
     !runtime_trigger_reasons(context).is_empty()
 }
 
+fn append_committed_activity_cells(
+    tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+    cells: Vec<crate::dashboard::ActivityCell>,
+) {
+    if cells.is_empty() {
+        return;
+    }
+    if let Some(tx) = tx {
+        tx.send_modify(|state| {
+            apply_activity_event(state, DashboardActivityEvent::AppendCommittedCells { cells });
+        });
+    }
+}
+
 async fn run_agent_turn_with_retry(
     context: &Context,
     request: AgentTurnRequest,
@@ -2402,6 +2449,9 @@ async fn run_agent_turn_with_retry(
 ) -> AgentTurnResponse {
     let mut attempt = 1usize;
     loop {
+        if let Some(tx) = tx {
+            tx.send_modify(|state| state.runtime_status = Some("Working".to_string()));
+        }
         match context.llm.run_agent_turn(context, request.clone()).await {
             Ok(response) => {
                 if let Some(tx) = tx {
@@ -2589,7 +2639,7 @@ async fn spinova_loop(
         .devices
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
         .await;
-    let _step = execute_agent_loop_step(context, Some(tx)).await;
+    execute_agent_loop_step(context, Some(tx)).await;
     refresh_sleep_trace_backlog(sleep_status).await;
     sync_dashboard_state(
         context,
@@ -2945,7 +2995,7 @@ fn format_duration(duration: Duration) -> String {
 
 fn render_status_command_output_for_dashboard(
     context: &Context,
-    _renders: &[(DeviceId, crate::device::DeviceStateRender)],
+    _: &[(DeviceId, crate::device::DeviceStateRender)],
 ) -> String {
     let mut sections = Vec::new();
 
