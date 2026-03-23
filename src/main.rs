@@ -2081,11 +2081,10 @@ async fn record_runtime_history_messages(
     context: &mut Context,
     current_doing: String,
     messages: Vec<PromptMessage>,
-    retain_text: String,
 ) {
     let retain_plan = context
         .memory
-        .record_agent_turn(current_doing, messages, retain_text)
+        .record_agent_turn(current_doing, messages)
         .await;
     for job in retain_plan.jobs {
         if let Err(err) = context.hindsight_retain.enqueue(job) {
@@ -2364,51 +2363,7 @@ async fn execute_agent_loop_step(
         }
     };
     if !history_messages.is_empty() {
-        let retain_text = if tool_results.is_empty() {
-            format!(
-                "runtime agent turn\nassistant/tool history:\n{}",
-                history_messages
-                    .iter()
-                    .map(|message| format!(
-                        "{}:\n{}",
-                        match message.role {
-                            PromptRole::System => "system",
-                            PromptRole::User => "user",
-                            PromptRole::Assistant => "assistant",
-                            PromptRole::Tool => "tool",
-                        },
-                        message.content
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
-            )
-        } else {
-            format!(
-                "runtime agent turn\nassistant/tool history:\n{}\n\ntool_results:\n{}",
-                history_messages
-                    .iter()
-                    .map(|message| format!(
-                        "{}:\n{}",
-                        match message.role {
-                            PromptRole::System => "system",
-                            PromptRole::User => "user",
-                            PromptRole::Assistant => "assistant",
-                            PromptRole::Tool => "tool",
-                        },
-                        message.content
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("\n\n"),
-                tool_results.join("\n")
-            )
-        };
-        record_runtime_history_messages(
-            context,
-            output.current_doing.clone(),
-            history_messages,
-            retain_text,
-        )
-        .await;
+        record_runtime_history_messages(context, output.current_doing.clone(), history_messages).await;
     }
     if !matches!(
         output.primary_action.kind.as_str(),
