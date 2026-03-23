@@ -94,6 +94,14 @@ enum SleepTrigger {
     Idle,
 }
 
+#[derive(Default)]
+struct SleepDashboardStatus {
+    running: bool,
+    current_trigger: Option<&'static str>,
+    last_result: Option<String>,
+    unread_trace_backlog: usize,
+}
+
 struct SleepTaskResult {
     trigger: SleepTrigger,
     result: Result<crate::reasoning::sleep::SleepSummary>,
@@ -252,6 +260,10 @@ async fn async_main(args: Vec<String>) -> Result<()> {
     let (tx, mut rx) = tokio::sync::watch::channel(DashboardState {
         focused_device: context.devices.focused(),
         status_output: render_status_command_output_for_dashboard(&context, &device_renders),
+        sleep_status_output: render_sleep_status_output_for_dashboard(
+            &context,
+            &SleepDashboardStatus::default(),
+        ),
         inspect_telegram_output: render_inspect_output_for_dashboard(
             &context,
             &device_renders,
@@ -271,21 +283,29 @@ async fn async_main(args: Vec<String>) -> Result<()> {
 
     let agent_handle = tokio::spawn(async move {
         let mut sleep_running = false;
+        let mut sleep_status = SleepDashboardStatus::default();
         loop {
             tokio::select! {
-                _ = spinova_loop(&mut context, &tx, &sleep_result_tx, &mut sleep_running) => {}
+                _ = spinova_loop(
+                    &mut context,
+                    &tx,
+                    &sleep_result_tx,
+                    &mut sleep_running,
+                    &mut sleep_status,
+                ) => {}
                 Some(command) = dashboard_control_rx.recv() => {
                     handle_dashboard_control_command(
                         &mut context,
                         &tx,
                         &sleep_result_tx,
                         &mut sleep_running,
+                        &mut sleep_status,
                         command,
                     ).await;
                 }
                 Some(result) = sleep_result_rx.recv() => {
                     sleep_running = false;
-                    handle_sleep_task_result(&mut context, &tx, result).await;
+                    handle_sleep_task_result(&mut context, &tx, &mut sleep_status, result).await;
                 }
                 _ = &mut shutdown_rx => {
                     context.shutdown().await;
@@ -2039,8 +2059,12 @@ fn build_runtime_agent_messages(context: &Context, snapshot_text: &str) -> Vec<A
             .into_iter()
             .map(prompt_message_to_agent_message),
     );
-    messages.push(AgentMessage::user(snapshot_text.to_string()));
+    messages.push(AgentMessage::user(render_world_snapshot_fragment(snapshot_text)));
     messages
+}
+
+fn render_world_snapshot_fragment(snapshot_text: &str) -> String {
+    format!("<world_snapshot>\n{snapshot_text}\n</world_snapshot>")
 }
 
 async fn record_runtime_history_messages(
@@ -2080,6 +2104,7 @@ async fn execute_agent_loop_step(
     let mut tool_results = Vec::new();
     let mut primary_action = None;
     let mut telegram_tool_nudges = 0usize;
+    let mut progress_tool_nudges = 0usize;
 
     let output = 'agent_loop: loop {
         let request = AgentTurnRequest {
@@ -2224,8 +2249,18 @@ async fn execute_agent_loop_step(
             AgentTurnResponse::Assistant { content } => {
                 if telegram_requires_tool_action(context) && telegram_tool_nudges < 2 {
                     telegram_tool_nudges += 1;
-                    messages.push(AgentMessage::user(
+                    messages.push(AgentMessage::system(
                         "Telegram 仍有待处理信号。不要只描述“继续等待”；请立即使用 Telegram 相关 tool 推进。先读取会话，再根据最新 incoming 决定 resolve 或 send。outgoing 是你自己已经发出的消息，不是新的外部输入。".to_string(),
+                    ));
+                    continue 'agent_loop;
+                }
+                if tool_results.is_empty()
+                    && runtime_turn_requires_tool_progress(context)
+                    && progress_tool_nudges < 2
+                {
+                    progress_tool_nudges += 1;
+                    messages.push(AgentMessage::system(
+                        "当前仍有待处理的世界状态需要推进。不要把 world snapshot 当成用户对话，也不要只返回 assistant 说明；请直接调用能够改变世界状态的 tool。".to_string(),
                     ));
                     continue 'agent_loop;
                 }
@@ -2257,8 +2292,18 @@ async fn execute_agent_loop_step(
             AgentTurnResponse::ToolCalls { .. } => {
                 if telegram_requires_tool_action(context) && telegram_tool_nudges < 2 {
                     telegram_tool_nudges += 1;
-                    messages.push(AgentMessage::user(
+                    messages.push(AgentMessage::system(
                         "Telegram 仍有待处理信号。不要返回空 tool call；请立即使用 Telegram 相关 tool 推进。".to_string(),
+                    ));
+                    continue 'agent_loop;
+                }
+                if tool_results.is_empty()
+                    && runtime_turn_requires_tool_progress(context)
+                    && progress_tool_nudges < 2
+                {
+                    progress_tool_nudges += 1;
+                    messages.push(AgentMessage::system(
+                        "当前仍有待处理的世界状态需要推进。空 tool call 列表不会改变世界；请直接调用能够推进状态的 tool。".to_string(),
                     ));
                     continue 'agent_loop;
                 }
@@ -2344,6 +2389,10 @@ fn telegram_requires_tool_action(context: &Context) -> bool {
             matches!(device_id, DeviceId::Telegram)
                 && matches!(render.attention, crate::device::AttentionLevel::Notice)
         })
+}
+
+fn runtime_turn_requires_tool_progress(context: &Context) -> bool {
+    !runtime_trigger_reasons(context).is_empty()
 }
 
 async fn run_agent_turn_with_retry(
@@ -2495,17 +2544,19 @@ async fn spinova_loop(
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
     sleep_running: &mut bool,
+    sleep_status: &mut SleepDashboardStatus,
 ) {
     let cycle_started_at = std::time::Instant::now();
+    refresh_sleep_trace_backlog(sleep_status).await;
     let forced_sleep_status =
-        maybe_start_forced_sleep(context, tx, sleep_result_tx, sleep_running).await;
+        maybe_start_forced_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await;
     let trigger_reasons = runtime_trigger_reasons(context);
     if trigger_reasons.is_empty() {
         if context.idle_since.is_none() {
             context.idle_since = Some(std::time::Instant::now());
         }
         if let Some(status) =
-            maybe_start_idle_sleep(context, tx, sleep_result_tx, sleep_running).await
+            maybe_start_idle_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await
         {
             tx.send_modify(|state| state.runtime_status = Some(status));
         } else if let Some(status) = forced_sleep_status {
@@ -2516,7 +2567,12 @@ async fn spinova_loop(
                     Some("空闲中：没有待处理的工作、义务、项目或设备信号".to_string())
             });
         }
-        sync_dashboard_state(context, tx, Some(cycle_started_at.elapsed().as_millis()));
+        sync_dashboard_state(
+            context,
+            tx,
+            sleep_status,
+            Some(cycle_started_at.elapsed().as_millis()),
+        );
         tokio::time::sleep(Duration::from_secs(2)).await;
         return;
     }
@@ -2534,7 +2590,13 @@ async fn spinova_loop(
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
         .await;
     let _step = execute_agent_loop_step(context, Some(tx)).await;
-    sync_dashboard_state(context, tx, Some(cycle_started_at.elapsed().as_millis()));
+    refresh_sleep_trace_backlog(sleep_status).await;
+    sync_dashboard_state(
+        context,
+        tx,
+        sleep_status,
+        Some(cycle_started_at.elapsed().as_millis()),
+    );
 }
 
 async fn maybe_start_forced_sleep(
@@ -2542,11 +2604,12 @@ async fn maybe_start_forced_sleep(
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
     sleep_running: &mut bool,
+    sleep_status: &mut SleepDashboardStatus,
 ) -> Option<String> {
     if *sleep_running {
         return None;
     }
-    let backlog = unread_runtime_trace_count().await.ok()?;
+    let backlog = sleep_status.unread_trace_backlog;
     if backlog < FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD {
         return None;
     }
@@ -2555,6 +2618,7 @@ async fn maybe_start_forced_sleep(
         tx,
         sleep_result_tx,
         sleep_running,
+        sleep_status,
         SleepTrigger::Idle,
         "trace backlog 过高：已启动后台 sleep",
     )
@@ -2567,13 +2631,14 @@ async fn handle_dashboard_control_command(
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
     sleep_running: &mut bool,
+    sleep_status: &mut SleepDashboardStatus,
     command: DashboardControlCommand,
 ) {
     match command {
         DashboardControlCommand::RunSleep => {
             if *sleep_running {
                 tx.send_modify(|state| state.runtime_status = Some("sleep 已在后台运行".to_string()));
-                sync_dashboard_state(context, tx, None);
+                sync_dashboard_state(context, tx, sleep_status, None);
                 return;
             }
             start_background_sleep(
@@ -2581,6 +2646,7 @@ async fn handle_dashboard_control_command(
                 tx,
                 sleep_result_tx,
                 sleep_running,
+                sleep_status,
                 SleepTrigger::Manual,
                 "正在后台执行 sleep",
             )
@@ -2594,6 +2660,7 @@ async fn maybe_start_idle_sleep(
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
     sleep_running: &mut bool,
+    sleep_status: &mut SleepDashboardStatus,
 ) -> Option<String> {
     let Some(idle_since) = context.idle_since else {
         return None;
@@ -2616,6 +2683,7 @@ async fn maybe_start_idle_sleep(
         tx,
         sleep_result_tx,
         sleep_running,
+        sleep_status,
         SleepTrigger::Idle,
         "空闲中：已启动后台 sleep",
     )
@@ -2628,12 +2696,18 @@ async fn start_background_sleep(
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
     sleep_running: &mut bool,
+    sleep_status: &mut SleepDashboardStatus,
     trigger: SleepTrigger,
     status: &str,
 ) {
     *sleep_running = true;
+    sleep_status.running = true;
+    sleep_status.current_trigger = Some(match trigger {
+        SleepTrigger::Manual => "manual",
+        SleepTrigger::Idle => "automatic",
+    });
     tx.send_modify(|state| state.runtime_status = Some(status.to_string()));
-    sync_dashboard_state(context, tx, None);
+    sync_dashboard_state(context, tx, sleep_status, None);
     let config = context.config.clone();
     let compiled_prompts = context.compiled_prompts.clone();
     let sleep_result_tx = sleep_result_tx.clone();
@@ -2648,8 +2722,11 @@ async fn start_background_sleep(
 async fn handle_sleep_task_result(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
+    sleep_status: &mut SleepDashboardStatus,
     result: SleepTaskResult,
 ) {
+    sleep_status.running = false;
+    sleep_status.current_trigger = None;
     match result.result {
         Ok(summary) => {
             if let Ok(store) = load_compiled_prompts_only().await {
@@ -2659,6 +2736,7 @@ async fn handle_sleep_task_result(
                 SleepTrigger::Manual => "sleep 完成",
                 SleepTrigger::Idle => "后台 sleep 完成",
             };
+            sleep_status.last_result = Some(format!("{prefix}：{}", summarize_sleep_summary(&summary)));
             tx.send_modify(|state| {
                 state.runtime_status = Some(format!("{prefix}：{}", summarize_sleep_summary(&summary)))
             });
@@ -2668,10 +2746,12 @@ async fn handle_sleep_task_result(
                 SleepTrigger::Manual => "sleep 失败",
                 SleepTrigger::Idle => "后台 sleep 失败",
             };
+            sleep_status.last_result = Some(format!("{prefix}：{err}"));
             tx.send_modify(|state| state.runtime_status = Some(format!("{prefix}：{err}")));
         }
     }
-    sync_dashboard_state(context, tx, None);
+    refresh_sleep_trace_backlog(sleep_status).await;
+    sync_dashboard_state(context, tx, sleep_status, None);
 }
 
 fn runtime_trigger_reasons(context: &Context) -> Vec<String> {
@@ -2764,17 +2844,103 @@ async fn execute_apply_patch_tool(patch_text: &str) -> miette::Result<ToolExecut
 fn sync_dashboard_state(
     context: &Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
+    sleep_status: &SleepDashboardStatus,
     last_cycle_elapsed_ms: Option<u128>,
 ) {
     tx.send_modify(|state| {
         let device_renders = context.devices.state_renders();
         state.focused_device = context.devices.focused();
         state.status_output = render_status_command_output_for_dashboard(context, &device_renders);
+        state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);
         state.inspect_telegram_output =
             render_inspect_output_for_dashboard(context, &device_renders, DeviceId::Telegram);
         state.activity_cells = render_activity_for_dashboard(context);
         state.last_cycle_elapsed_ms = last_cycle_elapsed_ms;
     });
+}
+
+async fn refresh_sleep_trace_backlog(sleep_status: &mut SleepDashboardStatus) {
+    if let Ok(backlog) = unread_runtime_trace_count().await {
+        sleep_status.unread_trace_backlog = backlog;
+    }
+}
+
+fn render_sleep_status_output_for_dashboard(
+    context: &Context,
+    sleep_status: &SleepDashboardStatus,
+) -> String {
+    let mut sections = Vec::new();
+    let state = if sleep_status.running {
+        "running"
+    } else {
+        "idle"
+    };
+    let mut overview_lines = vec![format!("State: {state}")];
+    if let Some(trigger) = sleep_status.current_trigger {
+        overview_lines.push(format!("Trigger: {trigger}"));
+    }
+    if let Some(last_result) = sleep_status.last_result.as_deref() {
+        overview_lines.push(format!("Last result: {last_result}"));
+    }
+    sections.push(format!("Overview\n{}", overview_lines.join("\n")));
+
+    let mut trigger_lines = vec![
+        format!(
+            "• Force backlog threshold: {} traces",
+            FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD
+        ),
+        format!(
+            "• Current trace backlog: {}",
+            sleep_status.unread_trace_backlog
+        ),
+        format!(
+            "• Auto sleep after idle: {}",
+            format_duration(AUTO_SLEEP_IDLE_THRESHOLD)
+        ),
+        format!(
+            "• Minimum idle sleep interval: {}",
+            format_duration(AUTO_SLEEP_MIN_INTERVAL)
+        ),
+    ];
+    match context.idle_since {
+        Some(idle_since) => trigger_lines.push(format!(
+            "• Currently idle for {}",
+            format_duration(idle_since.elapsed())
+        )),
+        None => trigger_lines.push("• Currently not idle".to_string()),
+    }
+    if let Some(last_idle_sleep_at) = context.last_idle_sleep_at {
+        trigger_lines.push(format!(
+            "• Last idle sleep: {} ago",
+            format_duration(last_idle_sleep_at.elapsed())
+        ));
+    }
+    sections.push(format!("Triggers\n{}", trigger_lines.join("\n")));
+
+    sections.join("\n\n")
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds >= 3600 {
+        let hours = seconds / 3600;
+        let minutes = (seconds % 3600) / 60;
+        if minutes == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h {minutes}m")
+        }
+    } else if seconds >= 60 {
+        let minutes = seconds / 60;
+        let rem = seconds % 60;
+        if rem == 0 {
+            format!("{minutes}m")
+        } else {
+            format!("{minutes}m {rem}s")
+        }
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 fn render_status_command_output_for_dashboard(

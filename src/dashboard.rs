@@ -23,6 +23,7 @@ use crate::{
 pub struct DashboardState {
     pub focused_device: Option<DeviceId>,
     pub status_output: String,
+    pub sleep_status_output: String,
     pub inspect_telegram_output: String,
     pub activity_cells: Vec<ActivityCell>,
     pub live_activity_cells: Vec<LiveActivityCell>,
@@ -558,6 +559,8 @@ trait DashboardSubcommand: Sync {
 struct QuitCommand;
 struct StatusCommand;
 struct SleepCommand;
+struct SleepRunSubcommand;
+struct SleepStatusSubcommand;
 struct TelegramCommand;
 struct TelegramStatusSubcommand;
 struct TelegramApproveSubcommand;
@@ -566,10 +569,14 @@ struct TelegramRejectSubcommand;
 static QUIT_COMMAND: QuitCommand = QuitCommand;
 static STATUS_COMMAND: StatusCommand = StatusCommand;
 static SLEEP_COMMAND: SleepCommand = SleepCommand;
+static SLEEP_RUN_SUBCOMMAND: SleepRunSubcommand = SleepRunSubcommand;
+static SLEEP_STATUS_SUBCOMMAND: SleepStatusSubcommand = SleepStatusSubcommand;
 static TELEGRAM_COMMAND: TelegramCommand = TelegramCommand;
 static TELEGRAM_STATUS_SUBCOMMAND: TelegramStatusSubcommand = TelegramStatusSubcommand;
 static TELEGRAM_APPROVE_SUBCOMMAND: TelegramApproveSubcommand = TelegramApproveSubcommand;
 static TELEGRAM_REJECT_SUBCOMMAND: TelegramRejectSubcommand = TelegramRejectSubcommand;
+static SLEEP_SUBCOMMANDS: [&dyn DashboardSubcommand; 2] =
+    [&SLEEP_RUN_SUBCOMMAND, &SLEEP_STATUS_SUBCOMMAND];
 static TELEGRAM_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
     &TELEGRAM_STATUS_SUBCOMMAND,
     &TELEGRAM_APPROVE_SUBCOMMAND,
@@ -630,7 +637,48 @@ impl DashboardCommand for SleepCommand {
     }
 
     fn description(&self) -> &'static str {
-        "run sleep now"
+        "sleep controls and status"
+    }
+
+    fn subcommands(&self) -> &'static [&'static dyn DashboardSubcommand] {
+        &SLEEP_SUBCOMMANDS
+    }
+
+    fn execute(
+        &self,
+        parts: &[&str],
+        raw: &str,
+        context: &DashboardCommandContext<'_>,
+    ) -> DashboardCommandResult {
+        let Some(subcommand_name) = parts.get(1).copied() else {
+            return DashboardCommandResult::ShowOverlay {
+                title: self.overlay_title(raw),
+                text: "available:\n  sleep run\n  sleep status".to_string(),
+            };
+        };
+        if let Some(subcommand) = self
+            .subcommands()
+            .iter()
+            .copied()
+            .find(|subcommand| subcommand.name() == subcommand_name)
+        {
+            subcommand.execute(parts, raw, context)
+        } else {
+            DashboardCommandResult::ShowOverlay {
+                title: self.overlay_title(raw),
+                text: format!("unknown sleep subcommand: {subcommand_name}"),
+            }
+        }
+    }
+}
+
+impl DashboardSubcommand for SleepRunSubcommand {
+    fn usage(&self) -> &'static str {
+        "run"
+    }
+
+    fn description(&self) -> &'static str {
+        "start a background sleep run"
     }
 
     fn execute(
@@ -641,13 +689,35 @@ impl DashboardCommand for SleepCommand {
     ) -> DashboardCommandResult {
         match context.control_tx.send(DashboardControlCommand::RunSleep) {
             Ok(()) => DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
+                title: raw.trim().to_uppercase(),
                 text: "queued sleep run".to_string(),
             },
             Err(err) => DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
+                title: raw.trim().to_uppercase(),
                 text: format!("failed to queue sleep run: {err}"),
             },
+        }
+    }
+}
+
+impl DashboardSubcommand for SleepStatusSubcommand {
+    fn usage(&self) -> &'static str {
+        "status"
+    }
+
+    fn description(&self) -> &'static str {
+        "show sleep status"
+    }
+
+    fn execute(
+        &self,
+        _parts: &[&str],
+        raw: &str,
+        context: &DashboardCommandContext<'_>,
+    ) -> DashboardCommandResult {
+        DashboardCommandResult::ShowOverlay {
+            title: raw.trim().to_uppercase(),
+            text: fallback_output(&context.state.sleep_status_output),
         }
     }
 }
