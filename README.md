@@ -4,21 +4,11 @@
 
 ## 运行
 
-```bash
-# ubuntu
-sudo apt install protobuf-compiler
-# macos
-brew install protobuf
-cargo run
-```
+长期记忆依赖 Hindsight 服务。所以需要先启动 Hindsight 服务，再启动 Spinova。
 
-## Hindsight
+### 1. 启动 Hindsight 服务
 
-长期记忆依赖 Hindsight。
-
-## 启动
-
-如果没有现成的 Hindsight 服务，最简单是用 Docker：
+推荐使用 Docker 启动服务：
 
 ```powershell
 docker run --rm -it -p 8888:8888 -p 9999:9999 `
@@ -30,17 +20,25 @@ docker run --rm -it -p 8888:8888 -p 9999:9999 `
   ghcr.io/vectorize-io/hindsight:latest
 ```
 
-然后在 `~/.spinova/config.toml` 里配置：
+`~/.spinova/config.toml` 内需要这样配置：
 
 ```toml
 [hindsight]
-enabled = true
 base_url = "http://localhost:8888"
-api_key = ""
+api_key = "" # 本地默认留空，如果使用了 API 密钥，请在此处填写
 namespace = "default"
 bank_id = "spinova"
 request_timeout_secs = 30
 default_recall_budget = "mid"
 default_reflect_budget = "low"
-retain_async = true
+```
+
+### 2. 启动 Spinova 主程序
+
+```bash
+# ubuntu
+sudo apt install protobuf-compiler
+# macos
+brew install protobuf
+cargo run
 ```
