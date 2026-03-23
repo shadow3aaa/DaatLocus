@@ -2516,12 +2516,13 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
     let recent_messages = select_recent_trail_lines_for_hindsight(context);
     let terminal_summary = summarize_terminal_for_hindsight(context);
     let thread_focus = context.memory.current_thread_focus();
-    let mut query_sections = vec![format!("阶段：{phase}")];
+    let mut query_sections = Vec::new();
     if let Some(task_description) = task_description
         && !task_description.trim().is_empty()
     {
-        query_sections.insert(0, format!("目标：{task_description}"));
+        query_sections.push(format!("目标：{task_description}"));
     }
+    query_sections.push(format!("阶段：{phase}"));
     if let Some(thread_focus) = thread_focus
         && !thread_focus.trim().is_empty()
     {
@@ -2535,7 +2536,11 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
     if !recent_messages.is_empty() {
         query_sections.push(format!("近期消息：\n{}", recent_messages.join("\n")));
     }
-    let query = query_sections.join("\n");
+    let mut query = "请根据以下当前上下文，召回最相关、最有助于继续推进的长期记忆。\n问题：哪些历史记忆与当前上下文最相关？".to_string();
+    if !query_sections.is_empty() {
+        query.push_str("\n\n当前上下文：\n");
+        query.push_str(&query_sections.join("\n"));
+    }
 
     let recall = hindsight
         .recall(
