@@ -227,17 +227,6 @@ impl TelegramDeviceHandle {
             .collect()
     }
 
-    pub fn pending_resolution_refs(&self) -> Vec<(String, String)> {
-        let state = self.inner.state.lock();
-        state
-            .order
-            .iter()
-            .filter_map(|id| state.chats.get(id))
-            .filter(|chat| chat.pending_resolution)
-            .map(|chat| (chat.id.clone(), chat.title.clone()))
-            .collect()
-    }
-
     pub fn list_chat_summaries(&self) -> Vec<String> {
         let state = self.inner.state.lock();
         state

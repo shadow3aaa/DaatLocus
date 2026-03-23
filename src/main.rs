@@ -47,13 +47,9 @@ use crate::{
     providers::OpenAIClient,
     reasoning::{
         adapters::swe_train_source::SweTrainSource,
-        bench::{
-            eval::{run_bench_eval_continuity, run_bench_eval_interactive_cli},
-            optimize::{run_bench_optimize_continuity, run_bench_optimize_interactive_cli},
-        },
         compiled::{
-            BENCH_COMPILED_DIR_NAME, COMPILED_DIR_NAME, CompiledPromptStore,
-            load_all_compiled_programs, load_compiled_runtime_system_prompt,
+            COMPILED_DIR_NAME, CompiledPromptStore, load_all_compiled_programs,
+            load_compiled_runtime_system_prompt,
         },
         environment::EpisodeObservation,
         episode::{
@@ -61,8 +57,6 @@ use crate::{
             EpisodeTask,
         },
         episode_harness::EpisodeHarness,
-        eval::run_reasoning_eval,
-        optimize::run_reasoning_optimize,
         programs::completion_judge::{CompletionJudgeOutput, CompletionJudgeProgram},
         programs::task_understanding::{TaskUnderstandingOutput, TaskUnderstandingProgram},
         prompts::{SYSTEM_PROMPT_KERNEL, build_device_context_prompt},
@@ -164,11 +158,6 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         }
     }
 
-    if is_sleep_optimize_command(&args) {
-        run_sleep_optimize(config).await?;
-        return Ok(());
-    }
-
     if let Some((path, limit, batch_size)) = train_source_learn_args(&args) {
         match run_train_source_learn(config, path, limit, batch_size).await {
             Ok(()) => return Ok(()),
@@ -184,102 +173,6 @@ async fn async_main(args: Vec<String>) -> Result<()> {
             Ok(()) => return Ok(()),
             Err(err) => {
                 eprintln!("{err:?}");
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if is_reasoning_eval_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_reasoning_eval(&context).await {
-            Ok(results) => {
-                print_reasoning_eval_results(&results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if is_reasoning_optimize_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_reasoning_optimize(&context).await {
-            Ok(results) => {
-                print_reasoning_optimization_results(&results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if is_bench_eval_continuity_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_bench_eval_continuity(&context).await {
-            Ok(results) => {
-                print_bench_eval_results("continuity", &results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if is_bench_eval_interactive_cli_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_bench_eval_interactive_cli(&context).await {
-            Ok(results) => {
-                print_bench_eval_results("interactive-cli", &results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if is_bench_optimize_continuity_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_bench_optimize_continuity(&context).await {
-            Ok(results) => {
-                print_bench_optimization_results("continuity", &results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if is_bench_optimize_interactive_cli_command(&args) {
-        let context = build_eval_context(config).await;
-        match run_bench_optimize_interactive_cli(&context).await {
-            Ok(results) => {
-                print_bench_optimization_results("interactive-cli", &results);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                eprintln!("{err:?}");
-                context.shutdown().await;
                 std::process::exit(1);
             }
         }
@@ -412,16 +305,6 @@ async fn async_main(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn is_reasoning_eval_command(args: &[String]) -> bool {
-    matches!(args, [command, target] if command == "eval" && target == "reasoning")
-        || matches!(args, [command] if command == "eval-reasoning")
-}
-
-fn is_reasoning_optimize_command(args: &[String]) -> bool {
-    matches!(args, [command, target] if command == "optimize" && target == "reasoning")
-        || matches!(args, [command] if command == "optimize-reasoning")
-}
-
 fn is_mem_reset_command(args: &[String]) -> bool {
     matches!(args, [command] if command == "mem-reset")
 }
@@ -433,10 +316,6 @@ fn is_prompt_reset_command(args: &[String]) -> bool {
 
 fn is_sleep_command(args: &[String]) -> bool {
     matches!(args, [command] if command == "sleep")
-}
-
-fn is_sleep_optimize_command(args: &[String]) -> bool {
-    matches!(args, [command] if command == "sleep-optimize")
 }
 
 fn train_source_inspect_path(args: &[String]) -> Option<&str> {
@@ -499,26 +378,6 @@ fn train_source_learn_args(args: &[String]) -> Option<(&str, usize, usize)> {
         }
         _ => None,
     }
-}
-
-fn is_bench_eval_continuity_command(args: &[String]) -> bool {
-    matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "continuity")
-        || matches!(args, [command] if command == "eval-bench-continuity")
-}
-
-fn is_bench_optimize_continuity_command(args: &[String]) -> bool {
-    matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "continuity")
-        || matches!(args, [command] if command == "optimize-bench-continuity")
-}
-
-fn is_bench_eval_interactive_cli_command(args: &[String]) -> bool {
-    matches!(args, [command, category, target] if command == "eval" && category == "bench" && target == "interactive-cli")
-        || matches!(args, [command] if command == "eval-bench-interactive-cli")
-}
-
-fn is_bench_optimize_interactive_cli_command(args: &[String]) -> bool {
-    matches!(args, [command, category, target] if command == "optimize" && category == "bench" && target == "interactive-cli")
-        || matches!(args, [command] if command == "optimize-bench-interactive-cli")
 }
 
 async fn run_mem_reset() -> Result<()> {
@@ -595,8 +454,8 @@ async fn run_prompt_reset() -> Result<()> {
     );
     if cleared.is_empty() {
         println!(
-            "[prompt-reset] nothing to remove; {} and {} were already absent",
-            COMPILED_DIR_NAME, BENCH_COMPILED_DIR_NAME
+            "[prompt-reset] nothing to remove; {} was already absent",
+            COMPILED_DIR_NAME
         );
     } else {
         println!("[prompt-reset] cleared: {}", cleared.join(", "));
@@ -611,7 +470,7 @@ async fn run_prompt_reset() -> Result<()> {
 async fn clear_prompt_cache_dirs(home: &PathBuf) -> Result<Vec<String>> {
     let mut cleared = Vec::new();
 
-    for dir_name in [COMPILED_DIR_NAME, BENCH_COMPILED_DIR_NAME] {
+    for dir_name in [COMPILED_DIR_NAME] {
         let path = home.join(dir_name);
         if path.exists() {
             tokio::fs::remove_dir_all(&path)
@@ -686,18 +545,6 @@ async fn load_compiled_prompts_only() -> miette::Result<CompiledPromptStore> {
     let compiled = load_all_compiled_programs().await?;
     let runtime_system_prompt = load_compiled_runtime_system_prompt().await?;
     Ok(CompiledPromptStore::from_entries(compiled).with_runtime_system_prompt(runtime_system_prompt))
-}
-
-async fn run_sleep_optimize(config: crate::config::Config) -> Result<()> {
-    let mut context = build_eval_context(config.clone()).await;
-    let summary = run_sleep(&mut context).await?;
-    print_sleep_summary(&summary);
-    let results = run_reasoning_optimize(&context).await;
-    context.shutdown().await;
-
-    let results = results?;
-    print_reasoning_optimization_results(&results);
-    Ok(())
 }
 
 fn run_train_source_inspect_blocking(path: &str) -> Result<()> {
@@ -924,26 +771,22 @@ async fn run_train_source_learn_loop(
         );
         sync_learning_assets_back_to_shared(&session_learning_home, &shared_learning_home).await?;
 
-        println!("  batch {} optimize starting", batch_index + 1);
-        let optimization_results = run_reasoning_optimize(&optimize_context).await?;
         optimize_context.shutdown().await;
         sync_learning_assets_back_to_shared(&session_learning_home, &shared_learning_home).await?;
 
         let compiled_prompt_count = load_compiled_prompts_only().await?.len();
         session
             .update(|state| {
-                state.optimize_runs += 1;
                 state.last_compiled_prompt_count = compiled_prompt_count;
                 if let Some(last_report) = state.batch_reports.last_mut() {
                     last_report.compiled_prompt_count = compiled_prompt_count;
-                    last_report.optimized_suites = optimization_results.len();
+                    last_report.optimized_suites = 0;
                 }
             })
             .await?;
         println!(
-            "  batch {} optimize finished: compiled_suites={} compiled_prompt_count={}",
+            "  batch {} compiled_prompt_count={}",
             batch_index + 1,
-            optimization_results.len(),
             compiled_prompt_count
         );
 
@@ -1011,71 +854,6 @@ async fn execute_train_source_task(
     context.shutdown().await;
     drop(home_override);
     Ok(outcome)
-}
-
-fn print_reasoning_eval_results(results: &[crate::reasoning::eval::EvalCaseResult]) {
-    let passed = results.iter().filter(|result| result.passed).count();
-    let failed = results.len().saturating_sub(passed);
-    println!(
-        "reasoning eval: total={} passed={} failed={}",
-        results.len(),
-        passed,
-        failed
-    );
-    for result in results {
-        let status = if result.passed { "PASS" } else { "FAIL" };
-        println!(
-            "[{}] {} / {} - {}",
-            status, result.suite, result.case_name, result.detail
-        );
-    }
-}
-
-fn print_reasoning_optimization_results(
-    results: &[crate::reasoning::optimizer::OptimizationResult],
-) {
-    println!("reasoning optimize:");
-    for result in results {
-        println!(
-            "- suite={} best_candidate={} score={}/{}",
-            result.suite, result.best_candidate, result.score, result.total_cases
-        );
-    }
-}
-
-fn print_bench_eval_results(
-    benchmark_name: &str,
-    results: &[crate::reasoning::eval::EvalCaseResult],
-) {
-    let passed = results.iter().filter(|result| result.passed).count();
-    let failed = results.len().saturating_sub(passed);
-    println!(
-        "bench eval ({}): total={} passed={} failed={}",
-        benchmark_name,
-        results.len(),
-        passed,
-        failed
-    );
-    for result in results {
-        let status = if result.passed { "PASS" } else { "FAIL" };
-        println!(
-            "[{}] {} / {} - {}",
-            status, result.suite, result.case_name, result.detail
-        );
-    }
-}
-
-fn print_bench_optimization_results(
-    benchmark_name: &str,
-    results: &[crate::reasoning::optimizer::OptimizationResult],
-) {
-    println!("bench optimize ({}):", benchmark_name);
-    for result in results {
-        println!(
-            "- suite={} best_candidate={} score={}/{}",
-            result.suite, result.best_candidate, result.score, result.total_cases
-        );
-    }
 }
 
 fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {

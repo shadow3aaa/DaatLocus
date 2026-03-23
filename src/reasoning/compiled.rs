@@ -14,7 +14,6 @@ use super::{
 };
 
 pub const COMPILED_DIR_NAME: &str = "reasoning_compiled";
-pub const BENCH_COMPILED_DIR_NAME: &str = "reasoning_bench_compiled";
 pub const RUNTIME_SYSTEM_PROMPT_COMPILE_KEY: &str = "runtime_agent_system";
 pub const RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY: &str = "runtime_agent_system_previous";
 
@@ -211,26 +210,6 @@ impl StoredPromptTuningConfig {
     }
 }
 
-pub async fn load_compiled_program(compile_key: &str) -> Result<Option<CompiledProgram>> {
-    load_compiled_program_from_dir(COMPILED_DIR_NAME, compile_key).await
-}
-
-pub async fn load_compiled_program_from_dir(
-    dir_name: &str,
-    compile_key: &str,
-) -> Result<Option<CompiledProgram>> {
-    let path = compiled_dir_named(dir_name)
-        .await
-        .join(format!("{compile_key}.json"));
-    let Ok(bytes) = fs::read(path).await else {
-        return Ok(None);
-    };
-
-    let compiled = serde_json::from_slice::<CompiledProgram>(&bytes)
-        .map_err(|err| miette!("failed to decode compiled prompt config: {err}"))?;
-    Ok(Some(compiled))
-}
-
 pub async fn load_all_compiled_programs() -> Result<Vec<CompiledProgram>> {
     load_all_compiled_programs_from_dir(COMPILED_DIR_NAME).await
 }
@@ -284,14 +263,7 @@ pub async fn load_all_compiled_programs_from_dir(dir_name: &str) -> Result<Vec<C
 }
 
 pub async fn save_compiled_program(compiled: &CompiledProgram) -> Result<()> {
-    save_compiled_program_to_dir(COMPILED_DIR_NAME, compiled).await
-}
-
-pub async fn save_compiled_program_to_dir(
-    dir_name: &str,
-    compiled: &CompiledProgram,
-) -> Result<()> {
-    let dir = compiled_dir_named(dir_name).await;
+    let dir = compiled_dir_named(COMPILED_DIR_NAME).await;
     if !dir.exists() {
         fs::create_dir_all(&dir)
             .await
@@ -304,6 +276,22 @@ pub async fn save_compiled_program_to_dir(
         .await
         .map_err(|err| miette!("failed to write compiled prompt config: {err}"))?;
     Ok(())
+}
+
+pub async fn seed_compiled_program_from_tuning<P: Program>(
+    program: &P,
+    tuning: &PromptTuningConfig<P::Output>,
+) -> Result<()> {
+    let compiled = CompiledProgram {
+        suite: program.tuning_key(),
+        compile_key: program.tuning_key(),
+        best_candidate: "default_seed".to_string(),
+        score: 0,
+        total_cases: 0,
+        tuning: StoredPromptTuningConfig::from_typed(tuning),
+        report: None,
+    };
+    save_compiled_program(&compiled).await
 }
 
 pub async fn load_compiled_runtime_system_prompt() -> Result<Option<CompiledRuntimeSystemPrompt>> {

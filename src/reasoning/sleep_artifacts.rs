@@ -163,80 +163,6 @@ pub struct SleepArtifactRuntimePromptEvolutionReport {
     pub round_history: Vec<SleepArtifactRuntimePromptEvolutionRound>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-pub struct SleepArtifactsSnapshot {
-    pub failure_patterns: Vec<SleepArtifactFailurePattern>,
-    pub bootstrap_demos: Vec<SleepArtifactBootstrapDemo>,
-    pub stress_cases: Vec<SleepArtifactStressCase>,
-    pub instruction_hypotheses: Vec<SleepArtifactInstructionHypothesis>,
-    pub runtime_demos: Vec<SleepArtifactRuntimeDemo>,
-    pub runtime_prompt_suggestions: Vec<SleepArtifactRuntimePromptSuggestion>,
-    pub runtime_demo_evaluations: Vec<SleepArtifactRuntimeDemoEvaluation>,
-    pub runtime_prompt_candidates: Vec<SleepArtifactRuntimePromptCandidate>,
-    pub runtime_prompt_evolution_reports: Vec<SleepArtifactRuntimePromptEvolutionReport>,
-}
-
-impl SleepArtifactsSnapshot {
-    pub fn filter_suite(&self, suite: &str) -> Self {
-        Self {
-            failure_patterns: self
-                .failure_patterns
-                .iter()
-                .filter(|item| item.suite == suite)
-                .cloned()
-                .collect(),
-            bootstrap_demos: self
-                .bootstrap_demos
-                .iter()
-                .filter(|item| item.suite == suite)
-                .cloned()
-                .collect(),
-            stress_cases: self
-                .stress_cases
-                .iter()
-                .filter(|item| item.suite == suite)
-                .cloned()
-                .collect(),
-            instruction_hypotheses: self
-                .instruction_hypotheses
-                .iter()
-                .filter(|item| item.suite == suite)
-                .cloned()
-                .collect(),
-            runtime_demos: self
-                .runtime_demos
-                .iter()
-                .filter(|item| item.compile_key == suite)
-                .cloned()
-                .collect(),
-            runtime_prompt_suggestions: self
-                .runtime_prompt_suggestions
-                .iter()
-                .filter(|item| item.compile_key == suite)
-                .cloned()
-                .collect(),
-            runtime_demo_evaluations: self
-                .runtime_demo_evaluations
-                .iter()
-                .filter(|item| item.compile_key == suite)
-                .cloned()
-                .collect(),
-            runtime_prompt_candidates: self
-                .runtime_prompt_candidates
-                .iter()
-                .filter(|item| item.compile_key == suite)
-                .cloned()
-                .collect(),
-            runtime_prompt_evolution_reports: self
-                .runtime_prompt_evolution_reports
-                .iter()
-                .filter(|item| item.compile_key == suite)
-                .cloned()
-                .collect(),
-        }
-    }
-}
-
 pub struct SleepArtifactsStore {
     root: PathBuf,
 }
@@ -255,43 +181,6 @@ impl SleepArtifactsStore {
         ensure_dir(&root.join(RUNTIME_PROMPT_CANDIDATES_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR)).await?;
         Ok(Self { root })
-    }
-
-    pub async fn load_snapshot(&self) -> Result<SleepArtifactsSnapshot> {
-        Ok(SleepArtifactsSnapshot {
-            failure_patterns: load_all::<SleepArtifactFailurePattern>(
-                &self.root.join(FAILURE_PATTERNS_DIR),
-            )
-            .await?,
-            bootstrap_demos: load_all::<SleepArtifactBootstrapDemo>(
-                &self.root.join(BOOTSTRAP_DEMOS_DIR),
-            )
-            .await?,
-            stress_cases: load_all::<SleepArtifactStressCase>(&self.root.join(STRESS_CASES_DIR))
-                .await?,
-            instruction_hypotheses: load_all::<SleepArtifactInstructionHypothesis>(
-                &self.root.join(INSTRUCTION_HYPOTHESES_DIR),
-            )
-            .await?,
-            runtime_demos: load_all::<SleepArtifactRuntimeDemo>(&self.root.join(RUNTIME_DEMOS_DIR))
-                .await?,
-            runtime_prompt_suggestions: load_all::<SleepArtifactRuntimePromptSuggestion>(
-                &self.root.join(RUNTIME_PROMPT_SUGGESTIONS_DIR),
-            )
-            .await?,
-            runtime_demo_evaluations: load_all::<SleepArtifactRuntimeDemoEvaluation>(
-                &self.root.join(RUNTIME_DEMO_EVALUATIONS_DIR),
-            )
-            .await?,
-            runtime_prompt_candidates: load_all::<SleepArtifactRuntimePromptCandidate>(
-                &self.root.join(RUNTIME_PROMPT_CANDIDATES_DIR),
-            )
-            .await?,
-            runtime_prompt_evolution_reports: load_all::<SleepArtifactRuntimePromptEvolutionReport>(
-                &self.root.join(RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR),
-            )
-            .await?,
-        })
     }
 
     pub async fn replace_failure_patterns(
@@ -436,39 +325,6 @@ async fn ensure_dir(path: &Path) -> Result<()> {
         })?;
     }
     Ok(())
-}
-
-async fn load_all<T>(dir: &Path) -> Result<Vec<T>>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    let mut entries = fs::read_dir(dir).await.map_err(|err| {
-        miette!(
-            "failed to read sleep artifacts dir {}: {err}",
-            dir.display()
-        )
-    })?;
-    let mut items = Vec::new();
-
-    while let Some(entry) = entries.next_entry().await.map_err(|err| {
-        miette!(
-            "failed to iterate sleep artifacts dir {}: {err}",
-            dir.display()
-        )
-    })? {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let bytes = fs::read(&path)
-            .await
-            .map_err(|err| miette!("failed to read sleep artifact {}: {err}", path.display()))?;
-        let item = serde_json::from_slice::<T>(&bytes)
-            .map_err(|err| miette!("failed to decode sleep artifact {}: {err}", path.display()))?;
-        items.push(item);
-    }
-
-    Ok(items)
 }
 
 async fn save_artifact<T>(dir: &Path, stem: &str, artifact: &T) -> Result<PathBuf>
