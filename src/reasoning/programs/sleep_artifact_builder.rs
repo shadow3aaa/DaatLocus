@@ -88,7 +88,7 @@ impl Program for SleepArtifactBuilderProgram {
             .rule("如果 pattern 更适合拉开候选差异，就生成 stress case。")
     }
 
-    fn build_ir(&self, _context: &Context, _snapshot: &Snapshot) -> PromptIR {
+    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
         self.dataset_ir(
             String::new(),
             String::new(),

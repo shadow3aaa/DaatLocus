@@ -61,7 +61,7 @@ impl Program for TaskUnderstandingProgram {
             .rule("优先保留路径、函数名、参数、错误信号等锚点。")
     }
 
-    fn build_ir(&self, _context: &Context, _snapshot: &Snapshot) -> PromptIR {
+    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
         let mut ir = PromptIR::with_system(SYSTEM_PROMPT);
         ir.push_instruction("把任务压缩成短而有执行性的理解结果，不要重复原文。");
         ir.push_instruction("investigation_plan 应是 3-5 条可执行步骤。");

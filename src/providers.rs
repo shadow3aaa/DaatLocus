@@ -3,6 +3,7 @@
 use std::error::Error as _;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use miette::{Result, miette};
 use serde_json::json;
 
@@ -20,6 +21,39 @@ pub struct OpenAIClient {
     base_url: String,
     model: String,
     temperature: f64,
+}
+
+#[derive(Default, Clone)]
+struct StreamingToolCallBuilder {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl StreamingToolCallBuilder {
+    fn apply_delta(&mut self, delta: &serde_json::Value) {
+        if let Some(id) = delta["id"].as_str() {
+            self.id.push_str(id);
+        }
+        if let Some(name) = delta["function"]["name"].as_str() {
+            self.name.push_str(name);
+        }
+        if let Some(arguments) = delta["function"]["arguments"].as_str() {
+            self.arguments.push_str(arguments);
+        }
+    }
+
+    fn try_build(&self) -> Option<AgentToolCall> {
+        if self.id.is_empty() || self.name.is_empty() {
+            return None;
+        }
+        let arguments = serde_json::from_str(&self.arguments).ok()?;
+        Some(AgentToolCall {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            arguments,
+        })
+    }
 }
 
 impl OpenAIClient {
@@ -147,9 +181,7 @@ impl OpenAIClient {
         })
     }
 
-    async fn call_agent_turn(&self, request: AgentTurnRequest) -> Result<AgentTurnResponse> {
-        let url = self.url();
-        let request_context = summarize_agent_turn_request(&request);
+    fn build_agent_turn_payload(&self, request: AgentTurnRequest, stream: bool) -> serde_json::Value {
         let messages = request
             .messages
             .into_iter()
@@ -170,12 +202,19 @@ impl OpenAIClient {
                 })
             })
             .collect::<Vec<_>>();
-        let payload = json!({
+        json!({
             "model": self.model,
             "messages": messages,
             "tools": tools,
-            "temperature": self.temperature
-        });
+            "temperature": self.temperature,
+            "stream": stream,
+        })
+    }
+
+    async fn call_agent_turn(&self, _context: &Context, request: AgentTurnRequest) -> Result<AgentTurnResponse> {
+        let url = self.url();
+        let request_context = summarize_agent_turn_request(&request);
+        let payload = self.build_agent_turn_payload(request, true);
         let response = self
             .client
             .post(&url)
@@ -187,12 +226,18 @@ impl OpenAIClient {
                 format_request_error("llm request failed", &url, &request_context, &err)
             })?;
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|err| miette!("llm response body read failed: {err}"))?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
 
         if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|err| miette!("llm response body read failed: {err}"))?;
             return Err(miette!(
                 "llm api returned HTTP {}: {}",
                 status,
@@ -200,53 +245,75 @@ impl OpenAIClient {
             ));
         }
 
-        let response_json: serde_json::Value = serde_json::from_str(&body).map_err(|err| {
-            miette!(
-                "llm response is not valid JSON: {err}; body={}",
-                truncate_for_error(&body)
-            )
-        })?;
-        let message = &response_json["choices"][0]["message"];
-        let content = message["content"]
-            .as_str()
-            .map(|text| text.to_string())
-            .unwrap_or_default();
+        if !content_type.contains("text/event-stream") {
+            let body = response
+                .text()
+                .await
+                .map_err(|err| miette!("llm response body read failed: {err}"))?;
+            let response_json: serde_json::Value = serde_json::from_str(&body).map_err(|err| {
+                miette!(
+                    "llm response is not valid JSON: {err}; body={}",
+                    truncate_for_error(&body)
+                )
+            })?;
+            return parse_agent_turn_response_from_json(&response_json);
+        }
 
-        if let Some(tool_calls) = message["tool_calls"].as_array()
-            && !tool_calls.is_empty()
-        {
-            let mut calls = Vec::new();
-            for tool_call in tool_calls {
-                let id = tool_call["id"].as_str().ok_or_else(|| {
+        let mut buffer = String::new();
+        let mut content = String::new();
+        let mut tool_calls: Vec<StreamingToolCallBuilder> = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|err| miette!("llm streaming chunk read failed: {err}"))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            normalize_sse_buffer(&mut buffer);
+            while let Some(event) = take_next_sse_event(&mut buffer) {
+                let data = event
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data:"))
+                    .map(str::trim_start)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if data.is_empty() {
+                    continue;
+                }
+                if data == "[DONE]" {
+                    break;
+                }
+                let response_json: serde_json::Value = serde_json::from_str(&data).map_err(|err| {
                     miette!(
-                        "llm response missing tool_call.id; response={}",
-                        truncate_for_json_error(&response_json)
+                        "llm streaming chunk is not valid JSON: {err}; data={}",
+                        truncate_for_error(&data)
                     )
                 })?;
-                let name = tool_call["function"]["name"].as_str().ok_or_else(|| {
+                let choice = &response_json["choices"][0];
+                let delta = &choice["delta"];
+                if let Some(delta_content) = delta["content"].as_str() {
+                    content.push_str(delta_content);
+                }
+                if let Some(delta_tool_calls) = delta["tool_calls"].as_array() {
+                    for tool_call in delta_tool_calls {
+                        let Some(index) = tool_call["index"].as_u64().map(|index| index as usize) else {
+                            continue;
+                        };
+                        while tool_calls.len() <= index {
+                            tool_calls.push(StreamingToolCallBuilder::default());
+                        }
+                        tool_calls[index].apply_delta(tool_call);
+                    }
+                }
+            }
+        }
+
+        if !tool_calls.is_empty() {
+            let mut calls = Vec::with_capacity(tool_calls.len());
+            for (index, builder) in tool_calls.into_iter().enumerate() {
+                let call = builder.try_build().ok_or_else(|| {
                     miette!(
-                        "llm response missing tool function name; response={}",
-                        truncate_for_json_error(&response_json)
+                        "llm streaming response ended with incomplete tool call at index {index}"
                     )
                 })?;
-                let arguments_str =
-                    tool_call["function"]["arguments"].as_str().ok_or_else(|| {
-                        miette!(
-                            "llm response missing tool function arguments; response={}",
-                            truncate_for_json_error(&response_json)
-                        )
-                    })?;
-                let arguments = serde_json::from_str(arguments_str).map_err(|err| {
-                    miette!(
-                        "failed to decode tool arguments as JSON: {err}; arguments={}",
-                        truncate_for_error(arguments_str)
-                    )
-                })?;
-                calls.push(AgentToolCall {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    arguments,
-                });
+                calls.push(call);
             }
             return Ok(AgentTurnResponse::ToolCalls {
                 content: if content.trim().is_empty() {
@@ -315,6 +382,76 @@ fn agent_message_char_count(message: &AgentMessage) -> usize {
     }
 }
 
+fn parse_agent_turn_response_from_json(
+    response_json: &serde_json::Value,
+) -> Result<AgentTurnResponse> {
+    let message = &response_json["choices"][0]["message"];
+    let content = message["content"]
+        .as_str()
+        .map(|text| text.to_string())
+        .unwrap_or_default();
+
+    if let Some(tool_calls) = message["tool_calls"].as_array()
+        && !tool_calls.is_empty()
+    {
+        let mut calls = Vec::new();
+        for tool_call in tool_calls {
+            let id = tool_call["id"].as_str().ok_or_else(|| {
+                miette!(
+                    "llm response missing tool_call.id; response={}",
+                    truncate_for_json_error(response_json)
+                )
+            })?;
+            let name = tool_call["function"]["name"].as_str().ok_or_else(|| {
+                miette!(
+                    "llm response missing tool function name; response={}",
+                    truncate_for_json_error(response_json)
+                )
+            })?;
+            let arguments_str = tool_call["function"]["arguments"].as_str().ok_or_else(|| {
+                miette!(
+                    "llm response missing tool function arguments; response={}",
+                    truncate_for_json_error(response_json)
+                )
+            })?;
+            let arguments = serde_json::from_str(arguments_str).map_err(|err| {
+                miette!(
+                    "failed to decode tool arguments as JSON: {err}; arguments={}",
+                    truncate_for_error(arguments_str)
+                )
+            })?;
+            calls.push(AgentToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments,
+            });
+        }
+        return Ok(AgentTurnResponse::ToolCalls {
+            content: if content.trim().is_empty() {
+                None
+            } else {
+                Some(content)
+            },
+            calls,
+        });
+    }
+
+    Ok(AgentTurnResponse::Assistant { content })
+}
+
+fn normalize_sse_buffer(buffer: &mut String) {
+    if buffer.contains('\r') {
+        *buffer = buffer.replace("\r\n", "\n").replace('\r', "\n");
+    }
+}
+
+fn take_next_sse_event(buffer: &mut String) -> Option<String> {
+    let delimiter_index = buffer.find("\n\n")?;
+    let event = buffer[..delimiter_index].to_string();
+    buffer.drain(..delimiter_index + 2);
+    Some(event)
+}
+
 fn format_request_error(
     prefix: &str,
     url: &str,
@@ -361,10 +498,10 @@ impl LLM for OpenAIClient {
 
     async fn run_agent_turn(
         &self,
-        _context: &Context,
+        context: &Context,
         request: AgentTurnRequest,
     ) -> Result<AgentTurnResponse> {
-        self.call_agent_turn(request).await
+        self.call_agent_turn(context, request).await
     }
 }
 

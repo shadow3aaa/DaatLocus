@@ -50,7 +50,7 @@ impl Program for RuntimeSystemPromptPatchBuilderProgram {
             .rule("不要重写整个 prompt。")
     }
 
-    fn build_ir(&self, _context: &Context, _snapshot: &Snapshot) -> PromptIR {
+    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
         self.dataset_ir(String::new(), String::new(), String::new(), String::new())
     }
 }

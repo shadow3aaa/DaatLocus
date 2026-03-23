@@ -55,7 +55,7 @@ impl Program for RuntimeSystemPromptJudgeProgram {
             .rule("needed_changes 应尽量是 prompt patch，而不是完整重写。")
     }
 
-    fn build_ir(&self, _context: &Context, _snapshot: &Snapshot) -> PromptIR {
+    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
         self.dataset_ir(
             String::new(),
             String::new(),
