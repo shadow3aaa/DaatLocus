@@ -30,7 +30,6 @@ enum RetainWorkerMessage {
 pub struct HindsightRetainJob {
     pub items: Vec<HindsightRetainItem>,
     pub document_id: Option<String>,
-    pub document_tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,7 +186,6 @@ impl HindsightClient {
         &self,
         items: Vec<HindsightRetainItem>,
         document_id: Option<&str>,
-        document_tags: &[String],
     ) -> Result<HindsightRetainResponse> {
         let url = format!("{}/memories/retain", self.bank_url());
         let items = items
@@ -202,7 +200,6 @@ impl HindsightClient {
         let body = json!({
             "items": items,
             "async": false,
-            "document_tags": if document_tags.is_empty() { serde_json::Value::Null } else { json!(document_tags) },
         });
         let response = self
             .authorized(self.http.post(url))
@@ -372,7 +369,7 @@ async fn retain_job(
         }
     }
     client
-        .retain(job.items, job.document_id.as_deref(), &job.document_tags)
+        .retain(job.items, job.document_id.as_deref())
         .await?;
     Ok(())
 }

@@ -1561,7 +1561,6 @@ async fn retain_sleep_reflections(
     context.hindsight_retain.enqueue(crate::hindsight::HindsightRetainJob {
         items,
         document_id: None,
-        document_tags: Vec::new(),
     })?;
     Ok(reflections.len())
 }

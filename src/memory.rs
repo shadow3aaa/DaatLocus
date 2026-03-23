@@ -12,7 +12,8 @@ use uuid::Uuid;
 use crate::{
     get_spinova_home,
     hindsight::{HindsightRetainItem, HindsightRetainJob},
-    reasoning::runtime::PromptMessage,
+    reasoning::runtime::{PromptMessage, PromptRole},
+    tool_ui::{PatchUiData, TelegramUiData, TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent},
 };
 
 pub struct Memory {
@@ -49,11 +50,8 @@ impl Memory {
         &mut self,
         current_doing: String,
         messages: Vec<PromptMessage>,
-        retain_text: String,
     ) -> MemoryRetainPlan {
-        let _ = self
-            .l1
-            .update_messages(current_doing, messages, retain_text);
+        let _ = self.l1.update_messages(current_doing, messages);
         let jobs = self.collect_retain_jobs();
         let must_flush_before_continue = self.front_is_pending_retain();
         MemoryRetainPlan {
@@ -103,7 +101,6 @@ impl Memory {
             jobs.push(HindsightRetainJob {
                 items: vec![item.to_hindsight_item()],
                 document_id: Some(format!("l1-step:{}", item.id)),
-                document_tags: vec!["spinova".to_string(), "l1-step".to_string()],
             });
         }
         jobs
@@ -147,7 +144,6 @@ pub struct L1Memory {
 struct L1Item {
     id: Uuid,
     current_doing: String,
-    retain_text: String,
     messages: Vec<PromptMessage>,
 }
 
@@ -179,9 +175,9 @@ impl L1Item {
 
     fn to_hindsight_item(&self) -> HindsightRetainItem {
         HindsightRetainItem {
-            content: self.retain_text.clone(),
+            content: self.render_for_retain(),
             timestamp: None,
-            context: Some("runtime raw l1 step".to_string()),
+            context: Some("runtime l1 step".to_string()),
             metadata: Some(std::collections::HashMap::from([
                 ("current_doing".to_string(), self.current_doing.clone()),
                 ("entry_id".to_string(), self.id.to_string()),
@@ -212,12 +208,10 @@ impl L1Memory {
         &mut self,
         current_doing: String,
         messages: Vec<PromptMessage>,
-        retain_text: String,
     ) -> Option<L1Item> {
         let item = L1Item {
             id: Uuid::new_v4(),
             current_doing,
-            retain_text,
             messages,
         };
         self.trail.push_back(item);
@@ -237,10 +231,10 @@ impl L1Memory {
 
 fn format_message_for_memory(message: &PromptMessage) -> String {
     let role = match message.role {
-        crate::reasoning::runtime::PromptRole::System => "system",
-        crate::reasoning::runtime::PromptRole::User => "user",
-        crate::reasoning::runtime::PromptRole::Assistant => "assistant",
-        crate::reasoning::runtime::PromptRole::Tool => "tool",
+        PromptRole::System => "system",
+        PromptRole::User => "user",
+        PromptRole::Assistant => "assistant",
+        PromptRole::Tool => "tool",
     };
     let mut parts = Vec::new();
     if !message.content.trim().is_empty() {
@@ -256,6 +250,137 @@ fn format_message_for_memory(message: &PromptMessage) -> String {
         parts.push(rendered);
     }
     format!("{role}:\n{}", parts.join("\n"))
+}
+
+impl L1Item {
+    fn render_for_retain(&self) -> String {
+        let mut lines = vec![
+            "runtime step".to_string(),
+            format!("focus: {}", self.current_doing),
+        ];
+        for message in &self.messages {
+            lines.extend(render_prompt_message_for_retain(message));
+        }
+        lines.join("\n")
+    }
+}
+
+fn render_prompt_message_for_retain(message: &PromptMessage) -> Vec<String> {
+    let mut lines = Vec::new();
+    match message.role {
+        PromptRole::Assistant => {
+            if !message.content.trim().is_empty() {
+                lines.push(format!("assistant action: {}", compact_inline_text(&message.content)));
+            }
+            for event in &message.tool_call_ui_events {
+                lines.extend(render_tool_call_event_for_retain(event));
+            }
+        }
+        PromptRole::Tool => {
+            if let Some(event) = &message.tool_ui_event {
+                lines.extend(render_tool_result_event_for_retain(event));
+            } else if !message.content.trim().is_empty() {
+                lines.push(format!("tool result: {}", compact_inline_text(&message.content)));
+            }
+        }
+        PromptRole::User => {
+            if !message.content.trim().is_empty() {
+                lines.push(format!("user context: {}", compact_inline_text(&message.content)));
+            }
+        }
+        PromptRole::System => {}
+    }
+    lines
+}
+
+fn render_tool_call_event_for_retain(event: &ToolCallUiEvent) -> Vec<String> {
+    match event {
+        ToolCallUiEvent::Exec(data)
+        | ToolCallUiEvent::Work(data)
+        | ToolCallUiEvent::Device(data)
+        | ToolCallUiEvent::Error(data) => render_tool_data_for_retain("tool call", data),
+        ToolCallUiEvent::Terminal(data) => render_terminal_data_for_retain("tool call", data),
+        ToolCallUiEvent::Patch(data) => render_patch_data_for_retain("tool call", data),
+        ToolCallUiEvent::Telegram(data) => render_telegram_data_for_retain("tool call", data),
+    }
+}
+
+fn render_tool_result_event_for_retain(event: &ToolUiEvent) -> Vec<String> {
+    match event {
+        ToolUiEvent::Exec(data)
+        | ToolUiEvent::Work(data)
+        | ToolUiEvent::Device(data)
+        | ToolUiEvent::Error(data) => render_tool_data_for_retain("tool result", data),
+        ToolUiEvent::Terminal(data) => render_terminal_data_for_retain("tool result", data),
+        ToolUiEvent::Patch(data) => render_patch_data_for_retain("tool result", data),
+        ToolUiEvent::Telegram(data) => render_telegram_data_for_retain("tool result", data),
+    }
+}
+
+fn render_tool_data_for_retain(prefix: &str, data: &ToolUiData) -> Vec<String> {
+    let mut lines = vec![format!("{prefix}: {}", compact_inline_text(&data.title))];
+    if !data.body_lines.is_empty() {
+        lines.push(format!(
+            "{prefix} details: {}",
+            compact_inline_text(&data.body_lines.join(" | "))
+        ));
+    }
+    lines
+}
+
+fn render_terminal_data_for_retain(prefix: &str, data: &TerminalUiData) -> Vec<String> {
+    let mut lines = vec![format!("{prefix}: {}", compact_inline_text(&data.title))];
+    if !data.body_lines.is_empty() {
+        lines.push(format!(
+            "{prefix} output: {}",
+            compact_inline_text(&data.body_lines.join(" | "))
+        ));
+    }
+    lines
+}
+
+fn render_patch_data_for_retain(prefix: &str, data: &PatchUiData) -> Vec<String> {
+    let mut lines = vec![format!("{prefix}: {}", compact_inline_text(&data.title))];
+    lines.push(format!("{prefix} summary: {}", compact_inline_text(&data.summary_line)));
+    for file in data.files.iter().take(6) {
+        let marker = match file.operation.as_str() {
+            "add" => "+",
+            "delete" => "-",
+            _ => "~",
+        };
+        lines.push(format!(
+            "{prefix} file: {marker} {} (+{} -{})",
+            file.path, file.added_lines, file.removed_lines
+        ));
+    }
+    lines
+}
+
+fn render_telegram_data_for_retain(prefix: &str, data: &TelegramUiData) -> Vec<String> {
+    let mut lines = vec![format!("{prefix}: {}", compact_inline_text(&data.title))];
+    if !data.detail_lines.is_empty() {
+        lines.push(format!(
+            "{prefix} details: {}",
+            compact_inline_text(&data.detail_lines.join(" | "))
+        ));
+    }
+    if !data.message_lines.is_empty() {
+        lines.push(format!(
+            "{prefix} messages: {}",
+            compact_inline_text(&data.message_lines.join(" | "))
+        ));
+    }
+    lines
+}
+
+fn compact_inline_text(text: &str) -> String {
+    const MAX_CHARS: usize = 280;
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= MAX_CHARS {
+        return normalized;
+    }
+    let truncated = normalized.chars().take(MAX_CHARS).collect::<String>();
+    format!("{truncated}…")
 }
 
 fn format_tool_call_ui_event_for_memory(event: &crate::tool_ui::ToolCallUiEvent) -> String {
