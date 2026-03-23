@@ -101,6 +101,15 @@ struct SleepDashboardStatus {
     current_trigger: Option<&'static str>,
     last_result: Option<String>,
     unread_trace_backlog: usize,
+    total_runs: usize,
+    total_consumed_trace_events: usize,
+    total_runtime_demos: usize,
+    total_runtime_demo_evaluations: usize,
+    total_runtime_demo_passed: usize,
+    total_runtime_demo_regressions: usize,
+    total_runtime_prompt_candidates: usize,
+    total_runtime_prompt_rollbacks: usize,
+    total_runtime_prompt_accepts: usize,
 }
 
 struct SleepTaskResult {
@@ -2786,9 +2795,23 @@ async fn handle_sleep_task_result(
                 SleepTrigger::Manual => "sleep 完成",
                 SleepTrigger::Idle => "后台 sleep 完成",
             };
-            sleep_status.last_result = Some(format!("{prefix}：{}", summarize_sleep_summary(&summary)));
+            sleep_status.total_runs += 1;
+            sleep_status.total_consumed_trace_events += summary.consumed_trace_events;
+            sleep_status.total_runtime_demos += summary.runtime_demos;
+            sleep_status.total_runtime_demo_evaluations += summary.runtime_demo_evaluations;
+            sleep_status.total_runtime_demo_passed += summary.runtime_demo_passed;
+            sleep_status.total_runtime_demo_regressions += summary.runtime_demo_regressions;
+            sleep_status.total_runtime_prompt_candidates += summary.runtime_prompt_candidates;
+            if summary.runtime_prompt_rolled_back {
+                sleep_status.total_runtime_prompt_rollbacks += 1;
+            }
+            if summary.runtime_prompt_accepted {
+                sleep_status.total_runtime_prompt_accepts += 1;
+            }
+            let summary_text = summarize_sleep_summary(&summary);
+            sleep_status.last_result = Some(summary_text.clone());
             tx.send_modify(|state| {
-                state.runtime_status = Some(format!("{prefix}：{}", summarize_sleep_summary(&summary)))
+                state.runtime_status = Some(format!("{prefix}：{summary_text}"))
             });
         }
         Err(err) => {
@@ -2796,7 +2819,7 @@ async fn handle_sleep_task_result(
                 SleepTrigger::Manual => "sleep 失败",
                 SleepTrigger::Idle => "后台 sleep 失败",
             };
-            sleep_status.last_result = Some(format!("{prefix}：{err}"));
+            sleep_status.last_result = Some(err.to_string());
             tx.send_modify(|state| state.runtime_status = Some(format!("{prefix}：{err}")));
         }
     }
@@ -2933,6 +2956,40 @@ fn render_sleep_status_output_for_dashboard(
         overview_lines.push(format!("Last result: {last_result}"));
     }
     sections.push(format!("Overview\n{}", overview_lines.join("\n")));
+
+    let totals_lines = vec![
+        format!("• Total runs: {}", sleep_status.total_runs),
+        format!(
+            "• Total consumed trace events: {}",
+            sleep_status.total_consumed_trace_events
+        ),
+        format!("• Total runtime demos: {}", sleep_status.total_runtime_demos),
+        format!(
+            "• Total runtime demo evaluations: {}",
+            sleep_status.total_runtime_demo_evaluations
+        ),
+        format!(
+            "• Total runtime demo passes: {}",
+            sleep_status.total_runtime_demo_passed
+        ),
+        format!(
+            "• Total runtime demo regressions: {}",
+            sleep_status.total_runtime_demo_regressions
+        ),
+        format!(
+            "• Total prompt candidates: {}",
+            sleep_status.total_runtime_prompt_candidates
+        ),
+        format!(
+            "• Total prompt accepts: {}",
+            sleep_status.total_runtime_prompt_accepts
+        ),
+        format!(
+            "• Total prompt rollbacks: {}",
+            sleep_status.total_runtime_prompt_rollbacks
+        ),
+    ];
+    sections.push(format!("Totals\n{}", totals_lines.join("\n")));
 
     let mut trigger_lines = vec![
         format!(

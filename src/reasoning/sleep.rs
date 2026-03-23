@@ -46,6 +46,7 @@ use super::{
 
 #[derive(Clone)]
 pub struct SleepSummary {
+    pub consumed_trace_events: usize,
     pub failure_patterns: Vec<SleepArtifactFailurePattern>,
     pub bootstrap_demos: usize,
     pub stress_cases: usize,
@@ -73,6 +74,7 @@ struct SleepActionOutput {
 
 pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let trace_batch = load_runtime_trace_records().await?;
+    let consumed_trace_events = trace_batch.records.len();
     let records = trace_batch.records;
     let mut failure_patterns = derive_failure_patterns(&records);
     let episode_outcomes = load_recent_learn_episode_outcomes().await?;
@@ -124,6 +126,7 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
         retain_sleep_reflections(context, &episode_synthesis.reflections).await?;
     compact_runtime_trace_file(trace_batch.next_offset).await?;
     Ok(SleepSummary {
+        consumed_trace_events,
         failure_patterns,
         bootstrap_demos: derived.bootstrap_demos.len(),
         stress_cases: derived.stress_cases.len(),
