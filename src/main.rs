@@ -244,7 +244,7 @@ async fn async_main(args: Vec<String>) -> Result<()> {
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
-    let hindsight = HindsightClient::from_config(&config.hindsight)?;
+    let hindsight = HindsightClient::connect(&config.hindsight).await?;
     let hindsight_retain = hindsight.spawn_retain_worker();
     let mut context = Context {
         llm: Box::new(client),
@@ -415,7 +415,7 @@ async fn run_mem_reset() -> Result<()> {
     let config = load_config()
         .await
         .map_err(|err| miette!("failed to load config for mem-reset: {err}"))?;
-    let hindsight = HindsightClient::from_config(&config.hindsight)?;
+    let hindsight = HindsightClient::connect(&config.hindsight).await?;
     hindsight.delete_bank().await?;
     let judge_model = config.judge.resolved_model(&config.main_model);
     let telegram = TelegramDevice::empty();
@@ -529,7 +529,8 @@ async fn build_eval_context_with_compiled(
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
-    let hindsight = HindsightClient::from_config(&config.hindsight)
+    let hindsight = HindsightClient::connect(&config.hindsight)
+        .await
         .unwrap_or_else(|err| panic!("failed to construct hindsight client: {err:?}"));
     let hindsight_retain = hindsight.spawn_retain_worker();
 
@@ -2036,6 +2037,70 @@ fn prompt_message_to_agent_message(message: PromptMessage) -> AgentMessage {
     }
 }
 
+const APPROX_BYTES_PER_TOKEN: usize = 4;
+const RUNTIME_HISTORY_MAX_TOKENS: usize = 4_000;
+const RUNTIME_HISTORY_MIN_MESSAGES: usize = 4;
+const HINDSIGHT_RECENT_MESSAGES_MAX_TOKENS: usize = 1_200;
+const HINDSIGHT_RECENT_MESSAGES_MIN_ENTRIES: usize = 2;
+
+fn approx_token_count(text: &str) -> usize {
+    let len = text.len();
+    len.saturating_add(APPROX_BYTES_PER_TOKEN.saturating_sub(1)) / APPROX_BYTES_PER_TOKEN
+}
+
+fn prompt_message_token_cost(message: &PromptMessage) -> usize {
+    let role = match message.role {
+        PromptRole::System => "system",
+        PromptRole::User => "user",
+        PromptRole::Assistant => "assistant",
+        PromptRole::Tool => "tool",
+    };
+    approx_token_count(role) + approx_token_count(&message.content) + 4
+}
+
+fn select_recent_prompt_messages_for_runtime(context: &Context) -> Vec<PromptMessage> {
+    select_recent_items_by_token_budget(
+        context.memory.prompt_messages(),
+        RUNTIME_HISTORY_MAX_TOKENS,
+        RUNTIME_HISTORY_MIN_MESSAGES,
+        prompt_message_token_cost,
+    )
+}
+
+fn select_recent_trail_lines_for_hindsight(context: &Context) -> Vec<String> {
+    select_recent_items_by_token_budget(
+        context.memory.trail(),
+        HINDSIGHT_RECENT_MESSAGES_MAX_TOKENS,
+        HINDSIGHT_RECENT_MESSAGES_MIN_ENTRIES,
+        |line| approx_token_count(line),
+    )
+}
+
+fn select_recent_items_by_token_budget<T, F>(
+    items: Vec<T>,
+    max_tokens: usize,
+    min_items: usize,
+    mut token_cost: F,
+) -> Vec<T>
+where
+    F: FnMut(&T) -> usize,
+{
+    let mut selected = Vec::new();
+    let mut total_tokens = 0usize;
+    for item in items.into_iter().rev() {
+        let cost = token_cost(&item);
+        let can_fit = total_tokens.saturating_add(cost) <= max_tokens;
+        if selected.len() < min_items || can_fit {
+            total_tokens = total_tokens.saturating_add(cost);
+            selected.push(item);
+        } else {
+            break;
+        }
+    }
+    selected.reverse();
+    selected
+}
+
 fn build_runtime_agent_messages(context: &Context, snapshot_text: &str) -> Vec<AgentMessage> {
     let mut messages = vec![
         AgentMessage::system(SYSTEM_PROMPT_KERNEL),
@@ -2063,9 +2128,7 @@ fn build_runtime_agent_messages(context: &Context, snapshot_text: &str) -> Vec<A
         )));
     }
     messages.extend(
-        context
-            .memory
-            .prompt_messages()
+        select_recent_prompt_messages_for_runtime(context)
             .into_iter()
             .map(prompt_message_to_agent_message),
     );
@@ -2450,16 +2513,7 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
         .unwrap_or("investigate")
         .to_string();
     let task_description = context.work_state.objective().map(str::to_string);
-    let recent_messages = context
-        .memory
-        .trail()
-        .into_iter()
-        .rev()
-        .take(6)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>();
+    let recent_messages = select_recent_trail_lines_for_hindsight(context);
     let terminal_summary = summarize_terminal_for_hindsight(context);
     let thread_focus = context.memory.current_thread_focus();
     let mut query_sections = vec![format!("阶段：{phase}")];
