@@ -120,6 +120,16 @@ pub struct ReportObligationArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct DeepRecallArgs {
+    /// 要交给长期记忆后端进行深度回忆/反思的自然语言问题
+    pub query: String,
+    /// 可选 budget；不填则使用配置默认值
+    pub budget: Option<String>,
+    /// 允许返回的最大 token 数
+    pub max_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct CommitToProjectArgs {
     pub obligation_id: String,
     pub title: String,

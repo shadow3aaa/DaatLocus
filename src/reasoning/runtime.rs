@@ -92,7 +92,6 @@ pub enum AgentTurnResponse {
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PromptMemoryContext {
     pub recalled_memories: Vec<String>,
-    pub reflected_strategy: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

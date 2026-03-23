@@ -74,11 +74,6 @@ fn build_long_term_memory_messages(context: &Context) -> Vec<PromptMessage> {
             context.prompt_memory.recalled_memories.join("\n")
         )));
     }
-    if let Some(reflection) = &context.prompt_memory.reflected_strategy {
-        messages.push(PromptMessage::system(format!(
-            "相关长期反思：\n{reflection}"
-        )));
-    }
     messages
 }
 

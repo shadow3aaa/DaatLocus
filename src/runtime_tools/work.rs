@@ -7,11 +7,12 @@ use crate::{
     apply_patch::{PatchOperationKind, parse_apply_patch, summarize_patch_ops},
     context::Context,
     core::{
-        ClearWorkObjectiveArgs, CommitToProjectArgs, FocusDeviceArgs, ObligationSatisfyArgs,
-        ProjectCompleteArgs, PutAwayDeviceArgs, ReportObligationArgs, ResolveTelegramChatArgs,
-        SetWorkObjectiveArgs,
+        ClearWorkObjectiveArgs, CommitToProjectArgs, DeepRecallArgs, FocusDeviceArgs,
+        ObligationSatisfyArgs, ProjectCompleteArgs, PutAwayDeviceArgs, ReportObligationArgs,
+        ResolveTelegramChatArgs, SetWorkObjectiveArgs,
     },
     device::DeviceId,
+    hindsight::HindsightReflectOptions,
     obligations::{ObligationSource, ObligationStatus},
     projects::ProjectOrigin,
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
@@ -80,6 +81,14 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             summarize_report_obligation_tool,
             render_report_obligation_call_ui,
             execute_report_obligation_tool,
+        )),
+        Box::new(StaticRuntimeTool::new::<DeepRecallArgs>(
+            "deep_recall",
+            "对长期记忆执行一次较慢但更深的 reflect 查询，用于高层经验归纳或线程恢复。",
+            None,
+            summarize_deep_recall_tool,
+            render_deep_recall_call_ui,
+            execute_deep_recall_tool,
         )),
         Box::new(StaticRuntimeTool::new::<CommitToProjectArgs>(
             "commit_to_project",
@@ -407,6 +416,70 @@ fn summarize_commit_to_project_tool(call: &AgentToolCall) -> Result<EpisodeActio
             args.obligation_id,
             summarize_inline_text(&args.title)
         ),
+    })
+}
+
+fn summarize_deep_recall_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: DeepRecallArgs = parse_tool_args(call)?;
+    Ok(EpisodeActionRecord {
+        kind: "deep_recall".to_string(),
+        summary: summarize_inline_text(&args.query),
+    })
+}
+
+fn render_deep_recall_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: DeepRecallArgs = parse_tool_args(call)?;
+    let mut lines = vec![summarize_inline_text(&args.query)];
+    if let Some(budget) = args.budget.as_deref()
+        && !budget.trim().is_empty()
+    {
+        lines.push(format!("budget={budget}"));
+    }
+    if let Some(max_tokens) = args.max_tokens {
+        lines.push(format!("max_tokens={max_tokens}"));
+    }
+    Ok(ToolCallUiEvent::work("deep_recall", lines))
+}
+
+fn execute_deep_recall_tool<'a>(
+    context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let args: DeepRecallArgs = parse_tool_args(call)?;
+        let response = context
+            .hindsight
+            .reflect(
+                &args.query,
+                HindsightReflectOptions {
+                    budget: args.budget.clone(),
+                    max_tokens: args.max_tokens,
+                    include_facts: false,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let title = format!("deep recall: {}", summarize_inline_text(&args.query));
+        let mut body_lines = Vec::new();
+        body_lines.extend(
+            response
+                .text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .take(12)
+                .map(ToString::to_string),
+        );
+        Ok(ToolExecutionResult::new(
+            title.clone(),
+            json!({
+                "query": args.query,
+                "budget": args.budget,
+                "max_tokens": args.max_tokens,
+                "text": response.text,
+            }),
+            ToolUiEvent::work(title, body_lines),
+        ))
     })
 }
 

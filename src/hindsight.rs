@@ -70,7 +70,6 @@ pub struct HindsightRecallOptions {
 #[derive(Clone, Debug, Default)]
 pub struct HindsightReflectOptions {
     pub budget: Option<String>,
-    pub context: Option<String>,
     pub max_tokens: Option<usize>,
     pub tags: Vec<String>,
     pub tags_match: Option<String>,
@@ -280,7 +279,6 @@ impl HindsightClient {
         let body = json!({
             "query": query,
             "budget": options.budget.unwrap_or_else(|| self.config.default_reflect_budget.clone()),
-            "context": options.context,
             "max_tokens": options.max_tokens,
             "tags": if options.tags.is_empty() { serde_json::Value::Null } else { json!(options.tags) },
             "tags_match": options.tags_match.unwrap_or_else(|| "any".to_string()),

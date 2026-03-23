@@ -41,7 +41,7 @@ use crate::{
     },
     device::{DeviceId, DeviceManager},
     emotion::Emotion,
-    hindsight::{HindsightClient, HindsightRecallOptions, HindsightReflectOptions},
+    hindsight::{HindsightClient, HindsightRecallOptions},
     memory::Memory,
     obligations::Obligations,
     projects::{ProjectStatus, Projects},
@@ -2122,11 +2122,6 @@ fn build_runtime_agent_messages(context: &Context, snapshot_text: &str) -> Vec<A
             context.prompt_memory.recalled_memories.join("\n")
         )));
     }
-    if let Some(reflection) = &context.prompt_memory.reflected_strategy {
-        messages.push(AgentMessage::system(format!(
-            "相关长期反思：\n{reflection}"
-        )));
-    }
     messages.extend(
         select_recent_prompt_messages_for_runtime(context)
             .into_iter()
@@ -2556,19 +2551,6 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
             },
         )
         .await;
-    let reflect = hindsight
-        .reflect(
-            &query,
-            HindsightReflectOptions {
-                budget: None,
-                context: Some(format!("当前阶段：{phase}")),
-                max_tokens: Some(500),
-                include_facts: false,
-                ..Default::default()
-            },
-        )
-        .await;
-
     let recalled_memories = recall
         .ok()
         .map(|response| {
@@ -2580,11 +2562,9 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let reflected_strategy = reflect.ok().map(|response| response.text);
 
     PromptMemoryContext {
         recalled_memories,
-        reflected_strategy,
     }
 }
 
