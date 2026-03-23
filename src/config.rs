@@ -19,7 +19,6 @@ pub struct Config {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HindsightConfig {
-    pub enabled: bool,
     pub base_url: String,
     pub api_key: String,
     pub namespace: String,
@@ -27,13 +26,11 @@ pub struct HindsightConfig {
     pub request_timeout_secs: u64,
     pub default_recall_budget: String,
     pub default_reflect_budget: String,
-    pub retain_async: bool,
 }
 
 impl Default for HindsightConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             base_url: "http://localhost:8888".to_string(),
             api_key: String::new(),
             namespace: "default".to_string(),
@@ -41,14 +38,7 @@ impl Default for HindsightConfig {
             request_timeout_secs: 30,
             default_recall_budget: "mid".to_string(),
             default_reflect_budget: "low".to_string(),
-            retain_async: true,
         }
-    }
-}
-
-impl HindsightConfig {
-    pub fn is_enabled(&self) -> bool {
-        self.enabled && !self.base_url.trim().is_empty() && !self.bank_id.trim().is_empty()
     }
 }
 

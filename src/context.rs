@@ -22,8 +22,8 @@ pub struct Context {
     pub llm: Box<dyn LLM + Send + Sync>,
     pub judge_llm: Box<dyn LLM + Send + Sync>,
     pub config: Config,
-    pub hindsight: Option<HindsightClient>,
-    pub hindsight_retain: Option<HindsightRetainHandle>,
+    pub hindsight: HindsightClient,
+    pub hindsight_retain: HindsightRetainHandle,
     pub memory: Memory,
     pub prompt_memory: PromptMemoryContext,
     pub obligations: Obligations,
@@ -40,10 +40,8 @@ pub struct Context {
 
 impl Context {
     pub async fn shutdown(self) {
-        if let Some(handle) = &self.hindsight_retain {
-            let _ = handle.flush().await;
-            handle.shutdown().await;
-        }
+        let _ = self.hindsight_retain.flush().await;
+        self.hindsight_retain.shutdown().await;
         self.memory.shutdown().await;
         self.obligations.shutdown().await;
         self.projects.shutdown().await;

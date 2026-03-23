@@ -78,10 +78,6 @@ pub struct HindsightRetainResponse {
     pub success: bool,
     #[serde(default)]
     pub item_count: usize,
-    #[serde(default, rename = "async")]
-    pub is_async: bool,
-    #[serde(default)]
-    pub operation_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -114,14 +110,19 @@ pub struct HindsightReflectResponse {
 }
 
 impl HindsightClient {
-    pub fn from_config(config: &HindsightConfig) -> Option<Self> {
-        if !config.is_enabled() {
-            return None;
+    pub fn from_config(config: &HindsightConfig) -> Result<Self> {
+        if config.base_url.trim().is_empty() {
+            return Err(miette!("hindsight base_url must not be empty"));
         }
-
+        if config.bank_id.trim().is_empty() {
+            return Err(miette!("hindsight bank_id must not be empty"));
+        }
         let timeout = Duration::from_secs(config.request_timeout_secs.max(1));
-        let http = reqwest::Client::builder().timeout(timeout).build().ok()?;
-        Some(Self {
+        let http = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(|err| miette!("failed to build hindsight http client: {err}"))?;
+        Ok(Self {
             http,
             config: config.clone(),
         })
@@ -200,7 +201,7 @@ impl HindsightClient {
             .collect::<Vec<_>>();
         let body = json!({
             "items": items,
-            "async": self.config.retain_async,
+            "async": false,
             "document_tags": if document_tags.is_empty() { serde_json::Value::Null } else { json!(document_tags) },
         });
         let response = self

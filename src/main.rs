@@ -226,8 +226,8 @@ async fn async_main(args: Vec<String>) -> Result<()> {
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
-    let hindsight = HindsightClient::from_config(&config.hindsight);
-    let hindsight_retain = hindsight.as_ref().map(HindsightClient::spawn_retain_worker);
+    let hindsight = HindsightClient::from_config(&config.hindsight)?;
+    let hindsight_retain = hindsight.spawn_retain_worker();
     let mut context = Context {
         llm: Box::new(client),
         judge_llm: Box::new(judge_client),
@@ -385,13 +385,8 @@ async fn run_mem_reset() -> Result<()> {
     let config = load_config()
         .await
         .map_err(|err| miette!("failed to load config for mem-reset: {err}"))?;
-    let hindsight = HindsightClient::from_config(&config.hindsight);
-    let hindsight_cleared = if let Some(client) = &hindsight {
-        client.delete_bank().await?;
-        true
-    } else {
-        false
-    };
+    let hindsight = HindsightClient::from_config(&config.hindsight)?;
+    hindsight.delete_bank().await?;
     let judge_model = config.judge.resolved_model(&config.main_model);
     let telegram = TelegramDevice::empty();
     let telegram_handle = telegram.handle();
@@ -402,8 +397,8 @@ async fn run_mem_reset() -> Result<()> {
         llm: Box::new(OpenAIClient::new(&config)),
         judge_llm: Box::new(OpenAIClient::from_model_config(&judge_model)),
         config,
-        hindsight: None,
-        hindsight_retain: None,
+        hindsight: hindsight.clone(),
+        hindsight_retain: hindsight.spawn_retain_worker(),
         memory: Memory::empty().await,
         prompt_memory: PromptMemoryContext::default(),
         obligations: Obligations::default(),
@@ -434,11 +429,7 @@ async fn run_mem_reset() -> Result<()> {
         "[mem-reset] cleared via empty context shutdown: l1_memory, projects, obligations, work_state, emotion"
     );
     println!("[mem-reset] cleared: reasoning_traces.jsonl");
-    if hindsight_cleared {
-        println!("[mem-reset] cleared: hindsight bank");
-    } else {
-        println!("[mem-reset] skipped: hindsight bank (disabled in config)");
-    }
+    println!("[mem-reset] cleared: hindsight bank");
     println!("[mem-reset] preserved: config.toml, reasoning_compiled/, telegram_acl.json");
 
     Ok(())
@@ -508,8 +499,9 @@ async fn build_eval_context_with_compiled(
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
-    let hindsight = HindsightClient::from_config(&config.hindsight);
-    let hindsight_retain = hindsight.as_ref().map(HindsightClient::spawn_retain_worker);
+    let hindsight = HindsightClient::from_config(&config.hindsight)
+        .unwrap_or_else(|err| panic!("failed to construct hindsight client: {err:?}"));
+    let hindsight_retain = hindsight.spawn_retain_worker();
 
     Context {
         llm: Box::new(client),
@@ -2061,21 +2053,17 @@ async fn record_runtime_history_messages(
         .memory
         .record_agent_turn(current_doing, messages, retain_text)
         .await;
-    if let Some(handle) = &context.hindsight_retain {
-        for job in retain_plan.jobs {
-            if let Err(err) = handle.enqueue(job) {
-                eprintln!("{err:?}");
-                context.memory.mark_pending_retained();
-                return;
-            }
-        }
-        if retain_plan.must_flush_before_continue {
-            if let Err(err) = handle.flush().await {
-                eprintln!("{err:?}");
-            }
+    for job in retain_plan.jobs {
+        if let Err(err) = context.hindsight_retain.enqueue(job) {
+            eprintln!("{err:?}");
             context.memory.mark_pending_retained();
+            return;
         }
-    } else {
+    }
+    if retain_plan.must_flush_before_continue {
+        if let Err(err) = context.hindsight_retain.flush().await {
+            eprintln!("{err:?}");
+        }
         context.memory.mark_pending_retained();
     }
 }
@@ -2391,9 +2379,7 @@ async fn run_agent_turn_with_retry(
 }
 
 async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryContext {
-    let Some(hindsight) = context.hindsight.clone() else {
-        return PromptMemoryContext::default();
-    };
+    let hindsight = context.hindsight.clone();
 
     let phase = context
         .work_state

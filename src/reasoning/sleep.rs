@@ -1540,9 +1540,6 @@ async fn retain_sleep_reflections(
     context: &Context,
     reflections: &[SleepReflectionRecord],
 ) -> Result<usize> {
-    let Some(retain_handle) = context.hindsight_retain.as_ref() else {
-        return Ok(0);
-    };
     if reflections.is_empty() {
         return Ok(0);
     }
@@ -1558,7 +1555,7 @@ async fn retain_sleep_reflections(
             tags: Some(reflection.tags.clone()),
         })
         .collect::<Vec<_>>();
-    retain_handle.enqueue(crate::hindsight::HindsightRetainJob {
+    context.hindsight_retain.enqueue(crate::hindsight::HindsightRetainJob {
         items,
         document_id: None,
         document_tags: Vec::new(),
@@ -1567,10 +1564,8 @@ async fn retain_sleep_reflections(
 }
 
 async fn recall_related_memories(context: &Context, query: &str, top_k: usize) -> Vec<String> {
-    let Some(hindsight) = context.hindsight.as_ref() else {
-        return Vec::new();
-    };
-    let response = hindsight
+    let response = context
+        .hindsight
         .recall(
             query,
             HindsightRecallOptions {
