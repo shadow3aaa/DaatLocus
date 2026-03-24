@@ -3151,7 +3151,9 @@ fn sync_dashboard_state(
         state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);
         state.inspect_telegram_output =
             render_inspect_output_for_dashboard(context, &device_renders, DeviceId::Telegram);
-        state.activity_cells = render_activity_for_dashboard(context);
+        if state.activity_cells.is_empty() {
+            state.activity_cells = render_activity_for_dashboard(context);
+        }
         state.last_cycle_elapsed_ms = last_cycle_elapsed_ms;
     });
 }
