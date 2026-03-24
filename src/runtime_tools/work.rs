@@ -117,15 +117,20 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             render_commit_to_project_call_ui,
             execute_commit_to_project_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<ProjectCompleteArgs>(
+        Box::new(StaticRuntimeTool::new_with_availability::<ProjectCompleteArgs>(
             "project_complete",
             "将项目标记为完成，并记录结果摘要。",
             None,
+            project_complete_is_available,
             summarize_project_complete_tool,
             render_project_complete_call_ui,
             execute_project_complete_tool,
         )),
     ]
+}
+
+fn project_complete_is_available(context: &Context) -> bool {
+    context.work_state.project_id.is_some()
 }
 
 fn resolution_kind(resolution: &TelegramResolution) -> &'static str {
@@ -627,11 +632,11 @@ pub(super) fn render_apply_patch_call_ui(call: &AgentToolCall) -> Result<ToolCal
 }
 
 pub(super) fn execute_apply_patch_runtime_tool<'a>(
-    _context: &'a mut Context,
+    context: &'a mut Context,
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        super::super::execute_apply_patch_tool(&extract_apply_patch_text(call)?).await
+        super::super::execute_apply_patch_tool(context, &extract_apply_patch_text(call)?).await
     })
 }
 
