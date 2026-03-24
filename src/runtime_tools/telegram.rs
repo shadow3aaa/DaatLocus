@@ -5,11 +5,10 @@ use crate::{
     context::Context,
     core::{
         TelegramListChatsArgs, TelegramReadChatArgs, TelegramSelectChatArgs,
-        TelegramSendMessageArgs,
     },
     device::DeviceToolScope,
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
-    tool_ui::{TelegramUiAction, ToolCallUiEvent, ToolUiEvent, compact_body_lines},
+    tool_ui::{TelegramUiAction, ToolCallUiEvent, ToolUiEvent},
 };
 
 use super::{
@@ -42,14 +41,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             summarize_telegram_select_chat_tool,
             render_telegram_select_chat_call_ui,
             execute_telegram_select_chat_tool,
-        )),
-        Box::new(StaticRuntimeTool::new::<TelegramSendMessageArgs>(
-            "telegram_send_message",
-            "向当前打开的 Telegram 会话发送消息。",
-            Some(DeviceToolScope::Telegram),
-            summarize_telegram_send_message_tool,
-            render_telegram_send_message_call_ui,
-            execute_telegram_send_message_tool,
         )),
     ]
 }
@@ -195,48 +186,6 @@ fn execute_telegram_select_chat_tool<'a>(
                 format!("selected telegram chat {}", args.chat_id),
                 vec![format!("chat_id={}", args.chat_id)],
                 Vec::new(),
-            ),
-        ))
-    })
-}
-
-fn summarize_telegram_send_message_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: TelegramSendMessageArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "telegram_send_message".to_string(),
-        summary: summarize_inline_text(&args.text),
-    })
-}
-
-fn render_telegram_send_message_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: TelegramSendMessageArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::telegram(
-        TelegramUiAction::SendMessage,
-        "telegram_send_message",
-        vec!["send message".to_string()],
-        vec![summarize_inline_text(&args.text)],
-    ))
-}
-
-fn execute_telegram_send_message_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: TelegramSendMessageArgs = parse_tool_args(call)?;
-        let text_preview = summarize_inline_text(&args.text);
-        context
-            .devices
-            .telegram_send_message(args.text.clone())
-            .await?;
-        Ok(ToolExecutionResult::new(
-            format!("sent telegram message: {}", text_preview),
-            json!({ "text": args.text }),
-            ToolUiEvent::telegram(
-                TelegramUiAction::SendMessage,
-                format!("sent telegram message: {}", text_preview),
-                vec!["outgoing message".to_string()],
-                compact_body_lines(&args.text, 3),
             ),
         ))
     })

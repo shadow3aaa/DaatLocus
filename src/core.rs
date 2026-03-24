@@ -93,11 +93,6 @@ pub struct TelegramReadChatArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct TelegramSendMessageArgs {
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ResolveTelegramChatArgs {
     pub chat_id: String,
     pub resolution: TelegramResolution,
