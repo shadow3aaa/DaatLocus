@@ -248,6 +248,8 @@ async fn async_main(args: Vec<String>) -> Result<()> {
     let judge_client = OpenAIClient::from_model_config(&judge_model);
     let hindsight = HindsightClient::connect(&config.hindsight).await?;
     let hindsight_retain = hindsight.spawn_retain_worker();
+    let execution_cwd =
+        env::current_dir().map_err(|err| miette!("failed to determine execution cwd: {err}"))?;
     let mut context = Context {
         llm: Box::new(client),
         judge_llm: Box::new(judge_client),
@@ -263,6 +265,7 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         devices,
         telegram: telegram_handle,
         compiled_prompts,
+        execution_cwd,
         dashboard_tx: None,
         idle_since: None,
         last_idle_sleep_at: None,
@@ -425,6 +428,8 @@ async fn run_mem_reset() -> Result<()> {
     let devices = DeviceManager::new(None, vec![Box::new(telegram)])
         .await
         .map_err(|err| miette!("failed to construct default devices for mem-reset: {err}"))?;
+    let execution_cwd =
+        env::current_dir().map_err(|err| miette!("failed to determine execution cwd: {err}"))?;
     let context = Context {
         llm: Box::new(OpenAIClient::new(&config)),
         judge_llm: Box::new(OpenAIClient::from_model_config(&judge_model)),
@@ -440,6 +445,7 @@ async fn run_mem_reset() -> Result<()> {
         devices,
         telegram: telegram_handle,
         compiled_prompts: CompiledPromptStore::empty(),
+        execution_cwd,
         dashboard_tx: None,
         idle_since: None,
         last_idle_sleep_at: None,
@@ -514,6 +520,8 @@ async fn build_eval_context_with_compiled(
     config: crate::config::Config,
     compiled_prompts: CompiledPromptStore,
 ) -> Context {
+    let execution_cwd = env::current_dir()
+        .unwrap_or_else(|err| panic!("failed to determine execution cwd: {err}"));
     let memory = Memory::new().await;
     let obligations = Obligations::new().await;
     let projects = Projects::new().await;
@@ -551,6 +559,7 @@ async fn build_eval_context_with_compiled(
         devices,
         telegram: telegram_handle,
         compiled_prompts,
+        execution_cwd,
         dashboard_tx: None,
         idle_since: None,
         last_idle_sleep_at: None,
@@ -2200,10 +2209,7 @@ async fn run_shell_line_capture(command: &str, cwd: &Path) -> Result<std::proces
 }
 
 async fn enter_episode_workspace(context: &mut Context, workspace_dir: &Path) -> Result<()> {
-    context
-        .devices
-        .set_terminal_default_workdir(Some(workspace_dir.display().to_string()))
-        .map_err(|err| miette!("failed to configure episode workspace for terminal: {err}"))?;
+    context.execution_cwd = workspace_dir.to_path_buf();
     Ok(())
 }
 
@@ -3080,10 +3086,11 @@ fn runtime_trigger_reasons(context: &Context) -> Vec<String> {
     reasons
 }
 
-async fn execute_apply_patch_tool(patch_text: &str) -> miette::Result<ToolExecutionResult> {
-    let cwd =
-        env::current_dir().map_err(|err| miette!("failed to read current directory: {err}"))?;
-    let summary = apply_patch_in_root(&cwd, patch_text).await?;
+async fn execute_apply_patch_tool(
+    context: &Context,
+    patch_text: &str,
+) -> miette::Result<ToolExecutionResult> {
+    let summary = apply_patch_in_root(&context.execution_cwd, patch_text).await?;
     Ok(ToolExecutionResult::new(
         format!("patched {} file(s)", summary.changed_files),
         json!({

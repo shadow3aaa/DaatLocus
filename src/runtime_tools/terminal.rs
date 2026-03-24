@@ -105,6 +105,10 @@ fn execute_terminal_exec_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: TerminalExecArgs = parse_tool_args(call)?;
+        let effective_workdir = args
+            .workdir
+            .clone()
+            .or_else(|| Some(context.execution_cwd.display().to_string()));
         let dashboard_tx = context.dashboard_tx.clone();
         let result = context
             .devices
@@ -112,7 +116,7 @@ fn execute_terminal_exec_tool<'a>(
                 args.command.clone(),
                 args.session_id.clone(),
                 args.create_new_session,
-                args.workdir.clone(),
+                effective_workdir,
                 args.yield_time_ms,
                 args.max_chars,
                 move |session, delta| {

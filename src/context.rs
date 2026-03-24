@@ -1,6 +1,6 @@
 //! 本模块包含context，它是spinova自旋循环中承载状态的结构体
 
-use std::time::Instant;
+use std::{path::PathBuf, time::Instant};
 
 use crate::{
     config::Config,
@@ -33,6 +33,7 @@ pub struct Context {
     pub devices: DeviceManager,
     pub telegram: TelegramDeviceHandle,
     pub compiled_prompts: CompiledPromptStore,
+    pub execution_cwd: PathBuf,
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
