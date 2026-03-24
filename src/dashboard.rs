@@ -1141,11 +1141,11 @@ fn render_activity_feed(
     cells: &[ActivityCell],
     live_cells: &[LiveActivityCell],
 ) {
-    let text = if cells.is_empty() && live_cells.is_empty() {
-        Text::from(Line::from(vec![Span::styled(
+    let lines = if cells.is_empty() && live_cells.is_empty() {
+        vec![Line::from(vec![Span::styled(
             "No activity yet",
             Style::default().fg(Color::DarkGray),
-        )]))
+        )])]
     } else {
         let mut visible_cells = cells.to_vec();
         visible_cells.extend(live_cells.iter().map(|cell| cell.cell.clone()));
@@ -1156,15 +1156,29 @@ fn render_activity_feed(
                 lines.push(Line::from(""));
             }
         }
+        lines
+    };
+    let text = if lines.is_empty() {
+        Text::from(Line::from(vec![Span::styled(
+            "No activity yet",
+            Style::default().fg(Color::DarkGray),
+        )]))
+    } else {
         Text::from(lines)
     };
-    let widget = Paragraph::new(text).wrap(Wrap { trim: false });
     let inner = Rect {
         x: area.x.saturating_add(1),
         y: area.y,
         width: area.width.saturating_sub(2),
         height: area.height,
     };
+    let max_scroll = text
+        .lines
+        .len()
+        .saturating_sub(inner.height.saturating_sub(1) as usize) as u16;
+    let widget = Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .scroll((max_scroll, 0));
     f.render_widget(widget, inner);
 }
 
