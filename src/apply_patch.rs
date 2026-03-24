@@ -139,6 +139,39 @@ pub(crate) fn parse_apply_patch(patch_text: &str) -> Result<Vec<PatchOp>> {
     Ok(ops)
 }
 
+pub(crate) fn summarize_apply_patch_error(message: &str) -> String {
+    if message.contains("must start with `*** Begin Patch`") {
+        return "patch 必须以 `*** Begin Patch` 开始".to_string();
+    }
+    if message.contains("must end with `*** End Patch`") {
+        return "patch 必须以 `*** End Patch` 结束".to_string();
+    }
+    if message.contains("unknown patch directive: @@") {
+        return "`@@` 只能出现在 `*** Update File:` 之后；当前 patch 缺少文件操作头".to_string();
+    }
+    if message.contains("unknown patch directive: ---")
+        || message.contains("unknown patch directive: +++")
+    {
+        return "不要使用 unified diff 的 `---` / `+++` 文件头；请改用 `*** Update File:`".to_string();
+    }
+    if message.contains("add file lines must start with `+`") {
+        return "新增文件时，每一行都必须以 `+` 开头".to_string();
+    }
+    if message.contains("contains no hunks") {
+        return "update patch 缺少 hunk；请在 `*** Update File:` 后提供 `@@` 和变更行".to_string();
+    }
+    if message.contains("update file hunk lines must start with space/+/- or @@") {
+        return "update hunk 中每一行都必须以空格、`+`、`-` 或 `@@` 开头".to_string();
+    }
+    if message.contains("patch hunk old text not found uniquely in target file") {
+        return "patch 上下文不足，旧文本无法在目标文件中唯一定位；请提供更多上下文".to_string();
+    }
+    if message.contains("patch hunk old text matched") {
+        return "patch 上下文过少，旧文本匹配了多个位置；请提供更多上下文".to_string();
+    }
+    message.to_string()
+}
+
 pub(crate) fn summarize_patch_ops(ops: &[PatchOp]) -> ApplyPatchSummary {
     let mut summary = ApplyPatchSummary::default();
     for op in ops {

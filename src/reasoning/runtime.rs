@@ -38,7 +38,18 @@ pub struct PromptRequest {
 pub struct AgentToolSpec {
     pub name: String,
     pub description: String,
-    pub input_schema: Value,
+    pub input_spec: AgentToolInputSpec,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentToolInputSpec {
+    JsonSchema { schema: Value },
+    FreeformGrammar {
+        syntax: String,
+        definition: String,
+        fallback_schema: Value,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -256,17 +267,31 @@ pub async fn resolve_program_tuning<P: Program>(
 
     let tuning = program.default_tuning();
     if let Err(err) = seed_compiled_program_from_tuning(program, &tuning).await {
-        eprintln!(
-            "[prompt-compile] failed to seed compiled tuning for {}: {err:?}",
-            program.tuning_key()
+        log_prompt_compile_event(
+            context,
+            format!(
+                "[prompt-compile] failed to seed compiled tuning for {}: {err:?}",
+                program.tuning_key()
+            ),
         );
     } else {
-        eprintln!(
-            "[prompt-compile] seeded compiled tuning for {}",
-            program.tuning_key()
+        log_prompt_compile_event(
+            context,
+            format!(
+                "[prompt-compile] seeded compiled tuning for {}",
+                program.tuning_key()
+            ),
         );
     }
     tuning
+}
+
+fn log_prompt_compile_event(context: &Context, message: String) {
+    if let Some(tx) = &context.dashboard_tx {
+        tx.send_modify(|state| state.runtime_status = Some(message.clone()));
+    } else {
+        eprintln!("{message}");
+    }
 }
 
 pub async fn execute_program_with_ir<P: Program, R: Renderer>(

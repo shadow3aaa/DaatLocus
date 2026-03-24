@@ -12,7 +12,8 @@ use crate::{
     context::Context,
     core::LLM,
     reasoning::runtime::{
-        AgentMessage, AgentToolCall, AgentTurnRequest, AgentTurnResponse, PromptRequest, PromptRole,
+        AgentMessage, AgentToolCall, AgentToolInputSpec, AgentTurnRequest, AgentTurnResponse,
+        PromptRequest, PromptRole,
     },
 };
 pub struct OpenAIClient {
@@ -181,7 +182,11 @@ impl OpenAIClient {
         })
     }
 
-    fn build_agent_turn_payload(&self, request: AgentTurnRequest, stream: bool) -> serde_json::Value {
+    fn build_agent_turn_payload(
+        &self,
+        request: AgentTurnRequest,
+        stream: bool,
+    ) -> serde_json::Value {
         let messages = request
             .messages
             .into_iter()
@@ -191,13 +196,28 @@ impl OpenAIClient {
             .tools
             .into_iter()
             .map(|tool| {
+                let (description, parameters, strict) = match tool.input_spec {
+                    AgentToolInputSpec::JsonSchema { schema } => (tool.description, schema, true),
+                    AgentToolInputSpec::FreeformGrammar {
+                        syntax,
+                        definition,
+                        fallback_schema,
+                    } => (
+                        format!(
+                            "{}\n\n这是一个 FREEFORM grammar tool。当前 provider 回退为单字符串输入：请把完整工具输入放进 `input` 字段。\nsyntax={syntax}\ndefinition=\n{definition}",
+                            tool.description
+                        ),
+                        fallback_schema,
+                        false,
+                    ),
+                };
                 json!({
                     "type": "function",
                     "function": {
-                        "strict": true,
+                        "strict": strict,
                         "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.input_schema,
+                        "description": description,
+                        "parameters": parameters,
                     }
                 })
             })
@@ -211,7 +231,11 @@ impl OpenAIClient {
         })
     }
 
-    async fn call_agent_turn(&self, _context: &Context, request: AgentTurnRequest) -> Result<AgentTurnResponse> {
+    async fn call_agent_turn(
+        &self,
+        _context: &Context,
+        request: AgentTurnRequest,
+    ) -> Result<AgentTurnResponse> {
         let url = self.url();
         let request_context = summarize_agent_turn_request(&request);
         let payload = self.build_agent_turn_payload(request, true);
@@ -280,12 +304,13 @@ impl OpenAIClient {
                 if data == "[DONE]" {
                     break;
                 }
-                let response_json: serde_json::Value = serde_json::from_str(&data).map_err(|err| {
-                    miette!(
-                        "llm streaming chunk is not valid JSON: {err}; data={}",
-                        truncate_for_error(&data)
-                    )
-                })?;
+                let response_json: serde_json::Value =
+                    serde_json::from_str(&data).map_err(|err| {
+                        miette!(
+                            "llm streaming chunk is not valid JSON: {err}; data={}",
+                            truncate_for_error(&data)
+                        )
+                    })?;
                 let choice = &response_json["choices"][0];
                 let delta = &choice["delta"];
                 if let Some(delta_content) = delta["content"].as_str() {
@@ -293,7 +318,8 @@ impl OpenAIClient {
                 }
                 if let Some(delta_tool_calls) = delta["tool_calls"].as_array() {
                     for tool_call in delta_tool_calls {
-                        let Some(index) = tool_call["index"].as_u64().map(|index| index as usize) else {
+                        let Some(index) = tool_call["index"].as_u64().map(|index| index as usize)
+                        else {
                             continue;
                         };
                         while tool_calls.len() <= index {

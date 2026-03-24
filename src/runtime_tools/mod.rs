@@ -7,11 +7,10 @@ use serde_json::Value;
 
 use crate::{
     context::Context,
-    core::ApplyPatchArgs,
     device::DeviceToolScope,
     reasoning::{
         episode::EpisodeActionRecord,
-        runtime::{AgentToolCall, AgentToolSpec},
+        runtime::{AgentToolCall, AgentToolInputSpec, AgentToolSpec},
     },
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
@@ -49,6 +48,20 @@ pub(super) fn summarize_inline_text(text: &str) -> String {
     } else {
         summary
     }
+}
+
+fn freeform_string_fallback_schema(description: &'static str) -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "input": {
+                "type": "string",
+                "description": description,
+            }
+        },
+        "required": ["input"],
+        "additionalProperties": false,
+    })
 }
 
 fn normalize_tool_input_schema(mut schema: serde_json::Value) -> serde_json::Value {
@@ -106,7 +119,7 @@ impl ToolExecutionResult {
 pub trait RuntimeTool: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
-    fn input_schema(&self) -> Value;
+    fn input_spec(&self) -> AgentToolInputSpec;
 
     fn is_available(&self, _: &Context) -> bool {
         true
@@ -116,7 +129,7 @@ pub trait RuntimeTool: Send + Sync {
         AgentToolSpec {
             name: self.name().to_string(),
             description: self.description().to_string(),
-            input_schema: self.input_schema(),
+            input_spec: self.input_spec(),
         }
     }
 
@@ -132,7 +145,7 @@ pub trait RuntimeTool: Send + Sync {
 struct StaticRuntimeTool {
     name: &'static str,
     description: &'static str,
-    input_schema: Value,
+    input_spec: AgentToolInputSpec,
     scope: Option<DeviceToolScope>,
     summarize: ToolSummarizer,
     call_ui: ToolCallUiBuilder,
@@ -151,9 +164,9 @@ impl StaticRuntimeTool {
         Self {
             name,
             description,
-            input_schema: normalize_tool_input_schema(
-                serde_json::to_value(schema_for!(T)).unwrap(),
-            ),
+            input_spec: AgentToolInputSpec::JsonSchema {
+                schema: normalize_tool_input_schema(serde_json::to_value(schema_for!(T)).unwrap()),
+            },
             scope,
             summarize,
             call_ui,
@@ -172,8 +185,8 @@ impl RuntimeTool for StaticRuntimeTool {
         self.description
     }
 
-    fn input_schema(&self) -> Value {
-        self.input_schema.clone()
+    fn input_spec(&self) -> AgentToolInputSpec {
+        self.input_spec.clone()
     }
 
     fn is_available(&self, context: &Context) -> bool {
@@ -200,17 +213,102 @@ impl RuntimeTool for StaticRuntimeTool {
     }
 }
 
+struct ApplyPatchRuntimeTool;
+
+#[async_trait]
+impl RuntimeTool for ApplyPatchRuntimeTool {
+    fn name(&self) -> &'static str {
+        "apply_patch"
+    }
+
+    fn description(&self) -> &'static str {
+        r#"使用 `apply_patch` 按严格 patch grammar 编辑文件。
+
+补丁必须满足：
+- 以 `*** Begin Patch` 开始
+- 以 `*** End Patch` 结束
+- 只能包含 `*** Add File:` / `*** Delete File:` / `*** Update File:` 三种文件操作头
+- `@@` 只能出现在 `*** Update File:` 之后，作为 hunk 头
+
+完整 grammar：
+Patch := Begin { FileOp } End
+Begin := "*** Begin Patch" NEWLINE
+End := "*** End Patch" NEWLINE
+FileOp := AddFile | DeleteFile | UpdateFile
+AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
+DeleteFile := "*** Delete File: " path NEWLINE
+UpdateFile := "*** Update File: " path NEWLINE { Hunk }
+Hunk := "@@" [ header ] NEWLINE { HunkLine }
+HunkLine := (" " | "-" | "+") text NEWLINE
+
+示例：
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+@@
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
+*** End Patch
+
+注意：
+- 新文件的每一行都必须以 `+` 开头
+- patch 必须使用相对路径，不能使用绝对路径
+- 不要输出 unified diff 的 `---` / `+++` 文件头
+- 不要省略 `*** Update File:` 后就直接写 `@@`"#
+    }
+
+    fn input_spec(&self) -> AgentToolInputSpec {
+        AgentToolInputSpec::FreeformGrammar {
+            syntax: "lark".to_string(),
+            definition: r#"start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change?
+filename: /(.+)/
+add_line: "+" /(.*)/ LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+%import common.LF"#
+                .to_string(),
+            fallback_schema: freeform_string_fallback_schema(
+                "The entire contents of the apply_patch command",
+            ),
+        }
+    }
+
+    fn is_available(&self, context: &Context) -> bool {
+        context
+            .devices
+            .focused_tool_scopes()
+            .contains(&DeviceToolScope::Terminal)
+    }
+
+    fn summarize_action(&self, call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
+        work::summarize_apply_patch_tool(call)
+    }
+
+    fn call_ui_event(&self, call: &AgentToolCall) -> miette::Result<ToolCallUiEvent> {
+        work::render_apply_patch_call_ui(call)
+    }
+
+    async fn execute(
+        &self,
+        context: &mut Context,
+        call: &AgentToolCall,
+    ) -> miette::Result<ToolExecutionResult> {
+        work::execute_apply_patch_runtime_tool(context, call).await
+    }
+}
+
 pub fn build_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
-    let mut tools: Vec<Box<dyn RuntimeTool>> = vec![Box::new(StaticRuntimeTool::new::<
-        ApplyPatchArgs,
-    >(
-        "apply_patch",
-        "使用 apply_patch 工具按 patch grammar 精确编辑文件。patch 必须以 `*** Begin Patch` 开始，以 `*** End Patch` 结束。",
-        Some(DeviceToolScope::Terminal),
-        work::summarize_apply_patch_tool,
-        work::render_apply_patch_call_ui,
-        work::execute_apply_patch_runtime_tool,
-    ))];
+    let mut tools: Vec<Box<dyn RuntimeTool>> = vec![Box::new(ApplyPatchRuntimeTool)];
     tools.extend(work::register_tools());
     tools.extend(terminal::register_tools());
     tools.extend(telegram::register_tools());
