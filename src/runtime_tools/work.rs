@@ -24,6 +24,25 @@ use super::{
     summarize_inline_text,
 };
 
+fn extract_apply_patch_text(call: &AgentToolCall) -> Result<String> {
+    if let Some(input) = call.arguments.as_object().and_then(|value| value.get("input"))
+        && let Some(text) = input.as_str()
+    {
+        return Ok(text.to_string());
+    }
+    if let Some(patch) = call.arguments.as_object().and_then(|value| value.get("patch"))
+        && let Some(text) = patch.as_str()
+    {
+        return Ok(text.to_string());
+    }
+    if let Some(text) = call.arguments.as_str() {
+        return Ok(text.to_string());
+    }
+    Err(miette::miette!(
+        "invalid arguments for tool `apply_patch`: expected a patch string in `input`"
+    ))
+}
+
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![
         Box::new(StaticRuntimeTool::new::<SetWorkObjectiveArgs>(
@@ -574,16 +593,14 @@ fn execute_project_complete_tool<'a>(
 }
 
 pub(super) fn summarize_apply_patch_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: crate::core::ApplyPatchArgs = parse_tool_args(call)?;
     Ok(EpisodeActionRecord {
         kind: "apply_patch".to_string(),
-        summary: summarize_inline_text(&args.patch),
+        summary: summarize_inline_text(&extract_apply_patch_text(call)?),
     })
 }
 
 pub(super) fn render_apply_patch_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: crate::core::ApplyPatchArgs = parse_tool_args(call)?;
-    let ops = parse_apply_patch(&args.patch)?;
+    let ops = parse_apply_patch(&extract_apply_patch_text(call)?)?;
     let summary = summarize_patch_ops(&ops);
     Ok(ToolCallUiEvent::patch(
         "apply_patch",
@@ -614,8 +631,7 @@ pub(super) fn execute_apply_patch_runtime_tool<'a>(
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        let args: crate::core::ApplyPatchArgs = parse_tool_args(call)?;
-        super::super::execute_apply_patch_tool(&args.patch).await
+        super::super::execute_apply_patch_tool(&extract_apply_patch_text(call)?).await
     })
 }
 

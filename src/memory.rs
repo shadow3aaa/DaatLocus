@@ -13,7 +13,9 @@ use crate::{
     get_spinova_home,
     hindsight::{HindsightRetainItem, HindsightRetainJob},
     reasoning::runtime::{PromptMessage, PromptRole},
-    tool_ui::{PatchUiData, TelegramUiData, TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent},
+    tool_ui::{
+        PatchUiData, TelegramUiData, TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent,
+    },
 };
 
 pub struct Memory {
@@ -270,7 +272,10 @@ fn render_prompt_message_for_retain(message: &PromptMessage) -> Vec<String> {
     match message.role {
         PromptRole::Assistant => {
             if !message.content.trim().is_empty() {
-                lines.push(format!("assistant action: {}", compact_inline_text(&message.content)));
+                lines.push(format!(
+                    "assistant action: {}",
+                    compact_inline_text(&message.content)
+                ));
             }
             for event in &message.tool_call_ui_events {
                 lines.extend(render_tool_call_event_for_retain(event));
@@ -280,12 +285,18 @@ fn render_prompt_message_for_retain(message: &PromptMessage) -> Vec<String> {
             if let Some(event) = &message.tool_ui_event {
                 lines.extend(render_tool_result_event_for_retain(event));
             } else if !message.content.trim().is_empty() {
-                lines.push(format!("tool result: {}", compact_inline_text(&message.content)));
+                lines.push(format!(
+                    "tool result: {}",
+                    compact_inline_text(&message.content)
+                ));
             }
         }
         PromptRole::User => {
             if !message.content.trim().is_empty() {
-                lines.push(format!("user context: {}", compact_inline_text(&message.content)));
+                lines.push(format!(
+                    "user context: {}",
+                    compact_inline_text(&message.content)
+                ));
             }
         }
         PromptRole::System => {}
@@ -295,6 +306,7 @@ fn render_prompt_message_for_retain(message: &PromptMessage) -> Vec<String> {
 
 fn render_tool_call_event_for_retain(event: &ToolCallUiEvent) -> Vec<String> {
     match event {
+        ToolCallUiEvent::Error(data) if data.title == "apply_patch" => Vec::new(),
         ToolCallUiEvent::Exec(data)
         | ToolCallUiEvent::Work(data)
         | ToolCallUiEvent::Device(data)
@@ -307,6 +319,7 @@ fn render_tool_call_event_for_retain(event: &ToolCallUiEvent) -> Vec<String> {
 
 fn render_tool_result_event_for_retain(event: &ToolUiEvent) -> Vec<String> {
     match event {
+        ToolUiEvent::Error(data) if data.title == "apply_patch failed" => Vec::new(),
         ToolUiEvent::Exec(data)
         | ToolUiEvent::Work(data)
         | ToolUiEvent::Device(data)
@@ -341,7 +354,10 @@ fn render_terminal_data_for_retain(prefix: &str, data: &TerminalUiData) -> Vec<S
 
 fn render_patch_data_for_retain(prefix: &str, data: &PatchUiData) -> Vec<String> {
     let mut lines = vec![format!("{prefix}: {}", compact_inline_text(&data.title))];
-    lines.push(format!("{prefix} summary: {}", compact_inline_text(&data.summary_line)));
+    lines.push(format!(
+        "{prefix} summary: {}",
+        compact_inline_text(&data.summary_line)
+    ));
     for file in data.files.iter().take(6) {
         let marker = match file.operation.as_str() {
             "add" => "+",

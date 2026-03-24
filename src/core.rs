@@ -79,11 +79,6 @@ pub struct TerminalTerminateArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ApplyPatchArgs {
-    pub patch: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TelegramSelectChatArgs {
     pub chat_id: String,
 }
@@ -155,11 +150,7 @@ pub trait LLM {
     ) -> Result<serde_json::Value>;
 
     /// 执行一轮工具驱动的 agent turn，返回 assistant 文本或 tool calls。
-    async fn run_agent_turn(
-        &self,
-        _: &Context,
-        _: AgentTurnRequest,
-    ) -> Result<AgentTurnResponse> {
+    async fn run_agent_turn(&self, _: &Context, _: AgentTurnRequest) -> Result<AgentTurnResponse> {
         Err(miette!(
             "run_agent_turn is not implemented for this provider"
         ))

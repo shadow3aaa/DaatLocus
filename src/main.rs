@@ -24,20 +24,22 @@ mod work_state;
 
 use std::{
     env,
+    future::Future,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 
 use crate::{
-    apply_patch::{PatchOperationKind, apply_patch_in_root},
+    apply_patch::{PatchOperationKind, apply_patch_in_root, summarize_apply_patch_error},
     config::load_config,
     context::Context,
     core::TelegramResolution,
     dashboard::{
-        DashboardActivityEvent, DashboardControlCommand, DashboardState, activity_cell_from_tool_ui_event,
-        activity_cells_from_tool_call_ui_event, apply_activity_event, assistant_activity_cell,
-        render_activity_from_messages, run_tui_dashboard,
+        DashboardActivityEvent, DashboardControlCommand, DashboardState,
+        activity_cell_from_tool_ui_event, activity_cells_from_tool_call_ui_event,
+        apply_activity_event, assistant_activity_cell, render_activity_from_messages,
+        run_tui_dashboard,
     },
     device::{DeviceId, DeviceManager},
     emotion::Emotion,
@@ -177,7 +179,7 @@ async fn async_main(args: Vec<String>) -> Result<()> {
     }
 
     if let Some((path, limit, batch_size)) = train_source_learn_args(&args) {
-        match run_train_source_learn(config, path, limit, batch_size).await {
+        match run_train_source_learn_with_dashboard(config, path, limit, batch_size).await {
             Ok(()) => return Ok(()),
             Err(err) => {
                 eprintln!("{err:?}");
@@ -187,7 +189,7 @@ async fn async_main(args: Vec<String>) -> Result<()> {
     }
 
     if let Some((path, task_index)) = train_source_rollout_args(&args) {
-        match run_train_source_rollout(config, path, task_index).await {
+        match run_train_source_rollout_with_dashboard(config, path, task_index).await {
             Ok(()) => return Ok(()),
             Err(err) => {
                 eprintln!("{err:?}");
@@ -567,7 +569,85 @@ fn bootstrap_telegram_device_from_acl(
 async fn load_compiled_prompts_only() -> miette::Result<CompiledPromptStore> {
     let compiled = load_all_compiled_programs().await?;
     let runtime_system_prompt = load_compiled_runtime_system_prompt().await?;
-    Ok(CompiledPromptStore::from_entries(compiled).with_runtime_system_prompt(runtime_system_prompt))
+    Ok(CompiledPromptStore::from_entries(compiled)
+        .with_runtime_system_prompt(runtime_system_prompt))
+}
+
+fn initial_train_source_dashboard_state(status: String) -> DashboardState {
+    DashboardState {
+        focused_device: Some(DeviceId::Terminal),
+        status_output: "Overview\nTrain-source session starting".to_string(),
+        sleep_status_output: "Overview\nSleep controls are unavailable in train-source sessions."
+            .to_string(),
+        inspect_telegram_output: "Telegram\nNo active Telegram session.".to_string(),
+        activity_cells: Vec::new(),
+        live_activity_cells: Vec::new(),
+        last_cycle_elapsed_ms: None,
+        runtime_status: Some(status),
+    }
+}
+
+async fn run_train_source_dashboard_session<Fut>(
+    initial_status: String,
+    runner: impl FnOnce(tokio::sync::watch::Sender<DashboardState>) -> Fut,
+) -> Result<()>
+where
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    let telegram_acl = TelegramAclHandle::load().await;
+    let (tx, mut rx) =
+        tokio::sync::watch::channel(initial_train_source_dashboard_state(initial_status));
+    let (control_tx, mut control_rx) =
+        tokio::sync::mpsc::unbounded_channel::<DashboardControlCommand>();
+    let control_state_tx = tx.clone();
+    let control_task = tokio::spawn(async move {
+        while let Some(command) = control_rx.recv().await {
+            match command {
+                DashboardControlCommand::RunSleep => {
+                    control_state_tx.send_modify(|state| {
+                        state.runtime_status = Some(
+                            "sleep command is unavailable during train-source sessions".to_string(),
+                        )
+                    });
+                }
+            }
+        }
+    });
+    let worker = tokio::spawn(runner(tx.clone()));
+    let dashboard_result = run_tui_dashboard(&mut rx, telegram_acl, control_tx).await;
+    control_task.abort();
+    let worker_result = if worker.is_finished() {
+        match worker.await {
+            Ok(result) => result,
+            Err(err) => Err(miette!("train-source worker failed: {err}")),
+        }
+    } else {
+        worker.abort();
+        Ok(())
+    };
+    dashboard_result.map_err(|err| miette!("dashboard failed: {err}"))?;
+    worker_result
+}
+
+fn train_progress(
+    dashboard_tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    if let Some(tx) = dashboard_tx {
+        tx.send_modify(|state| state.runtime_status = Some(message.clone()));
+    } else {
+        println!("{message}");
+    }
+}
+
+fn sync_training_dashboard_state(
+    context: &Context,
+    dashboard_tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+) {
+    if let Some(tx) = dashboard_tx {
+        sync_dashboard_state(context, tx, &SleepDashboardStatus::default(), None);
+    }
 }
 
 fn run_train_source_inspect_blocking(path: &str) -> Result<()> {
@@ -582,6 +662,7 @@ async fn run_train_source_rollout(
     config: crate::config::Config,
     path: &str,
     task_index: usize,
+    dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
 ) -> Result<()> {
     let source = SweTrainSource::load(path).await?;
     let tasks = source.into_episode_tasks(64);
@@ -594,24 +675,47 @@ async fn run_train_source_rollout(
     };
 
     let episode_root = prepare_isolated_episode_root(&task, "single").await?;
-    let episode_home = episode_root.join("spinova_home");
-    let workspace_dir = episode_root.join("workspace");
+    let episode_home = episode_root.join("h");
+    let workspace_dir = episode_root.join("ws");
     let home_override = SpinovaHomeOverride::set(episode_home.clone());
-    provision_episode_workspace(&task, &workspace_dir).await?;
+    provision_episode_workspace(&task, &workspace_dir, dashboard_tx.as_ref()).await?;
     task.workspace_hint = Some(workspace_dir.display().to_string());
 
     let mut context = build_eval_context(config).await;
+    context.dashboard_tx = dashboard_tx.clone();
     context.devices.focus(DeviceId::Terminal).await?;
     enter_episode_workspace(&mut context, &workspace_dir).await?;
     context
         .work_state
         .set_objective(task.instruction.clone(), None);
+    sync_training_dashboard_state(&context, dashboard_tx.as_ref());
+    train_progress(
+        dashboard_tx.as_ref(),
+        format!("Running train-source rollout task {}", task.id),
+    );
 
-    let outcome = rollout_agent_loop_episode(&mut context, task, &workspace_dir).await?;
-    print_episode_rollout(&outcome, &episode_home);
+    let outcome =
+        rollout_agent_loop_episode(&mut context, task, &workspace_dir, dashboard_tx.as_ref())
+            .await?;
+    print_episode_rollout(&outcome, &episode_home, dashboard_tx.as_ref());
     context.shutdown().await;
     drop(home_override);
     Ok(())
+}
+
+async fn run_train_source_rollout_with_dashboard(
+    config: crate::config::Config,
+    path: &str,
+    task_index: usize,
+) -> Result<()> {
+    let path = path.to_string();
+    run_train_source_dashboard_session(
+        format!("Preparing train-source rollout {}#{}", path, task_index),
+        move |dashboard_tx| async move {
+            run_train_source_rollout(config, &path, task_index, Some(dashboard_tx)).await
+        },
+    )
+    .await
 }
 
 async fn run_train_source_learn(
@@ -619,6 +723,7 @@ async fn run_train_source_learn(
     path: &str,
     limit: usize,
     batch_size: usize,
+    dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
 ) -> Result<()> {
     let source = SweTrainSource::load(path).await?;
     let mut tasks = source.into_episode_tasks(64);
@@ -636,14 +741,15 @@ async fn run_train_source_learn(
     )
     .await?;
 
-    println!(
-        "train source learn: path={} total_tasks={} batch_size={} session={} learning_home={} shared_long_term_home={}",
-        path,
-        tasks.len(),
-        batch_size,
-        session.session_root().display(),
-        session_learning_home.display(),
-        shared_learning_home.display()
+    train_progress(
+        dashboard_tx.as_ref(),
+        format!(
+            "train source learn: path={} total_tasks={} batch_size={} session={}",
+            path,
+            tasks.len(),
+            batch_size,
+            session.session_root().display()
+        ),
     );
 
     let home_override = SpinovaHomeOverride::set(session_learning_home.clone());
@@ -655,16 +761,33 @@ async fn run_train_source_learn(
             shared_learning_home,
             session_learning_home,
             session.clone(),
+            dashboard_tx.clone(),
         ) => result,
         _ = tokio::signal::ctrl_c() => {
-            session.shutdown(true).await?;
+            session.shutdown(true, dashboard_tx.as_ref()).await?;
             return Ok(());
         }
     };
     drop(home_override);
 
-    session.shutdown(false).await?;
+    session.shutdown(false, dashboard_tx.as_ref()).await?;
     run_result
+}
+
+async fn run_train_source_learn_with_dashboard(
+    config: crate::config::Config,
+    path: &str,
+    limit: usize,
+    batch_size: usize,
+) -> Result<()> {
+    let path = path.to_string();
+    run_train_source_dashboard_session(
+        format!("Preparing train-source learn {}", path),
+        move |dashboard_tx| async move {
+            run_train_source_learn(config, &path, limit, batch_size, Some(dashboard_tx)).await
+        },
+    )
+    .await
 }
 
 async fn run_train_source_learn_loop(
@@ -674,18 +797,22 @@ async fn run_train_source_learn_loop(
     shared_learning_home: PathBuf,
     session_learning_home: PathBuf,
     session: TrainSourceLearnSession,
+    dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
 ) -> Result<()> {
     let mut cursor = 0usize;
     let mut batch_index = 0usize;
     while cursor < tasks.len() {
         let batch_end = (cursor + batch_size).min(tasks.len());
         let batch_tasks = &tasks[cursor..batch_end];
-        println!(
-            "  batch {} running (tasks {}..{}, count={})",
-            batch_index + 1,
-            cursor + 1,
-            batch_end,
-            batch_tasks.len()
+        train_progress(
+            dashboard_tx.as_ref(),
+            format!(
+                "batch {} running (tasks {}..{}, count={})",
+                batch_index + 1,
+                cursor + 1,
+                batch_end,
+                batch_tasks.len()
+            ),
         );
         let compiled_prompts = load_compiled_prompts_only().await?;
         let active_variant = if compiled_prompts.is_empty() {
@@ -693,12 +820,15 @@ async fn run_train_source_learn_loop(
         } else {
             "compiled".to_string()
         };
-        println!(
-            "  batch {} active_variant={} (tasks {}..{})",
-            batch_index + 1,
-            active_variant,
-            cursor + 1,
-            batch_end
+        train_progress(
+            dashboard_tx.as_ref(),
+            format!(
+                "batch {} active_variant={} (tasks {}..{})",
+                batch_index + 1,
+                active_variant,
+                cursor + 1,
+                batch_end
+            ),
         );
 
         for (offset, task) in batch_tasks.iter().enumerate() {
@@ -711,6 +841,7 @@ async fn run_train_source_learn_loop(
                 compiled_prompts.clone(),
                 &episode_root,
                 true,
+                dashboard_tx.clone(),
             )
             .await?;
 
@@ -727,25 +858,32 @@ async fn run_train_source_learn_loop(
                 .await?;
 
             let snapshot = session.snapshot().await;
-            println!(
-                "- learn task {}/{} id={} status={:?} score={:.2}",
-                snapshot.completed_tasks,
-                snapshot.total_tasks,
-                outcome.task.id,
-                outcome.status,
-                outcome.metric.score
+            train_progress(
+                dashboard_tx.as_ref(),
+                format!(
+                    "learn task {}/{} id={} status={:?} score={:.2}",
+                    snapshot.completed_tasks,
+                    snapshot.total_tasks,
+                    outcome.task.id,
+                    outcome.status,
+                    outcome.metric.score
+                ),
             );
         }
 
         let completed_tasks = session.snapshot().await.completed_tasks;
-        println!(
-            "  batch {} sleep starting (completed_tasks={})",
-            batch_index + 1,
-            completed_tasks
+        train_progress(
+            dashboard_tx.as_ref(),
+            format!(
+                "batch {} sleep starting (completed_tasks={})",
+                batch_index + 1,
+                completed_tasks
+            ),
         );
         let mut optimize_context =
             build_eval_context_with_compiled(config.clone(), load_compiled_prompts_only().await?)
                 .await;
+        optimize_context.dashboard_tx = dashboard_tx.clone();
         let sleep_summary = run_sleep(&mut optimize_context).await?;
         let current_compiled_count = load_compiled_prompts_only().await?.len();
         session
@@ -774,23 +912,17 @@ async fn run_train_source_learn_loop(
                 });
             })
             .await?;
-        println!(
-            "  batch {} sleep finished: patterns={} demos={} stress={} instructions={} runtime_demos={} runtime_prompt_suggestions={} runtime_prompt_candidates={} runtime_demo_evals={} runtime_demo_passed={} runtime_demo_regressions={} rolled_back={} rounds={} accepted={} reflections={}",
-            batch_index + 1,
-            sleep_summary.failure_patterns.len(),
-            sleep_summary.bootstrap_demos,
-            sleep_summary.stress_cases,
-            sleep_summary.instruction_hypotheses,
-            sleep_summary.runtime_demos,
-            sleep_summary.runtime_prompt_suggestions,
-            sleep_summary.runtime_prompt_candidates,
-            sleep_summary.runtime_demo_evaluations,
-            sleep_summary.runtime_demo_passed,
-            sleep_summary.runtime_demo_regressions,
-            sleep_summary.runtime_prompt_rolled_back,
-            sleep_summary.runtime_prompt_evolution_rounds,
-            sleep_summary.runtime_prompt_accepted,
-            sleep_summary.retained_reflections
+        train_progress(
+            dashboard_tx.as_ref(),
+            format!(
+                "batch {} sleep finished: runtime demos {} evals {} candidates {} rounds {} accepted={}",
+                batch_index + 1,
+                sleep_summary.runtime_demos,
+                sleep_summary.runtime_demo_evaluations,
+                sleep_summary.runtime_prompt_candidates,
+                sleep_summary.runtime_prompt_evolution_rounds,
+                sleep_summary.runtime_prompt_accepted
+            ),
         );
         sync_learning_assets_back_to_shared(&session_learning_home, &shared_learning_home).await?;
 
@@ -807,31 +939,14 @@ async fn run_train_source_learn_loop(
                 }
             })
             .await?;
-        println!(
-            "  batch {} compiled_prompt_count={}",
-            batch_index + 1,
-            compiled_prompt_count
-        );
-
-        println!(
-            "  batch update: completed={} active_variant={} sleep_patterns={} demos={} stress={} instructions={} runtime_demos={} runtime_prompt_suggestions={} runtime_prompt_candidates={} runtime_demo_evals={} runtime_demo_passed={} runtime_demo_regressions={} rolled_back={} rounds={} accepted={} reflections={} compiled_suites={}",
-            session.snapshot().await.completed_tasks,
-            active_variant,
-            sleep_summary.failure_patterns.len(),
-            sleep_summary.bootstrap_demos,
-            sleep_summary.stress_cases,
-            sleep_summary.instruction_hypotheses,
-            sleep_summary.runtime_demos,
-            sleep_summary.runtime_prompt_suggestions,
-            sleep_summary.runtime_prompt_candidates,
-            sleep_summary.runtime_demo_evaluations,
-            sleep_summary.runtime_demo_passed,
-            sleep_summary.runtime_demo_regressions,
-            sleep_summary.runtime_prompt_rolled_back,
-            sleep_summary.runtime_prompt_evolution_rounds,
-            sleep_summary.runtime_prompt_accepted,
-            sleep_summary.retained_reflections,
-            compiled_prompt_count
+        train_progress(
+            dashboard_tx.as_ref(),
+            format!(
+                "batch {} compiled_prompt_count={} completed={}",
+                batch_index + 1,
+                compiled_prompt_count,
+                session.snapshot().await.completed_tasks
+            ),
         );
 
         cursor = batch_end;
@@ -847,32 +962,44 @@ async fn execute_train_source_task(
     compiled_prompts: CompiledPromptStore,
     episode_root: &Path,
     use_shared_learning_home: bool,
+    dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
 ) -> Result<EpisodeOutcome> {
-    let episode_home = episode_root.join("spinova_home");
-    let workspace_dir = episode_root.join("workspace");
+    let episode_home = episode_root.join("h");
+    let workspace_dir = episode_root.join("ws");
     let home_override = (!use_shared_learning_home).then(|| SpinovaHomeOverride::set(episode_home));
-    println!(
-        "        episode setup: id={} workspace={} home_mode={}",
-        task.id,
-        workspace_dir.display(),
-        if use_shared_learning_home {
-            "shared"
-        } else {
-            "isolated"
-        }
+    train_progress(
+        dashboard_tx.as_ref(),
+        format!(
+            "episode setup: id={} workspace={} home_mode={}",
+            task.id,
+            workspace_dir.display(),
+            if use_shared_learning_home {
+                "shared"
+            } else {
+                "isolated"
+            }
+        ),
     );
-    provision_episode_workspace(task, &workspace_dir).await?;
+    provision_episode_workspace(task, &workspace_dir, dashboard_tx.as_ref()).await?;
 
     let mut run_task = task.clone();
     run_task.workspace_hint = Some(workspace_dir.display().to_string());
     let mut context = build_eval_context_with_compiled(config.clone(), compiled_prompts).await;
+    context.dashboard_tx = dashboard_tx.clone();
     context.devices.focus(DeviceId::Terminal).await?;
     enter_episode_workspace(&mut context, &workspace_dir).await?;
     context
         .work_state
         .set_objective(run_task.instruction.clone(), None);
+    sync_training_dashboard_state(&context, dashboard_tx.as_ref());
 
-    let outcome = rollout_agent_loop_episode(&mut context, run_task, &workspace_dir).await?;
+    let outcome = rollout_agent_loop_episode(
+        &mut context,
+        run_task,
+        &workspace_dir,
+        dashboard_tx.as_ref(),
+    )
+    .await?;
     save_episode_outcome(episode_root, &outcome).await?;
     context.shutdown().await;
     drop(home_override);
@@ -972,6 +1099,7 @@ async fn rollout_agent_loop_episode(
     context: &mut Context,
     mut task: EpisodeTask,
     workspace_dir: &Path,
+    dashboard_tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
 ) -> Result<EpisodeOutcome> {
     let renderer = OpenAIToolRenderer;
     let mut steps = Vec::new();
@@ -1001,10 +1129,20 @@ async fn rollout_agent_loop_episode(
         metadata: std::collections::BTreeMap::new(),
     };
     let mut work_phase = "investigate".to_string();
+    sync_training_dashboard_state(context, dashboard_tx);
 
     for index in 0..task.max_steps {
         context.work_state.set_phase(work_phase.clone());
-        let step_execution = execute_agent_loop_step(context, None).await;
+        train_progress(
+            dashboard_tx,
+            format!(
+                "episode step {}/{} [{}]",
+                index + 1,
+                task.max_steps,
+                work_phase
+            ),
+        );
+        let step_execution = execute_agent_loop_step(context, dashboard_tx).await;
         let output = step_execution.output;
         let action = output.primary_action.clone();
 
@@ -1043,6 +1181,7 @@ async fn rollout_agent_loop_episode(
         });
         work_phase = next_work_phase;
         context.work_state.set_phase(work_phase.clone());
+        sync_training_dashboard_state(context, dashboard_tx);
 
         if matches!(work_phase.as_str(), "finish") {
             return finalize_runtime_episode(
@@ -1052,6 +1191,7 @@ async fn rollout_agent_loop_episode(
                 initial_observation,
                 steps,
                 Some(EpisodeStatus::Succeeded),
+                dashboard_tx,
             )
             .await;
         }
@@ -1064,6 +1204,7 @@ async fn rollout_agent_loop_episode(
                 initial_observation,
                 steps,
                 None,
+                dashboard_tx,
             )
             .await;
         }
@@ -1076,6 +1217,7 @@ async fn rollout_agent_loop_episode(
         initial_observation,
         steps,
         None,
+        dashboard_tx,
     )
     .await
 }
@@ -1175,6 +1317,7 @@ async fn finalize_runtime_episode(
     initial_observation: EpisodeObservation,
     steps: Vec<EpisodeStep>,
     forced_rollout_status: Option<EpisodeStatus>,
+    dashboard_tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
 ) -> Result<EpisodeOutcome> {
     let rollout_status = forced_rollout_status.unwrap_or_else(|| {
         if !context.work_state.has_objective() {
@@ -1186,7 +1329,7 @@ async fn finalize_runtime_episode(
         }
     });
     let validation_results =
-        run_validation_commands(&task.validation_commands, workspace_dir).await?;
+        run_validation_commands(&task.validation_commands, workspace_dir, dashboard_tx).await?;
     let status = final_episode_status(rollout_status, &validation_results);
     let final_snapshot = Snapshot::new(context).await.to_string();
     let metric = build_episode_metric(&steps, status, rollout_status, &validation_results);
@@ -1329,7 +1472,25 @@ fn final_episode_summary(
     format!("status={status:?}; {validation_summary}; last_observation={last}")
 }
 
-fn print_episode_rollout(outcome: &EpisodeOutcome, episode_home: &PathBuf) {
+fn print_episode_rollout(
+    outcome: &EpisodeOutcome,
+    episode_home: &PathBuf,
+    dashboard_tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+) {
+    if dashboard_tx.is_some() {
+        train_progress(
+            dashboard_tx,
+            format!(
+                "train source rollout complete: id={} steps={} status={:?} score={:.2} home={}",
+                outcome.task.id,
+                outcome.steps.len(),
+                outcome.status,
+                outcome.metric.score,
+                episode_home.display()
+            ),
+        );
+        return;
+    }
     println!(
         "train source rollout: id={} title={} steps={} status={:?} score={:.2} home={}",
         outcome.task.id,
@@ -1381,7 +1542,11 @@ async fn save_episode_outcome(episode_root: &Path, outcome: &EpisodeOutcome) -> 
     Ok(())
 }
 
-fn print_train_source_learn_summary(session_root: &Path, state: &TrainSourceLearnState) {
+fn print_train_source_learn_summary(
+    session_root: &Path,
+    state: &TrainSourceLearnState,
+    dashboard_tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+) {
     let succeeded = state
         .outcomes
         .iter()
@@ -1412,19 +1577,22 @@ fn print_train_source_learn_summary(session_root: &Path, state: &TrainSourceLear
             .sum::<f32>()
             / state.outcomes.len() as f32
     };
-    println!(
-        "train source learn summary: session={} completed={}/{} succeeded={} failed={} aborted={} max_steps={} avg_score={:.2} sleep_runs={} optimize_runs={} compiled_suites={}",
-        session_root.display(),
-        state.completed_tasks,
-        state.total_tasks,
-        succeeded,
-        failed,
-        aborted,
-        max_steps,
-        avg_score,
-        state.sleep_runs,
-        state.optimize_runs,
-        state.last_compiled_prompt_count
+    train_progress(
+        dashboard_tx,
+        format!(
+            "train source learn summary: session={} completed={}/{} succeeded={} failed={} aborted={} max_steps={} avg_score={:.2} sleep_runs={} optimize_runs={} compiled_suites={}",
+            session_root.display(),
+            state.completed_tasks,
+            state.total_tasks,
+            succeeded,
+            failed,
+            aborted,
+            max_steps,
+            avg_score,
+            state.sleep_runs,
+            state.optimize_runs,
+            state.last_compiled_prompt_count
+        ),
     );
 }
 
@@ -1560,16 +1728,23 @@ impl TrainSourceLearnSession {
         Ok(())
     }
 
-    async fn shutdown(&self, interrupted: bool) -> Result<()> {
+    async fn shutdown(
+        &self,
+        interrupted: bool,
+        dashboard_tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+    ) -> Result<()> {
         self.save().await?;
         let state = self.snapshot().await;
         if interrupted {
-            println!(
-                "train source learn interrupted: session state saved to {}",
-                self.session_root.display()
+            train_progress(
+                dashboard_tx,
+                format!(
+                    "train source learn interrupted: session state saved to {}",
+                    self.session_root.display()
+                ),
             );
         }
-        print_train_source_learn_summary(&self.session_root, &state);
+        print_train_source_learn_summary(&self.session_root, &state, dashboard_tx);
         Ok(())
     }
 }
@@ -1584,10 +1759,11 @@ struct ValidationCommandResult {
 async fn run_validation_commands(
     commands: &[String],
     workspace_dir: &Path,
+    dashboard_tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
 ) -> Result<Vec<ValidationCommandResult>> {
     let mut results = Vec::new();
     for command in commands {
-        println!("        validation command: {}", command);
+        train_progress(dashboard_tx, format!("validation command: {}", command));
         let output = run_shell_line_capture(command, workspace_dir).await?;
         results.push(ValidationCommandResult {
             command: command.clone(),
@@ -1676,12 +1852,16 @@ impl Drop for SpinovaHomeOverride {
 }
 
 async fn prepare_isolated_episode_root(task: &EpisodeTask, variant_name: &str) -> Result<PathBuf> {
+    let task_slug = slugify(&task.id);
+    let short_task = task_slug.chars().take(16).collect::<String>();
+    let variant_slug = slugify(variant_name);
+    let short_variant = variant_slug.chars().take(8).collect::<String>();
     let path = env::current_dir()
         .map_err(|err| miette!("failed to get current dir for episode home: {err}"))?
         .join("tmp")
-        .join("episode_envs")
-        .join(slugify(&task.id))
-        .join(slugify(variant_name));
+        .join("ep")
+        .join(short_task)
+        .join(short_variant);
 
     if path.exists() {
         tokio::fs::remove_dir_all(&path).await.map_err(|err| {
@@ -1704,12 +1884,12 @@ async fn prepare_learning_session_root(path: &str) -> Result<PathBuf> {
     let session_id = format!(
         "{}-{}",
         Local::now().format("%Y%m%d-%H%M%S"),
-        slugify(path).chars().take(24).collect::<String>()
+        slugify(path).chars().take(8).collect::<String>()
     );
     let root = env::current_dir()
         .map_err(|err| miette!("failed to get current dir for learn session: {err}"))?
         .join("tmp")
-        .join("train_source_learn")
+        .join("tsl")
         .join(session_id);
     tokio::fs::create_dir_all(&root).await.map_err(|err| {
         miette!(
@@ -1721,7 +1901,7 @@ async fn prepare_learning_session_root(path: &str) -> Result<PathBuf> {
 }
 
 async fn prepare_learning_home_root(session_root: &Path) -> Result<PathBuf> {
-    let root = session_root.join("learning_home");
+    let root = session_root.join("h");
     if root.exists() {
         tokio::fs::remove_dir_all(&root).await.map_err(|err| {
             miette!(
@@ -1819,9 +1999,9 @@ async fn prepare_learning_episode_root(
     task: &EpisodeTask,
     index: usize,
 ) -> Result<PathBuf> {
-    let root = session_root
-        .join("episodes")
-        .join(format!("{:04}-{}", index, slugify(&task.id)));
+    let task_slug = slugify(&task.id);
+    let short_task = task_slug.chars().take(12).collect::<String>();
+    let root = session_root.join("e").join(format!("{:04}-{}", index, short_task));
     if root.exists() {
         tokio::fs::remove_dir_all(&root).await.map_err(|err| {
             miette!(
@@ -1839,7 +2019,11 @@ async fn prepare_learning_episode_root(
     Ok(root)
 }
 
-async fn provision_episode_workspace(task: &EpisodeTask, workspace_dir: &Path) -> Result<()> {
+async fn provision_episode_workspace(
+    task: &EpisodeTask,
+    workspace_dir: &Path,
+    dashboard_tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+) -> Result<()> {
     tokio::fs::create_dir_all(workspace_dir)
         .await
         .map_err(|err| {
@@ -1853,15 +2037,20 @@ async fn provision_episode_workspace(task: &EpisodeTask, workspace_dir: &Path) -
         let remote = infer_repo_remote(repo);
         let cache_root = prepare_train_source_repo_cache_root().await?;
         let cache_repo = cache_root.join(format!("{}.git", slugify(repo)));
-        ensure_cached_repo(repo, &remote, &cache_repo).await?;
-        println!(
-            "          clone repo={} from local cache {}",
-            repo,
-            cache_repo.display()
+        ensure_cached_repo(repo, &remote, &cache_repo, dashboard_tx).await?;
+        train_progress(
+            dashboard_tx,
+            format!(
+                "clone repo={} from local cache {}",
+                repo,
+                cache_repo.display()
+            ),
         );
         run_host_command(
             &[
                 "git",
+                "-c",
+                "core.longpaths=true",
                 "clone",
                 "--shared",
                 cache_repo.to_string_lossy().as_ref(),
@@ -1872,9 +2061,18 @@ async fn provision_episode_workspace(task: &EpisodeTask, workspace_dir: &Path) -
         .await?;
 
         if let Some(base_commit) = task.metadata.get("base_commit") {
-            println!("          checkout base_commit={}", base_commit);
+            train_progress(
+                dashboard_tx,
+                format!("checkout base_commit={}", base_commit),
+            );
             run_host_command(
-                &["git", "checkout", base_commit.as_str()],
+                &[
+                    "git",
+                    "-c",
+                    "core.longpaths=true",
+                    "checkout",
+                    base_commit.as_str(),
+                ],
                 Some(workspace_dir),
             )
             .await?;
@@ -1882,7 +2080,7 @@ async fn provision_episode_workspace(task: &EpisodeTask, workspace_dir: &Path) -
     }
 
     for command in &task.setup_commands {
-        println!("          setup command: {}", command);
+        train_progress(dashboard_tx, format!("setup command: {}", command));
         run_shell_line(command, workspace_dir).await?;
     }
 
@@ -1911,24 +2109,29 @@ async fn prepare_train_source_repo_cache_root() -> Result<PathBuf> {
     Ok(root)
 }
 
-async fn ensure_cached_repo(repo: &str, remote: &str, cache_repo: &Path) -> Result<()> {
+async fn ensure_cached_repo(
+    repo: &str,
+    remote: &str,
+    cache_repo: &Path,
+    dashboard_tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+) -> Result<()> {
     if cache_repo.exists() {
-        println!(
-            "          repo cache hit for {} at {}",
-            repo,
-            cache_repo.display()
+        train_progress(
+            dashboard_tx,
+            format!("repo cache hit for {} at {}", repo, cache_repo.display()),
         );
         return Ok(());
     }
 
-    println!(
-        "          repo cache miss for {} -> {}",
-        repo,
-        cache_repo.display()
+    train_progress(
+        dashboard_tx,
+        format!("repo cache miss for {} -> {}", repo, cache_repo.display()),
     );
     run_host_command(
         &[
             "git",
+            "-c",
+            "core.longpaths=true",
             "clone",
             "--mirror",
             remote,
@@ -1997,20 +2200,10 @@ async fn run_shell_line_capture(command: &str, cwd: &Path) -> Result<std::proces
 }
 
 async fn enter_episode_workspace(context: &mut Context, workspace_dir: &Path) -> Result<()> {
-    let cd_command = if cfg!(windows) {
-        format!("Set-Location \"{}\"\r", workspace_dir.display())
-    } else {
-        format!("cd \"{}\"\n", workspace_dir.display())
-    };
     context
         .devices
-        .send_terminal_input(cd_command)
-        .await
-        .map_err(|err| miette!("failed to enter episode workspace in terminal: {err}"))?;
-    context
-        .devices
-        .wait_until_settled(Duration::from_millis(300), Duration::from_secs(2))
-        .await;
+        .set_terminal_default_workdir(Some(workspace_dir.display().to_string()))
+        .map_err(|err| miette!("failed to configure episode workspace for terminal: {err}"))?;
     Ok(())
 }
 
@@ -2127,7 +2320,9 @@ fn build_runtime_agent_messages(context: &Context, snapshot_text: &str) -> Vec<A
             .into_iter()
             .map(prompt_message_to_agent_message),
     );
-    messages.push(AgentMessage::user(render_world_snapshot_fragment(snapshot_text)));
+    messages.push(AgentMessage::user(render_world_snapshot_fragment(
+        snapshot_text,
+    )));
     messages
 }
 
@@ -2195,10 +2390,17 @@ async fn execute_agent_loop_step(
                     .iter()
                     .map(|call| {
                         render_tool_call_ui_event(call).unwrap_or_else(|_| {
-                            ToolCallUiEvent::error(
-                                call.name.clone(),
-                                vec![call.arguments.to_string()],
-                            )
+                            if call.name == "apply_patch" {
+                                ToolCallUiEvent::error(
+                                    "apply_patch".to_string(),
+                                    vec!["invalid patch syntax".to_string()],
+                                )
+                            } else {
+                                ToolCallUiEvent::error(
+                                    call.name.clone(),
+                                    vec![call.arguments.to_string()],
+                                )
+                            }
                         })
                     })
                     .collect::<Vec<_>>();
@@ -2214,6 +2416,9 @@ async fn execute_agent_loop_step(
                     );
                 messages.push(agent_message);
                 let suppress_assistant_history = assistant_text.starts_with("tool_calls=")
+                    || tool_call_ui_events
+                        .iter()
+                        .all(is_apply_patch_tool_call_event)
                     || tool_call_ui_events.iter().all(|event| {
                         matches!(
                             event,
@@ -2240,6 +2445,7 @@ async fn execute_agent_loop_step(
                         .iter()
                         .cloned()
                         .filter(|event| match event {
+                            event if is_apply_patch_tool_call_event(event) => false,
                             ToolCallUiEvent::Exec(_) => false,
                             ToolCallUiEvent::Terminal(terminal_event) => !matches!(
                                 terminal_event.action,
@@ -2301,6 +2507,11 @@ async fn execute_agent_loop_step(
                         Ok(result) => result,
                         Err(err) => {
                             let error_text = err.to_string();
+                            let ui_error_text = if call.name == "apply_patch" {
+                                summarize_apply_patch_error(&error_text)
+                            } else {
+                                error_text.clone()
+                            };
                             ToolExecutionResult::new(
                                 format!("{} failed", call.name),
                                 json!({
@@ -2308,7 +2519,7 @@ async fn execute_agent_loop_step(
                                 }),
                                 ToolUiEvent::error(
                                     format!("{} failed", call.name),
-                                    compact_body_lines(&error_text, 12),
+                                    compact_body_lines(&ui_error_text, 6),
                                 ),
                             )
                         }
@@ -2421,7 +2632,8 @@ async fn execute_agent_loop_step(
         }
     };
     if !history_messages.is_empty() {
-        record_runtime_history_messages(context, output.current_doing.clone(), history_messages).await;
+        record_runtime_history_messages(context, output.current_doing.clone(), history_messages)
+            .await;
     }
     if !matches!(
         output.primary_action.kind.as_str(),
@@ -2450,6 +2662,14 @@ fn runtime_turn_requires_tool_progress(context: &Context) -> bool {
     !runtime_trigger_reasons(context).is_empty()
 }
 
+fn is_apply_patch_tool_call_event(event: &ToolCallUiEvent) -> bool {
+    match event {
+        ToolCallUiEvent::Patch(_) => true,
+        ToolCallUiEvent::Error(data) => data.title == "apply_patch",
+        _ => false,
+    }
+}
+
 fn append_committed_activity_cells(
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
     cells: Vec<crate::dashboard::ActivityCell>,
@@ -2459,7 +2679,10 @@ fn append_committed_activity_cells(
     }
     if let Some(tx) = tx {
         tx.send_modify(|state| {
-            apply_activity_event(state, DashboardActivityEvent::AppendCommittedCells { cells });
+            apply_activity_event(
+                state,
+                DashboardActivityEvent::AppendCommittedCells { cells },
+            );
         });
     }
 }
@@ -2563,9 +2786,7 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
         })
         .unwrap_or_default();
 
-    PromptMemoryContext {
-        recalled_memories,
-    }
+    PromptMemoryContext { recalled_memories }
 }
 
 fn summarize_terminal_for_hindsight(context: &Context) -> Option<String> {
@@ -2690,7 +2911,9 @@ async fn handle_dashboard_control_command(
     match command {
         DashboardControlCommand::RunSleep => {
             if *sleep_running {
-                tx.send_modify(|state| state.runtime_status = Some("sleep 已在后台运行".to_string()));
+                tx.send_modify(|state| {
+                    state.runtime_status = Some("sleep 已在后台运行".to_string())
+                });
                 sync_dashboard_state(context, tx, sleep_status, None);
                 return;
             }
@@ -2957,7 +3180,10 @@ fn render_sleep_status_output_for_dashboard(
             "• Total consumed trace events: {}",
             sleep_status.total_consumed_trace_events
         ),
-        format!("• Total runtime demos: {}", sleep_status.total_runtime_demos),
+        format!(
+            "• Total runtime demos: {}",
+            sleep_status.total_runtime_demos
+        ),
         format!(
             "• Total runtime demo evaluations: {}",
             sleep_status.total_runtime_demo_evaluations
