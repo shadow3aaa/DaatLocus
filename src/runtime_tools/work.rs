@@ -79,7 +79,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<ResolveTelegramChatArgs>(
             "resolve_telegram_chat",
-            "对 Telegram 会话做语义判断并自动完成后续 bookkeeping。",
+            "对 Telegram 会话做语义判断；在 resolution 带 reply 时发送回复，并完成后续 bookkeeping。",
             None,
             summarize_resolve_telegram_chat_tool,
             render_resolve_telegram_chat_call_ui,
