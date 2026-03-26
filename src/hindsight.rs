@@ -276,14 +276,7 @@ impl HindsightClient {
         options: HindsightReflectOptions,
     ) -> Result<HindsightReflectResponse> {
         let url = format!("{}/reflect", self.bank_url());
-        let body = json!({
-            "query": query,
-            "budget": options.budget.unwrap_or_else(|| self.config.default_reflect_budget.clone()),
-            "max_tokens": options.max_tokens,
-            "tags": if options.tags.is_empty() { serde_json::Value::Null } else { json!(options.tags) },
-            "tags_match": options.tags_match.unwrap_or_else(|| "any".to_string()),
-            "include": if options.include_facts { json!({ "facts": {} }) } else { serde_json::Value::Null }
-        });
+        let body = build_reflect_body(query, &self.config, options);
         let response = self
             .authorized(self.http.post(url))
             .json(&body)
@@ -567,4 +560,101 @@ fn truncate_for_error(text: &str) -> String {
     }
     let truncated = text.chars().take(MAX_LEN).collect::<String>();
     format!("{truncated}...")
+}
+
+fn build_reflect_body(
+    query: &str,
+    config: &HindsightConfig,
+    options: HindsightReflectOptions,
+) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert("query".to_string(), Value::String(query.to_string()));
+    body.insert(
+        "budget".to_string(),
+        Value::String(
+            options
+                .budget
+                .unwrap_or_else(|| config.default_reflect_budget.clone()),
+        ),
+    );
+    if let Some(max_tokens) = options.max_tokens {
+        body.insert("max_tokens".to_string(), json!(max_tokens.max(1)));
+    }
+    if !options.tags.is_empty() {
+        body.insert("tags".to_string(), json!(options.tags));
+    }
+    if let Some(tags_match) = options.tags_match {
+        body.insert("tags_match".to_string(), Value::String(tags_match));
+    } else {
+        body.insert("tags_match".to_string(), Value::String("any".to_string()));
+    }
+    if options.include_facts {
+        body.insert("include".to_string(), json!({ "facts": {} }));
+    }
+    Value::Object(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> HindsightConfig {
+        HindsightConfig {
+            base_url: "http://localhost:8888".to_string(),
+            api_key: String::new(),
+            namespace: "default".to_string(),
+            bank_id: "spinova".to_string(),
+            request_timeout_secs: 120,
+            default_recall_budget: "mid".to_string(),
+            default_reflect_budget: "low".to_string(),
+        }
+    }
+
+    #[test]
+    fn reflect_body_omits_null_only_fields() {
+        let body = build_reflect_body(
+            "hello",
+            &test_config(),
+            HindsightReflectOptions {
+                budget: None,
+                max_tokens: None,
+                tags: Vec::new(),
+                tags_match: None,
+                include_facts: false,
+            },
+        );
+        let object = body.as_object().expect("reflect body should be an object");
+        assert_eq!(object.get("query"), Some(&json!("hello")));
+        assert_eq!(object.get("budget"), Some(&json!("low")));
+        assert_eq!(object.get("tags_match"), Some(&json!("any")));
+        assert!(!object.contains_key("max_tokens"));
+        assert!(!object.contains_key("include"));
+        assert!(!object.contains_key("tags"));
+    }
+
+    #[test]
+    fn reflect_body_includes_requested_options() {
+        let body = build_reflect_body(
+            "hello",
+            &test_config(),
+            HindsightReflectOptions {
+                budget: Some("high".to_string()),
+                max_tokens: Some(500),
+                tags: vec!["user:alice".to_string()],
+                tags_match: Some("any_strict".to_string()),
+                include_facts: true,
+            },
+        );
+        assert_eq!(
+            body,
+            json!({
+                "query": "hello",
+                "budget": "high",
+                "max_tokens": 500,
+                "tags": ["user:alice"],
+                "tags_match": "any_strict",
+                "include": { "facts": {} }
+            })
+        );
+    }
 }
