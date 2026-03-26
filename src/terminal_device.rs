@@ -78,28 +78,23 @@ impl TerminalDevice {
             .map(|_| "interactive authentication/login commands are not allowed in Terminal; abort and use a non-interactive alternative")
     }
 
-    pub async fn send_input(&mut self, text: String) -> Result<()> {
-        let focused_session_id = self
-            .focused_session_id
-            .clone()
-            .ok_or_else(|| miette!("no focused terminal session"))?;
-        let session = self
-            .sessions
-            .get_mut(&focused_session_id)
-            .expect("focused terminal session must exist");
-        if let Some(reason) = Self::forbidden_input_reason(&text) {
-            bail!(reason);
+    fn cwd_from_shell_input(text: &str) -> Option<String> {
+        let trimmed = text.trim();
+        if cfg!(windows) {
+            let prefix = "Set-Location -LiteralPath '";
+            let suffix = "'";
+            return trimmed
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_suffix(suffix))
+                .map(|path| path.replace("''", "'"));
         }
-        let Some(process) = session.process.as_mut() else {
-            bail!("focused terminal session has no running process");
-        };
-        process
-            .write(&text)
-            .await
-            .map_err(|err| miette!("failed to write to terminal process: {err}"))?;
-        session.last_activity = Instant::now();
-        session.state.has_unread_output = true;
-        Ok(())
+
+        let prefix = "cd -- '";
+        let suffix = "'";
+        trimmed
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .map(|path| path.replace("'\"'\"'", "'"))
     }
 
     pub async fn exec_command_with_progress<F>(
@@ -125,19 +120,20 @@ impl TerminalDevice {
         if let Some(reason) = Self::forbidden_input_reason(&command) {
             bail!(reason);
         }
+        let effective_workdir = workdir;
         let session = self.session_mut(&target_session_id)?;
         if session.state.status == "running" {
             bail!("terminal session `{target_session_id}` already has a running process");
         }
         session.process = Some(
-            TerminalProcess::spawn(&command, workdir.as_deref())
+            TerminalProcess::spawn(&command, effective_workdir.as_deref())
                 .map_err(|err| miette!("failed to spawn terminal process: {err}"))?,
         );
         session.output_offset = 0;
         session.state.command = Some(command);
         session.state.status = "running".to_string();
         session.state.exit_code = None;
-        if let Some(workdir) = workdir.clone() {
+        if let Some(workdir) = effective_workdir.clone() {
             session.state.cwd = Some(workdir);
         }
         session.state.has_unread_output = true;
@@ -207,6 +203,9 @@ impl TerminalDevice {
         let Some(process) = session.process.as_mut() else {
             bail!("terminal session `{session_id}` has no running process");
         };
+        if let Some(updated_cwd) = Self::cwd_from_shell_input(&text) {
+            session.state.cwd = Some(updated_cwd);
+        }
         let start_offset = process.output_len();
         let mut progress_offset = start_offset;
         process

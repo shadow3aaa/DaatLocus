@@ -187,16 +187,6 @@ impl DeviceManager {
             .ok_or_else(|| miette!("focused device missing: {focused}"))
     }
 
-    pub async fn send_terminal_input(&mut self, text: String) -> Result<()> {
-        let focused = self.focused;
-        let device = self.focused_device_mut()?;
-        let terminal = device
-            .as_any_mut()
-            .downcast_mut::<TerminalDevice>()
-            .ok_or_else(|| miette!("focused device is not Terminal: {:?}", focused))?;
-        terminal.send_input(text).await
-    }
-
     pub async fn terminal_exec_with_progress<F>(
         &mut self,
         command: String,
