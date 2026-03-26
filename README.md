@@ -33,7 +33,7 @@ base_url = "http://localhost:8888"
 api_key = "" # 本地无鉴权服务（默认如此）可留空
 namespace = "default"
 bank_id = "spinova"
-request_timeout_secs = 30
+request_timeout_secs = 120 # retain 可能较慢，30s 容易误超时
 default_recall_budget = "mid"
 default_reflect_budget = "high" # 仅用于显式的 `deep_recall`
 ```

@@ -35,7 +35,7 @@ impl Default for HindsightConfig {
             api_key: String::new(),
             namespace: "default".to_string(),
             bank_id: "spinova".to_string(),
-            request_timeout_secs: 30,
+            request_timeout_secs: 120,
             default_recall_budget: "mid".to_string(),
             default_reflect_budget: "low".to_string(),
         }
