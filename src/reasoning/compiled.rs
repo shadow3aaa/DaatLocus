@@ -304,8 +304,8 @@ pub async fn save_compiled_runtime_system_prompt(
     save_compiled_runtime_system_prompt_by_key(RUNTIME_SYSTEM_PROMPT_COMPILE_KEY, compiled).await
 }
 
-pub async fn load_previous_compiled_runtime_system_prompt(
-) -> Result<Option<CompiledRuntimeSystemPrompt>> {
+pub async fn load_previous_compiled_runtime_system_prompt()
+-> Result<Option<CompiledRuntimeSystemPrompt>> {
     load_compiled_runtime_system_prompt_by_key(RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY).await
 }
 

@@ -303,7 +303,10 @@ impl HindsightClient {
     }
 
     async fn detect_retain_api(&self) -> Result<HindsightRetainApi> {
-        let url = format!("{}/openapi.json", self.config.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/openapi.json",
+            self.config.base_url.trim_end_matches('/')
+        );
         let response = self
             .authorized(self.http.get(url))
             .send()
@@ -324,8 +327,13 @@ impl HindsightClient {
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         let has_memories_post = path_has_post(&value, "/v1/default/banks/{bank_id}/memories");
-        let has_legacy_files_post = path_has_post(&value, "/v1/default/banks/{bank_id}/files/retain");
-        let has_operations_status = path_has_method(&value, "/v1/default/banks/{bank_id}/operations/{operation_id}", "get");
+        let has_legacy_files_post =
+            path_has_post(&value, "/v1/default/banks/{bank_id}/files/retain");
+        let has_operations_status = path_has_method(
+            &value,
+            "/v1/default/banks/{bank_id}/operations/{operation_id}",
+            "get",
+        );
         if has_memories_post {
             return Ok(HindsightRetainApi::MemoriesEndpoint);
         }
@@ -337,7 +345,10 @@ impl HindsightClient {
         ))
     }
 
-    async fn retain_via_memories(&self, items: Vec<HindsightRetainItem>) -> Result<HindsightRetainResponse> {
+    async fn retain_via_memories(
+        &self,
+        items: Vec<HindsightRetainItem>,
+    ) -> Result<HindsightRetainResponse> {
         let url = format!("{}/memories", self.bank_url());
         let body = json!({
             "items": items,
@@ -348,10 +359,14 @@ impl HindsightClient {
             .json(&body)
             .send()
             .await;
-        self.expect_json_success(response, "retain hindsight memories").await
+        self.expect_json_success(response, "retain hindsight memories")
+            .await
     }
 
-    async fn retain_via_legacy_files(&self, items: Vec<HindsightRetainItem>) -> Result<HindsightRetainResponse> {
+    async fn retain_via_legacy_files(
+        &self,
+        items: Vec<HindsightRetainItem>,
+    ) -> Result<HindsightRetainResponse> {
         let url = format!("{}/files/retain", self.bank_url());
         let files_metadata = items
             .iter()
@@ -389,10 +404,15 @@ impl HindsightClient {
             .send()
             .await;
         let submit = self
-            .expect_json_success::<HindsightLegacyFileRetainResponse>(response, "retain hindsight memories (legacy files)")
+            .expect_json_success::<HindsightLegacyFileRetainResponse>(
+                response,
+                "retain hindsight memories (legacy files)",
+            )
             .await?;
         if submit.operation_ids.is_empty() {
-            return Err(miette!("legacy hindsight file retain returned no operation ids"));
+            return Err(miette!(
+                "legacy hindsight file retain returned no operation ids"
+            ));
         }
         for operation_id in &submit.operation_ids {
             self.wait_for_operation(operation_id).await?;
@@ -408,14 +428,19 @@ impl HindsightClient {
         for _ in 0..120 {
             let response = self.authorized(self.http.get(&url)).send().await;
             let status = self
-                .expect_json_success::<HindsightOperationStatusResponse>(response, "poll hindsight operation")
+                .expect_json_success::<HindsightOperationStatusResponse>(
+                    response,
+                    "poll hindsight operation",
+                )
                 .await?;
             match status.status.as_str() {
                 "completed" | "not_found" => return Ok(()),
                 "failed" => {
                     return Err(miette!(
                         "hindsight legacy retain operation failed: {}",
-                        status.error_message.unwrap_or_else(|| "unknown failure".to_string())
+                        status
+                            .error_message
+                            .unwrap_or_else(|| "unknown failure".to_string())
                     ));
                 }
                 "pending" => tokio::time::sleep(Duration::from_millis(500)).await,
@@ -424,7 +449,9 @@ impl HindsightClient {
                 }
             }
         }
-        Err(miette!("timed out waiting for hindsight retain operation {operation_id}"))
+        Err(miette!(
+            "timed out waiting for hindsight retain operation {operation_id}"
+        ))
     }
 
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -529,9 +556,7 @@ async fn retain_job(
             *ready = true;
         }
     }
-    client
-        .retain(job.items, job.document_id.as_deref())
-        .await?;
+    client.retain(job.items, job.document_id.as_deref()).await?;
     Ok(())
 }
 

@@ -18,13 +18,13 @@ use crate::{
 };
 
 use super::{
-    programs::sleep_artifact_builder::{SleepArtifactBuilderOutput, SleepArtifactBuilderProgram},
     programs::runtime_system_prompt_judge::{
         RuntimeSystemPromptJudgeOutput, RuntimeSystemPromptJudgeProgram,
     },
     programs::runtime_system_prompt_patch_builder::{
         RuntimeSystemPromptPatchBuilderOutput, RuntimeSystemPromptPatchBuilderProgram,
     },
+    programs::sleep_artifact_builder::{SleepArtifactBuilderOutput, SleepArtifactBuilderProgram},
     programs::sleep_episode_synthesizer::{
         SleepEpisodeSynthesizerOutput, SleepEpisodeSynthesizerProgram,
     },
@@ -32,11 +32,11 @@ use super::{
     runtime::{execute_program_with_ir_report, resolve_program_tuning},
     sleep_artifacts::{
         SleepArtifactBootstrapDemo, SleepArtifactFailurePattern,
-        SleepArtifactInstructionHypothesis, SleepArtifactStressCase, SleepArtifactSuggestedFixKind,
-        SleepArtifactRuntimeDemo, SleepArtifactRuntimeDemoEvaluation,
-        SleepArtifactRuntimePromptCandidate, SleepArtifactRuntimePromptEvolutionReport,
-        SleepArtifactRuntimePromptEvolutionRound,
-        SleepArtifactRuntimePromptSuggestion, SleepArtifactsStore,
+        SleepArtifactInstructionHypothesis, SleepArtifactRuntimeDemo,
+        SleepArtifactRuntimeDemoEvaluation, SleepArtifactRuntimePromptCandidate,
+        SleepArtifactRuntimePromptEvolutionReport, SleepArtifactRuntimePromptEvolutionRound,
+        SleepArtifactRuntimePromptSuggestion, SleepArtifactStressCase,
+        SleepArtifactSuggestedFixKind, SleepArtifactsStore,
     },
     trace::{
         ProgramTraceRecord, RuntimeTraceBatch, TraceOrigin, compact_runtime_trace_file,
@@ -98,7 +98,9 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     derived
         .runtime_demos
         .extend(episode_synthesis.runtime_demos.clone());
-    store.replace_bootstrap_demos(&derived.bootstrap_demos).await?;
+    store
+        .replace_bootstrap_demos(&derived.bootstrap_demos)
+        .await?;
     store.replace_stress_cases(&derived.stress_cases).await?;
     store
         .replace_instruction_hypotheses(&derived.instruction_hypotheses)
@@ -858,7 +860,10 @@ async fn evolve_runtime_system_prompt(
                 regressions: 0,
                 selected_candidate: "current".to_string(),
                 selected_demo_titles: Vec::new(),
-                final_system_additions: context.compiled_prompts.runtime_system_additions().to_vec(),
+                final_system_additions: context
+                    .compiled_prompts
+                    .runtime_system_additions()
+                    .to_vec(),
                 round_history: Vec::new(),
             },
             passed: 0,
@@ -898,9 +903,15 @@ async fn evolve_runtime_system_prompt(
         let passed = latest_evaluations.iter().filter(|item| item.passed).count();
         let has_regression = latest_regressions > 0;
 
-        let round_accepted = is_acceptable_runtime_round(passed, latest_evaluations.len(), has_regression);
-        let (next_best_prompt, next_best_passed) =
-            choose_best_non_regressing_prompt(&best_prompt, best_passed, &current_prompt, passed, has_regression);
+        let round_accepted =
+            is_acceptable_runtime_round(passed, latest_evaluations.len(), has_regression);
+        let (next_best_prompt, next_best_passed) = choose_best_non_regressing_prompt(
+            &best_prompt,
+            best_passed,
+            &current_prompt,
+            passed,
+            has_regression,
+        );
         best_prompt = next_best_prompt;
         best_passed = next_best_passed;
 
@@ -1025,7 +1036,9 @@ async fn generate_runtime_prompt_candidates(
     )
     .await?;
 
-    let Some(candidate) = runtime_prompt_candidate_from_output(&output.output, &failed, instruction_hypotheses) else {
+    let Some(candidate) =
+        runtime_prompt_candidate_from_output(&output.output, &failed, instruction_hypotheses)
+    else {
         return Ok(Vec::new());
     };
     Ok(vec![candidate])
@@ -1210,7 +1223,10 @@ fn runtime_prompt_candidate_from_output(
             .filter(|item| !item.trim().is_empty())
             .cloned()
             .collect(),
-        source_demo_titles: evaluations.iter().map(|item| item.demo_title.clone()).collect(),
+        source_demo_titles: evaluations
+            .iter()
+            .map(|item| item.demo_title.clone())
+            .collect(),
         source_hypotheses: instruction_hypotheses
             .iter()
             .map(|item| item.text.clone())
@@ -1232,9 +1248,9 @@ async fn rollback_runtime_system_prompt_if_regressed(
     context.compiled_prompts = context
         .compiled_prompts
         .clone()
-        .with_runtime_system_prompt(Some(previous.with_compile_key(
-            RUNTIME_SYSTEM_PROMPT_COMPILE_KEY,
-        )));
+        .with_runtime_system_prompt(Some(
+            previous.with_compile_key(RUNTIME_SYSTEM_PROMPT_COMPILE_KEY),
+        ));
     Ok(true)
 }
 
@@ -1427,7 +1443,6 @@ fn episode_runtime_demo(
     })
 }
 
-
 fn derive_success_bootstrap_demos(
     records: &[ProgramTraceRecord],
 ) -> Vec<SleepArtifactBootstrapDemo> {
@@ -1558,10 +1573,12 @@ async fn retain_sleep_reflections(
             tags: Some(reflection.tags.clone()),
         })
         .collect::<Vec<_>>();
-    context.hindsight_retain.enqueue(crate::hindsight::HindsightRetainJob {
-        items,
-        document_id: None,
-    })?;
+    context
+        .hindsight_retain
+        .enqueue(crate::hindsight::HindsightRetainJob {
+            items,
+            document_id: None,
+        })?;
     Ok(reflections.len())
 }
 
@@ -1594,7 +1611,10 @@ async fn recall_related_memories(context: &Context, query: &str, top_k: usize) -
 mod tests {
     use super::*;
 
-    fn test_prompt(best_candidate: &str, additions: &[&str]) -> crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
+    fn test_prompt(
+        best_candidate: &str,
+        additions: &[&str],
+    ) -> crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
         crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
             compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
             best_candidate: best_candidate.to_string(),
@@ -1645,7 +1665,10 @@ mod tests {
         ]);
 
         assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].title, "runtime prompt suggestion failed-demo");
+        assert_eq!(
+            suggestions[0].title,
+            "runtime prompt suggestion failed-demo"
+        );
         assert_eq!(suggestions[0].suggested_additions, vec!["add rule"]);
     }
 
@@ -1661,13 +1684,11 @@ mod tests {
         let best = test_prompt("best", &["rule a"]);
         let current = test_prompt("current", &["rule a", "rule b"]);
 
-        let (selected, passed) =
-            choose_best_non_regressing_prompt(&best, 1, &current, 2, false);
+        let (selected, passed) = choose_best_non_regressing_prompt(&best, 1, &current, 2, false);
         assert_eq!(selected.best_candidate, "current");
         assert_eq!(passed, 2);
 
-        let (selected, passed) =
-            choose_best_non_regressing_prompt(&best, 2, &current, 3, true);
+        let (selected, passed) = choose_best_non_regressing_prompt(&best, 2, &current, 3, true);
         assert_eq!(selected.best_candidate, "best");
         assert_eq!(passed, 2);
     }

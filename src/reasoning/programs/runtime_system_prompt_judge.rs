@@ -41,7 +41,10 @@ impl Program for RuntimeSystemPromptJudgeProgram {
     fn signature(&self) -> Signature {
         Signature::new("评估当前 runtime system prompt 是否通过 demo。")
             .input("current system prompt", "当前正在评估的 system prompt。")
-            .input("previous system prompt", "上一版 system prompt；没有则写 none。")
+            .input(
+                "previous system prompt",
+                "上一版 system prompt；没有则写 none。",
+            )
             .input("demo title", "当前 demo 标题。")
             .input("scenario summary", "demo 场景摘要。")
             .input("expected behavior", "该 demo 期望的行为。")
