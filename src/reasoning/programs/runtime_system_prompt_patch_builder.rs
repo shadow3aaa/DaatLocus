@@ -44,7 +44,10 @@ impl Program for RuntimeSystemPromptPatchBuilderProgram {
             .input("sleep hypotheses", "sleep 产生的 instruction hypotheses。")
             .output("title", "候选 patch 标题。")
             .output("rationale", "为什么这些 patch 能修复当前 failed demos。")
-            .output("prompt_patches", "建议追加到 evolvable layer 的最小 patch 列表。")
+            .output(
+                "prompt_patches",
+                "建议追加到 evolvable layer 的最小 patch 列表。",
+            )
             .rule("尽量输出 1 到 5 条 patch。")
             .rule("每条 patch 应是稳定的系统规则，而不是 case 特化描述。")
             .rule("不要重写整个 prompt。")
@@ -65,7 +68,9 @@ impl RuntimeSystemPromptPatchBuilderProgram {
     ) -> PromptIR {
         let mut ir = PromptIR::with_system(RUNTIME_SYSTEM_PROMPT_PATCH_BUILDER_SYSTEM_PROMPT);
         ir.push_instruction("优先把 judge 提到的 needed_changes 抽象成更稳定的 runtime 规则。");
-        ir.push_instruction("如果 sleep hypotheses 与 judge feedback 冲突，以 judge 针对 failed demos 的反馈为准。");
+        ir.push_instruction(
+            "如果 sleep hypotheses 与 judge feedback 冲突，以 judge 针对 failed demos 的反馈为准。",
+        );
         ir.push_section("current system prompt", current_system_prompt);
         ir.push_section("failed demos", failed_demos);
         ir.push_section("judge feedback", judge_feedback);

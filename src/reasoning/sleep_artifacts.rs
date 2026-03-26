@@ -311,7 +311,11 @@ impl SleepArtifactsStore {
                 )
             })
             .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR), artifacts).await
+        replace_artifacts(
+            &self.root.join(RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR),
+            artifacts,
+        )
+        .await
     }
 }
 
