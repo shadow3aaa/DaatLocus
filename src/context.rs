@@ -37,6 +37,7 @@ pub struct Context {
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
+    pub record_runtime_reviews: bool,
 }
 
 impl Context {

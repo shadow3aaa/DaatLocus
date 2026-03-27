@@ -68,6 +68,9 @@ use crate::{
             AgentMessage, AgentTurnRequest, AgentTurnResponse, PromptMemoryContext, PromptMessage,
             PromptRole, execute_program,
         },
+        runtime_review::{
+            RuntimeTurnRecord, append_runtime_turn_record, unread_runtime_review_count,
+        },
         sleep::run_sleep,
         sleep_artifacts::SleepArtifactSuggestedFixKind,
         trace::unread_runtime_trace_count,
@@ -84,7 +87,7 @@ use crate::{
     tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
     work_state::WorkState,
 };
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone, Utc};
 use miette::{Result, miette};
 use serde_json::json;
 
@@ -103,8 +106,10 @@ struct SleepDashboardStatus {
     current_trigger: Option<&'static str>,
     last_result: Option<String>,
     unread_trace_backlog: usize,
+    unread_runtime_review_backlog: usize,
     total_runs: usize,
     total_consumed_trace_events: usize,
+    total_consumed_runtime_reviews: usize,
     total_runtime_demos: usize,
     total_runtime_demo_evaluations: usize,
     total_runtime_demo_passed: usize,
@@ -269,6 +274,7 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         dashboard_tx: None,
         idle_since: None,
         last_idle_sleep_at: None,
+        record_runtime_reviews: true,
     };
     let device_renders = context.devices.state_renders();
 
@@ -449,6 +455,7 @@ async fn run_mem_reset() -> Result<()> {
         dashboard_tx: None,
         idle_since: None,
         last_idle_sleep_at: None,
+        record_runtime_reviews: false,
     };
     context.shutdown().await;
 
@@ -458,6 +465,12 @@ async fn run_mem_reset() -> Result<()> {
             .await
             .map_err(|err| miette!("failed to remove {}: {err}", trace_path.display()))?;
     }
+    let runtime_review_path = home.join("runtime_reviews.jsonl");
+    if runtime_review_path.exists() {
+        tokio::fs::remove_file(&runtime_review_path)
+            .await
+            .map_err(|err| miette!("failed to remove {}: {err}", runtime_review_path.display()))?;
+    }
 
     println!(
         "[mem-reset] reset persistent runtime state under {}",
@@ -466,7 +479,7 @@ async fn run_mem_reset() -> Result<()> {
     println!(
         "[mem-reset] cleared via empty context shutdown: l1_memory, projects, obligations, work_state, emotion"
     );
-    println!("[mem-reset] cleared: reasoning_traces.jsonl");
+    println!("[mem-reset] cleared: reasoning_traces.jsonl, runtime_reviews.jsonl");
     println!("[mem-reset] cleared: hindsight bank");
     println!("[mem-reset] preserved: config.toml, reasoning_compiled/, telegram_acl.json");
 
@@ -520,8 +533,8 @@ async fn build_eval_context_with_compiled(
     config: crate::config::Config,
     compiled_prompts: CompiledPromptStore,
 ) -> Context {
-    let execution_cwd = env::current_dir()
-        .unwrap_or_else(|err| panic!("failed to determine execution cwd: {err}"));
+    let execution_cwd =
+        env::current_dir().unwrap_or_else(|err| panic!("failed to determine execution cwd: {err}"));
     let memory = Memory::new().await;
     let obligations = Obligations::new().await;
     let projects = Projects::new().await;
@@ -563,6 +576,7 @@ async fn build_eval_context_with_compiled(
         dashboard_tx: None,
         idle_since: None,
         last_idle_sleep_at: None,
+        record_runtime_reviews: false,
     }
 }
 
@@ -1017,7 +1031,9 @@ async fn execute_train_source_task(
 
 fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
     println!(
-        "sleep: derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, {} runtime demos, {} runtime prompt suggestions, {} runtime prompt candidates, {} runtime demo evaluations (passed {}, regressed {}, rolled_back {}, rounds {}, accepted {}), retained {} hindsight reflections",
+        "sleep: consumed {} runtime reviews, {} runtime traces; derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, {} runtime demos, {} runtime prompt suggestions, {} runtime prompt candidates, {} runtime demo evaluations (passed {}, regressed {}, rolled_back {}, rounds {}, accepted {}), retained {} hindsight reflections",
+        summary.consumed_runtime_reviews,
+        summary.consumed_trace_events,
         summary.failure_patterns.len(),
         summary.bootstrap_demos,
         summary.stress_cases,
@@ -1053,7 +1069,9 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
 
 fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> String {
     format!(
-        "sleep 完成：runtime demos {}，评估 {}（通过 {}，退化 {}），候选 {}，轮次 {}，accepted={}",
+        "sleep 完成：runtime reviews {}，traces {}，runtime demos {}，评估 {}（通过 {}，退化 {}），候选 {}，轮次 {}，accepted={}",
+        summary.consumed_runtime_reviews,
+        summary.consumed_trace_events,
         summary.runtime_demos,
         summary.runtime_demo_evaluations,
         summary.runtime_demo_passed,
@@ -2010,7 +2028,9 @@ async fn prepare_learning_episode_root(
 ) -> Result<PathBuf> {
     let task_slug = slugify(&task.id);
     let short_task = task_slug.chars().take(12).collect::<String>();
-    let root = session_root.join("e").join(format!("{:04}-{}", index, short_task));
+    let root = session_root
+        .join("e")
+        .join(format!("{:04}-{}", index, short_task));
     if root.exists() {
         tokio::fs::remove_dir_all(&root).await.map_err(|err| {
             miette!(
@@ -2360,6 +2380,54 @@ async fn record_runtime_history_messages(
     }
 }
 
+async fn record_runtime_review_turn(
+    context: &mut Context,
+    pre_step_snapshot_text: &str,
+    history_messages: &[PromptMessage],
+    output: &AgentLoopStepOutput,
+) {
+    if !context.record_runtime_reviews || history_messages.is_empty() {
+        return;
+    }
+    let mut metadata = std::collections::BTreeMap::new();
+    metadata.insert("origin".to_string(), "runtime_agent_loop".to_string());
+    metadata.insert(
+        "action_kind".to_string(),
+        output.primary_action.kind.clone(),
+    );
+    metadata.insert(
+        "action_summary".to_string(),
+        output.primary_action.summary.clone(),
+    );
+    if let Some(objective) = context.work_state.objective() {
+        metadata.insert("objective".to_string(), objective.to_string());
+    }
+    if let Some(phase) = context.work_state.work_phase() {
+        metadata.insert("work_phase".to_string(), phase.to_string());
+    }
+    if let Some(project_id) = context.work_state.project_id {
+        metadata.insert("project_id".to_string(), project_id.to_string());
+    }
+    metadata.insert(
+        "execution_cwd".to_string(),
+        context.execution_cwd.display().to_string(),
+    );
+
+    let turn = RuntimeTurnRecord {
+        id: format!("runtime-turn:{}", uuid::Uuid::new_v4()),
+        recorded_at_ms: Utc::now().timestamp_millis(),
+        current_doing: output.current_doing.clone(),
+        description: output.description.clone(),
+        observation: output.observation.clone(),
+        primary_action: output.primary_action.clone(),
+        before_snapshot_text: pre_step_snapshot_text.to_string(),
+        after_snapshot_text: Snapshot::new(context).await.to_string(),
+        history_messages: history_messages.to_vec(),
+        metadata,
+    };
+    append_runtime_turn_record(&turn).await;
+}
+
 async fn execute_agent_loop_step(
     context: &mut Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
@@ -2638,8 +2706,12 @@ async fn execute_agent_loop_step(
         }
     };
     if !history_messages.is_empty() {
-        record_runtime_history_messages(context, output.current_doing.clone(), history_messages)
-            .await;
+        record_runtime_history_messages(
+            context,
+            output.current_doing.clone(),
+            history_messages.clone(),
+        )
+        .await;
     }
     if !matches!(
         output.primary_action.kind.as_str(),
@@ -2647,6 +2719,7 @@ async fn execute_agent_loop_step(
     ) {
         context.work_state.touch();
     }
+    record_runtime_review_turn(context, &snapshot_text, &history_messages, &output).await;
     AgentLoopStepExecution {
         output,
         snapshot_text,
@@ -2827,7 +2900,7 @@ async fn spinova_loop(
     sleep_status: &mut SleepDashboardStatus,
 ) {
     let cycle_started_at = std::time::Instant::now();
-    refresh_sleep_trace_backlog(sleep_status).await;
+    refresh_sleep_backlogs(sleep_status).await;
     let forced_sleep_status =
         maybe_start_forced_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await;
     let trigger_reasons = runtime_trigger_reasons(context);
@@ -2870,7 +2943,7 @@ async fn spinova_loop(
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
         .await;
     execute_agent_loop_step(context, Some(tx)).await;
-    refresh_sleep_trace_backlog(sleep_status).await;
+    refresh_sleep_backlogs(sleep_status).await;
     sync_dashboard_state(
         context,
         tx,
@@ -2889,10 +2962,17 @@ async fn maybe_start_forced_sleep(
     if *sleep_running {
         return None;
     }
-    let backlog = sleep_status.unread_trace_backlog;
-    if backlog < FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD {
+    let trace_backlog = sleep_status.unread_trace_backlog;
+    let runtime_review_backlog = sleep_status.unread_runtime_review_backlog;
+    if trace_backlog < FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD
+        && runtime_review_backlog < FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD
+    {
         return None;
     }
+    let status = format!(
+        "backlog 过高（traces={} runtime_reviews={}）：已启动后台 sleep",
+        trace_backlog, runtime_review_backlog
+    );
     start_background_sleep(
         context,
         tx,
@@ -2900,10 +2980,13 @@ async fn maybe_start_forced_sleep(
         sleep_running,
         sleep_status,
         SleepTrigger::Idle,
-        "trace backlog 过高：已启动后台 sleep",
+        &status,
     )
     .await;
-    Some(format!("trace backlog={}：后台 sleep 已启动", backlog))
+    Some(format!(
+        "backlog 过高（traces={} runtime_reviews={}）：后台 sleep 已启动",
+        trace_backlog, runtime_review_backlog
+    ))
 }
 
 async fn handle_dashboard_control_command(
@@ -3020,6 +3103,7 @@ async fn handle_sleep_task_result(
             };
             sleep_status.total_runs += 1;
             sleep_status.total_consumed_trace_events += summary.consumed_trace_events;
+            sleep_status.total_consumed_runtime_reviews += summary.consumed_runtime_reviews;
             sleep_status.total_runtime_demos += summary.runtime_demos;
             sleep_status.total_runtime_demo_evaluations += summary.runtime_demo_evaluations;
             sleep_status.total_runtime_demo_passed += summary.runtime_demo_passed;
@@ -3046,7 +3130,7 @@ async fn handle_sleep_task_result(
             tx.send_modify(|state| state.runtime_status = Some(format!("{prefix}：{err}")));
         }
     }
-    refresh_sleep_trace_backlog(sleep_status).await;
+    refresh_sleep_backlogs(sleep_status).await;
     sync_dashboard_state(context, tx, sleep_status, None);
 }
 
@@ -3158,9 +3242,12 @@ fn sync_dashboard_state(
     });
 }
 
-async fn refresh_sleep_trace_backlog(sleep_status: &mut SleepDashboardStatus) {
+async fn refresh_sleep_backlogs(sleep_status: &mut SleepDashboardStatus) {
     if let Ok(backlog) = unread_runtime_trace_count().await {
         sleep_status.unread_trace_backlog = backlog;
+    }
+    if let Ok(backlog) = unread_runtime_review_count().await {
+        sleep_status.unread_runtime_review_backlog = backlog;
     }
 }
 
@@ -3188,6 +3275,10 @@ fn render_sleep_status_output_for_dashboard(
         format!(
             "• Total consumed trace events: {}",
             sleep_status.total_consumed_trace_events
+        ),
+        format!(
+            "• Total consumed runtime reviews: {}",
+            sleep_status.total_consumed_runtime_reviews
         ),
         format!(
             "• Total runtime demos: {}",
@@ -3228,6 +3319,10 @@ fn render_sleep_status_output_for_dashboard(
         format!(
             "• Current trace backlog: {}",
             sleep_status.unread_trace_backlog
+        ),
+        format!(
+            "• Current runtime review backlog: {}",
+            sleep_status.unread_runtime_review_backlog
         ),
         format!(
             "• Auto sleep after idle: {}",

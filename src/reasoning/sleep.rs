@@ -13,8 +13,9 @@ use crate::{
         },
         episode::{EpisodeOutcome, EpisodeStatus, EpisodeStep},
         examples::ExampleField,
-        runtime::{PromptRequest, PromptRole},
+        runtime::{PromptMessage, PromptRequest, PromptRole},
     },
+    tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 
 use super::{
@@ -25,11 +26,15 @@ use super::{
         RuntimeSystemPromptPatchBuilderOutput, RuntimeSystemPromptPatchBuilderProgram,
     },
     programs::sleep_artifact_builder::{SleepArtifactBuilderOutput, SleepArtifactBuilderProgram},
-    programs::sleep_episode_synthesizer::{
-        SleepEpisodeSynthesizerOutput, SleepEpisodeSynthesizerProgram,
+    programs::sleep_review_synthesizer::{
+        SleepReviewSynthesizerOutput, SleepReviewSynthesizerProgram,
     },
     render::openai_tools::OpenAIToolRenderer,
     runtime::{execute_program_with_ir_report, resolve_program_tuning},
+    runtime_review::{
+        RuntimeReviewSpan, RuntimeTurnRecord, build_runtime_review_spans,
+        compact_runtime_review_file, load_runtime_review_batch,
+    },
     sleep_artifacts::{
         SleepArtifactBootstrapDemo, SleepArtifactFailurePattern,
         SleepArtifactInstructionHypothesis, SleepArtifactRuntimeDemo,
@@ -47,6 +52,7 @@ use super::{
 #[derive(Clone)]
 pub struct SleepSummary {
     pub consumed_trace_events: usize,
+    pub consumed_runtime_reviews: usize,
     pub failure_patterns: Vec<SleepArtifactFailurePattern>,
     pub bootstrap_demos: usize,
     pub stress_cases: usize,
@@ -63,7 +69,7 @@ pub struct SleepSummary {
     pub retained_reflections: usize,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 struct SleepActionOutput {
     observation: String,
     description: String,
@@ -76,10 +82,14 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let trace_batch = load_runtime_trace_records().await?;
     let consumed_trace_events = trace_batch.records.len();
     let records = trace_batch.records;
+    let runtime_review_batch = load_runtime_review_batch().await?;
+    let consumed_runtime_reviews = runtime_review_batch.turns.len();
+    let runtime_review_spans = build_runtime_review_spans(&runtime_review_batch.turns);
     let mut failure_patterns = derive_failure_patterns(&records);
     let episode_outcomes = load_recent_learn_episode_outcomes().await?;
-    let episode_synthesis = synthesize_episode_outcomes(context, &episode_outcomes).await?;
-    failure_patterns.extend(episode_synthesis.failure_patterns.clone());
+    let review_inputs = collect_review_inputs(&episode_outcomes, &runtime_review_spans);
+    let review_synthesis = synthesize_review_inputs(context, &review_inputs).await?;
+    failure_patterns.extend(review_synthesis.failure_patterns.clone());
     let store = SleepArtifactsStore::open().await?;
     store.replace_failure_patterns(&failure_patterns).await?;
     let mut derived = derive_sleep_artifacts(context, &failure_patterns).await?;
@@ -88,16 +98,16 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
         .extend(derive_success_bootstrap_demos(&records));
     derived
         .bootstrap_demos
-        .extend(episode_synthesis.bootstrap_demos.clone());
+        .extend(review_synthesis.bootstrap_demos.clone());
     derived
         .stress_cases
-        .extend(episode_synthesis.stress_cases.clone());
+        .extend(review_synthesis.stress_cases.clone());
     derived
         .instruction_hypotheses
-        .extend(episode_synthesis.instruction_hypotheses.clone());
+        .extend(review_synthesis.instruction_hypotheses.clone());
     derived
         .runtime_demos
-        .extend(episode_synthesis.runtime_demos.clone());
+        .extend(review_synthesis.runtime_demos.clone());
     store
         .replace_bootstrap_demos(&derived.bootstrap_demos)
         .await?;
@@ -125,10 +135,12 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
         .replace_runtime_prompt_evolution_reports(std::slice::from_ref(&runtime_evolution.report))
         .await?;
     let retained_reflections =
-        retain_sleep_reflections(context, &episode_synthesis.reflections).await?;
+        retain_sleep_reflections(context, &review_synthesis.reflections).await?;
     compact_runtime_trace_file(trace_batch.next_offset).await?;
+    compact_runtime_review_file(runtime_review_batch.next_offset).await?;
     Ok(SleepSummary {
         consumed_trace_events,
+        consumed_runtime_reviews,
         failure_patterns,
         bootstrap_demos: derived.bootstrap_demos.len(),
         stress_cases: derived.stress_cases.len(),
@@ -256,7 +268,7 @@ async fn load_recent_learn_episode_outcomes() -> Result<Vec<EpisodeOutcome>> {
 }
 
 #[derive(Default)]
-struct EpisodeSleepSynthesis {
+struct ReviewSleepSynthesis {
     failure_patterns: Vec<SleepArtifactFailurePattern>,
     bootstrap_demos: Vec<SleepArtifactBootstrapDemo>,
     stress_cases: Vec<SleepArtifactStressCase>,
@@ -272,56 +284,66 @@ struct SleepReflectionRecord {
     tags: Vec<String>,
 }
 
-async fn synthesize_episode_outcomes(
-    context: &mut Context,
-    outcomes: &[EpisodeOutcome],
-) -> Result<EpisodeSleepSynthesis> {
-    let renderer = OpenAIToolRenderer;
-    let program = SleepEpisodeSynthesizerProgram;
-    let tuning = resolve_program_tuning(context, &program).await;
-    let mut synthesized = EpisodeSleepSynthesis::default();
+#[derive(Clone)]
+struct ReviewInput {
+    review_id: String,
+    review_label: String,
+    source_kind: String,
+    outcome_status: String,
+    task_goal: String,
+    done_criteria: String,
+    recent_steps: String,
+    final_observation: String,
+    memory_query: String,
+    demo_inputs: Vec<ExampleField>,
+    expected_output: SleepActionOutput,
+    source_trace_ids: Vec<String>,
+    repeat_hint: usize,
+    can_create_failure_pattern: bool,
+    reflection_tags: Vec<String>,
+    reflection_subject: String,
+    last_action_kind: String,
+    last_action_summary: String,
+}
 
-    for outcome in outcomes.iter().cloned() {
-        let Some(step) = outcome
-            .steps
+fn collect_review_inputs(
+    episode_outcomes: &[EpisodeOutcome],
+    runtime_review_spans: &[RuntimeReviewSpan],
+) -> Vec<ReviewInput> {
+    let mut inputs = Vec::new();
+    inputs.extend(
+        episode_outcomes
             .iter()
-            .rev()
-            .find(|step| infer_episode_suite_from_step(step).is_some())
-            .cloned()
-        else {
-            continue;
-        };
-        let Some(suite) = infer_episode_suite_from_step(&step).map(str::to_string) else {
-            continue;
-        };
+            .filter_map(review_input_from_episode),
+    );
+    inputs.extend(
+        runtime_review_spans
+            .iter()
+            .filter_map(review_input_from_runtime_span),
+    );
+    inputs
+}
 
-        let episode_id = format!("episode:{}", outcome.task.id);
-        let recent_steps = render_recent_episode_steps(&outcome);
-        let task_goal = outcome
-            .task
-            .task_goal
-            .clone()
-            .unwrap_or_else(|| outcome.task.title.clone());
-        let final_observation = format!(
-            "{}\n\n{}",
-            outcome.final_observation.summary.trim(),
-            outcome.final_observation.snapshot_text.trim()
-        );
-        let memory_query = format!(
-            "{}\n{}\n{}",
-            task_goal.trim(),
-            outcome.final_observation.summary.trim(),
-            recent_steps.trim()
-        );
-        let related_memories = recall_related_memories(context, &memory_query, 3).await;
+async fn synthesize_review_inputs(
+    context: &mut Context,
+    inputs: &[ReviewInput],
+) -> Result<ReviewSleepSynthesis> {
+    let renderer = OpenAIToolRenderer;
+    let program = SleepReviewSynthesizerProgram;
+    let tuning = resolve_program_tuning(context, &program).await;
+    let mut synthesized = ReviewSleepSynthesis::default();
+
+    for review in inputs.iter().cloned() {
+        let related_memories = recall_related_memories(context, &review.memory_query, 3).await;
         let outcome_ir = program.dataset_ir(
-            suite.to_string(),
-            episode_id.clone(),
-            format!("{:?}", outcome.status),
-            task_goal,
-            outcome.task.done_criteria.join("\n"),
-            recent_steps.clone(),
-            final_observation.clone(),
+            review.review_label.clone(),
+            review.source_kind.clone(),
+            review.review_id.clone(),
+            review.outcome_status.clone(),
+            review.task_goal.clone(),
+            review.done_criteria.clone(),
+            review.recent_steps.clone(),
+            review.final_observation.clone(),
             render_related_memories(&related_memories).unwrap_or_else(|| "无".to_string()),
         );
         let synthesized_outcome = execute_program_with_ir_report(
@@ -335,18 +357,158 @@ async fn synthesize_episode_outcomes(
         )
         .await?;
 
-        merge_episode_synthesis(
+        merge_review_synthesis(
             &mut synthesized,
-            &outcome,
-            &suite,
-            &step,
-            &episode_id,
+            &review,
             &related_memories,
             &synthesized_outcome.output,
         );
     }
 
     Ok(synthesized)
+}
+
+fn review_input_from_episode(outcome: &EpisodeOutcome) -> Option<ReviewInput> {
+    let step = outcome.steps.last()?.clone();
+    let review_label = review_label_from_action_kind(&step.action.kind, &outcome.environment_name);
+    let task_goal = outcome
+        .task
+        .task_goal
+        .clone()
+        .unwrap_or_else(|| outcome.task.title.clone());
+    let done_criteria = if outcome.task.done_criteria.is_empty() {
+        outcome.task.success_criteria.join("\n")
+    } else {
+        outcome.task.done_criteria.join("\n")
+    };
+    let recent_steps = render_recent_episode_steps(outcome);
+    let final_observation = format!(
+        "{}\n\n{}",
+        outcome.final_observation.summary.trim(),
+        outcome.final_observation.snapshot_text.trim()
+    );
+    let memory_query = format!(
+        "{}\n{}\n{}",
+        task_goal.trim(),
+        outcome.final_observation.summary.trim(),
+        recent_steps.trim()
+    );
+    let review_id = format!("episode:{}", outcome.task.id);
+    Some(ReviewInput {
+        review_id: review_id.clone(),
+        review_label: review_label.clone(),
+        source_kind: "train_episode".to_string(),
+        outcome_status: format!("{:?}", outcome.status),
+        task_goal,
+        done_criteria,
+        recent_steps,
+        final_observation,
+        memory_query,
+        demo_inputs: episode_example_inputs(outcome, &step),
+        expected_output: step_to_output(&step),
+        source_trace_ids: vec![review_id.clone()],
+        repeat_hint: outcome.metric.repeated_actions.max(2),
+        can_create_failure_pattern: !matches!(outcome.status, EpisodeStatus::Succeeded),
+        reflection_tags: vec![
+            "sleep-reflection".to_string(),
+            format!("label:{}", review_label),
+            "source:train_episode".to_string(),
+            format!("status:{:?}", outcome.status).to_ascii_lowercase(),
+        ],
+        reflection_subject: format!("train episode {}", outcome.task.id),
+        last_action_kind: step.action.kind.clone(),
+        last_action_summary: step.action.summary.clone(),
+    })
+}
+
+fn review_input_from_runtime_span(span: &RuntimeReviewSpan) -> Option<ReviewInput> {
+    let first_turn = span.turns.first()?;
+    let last_turn = span.last_turn();
+    let review_label = review_label_from_action_kind(&last_turn.primary_action.kind, "runtime");
+    let task_goal = last_turn
+        .metadata
+        .get("objective")
+        .cloned()
+        .filter(|item| !item.trim().is_empty())
+        .or_else(|| {
+            (!last_turn.current_doing.trim().is_empty()).then(|| last_turn.current_doing.clone())
+        })
+        .unwrap_or_else(|| last_turn.primary_action.summary.clone());
+    let outcome_status = infer_runtime_review_status(span);
+    let done_criteria = last_turn
+        .metadata
+        .get("objective")
+        .map(|objective| format!("推进目标：{objective}"))
+        .unwrap_or_else(|| "推进当前 runtime 世界状态并保持行为边界稳定。".to_string());
+    let recent_steps = render_recent_runtime_span_steps(span);
+    let final_observation = format!(
+        "{}\n\n{}",
+        last_turn.observation.trim(),
+        last_turn.after_snapshot_text.trim()
+    );
+    let memory_query = format!(
+        "{}\n{}\n{}",
+        task_goal.trim(),
+        last_turn.observation.trim(),
+        recent_steps.trim()
+    );
+    Some(ReviewInput {
+        review_id: format!("runtime_review:{}", span.id),
+        review_label: review_label.clone(),
+        source_kind: "runtime_review".to_string(),
+        outcome_status: outcome_status.clone(),
+        task_goal,
+        done_criteria,
+        recent_steps,
+        final_observation,
+        memory_query,
+        demo_inputs: runtime_span_example_inputs(first_turn, span),
+        expected_output: runtime_turn_to_output(last_turn),
+        source_trace_ids: span
+            .turns
+            .iter()
+            .map(|turn| format!("runtime_turn:{}", turn.id))
+            .collect(),
+        repeat_hint: span.turns.len().max(2),
+        can_create_failure_pattern: matches!(outcome_status.as_str(), "Blocked" | "NoProgress"),
+        reflection_tags: vec![
+            "sleep-reflection".to_string(),
+            format!("label:{}", review_label),
+            "source:runtime_review".to_string(),
+            format!("status:{}", outcome_status.to_ascii_lowercase()),
+        ],
+        reflection_subject: format!("runtime review {}", span.id),
+        last_action_kind: last_turn.primary_action.kind.clone(),
+        last_action_summary: last_turn.primary_action.summary.clone(),
+    })
+}
+
+fn review_label_from_action_kind(action_kind: &str, fallback: &str) -> String {
+    let action_kind = action_kind.trim();
+    if action_kind.is_empty() {
+        fallback.to_string()
+    } else {
+        action_kind.to_string()
+    }
+}
+
+fn infer_runtime_review_status(span: &RuntimeReviewSpan) -> String {
+    if span.turns.iter().all(|turn| {
+        matches!(
+            turn.primary_action.kind.as_str(),
+            "assistant_message" | "empty_tool_calls"
+        )
+    }) {
+        return "NoProgress".to_string();
+    }
+    if span.turns.iter().any(|turn| {
+        turn.observation.contains("failed")
+            || turn.description.contains("没有可执行动作")
+            || turn.description.contains("empty tool call")
+    }) {
+        return "Blocked".to_string();
+    }
+    "Observed".to_string()
 }
 
 fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<SleepArtifactFailurePattern> {
@@ -408,13 +570,6 @@ fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<SleepArtifactF
     patterns
 }
 
-fn infer_episode_suite_from_step(step: &EpisodeStep) -> Option<&'static str> {
-    match step.action.kind.as_str() {
-        "resolve_telegram_chat" => Some("resolve_telegram_chat"),
-        _ => None,
-    }
-}
-
 fn render_recent_episode_steps(outcome: &EpisodeOutcome) -> String {
     outcome
         .steps
@@ -450,35 +605,124 @@ fn render_recent_episode_steps(outcome: &EpisodeOutcome) -> String {
         .join("\n")
 }
 
-fn merge_episode_synthesis(
-    synthesized: &mut EpisodeSleepSynthesis,
-    outcome: &EpisodeOutcome,
-    suite: &str,
-    step: &EpisodeStep,
-    episode_id: &str,
+fn render_recent_runtime_span_steps(span: &RuntimeReviewSpan) -> String {
+    span.turns
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| {
+            let phase = turn
+                .metadata
+                .get("work_phase")
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            let history_summary = render_runtime_turn_history_summary(&turn.history_messages);
+            format!(
+                "{}. phase={} action={} ({}) current_doing={} observation={} history={}",
+                index + 1,
+                phase,
+                turn.primary_action.kind,
+                turn.primary_action.summary,
+                compact_review_text(&turn.current_doing),
+                compact_review_text(&turn.observation),
+                compact_review_text(&history_summary)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_runtime_turn_history_summary(messages: &[PromptMessage]) -> String {
+    let mut lines = Vec::new();
+    for message in messages {
+        if let Some(summary) = render_prompt_message_summary_for_review(message) {
+            lines.push(summary);
+        }
+    }
+    lines.join(" | ")
+}
+
+fn render_prompt_message_summary_for_review(message: &PromptMessage) -> Option<String> {
+    let mut parts = Vec::new();
+    if !message.content.trim().is_empty() {
+        parts.push(compact_review_text(&message.content));
+    }
+    for event in &message.tool_call_ui_events {
+        parts.push(render_tool_call_ui_event_summary(event));
+    }
+    if let Some(event) = &message.tool_ui_event {
+        parts.push(render_tool_ui_event_summary(event));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" / "))
+    }
+}
+
+fn render_tool_call_ui_event_summary(event: &ToolCallUiEvent) -> String {
+    match event {
+        ToolCallUiEvent::Exec(data)
+        | ToolCallUiEvent::Work(data)
+        | ToolCallUiEvent::Device(data)
+        | ToolCallUiEvent::Error(data) => compact_review_text(&data.title),
+        ToolCallUiEvent::Terminal(data) => compact_review_text(&data.title),
+        ToolCallUiEvent::Patch(data) => compact_review_text(&data.summary_line),
+        ToolCallUiEvent::Telegram(data) => compact_review_text(&data.title),
+    }
+}
+
+fn render_tool_ui_event_summary(event: &ToolUiEvent) -> String {
+    match event {
+        ToolUiEvent::Exec(data)
+        | ToolUiEvent::Work(data)
+        | ToolUiEvent::Device(data)
+        | ToolUiEvent::Error(data) => compact_review_text(&data.title),
+        ToolUiEvent::Terminal(data) => compact_review_text(&data.title),
+        ToolUiEvent::Patch(data) => compact_review_text(&data.summary_line),
+        ToolUiEvent::Telegram(data) => compact_review_text(&data.title),
+    }
+}
+
+fn compact_review_text(text: &str) -> String {
+    const MAX_CHARS: usize = 180;
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= MAX_CHARS {
+        return normalized;
+    }
+    let truncated = normalized.chars().take(MAX_CHARS).collect::<String>();
+    format!("{truncated}…")
+}
+
+fn merge_review_synthesis(
+    synthesized: &mut ReviewSleepSynthesis,
+    review: &ReviewInput,
     related_memories: &[String],
-    output: &SleepEpisodeSynthesizerOutput,
+    output: &SleepReviewSynthesizerOutput,
 ) {
     let has_case_artifact = output.create_bootstrap_demo || output.create_stress_case;
 
     if output.create_failure_pattern
         && !output.failure_pattern_summary.trim().is_empty()
-        && !matches!(outcome.status, EpisodeStatus::Succeeded)
+        && review.can_create_failure_pattern
     {
         synthesized
             .failure_patterns
             .push(SleepArtifactFailurePattern {
-                suite: suite.to_string(),
+                suite: review.review_label.clone(),
                 pattern_id: format!(
-                    "episode:{}:{}:{}",
-                    slugify(suite),
+                    "review:{}:{}:{}",
+                    slugify(&review.review_label),
                     slugify(output.failure_pattern_summary.trim()),
-                    slugify(&outcome.task.id)
+                    slugify(&review.review_id)
                 ),
                 description: output.failure_pattern_summary.trim().to_string(),
-                supporting_trace_ids: vec![episode_id.to_string()],
-                frequency: outcome.metric.repeated_actions.max(1),
-                severity: 4,
+                supporting_trace_ids: review.source_trace_ids.clone(),
+                frequency: review.repeat_hint.max(1),
+                severity: if review.source_kind == "runtime_review" {
+                    3
+                } else {
+                    4
+                },
                 suggested_fix_kind: match output
                     .suggested_fix_kind
                     .trim()
@@ -501,33 +745,34 @@ fn merge_episode_synthesis(
         synthesized
             .bootstrap_demos
             .push(SleepArtifactBootstrapDemo {
-                suite: suite.to_string(),
+                suite: review.review_label.clone(),
                 title: output.bootstrap_demo_title.trim().to_string(),
                 input_summary: output.synthesized_summary.trim().to_string(),
-                inputs: episode_example_inputs(outcome, step),
-                expected_output: serde_json::to_value(step_to_output(step))
+                inputs: review.demo_inputs.clone(),
+                expected_output: serde_json::to_value(&review.expected_output)
                     .unwrap_or_else(|_| json!({})),
                 reference_case_names: Vec::new(),
-                source_trace_ids: vec![episode_id.to_string()],
+                source_trace_ids: review.source_trace_ids.clone(),
                 confidence: output.reflection_confidence.clamp(0.0, 1.0) as f32,
             });
     }
 
     if output.create_stress_case && !output.stress_case_name.trim().is_empty() {
         synthesized.stress_cases.push(SleepArtifactStressCase {
-            suite: suite.to_string(),
+            suite: review.review_label.clone(),
             name: output.stress_case_name.trim().to_string(),
             input_ir: json!({
-                "task_title": outcome.task.title,
-                "task_goal": outcome.task.task_goal,
+                "review_label": review.review_label,
+                "source_kind": review.source_kind,
+                "task_goal": review.task_goal,
                 "summary": output.synthesized_summary,
-                "last_action": format!("{} ({})", step.action.kind, step.action.summary),
+                "last_action": format!("{} ({})", review.last_action_kind, review.last_action_summary),
                 "related_memories": related_memories,
             }),
             expected_constraints: output.stress_constraints.clone(),
             reference_case_names: Vec::new(),
-            source_pattern_id: episode_id.to_string(),
-            repeat: outcome.metric.repeated_actions.max(2),
+            source_pattern_id: review.review_id.clone(),
+            repeat: review.repeat_hint.max(2),
             weight: 2,
         });
     }
@@ -539,34 +784,30 @@ fn merge_episode_synthesis(
         synthesized
             .instruction_hypotheses
             .push(SleepArtifactInstructionHypothesis {
-                suite: suite.to_string(),
+                suite: review.review_label.clone(),
                 text: output.instruction_text.trim().to_string(),
                 justification: output.reason.trim().to_string(),
-                source_pattern_ids: vec![episode_id.to_string()],
+                source_pattern_ids: review.source_trace_ids.clone(),
             });
     }
 
-    if let Some(runtime_demo) = episode_runtime_demo(outcome, step, episode_id, output) {
+    if let Some(runtime_demo) = review_runtime_demo(review, output) {
         synthesized.runtime_demos.push(runtime_demo);
     }
 
     if !output.synthesized_summary.trim().is_empty() || !output.strategy_lesson.trim().is_empty() {
         synthesized.reflections.push(SleepReflectionRecord {
-            document_id: format!("sleep-reflection:{}", slugify(episode_id)),
+            document_id: format!("sleep-reflection:{}", slugify(&review.review_id)),
             content: format!(
-                "Episode: {}\nSuite: {}\nStatus: {:?}\nSummary: {}\nStrategy lesson: {}\nReason: {}",
-                outcome.task.id,
-                suite,
-                outcome.status,
+                "Source: {}\nLabel: {}\nStatus: {}\nSummary: {}\nStrategy lesson: {}\nReason: {}",
+                review.reflection_subject,
+                review.review_label,
+                review.outcome_status,
                 output.synthesized_summary.trim(),
                 output.strategy_lesson.trim(),
                 output.reason.trim(),
             ),
-            tags: vec![
-                "sleep-reflection".to_string(),
-                format!("suite:{}", suite),
-                format!("status:{:?}", outcome.status).to_ascii_lowercase(),
-            ],
+            tags: review.reflection_tags.clone(),
         });
     }
 }
@@ -599,6 +840,32 @@ fn step_to_output(step: &EpisodeStep) -> SleepActionOutput {
             .unwrap_or_default(),
         action_kind: step.action.kind.clone(),
         action_summary: step.action.summary.clone(),
+    }
+}
+
+fn runtime_span_example_inputs(
+    first_turn: &RuntimeTurnRecord,
+    span: &RuntimeReviewSpan,
+) -> Vec<ExampleField> {
+    vec![
+        ExampleField {
+            name: "当前状态".to_string(),
+            value: first_turn.before_snapshot_text.clone(),
+        },
+        ExampleField {
+            name: "最近交互".to_string(),
+            value: render_recent_runtime_span_steps(span),
+        },
+    ]
+}
+
+fn runtime_turn_to_output(turn: &RuntimeTurnRecord) -> SleepActionOutput {
+    SleepActionOutput {
+        observation: turn.observation.clone(),
+        description: turn.description.clone(),
+        current_doing: turn.current_doing.clone(),
+        action_kind: turn.primary_action.kind.clone(),
+        action_summary: turn.primary_action.summary.clone(),
     }
 }
 
@@ -869,7 +1136,7 @@ async fn evolve_runtime_system_prompt(
             passed: 0,
             regressions: 0,
             rolled_back: false,
-            accepted: true,
+            accepted: false,
             rounds: 0,
         });
     }
@@ -1400,11 +1667,9 @@ fn to_stress_case(
     })
 }
 
-fn episode_runtime_demo(
-    outcome: &EpisodeOutcome,
-    step: &EpisodeStep,
-    episode_id: &str,
-    output: &SleepEpisodeSynthesizerOutput,
+fn review_runtime_demo(
+    review: &ReviewInput,
+    output: &SleepReviewSynthesizerOutput,
 ) -> Option<SleepArtifactRuntimeDemo> {
     let expected_behavior = if !output.strategy_lesson.trim().is_empty() {
         output.strategy_lesson.trim()
@@ -1413,21 +1678,18 @@ fn episode_runtime_demo(
     } else {
         return None;
     };
-    let task_goal = outcome
-        .task
-        .task_goal
-        .clone()
-        .unwrap_or_else(|| outcome.task.title.clone());
     Some(SleepArtifactRuntimeDemo {
         compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-        title: format!("runtime demo {}", outcome.task.id),
+        title: format!("runtime demo {}", review.review_id),
         scenario_summary: format!(
-            "task: {}\noutcome: {:?}\nsummary: {}",
-            task_goal.trim(),
-            outcome.status,
+            "source: {}\nlabel: {}\nstatus: {}\ntask: {}\nsummary: {}",
+            review.source_kind,
+            review.review_label,
+            review.outcome_status,
+            review.task_goal.trim(),
             output.synthesized_summary.trim()
         ),
-        inputs: episode_example_inputs(outcome, step),
+        inputs: review.demo_inputs.clone(),
         expected_behavior: expected_behavior.to_string(),
         judge_focus: [
             output.failure_pattern_summary.trim(),
@@ -1438,7 +1700,7 @@ fn episode_runtime_demo(
         .filter(|item| !item.is_empty())
         .map(str::to_string)
         .collect(),
-        source_trace_ids: vec![episode_id.to_string()],
+        source_trace_ids: review.source_trace_ids.clone(),
         confidence: output.reflection_confidence.clamp(0.0, 1.0) as f32,
     })
 }

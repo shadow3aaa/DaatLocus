@@ -7,24 +7,27 @@ use crate::{
     snapshot::Snapshot,
 };
 
-const SLEEP_EPISODE_SYNTHESIZER_SYSTEM_PROMPT: &str = r#"你现在处于睡眠整理阶段。
-你的任务是阅读一个训练/运行 episode 的结果，并把它抽象成可复用的学习结论。
+const SLEEP_REVIEW_SYNTHESIZER_SYSTEM_PROMPT: &str = r#"你现在处于睡眠整理阶段。
+你的任务是阅读一个 review unit 的结果，并把它抽象成可复用的学习结论。
+
+review unit 可能来自：
+1. train/eval episode
+2. 正常 runtime span
 
 目标不是复述轨迹，而是提炼：
-1. 这次为什么成功或失败
+1. 这次行为片段暴露了什么稳定模式
 2. 下次遇到类似情况应如何更快收敛
 3. 哪些 compile 产物值得生成（demo / instruction / stress）
 4. 是否值得保留为长期复盘经验
 
 重要原则：
-- 优先把 lesson 落成可验证的 bootstrap demo 或 stress case；只有无法 case 化时，才退回 instruction hypothesis。
-- 优先学习“如何围绕明确错误对象收敛”的策略，而不是只记录表面现象。
-- 成功是常态，只有当成功模式明显可迁移、可复用、能稳定指导未来任务时，才允许 retain_reflection=true。
-- 失败更容易产生长期复盘经验，但也必须抽象成未来可执行的策略，不要停留在 case 名称或日志片段。
-- 如果 episode 已经给出明确错误对象（导入错误、路径错误、入口错误、命令未触发、环境缺失），应围绕该错误对象总结下一步策略。
-- 输出必须简洁、抽象、可迁移，不要长篇复述整个 trace。 "#;
+- 优先把 lesson 落成可验证的 runtime demo 或 stress case；只有无法 case 化时，才退回 instruction hypothesis。
+- 优先学习“如何围绕明确错误对象或状态边界收敛”的策略，而不是只记录表面现象。
+- 成功或常规推进不默认 retain；只有模式明显可迁移、可复用、能稳定指导未来任务时，才允许 retain_reflection=true。
+- 如果 review unit 已经给出明确错误对象（导入错误、路径错误、入口错误、命令未触发、环境缺失、状态推进冲突），应围绕该错误对象总结下一步策略。
+- 输出必须简洁、抽象、可迁移，不要长篇复述整个轨迹。 "#;
 
-pub struct SleepEpisodeSynthesizerProgram;
+pub struct SleepReviewSynthesizerProgram;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum ReflectionKind {
@@ -44,7 +47,7 @@ pub enum ReflectionStability {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SleepEpisodeSynthesizerOutput {
+pub struct SleepReviewSynthesizerOutput {
     pub synthesized_summary: String,
     pub strategy_lesson: String,
     pub create_failure_pattern: bool,
@@ -68,33 +71,40 @@ pub struct SleepEpisodeSynthesizerOutput {
     pub reason: String,
 }
 
-impl Program for SleepEpisodeSynthesizerProgram {
-    type Output = SleepEpisodeSynthesizerOutput;
+impl Program for SleepReviewSynthesizerProgram {
+    type Output = SleepReviewSynthesizerOutput;
 
     fn name(&self) -> &'static str {
-        "sleep_episode_synthesizer"
+        "sleep_review_synthesizer"
     }
 
     fn description(&self) -> &'static str {
-        "把单个成功/失败 episode 抽象成可复用策略，并生成 artifacts 与长期复盘提议。"
+        "把单个 train episode 或 runtime review span 抽象成可复用策略，并生成 sleep artifacts 与长期复盘提议。"
     }
 
     fn signature(&self) -> Signature {
-        Signature::new("从单个 episode 结果中抽象学习结论。")
-            .input("target suite", "当前 episode 最相关的 suite。")
-            .input("episode id", "episode 的稳定标识。")
-            .input("outcome status", "Succeeded/Failed/Aborted/MaxStepsExceeded。")
-            .input("task goal", "任务目标。")
-            .input("done criteria", "任务完成标准。")
+        Signature::new("从单个 review unit 结果中抽象学习结论。")
+            .input("review label", "这个 review unit 最相关的标签或能力名。")
+            .input("source kind", "train_episode 或 runtime_review。")
+            .input("review id", "review unit 的稳定标识。")
+            .input(
+                "outcome status",
+                "Succeeded/Failed/Observed/NoProgress 等高层状态。",
+            )
+            .input("task goal", "当前目标。")
+            .input("done criteria", "完成标准或推进标准。")
             .input("recent steps", "最近关键步骤摘要。")
             .input("final observation", "最终总结和快照摘要。")
             .input("related memories", "相关长期记忆。")
-            .output("synthesized_summary", "对 episode 的高层抽象总结。")
+            .output("synthesized_summary", "对 review unit 的高层抽象总结。")
             .output("strategy_lesson", "下次应如何行动的可迁移策略。")
             .output("create_failure_pattern", "是否生成失败 pattern。")
             .output("failure_pattern_summary", "失败 pattern 的高层描述。")
             .output("suggested_fix_kind", "demo/instruction/stress_case 之一。")
-            .output("create_instruction_hypothesis", "是否生成 instruction hypothesis。")
+            .output(
+                "create_instruction_hypothesis",
+                "是否生成 instruction hypothesis。",
+            )
             .output("instruction_text", "生成的 instruction。")
             .output("create_bootstrap_demo", "是否生成 bootstrap demo。")
             .output("bootstrap_demo_title", "demo 标题。")
@@ -110,10 +120,10 @@ impl Program for SleepEpisodeSynthesizerProgram {
             .output("reflection_retrieval_text", "供长期记忆检索的文本。")
             .output("reflection_confidence", "0 到 1 的置信度。")
             .output("reason", "为什么这样判断。")
-            .rule("成功 episode 默认不要 retain_reflection，除非成功模式明显可迁移且足以稳定指导未来任务。")
-            .rule("失败 episode 优先输出收敛策略，不要只复述报错原文。")
-            .rule("如果已经有明确错误对象，strategy_lesson 必须围绕该错误对象收敛。")
+            .rule("优先产出适合后续 runtime system prompt 优化的 demo。")
             .rule("如果一个 lesson 可以稳定落成 demo 或 stress case，就不要只生成 instruction。")
+            .rule("失败或卡住的 review unit 优先输出收敛策略，不要只复述报错或日志。")
+            .rule("如果已经有明确错误对象或状态冲突，strategy_lesson 必须围绕该对象收敛。")
     }
 
     fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
@@ -126,16 +136,18 @@ impl Program for SleepEpisodeSynthesizerProgram {
             String::new(),
             String::new(),
             String::new(),
+            String::new(),
         )
     }
 }
 
-impl SleepEpisodeSynthesizerProgram {
+impl SleepReviewSynthesizerProgram {
     #[allow(clippy::too_many_arguments)]
     pub fn dataset_ir(
         &self,
-        target_suite: String,
-        episode_id: String,
+        review_label: String,
+        source_kind: String,
+        review_id: String,
         outcome_status: String,
         task_goal: String,
         done_criteria: String,
@@ -143,16 +155,15 @@ impl SleepEpisodeSynthesizerProgram {
         final_observation: String,
         related_memories: String,
     ) -> PromptIR {
-        let mut ir = PromptIR::with_system(SLEEP_EPISODE_SYNTHESIZER_SYSTEM_PROMPT);
+        let mut ir = PromptIR::with_system(SLEEP_REVIEW_SYNTHESIZER_SYSTEM_PROMPT);
         ir.push_instruction("优先提炼高层策略，避免只记录 tail/grep/cat/pytest 这类表面命令。");
         ir.push_instruction(
-            "如果成功只是常规完成，不必保留为长期复盘；成功只有在明显可迁移时才 retain。",
+            "优先生成可比较效果的 runtime demo/stress；只有无法 case 化时才生成 instruction。",
         );
-        ir.push_instruction(
-            "优先生成可比较效果的 demo/stress；只有无法 case 化时才生成 instruction。",
-        );
-        ir.push_section("target suite", target_suite);
-        ir.push_section("episode id", episode_id);
+        ir.push_instruction("source kind 为 runtime_review 时，不要强行套 train/eval 完成语义，应更关注状态推进质量与行为边界。");
+        ir.push_section("review label", review_label);
+        ir.push_section("source kind", source_kind);
+        ir.push_section("review id", review_id);
         ir.push_section("outcome status", outcome_status);
         ir.push_section("task goal", task_goal);
         ir.push_section("done criteria", done_criteria);
