@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::get_spinova_home;
+use crate::spinova_paths::spinova_paths;
 use crate::reasoning::examples::ExampleField;
 
-const SLEEP_ARTIFACTS_DIR_NAME: &str = "sleep_artifacts";
+const EVALUATIONS_DIR_NAME: &str = "evaluations";
 const FAILURE_PATTERNS_DIR: &str = "failure_patterns";
 const BOOTSTRAP_DEMOS_DIR: &str = "bootstrap_demos";
 const STRESS_CASES_DIR: &str = "stress_cases";
@@ -24,14 +24,14 @@ const MAX_ARTIFACT_FILE_STEM_LEN: usize = 96;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SleepArtifactSuggestedFixKind {
+pub enum EvaluationArtifactSuggestedFixKind {
     Demo,
     Instruction,
     StressCase,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SleepArtifactFailurePattern {
+pub struct EvaluationArtifactFailurePattern {
     pub suite: String,
     pub pattern_id: String,
     pub description: String,
@@ -39,11 +39,11 @@ pub struct SleepArtifactFailurePattern {
     pub supporting_trace_ids: Vec<String>,
     pub frequency: usize,
     pub severity: u8,
-    pub suggested_fix_kind: SleepArtifactSuggestedFixKind,
+    pub suggested_fix_kind: EvaluationArtifactSuggestedFixKind,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SleepArtifactBootstrapDemo {
+pub struct EvaluationArtifactBootstrapDemo {
     pub suite: String,
     pub title: String,
     pub input_summary: String,
@@ -58,7 +58,7 @@ pub struct SleepArtifactBootstrapDemo {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SleepArtifactStressCase {
+pub struct EvaluationArtifactStressCase {
     pub suite: String,
     pub name: String,
     pub input_ir: serde_json::Value,
@@ -72,7 +72,7 @@ pub struct SleepArtifactStressCase {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SleepArtifactInstructionHypothesis {
+pub struct EvaluationArtifactInstructionHypothesis {
     pub suite: String,
     pub text: String,
     pub justification: String,
@@ -81,7 +81,7 @@ pub struct SleepArtifactInstructionHypothesis {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SleepArtifactRuntimeDemo {
+pub struct EvaluationArtifactRuntimeDemo {
     pub compile_key: String,
     pub title: String,
     pub scenario_summary: String,
@@ -96,7 +96,7 @@ pub struct SleepArtifactRuntimeDemo {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SleepArtifactTurnDemo {
+pub struct EvaluationArtifactTurnDemo {
     pub compile_key: String,
     pub title: String,
     pub scenario_summary: String,
@@ -115,7 +115,7 @@ pub struct SleepArtifactTurnDemo {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SleepArtifactRuntimePromptSuggestion {
+pub struct EvaluationArtifactRuntimePromptSuggestion {
     pub compile_key: String,
     pub title: String,
     pub rationale: String,
@@ -128,7 +128,7 @@ pub struct SleepArtifactRuntimePromptSuggestion {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SleepArtifactRuntimeDemoEvaluation {
+pub struct EvaluationArtifactRuntimeDemoEvaluation {
     pub compile_key: String,
     pub demo_title: String,
     pub passed: bool,
@@ -140,7 +140,7 @@ pub struct SleepArtifactRuntimeDemoEvaluation {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct SleepArtifactTurnDemoEvaluation {
+pub struct EvaluationArtifactTurnDemoEvaluation {
     pub compile_key: String,
     pub demo_title: String,
     pub passed: bool,
@@ -171,7 +171,7 @@ pub struct SleepArtifactTurnDemoEvaluation {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SleepArtifactRuntimePromptCandidate {
+pub struct EvaluationArtifactRuntimePromptCandidate {
     pub compile_key: String,
     pub title: String,
     pub rationale: String,
@@ -184,7 +184,7 @@ pub struct SleepArtifactRuntimePromptCandidate {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SleepArtifactRuntimePromptEvolutionRound {
+pub struct EvaluationArtifactRuntimePromptEvolutionRound {
     pub round: usize,
     pub candidate: String,
     pub passed: usize,
@@ -199,7 +199,7 @@ pub struct SleepArtifactRuntimePromptEvolutionRound {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SleepArtifactRuntimePromptEvolutionReport {
+pub struct EvaluationArtifactRuntimePromptEvolutionReport {
     pub compile_key: String,
     pub rounds: usize,
     pub accepted: bool,
@@ -213,20 +213,20 @@ pub struct SleepArtifactRuntimePromptEvolutionReport {
     #[serde(default)]
     pub final_system_additions: Vec<String>,
     #[serde(default)]
-    pub round_history: Vec<SleepArtifactRuntimePromptEvolutionRound>,
+    pub round_history: Vec<EvaluationArtifactRuntimePromptEvolutionRound>,
 }
 
-pub struct SleepArtifactsStore {
+pub struct EvaluationArtifactsStore {
     root: PathBuf,
 }
 
-impl SleepArtifactsStore {
+impl EvaluationArtifactsStore {
     pub async fn open() -> Result<Self> {
         Self::open_scoped(None).await
     }
 
     pub async fn open_scoped(scope: Option<&str>) -> Result<Self> {
-        let mut root = get_spinova_home().await.join(SLEEP_ARTIFACTS_DIR_NAME);
+        let mut root = spinova_paths().await.artifact_dir(EVALUATIONS_DIR_NAME);
         if let Some(scope) = scope {
             root = root.join(artifact_file_stem(scope));
         }
@@ -247,7 +247,7 @@ impl SleepArtifactsStore {
 
     pub async fn replace_failure_patterns(
         &self,
-        artifacts: &[SleepArtifactFailurePattern],
+        artifacts: &[EvaluationArtifactFailurePattern],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
@@ -259,7 +259,7 @@ impl SleepArtifactsStore {
 
     pub async fn replace_bootstrap_demos(
         &self,
-        artifacts: &[SleepArtifactBootstrapDemo],
+        artifacts: &[EvaluationArtifactBootstrapDemo],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
@@ -274,7 +274,7 @@ impl SleepArtifactsStore {
 
     pub async fn replace_stress_cases(
         &self,
-        artifacts: &[SleepArtifactStressCase],
+        artifacts: &[EvaluationArtifactStressCase],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
@@ -286,7 +286,7 @@ impl SleepArtifactsStore {
 
     pub async fn replace_instruction_hypotheses(
         &self,
-        artifacts: &[SleepArtifactInstructionHypothesis],
+        artifacts: &[EvaluationArtifactInstructionHypothesis],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
@@ -301,7 +301,7 @@ impl SleepArtifactsStore {
 
     pub async fn replace_runtime_demos(
         &self,
-        artifacts: &[SleepArtifactRuntimeDemo],
+        artifacts: &[EvaluationArtifactRuntimeDemo],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
@@ -316,7 +316,7 @@ impl SleepArtifactsStore {
 
     pub async fn replace_turn_demos(
         &self,
-        artifacts: &[SleepArtifactTurnDemo],
+        artifacts: &[EvaluationArtifactTurnDemo],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
@@ -331,7 +331,7 @@ impl SleepArtifactsStore {
 
     pub async fn replace_runtime_prompt_suggestions(
         &self,
-        artifacts: &[SleepArtifactRuntimePromptSuggestion],
+        artifacts: &[EvaluationArtifactRuntimePromptSuggestion],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
@@ -346,7 +346,7 @@ impl SleepArtifactsStore {
 
     pub async fn replace_runtime_demo_evaluations(
         &self,
-        artifacts: &[SleepArtifactRuntimeDemoEvaluation],
+        artifacts: &[EvaluationArtifactRuntimeDemoEvaluation],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
@@ -361,7 +361,7 @@ impl SleepArtifactsStore {
 
     pub async fn replace_turn_demo_evaluations(
         &self,
-        artifacts: &[SleepArtifactTurnDemoEvaluation],
+        artifacts: &[EvaluationArtifactTurnDemoEvaluation],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
@@ -376,7 +376,7 @@ impl SleepArtifactsStore {
 
     pub async fn replace_runtime_prompt_candidates(
         &self,
-        artifacts: &[SleepArtifactRuntimePromptCandidate],
+        artifacts: &[EvaluationArtifactRuntimePromptCandidate],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
@@ -391,7 +391,7 @@ impl SleepArtifactsStore {
 
     pub async fn replace_runtime_prompt_evolution_reports(
         &self,
-        artifacts: &[SleepArtifactRuntimePromptEvolutionReport],
+        artifacts: &[EvaluationArtifactRuntimePromptEvolutionReport],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
@@ -415,7 +415,7 @@ async fn ensure_dir(path: &Path) -> Result<()> {
     if !path.exists() {
         fs::create_dir_all(path).await.map_err(|err| {
             miette!(
-                "failed to create sleep artifacts dir {}: {err}",
+                "failed to create evaluation artifacts dir {}: {err}",
                 path.display()
             )
         })?;
@@ -430,10 +430,10 @@ where
     let file_name = format!("{}-{}.json", artifact_file_stem(stem), Uuid::new_v4());
     let path = dir.join(file_name);
     let bytes = serde_json::to_vec_pretty(artifact)
-        .map_err(|err| miette!("failed to serialize sleep artifact: {err}"))?;
+        .map_err(|err| miette!("failed to serialize evaluation artifact: {err}"))?;
     fs::write(&path, bytes)
         .await
-        .map_err(|err| miette!("failed to write sleep artifact {}: {err}", path.display()))?;
+        .map_err(|err| miette!("failed to write evaluation artifact {}: {err}", path.display()))?;
     Ok(path)
 }
 
@@ -446,7 +446,7 @@ where
     if dir.exists() {
         fs::remove_dir_all(dir).await.map_err(|err| {
             miette!(
-                "failed to reset sleep artifacts dir {}: {err}",
+                "failed to reset evaluation artifacts dir {}: {err}",
                 dir.display()
             )
         })?;
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn runtime_prompt_evolution_report_roundtrip_preserves_round_history() {
-        let report = SleepArtifactRuntimePromptEvolutionReport {
+        let report = EvaluationArtifactRuntimePromptEvolutionReport {
             compile_key: "runtime_agent_system".to_string(),
             rounds: 2,
             accepted: false,
@@ -502,7 +502,7 @@ mod tests {
             selected_demo_titles: vec!["demo-a".to_string()],
             final_system_additions: vec!["rule a".to_string(), "rule b".to_string()],
             round_history: vec![
-                SleepArtifactRuntimePromptEvolutionRound {
+                EvaluationArtifactRuntimePromptEvolutionRound {
                     round: 1,
                     candidate: "current".to_string(),
                     passed: 1,
@@ -513,7 +513,7 @@ mod tests {
                     suggestion_titles: vec!["suggestion-1".to_string()],
                     candidate_titles: vec!["candidate-a".to_string()],
                 },
-                SleepArtifactRuntimePromptEvolutionRound {
+                EvaluationArtifactRuntimePromptEvolutionRound {
                     round: 2,
                     candidate: "candidate-a".to_string(),
                     passed: 1,
@@ -528,7 +528,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&report).unwrap();
-        let decoded: SleepArtifactRuntimePromptEvolutionReport =
+        let decoded: EvaluationArtifactRuntimePromptEvolutionReport =
             serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, report);
     }

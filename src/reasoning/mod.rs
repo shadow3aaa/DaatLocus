@@ -15,6 +15,6 @@ pub mod runtime;
 pub mod runtime_review;
 pub mod signature;
 pub mod sleep;
-pub mod sleep_artifacts;
+pub mod evaluation_artifacts;
 pub mod trace;
 pub mod turn_compile;

@@ -5,7 +5,6 @@ mod context_budget;
 mod core;
 mod dashboard;
 mod device;
-mod emotion;
 mod events;
 mod hindsight;
 mod logging;
@@ -17,6 +16,7 @@ mod runtime_context;
 mod runtime_tools;
 mod sandbox;
 mod snapshot;
+mod spinova_paths;
 mod system_info;
 mod telegram_acl;
 mod telegram_device;
@@ -47,7 +47,6 @@ use crate::{
         run_tui_dashboard,
     },
     device::{DeviceId, DeviceManager},
-    emotion::Emotion,
     events::{EventPayload, EventStatus, EventStore, EventView},
     hindsight::{HindsightClient, HindsightRecallOptions},
     logging::{
@@ -81,7 +80,7 @@ use crate::{
             RuntimeTurnRecord, append_runtime_turn_record, unread_runtime_review_count,
         },
         sleep::run_sleep,
-        sleep_artifacts::SleepArtifactSuggestedFixKind,
+        evaluation_artifacts::EvaluationArtifactSuggestedFixKind,
         trace::unread_runtime_trace_count,
         turn_compile::TurnCompileEngine,
     },
@@ -96,6 +95,7 @@ use crate::{
     },
     sandbox::RuntimeSandboxPolicy,
     snapshot::Snapshot,
+    spinova_paths::{SpinovaPaths, spinova_paths},
     telegram_acl::TelegramAclHandle,
     telegram_device::TelegramDevice,
     telegram_transport::TelegramTransport,
@@ -188,10 +188,11 @@ enum SpinovaCommand {
 
 #[derive(Debug, Subcommand)]
 enum ResetTarget {
+    #[command(name = "complite", alias = "compile")]
+    Complite,
+    State,
+    Memory,
     All,
-    Mem,
-    Prompt,
-    Log,
 }
 
 #[derive(Debug, Subcommand)]
@@ -237,27 +238,27 @@ fn main() {
 async fn async_main(cli: Cli) -> Result<()> {
     match cli.command.as_ref() {
         Some(SpinovaCommand::Reset {
+            target: ResetTarget::Complite,
+        }) => {
+            run_complite_reset().await?;
+            return Ok(());
+        }
+        Some(SpinovaCommand::Reset {
+            target: ResetTarget::State,
+        }) => {
+            run_state_reset().await?;
+            return Ok(());
+        }
+        Some(SpinovaCommand::Reset {
+            target: ResetTarget::Memory,
+        }) => {
+            run_memory_reset().await?;
+            return Ok(());
+        }
+        Some(SpinovaCommand::Reset {
             target: ResetTarget::All,
         }) => {
             run_reset_all().await?;
-            return Ok(());
-        }
-        Some(SpinovaCommand::Reset {
-            target: ResetTarget::Mem,
-        }) => {
-            run_mem_reset().await?;
-            return Ok(());
-        }
-        Some(SpinovaCommand::Reset {
-            target: ResetTarget::Prompt,
-        }) => {
-            run_prompt_reset().await?;
-            return Ok(());
-        }
-        Some(SpinovaCommand::Reset {
-            target: ResetTarget::Log,
-        }) => {
-            run_log_reset().await?;
             return Ok(());
         }
         _ => {}
@@ -359,7 +360,6 @@ async fn async_main(cli: Cli) -> Result<()> {
     let memory = Memory::new().await;
     let todo_board = TodoBoard::new().await;
     let work_state = WorkState::new().await;
-    let emotion = Emotion::new().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
     let telegram_acl = TelegramAclHandle::load().await;
@@ -402,7 +402,6 @@ async fn async_main(cli: Cli) -> Result<()> {
         prompt_memory: PromptMemoryContext::default(),
         todo_board,
         work_state,
-        emotion,
         events,
         pending_work,
         devices,
@@ -526,138 +525,136 @@ fn train_source_learn_args(cli: &Cli) -> Option<(String, usize, usize)> {
     }
 }
 
-async fn run_mem_reset() -> Result<()> {
+async fn run_memory_reset() -> Result<()> {
     let home = get_spinova_home().await;
-    clear_mem_state(&home).await?;
+    clear_memory_state(&home).await?;
 
     println!(
-        "[mem-reset] reset persistent runtime state under {}",
+        "[memory-reset] reset memory persistence under {}",
         home.display()
     );
+    println!("[memory-reset] cleared: runtime_conversation, hindsight_queue");
+    println!("[memory-reset] cleared: reasoning_traces.jsonl, runtime_reviews.jsonl");
+    println!("[memory-reset] cleared: hindsight bank");
     println!(
-        "[mem-reset] cleared via empty context shutdown: runtime_conversation, hindsight_queue, todo_board, work_state, emotion, events"
+        "[memory-reset] preserved: config/, state/, artifacts/, logs/"
     );
-    println!("[mem-reset] cleared: reasoning_traces.jsonl, runtime_reviews.jsonl");
-    println!("[mem-reset] cleared: hindsight bank");
-    println!("[mem-reset] preserved: config.toml, reasoning_compiled/, telegram_acl.json, logs/");
 
     Ok(())
 }
 
-async fn clear_mem_state(home: &PathBuf) -> Result<()> {
+async fn clear_memory_state(home: &PathBuf) -> Result<()> {
     let config = load_config()
         .await
-        .map_err(|err| miette!("failed to load config for mem-reset: {err}"))?;
+        .map_err(|err| miette!("failed to load config for memory-reset: {err}"))?;
     let hindsight = HindsightClient::connect(&config.hindsight).await?;
     hindsight.delete_bank().await?;
-    let judge_model = config.judge.resolved_model(&config.main_model);
-    let telegram = TelegramDevice::empty();
-    let telegram_handle = telegram.handle();
-    let devices = DeviceManager::new(None, vec![])
-        .await
-        .map_err(|err| miette!("failed to construct default devices for mem-reset: {err}"))?;
-    let execution_cwd =
-        env::current_dir().map_err(|err| miette!("failed to determine execution cwd: {err}"))?;
-    let sandbox_policy = sandbox_policy_for_runtime(&execution_cwd).await;
-    let context = Context {
-        llm: Box::new(OpenAIClient::new(&config)),
-        judge_llm: Box::new(OpenAIClient::from_model_config(&judge_model)),
-        config,
-        hindsight: hindsight.clone(),
-        hindsight_retain: hindsight.spawn_retain_worker(),
-        memory: Memory::empty().await,
-        prompt_memory: PromptMemoryContext::default(),
-        todo_board: TodoBoard::default(),
-        work_state: WorkState::default(),
-        emotion: Emotion::default(),
-        events: EventStore::empty(),
-        pending_work: PendingWorkQueue::empty(),
-        devices,
-        telegram: telegram_handle,
-        compiled_prompts: CompiledPromptStore::empty(),
-        execution_cwd,
-        sandbox_policy,
-        dashboard_tx: None,
-        active_runtime_turn: false,
-        active_device_notices: std::collections::HashSet::new(),
-        idle_since: None,
-        last_idle_sleep_at: None,
-        record_runtime_reviews: false,
-    };
-    context.shutdown().await;
-
-    let trace_path = home.join("reasoning_traces.jsonl");
-    if trace_path.exists() {
-        tokio::fs::remove_file(&trace_path)
-            .await
-            .map_err(|err| miette!("failed to remove {}: {err}", trace_path.display()))?;
-    }
-    let runtime_review_path = home.join("runtime_reviews.jsonl");
-    if runtime_review_path.exists() {
-        tokio::fs::remove_file(&runtime_review_path)
-            .await
-            .map_err(|err| miette!("failed to remove {}: {err}", runtime_review_path.display()))?;
-    }
+    let paths = SpinovaPaths::from_root(home.clone());
+    clear_files(
+        &[
+            paths.state_file("runtime_conversation"),
+            paths.state_file("hindsight_queue"),
+            paths.journal_file("reasoning_traces.jsonl"),
+            paths.journal_file("runtime_reviews.jsonl"),
+        ],
+    )
+    .await?;
 
     Ok(())
 }
 
-async fn run_prompt_reset() -> Result<()> {
+async fn run_state_reset() -> Result<()> {
     let home = get_spinova_home().await;
-    let cleared = clear_prompt_cache_dirs(&home).await?;
+    let cleared = clear_state_files(&home).await?;
 
     println!(
-        "[prompt-reset] cleared prompt compile cache under {}",
+        "[state-reset] reset runtime state under {}",
         home.display()
     );
     if cleared.is_empty() {
-        println!(
-            "[prompt-reset] nothing to remove; {} was already absent",
-            COMPILED_DIR_NAME
-        );
+        println!("[state-reset] nothing to remove");
     } else {
-        println!("[prompt-reset] cleared: {}", cleared.join(", "));
+        println!("[state-reset] cleared: {}", cleared.join(", "));
     }
     println!(
-        "[prompt-reset] preserved: config.toml, telegram_acl.json, reasoning_traces.jsonl, runtime memory state"
+        "[state-reset] preserved: config/, memory state, artifacts/, logs/"
     );
 
     Ok(())
 }
 
-async fn run_log_reset() -> Result<()> {
-    let home = get_spinova_home().await;
-    let cleared = clear_log_dirs(&home).await?;
+async fn clear_state_files(home: &PathBuf) -> Result<Vec<String>> {
+    let paths = SpinovaPaths::from_root(home.clone());
+    let files = [
+        "todo_board",
+        "work_state",
+        "events",
+        "pending_work_queue",
+        "telegram_transport_state",
+    ];
+    clear_named_files(paths.state_dir(), &files).await
+}
 
-    println!("[log-reset] cleared log state under {}", home.display());
+async fn run_complite_reset() -> Result<()> {
+    let home = get_spinova_home().await;
+    let cleared = clear_compiled_artifacts(&home).await?;
+
+    println!(
+        "[complite-reset] cleared compile/evaluation artifacts under {}",
+        home.display()
+    );
     if cleared.is_empty() {
-        println!("[log-reset] nothing to remove; logs was already absent");
+        println!("[complite-reset] nothing to remove");
     } else {
-        println!("[log-reset] cleared: {}", cleared.join(", "));
+        println!("[complite-reset] cleared: {}", cleared.join(", "));
     }
     println!(
-        "[log-reset] preserved: config.toml, telegram_acl.json, reasoning_compiled/, runtime memory state"
+        "[complite-reset] preserved: config/, state/, memory, logs/"
     );
 
     Ok(())
+}
+
+async fn clear_compiled_artifacts(home: &PathBuf) -> Result<Vec<String>> {
+    let mut cleared = Vec::new();
+    let paths = SpinovaPaths::from_root(home.clone());
+
+    for dir_name in [COMPILED_DIR_NAME, "evaluations"] {
+        let path = paths.artifact_dir(dir_name);
+        if path.exists() {
+            tokio::fs::remove_dir_all(&path)
+                .await
+                .map_err(|err| miette!("failed to remove {}: {err}", path.display()))?;
+            cleared.push(dir_name.to_string());
+        }
+    }
+
+    Ok(cleared)
 }
 
 async fn run_reset_all() -> Result<()> {
     let home = get_spinova_home().await;
-    clear_mem_state(&home).await?;
-    let prompt_cleared = clear_prompt_cache_dirs(&home).await?;
+    let memory_cleared = clear_memory_state(&home).await;
+    let state_cleared = clear_state_files(&home).await?;
+    let artifact_cleared = clear_compiled_artifacts(&home).await?;
     let log_cleared = clear_log_dirs(&home).await?;
+    memory_cleared?;
 
     println!("[reset] reset all state under {}", home.display());
+    if state_cleared.is_empty() {
+        println!("[reset] cleared state: none");
+    } else {
+        println!("[reset] cleared state: {}", state_cleared.join(", "));
+    }
     println!(
-        "[reset] cleared memory state: runtime_conversation, hindsight_queue, todo_board, work_state, emotion, events, reasoning_traces.jsonl, runtime_reviews.jsonl, hindsight bank"
+        "[reset] cleared memory: runtime_conversation, hindsight_queue, reasoning_traces.jsonl, runtime_reviews.jsonl, hindsight bank"
     );
-    if prompt_cleared.is_empty() {
-        println!("[reset] cleared prompt cache: none");
+    if artifact_cleared.is_empty() {
+        println!("[reset] cleared complite artifacts: none");
     } else {
         println!(
-            "[reset] cleared prompt cache: {}",
-            prompt_cleared.join(", ")
+            "[reset] cleared complite artifacts: {}",
+            artifact_cleared.join(", ")
         );
     }
     if log_cleared.is_empty() {
@@ -670,25 +667,10 @@ async fn run_reset_all() -> Result<()> {
     Ok(())
 }
 
-async fn clear_prompt_cache_dirs(home: &PathBuf) -> Result<Vec<String>> {
-    let mut cleared = Vec::new();
-
-    for dir_name in [COMPILED_DIR_NAME] {
-        let path = home.join(dir_name);
-        if path.exists() {
-            tokio::fs::remove_dir_all(&path)
-                .await
-                .map_err(|err| miette!("failed to remove {}: {err}", path.display()))?;
-            cleared.push(dir_name.to_string());
-        }
-    }
-
-    Ok(cleared)
-}
-
 async fn clear_log_dirs(home: &PathBuf) -> Result<Vec<String>> {
     let mut cleared = Vec::new();
-    let path = home.join("logs");
+    let paths = SpinovaPaths::from_root(home.clone());
+    let path = paths.logs_dir();
     if path.exists() {
         tokio::fs::remove_dir_all(&path)
             .await
@@ -696,6 +678,31 @@ async fn clear_log_dirs(home: &PathBuf) -> Result<Vec<String>> {
         cleared.push("logs".to_string());
     }
     Ok(cleared)
+}
+
+async fn clear_named_files(dir: PathBuf, file_names: &[&str]) -> Result<Vec<String>> {
+    let mut cleared = Vec::new();
+    for file_name in file_names {
+        let path = dir.join(file_name);
+        if path.exists() {
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|err| miette!("failed to remove {}: {err}", path.display()))?;
+            cleared.push((*file_name).to_string());
+        }
+    }
+    Ok(cleared)
+}
+
+async fn clear_files(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        if path.exists() {
+            tokio::fs::remove_file(path)
+                .await
+                .map_err(|err| miette!("failed to remove {}: {err}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 async fn build_eval_context(config: crate::config::Config) -> Context {
@@ -724,7 +731,6 @@ pub(crate) async fn build_eval_context_with_compiled(
     let memory = Memory::new().await;
     let todo_board = TodoBoard::new().await;
     let work_state = WorkState::new().await;
-    let emotion = Emotion::new().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
     let terminal = TerminalDevice::new();
@@ -751,7 +757,6 @@ pub(crate) async fn build_eval_context_with_compiled(
         prompt_memory: PromptMemoryContext::default(),
         todo_board,
         work_state,
-        emotion,
         events,
         pending_work,
         devices,
@@ -1251,9 +1256,9 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
     );
     for pattern in &summary.failure_patterns {
         let kind = match pattern.suggested_fix_kind {
-            SleepArtifactSuggestedFixKind::Demo => "demo",
-            SleepArtifactSuggestedFixKind::Instruction => "instruction",
-            SleepArtifactSuggestedFixKind::StressCase => "stress_case",
+            EvaluationArtifactSuggestedFixKind::Demo => "demo",
+            EvaluationArtifactSuggestedFixKind::Instruction => "instruction",
+            EvaluationArtifactSuggestedFixKind::StressCase => "stress_case",
         };
         println!(
             "- suite={} pattern_id={} frequency={} severity={} fix={} traces={}",
@@ -2159,9 +2164,18 @@ async fn prepare_learning_home_root(session_root: &Path) -> Result<PathBuf> {
 }
 
 async fn sync_learning_assets_to_session(shared_home: &Path, session_home: &Path) -> Result<()> {
-    for name in [COMPILED_DIR_NAME, "sleep_artifacts"] {
-        sync_path_replace(&shared_home.join(name), &session_home.join(name)).await?;
-    }
+    let shared = SpinovaPaths::from_root(shared_home.to_path_buf());
+    let session = SpinovaPaths::from_root(session_home.to_path_buf());
+    sync_path_replace(
+        &shared.artifact_dir(COMPILED_DIR_NAME),
+        &session.artifact_dir(COMPILED_DIR_NAME),
+    )
+    .await?;
+    sync_path_replace(
+        &shared.artifact_dir("evaluations"),
+        &session.artifact_dir("evaluations"),
+    )
+    .await?;
     Ok(())
 }
 
@@ -2169,9 +2183,18 @@ async fn sync_learning_assets_back_to_shared(
     session_home: &Path,
     shared_home: &Path,
 ) -> Result<()> {
-    for name in [COMPILED_DIR_NAME, "sleep_artifacts"] {
-        sync_path_replace(&session_home.join(name), &shared_home.join(name)).await?;
-    }
+    let shared = SpinovaPaths::from_root(shared_home.to_path_buf());
+    let session = SpinovaPaths::from_root(session_home.to_path_buf());
+    sync_path_replace(
+        &session.artifact_dir(COMPILED_DIR_NAME),
+        &shared.artifact_dir(COMPILED_DIR_NAME),
+    )
+    .await?;
+    sync_path_replace(
+        &session.artifact_dir("evaluations"),
+        &shared.artifact_dir("evaluations"),
+    )
+    .await?;
     Ok(())
 }
 
@@ -3214,18 +3237,13 @@ fn prompt_message_for_claimed_input(
     match input {
         ClaimedRuntimeInput::Event(event) => match &event.payload {
             EventPayload::TelegramIncoming(payload) => PromptMessage::user(format!(
-                "<world_event source=\"telegram\" event_id=\"{}\" status=\"{}\">\nfrom: {}\nchat_title: {}\nchat_id: {}\nincoming_text: {}\nlatest_outgoing: {}\n</world_event>",
+                "<world_event source=\"telegram\" event_id=\"{}\" status=\"{}\">\nfrom: {}\nchat_title: {}\nchat_id: {}\nincoming_text: {}\n</world_event>",
                 event.event_id,
                 event.status,
                 payload.sender,
                 payload.chat_title,
                 payload.chat_id,
                 payload.incoming_text.trim(),
-                payload
-                    .latest_outgoing_preview
-                    .as_deref()
-                    .filter(|text| !text.trim().is_empty())
-                    .unwrap_or("<none>"),
             )),
         },
         ClaimedRuntimeInput::DeviceNotice { device, reason } => PromptMessage::user(format!(
@@ -4378,19 +4396,12 @@ fn render_telegram_status_for_dashboard(context: &Context) -> String {
         .iter()
         .map(|chat| chat.pending_outbound_count)
         .sum::<usize>();
-    let failed_deliveries = chats
-        .iter()
-        .map(|chat| chat.failed_delivery_count)
-        .sum::<usize>();
-    let unread_messages = chats.iter().map(|chat| chat.unread).sum::<usize>();
 
     let mut lines = vec![
         "Telegram".to_string(),
         "Role: transport / adapter".to_string(),
         format!("Known chats: {}", chats.len()),
         format!("Queued outbound: {queued_outbound}"),
-        format!("Failed deliveries: {failed_deliveries}"),
-        format!("Unread messages: {unread_messages}"),
     ];
 
     if chats.is_empty() {
@@ -4403,14 +4414,8 @@ fn render_telegram_status_for_dashboard(context: &Context) -> String {
     lines.push("Chats".to_string());
     lines.extend(chats.iter().take(8).map(|chat| {
         let mut flags = Vec::new();
-        if chat.unread > 0 {
-            flags.push(format!("{} unread", chat.unread));
-        }
         if chat.pending_outbound_count > 0 {
             flags.push(format!("{} queued", chat.pending_outbound_count));
-        }
-        if chat.failed_delivery_count > 0 {
-            flags.push(format!("{} send failed", chat.failed_delivery_count));
         }
         let suffix = if flags.is_empty() {
             String::new()
@@ -4477,11 +4482,5 @@ fn truncate_from_left(text: &str, max_chars: usize) -> String {
 }
 
 pub async fn get_spinova_home() -> PathBuf {
-    let path = env::var("SPINOVA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| env::home_dir().unwrap().join(".spinova"));
-    if !path.exists() {
-        tokio::fs::create_dir_all(&path).await.unwrap();
-    }
-    path
+    spinova_paths().await.root().to_path_buf()
 }

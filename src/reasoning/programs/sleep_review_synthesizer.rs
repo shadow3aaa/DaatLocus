@@ -8,7 +8,7 @@ use crate::{
     snapshot::Snapshot,
 };
 
-const SLEEP_REVIEW_SYNTHESIZER_SYSTEM_PROMPT: &str = r#"你现在处于睡眠整理阶段。
+const SLEEP_REVIEW_SYNTHESIZER_SYSTEM_PROMPT: &str = r#"你现在处于评估整理阶段。
 你的任务是阅读一个 review unit 的结果，并把它抽象成可复用的学习结论。
 
 review unit 可能来自：
@@ -235,7 +235,7 @@ impl Program for SleepReviewSynthesizerProgram {
     }
 
     fn description(&self) -> &'static str {
-        "把单个 train episode 或 runtime review span 抽象成可复用策略，并生成 sleep artifacts 与长期复盘提议。"
+        "把单个 train episode 或 runtime review span 抽象成可复用策略，并生成 evaluation artifacts 与长期复盘提议。"
     }
 
     fn signature(&self) -> Signature {

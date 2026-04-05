@@ -11,7 +11,6 @@ use crate::{
     core::LLM,
     dashboard::DashboardState,
     device::{DeviceId, DeviceManager},
-    emotion::Emotion,
     events::EventStore,
     hindsight::{HindsightClient, HindsightRetainHandle},
     memory::Memory,
@@ -34,7 +33,6 @@ pub struct Context {
     pub prompt_memory: PromptMemoryContext,
     pub todo_board: TodoBoard,
     pub work_state: WorkState,
-    pub emotion: Emotion,
     pub events: EventStore,
     pub pending_work: PendingWorkQueue,
     pub devices: DeviceManager,
@@ -63,7 +61,6 @@ impl Context {
         self.memory.shutdown().await;
         self.todo_board.shutdown().await;
         self.work_state.shutdown().await;
-        self.emotion.shutdown().await;
         self.events.shutdown().await;
         self.pending_work.shutdown().await;
         let _ = self.devices.shutdown().await;

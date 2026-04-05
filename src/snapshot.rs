@@ -268,16 +268,13 @@ impl Display for EventSnapshot {
                     )?;
                     writeln!(
                         f,
-                        "  latest_outgoing={}",
-                        payload
-                            .latest_outgoing_preview
+                        "  last_error={}",
+                        event
+                            .last_error
                             .as_deref()
                             .map(summarize_inline_text)
                             .unwrap_or_else(|| "<none>".to_string())
                     )?;
-                    if let Some(error) = event.last_error.as_deref() {
-                        writeln!(f, "  last_error={}", summarize_inline_text(error))?;
-                    }
                 }
             }
         }
@@ -363,14 +360,6 @@ impl EventSnapshot {
                         payload.chat_title,
                         payload.chat_id,
                         summarize_inline_text(&payload.incoming_text)
-                    ));
-                    lines.push(format!(
-                        "  latest_outgoing={}",
-                        payload
-                            .latest_outgoing_preview
-                            .as_deref()
-                            .map(summarize_inline_text)
-                            .unwrap_or_else(|| "<none>".to_string())
                     ));
                     if let Some(error) = event.last_error.as_deref() {
                         lines.push(format!("  last_error={}", summarize_inline_text(error)));

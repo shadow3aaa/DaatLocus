@@ -624,9 +624,7 @@ fn execute_event_resolve_with_reply(
 ) -> miette::Result<()> {
     match &event.payload {
         EventPayload::TelegramIncoming(payload) => {
-            context
-                .events
-                .prepare_telegram_delivery(event_id, Some(reply_message.clone()))?;
+            context.events.prepare_telegram_delivery(event_id)?;
             context.telegram.enqueue_outgoing_message(
                 payload.chat_id.clone(),
                 reply_message,

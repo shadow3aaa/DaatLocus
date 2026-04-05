@@ -68,17 +68,17 @@ impl TelegramTransport {
                 .parse::<i64>()
                 .map_err(|err| miette!("invalid telegram chat id {}: {err}", message.chat_id))?;
             if self.acl.classify(chat_id) != AccessDecision::Approved {
-                self.handle.mark_outgoing_failed(
-                    &message.local_message_id,
-                    "chat is not approved in telegram acl",
-                );
+                let reason = "chat is not approved in telegram acl".to_string();
+                if let Some(event_id) = message.related_event_id.as_deref()
+                    && let Err(err) = self.events.mark_delivery_failed(event_id, reason)
+                {
+                    tracing::error!("mark telegram event failed failed: {err:?}");
+                }
                 continue;
             }
 
             match self.send_message(chat_id, &message.text).await {
                 Ok(()) => {
-                    self.handle
-                        .mark_outgoing_delivered(&message.local_message_id);
                     if let Some(event_id) = message.related_event_id.as_deref()
                         && let Err(err) = self.events.set_status(
                             event_id,
@@ -93,8 +93,6 @@ impl TelegramTransport {
                 }
                 Err(err) => {
                     let reason = truncate_reason(&format!("{err:?}"));
-                    self.handle
-                        .mark_outgoing_failed(&message.local_message_id, reason.clone());
                     if let Some(event_id) = message.related_event_id.as_deref()
                         && let Err(mark_err) = self.events.mark_delivery_failed(event_id, reason)
                     {
@@ -141,7 +139,6 @@ impl TelegramTransport {
                         telegram_update_id: update.update_id,
                         telegram_message_id: message.message_id,
                         telegram_message_date: message.date,
-                        latest_outgoing_preview: self.handle.latest_outgoing_preview(&chat_id),
                     }) {
                     Ok(event_id) => {
                         if let Err(err) = self.pending_work.enqueue(PendingWork::Event { event_id })
@@ -156,12 +153,6 @@ impl TelegramTransport {
                 self.handle.observe_incoming_message(
                     chat_id,
                     chat_title.clone(),
-                    sender,
-                    text.clone(),
-                    message
-                        .date
-                        .map(|seconds| seconds.saturating_mul(1000))
-                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
                 );
             }
             AccessDecision::Blocked => (),
