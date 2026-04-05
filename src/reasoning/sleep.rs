@@ -27,7 +27,7 @@ use super::{
     programs::runtime_system_prompt_patch_builder::{
         RuntimeSystemPromptPatchBuilderOutput, RuntimeSystemPromptPatchBuilderProgram,
     },
-    programs::sleep_artifact_builder::{SleepArtifactBuilderOutput, SleepArtifactBuilderProgram},
+    programs::evaluation_artifact_builder::{EvaluationArtifactBuilderOutput, EvaluationArtifactBuilderProgram},
     programs::sleep_review_synthesizer::{
         SleepReviewSynthesizerOutput, SleepReviewSynthesizerProgram,
     },
@@ -37,14 +37,14 @@ use super::{
         RuntimeReviewSpan, RuntimeTurnRecord, build_runtime_review_spans,
         compact_runtime_review_file, load_runtime_review_batch,
     },
-    sleep_artifacts::{
-        SleepArtifactBootstrapDemo, SleepArtifactFailurePattern,
-        SleepArtifactInstructionHypothesis, SleepArtifactRuntimeDemo,
-        SleepArtifactRuntimeDemoEvaluation, SleepArtifactRuntimePromptCandidate,
-        SleepArtifactRuntimePromptEvolutionReport, SleepArtifactRuntimePromptEvolutionRound,
-        SleepArtifactRuntimePromptSuggestion, SleepArtifactStressCase,
-        SleepArtifactSuggestedFixKind, SleepArtifactTurnDemo, SleepArtifactTurnDemoEvaluation,
-        SleepArtifactsStore,
+    evaluation_artifacts::{
+        EvaluationArtifactBootstrapDemo, EvaluationArtifactFailurePattern,
+        EvaluationArtifactInstructionHypothesis, EvaluationArtifactRuntimeDemo,
+        EvaluationArtifactRuntimeDemoEvaluation, EvaluationArtifactRuntimePromptCandidate,
+        EvaluationArtifactRuntimePromptEvolutionReport, EvaluationArtifactRuntimePromptEvolutionRound,
+        EvaluationArtifactRuntimePromptSuggestion, EvaluationArtifactStressCase,
+        EvaluationArtifactSuggestedFixKind, EvaluationArtifactTurnDemo, EvaluationArtifactTurnDemoEvaluation,
+        EvaluationArtifactsStore,
     },
     trace::{
         ProgramTraceRecord, RuntimeTraceBatch, TraceOrigin, compact_runtime_trace_file,
@@ -65,7 +65,7 @@ use super::{
 pub struct SleepSummary {
     pub consumed_trace_events: usize,
     pub consumed_runtime_reviews: usize,
-    pub failure_patterns: Vec<SleepArtifactFailurePattern>,
+    pub failure_patterns: Vec<EvaluationArtifactFailurePattern>,
     pub bootstrap_demos: usize,
     pub stress_cases: usize,
     pub instruction_hypotheses: usize,
@@ -104,9 +104,9 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let review_inputs = collect_review_inputs(&episode_outcomes, &runtime_review_spans);
     let review_synthesis = synthesize_review_inputs(context, &review_inputs).await?;
     failure_patterns.extend(review_synthesis.failure_patterns.clone());
-    let store = SleepArtifactsStore::open().await?;
+    let store = EvaluationArtifactsStore::open().await?;
     store.replace_failure_patterns(&failure_patterns).await?;
-    let mut derived = derive_sleep_artifacts(context, &failure_patterns).await?;
+    let mut derived = derive_evaluation_artifacts(context, &failure_patterns).await?;
     derived
         .bootstrap_demos
         .extend(derive_success_bootstrap_demos(&records));
@@ -180,20 +180,20 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     })
 }
 
-struct DerivedSleepArtifacts {
-    bootstrap_demos: Vec<SleepArtifactBootstrapDemo>,
-    stress_cases: Vec<SleepArtifactStressCase>,
-    instruction_hypotheses: Vec<SleepArtifactInstructionHypothesis>,
-    runtime_demos: Vec<SleepArtifactRuntimeDemo>,
-    turn_demos: Vec<SleepArtifactTurnDemo>,
+struct DerivedEvaluationArtifacts {
+    bootstrap_demos: Vec<EvaluationArtifactBootstrapDemo>,
+    stress_cases: Vec<EvaluationArtifactStressCase>,
+    instruction_hypotheses: Vec<EvaluationArtifactInstructionHypothesis>,
+    runtime_demos: Vec<EvaluationArtifactRuntimeDemo>,
+    turn_demos: Vec<EvaluationArtifactTurnDemo>,
 }
 
 struct RuntimePromptEvolutionResult {
-    evaluations: Vec<SleepArtifactRuntimeDemoEvaluation>,
-    turn_evaluations: Vec<SleepArtifactTurnDemoEvaluation>,
-    suggestions: Vec<SleepArtifactRuntimePromptSuggestion>,
-    candidates: Vec<SleepArtifactRuntimePromptCandidate>,
-    report: SleepArtifactRuntimePromptEvolutionReport,
+    evaluations: Vec<EvaluationArtifactRuntimeDemoEvaluation>,
+    turn_evaluations: Vec<EvaluationArtifactTurnDemoEvaluation>,
+    suggestions: Vec<EvaluationArtifactRuntimePromptSuggestion>,
+    candidates: Vec<EvaluationArtifactRuntimePromptCandidate>,
+    report: EvaluationArtifactRuntimePromptEvolutionReport,
     passed: usize,
     regressions: usize,
     rolled_back: bool,
@@ -293,11 +293,11 @@ async fn load_recent_learn_episode_outcomes() -> Result<Vec<EpisodeOutcome>> {
 
 #[derive(Default)]
 struct ReviewSleepSynthesis {
-    failure_patterns: Vec<SleepArtifactFailurePattern>,
-    bootstrap_demos: Vec<SleepArtifactBootstrapDemo>,
-    stress_cases: Vec<SleepArtifactStressCase>,
-    instruction_hypotheses: Vec<SleepArtifactInstructionHypothesis>,
-    runtime_demos: Vec<SleepArtifactRuntimeDemo>,
+    failure_patterns: Vec<EvaluationArtifactFailurePattern>,
+    bootstrap_demos: Vec<EvaluationArtifactBootstrapDemo>,
+    stress_cases: Vec<EvaluationArtifactStressCase>,
+    instruction_hypotheses: Vec<EvaluationArtifactInstructionHypothesis>,
+    runtime_demos: Vec<EvaluationArtifactRuntimeDemo>,
     reflections: Vec<SleepReflectionRecord>,
 }
 
@@ -544,7 +544,7 @@ fn infer_runtime_review_status(span: &RuntimeReviewSpan) -> String {
     "Observed".to_string()
 }
 
-fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<SleepArtifactFailurePattern> {
+fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<EvaluationArtifactFailurePattern> {
     let mut buckets: HashMap<(String, String), PatternAccumulator> = HashMap::new();
 
     for record in records {
@@ -581,7 +581,7 @@ fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<SleepArtifactF
 
     let mut patterns = buckets
         .into_values()
-        .map(|bucket| SleepArtifactFailurePattern {
+        .map(|bucket| EvaluationArtifactFailurePattern {
             suite: bucket.suite.clone(),
             pattern_id: format!("{}:{}", slugify(&bucket.suite), slugify(&bucket.label)),
             description: bucket.description,
@@ -739,7 +739,7 @@ fn merge_review_synthesis(
     {
         synthesized
             .failure_patterns
-            .push(SleepArtifactFailurePattern {
+            .push(EvaluationArtifactFailurePattern {
                 suite: review.review_label.clone(),
                 pattern_id: format!(
                     "review:{}:{}:{}",
@@ -761,11 +761,11 @@ fn merge_review_synthesis(
                     .to_ascii_lowercase()
                     .as_str()
                 {
-                    "demo" => SleepArtifactSuggestedFixKind::Demo,
+                    "demo" => EvaluationArtifactSuggestedFixKind::Demo,
                     "stress" | "stress_case" | "stresscase" => {
-                        SleepArtifactSuggestedFixKind::StressCase
+                        EvaluationArtifactSuggestedFixKind::StressCase
                     }
-                    _ => SleepArtifactSuggestedFixKind::Instruction,
+                    _ => EvaluationArtifactSuggestedFixKind::Instruction,
                 },
             });
     }
@@ -776,7 +776,7 @@ fn merge_review_synthesis(
     {
         synthesized
             .bootstrap_demos
-            .push(SleepArtifactBootstrapDemo {
+            .push(EvaluationArtifactBootstrapDemo {
                 suite: review.review_label.clone(),
                 title: output.bootstrap_demo_title.trim().to_string(),
                 input_summary: output.synthesized_summary.trim().to_string(),
@@ -790,7 +790,7 @@ fn merge_review_synthesis(
     }
 
     if output.create_stress_case && !output.stress_case_name.trim().is_empty() {
-        synthesized.stress_cases.push(SleepArtifactStressCase {
+        synthesized.stress_cases.push(EvaluationArtifactStressCase {
             suite: review.review_label.clone(),
             name: output.stress_case_name.trim().to_string(),
             input_ir: json!({
@@ -815,7 +815,7 @@ fn merge_review_synthesis(
     {
         synthesized
             .instruction_hypotheses
-            .push(SleepArtifactInstructionHypothesis {
+            .push(EvaluationArtifactInstructionHypothesis {
                 suite: review.review_label.clone(),
                 text: output.instruction_text.trim().to_string(),
                 justification: output.reason.trim().to_string(),
@@ -923,7 +923,7 @@ struct PatternAccumulator {
     supporting_trace_ids: Vec<String>,
     frequency: usize,
     severity: u8,
-    suggested_fix_kind: SleepArtifactSuggestedFixKind,
+    suggested_fix_kind: EvaluationArtifactSuggestedFixKind,
 }
 
 fn classify_failure(_record: &ProgramTraceRecord, error: &str) -> String {
@@ -980,14 +980,14 @@ fn describe_failure(record: &ProgramTraceRecord, error: &str, label: &str) -> St
     }
 }
 
-fn suggested_fix_kind(label: &str) -> SleepArtifactSuggestedFixKind {
+fn suggested_fix_kind(label: &str) -> EvaluationArtifactSuggestedFixKind {
     if label.starts_with("missing_field:") || label.starts_with("unknown_variant:") {
-        return SleepArtifactSuggestedFixKind::StressCase;
+        return EvaluationArtifactSuggestedFixKind::StressCase;
     }
     if label == "resolve_chat_schema_drift" {
-        return SleepArtifactSuggestedFixKind::Demo;
+        return EvaluationArtifactSuggestedFixKind::Demo;
     }
-    SleepArtifactSuggestedFixKind::Instruction
+    EvaluationArtifactSuggestedFixKind::Instruction
 }
 
 fn derive_severity(error: &str) -> u8 {
@@ -1022,12 +1022,12 @@ fn slugify(value: &str) -> String {
     slug.trim_matches('-').to_string()
 }
 
-async fn derive_sleep_artifacts(
+async fn derive_evaluation_artifacts(
     context: &mut Context,
-    patterns: &[SleepArtifactFailurePattern],
-) -> Result<DerivedSleepArtifacts> {
+    patterns: &[EvaluationArtifactFailurePattern],
+) -> Result<DerivedEvaluationArtifacts> {
     if patterns.is_empty() {
-        return Ok(DerivedSleepArtifacts {
+        return Ok(DerivedEvaluationArtifacts {
             bootstrap_demos: Vec::new(),
             stress_cases: Vec::new(),
             instruction_hypotheses: Vec::new(),
@@ -1037,7 +1037,7 @@ async fn derive_sleep_artifacts(
     }
 
     let renderer = OpenAIToolRenderer;
-    let program = SleepArtifactBuilderProgram;
+    let program = EvaluationArtifactBuilderProgram;
     let tuning = resolve_program_tuning(context, &program).await;
     let mut bootstrap_demos = Vec::new();
     let mut stress_cases = Vec::new();
@@ -1093,7 +1093,7 @@ async fn derive_sleep_artifacts(
         }
     }
 
-    Ok(DerivedSleepArtifacts {
+    Ok(DerivedEvaluationArtifacts {
         bootstrap_demos,
         stress_cases,
         instruction_hypotheses,
@@ -1104,8 +1104,8 @@ async fn derive_sleep_artifacts(
 
 async fn evaluate_runtime_demos(
     context: &mut Context,
-    runtime_demos: &[SleepArtifactRuntimeDemo],
-) -> Result<Vec<SleepArtifactRuntimeDemoEvaluation>> {
+    runtime_demos: &[EvaluationArtifactRuntimeDemo],
+) -> Result<Vec<EvaluationArtifactRuntimeDemoEvaluation>> {
     if runtime_demos.is_empty() {
         return Ok(Vec::new());
     }
@@ -1151,10 +1151,10 @@ const MAX_RUNTIME_PROMPT_EVOLUTION_ROUNDS: usize = 3;
 
 async fn evolve_runtime_system_prompt(
     context: &mut Context,
-    runtime_demos: &[SleepArtifactRuntimeDemo],
-    turn_demos: &[SleepArtifactTurnDemo],
+    runtime_demos: &[EvaluationArtifactRuntimeDemo],
+    turn_demos: &[EvaluationArtifactTurnDemo],
     runtime_review_spans: &[RuntimeReviewSpan],
-    instruction_hypotheses: &[SleepArtifactInstructionHypothesis],
+    instruction_hypotheses: &[EvaluationArtifactInstructionHypothesis],
 ) -> Result<RuntimePromptEvolutionResult> {
     if runtime_demos.is_empty() && turn_demos.is_empty() {
         return Ok(RuntimePromptEvolutionResult {
@@ -1162,7 +1162,7 @@ async fn evolve_runtime_system_prompt(
             turn_evaluations: Vec::new(),
             suggestions: Vec::new(),
             candidates: Vec::new(),
-            report: SleepArtifactRuntimePromptEvolutionReport {
+            report: EvaluationArtifactRuntimePromptEvolutionReport {
                 compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
                 rounds: 0,
                 accepted: true,
@@ -1194,7 +1194,7 @@ async fn evolve_runtime_system_prompt(
     let mut accepted = false;
     let mut all_candidates = Vec::new();
     let mut latest_evaluations = Vec::new();
-    let mut latest_turn_evaluations: Option<Vec<SleepArtifactTurnDemoEvaluation>> = None;
+    let mut latest_turn_evaluations: Option<Vec<EvaluationArtifactTurnDemoEvaluation>> = None;
     let mut latest_suggestions = Vec::new();
     let mut latest_regressions = 0usize;
     let mut round_history = Vec::new();
@@ -1229,7 +1229,7 @@ async fn evolve_runtime_system_prompt(
         let turn_suggestions =
             turn_prompt_suggestions_from_evaluations(latest_turn_evaluations_ref)
                 .into_iter()
-                .map(|title| SleepArtifactRuntimePromptSuggestion {
+                .map(|title| EvaluationArtifactRuntimePromptSuggestion {
                     compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
                     title,
                     rationale: "turn demo failed".to_string(),
@@ -1277,7 +1277,7 @@ async fn evolve_runtime_system_prompt(
         best_prompt = next_best_prompt;
         best_passed = next_best_passed;
 
-        round_history.push(SleepArtifactRuntimePromptEvolutionRound {
+        round_history.push(EvaluationArtifactRuntimePromptEvolutionRound {
             round: rounds,
             candidate: current_prompt.best_candidate.clone(),
             passed,
@@ -1420,9 +1420,9 @@ async fn evolve_runtime_system_prompt(
 
 async fn generate_runtime_prompt_candidates(
     context: &mut Context,
-    evaluations: &[SleepArtifactRuntimeDemoEvaluation],
-    instruction_hypotheses: &[SleepArtifactInstructionHypothesis],
-) -> Result<Vec<SleepArtifactRuntimePromptCandidate>> {
+    evaluations: &[EvaluationArtifactRuntimeDemoEvaluation],
+    instruction_hypotheses: &[EvaluationArtifactInstructionHypothesis],
+) -> Result<Vec<EvaluationArtifactRuntimePromptCandidate>> {
     let failed = evaluations
         .iter()
         .filter(|item| !item.passed)
@@ -1496,10 +1496,10 @@ fn current_runtime_system_prompt_text(context: &Context) -> String {
 }
 
 fn runtime_demo_evaluation_from_output(
-    demo: &SleepArtifactRuntimeDemo,
+    demo: &EvaluationArtifactRuntimeDemo,
     output: &RuntimeSystemPromptJudgeOutput,
-) -> SleepArtifactRuntimeDemoEvaluation {
-    SleepArtifactRuntimeDemoEvaluation {
+) -> EvaluationArtifactRuntimeDemoEvaluation {
+    EvaluationArtifactRuntimeDemoEvaluation {
         compile_key: demo.compile_key.clone(),
         demo_title: demo.title.clone(),
         passed: output.passed,
@@ -1511,13 +1511,13 @@ fn runtime_demo_evaluation_from_output(
 }
 
 fn runtime_prompt_suggestions_from_evaluations(
-    evaluations: &[SleepArtifactRuntimeDemoEvaluation],
-) -> Vec<SleepArtifactRuntimePromptSuggestion> {
+    evaluations: &[EvaluationArtifactRuntimeDemoEvaluation],
+) -> Vec<EvaluationArtifactRuntimePromptSuggestion> {
     evaluations
         .iter()
         .filter(|item| !item.passed)
         .filter(|item| !item.needed_changes.is_empty())
-        .map(|item| SleepArtifactRuntimePromptSuggestion {
+        .map(|item| EvaluationArtifactRuntimePromptSuggestion {
             compile_key: item.compile_key.clone(),
             title: format!("runtime prompt suggestion {}", item.demo_title),
             rationale: item.reason.clone(),
@@ -1528,7 +1528,7 @@ fn runtime_prompt_suggestions_from_evaluations(
         .collect()
 }
 
-fn render_failed_runtime_demos(evaluations: &[SleepArtifactRuntimeDemoEvaluation]) -> String {
+fn render_failed_runtime_demos(evaluations: &[EvaluationArtifactRuntimeDemoEvaluation]) -> String {
     evaluations
         .iter()
         .map(|item| format!("- {}: {}", item.demo_title, item.reason.trim()))
@@ -1536,7 +1536,7 @@ fn render_failed_runtime_demos(evaluations: &[SleepArtifactRuntimeDemoEvaluation
         .join("\n")
 }
 
-fn render_runtime_judge_feedback(evaluations: &[SleepArtifactRuntimeDemoEvaluation]) -> String {
+fn render_runtime_judge_feedback(evaluations: &[EvaluationArtifactRuntimeDemoEvaluation]) -> String {
     evaluations
         .iter()
         .map(|item| {
@@ -1555,7 +1555,7 @@ fn render_runtime_judge_feedback(evaluations: &[SleepArtifactRuntimeDemoEvaluati
 }
 
 fn render_runtime_hypotheses(
-    instruction_hypotheses: &[SleepArtifactInstructionHypothesis],
+    instruction_hypotheses: &[EvaluationArtifactInstructionHypothesis],
 ) -> String {
     if instruction_hypotheses.is_empty() {
         return String::from("none");
@@ -1569,13 +1569,13 @@ fn render_runtime_hypotheses(
 
 fn runtime_prompt_candidate_from_output(
     output: &RuntimeSystemPromptPatchBuilderOutput,
-    evaluations: &[SleepArtifactRuntimeDemoEvaluation],
-    instruction_hypotheses: &[SleepArtifactInstructionHypothesis],
-) -> Option<SleepArtifactRuntimePromptCandidate> {
+    evaluations: &[EvaluationArtifactRuntimeDemoEvaluation],
+    instruction_hypotheses: &[EvaluationArtifactInstructionHypothesis],
+) -> Option<EvaluationArtifactRuntimePromptCandidate> {
     if output.prompt_patches.is_empty() {
         return None;
     }
-    Some(SleepArtifactRuntimePromptCandidate {
+    Some(EvaluationArtifactRuntimePromptCandidate {
         compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
         title: if output.title.trim().is_empty() {
             String::from("runtime prompt candidate")
@@ -1602,8 +1602,8 @@ fn runtime_prompt_candidate_from_output(
 
 async fn rollback_runtime_system_prompt_if_regressed(
     context: &mut Context,
-    evaluations: &[SleepArtifactRuntimeDemoEvaluation],
-    turn_evaluations: &[SleepArtifactTurnDemoEvaluation],
+    evaluations: &[EvaluationArtifactRuntimeDemoEvaluation],
+    turn_evaluations: &[EvaluationArtifactTurnDemoEvaluation],
 ) -> Result<bool> {
     if !evaluations.iter().any(|item| item.regression_detected)
         && !turn_evaluations.iter().any(|item| item.regression_detected)
@@ -1644,7 +1644,7 @@ fn render_related_memories(related_memories: &[String]) -> Option<String> {
 }
 
 fn render_input_summary(
-    pattern: &SleepArtifactFailurePattern,
+    pattern: &EvaluationArtifactFailurePattern,
     evidence_summary: Option<&str>,
 ) -> String {
     match evidence_summary {
@@ -1662,13 +1662,13 @@ fn suite_reference_case_names(suite: &str) -> Vec<String> {
 }
 
 fn to_instruction_hypothesis(
-    pattern: &SleepArtifactFailurePattern,
-    output: &SleepArtifactBuilderOutput,
-) -> Option<SleepArtifactInstructionHypothesis> {
+    pattern: &EvaluationArtifactFailurePattern,
+    output: &EvaluationArtifactBuilderOutput,
+) -> Option<EvaluationArtifactInstructionHypothesis> {
     if !output.create_instruction_hypothesis || output.instruction_text.trim().is_empty() {
         return None;
     }
-    Some(SleepArtifactInstructionHypothesis {
+    Some(EvaluationArtifactInstructionHypothesis {
         suite: pattern.suite.clone(),
         text: output.instruction_text.trim().to_string(),
         justification: output.reason.trim().to_string(),
@@ -1677,23 +1677,23 @@ fn to_instruction_hypothesis(
 }
 
 fn to_bootstrap_demo(
-    pattern: &SleepArtifactFailurePattern,
+    pattern: &EvaluationArtifactFailurePattern,
     related_memories: &[String],
     evidence_summary: Option<&str>,
-    output: &SleepArtifactBuilderOutput,
-) -> Option<SleepArtifactBootstrapDemo> {
+    output: &EvaluationArtifactBuilderOutput,
+) -> Option<EvaluationArtifactBootstrapDemo> {
     if !output.create_bootstrap_demo
         || output.bootstrap_demo_title.trim().is_empty()
         || output.reference_case_names.is_empty()
     {
         return None;
     }
-    Some(SleepArtifactBootstrapDemo {
+    Some(EvaluationArtifactBootstrapDemo {
         suite: pattern.suite.clone(),
         title: output.bootstrap_demo_title.trim().to_string(),
         input_summary: render_input_summary(pattern, evidence_summary),
         inputs: vec![ExampleField {
-            name: "sleep artifact summary".to_string(),
+            name: "evaluation artifact summary".to_string(),
             value: render_input_summary(pattern, evidence_summary),
         }],
         expected_output: json!({
@@ -1710,18 +1710,18 @@ fn to_bootstrap_demo(
 }
 
 fn to_runtime_demo(
-    pattern: &SleepArtifactFailurePattern,
+    pattern: &EvaluationArtifactFailurePattern,
     related_memories: &[String],
     evidence_summary: Option<&str>,
-    output: &SleepArtifactBuilderOutput,
-) -> Option<SleepArtifactRuntimeDemo> {
+    output: &EvaluationArtifactBuilderOutput,
+) -> Option<EvaluationArtifactRuntimeDemo> {
     if !output.create_bootstrap_demo
         || output.bootstrap_demo_title.trim().is_empty()
         || output.bootstrap_demo_summary.trim().is_empty()
     {
         return None;
     }
-    Some(SleepArtifactRuntimeDemo {
+    Some(EvaluationArtifactRuntimeDemo {
         compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
         title: output.bootstrap_demo_title.trim().to_string(),
         scenario_summary: render_input_summary(pattern, evidence_summary),
@@ -1747,17 +1747,17 @@ fn to_runtime_demo(
 }
 
 fn to_stress_case(
-    pattern: &SleepArtifactFailurePattern,
+    pattern: &EvaluationArtifactFailurePattern,
     related_memories: &[String],
-    output: &SleepArtifactBuilderOutput,
-) -> Option<SleepArtifactStressCase> {
+    output: &EvaluationArtifactBuilderOutput,
+) -> Option<EvaluationArtifactStressCase> {
     if !output.create_stress_case
         || output.stress_case_name.trim().is_empty()
         || output.reference_case_names.is_empty()
     {
         return None;
     }
-    Some(SleepArtifactStressCase {
+    Some(EvaluationArtifactStressCase {
         suite: pattern.suite.clone(),
         name: output.stress_case_name.trim().to_string(),
         input_ir: json!({
@@ -1777,7 +1777,7 @@ fn to_stress_case(
 fn review_runtime_demo(
     review: &ReviewInput,
     output: &SleepReviewSynthesizerOutput,
-) -> Option<SleepArtifactRuntimeDemo> {
+) -> Option<EvaluationArtifactRuntimeDemo> {
     let expected_behavior = if !output.strategy_lesson.trim().is_empty() {
         output.strategy_lesson.trim()
     } else if !output.reflection_lesson.trim().is_empty() {
@@ -1785,7 +1785,7 @@ fn review_runtime_demo(
     } else {
         return None;
     };
-    Some(SleepArtifactRuntimeDemo {
+    Some(EvaluationArtifactRuntimeDemo {
         compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
         title: format!("runtime demo {}", review.review_id),
         scenario_summary: format!(
@@ -1814,7 +1814,7 @@ fn review_runtime_demo(
 
 fn derive_success_bootstrap_demos(
     records: &[ProgramTraceRecord],
-) -> Vec<SleepArtifactBootstrapDemo> {
+) -> Vec<EvaluationArtifactBootstrapDemo> {
     let mut per_suite = std::collections::HashMap::<String, usize>::new();
     let mut demos = Vec::new();
 
@@ -1837,7 +1837,7 @@ fn derive_success_bootstrap_demos(
             continue;
         }
         *count += 1;
-        demos.push(SleepArtifactBootstrapDemo {
+        demos.push(EvaluationArtifactBootstrapDemo {
             suite,
             title: format!("Sleep success trace {} #{}", record.program_name, count),
             input_summary: inputs
@@ -1993,7 +1993,7 @@ mod tests {
     #[test]
     fn apply_runtime_prompt_candidate_appends_only_new_patches() {
         let current = test_prompt("current", &["rule a", "rule b"]);
-        let candidate = SleepArtifactRuntimePromptCandidate {
+        let candidate = EvaluationArtifactRuntimePromptCandidate {
             compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
             title: "candidate".to_string(),
             rationale: "test".to_string(),
@@ -2010,7 +2010,7 @@ mod tests {
     #[test]
     fn runtime_prompt_suggestions_come_only_from_failed_evaluations_with_changes() {
         let suggestions = runtime_prompt_suggestions_from_evaluations(&[
-            SleepArtifactRuntimeDemoEvaluation {
+            EvaluationArtifactRuntimeDemoEvaluation {
                 compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
                 demo_title: "passed-demo".to_string(),
                 passed: true,
@@ -2019,7 +2019,7 @@ mod tests {
                 needed_changes: vec!["unused".to_string()],
                 reason: "ok".to_string(),
             },
-            SleepArtifactRuntimeDemoEvaluation {
+            EvaluationArtifactRuntimeDemoEvaluation {
                 compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
                 demo_title: "failed-demo".to_string(),
                 passed: false,

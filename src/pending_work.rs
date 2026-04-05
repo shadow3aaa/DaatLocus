@@ -5,7 +5,10 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{device::DeviceId, get_spinova_home};
+use crate::{
+    device::DeviceId,
+    spinova_paths::{spinova_paths, spinova_paths_sync},
+};
 
 const PENDING_WORK_FILE_NAME: &str = "pending_work_queue";
 
@@ -65,7 +68,7 @@ impl PendingWork {
 
 impl PendingWorkQueue {
     pub async fn new() -> Self {
-        let path = get_spinova_home().await.join(PENDING_WORK_FILE_NAME);
+        let path = spinova_paths().await.state_file(PENDING_WORK_FILE_NAME);
         let mut state = tokio::fs::read(&path)
             .await
             .ok()
@@ -84,7 +87,7 @@ impl PendingWorkQueue {
     pub fn empty() -> Self {
         Self {
             inner: Arc::new(Mutex::new(PendingWorkQueueInner {
-                path: pending_work_state_path_sync(),
+                path: spinova_paths_sync().state_file(PENDING_WORK_FILE_NAME),
                 state: PersistedPendingWorkQueue::default(),
             })),
         }
@@ -242,14 +245,6 @@ fn persist_locked(inner: &PendingWorkQueueInner) -> Result<()> {
     std::fs::write(&inner.path, bytes)
         .map_err(|err| miette!("persist pending work queue failed: {err}"))?;
     Ok(())
-}
-
-fn pending_work_state_path_sync() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".spinova")
-        .join(PENDING_WORK_FILE_NAME)
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::get_spinova_home;
+use crate::spinova_paths::spinova_paths;
 
 const EVENTS_FILE_NAME: &str = "events";
 
@@ -74,7 +74,6 @@ pub struct TelegramIncomingEvent {
     pub telegram_update_id: i64,
     pub telegram_message_id: Option<i64>,
     pub telegram_message_date: Option<i64>,
-    pub latest_outgoing_preview: Option<String>,
 }
 
 #[derive(Clone)]
@@ -89,7 +88,7 @@ pub struct EventView {
 
 impl EventStore {
     pub async fn new() -> Self {
-        let path = get_spinova_home().await.join(EVENTS_FILE_NAME);
+        let path = spinova_paths().await.state_file(EVENTS_FILE_NAME);
         let mut state = tokio::fs::read(&path)
             .await
             .ok()
@@ -102,15 +101,6 @@ impl EventStore {
         }
         Self {
             inner: Arc::new(Mutex::new(EventStoreInner { path, state })),
-        }
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(EventStoreInner {
-                path: events_state_path_sync(),
-                state: PersistedEventStore::default(),
-            })),
         }
     }
 
@@ -130,9 +120,6 @@ impl EventStore {
                 existing_payload.telegram_message_date = existing_payload
                     .telegram_message_date
                     .or(event.telegram_message_date);
-                if let Some(preview) = event.latest_outgoing_preview {
-                    existing_payload.latest_outgoing_preview = Some(preview);
-                }
                 existing.last_updated_at_ms = now;
             }
             persist_locked(&inner)?;
@@ -242,13 +229,8 @@ impl EventStore {
         })
     }
 
-    pub fn prepare_telegram_delivery(
-        &self,
-        event_id: &str,
-        outgoing_preview: Option<String>,
-    ) -> Result<()> {
+    pub fn prepare_telegram_delivery(&self, event_id: &str) -> Result<()> {
         self.with_event_mut_from_str(event_id, |event| {
-            let EventPayload::TelegramIncoming(payload) = &mut event.payload;
             if !matches!(
                 event.status,
                 EventStatus::Pending | EventStatus::Claimed | EventStatus::Failed
@@ -260,9 +242,6 @@ impl EventStore {
             }
             event.status = EventStatus::AwaitingDelivery;
             event.last_error = None;
-            if let Some(preview) = outgoing_preview {
-                payload.latest_outgoing_preview = Some(preview);
-            }
             Ok(())
         })
     }
@@ -386,14 +365,4 @@ fn persist_locked(inner: &EventStoreInner) -> Result<()> {
         .map_err(|err| miette!("serialize events failed: {err}"))?;
     std::fs::write(&inner.path, bytes).map_err(|err| miette!("write events file failed: {err}"))?;
     Ok(())
-}
-
-fn events_state_path_sync() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let path = home.join(".spinova");
-    let _ = std::fs::create_dir_all(&path);
-    path.join(EVENTS_FILE_NAME)
 }

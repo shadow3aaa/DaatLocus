@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::get_spinova_home;
+use crate::spinova_paths::spinova_paths;
 
 const TODO_BOARD_FILE_NAME: &str = "todo_board";
 
@@ -44,7 +44,7 @@ pub enum TodoStatus {
 
 impl TodoBoard {
     pub async fn new() -> Self {
-        let persistence_path = get_spinova_home().await.join(TODO_BOARD_FILE_NAME);
+        let persistence_path = spinova_paths().await.state_file(TODO_BOARD_FILE_NAME);
         tokio::fs::read(&persistence_path)
             .await
             .ok()
@@ -133,7 +133,7 @@ impl TodoBoard {
     }
 
     pub async fn shutdown(self) {
-        let persistence_path = get_spinova_home().await.join(TODO_BOARD_FILE_NAME);
+        let persistence_path = spinova_paths().await.state_file(TODO_BOARD_FILE_NAME);
         let data = postcard::to_allocvec(&self).unwrap();
         tokio::fs::write(persistence_path, data).await.unwrap();
     }

@@ -7,7 +7,7 @@ use crate::{
         DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS, DEFAULT_CONTEXT_WINDOW_TOKENS,
         DEFAULT_MAX_COMPLETION_TOKENS, DEFAULT_TOOL_OUTPUT_MAX_TOKENS,
     },
-    get_spinova_home,
+    spinova_paths::spinova_paths,
 };
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -215,7 +215,7 @@ pub enum ConfigError {
 }
 
 pub async fn load_config() -> Result<Config, ConfigError> {
-    let config_path = get_spinova_home().await.join(CONFIG_FILE_NAME);
+    let config_path = spinova_paths().await.config_file(CONFIG_FILE_NAME);
 
     if !config_path.exists() {
         let default_config = Config::default();

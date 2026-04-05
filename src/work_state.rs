@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use uuid::Uuid;
 
-use crate::get_spinova_home;
+use crate::spinova_paths::spinova_paths;
+
+const WORK_STATE_FILE_NAME: &str = "work_state";
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct WorkState {
@@ -24,7 +26,7 @@ pub struct WorkState {
 
 impl WorkState {
     pub async fn new() -> Self {
-        let path = get_spinova_home().await.join("work_state");
+        let path = spinova_paths().await.state_file(WORK_STATE_FILE_NAME);
         tokio::fs::read(path)
             .await
             .ok()
@@ -33,7 +35,7 @@ impl WorkState {
     }
 
     pub async fn shutdown(self) {
-        let path = get_spinova_home().await.join("work_state");
+        let path = spinova_paths().await.state_file(WORK_STATE_FILE_NAME);
         let data = postcard::to_allocvec(&self).unwrap();
         tokio::fs::write(path, data).await.unwrap();
     }

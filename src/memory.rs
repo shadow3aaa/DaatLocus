@@ -9,9 +9,9 @@ use crate::{
         RequestBudgetLimits, approx_token_count, estimate_agent_turn_request,
         estimate_runtime_request_envelope, truncate_text_to_token_budget,
     },
-    get_spinova_home,
     hindsight::{HindsightRetainItem, HindsightRetainJob},
     reasoning::runtime::{AgentMessage, AgentToolSpec, PromptMessage, PromptRole},
+    spinova_paths::spinova_paths,
     tool_ui::{
         PatchUiData, TelegramUiData, TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent,
     },
@@ -19,6 +19,8 @@ use crate::{
 
 const RUNTIME_HISTORY_SUMMARY_PREFIX: &str = "Earlier runtime history summary:";
 const MID_TURN_SUMMARY_PREFIX: &str = "Earlier tool/context progress summary:";
+const RUNTIME_CONVERSATION_FILE_NAME: &str = "runtime_conversation";
+const HINDSIGHT_QUEUE_FILE_NAME: &str = "hindsight_queue";
 
 pub struct Memory {
     runtime_conversation: RuntimeConversation,
@@ -73,13 +75,6 @@ impl Memory {
         Self {
             runtime_conversation,
             hindsight_queue,
-        }
-    }
-
-    pub async fn empty() -> Self {
-        Self {
-            runtime_conversation: RuntimeConversation::default(),
-            hindsight_queue: HindsightQueue::default(),
         }
     }
 
@@ -456,7 +451,9 @@ fn prompt_message_to_agent_message(message: PromptMessage) -> AgentMessage {
 
 impl RuntimeConversation {
     async fn new(bootstrap_focus: Option<String>, bootstrap_messages: Vec<PromptMessage>) -> Self {
-        let persistence_path = get_spinova_home().await.join("runtime_conversation");
+        let persistence_path = spinova_paths()
+            .await
+            .state_file(RUNTIME_CONVERSATION_FILE_NAME);
         tokio::fs::read(persistence_path)
             .await
             .ok()
@@ -597,7 +594,9 @@ impl RuntimeConversation {
     }
 
     async fn sync_to_disk(&self) {
-        let persistence_path = get_spinova_home().await.join("runtime_conversation");
+        let persistence_path = spinova_paths()
+            .await
+            .state_file(RUNTIME_CONVERSATION_FILE_NAME);
         let data = match postcard::to_allocvec(self) {
             Ok(data) => data,
             Err(err) => {
@@ -654,7 +653,9 @@ impl HindsightQueueItem {
 
 impl HindsightQueue {
     async fn new() -> Self {
-        let persistence_path = get_spinova_home().await.join("hindsight_queue");
+        let persistence_path = spinova_paths()
+            .await
+            .state_file(HINDSIGHT_QUEUE_FILE_NAME);
         tokio::fs::read(persistence_path)
             .await
             .ok()
@@ -692,7 +693,9 @@ impl HindsightQueue {
     }
 
     async fn sync_to_disk(&self) {
-        let persistence_path = get_spinova_home().await.join("hindsight_queue");
+        let persistence_path = spinova_paths()
+            .await
+            .state_file(HINDSIGHT_QUEUE_FILE_NAME);
         let data = match postcard::to_allocvec(self) {
             Ok(data) => data,
             Err(err) => {

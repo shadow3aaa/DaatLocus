@@ -8,11 +8,11 @@ use tracing_subscriber::EnvFilter;
 use crate::{
     context_budget::RequestBudgetBreakdown,
     dashboard::DashboardState,
-    get_spinova_home,
     reasoning::runtime::{
         AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult,
         render_assistant_tool_call_protocol_dump,
     },
+    spinova_paths::spinova_paths,
 };
 
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
@@ -26,8 +26,7 @@ pub enum RuntimeStatusLevel {
 }
 
 pub async fn init_logging() {
-    let home = get_spinova_home().await;
-    let log_dir = home.join("logs");
+    let log_dir = spinova_paths().await.logs_dir();
     if let Err(err) = tokio::fs::create_dir_all(&log_dir).await {
         eprintln!(
             "failed to create log directory {}: {err}",
@@ -108,8 +107,8 @@ pub async fn write_current_turn_response_error_dump(
 }
 
 async fn write_current_turn_log_file(file_name: &str, body: String) {
-    let home = get_spinova_home().await;
-    let log_dir = home.join("logs");
+    let paths = spinova_paths().await;
+    let log_dir = paths.logs_dir();
     if let Err(err) = tokio::fs::create_dir_all(&log_dir).await {
         tracing::warn!(
             "failed to create log directory for current turn dump {}: {err}",
@@ -118,7 +117,7 @@ async fn write_current_turn_log_file(file_name: &str, body: String) {
         return;
     }
 
-    let dump_path = log_dir.join(file_name);
+    let dump_path = paths.logs_file(file_name);
     if let Err(err) = tokio::fs::write(&dump_path, body).await {
         tracing::warn!("failed to write current turn dump {}: {err}", dump_path.display());
     }

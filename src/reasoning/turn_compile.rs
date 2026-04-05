@@ -26,7 +26,7 @@ use crate::{
     config::Config,
     context::Context,
     events::TelegramIncomingEvent,
-    execute_agent_loop_step, get_spinova_home,
+    execute_agent_loop_step,
     pending_work::PendingWork,
     reasoning::{
         episode::EpisodeActionRecord,
@@ -46,13 +46,14 @@ use crate::{
         runtime::{PromptMessage, PromptRole},
         runtime::{execute_program_with_ir_report, resolve_program_tuning},
         runtime_review::{RuntimeReviewSpan, RuntimeTurnRecord},
-        sleep_artifacts::{
-            SleepArtifactRuntimePromptCandidate, SleepArtifactRuntimePromptEvolutionReport,
-            SleepArtifactRuntimePromptEvolutionRound, SleepArtifactTurnDemo,
-            SleepArtifactTurnDemoEvaluation, SleepArtifactsStore,
+        evaluation_artifacts::{
+            EvaluationArtifactRuntimePromptCandidate, EvaluationArtifactRuntimePromptEvolutionReport,
+            EvaluationArtifactRuntimePromptEvolutionRound, EvaluationArtifactTurnDemo,
+            EvaluationArtifactTurnDemoEvaluation, EvaluationArtifactsStore,
         },
         trace::TraceOrigin,
     },
+    spinova_paths::spinova_paths,
 };
 
 const MAX_COLD_START_PROMPT_COMPILE_ROUNDS: usize = 8;
@@ -448,11 +449,11 @@ pub struct TurnCompileEngine;
 impl TurnCompileEngine {
     pub async fn evaluate_from_review_spans(
         context: &mut Context,
-        turn_demos: &[SleepArtifactTurnDemo],
+        turn_demos: &[EvaluationArtifactTurnDemo],
         runtime_review_spans: &[RuntimeReviewSpan],
         current_system_prompt: String,
         previous_system_prompt: String,
-    ) -> Result<Vec<SleepArtifactTurnDemoEvaluation>> {
+    ) -> Result<Vec<EvaluationArtifactTurnDemoEvaluation>> {
         info!(
             "[turn-compile:{}] evaluating {} turn demos from runtime review spans",
             compile_mode_label(TurnCompileMode::SleepReplay),
@@ -471,11 +472,11 @@ impl TurnCompileEngine {
     async fn evaluate_cold_start(
         config: Config,
         compiled_prompts: CompiledPromptStore,
-        turn_demos: &[SleepArtifactTurnDemo],
+        turn_demos: &[EvaluationArtifactTurnDemo],
         current_system_prompt: String,
         previous_system_prompt: String,
         mut progress_ui: Option<&mut TurnCompileInlineProgress>,
-    ) -> Result<Vec<SleepArtifactTurnDemoEvaluation>> {
+    ) -> Result<Vec<EvaluationArtifactTurnDemoEvaluation>> {
         if turn_demos.is_empty() {
             return Ok(Vec::new());
         }
@@ -581,14 +582,14 @@ impl TurnCompileEngine {
         config: Config,
         compiled_prompts: CompiledPromptStore,
     ) -> Result<CompiledRuntimeSystemPrompt> {
-        let artifacts = SleepArtifactsStore::open_scoped(Some(COLD_START_ARTIFACT_SCOPE)).await?;
+        let artifacts = EvaluationArtifactsStore::open_scoped(Some(COLD_START_ARTIFACT_SCOPE)).await?;
         let mut progress_ui = TurnCompileInlineProgress::try_new();
         let persona_spec = load_or_seed_prompt_persona_spec().await?;
         if let Some(ui) = progress_ui.as_mut() {
             ui.set_phase("loading persona");
         }
         emit_turn_compile_progress(format!(
-            "[turn-compile:{}] loaded persona '{}' from ~/.spinova/{}",
+            "[turn-compile:{}] loaded persona '{}' from ~/.spinova/config/{}",
             compile_mode_label(TurnCompileMode::ColdStart),
             persona_spec.name,
             PROMPT_PERSONA_FILE_NAME
@@ -666,7 +667,7 @@ impl TurnCompileEngine {
                 best_evaluations = evaluations.clone();
             }
 
-            round_history.push(SleepArtifactRuntimePromptEvolutionRound {
+            round_history.push(EvaluationArtifactRuntimePromptEvolutionRound {
                 round: round + 1,
                 candidate: current_prompt.best_candidate.clone(),
                 passed,
@@ -790,7 +791,7 @@ impl TurnCompileEngine {
 }
 
 async fn prompt_persona_path() -> PathBuf {
-    get_spinova_home().await.join(PROMPT_PERSONA_FILE_NAME)
+    spinova_paths().await.config_file(PROMPT_PERSONA_FILE_NAME)
 }
 
 async fn load_or_seed_prompt_persona_spec() -> Result<PromptPersonaSpec> {
@@ -842,7 +843,7 @@ async fn generate_turn_demos_from_persona_spec(
     config: Config,
     compiled_prompts: CompiledPromptStore,
     spec: &PromptPersonaSpec,
-) -> Result<Vec<SleepArtifactTurnDemo>> {
+) -> Result<Vec<EvaluationArtifactTurnDemo>> {
     let workspace_facts = collect_turn_demo_workspace_facts().await?;
     let mut isolated_context = IsolatedEvalContext::new(config, compiled_prompts).await?;
     let renderer = OpenAIToolRenderer;
@@ -873,7 +874,7 @@ async fn generate_turn_demos_from_persona_spec(
 fn demos_from_generator_output(
     spec: &PromptPersonaSpec,
     output: &RuntimeTurnDemoGeneratorOutput,
-) -> Result<Vec<SleepArtifactTurnDemo>> {
+) -> Result<Vec<EvaluationArtifactTurnDemo>> {
     let demos = output
         .demos
         .iter()
@@ -898,7 +899,7 @@ fn demos_from_generator_output(
 fn normalize_generated_turn_demo(
     spec: &PromptPersonaSpec,
     demo: &crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo,
-) -> SleepArtifactTurnDemo {
+) -> EvaluationArtifactTurnDemo {
     let (requires_fresh_world_state, must_use_tools) =
         normalized_demo_requirements(demo.requires_fresh_world_state, demo.must_use_tools);
     let mut judge_focus = demo
@@ -928,7 +929,7 @@ fn normalize_generated_turn_demo(
         judge_focus.push("必须先查再答，不能跳过工具调用".to_string());
     }
 
-    SleepArtifactTurnDemo {
+    EvaluationArtifactTurnDemo {
         compile_key: spec.compile_key.clone(),
         title: demo.title.trim().to_string(),
         scenario_summary: demo.scenario_summary.trim().to_string(),
@@ -1129,7 +1130,7 @@ fn render_rule_list(items: &[String]) -> String {
 }
 
 pub fn turn_prompt_suggestions_from_evaluations(
-    evaluations: &[SleepArtifactTurnDemoEvaluation],
+    evaluations: &[EvaluationArtifactTurnDemoEvaluation],
 ) -> Vec<String> {
     evaluations
         .iter()
@@ -1138,7 +1139,7 @@ pub fn turn_prompt_suggestions_from_evaluations(
         .collect()
 }
 
-pub fn turn_evaluation_stats(evaluations: &[SleepArtifactTurnDemoEvaluation]) -> (usize, usize) {
+pub fn turn_evaluation_stats(evaluations: &[EvaluationArtifactTurnDemoEvaluation]) -> (usize, usize) {
     let passed = evaluations.iter().filter(|item| item.passed).count();
     let regressions = evaluations
         .iter()
@@ -1153,9 +1154,9 @@ pub fn is_acceptable_turn_round(passed: usize, total: usize, has_regression: boo
 
 pub async fn generate_turn_prompt_candidates(
     context: &mut Context,
-    evaluations: &[SleepArtifactTurnDemoEvaluation],
+    evaluations: &[EvaluationArtifactTurnDemoEvaluation],
     sleep_hypotheses: String,
-) -> Result<Vec<SleepArtifactRuntimePromptCandidate>> {
+) -> Result<Vec<EvaluationArtifactRuntimePromptCandidate>> {
     let failed = evaluations
         .iter()
         .filter(|item| !item.passed)
@@ -1192,7 +1193,7 @@ pub async fn generate_turn_prompt_candidates(
 }
 
 impl TurnCompileSpec {
-    pub fn from_demo(demo: &SleepArtifactTurnDemo) -> Self {
+    pub fn from_demo(demo: &EvaluationArtifactTurnDemo) -> Self {
         Self {
             compile_key: demo.compile_key.clone(),
             title: demo.title.clone(),
@@ -1206,11 +1207,11 @@ impl TurnCompileSpec {
 
 pub async fn evaluate_turn_demos_from_review_spans(
     context: &mut Context,
-    turn_demos: &[SleepArtifactTurnDemo],
+    turn_demos: &[EvaluationArtifactTurnDemo],
     runtime_review_spans: &[RuntimeReviewSpan],
     current_system_prompt: String,
     previous_system_prompt: String,
-) -> Result<Vec<SleepArtifactTurnDemoEvaluation>> {
+) -> Result<Vec<EvaluationArtifactTurnDemoEvaluation>> {
     if turn_demos.is_empty() {
         return Ok(Vec::new());
     }
@@ -1379,7 +1380,6 @@ async fn run_cold_start_turn_demo(
             telegram_update_id: synthetic_update_id,
             telegram_message_id: Some(synthetic_update_id),
             telegram_message_date: None,
-            latest_outgoing_preview: None,
         })?;
     context
         .pending_work
@@ -1428,12 +1428,12 @@ fn unique_synthetic_telegram_id() -> i64 {
 }
 
 fn turn_demo_evaluation_from_output(
-    demo: &SleepArtifactTurnDemo,
+    demo: &EvaluationArtifactTurnDemo,
     trace: &TurnTraceArtifact,
     rendered_trace: &str,
     output: &RuntimeTurnTraceJudgeOutput,
-) -> SleepArtifactTurnDemoEvaluation {
-    SleepArtifactTurnDemoEvaluation {
+) -> EvaluationArtifactTurnDemoEvaluation {
+    EvaluationArtifactTurnDemoEvaluation {
         compile_key: demo.compile_key.clone(),
         demo_title: demo.title.clone(),
         passed: output.passed,
@@ -1465,8 +1465,8 @@ fn turn_demo_evaluation_from_output(
 async fn generate_turn_prompt_candidate(
     config: Config,
     compiled_prompts: CompiledPromptStore,
-    evaluations: &[SleepArtifactTurnDemoEvaluation],
-) -> Result<Option<SleepArtifactRuntimePromptCandidate>> {
+    evaluations: &[EvaluationArtifactTurnDemoEvaluation],
+) -> Result<Option<EvaluationArtifactRuntimePromptCandidate>> {
     let failed = evaluations
         .iter()
         .filter(|item| !item.passed)
@@ -1512,7 +1512,7 @@ async fn generate_turn_prompt_candidate(
     Ok(turn_prompt_candidate_from_output(&output.output, &failed))
 }
 
-fn render_failed_turn_demos(evaluations: &[SleepArtifactTurnDemoEvaluation]) -> String {
+fn render_failed_turn_demos(evaluations: &[EvaluationArtifactTurnDemoEvaluation]) -> String {
     evaluations
         .iter()
         .map(|item| {
@@ -1569,7 +1569,7 @@ fn last_finish_and_send_reply_message(history_messages: &[PromptMessage]) -> Opt
         .find_map(prompt_message_finish_and_send_reply_message)
 }
 
-fn render_turn_judge_feedback(evaluations: &[SleepArtifactTurnDemoEvaluation]) -> String {
+fn render_turn_judge_feedback(evaluations: &[EvaluationArtifactTurnDemoEvaluation]) -> String {
     evaluations
         .iter()
         .map(|item| {
@@ -1589,12 +1589,12 @@ fn render_turn_judge_feedback(evaluations: &[SleepArtifactTurnDemoEvaluation]) -
 
 fn turn_prompt_candidate_from_output(
     output: &crate::reasoning::programs::runtime_turn_prompt_patch_builder::RuntimeTurnPromptPatchBuilderOutput,
-    evaluations: &[SleepArtifactTurnDemoEvaluation],
-) -> Option<SleepArtifactRuntimePromptCandidate> {
+    evaluations: &[EvaluationArtifactTurnDemoEvaluation],
+) -> Option<EvaluationArtifactRuntimePromptCandidate> {
     if output.prompt_patches.is_empty() {
         return None;
     }
-    Some(SleepArtifactRuntimePromptCandidate {
+    Some(EvaluationArtifactRuntimePromptCandidate {
         compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
         title: if output.title.trim().is_empty() {
             "turn cold-start candidate".to_string()
@@ -1618,7 +1618,7 @@ fn turn_prompt_candidate_from_output(
 
 pub fn apply_runtime_prompt_candidate_shared(
     current: &CompiledRuntimeSystemPrompt,
-    candidate: &SleepArtifactRuntimePromptCandidate,
+    candidate: &EvaluationArtifactRuntimePromptCandidate,
 ) -> CompiledRuntimeSystemPrompt {
     let mut system_additions = current.system_additions.clone();
     for patch in &candidate.prompt_patches {
@@ -1705,13 +1705,13 @@ pub fn build_compiled_runtime_system_prompt_report(
 pub fn build_runtime_prompt_evolution_report(
     total_demos: usize,
     selected_prompt: &CompiledRuntimeSystemPrompt,
-    round_history: &[SleepArtifactRuntimePromptEvolutionRound],
+    round_history: &[EvaluationArtifactRuntimePromptEvolutionRound],
     accepted: bool,
     rolled_back: bool,
     regressions: usize,
     passed: usize,
-) -> SleepArtifactRuntimePromptEvolutionReport {
-    SleepArtifactRuntimePromptEvolutionReport {
+) -> EvaluationArtifactRuntimePromptEvolutionReport {
+    EvaluationArtifactRuntimePromptEvolutionReport {
         compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
         rounds: round_history.len(),
         accepted,
@@ -1727,7 +1727,7 @@ pub fn build_runtime_prompt_evolution_report(
 }
 
 pub fn turn_evaluation_summary_lines(
-    evaluations: &[SleepArtifactTurnDemoEvaluation],
+    evaluations: &[EvaluationArtifactTurnDemoEvaluation],
 ) -> Vec<String> {
     evaluations
         .iter()
