@@ -412,6 +412,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             &SleepDashboardStatus::default(),
         ),
         inspect_telegram_output: render_telegram_status_for_dashboard(&context),
+        system_prompt_output: render_system_prompt_output_for_dashboard(&context),
         activity_cells: render_activity_for_dashboard(&context),
         live_activity_cells: Vec::new(),
         last_cycle_elapsed_ms: None,
@@ -803,6 +804,9 @@ fn initial_train_source_dashboard_state(status: String) -> DashboardState {
         sleep_status_output: "Overview\nSleep controls are unavailable in train-source sessions."
             .to_string(),
         inspect_telegram_output: "Telegram\nNo active Telegram session.".to_string(),
+        system_prompt_output:
+            "System Prompt\nSystem prompt inspection is unavailable in train-source sessions."
+                .to_string(),
         activity_cells: Vec::new(),
         live_activity_cells: Vec::new(),
         last_cycle_elapsed_ms: None,
@@ -4098,6 +4102,7 @@ fn sync_dashboard_state(
         state.status_output = render_status_command_output_for_dashboard(context, &device_renders);
         state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);
         state.inspect_telegram_output = render_telegram_status_for_dashboard(context);
+        state.system_prompt_output = render_system_prompt_output_for_dashboard(context);
         if state.activity_cells.is_empty() {
             state.activity_cells = render_activity_for_dashboard(context);
         }
@@ -4156,6 +4161,31 @@ fn render_dashboard_footer_context(
             focused_device
         ),
     }
+}
+
+fn render_system_prompt_output_for_dashboard(context: &Context) -> String {
+    let mut lines = Vec::new();
+    lines.push("Runtime System Prompt".to_string());
+    lines.push(String::new());
+    lines.push("[kernel]".to_string());
+    lines.push(crate::reasoning::prompts::SYSTEM_PROMPT_KERNEL.to_string());
+    lines.push(String::new());
+    lines.push("[tool_action]".to_string());
+    lines.push(crate::reasoning::prompts::TOOL_ACTION_PROMPT.to_string());
+
+    let additions = context.compiled_prompts.runtime_system_additions();
+    lines.push(String::new());
+    lines.push("[compiled_additions]".to_string());
+    if additions.is_empty() {
+        lines.push("(none)".to_string());
+    } else {
+        lines.extend(additions.iter().cloned());
+    }
+
+    lines.push(String::new());
+    lines.push("[device_context]".to_string());
+    lines.push(crate::reasoning::prompts::build_device_context_prompt(context));
+    lines.join("\n")
 }
 
 fn render_footer_context_with_usage(
