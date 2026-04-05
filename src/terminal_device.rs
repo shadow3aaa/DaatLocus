@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     device::{AttentionLevel, Device, DeviceId, DeviceStateRender, DeviceToolScope},
+    sandbox::RuntimeSandboxPolicy,
     terminal_process::TerminalProcess,
 };
 
@@ -58,6 +59,13 @@ impl TerminalDevice {
         }
     }
 
+    pub fn session_state(&self, session_id: &str) -> Result<TerminalSessionState> {
+        self.sessions
+            .get(session_id)
+            .map(|session| session.state.clone())
+            .ok_or_else(|| miette!("unknown terminal session `{session_id}`"))
+    }
+
     fn forbidden_input_reason(text: &str) -> Option<&'static str> {
         let normalized = text.trim().to_ascii_lowercase();
         let forbidden_prefixes = [
@@ -103,6 +111,7 @@ impl TerminalDevice {
         session_id: Option<String>,
         create_new_session: bool,
         workdir: Option<String>,
+        sandbox_policy: &RuntimeSandboxPolicy,
         yield_time_ms: Option<u64>,
         max_chars: Option<usize>,
         mut on_progress: F,
@@ -126,7 +135,7 @@ impl TerminalDevice {
             bail!("terminal session `{target_session_id}` already has a running process");
         }
         session.process = Some(
-            TerminalProcess::spawn(&command, effective_workdir.as_deref())
+            TerminalProcess::spawn(&command, effective_workdir.as_deref(), sandbox_policy)
                 .map_err(|err| miette!("failed to spawn terminal process: {err}"))?,
         );
         session.output_offset = 0;
@@ -347,6 +356,10 @@ impl Device for TerminalDevice {
         DeviceId::Terminal
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -534,6 +547,21 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    use crate::sandbox::{FileSystemSandboxPolicy, RuntimeSandboxPolicy};
+
+    fn test_sandbox_policy() -> RuntimeSandboxPolicy {
+        RuntimeSandboxPolicy {
+            filesystem: FileSystemSandboxPolicy {
+                full_disk_read: true,
+                full_disk_write: true,
+                readable_roots: Vec::new(),
+                writable_roots: Vec::new(),
+                deny_read_paths: Vec::new(),
+                deny_write_paths: Vec::new(),
+            },
+        }
+    }
+
     fn echo_command(text: &str) -> String {
         if cfg!(windows) {
             format!("Write-Output '{text}'")
@@ -562,6 +590,7 @@ mod tests {
     #[tokio::test]
     async fn creates_new_sessions_and_lists_them() {
         let mut device = TerminalDevice::new();
+        let sandbox_policy = test_sandbox_policy();
 
         let created = device
             .exec_command_with_progress(
@@ -569,6 +598,7 @@ mod tests {
                 None,
                 true,
                 None,
+                &sandbox_policy,
                 None,
                 None,
                 |_session, _delta| {},
@@ -592,6 +622,7 @@ mod tests {
     #[tokio::test]
     async fn terminate_removes_non_main_session() {
         let mut device = TerminalDevice::new();
+        let sandbox_policy = test_sandbox_policy();
 
         let created = device
             .exec_command_with_progress(
@@ -599,6 +630,7 @@ mod tests {
                 None,
                 true,
                 None,
+                &sandbox_policy,
                 None,
                 None,
                 |_session, _delta| {},
@@ -629,6 +661,7 @@ mod tests {
     #[tokio::test]
     async fn focus_clears_when_last_session_is_terminated() {
         let mut device = TerminalDevice::new();
+        let sandbox_policy = test_sandbox_policy();
 
         let created = device
             .exec_command_with_progress(
@@ -636,6 +669,7 @@ mod tests {
                 None,
                 true,
                 None,
+                &sandbox_policy,
                 None,
                 None,
                 |_session, _delta| {},
@@ -653,6 +687,7 @@ mod tests {
     #[tokio::test]
     async fn prunes_old_exited_non_main_sessions() {
         let mut device = TerminalDevice::new();
+        let sandbox_policy = test_sandbox_policy();
 
         for idx in 0..(TerminalDevice::MAX_EXITED_SESSION_TOMBSTONES + 2) {
             let created = device
@@ -661,6 +696,7 @@ mod tests {
                     None,
                     true,
                     None,
+                    &sandbox_policy,
                     None,
                     None,
                     |_session, _delta| {},
@@ -688,6 +724,7 @@ mod tests {
     #[tokio::test]
     async fn exec_returns_running_session_when_yield_window_ends_first() {
         let mut device = TerminalDevice::new();
+        let sandbox_policy = test_sandbox_policy();
 
         let result = device
             .exec_command_with_progress(
@@ -695,6 +732,7 @@ mod tests {
                 None,
                 true,
                 None,
+                &sandbox_policy,
                 Some(100),
                 None,
                 |_session, _delta| {},
@@ -713,6 +751,7 @@ mod tests {
     #[tokio::test]
     async fn empty_stdin_poll_continues_running_session_until_output_arrives() {
         let mut device = TerminalDevice::new();
+        let sandbox_policy = test_sandbox_policy();
 
         let started = device
             .exec_command_with_progress(
@@ -720,6 +759,7 @@ mod tests {
                 None,
                 true,
                 None,
+                &sandbox_policy,
                 Some(50),
                 None,
                 |_session, _delta| {},

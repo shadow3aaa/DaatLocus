@@ -1,4 +1,6 @@
-use miette::Result;
+use std::path::Path;
+
+use miette::{Result, miette};
 use serde_json::json;
 
 use crate::{
@@ -39,6 +41,27 @@ fn terminal_session_meta(session: &crate::terminal_device::TerminalSessionState)
 
 fn model_tool_output_token_budget(context: &Context) -> usize {
     context.config.main_model.tool_output_max_tokens.max(1)
+}
+
+fn resolve_terminal_path(context: &Context, raw: &str, base: Option<&Path>) -> std::path::PathBuf {
+    context.resolve_tool_path(Path::new(raw), base)
+}
+
+fn command_mentions_protected_paths(context: &Context, text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains(".spinova") {
+        return true;
+    }
+    context.sandbox_policy.protected_paths().iter().any(|root| {
+        let rendered = root.display().to_string();
+        !rendered.is_empty() && text.contains(&rendered)
+    })
+}
+
+fn terminal_protection_error(label: &str) -> miette::Report {
+    miette!(
+        "terminal access to protected runtime path is not allowed ({label})"
+    )
 }
 
 fn compact_terminal_model_content(
@@ -131,8 +154,21 @@ fn execute_terminal_exec_tool<'a>(
         let args: TerminalExecArgs = parse_tool_args(call)?;
         let effective_workdir = args
             .workdir
+            .as_deref()
+            .map(|workdir| resolve_terminal_path(context, workdir, Some(&context.execution_cwd)))
+            .unwrap_or_else(|| context.execution_cwd.clone());
+        context
+            .sandbox_policy
+            .ensure_path_readable(&effective_workdir, "terminal workdir")
+            .map_err(|_| terminal_protection_error(&format!("workdir={}", effective_workdir.display())))?;
+        if command_mentions_protected_paths(context, &args.command) {
+            return Err(terminal_protection_error("command references protected path"));
+        }
+        let effective_workdir = args
+            .workdir
             .clone()
             .or_else(|| Some(context.execution_cwd.display().to_string()));
+        let sandbox_policy = context.sandbox_policy.clone();
         let dashboard_tx = context.dashboard_tx.clone();
         let result = context
             .devices
@@ -141,6 +177,7 @@ fn execute_terminal_exec_tool<'a>(
                 args.session_id.clone(),
                 args.create_new_session,
                 effective_workdir,
+                &sandbox_policy,
                 args.yield_time_ms,
                 args.max_chars,
                 move |session, delta| {
@@ -270,6 +307,17 @@ fn execute_terminal_write_stdin_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: TerminalWriteStdinArgs = parse_tool_args(call)?;
+        let session = context.devices.terminal_session_state(&args.session_id)?;
+        if let Some(cwd) = session.cwd.as_deref() {
+            let resolved_cwd = resolve_terminal_path(context, cwd, None);
+            context
+                .sandbox_policy
+                .ensure_path_readable(&resolved_cwd, "terminal session cwd")
+                .map_err(|_| terminal_protection_error(&format!("session cwd={}", resolved_cwd.display())))?;
+        }
+        if command_mentions_protected_paths(context, &args.text) {
+            return Err(terminal_protection_error("stdin references protected path"));
+        }
         let dashboard_tx = context.dashboard_tx.clone();
         let result = context
             .devices

@@ -5,7 +5,7 @@ use miette::{Result, miette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::terminal_device::TerminalDevice;
+use crate::{sandbox::RuntimeSandboxPolicy, terminal_device::TerminalDevice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
 pub enum DeviceId {
@@ -51,6 +51,8 @@ pub struct DeviceStateRender {
 #[async_trait]
 pub trait Device: Send + Sync {
     fn id(&self) -> DeviceId;
+
+    fn as_any(&self) -> &dyn Any;
 
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
@@ -190,6 +192,7 @@ impl DeviceManager {
         session_id: Option<String>,
         create_new_session: bool,
         workdir: Option<String>,
+        sandbox_policy: &RuntimeSandboxPolicy,
         yield_time_ms: Option<u64>,
         max_chars: Option<usize>,
         on_progress: F,
@@ -209,6 +212,7 @@ impl DeviceManager {
                 session_id,
                 create_new_session,
                 workdir,
+                sandbox_policy,
                 yield_time_ms,
                 max_chars,
                 on_progress,
@@ -249,6 +253,22 @@ impl DeviceManager {
             .downcast_mut::<TerminalDevice>()
             .ok_or_else(|| miette!("focused device is not Terminal: {:?}", focused))?;
         terminal.terminate_session(session_id).await
+    }
+
+    pub fn terminal_session_state(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::terminal_device::TerminalSessionState> {
+        let focused = self.focused.ok_or_else(|| miette!("no focused device"))?;
+        let device = self
+            .devices
+            .get(&focused)
+            .ok_or_else(|| miette!("focused device missing: {focused}"))?;
+        let terminal = device
+            .as_any()
+            .downcast_ref::<TerminalDevice>()
+            .ok_or_else(|| miette!("focused device is not Terminal: {:?}", focused))?;
+        terminal.session_state(session_id)
     }
 
     pub async fn shutdown(mut self) -> Result<()> {

@@ -10,6 +10,8 @@ use tokio::{
     process::{Child, ChildStdin, Command},
 };
 
+use crate::sandbox::RuntimeSandboxPolicy;
+
 pub struct TerminalProcess {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -18,17 +20,17 @@ pub struct TerminalProcess {
 }
 
 impl TerminalProcess {
-    pub fn spawn(command: &str, workdir: Option<&str>) -> std::io::Result<Self> {
-        let mut process = if cfg!(windows) {
-            let mut cmd = Command::new("powershell.exe");
-            cmd.arg("-NoLogo").arg("-NoProfile").arg("-Command");
-            cmd.arg(shell_command(command, workdir));
-            cmd
-        } else {
-            let mut cmd = Command::new("bash");
-            cmd.arg("-lc").arg(shell_command(command, workdir));
-            cmd
-        };
+    pub fn spawn(
+        command: &str,
+        workdir: Option<&str>,
+        sandbox_policy: &RuntimeSandboxPolicy,
+    ) -> std::io::Result<Self> {
+        let (shell_program, shell_args) = shell_invocation(command, workdir);
+        let spawn_spec = sandbox_policy
+            .shell_spawn_spec(shell_program, shell_args)
+            .map_err(std::io::Error::other)?;
+        let mut process = Command::new(&spawn_spec.program);
+        process.args(&spawn_spec.args);
 
         process
             .stdin(Stdio::piped())
@@ -137,6 +139,23 @@ where
             }
         }
     });
+}
+
+fn shell_invocation(command: &str, workdir: Option<&str>) -> (&'static str, Vec<String>) {
+    let shell_command = shell_command(command, workdir);
+    if cfg!(windows) {
+        (
+            "powershell.exe",
+            vec![
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                shell_command,
+            ],
+        )
+    } else {
+        ("bash", vec!["-lc".to_string(), shell_command])
+    }
 }
 
 fn shell_command(command: &str, workdir: Option<&str>) -> String {
