@@ -370,20 +370,6 @@ async fn async_main(cli: Cli) -> Result<()> {
     let devices = DeviceManager::new(Some(DeviceId::Terminal), vec![Box::new(terminal)])
         .await
         .unwrap();
-    let telegram_transport = if config.telegram.enabled && config.telegram.has_real_credentials() {
-        Some(tokio::spawn(
-            TelegramTransport::new(
-                config.telegram.clone(),
-                telegram_handle.clone(),
-                telegram_acl.clone(),
-                events.clone(),
-                pending_work.clone(),
-            )
-            .run(),
-        ))
-    } else {
-        None
-    };
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
@@ -439,6 +425,24 @@ async fn async_main(cli: Cli) -> Result<()> {
         tokio::sync::mpsc::unbounded_channel::<DashboardControlCommand>();
     let (sleep_result_tx, mut sleep_result_rx) =
         tokio::sync::mpsc::unbounded_channel::<SleepTaskResult>();
+    let telegram_transport = if context.config.telegram.enabled
+        && context.config.telegram.has_real_credentials()
+    {
+        Some(tokio::spawn(
+            TelegramTransport::new(
+                context.config.telegram.clone(),
+                context.telegram.clone(),
+                telegram_acl.clone(),
+                context.events.clone(),
+                context.pending_work.clone(),
+                tx.subscribe(),
+                dashboard_control_tx.clone(),
+            )
+            .run(),
+        ))
+    } else {
+        None
+    };
 
     let agent_handle = tokio::spawn(async move {
         let mut sleep_running = false;

@@ -1128,6 +1128,27 @@ fn execute_dashboard_command(
     }
 }
 
+pub(crate) fn execute_remote_command(
+    command: &str,
+    telegram_acl: &TelegramAclHandle,
+    state: &DashboardState,
+    control_tx: &tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
+) -> String {
+    let result = execute_dashboard_command(
+        command,
+        &telegram_acl.pending_requests(),
+        telegram_acl,
+        state,
+        control_tx,
+    );
+    match result {
+        DashboardCommandResult::ShowOverlay { text, .. } => text,
+        DashboardCommandResult::Quit => {
+            "quit command is only available in the local dashboard".to_string()
+        }
+    }
+}
+
 fn panel(title: impl Into<Line<'static>>) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)

@@ -3,9 +3,11 @@ use std::time::Duration;
 use miette::{Result, bail, miette};
 use reqwest::Client;
 use serde::Deserialize;
+use tokio::sync::{mpsc, watch};
 
 use crate::{
     config::TelegramConfig,
+    dashboard::{DashboardControlCommand, DashboardState, execute_remote_command},
     events::{EventStatus, EventStore, TelegramIncomingEvent},
     pending_work::{PendingWork, PendingWorkQueue},
     telegram_acl::{AccessDecision, TelegramAclHandle},
@@ -19,7 +21,11 @@ pub struct TelegramTransport {
     handle: TelegramDeviceHandle,
     events: EventStore,
     pending_work: PendingWorkQueue,
+    command_state_rx: watch::Receiver<DashboardState>,
+    command_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     offset: Option<i64>,
+    bot_username: Option<String>,
+    commands_registered: bool,
 }
 
 impl TelegramTransport {
@@ -29,6 +35,8 @@ impl TelegramTransport {
         acl: TelegramAclHandle,
         events: EventStore,
         pending_work: PendingWorkQueue,
+        command_state_rx: watch::Receiver<DashboardState>,
+        command_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     ) -> Self {
         Self {
             client: Client::new(),
@@ -37,7 +45,11 @@ impl TelegramTransport {
             handle,
             events,
             pending_work,
+            command_state_rx,
+            command_control_tx,
             offset: None,
+            bot_username: None,
+            commands_registered: false,
         }
     }
 
@@ -51,14 +63,27 @@ impl TelegramTransport {
     }
 
     async fn run_once(&mut self) -> Result<()> {
+        if !self.commands_registered {
+            self.sync_bot_commands().await?;
+            self.commands_registered = true;
+        }
         self.flush_outbox().await?;
         let updates = self.get_updates().await?;
         for update in updates {
             self.offset = Some(update.update_id + 1);
-            self.handle_update(update);
+            self.handle_update(update).await;
         }
         self.flush_outbox().await?;
         Ok(())
+    }
+
+    async fn sync_bot_commands(&mut self) -> Result<()> {
+        let bot = self.get_me().await?;
+        self.bot_username = bot
+            .username
+            .map(|username| username.trim().trim_start_matches('@').to_string())
+            .filter(|username| !username.is_empty());
+        self.set_my_commands().await
     }
 
     async fn flush_outbox(&mut self) -> Result<()> {
@@ -104,7 +129,7 @@ impl TelegramTransport {
         Ok(())
     }
 
-    fn handle_update(&self, update: TelegramUpdate) {
+    async fn handle_update(&self, update: TelegramUpdate) {
         let Some(message) = update.message else {
             return;
         };
@@ -119,6 +144,15 @@ impl TelegramTransport {
 
         match self.acl.classify(message.chat.id) {
             AccessDecision::Approved => {
+                if let Some(command) =
+                    extract_telegram_command(&message, self.bot_username.as_deref())
+                {
+                    if let Err(err) = self.handle_command_message(message.chat.id, &command).await
+                    {
+                        tracing::error!("handle telegram command failed: {err:?}");
+                    }
+                    return;
+                }
                 if let Err(err) = self.acl.observe_approved(
                     message.chat.id,
                     chat_title.clone(),
@@ -170,6 +204,16 @@ impl TelegramTransport {
         }
     }
 
+    async fn handle_command_message(&self, chat_id: i64, command: &str) -> Result<()> {
+        let response = {
+            let state = self.command_state_rx.borrow();
+            execute_remote_command(&command, &self.acl, &state, &self.command_control_tx)
+        };
+        self.handle
+            .register_known_chat(chat_id.to_string(), chat_id.to_string());
+        self.send_message(chat_id, &response).await
+    }
+
     async fn get_updates(&self) -> Result<Vec<TelegramUpdate>> {
         let url = self.endpoint("getUpdates");
         let response = self
@@ -195,6 +239,59 @@ impl TelegramTransport {
         } else {
             bail!(
                 "telegram getUpdates failed: {}",
+                payload
+                    .description
+                    .unwrap_or_else(|| "unknown api error".to_string())
+            );
+        }
+    }
+
+    async fn get_me(&self) -> Result<TelegramBotProfile> {
+        let response = self
+            .client
+            .post(self.endpoint("getMe"))
+            .send()
+            .await
+            .map_err(|err| miette!("telegram getMe request failed: {err}"))?
+            .error_for_status()
+            .map_err(|err| miette!("telegram getMe http error: {err}"))?;
+        let payload: TelegramApiResponse<TelegramBotProfile> = response
+            .json()
+            .await
+            .map_err(|err| miette!("telegram getMe json decode failed: {err}"))?;
+        if payload.ok {
+            Ok(payload.result)
+        } else {
+            bail!(
+                "telegram getMe failed: {}",
+                payload
+                    .description
+                    .unwrap_or_else(|| "unknown api error".to_string())
+            );
+        }
+    }
+
+    async fn set_my_commands(&self) -> Result<()> {
+        let response = self
+            .client
+            .post(self.endpoint("setMyCommands"))
+            .json(&serde_json::json!({
+                "commands": TELEGRAM_BOT_COMMANDS,
+            }))
+            .send()
+            .await
+            .map_err(|err| miette!("telegram setMyCommands request failed: {err}"))?
+            .error_for_status()
+            .map_err(|err| miette!("telegram setMyCommands http error: {err}"))?;
+        let payload: TelegramApiResponse<bool> = response
+            .json()
+            .await
+            .map_err(|err| miette!("telegram setMyCommands json decode failed: {err}"))?;
+        if payload.ok && payload.result {
+            Ok(())
+        } else {
+            bail!(
+                "telegram setMyCommands failed: {}",
                 payload
                     .description
                     .unwrap_or_else(|| "unknown api error".to_string())
@@ -261,7 +358,17 @@ struct TelegramIncomingMessage {
     chat: TelegramChat,
     from: Option<TelegramUser>,
     text: Option<String>,
+    entities: Option<Vec<TelegramMessageEntity>>,
     caption: Option<String>,
+    caption_entities: Option<Vec<TelegramMessageEntity>>,
+}
+
+#[derive(Deserialize)]
+struct TelegramMessageEntity {
+    #[serde(rename = "type")]
+    kind: String,
+    offset: usize,
+    length: usize,
 }
 
 #[derive(Deserialize)]
@@ -279,6 +386,32 @@ struct TelegramUser {
     last_name: Option<String>,
     username: Option<String>,
 }
+
+#[derive(Deserialize)]
+struct TelegramBotProfile {
+    username: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct TelegramBotCommand {
+    command: &'static str,
+    description: &'static str,
+}
+
+const TELEGRAM_BOT_COMMANDS: &[TelegramBotCommand] = &[
+    TelegramBotCommand {
+        command: "status",
+        description: "查看当前状态",
+    },
+    TelegramBotCommand {
+        command: "sleep",
+        description: "sleep run 或 sleep status",
+    },
+    TelegramBotCommand {
+        command: "telegram",
+        description: "telegram status/approve/reject",
+    },
+];
 
 fn extract_message_text(message: &TelegramIncomingMessage) -> String {
     message
@@ -333,4 +466,54 @@ fn truncate_reason(text: &str) -> String {
     } else {
         preview
     }
+}
+
+fn extract_telegram_command(
+    message: &TelegramIncomingMessage,
+    bot_username: Option<&str>,
+) -> Option<String> {
+    let (text, entities) = if let Some(text) = message.text.as_deref() {
+        (text, message.entities.as_deref()?)
+    } else if let Some(caption) = message.caption.as_deref() {
+        (caption, message.caption_entities.as_deref()?)
+    } else {
+        return None;
+    };
+    let entity = entities.first()?;
+    if entity.kind != "bot_command" || entity.offset != 0 || entity.length == 0 {
+        return None;
+    }
+    let command_token = text.get(..entity.length)?.trim();
+    let remainder = text.get(entity.length..).unwrap_or_default().trim();
+    normalize_telegram_command(command_token, remainder, bot_username)
+}
+
+fn normalize_telegram_command(
+    command_token: &str,
+    remainder: &str,
+    bot_username: Option<&str>,
+) -> Option<String> {
+    let command = command_token.trim().trim_start_matches('/');
+    if command.is_empty() {
+        return None;
+    }
+    let (command_name, mentioned_username) = match command.split_once('@') {
+        Some((name, username)) => (name.trim(), Some(username.trim())),
+        None => (command.trim(), None),
+    };
+    if command_name.is_empty() {
+        return None;
+    }
+    if let Some(mentioned_username) = mentioned_username {
+        let bot_username = bot_username?;
+        if !mentioned_username.eq_ignore_ascii_case(bot_username) {
+            return None;
+        }
+    }
+    let args = remainder.trim();
+    Some(if args.is_empty() {
+        command_name.to_string()
+    } else {
+        format!("{command_name} {args}")
+    })
 }
