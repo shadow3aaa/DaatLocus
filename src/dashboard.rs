@@ -13,6 +13,7 @@ use ratatui::{
 use crate::{
     device::DeviceId,
     reasoning::runtime::{PromptMessage, PromptRole},
+    spinova_paths::spinova_paths_sync,
     telegram_acl::TelegramAclHandle,
     tool_ui::{
         PatchFileUiData, PatchUiData, TelegramUiAction, TelegramUiData, TerminalUiAction,
@@ -36,6 +37,7 @@ pub struct DashboardState {
 #[derive(Clone, Debug)]
 pub enum DashboardControlCommand {
     RunSleep,
+    ClearConversation,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -582,6 +584,8 @@ trait DashboardSubcommand: Sync {
 }
 
 struct QuitCommand;
+struct ClearCommand;
+struct PersonaCommand;
 struct StatusCommand;
 struct SleepCommand;
 struct SleepRunSubcommand;
@@ -592,6 +596,8 @@ struct TelegramApproveSubcommand;
 struct TelegramRejectSubcommand;
 
 static QUIT_COMMAND: QuitCommand = QuitCommand;
+static CLEAR_COMMAND: ClearCommand = ClearCommand;
+static PERSONA_COMMAND: PersonaCommand = PersonaCommand;
 static STATUS_COMMAND: StatusCommand = StatusCommand;
 static SLEEP_COMMAND: SleepCommand = SleepCommand;
 static SLEEP_RUN_SUBCOMMAND: SleepRunSubcommand = SleepRunSubcommand;
@@ -608,8 +614,10 @@ static TELEGRAM_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
     &TELEGRAM_REJECT_SUBCOMMAND,
 ];
 
-static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 4] = [
+static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 6] = [
     &QUIT_COMMAND,
+    &CLEAR_COMMAND,
+    &PERSONA_COMMAND,
     &STATUS_COMMAND,
     &SLEEP_COMMAND,
     &TELEGRAM_COMMAND,
@@ -656,6 +664,64 @@ impl DashboardCommand for StatusCommand {
         DashboardCommandResult::ShowOverlay {
             title: self.overlay_title(raw),
             text: fallback_output(&context.state.status_output),
+        }
+    }
+}
+
+impl DashboardCommand for ClearCommand {
+    fn usage(&self) -> &'static str {
+        "clear"
+    }
+
+    fn description(&self) -> &'static str {
+        "clear runtime conversation history"
+    }
+
+    fn execute(
+        &self,
+        _: &[&str],
+        raw: &str,
+        context: &DashboardCommandContext<'_>,
+    ) -> DashboardCommandResult {
+        match context
+            .control_tx
+            .send(DashboardControlCommand::ClearConversation)
+        {
+            Ok(()) => DashboardCommandResult::ShowOverlay {
+                title: raw.trim().to_uppercase(),
+                text: "queued runtime conversation clear".to_string(),
+            },
+            Err(err) => DashboardCommandResult::ShowOverlay {
+                title: raw.trim().to_uppercase(),
+                text: format!("failed to queue clear command: {err}"),
+            },
+        }
+    }
+}
+
+impl DashboardCommand for PersonaCommand {
+    fn usage(&self) -> &'static str {
+        "persona"
+    }
+
+    fn description(&self) -> &'static str {
+        "show current prompt persona config"
+    }
+
+    fn execute(
+        &self,
+        _: &[&str],
+        raw: &str,
+        _: &DashboardCommandContext<'_>,
+    ) -> DashboardCommandResult {
+        let path = spinova_paths_sync().config_file("prompt_persona.toml");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(err) => format!("failed to read {}: {err}", path.display()),
+        };
+        DashboardCommandResult::ShowOverlay {
+            title: raw.trim().to_uppercase(),
+            text,
         }
     }
 }

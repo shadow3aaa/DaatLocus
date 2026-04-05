@@ -189,6 +189,28 @@ impl Memory {
         self.hindsight_queue.mark_queued_retained();
     }
 
+    pub async fn clear_runtime_conversation(&mut self) -> MemoryRetainPlan {
+        let retain_plan = self.runtime_conversation.take_for_hindsight().map_or(
+            MemoryRetainPlan {
+                jobs: Vec::new(),
+                must_flush_before_continue: false,
+            },
+            |(current_doing, messages)| {
+                self.hindsight_queue.push_turn(current_doing, messages);
+                let jobs = self.collect_pending_retain_jobs();
+                let must_flush_before_continue =
+                    self.hindsight_queue.retain_backlog_count() >= HINDSIGHT_RETAIN_BACKLOG_LIMIT;
+                MemoryRetainPlan {
+                    jobs,
+                    must_flush_before_continue,
+                }
+            },
+        );
+        self.runtime_conversation.sync_to_disk().await;
+        self.hindsight_queue.sync_to_disk().await;
+        retain_plan
+    }
+
     pub async fn shutdown(self) {
         self.runtime_conversation.sync_to_disk().await;
         self.hindsight_queue.sync_to_disk().await;
@@ -474,6 +496,24 @@ impl RuntimeConversation {
 
     pub fn current_focus(&self) -> Option<String> {
         self.last_focus.clone()
+    }
+
+    pub fn clear(&mut self) {
+        self.last_focus = None;
+        self.messages.clear();
+    }
+
+    pub fn take_for_hindsight(&mut self) -> Option<(String, Vec<PromptMessage>)> {
+        let messages = self.messages();
+        if messages.is_empty() {
+            self.clear();
+            return None;
+        }
+        let current_doing = self
+            .current_focus()
+            .unwrap_or_else(|| "manual runtime conversation clear".to_string());
+        self.clear();
+        Some((current_doing, messages))
     }
 
     pub fn messages(&self) -> Vec<PromptMessage> {

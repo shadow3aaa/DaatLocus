@@ -404,6 +404,14 @@ const TELEGRAM_BOT_COMMANDS: &[TelegramBotCommand] = &[
         description: "查看当前状态",
     },
     TelegramBotCommand {
+        command: "clear",
+        description: "清空当前会话消息历史",
+    },
+    TelegramBotCommand {
+        command: "persona",
+        description: "查看当前人格配置",
+    },
+    TelegramBotCommand {
         command: "sleep",
         description: "sleep run 或 sleep status",
     },
