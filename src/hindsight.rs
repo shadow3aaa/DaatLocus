@@ -166,7 +166,7 @@ impl HindsightClient {
                             Ok(()) => {}
                             Err(err) => {
                                 let detail = err.to_string();
-                                eprintln!("[hindsight] retain failed: {detail}");
+                                tracing::error!("[hindsight] retain failed: {detail}");
                                 std::process::exit(1);
                             }
                         }

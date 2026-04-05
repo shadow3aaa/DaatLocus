@@ -5,12 +5,13 @@ use serde_json::{Value, json};
 use crate::{
     context::Context,
     core::LLM,
+    logging::{RuntimeStatusLevel, set_runtime_status},
     snapshot::Snapshot,
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 
 use super::{
-    compiled::seed_compiled_program_from_tuning,
+    compiled::seed_compiled_program_from_tuning_for_model,
     optimizer::PromptTuningConfig,
     program::Program,
     render::Renderer,
@@ -44,7 +45,9 @@ pub struct AgentToolSpec {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentToolInputSpec {
-    JsonSchema { schema: Value },
+    JsonSchema {
+        schema: Value,
+    },
     FreeformGrammar {
         syntax: String,
         definition: String,
@@ -71,7 +74,7 @@ pub enum AgentMessage {
     Assistant {
         content: String,
     },
-    AssistantToolCalls {
+    AssistantToolCallProtocol {
         content: Option<String>,
         calls: Vec<AgentToolCall>,
     },
@@ -90,14 +93,17 @@ pub struct AgentTurnRequest {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
-pub enum AgentTurnResponse {
-    Assistant {
-        content: String,
-    },
-    ToolCalls {
-        content: Option<String>,
-        calls: Vec<AgentToolCall>,
-    },
+pub enum AgentTurnItem {
+    AssistantMessage { content: String },
+    ToolCall { call: AgentToolCall },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AgentTurnStreamResult {
+    pub items: Vec<AgentTurnItem>,
+    #[serde(alias = "needs_follow_up")]
+    pub raw_stream_follow_up: bool,
+    pub last_assistant_message: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -115,7 +121,7 @@ pub struct PromptMessage {
     pub tool_call_ui_events: Vec<ToolCallUiEvent>,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PromptRole {
     System,
     User,
@@ -177,7 +183,14 @@ impl PromptRequest {
     fn with_retry_note(&self, note: impl Into<String>) -> Self {
         let mut request = self.clone();
         request.retry_messages.push(PromptMessage::user(format!(
-            "上一次输出未通过类型校验，请只修正输出结构并重试。\n错误：{}",
+            "上一次输出未通过类型校验，请只修正输出结构并重试。\n\
+错误：{}\n\
+严格要求：\n\
+1. 必须返回与 schema 完全匹配的单个 JSON 对象。\n\
+2. 不要返回 markdown，不要使用 ```json 代码块，不要附加解释文字。\n\
+3. 所有字段都必须提供；如果某字段当前不需要，请使用空字符串、false、0 或空数组，而不是 null，也不要省略。\n\
+4. 枚举值必须逐字匹配 schema，不能自行改写名称。\n\
+5. 如果 provider 支持 tool call，请把该 JSON 放在 tool arguments 中，而不是普通文本 content 里。",
             note.into()
         )));
         request
@@ -217,19 +230,11 @@ impl AgentMessage {
         }
     }
 
-    pub fn assistant_tool_calls_with_history(
+    pub fn assistant_tool_call_protocol(
         content: Option<String>,
         calls: Vec<AgentToolCall>,
-        tool_call_ui_events: Vec<ToolCallUiEvent>,
-    ) -> (Self, PromptMessage) {
-        let history_content = content
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_default();
-        (
-            Self::AssistantToolCalls { content, calls },
-            PromptMessage::assistant_with_tool_calls(history_content, tool_call_ui_events),
-        )
+    ) -> Self {
+        Self::AssistantToolCallProtocol { content, calls }
     }
 
     pub fn tool(
@@ -242,6 +247,91 @@ impl AgentMessage {
             name: name.into(),
             content: content.into(),
         }
+    }
+}
+
+pub fn summarize_assistant_tool_call_protocol(
+    content: Option<&str>,
+    calls: &[AgentToolCall],
+) -> String {
+    let tool_names = calls
+        .iter()
+        .map(|call| call.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let note = content
+        .map(summarize_agent_inline_text)
+        .filter(|text| !text.is_empty());
+    match note {
+        Some(note) => format!("assistant tool-call protocol [{tool_names}] with note: {note}"),
+        None => format!("assistant tool-call protocol [{tool_names}]"),
+    }
+}
+
+pub fn assistant_tool_call_protocol_char_count(
+    content: Option<&str>,
+    calls: &[AgentToolCall],
+) -> usize {
+    content.unwrap_or_default().chars().count()
+        + calls
+            .iter()
+            .map(|call| {
+                call.name.chars().count()
+                    + call.id.chars().count()
+                    + call.arguments.to_string().chars().count()
+            })
+            .sum::<usize>()
+}
+
+pub fn estimate_assistant_tool_call_protocol_tokens(
+    calls: &[AgentToolCall],
+    estimate_json_value_tokens: impl Fn(&Value) -> usize,
+    approx_token_count: impl Fn(&str) -> usize,
+) -> usize {
+    calls
+        .iter()
+        .map(|call| {
+            approx_token_count(&call.id)
+                .saturating_add(approx_token_count(&call.name))
+                .saturating_add(estimate_json_value_tokens(&call.arguments))
+                .saturating_add(16)
+        })
+        .sum()
+}
+
+pub fn render_assistant_tool_call_protocol_dump(
+    content: Option<&str>,
+    calls: &[AgentToolCall],
+) -> Vec<String> {
+    let mut lines = vec!["role=assistant".to_string()];
+    if let Some(content) = content
+        && !content.trim().is_empty()
+    {
+        lines.push("content:".to_string());
+        lines.push(content.to_string());
+    }
+    lines.push(format!("tool_call_count={}", calls.len()));
+    for (index, call) in calls.iter().enumerate() {
+        lines.push(format!("tool_call[{}].id={}", index, call.id));
+        lines.push(format!("tool_call[{}].name={}", index, call.name));
+        lines.push(format!("tool_call[{}].arguments=", index));
+        lines.push(
+            serde_json::to_string_pretty(&call.arguments)
+                .unwrap_or_else(|_| call.arguments.to_string()),
+        );
+    }
+    lines
+}
+
+fn summarize_agent_inline_text(text: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let compact = text.replace('\n', "\\n");
+    let mut chars = compact.chars();
+    let summary = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{summary}...")
+    } else {
+        summary
     }
 }
 
@@ -266,7 +356,13 @@ pub async fn resolve_program_tuning<P: Program>(
     }
 
     let tuning = program.default_tuning();
-    if let Err(err) = seed_compiled_program_from_tuning(program, &tuning).await {
+    if let Err(err) = seed_compiled_program_from_tuning_for_model(
+        &context.config.main_model.model_name,
+        program,
+        &tuning,
+    )
+    .await
+    {
         log_prompt_compile_event(
             context,
             format!(
@@ -287,11 +383,11 @@ pub async fn resolve_program_tuning<P: Program>(
 }
 
 fn log_prompt_compile_event(context: &Context, message: String) {
-    if let Some(tx) = &context.dashboard_tx {
-        tx.send_modify(|state| state.runtime_status = Some(message.clone()));
-    } else {
-        eprintln!("{message}");
-    }
+    set_runtime_status(
+        context.dashboard_tx.as_ref(),
+        RuntimeStatusLevel::Info,
+        message,
+    );
 }
 
 pub async fn execute_program_with_ir<P: Program, R: Renderer>(

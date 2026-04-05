@@ -1,16 +1,19 @@
 mod apply_patch;
 mod config;
 mod context;
+mod context_budget;
 mod core;
 mod dashboard;
 mod device;
 mod emotion;
+mod events;
 mod hindsight;
+mod logging;
 mod memory;
-mod obligations;
-mod projects;
+mod pending_work;
 mod providers;
 mod reasoning;
+mod runtime_context;
 mod runtime_tools;
 mod snapshot;
 mod system_info;
@@ -19,6 +22,7 @@ mod telegram_device;
 mod telegram_transport;
 mod terminal_device;
 mod terminal_process;
+mod todo_board;
 mod tool_ui;
 mod work_state;
 
@@ -34,7 +38,7 @@ use crate::{
     apply_patch::{PatchOperationKind, apply_patch_in_root, summarize_apply_patch_error},
     config::load_config,
     context::Context,
-    core::TelegramResolution,
+    context_budget::{approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded},
     dashboard::{
         DashboardActivityEvent, DashboardControlCommand, DashboardState,
         activity_cell_from_tool_ui_event, activity_cells_from_tool_call_ui_event,
@@ -43,16 +47,21 @@ use crate::{
     },
     device::{DeviceId, DeviceManager},
     emotion::Emotion,
+    events::{EventPayload, EventStatus, EventStore, EventView},
     hindsight::{HindsightClient, HindsightRecallOptions},
-    memory::Memory,
-    obligations::Obligations,
-    projects::{ProjectStatus, Projects},
+    logging::{
+        RuntimeStatusLevel, clear_runtime_status, init_logging, set_runtime_status,
+        write_current_turn_messages_dump, write_current_turn_response_dump,
+        write_current_turn_response_error_dump,
+    },
+    memory::{Memory, RuntimeTurnDraft},
+    pending_work::{PendingWork, PendingWorkQueue},
     providers::OpenAIClient,
     reasoning::{
         adapters::swe_train_source::SweTrainSource,
         compiled::{
-            COMPILED_DIR_NAME, CompiledPromptStore, load_all_compiled_programs,
-            load_compiled_runtime_system_prompt,
+            COMPILED_DIR_NAME, CompiledPromptStore, load_all_compiled_programs_for_model,
+            load_compiled_runtime_system_prompt_for_model,
         },
         environment::EpisodeObservation,
         episode::{
@@ -62,11 +71,10 @@ use crate::{
         episode_harness::EpisodeHarness,
         programs::completion_judge::{CompletionJudgeOutput, CompletionJudgeProgram},
         programs::task_understanding::{TaskUnderstandingOutput, TaskUnderstandingProgram},
-        prompts::{SYSTEM_PROMPT_KERNEL, build_device_context_prompt},
         render::openai_tools::OpenAIToolRenderer,
         runtime::{
-            AgentMessage, AgentTurnRequest, AgentTurnResponse, PromptMemoryContext, PromptMessage,
-            PromptRole, execute_program,
+            AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult,
+            PromptMemoryContext, PromptMessage, execute_program,
         },
         runtime_review::{
             RuntimeTurnRecord, append_runtime_turn_record, unread_runtime_review_count,
@@ -74,26 +82,41 @@ use crate::{
         sleep::run_sleep,
         sleep_artifacts::SleepArtifactSuggestedFixKind,
         trace::unread_runtime_trace_count,
+        turn_compile::TurnCompileEngine,
+    },
+    runtime_context::{
+        MID_TURN_COMPACTION_MAX_RECOVERIES, build_runtime_conversation_summary,
+        build_runtime_request_envelope, maybe_compact_runtime_messages,
+        runtime_request_budget_limits,
     },
     runtime_tools::{
         ToolExecutionResult, build_runtime_tool_specs, execute_agent_tool_call,
-        render_tool_call_ui_event, summarize_primary_action_from_tool_call,
+        render_tool_call_ui_event, summarize_action_from_tool_call,
     },
     snapshot::Snapshot,
     telegram_acl::TelegramAclHandle,
     telegram_device::TelegramDevice,
     telegram_transport::TelegramTransport,
     terminal_device::TerminalDevice,
+    todo_board::TodoBoard,
     tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
     work_state::WorkState,
 };
 use chrono::{Local, TimeZone, Utc};
+use clap::{Parser, Subcommand};
 use miette::{Result, miette};
 use serde_json::json;
 
 const AUTO_SLEEP_IDLE_THRESHOLD: Duration = Duration::from_secs(300);
 const AUTO_SLEEP_MIN_INTERVAL: Duration = Duration::from_secs(300);
 const FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD: usize = 128;
+const RUNTIME_EVENT_CLAIM_BATCH_SIZE: usize = 1;
+
+fn emit_startup_progress(message: impl AsRef<str>) {
+    let message = message.as_ref();
+    tracing::info!("{message}");
+    println!("{message}");
+}
 
 enum SleepTrigger {
     Manual,
@@ -111,7 +134,9 @@ struct SleepDashboardStatus {
     total_consumed_trace_events: usize,
     total_consumed_runtime_reviews: usize,
     total_runtime_demos: usize,
+    total_turn_demos: usize,
     total_runtime_demo_evaluations: usize,
+    total_turn_demo_evaluations: usize,
     total_runtime_demo_passed: usize,
     total_runtime_demo_regressions: usize,
     total_runtime_prompt_candidates: usize,
@@ -124,11 +149,70 @@ struct SleepTaskResult {
     result: Result<crate::reasoning::sleep::SleepSummary>,
 }
 
-fn main() {
-    let args = env::args().skip(1).collect::<Vec<_>>();
+#[derive(Debug, Parser)]
+#[command(name = "spinova")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<SpinovaCommand>,
+}
 
-    if let Some(path) = train_source_inspect_path(&args) {
-        match run_train_source_inspect_blocking(path) {
+#[derive(Debug, Subcommand)]
+enum SpinovaCommand {
+    Reset {
+        #[command(subcommand)]
+        target: ResetTarget,
+    },
+    Sleep,
+    TrainSource {
+        #[command(subcommand)]
+        command: TrainSourceCommand,
+    },
+    #[command(name = "inspect-train-source", hide = true)]
+    LegacyInspectTrainSource {
+        path: String,
+    },
+    #[command(name = "rollout-train-source", hide = true)]
+    LegacyRolloutTrainSource {
+        path: String,
+        task_index: Option<usize>,
+    },
+    #[command(name = "learn-train-source", hide = true)]
+    LegacyLearnTrainSource {
+        path: String,
+        limit: Option<usize>,
+        batch_size: Option<usize>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ResetTarget {
+    All,
+    Mem,
+    Prompt,
+    Log,
+}
+
+#[derive(Debug, Subcommand)]
+enum TrainSourceCommand {
+    Inspect {
+        path: String,
+    },
+    Rollout {
+        path: String,
+        task_index: Option<usize>,
+    },
+    Learn {
+        path: String,
+        limit: Option<usize>,
+        batch_size: Option<usize>,
+    },
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    if let Some(path) = train_source_inspect_path(&cli) {
+        match run_train_source_inspect_blocking(&path) {
             Ok(()) => return,
             Err(err) => {
                 eprintln!("{err:?}");
@@ -142,32 +226,52 @@ fn main() {
         .build()
         .expect("failed to build tokio runtime");
 
-    if let Err(err) = runtime.block_on(async_main(args)) {
+    if let Err(err) = runtime.block_on(async_main(cli)) {
         eprintln!("{err:?}");
         std::process::exit(1);
     }
 }
 
-async fn async_main(args: Vec<String>) -> Result<()> {
-    if is_mem_reset_command(&args) {
-        run_mem_reset().await?;
-        return Ok(());
+async fn async_main(cli: Cli) -> Result<()> {
+    match cli.command.as_ref() {
+        Some(SpinovaCommand::Reset {
+            target: ResetTarget::All,
+        }) => {
+            run_reset_all().await?;
+            return Ok(());
+        }
+        Some(SpinovaCommand::Reset {
+            target: ResetTarget::Mem,
+        }) => {
+            run_mem_reset().await?;
+            return Ok(());
+        }
+        Some(SpinovaCommand::Reset {
+            target: ResetTarget::Prompt,
+        }) => {
+            run_prompt_reset().await?;
+            return Ok(());
+        }
+        Some(SpinovaCommand::Reset {
+            target: ResetTarget::Log,
+        }) => {
+            run_log_reset().await?;
+            return Ok(());
+        }
+        _ => {}
     }
 
-    if is_prompt_reset_command(&args) {
-        run_prompt_reset().await?;
-        return Ok(());
-    }
+    init_logging().await;
 
     let config = match load_config().await {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("{e}");
+            tracing::error!("failed to load config: {e}");
             std::process::exit(1);
         }
     };
 
-    if is_sleep_command(&args) {
+    if matches!(cli.command, Some(SpinovaCommand::Sleep)) {
         let mut context = build_eval_context(config).await;
         match run_sleep(&mut context).await {
             Ok(summary) => {
@@ -176,72 +280,102 @@ async fn async_main(args: Vec<String>) -> Result<()> {
                 return Ok(());
             }
             Err(err) => {
-                eprintln!("{err:?}");
+                tracing::error!("sleep command failed: {err:?}");
                 context.shutdown().await;
                 std::process::exit(1);
             }
         }
     }
 
-    if let Some((path, limit, batch_size)) = train_source_learn_args(&args) {
-        match run_train_source_learn_with_dashboard(config, path, limit, batch_size).await {
+    if let Some((path, limit, batch_size)) = train_source_learn_args(&cli) {
+        match run_train_source_learn_with_dashboard(config, &path, limit, batch_size).await {
             Ok(()) => return Ok(()),
             Err(err) => {
-                eprintln!("{err:?}");
+                tracing::error!("train-source learn failed: {err:?}");
                 std::process::exit(1);
             }
         }
     }
 
-    if let Some((path, task_index)) = train_source_rollout_args(&args) {
-        match run_train_source_rollout_with_dashboard(config, path, task_index).await {
+    if let Some((path, task_index)) = train_source_rollout_args(&cli) {
+        match run_train_source_rollout_with_dashboard(config, &path, task_index).await {
             Ok(()) => return Ok(()),
             Err(err) => {
-                eprintln!("{err:?}");
+                tracing::error!("train-source rollout failed: {err:?}");
                 std::process::exit(1);
             }
         }
     }
 
-    eprintln!("[prompt-compile] loading compiled prompts before dashboard startup...");
-    let compiled_prompts = match load_compiled_prompts_only().await {
+    emit_startup_progress("[prompt-compile] loading compiled prompts before dashboard startup...");
+    let mut compiled_prompts = match load_compiled_prompts_only(&config).await {
         Ok(store) => store,
         Err(err) => {
-            eprintln!("{err:?}");
+            tracing::error!("failed to load compiled prompts: {err:?}");
             std::process::exit(1);
         }
     };
-    if compiled_prompts.is_empty() {
-        eprintln!("[prompt-compile] no compiled prompts found; running with baseline prompts");
-    } else {
-        eprintln!(
-            "[prompt-compile] loaded {} compiled prompt suites",
-            compiled_prompts.len()
+    if !compiled_prompts.has_runtime_system_prompt() {
+        emit_startup_progress(
+            "[prompt-compile] runtime system prompt missing; running cold-start turn compile...",
         );
+        match TurnCompileEngine::compile_cold_start(config.clone(), compiled_prompts.clone()).await
+        {
+            Ok(runtime_prompt) => {
+                compiled_prompts =
+                    compiled_prompts.with_runtime_system_prompt(Some(runtime_prompt));
+                emit_startup_progress(
+                    "[prompt-compile] cold-start turn compile completed; runtime prompt cached",
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    "cold-start turn compile failed; continuing with baseline runtime prompt: {err:?}"
+                );
+                println!(
+                    "[prompt-compile] cold-start turn compile failed; continuing with baseline runtime prompt"
+                );
+            }
+        }
+    }
+    if compiled_prompts.is_empty() {
+        emit_startup_progress(
+            "[prompt-compile] no compiled prompts found; running with baseline prompts",
+        );
+    } else if compiled_prompts.has_runtime_system_prompt() {
+        emit_startup_progress(format!(
+            "[prompt-compile] loaded {} compiled prompt suites (including runtime system prompt)",
+            compiled_prompts.len()
+        ));
+    } else {
+        emit_startup_progress(format!(
+            "[prompt-compile] loaded {} compiled program suites; runtime system prompt still baseline",
+            compiled_prompts.len()
+        ));
     }
 
     let memory = Memory::new().await;
-    let obligations = Obligations::new().await;
-    let projects = Projects::new().await;
+    let todo_board = TodoBoard::new().await;
     let work_state = WorkState::new().await;
     let emotion = Emotion::new().await;
+    let events = EventStore::new().await;
+    let pending_work = PendingWorkQueue::new().await;
     let telegram_acl = TelegramAclHandle::load().await;
     let terminal = TerminalDevice::new();
     let telegram = TelegramDevice::new();
     let telegram_handle = telegram.handle();
     bootstrap_telegram_device_from_acl(&telegram_handle, &telegram_acl);
-    let devices = DeviceManager::new(
-        Some(DeviceId::Terminal),
-        vec![Box::new(terminal), Box::new(telegram)],
-    )
-    .await
-    .unwrap();
+    let devices = DeviceManager::new(Some(DeviceId::Terminal), vec![Box::new(terminal)])
+        .await
+        .unwrap();
     let telegram_transport = if config.telegram.enabled && config.telegram.has_real_credentials() {
         Some(tokio::spawn(
             TelegramTransport::new(
                 config.telegram.clone(),
                 telegram_handle.clone(),
                 telegram_acl.clone(),
+                events.clone(),
+                pending_work.clone(),
             )
             .run(),
         ))
@@ -263,15 +397,18 @@ async fn async_main(args: Vec<String>) -> Result<()> {
         hindsight_retain,
         memory,
         prompt_memory: PromptMemoryContext::default(),
-        obligations,
-        projects,
+        todo_board,
         work_state,
         emotion,
+        events,
+        pending_work,
         devices,
         telegram: telegram_handle,
         compiled_prompts,
         execution_cwd,
         dashboard_tx: None,
+        active_runtime_turn: false,
+        active_device_notices: std::collections::HashSet::new(),
         idle_since: None,
         last_idle_sleep_at: None,
         record_runtime_reviews: true,
@@ -285,15 +422,13 @@ async fn async_main(args: Vec<String>) -> Result<()> {
             &context,
             &SleepDashboardStatus::default(),
         ),
-        inspect_telegram_output: render_inspect_output_for_dashboard(
-            &context,
-            &device_renders,
-            DeviceId::Telegram,
-        ),
+        inspect_telegram_output: render_telegram_status_for_dashboard(&context),
         activity_cells: render_activity_for_dashboard(&context),
         live_activity_cells: Vec::new(),
         last_cycle_elapsed_ms: None,
         runtime_status: None,
+        footer_context: render_dashboard_footer_context(&context, None),
+        footer_estimated_input_tokens: None,
     });
     context.dashboard_tx = Some(tx.clone());
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
@@ -346,83 +481,66 @@ async fn async_main(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn is_mem_reset_command(args: &[String]) -> bool {
-    matches!(args, [command] if command == "mem-reset")
-}
-
-fn is_prompt_reset_command(args: &[String]) -> bool {
-    matches!(args, [command] if command == "prompt-reset")
-        || matches!(args, [command] if command == "compile-reset")
-}
-
-fn is_sleep_command(args: &[String]) -> bool {
-    matches!(args, [command] if command == "sleep")
-}
-
-fn train_source_inspect_path(args: &[String]) -> Option<&str> {
-    match args {
-        [command, subcommand, path] if command == "train-source" && subcommand == "inspect" => {
-            Some(path.as_str())
-        }
-        [command, path] if command == "inspect-train-source" => Some(path.as_str()),
+fn train_source_inspect_path(cli: &Cli) -> Option<String> {
+    match cli.command.as_ref()? {
+        SpinovaCommand::TrainSource {
+            command: TrainSourceCommand::Inspect { path },
+        } => Some(path.clone()),
+        SpinovaCommand::LegacyInspectTrainSource { path } => Some(path.clone()),
         _ => None,
     }
 }
 
-fn train_source_rollout_args(args: &[String]) -> Option<(&str, usize)> {
-    match args {
-        [command, subcommand, path] if command == "train-source" && subcommand == "rollout" => {
-            Some((path.as_str(), 0))
-        }
-        [command, subcommand, path, index]
-            if command == "train-source" && subcommand == "rollout" =>
-        {
-            let index = index.parse::<usize>().ok()?;
-            Some((path.as_str(), index))
-        }
-        [command, path] if command == "rollout-train-source" => Some((path.as_str(), 0)),
-        [command, path, index] if command == "rollout-train-source" => {
-            let index = index.parse::<usize>().ok()?;
-            Some((path.as_str(), index))
+fn train_source_rollout_args(cli: &Cli) -> Option<(String, usize)> {
+    match cli.command.as_ref()? {
+        SpinovaCommand::TrainSource {
+            command: TrainSourceCommand::Rollout { path, task_index },
+        } => Some((path.clone(), task_index.unwrap_or(0))),
+        SpinovaCommand::LegacyRolloutTrainSource { path, task_index } => {
+            Some((path.clone(), task_index.unwrap_or(0)))
         }
         _ => None,
     }
 }
 
-fn train_source_learn_args(args: &[String]) -> Option<(&str, usize, usize)> {
-    match args {
-        [command, subcommand, path] if command == "train-source" && subcommand == "learn" => {
-            Some((path.as_str(), 20, 5))
-        }
-        [command, subcommand, path, limit]
-            if command == "train-source" && subcommand == "learn" =>
-        {
-            let limit = limit.parse::<usize>().ok()?;
-            Some((path.as_str(), limit, 5))
-        }
-        [command, subcommand, path, limit, batch_size]
-            if command == "train-source" && subcommand == "learn" =>
-        {
-            let limit = limit.parse::<usize>().ok()?;
-            let batch_size = batch_size.parse::<usize>().ok()?;
-            Some((path.as_str(), limit, batch_size))
-        }
-        [command, path] if command == "learn-train-source" => Some((path.as_str(), 20, 5)),
-        [command, path, limit] if command == "learn-train-source" => {
-            let limit = limit.parse::<usize>().ok()?;
-            Some((path.as_str(), limit, 5))
-        }
-        [command, path, limit, batch_size] if command == "learn-train-source" => {
-            let limit = limit.parse::<usize>().ok()?;
-            let batch_size = batch_size.parse::<usize>().ok()?;
-            Some((path.as_str(), limit, batch_size))
-        }
+fn train_source_learn_args(cli: &Cli) -> Option<(String, usize, usize)> {
+    match cli.command.as_ref()? {
+        SpinovaCommand::TrainSource {
+            command:
+                TrainSourceCommand::Learn {
+                    path,
+                    limit,
+                    batch_size,
+                },
+        } => Some((path.clone(), limit.unwrap_or(20), batch_size.unwrap_or(5))),
+        SpinovaCommand::LegacyLearnTrainSource {
+            path,
+            limit,
+            batch_size,
+        } => Some((path.clone(), limit.unwrap_or(20), batch_size.unwrap_or(5))),
         _ => None,
     }
 }
 
 async fn run_mem_reset() -> Result<()> {
     let home = get_spinova_home().await;
+    clear_mem_state(&home).await?;
+
+    println!(
+        "[mem-reset] reset persistent runtime state under {}",
+        home.display()
+    );
+    println!(
+        "[mem-reset] cleared via empty context shutdown: runtime_conversation, hindsight_queue, todo_board, work_state, emotion, events"
+    );
+    println!("[mem-reset] cleared: reasoning_traces.jsonl, runtime_reviews.jsonl");
+    println!("[mem-reset] cleared: hindsight bank");
+    println!("[mem-reset] preserved: config.toml, reasoning_compiled/, telegram_acl.json, logs/");
+
+    Ok(())
+}
+
+async fn clear_mem_state(home: &PathBuf) -> Result<()> {
     let config = load_config()
         .await
         .map_err(|err| miette!("failed to load config for mem-reset: {err}"))?;
@@ -431,7 +549,7 @@ async fn run_mem_reset() -> Result<()> {
     let judge_model = config.judge.resolved_model(&config.main_model);
     let telegram = TelegramDevice::empty();
     let telegram_handle = telegram.handle();
-    let devices = DeviceManager::new(None, vec![Box::new(telegram)])
+    let devices = DeviceManager::new(None, vec![])
         .await
         .map_err(|err| miette!("failed to construct default devices for mem-reset: {err}"))?;
     let execution_cwd =
@@ -444,15 +562,18 @@ async fn run_mem_reset() -> Result<()> {
         hindsight_retain: hindsight.spawn_retain_worker(),
         memory: Memory::empty().await,
         prompt_memory: PromptMemoryContext::default(),
-        obligations: Obligations::default(),
-        projects: Projects::default(),
+        todo_board: TodoBoard::default(),
         work_state: WorkState::default(),
         emotion: Emotion::default(),
+        events: EventStore::empty(),
+        pending_work: PendingWorkQueue::empty(),
         devices,
         telegram: telegram_handle,
         compiled_prompts: CompiledPromptStore::empty(),
         execution_cwd,
         dashboard_tx: None,
+        active_runtime_turn: false,
+        active_device_notices: std::collections::HashSet::new(),
         idle_since: None,
         last_idle_sleep_at: None,
         record_runtime_reviews: false,
@@ -471,17 +592,6 @@ async fn run_mem_reset() -> Result<()> {
             .await
             .map_err(|err| miette!("failed to remove {}: {err}", runtime_review_path.display()))?;
     }
-
-    println!(
-        "[mem-reset] reset persistent runtime state under {}",
-        home.display()
-    );
-    println!(
-        "[mem-reset] cleared via empty context shutdown: l1_memory, projects, obligations, work_state, emotion"
-    );
-    println!("[mem-reset] cleared: reasoning_traces.jsonl, runtime_reviews.jsonl");
-    println!("[mem-reset] cleared: hindsight bank");
-    println!("[mem-reset] preserved: config.toml, reasoning_compiled/, telegram_acl.json");
 
     Ok(())
 }
@@ -509,6 +619,51 @@ async fn run_prompt_reset() -> Result<()> {
     Ok(())
 }
 
+async fn run_log_reset() -> Result<()> {
+    let home = get_spinova_home().await;
+    let cleared = clear_log_dirs(&home).await?;
+
+    println!("[log-reset] cleared log state under {}", home.display());
+    if cleared.is_empty() {
+        println!("[log-reset] nothing to remove; logs was already absent");
+    } else {
+        println!("[log-reset] cleared: {}", cleared.join(", "));
+    }
+    println!(
+        "[log-reset] preserved: config.toml, telegram_acl.json, reasoning_compiled/, runtime memory state"
+    );
+
+    Ok(())
+}
+
+async fn run_reset_all() -> Result<()> {
+    let home = get_spinova_home().await;
+    clear_mem_state(&home).await?;
+    let prompt_cleared = clear_prompt_cache_dirs(&home).await?;
+    let log_cleared = clear_log_dirs(&home).await?;
+
+    println!("[reset] reset all state under {}", home.display());
+    println!(
+        "[reset] cleared memory state: runtime_conversation, hindsight_queue, todo_board, work_state, emotion, events, reasoning_traces.jsonl, runtime_reviews.jsonl, hindsight bank"
+    );
+    if prompt_cleared.is_empty() {
+        println!("[reset] cleared prompt cache: none");
+    } else {
+        println!(
+            "[reset] cleared prompt cache: {}",
+            prompt_cleared.join(", ")
+        );
+    }
+    if log_cleared.is_empty() {
+        println!("[reset] cleared logs: none");
+    } else {
+        println!("[reset] cleared logs: {}", log_cleared.join(", "));
+    }
+    println!("[reset] preserved: config.toml, telegram_acl.json");
+
+    Ok(())
+}
+
 async fn clear_prompt_cache_dirs(home: &PathBuf) -> Result<Vec<String>> {
     let mut cleared = Vec::new();
 
@@ -525,30 +680,40 @@ async fn clear_prompt_cache_dirs(home: &PathBuf) -> Result<Vec<String>> {
     Ok(cleared)
 }
 
+async fn clear_log_dirs(home: &PathBuf) -> Result<Vec<String>> {
+    let mut cleared = Vec::new();
+    let path = home.join("logs");
+    if path.exists() {
+        tokio::fs::remove_dir_all(&path)
+            .await
+            .map_err(|err| miette!("failed to remove {}: {err}", path.display()))?;
+        cleared.push("logs".to_string());
+    }
+    Ok(cleared)
+}
+
 async fn build_eval_context(config: crate::config::Config) -> Context {
     build_eval_context_with_compiled(config, CompiledPromptStore::empty()).await
 }
 
-async fn build_eval_context_with_compiled(
+pub(crate) async fn build_eval_context_with_compiled(
     config: crate::config::Config,
     compiled_prompts: CompiledPromptStore,
 ) -> Context {
     let execution_cwd =
         env::current_dir().unwrap_or_else(|err| panic!("failed to determine execution cwd: {err}"));
     let memory = Memory::new().await;
-    let obligations = Obligations::new().await;
-    let projects = Projects::new().await;
+    let todo_board = TodoBoard::new().await;
     let work_state = WorkState::new().await;
     let emotion = Emotion::new().await;
+    let events = EventStore::new().await;
+    let pending_work = PendingWorkQueue::new().await;
     let terminal = TerminalDevice::new();
     let telegram = TelegramDevice::new();
     let telegram_handle = telegram.handle();
-    let devices = DeviceManager::new(
-        Some(DeviceId::Terminal),
-        vec![Box::new(terminal), Box::new(telegram)],
-    )
-    .await
-    .unwrap();
+    let devices = DeviceManager::new(Some(DeviceId::Terminal), vec![Box::new(terminal)])
+        .await
+        .unwrap();
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
@@ -565,15 +730,18 @@ async fn build_eval_context_with_compiled(
         hindsight_retain,
         memory,
         prompt_memory: PromptMemoryContext::default(),
-        obligations,
-        projects,
+        todo_board,
         work_state,
         emotion,
+        events,
+        pending_work,
         devices,
         telegram: telegram_handle,
         compiled_prompts,
         execution_cwd,
         dashboard_tx: None,
+        active_runtime_turn: false,
+        active_device_notices: std::collections::HashSet::new(),
         idle_since: None,
         last_idle_sleep_at: None,
         record_runtime_reviews: false,
@@ -589,9 +757,12 @@ fn bootstrap_telegram_device_from_acl(
     }
 }
 
-async fn load_compiled_prompts_only() -> miette::Result<CompiledPromptStore> {
-    let compiled = load_all_compiled_programs().await?;
-    let runtime_system_prompt = load_compiled_runtime_system_prompt().await?;
+async fn load_compiled_prompts_only(
+    config: &crate::config::Config,
+) -> miette::Result<CompiledPromptStore> {
+    let compiled = load_all_compiled_programs_for_model(&config.main_model.model_name).await?;
+    let runtime_system_prompt =
+        load_compiled_runtime_system_prompt_for_model(&config.main_model.model_name).await?;
     Ok(CompiledPromptStore::from_entries(compiled)
         .with_runtime_system_prompt(runtime_system_prompt))
 }
@@ -607,6 +778,8 @@ fn initial_train_source_dashboard_state(status: String) -> DashboardState {
         live_activity_cells: Vec::new(),
         last_cycle_elapsed_ms: None,
         runtime_status: Some(status),
+        footer_context: "train-source".to_string(),
+        footer_estimated_input_tokens: None,
     }
 }
 
@@ -627,11 +800,11 @@ where
         while let Some(command) = control_rx.recv().await {
             match command {
                 DashboardControlCommand::RunSleep => {
-                    control_state_tx.send_modify(|state| {
-                        state.runtime_status = Some(
-                            "sleep command is unavailable during train-source sessions".to_string(),
-                        )
-                    });
+                    set_runtime_status(
+                        Some(&control_state_tx),
+                        RuntimeStatusLevel::Warn,
+                        "sleep command is unavailable during train-source sessions",
+                    );
                 }
             }
         }
@@ -657,9 +830,8 @@ fn train_progress(
     message: impl Into<String>,
 ) {
     let message = message.into();
-    if let Some(tx) = dashboard_tx {
-        tx.send_modify(|state| state.runtime_status = Some(message.clone()));
-    } else {
+    set_runtime_status(dashboard_tx, RuntimeStatusLevel::Info, message.clone());
+    if dashboard_tx.is_none() {
         println!("{message}");
     }
 }
@@ -837,7 +1009,7 @@ async fn run_train_source_learn_loop(
                 batch_tasks.len()
             ),
         );
-        let compiled_prompts = load_compiled_prompts_only().await?;
+        let compiled_prompts = load_compiled_prompts_only(&config).await?;
         let active_variant = if compiled_prompts.is_empty() {
             "baseline".to_string()
         } else {
@@ -903,12 +1075,14 @@ async fn run_train_source_learn_loop(
                 completed_tasks
             ),
         );
-        let mut optimize_context =
-            build_eval_context_with_compiled(config.clone(), load_compiled_prompts_only().await?)
-                .await;
+        let mut optimize_context = build_eval_context_with_compiled(
+            config.clone(),
+            load_compiled_prompts_only(&config).await?,
+        )
+        .await;
         optimize_context.dashboard_tx = dashboard_tx.clone();
         let sleep_summary = run_sleep(&mut optimize_context).await?;
-        let current_compiled_count = load_compiled_prompts_only().await?.len();
+        let current_compiled_count = load_compiled_prompts_only(&config).await?.len();
         session
             .update(|state| {
                 state.sleep_runs += 1;
@@ -920,9 +1094,11 @@ async fn run_train_source_learn_loop(
                     sleep_stress_cases: sleep_summary.stress_cases,
                     sleep_instruction_hypotheses: sleep_summary.instruction_hypotheses,
                     sleep_runtime_demos: sleep_summary.runtime_demos,
+                    sleep_turn_demos: sleep_summary.turn_demos,
                     sleep_runtime_prompt_suggestions: sleep_summary.runtime_prompt_suggestions,
                     sleep_runtime_prompt_candidates: sleep_summary.runtime_prompt_candidates,
                     sleep_runtime_demo_evaluations: sleep_summary.runtime_demo_evaluations,
+                    sleep_turn_demo_evaluations: sleep_summary.turn_demo_evaluations,
                     sleep_runtime_demo_passed: sleep_summary.runtime_demo_passed,
                     sleep_runtime_demo_regressions: sleep_summary.runtime_demo_regressions,
                     sleep_runtime_prompt_rolled_back: sleep_summary.runtime_prompt_rolled_back,
@@ -938,10 +1114,12 @@ async fn run_train_source_learn_loop(
         train_progress(
             dashboard_tx.as_ref(),
             format!(
-                "batch {} sleep finished: runtime demos {} evals {} candidates {} rounds {} accepted={}",
+                "batch {} sleep finished: runtime demos {} turn demos {} evals {}/{} candidates {} rounds {} accepted={}",
                 batch_index + 1,
                 sleep_summary.runtime_demos,
+                sleep_summary.turn_demos,
                 sleep_summary.runtime_demo_evaluations,
+                sleep_summary.turn_demo_evaluations,
                 sleep_summary.runtime_prompt_candidates,
                 sleep_summary.runtime_prompt_evolution_rounds,
                 sleep_summary.runtime_prompt_accepted
@@ -952,7 +1130,7 @@ async fn run_train_source_learn_loop(
         optimize_context.shutdown().await;
         sync_learning_assets_back_to_shared(&session_learning_home, &shared_learning_home).await?;
 
-        let compiled_prompt_count = load_compiled_prompts_only().await?.len();
+        let compiled_prompt_count = load_compiled_prompts_only(&config).await?.len();
         session
             .update(|state| {
                 state.last_compiled_prompt_count = compiled_prompt_count;
@@ -1031,7 +1209,7 @@ async fn execute_train_source_task(
 
 fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
     println!(
-        "sleep: consumed {} runtime reviews, {} runtime traces; derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, {} runtime demos, {} runtime prompt suggestions, {} runtime prompt candidates, {} runtime demo evaluations (passed {}, regressed {}, rolled_back {}, rounds {}, accepted {}), retained {} hindsight reflections",
+        "sleep: consumed {} runtime reviews, {} runtime traces; derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, {} runtime demos, {} turn demos, {} runtime prompt suggestions, {} runtime prompt candidates, runtime evals {} / turn evals {} (passed {}, regressed {}, rolled_back {}, rounds {}, accepted {}), retained {} hindsight reflections",
         summary.consumed_runtime_reviews,
         summary.consumed_trace_events,
         summary.failure_patterns.len(),
@@ -1039,9 +1217,11 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
         summary.stress_cases,
         summary.instruction_hypotheses,
         summary.runtime_demos,
+        summary.turn_demos,
         summary.runtime_prompt_suggestions,
         summary.runtime_prompt_candidates,
         summary.runtime_demo_evaluations,
+        summary.turn_demo_evaluations,
         summary.runtime_demo_passed,
         summary.runtime_demo_regressions,
         summary.runtime_prompt_rolled_back,
@@ -1069,11 +1249,13 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
 
 fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> String {
     format!(
-        "sleep 完成：runtime reviews {}，traces {}，runtime demos {}，评估 {}（通过 {}，退化 {}），候选 {}，轮次 {}，accepted={}",
+        "sleep 完成：runtime reviews {}，traces {}，runtime demos {}，turn demos {}，评估 {}/{}（通过 {}，退化 {}），候选 {}，轮次 {}，accepted={}",
         summary.consumed_runtime_reviews,
         summary.consumed_trace_events,
         summary.runtime_demos,
+        summary.turn_demos,
         summary.runtime_demo_evaluations,
+        summary.turn_demo_evaluations,
         summary.runtime_demo_passed,
         summary.runtime_demo_regressions,
         summary.runtime_prompt_candidates,
@@ -1171,10 +1353,18 @@ async fn rollout_agent_loop_episode(
         );
         let step_execution = execute_agent_loop_step(context, dashboard_tx).await;
         let output = step_execution.output;
-        let action = output.primary_action.clone();
+        let action = output
+            .actions
+            .last()
+            .cloned()
+            .unwrap_or(EpisodeActionRecord {
+                kind: "no_action".to_string(),
+                summary: String::new(),
+            });
 
         let mut metadata = std::collections::BTreeMap::new();
         metadata.insert("description".to_string(), output.description.clone());
+        metadata.insert("stop_reason".to_string(), output.stop_reason.clone());
         metadata.insert("current_doing".to_string(), output.current_doing.clone());
         let completion = judge_episode_completion(
             context,
@@ -1688,9 +1878,11 @@ struct TrainSourceLearnBatchReport {
     sleep_stress_cases: usize,
     sleep_instruction_hypotheses: usize,
     sleep_runtime_demos: usize,
+    sleep_turn_demos: usize,
     sleep_runtime_prompt_suggestions: usize,
     sleep_runtime_prompt_candidates: usize,
     sleep_runtime_demo_evaluations: usize,
+    sleep_turn_demo_evaluations: usize,
     sleep_runtime_demo_passed: usize,
     sleep_runtime_demo_regressions: usize,
     sleep_runtime_prompt_rolled_back: bool,
@@ -1851,12 +2043,12 @@ fn validation_metadata(
     metadata
 }
 
-struct SpinovaHomeOverride {
+pub(crate) struct SpinovaHomeOverride {
     previous: Option<String>,
 }
 
 impl SpinovaHomeOverride {
-    fn set(path: PathBuf) -> Self {
+    pub(crate) fn set(path: PathBuf) -> Self {
         let previous = env::var("SPINOVA_HOME").ok();
         unsafe {
             env::set_var("SPINOVA_HOME", path);
@@ -2233,58 +2425,26 @@ async fn enter_episode_workspace(context: &mut Context, workspace_dir: &Path) ->
     Ok(())
 }
 
-struct AgentLoopStepExecution {
-    output: AgentLoopStepOutput,
-    snapshot_text: String,
+pub(crate) struct AgentLoopStepExecution {
+    pub(crate) output: AgentLoopStepOutput,
+    pub(crate) snapshot_text: String,
+    pub(crate) history_messages: Vec<PromptMessage>,
 }
 
-struct AgentLoopStepOutput {
-    observation: String,
-    description: String,
-    current_doing: String,
-    primary_action: EpisodeActionRecord,
+pub(crate) struct AgentLoopStepOutput {
+    pub(crate) observation: String,
+    pub(crate) description: String,
+    pub(crate) stop_reason: String,
+    pub(crate) current_doing: String,
+    pub(crate) actions: Vec<EpisodeActionRecord>,
 }
 
-fn prompt_message_to_agent_message(message: PromptMessage) -> AgentMessage {
-    match message.role {
-        PromptRole::System => AgentMessage::system(message.content),
-        PromptRole::User => AgentMessage::user(message.content),
-        PromptRole::Assistant => AgentMessage::assistant(message.content),
-        PromptRole::Tool => {
-            AgentMessage::tool("historical-tool", "historical_tool", message.content)
-        }
-    }
-}
-
-const APPROX_BYTES_PER_TOKEN: usize = 4;
-const RUNTIME_HISTORY_MAX_TOKENS: usize = 4_000;
 const RUNTIME_HISTORY_MIN_MESSAGES: usize = 4;
-const HINDSIGHT_RECENT_MESSAGES_MAX_TOKENS: usize = 1_200;
+const RUNTIME_HISTORY_SUMMARY_MAX_TOKENS: usize = 800;
+const HINDSIGHT_RECALL_QUERY_MAX_TOKENS: usize = 420;
+const HINDSIGHT_RECENT_MESSAGES_MAX_TOKENS: usize = 160;
 const HINDSIGHT_RECENT_MESSAGES_MIN_ENTRIES: usize = 2;
-
-fn approx_token_count(text: &str) -> usize {
-    let len = text.len();
-    len.saturating_add(APPROX_BYTES_PER_TOKEN.saturating_sub(1)) / APPROX_BYTES_PER_TOKEN
-}
-
-fn prompt_message_token_cost(message: &PromptMessage) -> usize {
-    let role = match message.role {
-        PromptRole::System => "system",
-        PromptRole::User => "user",
-        PromptRole::Assistant => "assistant",
-        PromptRole::Tool => "tool",
-    };
-    approx_token_count(role) + approx_token_count(&message.content) + 4
-}
-
-fn select_recent_prompt_messages_for_runtime(context: &Context) -> Vec<PromptMessage> {
-    select_recent_items_by_token_budget(
-        context.memory.prompt_messages(),
-        RUNTIME_HISTORY_MAX_TOKENS,
-        RUNTIME_HISTORY_MIN_MESSAGES,
-        prompt_message_token_cost,
-    )
-}
+const CLAIMED_EVENT_FINISHED_STOP_REASON: &str = "claimed_event_finished";
 
 fn select_recent_trail_lines_for_hindsight(context: &Context) -> Vec<String> {
     select_recent_items_by_token_budget(
@@ -2320,63 +2480,20 @@ where
     selected
 }
 
-fn build_runtime_agent_messages(context: &Context, snapshot_text: &str) -> Vec<AgentMessage> {
-    let mut messages = vec![
-        AgentMessage::system(SYSTEM_PROMPT_KERNEL),
-        AgentMessage::system(crate::reasoning::prompts::TOOL_ACTION_PROMPT),
-    ];
-    messages.extend(
-        context
-            .compiled_prompts
-            .runtime_system_additions()
-            .iter()
-            .filter(|line| !line.trim().is_empty())
-            .cloned()
-            .map(AgentMessage::system),
-    );
-    messages.push(AgentMessage::system(build_device_context_prompt(context)));
-    if !context.prompt_memory.recalled_memories.is_empty() {
-        messages.push(AgentMessage::system(format!(
-            "相关长期记忆：\n{}",
-            context.prompt_memory.recalled_memories.join("\n")
-        )));
-    }
-    messages.extend(
-        select_recent_prompt_messages_for_runtime(context)
-            .into_iter()
-            .map(prompt_message_to_agent_message),
-    );
-    messages.push(AgentMessage::user(render_world_snapshot_fragment(
-        snapshot_text,
-    )));
-    messages
-}
-
-fn render_world_snapshot_fragment(snapshot_text: &str) -> String {
-    format!("<world_snapshot>\n{snapshot_text}\n</world_snapshot>")
-}
-
-async fn record_runtime_history_messages(
-    context: &mut Context,
-    current_doing: String,
-    messages: Vec<PromptMessage>,
-) {
-    let retain_plan = context
-        .memory
-        .record_agent_turn(current_doing, messages)
-        .await;
+async fn record_runtime_history_messages(context: &mut Context, draft: RuntimeTurnDraft) {
+    let retain_plan = context.memory.commit_runtime_turn(draft).await;
     for job in retain_plan.jobs {
         if let Err(err) = context.hindsight_retain.enqueue(job) {
-            eprintln!("{err:?}");
-            context.memory.mark_pending_retained();
+            tracing::error!("failed to enqueue hindsight retain job: {err:?}");
             return;
         }
     }
     if retain_plan.must_flush_before_continue {
         if let Err(err) = context.hindsight_retain.flush().await {
-            eprintln!("{err:?}");
+            tracing::error!("failed to flush hindsight retain queue: {err:?}");
+        } else {
+            context.memory.mark_queued_retained();
         }
-        context.memory.mark_pending_retained();
     }
 }
 
@@ -2391,27 +2508,44 @@ async fn record_runtime_review_turn(
     }
     let mut metadata = std::collections::BTreeMap::new();
     metadata.insert("origin".to_string(), "runtime_agent_loop".to_string());
-    metadata.insert(
-        "action_kind".to_string(),
-        output.primary_action.kind.clone(),
-    );
-    metadata.insert(
-        "action_summary".to_string(),
-        output.primary_action.summary.clone(),
-    );
+    if let Some(action) = output.actions.last() {
+        metadata.insert("action_kind".to_string(), action.kind.clone());
+        metadata.insert("action_summary".to_string(), action.summary.clone());
+    }
+    metadata.insert("stop_reason".to_string(), output.stop_reason.clone());
     if let Some(objective) = context.work_state.objective() {
         metadata.insert("objective".to_string(), objective.to_string());
     }
     if let Some(phase) = context.work_state.work_phase() {
         metadata.insert("work_phase".to_string(), phase.to_string());
     }
-    if let Some(project_id) = context.work_state.project_id {
-        metadata.insert("project_id".to_string(), project_id.to_string());
+    if let Some(item_id) = context.work_state.item_id {
+        metadata.insert("item_id".to_string(), item_id.to_string());
     }
     metadata.insert(
         "execution_cwd".to_string(),
         context.execution_cwd.display().to_string(),
     );
+    if let Some(info) = context.llm.token_usage_info() {
+        metadata.insert(
+            "main_model_total_tokens".to_string(),
+            info.total_token_usage.total_tokens.to_string(),
+        );
+        metadata.insert(
+            "main_model_last_tokens".to_string(),
+            info.last_token_usage.total_tokens.to_string(),
+        );
+    }
+    if let Some(info) = context.judge_llm.token_usage_info() {
+        metadata.insert(
+            "judge_model_total_tokens".to_string(),
+            info.total_token_usage.total_tokens.to_string(),
+        );
+        metadata.insert(
+            "judge_model_last_tokens".to_string(),
+            info.last_token_usage.total_tokens.to_string(),
+        );
+    }
 
     let turn = RuntimeTurnRecord {
         id: format!("runtime-turn:{}", uuid::Uuid::new_v4()),
@@ -2419,328 +2553,732 @@ async fn record_runtime_review_turn(
         current_doing: output.current_doing.clone(),
         description: output.description.clone(),
         observation: output.observation.clone(),
-        primary_action: output.primary_action.clone(),
+        actions: output.actions.clone(),
         before_snapshot_text: pre_step_snapshot_text.to_string(),
-        after_snapshot_text: Snapshot::new(context).await.to_string(),
+        after_snapshot_text: Snapshot::new(context).await.to_runtime_text(),
         history_messages: history_messages.to_vec(),
         metadata,
     };
     append_runtime_turn_record(&turn).await;
 }
 
-async fn execute_agent_loop_step(
+pub(crate) async fn execute_agent_loop_step(
     context: &mut Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
 ) -> AgentLoopStepExecution {
     context.prompt_memory = build_hindsight_memory_context(context).await;
-    let snapshot = Snapshot::new(context).await;
-    let snapshot_text = snapshot.to_string();
-    let mut messages = build_runtime_agent_messages(context, &snapshot_text);
-    let mut history_messages = Vec::new();
+    let claimed_inputs = claim_pending_runtime_inputs(context, RUNTIME_EVENT_CLAIM_BATCH_SIZE);
+    let claimed_event_ids = claimed_inputs
+        .iter()
+        .filter_map(|input| match input {
+            ClaimedRuntimeInput::Event(event) => Some(event.event_id.to_string()),
+            ClaimedRuntimeInput::DeviceNotice { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let claimed_device_notices = claimed_inputs
+        .iter()
+        .filter_map(|input| match input {
+            ClaimedRuntimeInput::Event(_) => None,
+            ClaimedRuntimeInput::DeviceNotice { device, .. } => Some(*device),
+        })
+        .collect::<Vec<_>>();
+    let claimed_input_messages = claimed_inputs
+        .iter()
+        .map(|input| prompt_message_for_claimed_input(context, input))
+        .collect::<Vec<_>>();
+    let claimed_event_views = claimed_inputs
+        .iter()
+        .filter_map(|input| match input {
+            ClaimedRuntimeInput::Event(event) => Some(event.clone()),
+            ClaimedRuntimeInput::DeviceNotice { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let snapshot = Snapshot::new_with_claimed_events(context, &claimed_event_views).await;
+    let snapshot_text = snapshot.to_runtime_text();
+    let request_envelope = build_runtime_request_envelope(context, &snapshot_text);
+    let initial_tools = build_runtime_tool_specs(context);
+    let runtime_conversation_budget = request_envelope
+        .conversation_budget_tokens(&initial_tools, runtime_request_budget_limits(context));
+    let runtime_conversation_summary_budget =
+        RUNTIME_HISTORY_SUMMARY_MAX_TOKENS.min(runtime_conversation_budget);
+    if let Some(plan) = context.memory.plan_runtime_conversation_compaction(
+        runtime_conversation_budget,
+        RUNTIME_HISTORY_MIN_MESSAGES,
+        runtime_conversation_summary_budget,
+    ) {
+        let summary = build_runtime_conversation_summary(context, &plan).await;
+        let _ = context
+            .memory
+            .apply_runtime_conversation_compaction(plan, summary);
+    }
+    let mut conversation_slice = context.memory.runtime_conversation_slice(
+        runtime_conversation_budget,
+        RUNTIME_HISTORY_MIN_MESSAGES,
+        runtime_conversation_summary_budget,
+    );
+    conversation_slice.extend(claimed_input_messages.iter().cloned());
+    let mut runtime_step = context
+        .memory
+        .begin_runtime_step_from_parts(request_envelope, conversation_slice);
     let mut tool_results = Vec::new();
-    let mut primary_action = None;
-    let mut telegram_tool_nudges = 0usize;
-    let mut progress_tool_nudges = 0usize;
+    let mut actions = Vec::new();
+    let mut budget_recoveries = 0usize;
 
     let output = 'agent_loop: loop {
+        let tools = build_runtime_tool_specs(context);
+        if maybe_compact_runtime_messages(context, &mut runtime_step, &tools, false).await {
+            set_runtime_status(tx, RuntimeStatusLevel::Info, "Compacting runtime context");
+        }
         let request = AgentTurnRequest {
-            messages: messages.clone(),
-            tools: build_runtime_tool_specs(context),
+            messages: runtime_step.clone_agent_messages(),
+            tools: tools.clone(),
         };
-        let response = run_agent_turn_with_retry(context, request, tx).await;
-        match response {
-            AgentTurnResponse::ToolCalls { content, calls } if !calls.is_empty() => {
-                let assistant_text = content.unwrap_or_else(|| {
-                    format!(
-                        "tool_calls={}",
-                        calls
-                            .iter()
-                            .map(|call| call.name.clone())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                });
-                let tool_call_ui_events = calls
-                    .iter()
-                    .map(|call| {
-                        render_tool_call_ui_event(call).unwrap_or_else(|_| {
-                            if call.name == "apply_patch" {
-                                ToolCallUiEvent::error(
-                                    "apply_patch".to_string(),
-                                    vec!["invalid patch syntax".to_string()],
-                                )
-                            } else {
-                                ToolCallUiEvent::error(
-                                    call.name.clone(),
-                                    vec![call.arguments.to_string()],
-                                )
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let (agent_message, history_message) =
-                    AgentMessage::assistant_tool_calls_with_history(
-                        if assistant_text.trim().is_empty() {
-                            None
-                        } else {
-                            Some(assistant_text.clone())
-                        },
-                        calls.clone(),
-                        tool_call_ui_events.clone(),
-                    );
-                messages.push(agent_message);
-                let suppress_assistant_history = assistant_text.starts_with("tool_calls=")
-                    || tool_call_ui_events
-                        .iter()
-                        .all(is_apply_patch_tool_call_event)
-                    || tool_call_ui_events.iter().all(|event| {
-                        matches!(
-                            event,
-                            ToolCallUiEvent::Terminal(event)
-                                if matches!(event.action, crate::tool_ui::TerminalUiAction::Poll)
-                        )
-                    });
-                history_messages.push(if suppress_assistant_history {
-                    PromptMessage {
-                        content: String::new(),
-                        ..history_message
-                    }
-                } else {
-                    history_message
-                });
-                let mut committed_cells = Vec::new();
-                if !suppress_assistant_history
-                    && let Some(cell) = assistant_activity_cell(&assistant_text)
+        let response = match run_agent_turn_with_retry(context, request, tx).await {
+            Ok(response) => response,
+            Err(err) => {
+                if is_context_budget_exceeded(&err)
+                    && budget_recoveries < MID_TURN_COMPACTION_MAX_RECOVERIES
+                    && maybe_compact_runtime_messages(context, &mut runtime_step, &tools, true)
+                        .await
                 {
-                    committed_cells.push(cell);
-                }
-                committed_cells.extend(
-                    tool_call_ui_events
-                        .iter()
-                        .cloned()
-                        .filter(|event| match event {
-                            event if is_apply_patch_tool_call_event(event) => false,
-                            ToolCallUiEvent::Exec(_) => false,
-                            ToolCallUiEvent::Terminal(terminal_event) => !matches!(
-                                terminal_event.action,
-                                crate::tool_ui::TerminalUiAction::Execute
-                                    | crate::tool_ui::TerminalUiAction::Continue
-                            ),
-                            _ => true,
-                        })
-                        .flat_map(activity_cells_from_tool_call_ui_event),
-                );
-                append_committed_activity_cells(tx, committed_cells);
-                if primary_action.is_none() {
-                    primary_action = Some(
-                        summarize_primary_action_from_tool_call(&calls[0]).unwrap_or_else(|_| {
-                            EpisodeActionRecord {
-                                kind: "tool_call".to_string(),
-                                summary: calls[0].name.clone(),
-                            }
-                        }),
-                    );
-                }
-                for (call, call_ui_event) in calls.iter().zip(tool_call_ui_events.iter()) {
-                    if let Some(tx) = tx {
-                        match call_ui_event.clone() {
-                            ToolCallUiEvent::Exec(event) => {
-                                tx.send_modify(|state| {
-                                    apply_activity_event(
-                                        state,
-                                        DashboardActivityEvent::ExecBegin {
-                                            key: call.id.clone(),
-                                            title: event.title,
-                                            call_lines: event.body_lines,
-                                        },
-                                    );
-                                });
-                            }
-                            ToolCallUiEvent::Terminal(event)
-                                if matches!(
-                                    event.action,
-                                    crate::tool_ui::TerminalUiAction::Execute
-                                        | crate::tool_ui::TerminalUiAction::Continue
-                                ) =>
-                            {
-                                tx.send_modify(|state| {
-                                    apply_activity_event(
-                                        state,
-                                        DashboardActivityEvent::ExecBegin {
-                                            key: call.id.clone(),
-                                            title: event.title,
-                                            call_lines: event.body_lines,
-                                        },
-                                    );
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                    let result = match execute_agent_tool_call(context, call).await {
-                        Ok(result) => result,
-                        Err(err) => {
-                            let error_text = err.to_string();
-                            let ui_error_text = if call.name == "apply_patch" {
-                                summarize_apply_patch_error(&error_text)
-                            } else {
-                                error_text.clone()
-                            };
-                            ToolExecutionResult::new(
-                                format!("{} failed", call.name),
-                                json!({
-                                    "error": error_text,
-                                }),
-                                ToolUiEvent::error(
-                                    format!("{} failed", call.name),
-                                    compact_body_lines(&ui_error_text, 6),
-                                ),
-                            )
-                        }
-                    };
-                    if let Some(tx) = tx {
-                        tx.send_modify(|state| {
-                            apply_activity_event(
-                                state,
-                                DashboardActivityEvent::ExecEnd {
-                                    key: call.id.clone(),
-                                },
-                            );
-                        });
-                    }
-                    messages.push(AgentMessage::tool(
-                        call.id.clone(),
-                        call.name.clone(),
-                        result.model_content(),
-                    ));
-                    history_messages.push(PromptMessage::tool_with_ui(
-                        result.history_content(&call.id, &call.name),
-                        result.ui_event.clone(),
-                    ));
-                    append_committed_activity_cells(
+                    budget_recoveries += 1;
+                    set_runtime_status(
                         tx,
-                        vec![activity_cell_from_tool_ui_event(result.ui_event.clone())],
+                        RuntimeStatusLevel::Warn,
+                        format!(
+                            "Recovering from context overflow ({budget_recoveries}/{})",
+                            MID_TURN_COMPACTION_MAX_RECOVERIES
+                        ),
                     );
-                    tool_results.push(format!("{} => {}", call.name, result.summary));
-                }
-            }
-            AgentTurnResponse::Assistant { content } => {
-                if telegram_requires_tool_action(context) && telegram_tool_nudges < 2 {
-                    telegram_tool_nudges += 1;
-                    messages.push(AgentMessage::system(
-                        "Telegram 仍有待处理信号。不要只描述“继续等待”；请立即使用 Telegram 相关 tool 推进。先读取会话，再根据最新 incoming 决定 resolve 或 send。outgoing 是你自己已经发出的消息，不是新的外部输入。".to_string(),
-                    ));
                     continue 'agent_loop;
                 }
-                if tool_results.is_empty()
-                    && runtime_turn_requires_tool_progress(context)
-                    && progress_tool_nudges < 2
-                {
-                    progress_tool_nudges += 1;
-                    messages.push(AgentMessage::system(
-                        "当前仍有待处理的世界状态需要推进。不要把 world snapshot 当成用户对话，也不要只返回 assistant 说明；请直接调用能够改变世界状态的 tool。".to_string(),
-                    ));
-                    continue 'agent_loop;
+                if !claimed_event_ids.is_empty() {
+                    requeue_claimed_runtime_events(context, &claimed_event_ids);
                 }
-                let current_doing = content
-                    .lines()
-                    .next()
-                    .filter(|line| !line.trim().is_empty())
-                    .unwrap_or("等待下一轮工具决策")
-                    .to_string();
-                history_messages.push(PromptMessage::assistant(content.clone()));
-                if let Some(cell) = assistant_activity_cell(&content) {
-                    append_committed_activity_cells(tx, vec![cell]);
-                }
-                break 'agent_loop AgentLoopStepOutput {
-                    observation: if tool_results.is_empty() {
-                        content.clone()
-                    } else {
-                        tool_results.join("\n")
-                    },
-                    description: if tool_results.is_empty() {
-                        "模型返回了 assistant 文本，但没有调用 tool。".to_string()
-                    } else {
-                        content
-                    },
-                    current_doing,
-                    primary_action: primary_action.clone().unwrap_or(EpisodeActionRecord {
-                        kind: "assistant_message".to_string(),
-                        summary: "assistant-only turn without tool call".to_string(),
-                    }),
+                let observation = format!("agent turn failed: {err}");
+                let terminal_action = EpisodeActionRecord {
+                    kind: "agent_turn_failed".to_string(),
+                    summary: observation.clone(),
                 };
-            }
-            AgentTurnResponse::ToolCalls { .. } => {
-                if telegram_requires_tool_action(context) && telegram_tool_nudges < 2 {
-                    telegram_tool_nudges += 1;
-                    messages.push(AgentMessage::system(
-                        "Telegram 仍有待处理信号。不要返回空 tool call；请立即使用 Telegram 相关 tool 推进。".to_string(),
-                    ));
-                    continue 'agent_loop;
-                }
-                if tool_results.is_empty()
-                    && runtime_turn_requires_tool_progress(context)
-                    && progress_tool_nudges < 2
-                {
-                    progress_tool_nudges += 1;
-                    messages.push(AgentMessage::system(
-                        "当前仍有待处理的世界状态需要推进。空 tool call 列表不会改变世界；请直接调用能够推进状态的 tool。".to_string(),
-                    ));
-                    continue 'agent_loop;
-                }
-                let observation = "模型返回了空 tool call 列表。".to_string();
-                history_messages.push(PromptMessage::assistant(observation.clone()));
+                let mut terminal_actions = actions.clone();
+                terminal_actions.push(terminal_action.clone());
+                runtime_step.push_history_message(PromptMessage::assistant(observation.clone()));
                 if let Some(cell) = assistant_activity_cell(&observation) {
                     append_committed_activity_cells(tx, vec![cell]);
                 }
                 break 'agent_loop AgentLoopStepOutput {
-                    observation,
-                    description: "没有可执行动作。".to_string(),
+                    observation: observation.clone(),
+                    description: "模型请求失败。".to_string(),
+                    stop_reason: "agent_turn_failed".to_string(),
                     current_doing: "等待下一轮工具决策".to_string(),
-                    primary_action: primary_action.clone().unwrap_or(EpisodeActionRecord {
-                        kind: "empty_tool_calls".to_string(),
-                        summary: "empty tool call list".to_string(),
-                    }),
+                    actions: terminal_actions,
                 };
             }
+        };
+        let mut response_assistant_messages = Vec::new();
+        let mut response_tool_calls = Vec::new();
+        for item in response.items {
+            match item {
+                AgentTurnItem::AssistantMessage { content } => {
+                    if !content.trim().is_empty() {
+                        response_assistant_messages.push(content);
+                    }
+                }
+                AgentTurnItem::ToolCall { call } => response_tool_calls.push(call),
+            }
         }
+        let response_assistant_content = response
+            .last_assistant_message
+            .clone()
+            .or_else(|| response_assistant_messages.last().cloned());
+
+        if !response_tool_calls.is_empty() {
+            let calls = response_tool_calls;
+            let assistant_text = if response_assistant_messages.is_empty() {
+                None
+            } else {
+                Some(response_assistant_messages.join("\n\n"))
+            };
+            let tool_call_ui_events = calls
+                .iter()
+                .map(|call| {
+                    render_tool_call_ui_event(call).unwrap_or_else(|_| {
+                        if call.name == "apply_patch" {
+                            ToolCallUiEvent::error(
+                                "apply_patch".to_string(),
+                                vec!["invalid patch syntax".to_string()],
+                            )
+                        } else {
+                            ToolCallUiEvent::error(
+                                call.name.clone(),
+                                vec![call.arguments.to_string()],
+                            )
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            runtime_step.push_agent_message(AgentMessage::assistant_tool_call_protocol(
+                assistant_text.clone(),
+                calls.clone(),
+            ));
+            if let Some(content) = assistant_text.clone()
+                && !content.trim().is_empty()
+            {
+                runtime_step.push_history_message(PromptMessage::assistant(content));
+            }
+            runtime_step.push_history_message(PromptMessage::assistant_with_tool_calls(
+                String::new(),
+                tool_call_ui_events.clone(),
+            ));
+            let mut committed_cells = Vec::new();
+            if let Some(content) = assistant_text.clone()
+                && let Some(cell) = assistant_activity_cell(&content)
+            {
+                committed_cells.push(cell);
+            }
+            committed_cells.extend(
+                tool_call_ui_events
+                    .iter()
+                    .cloned()
+                    .filter(|event| match event {
+                        event if is_apply_patch_tool_call_event(event) => false,
+                        ToolCallUiEvent::Exec(_) => false,
+                        ToolCallUiEvent::Terminal(terminal_event) => !matches!(
+                            terminal_event.action,
+                            crate::tool_ui::TerminalUiAction::Execute
+                                | crate::tool_ui::TerminalUiAction::Continue
+                        ),
+                        _ => true,
+                    })
+                    .flat_map(activity_cells_from_tool_call_ui_event),
+            );
+            append_committed_activity_cells(tx, committed_cells);
+            for (call, call_ui_event) in calls.iter().zip(tool_call_ui_events.iter()) {
+                let action_record = summarize_action_from_tool_call(call).unwrap_or_else(|_| {
+                        EpisodeActionRecord {
+                            kind: "tool_call".to_string(),
+                            summary: call.name.clone(),
+                        }
+                    });
+                actions.push(action_record);
+                if let Some(tx) = tx {
+                    match call_ui_event.clone() {
+                        ToolCallUiEvent::Exec(event) => {
+                            tx.send_modify(|state| {
+                                apply_activity_event(
+                                    state,
+                                    DashboardActivityEvent::ExecBegin {
+                                        key: call.id.clone(),
+                                        title: event.title,
+                                        call_lines: event.body_lines,
+                                    },
+                                );
+                            });
+                        }
+                        ToolCallUiEvent::Terminal(event)
+                            if matches!(
+                                event.action,
+                                crate::tool_ui::TerminalUiAction::Execute
+                                    | crate::tool_ui::TerminalUiAction::Continue
+                            ) =>
+                        {
+                            tx.send_modify(|state| {
+                                apply_activity_event(
+                                    state,
+                                    DashboardActivityEvent::ExecBegin {
+                                        key: call.id.clone(),
+                                        title: event.title,
+                                        call_lines: event.body_lines,
+                                    },
+                                );
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                let result = match execute_agent_tool_call(context, call).await {
+                    Ok(result) => result,
+                    Err(err) => {
+                        let error_text = err.to_string();
+                        let ui_error_text = if call.name == "apply_patch" {
+                            summarize_apply_patch_error(&error_text)
+                        } else {
+                            error_text.clone()
+                        };
+                        ToolExecutionResult::new(
+                            format!("{} failed", call.name),
+                            json!({
+                                "error": error_text,
+                            }),
+                            ToolUiEvent::error(
+                                format!("{} failed", call.name),
+                                compact_body_lines(&ui_error_text, 6),
+                            ),
+                        )
+                    }
+                };
+                if let Some(tx) = tx {
+                    tx.send_modify(|state| {
+                        apply_activity_event(
+                            state,
+                            DashboardActivityEvent::ExecEnd {
+                                key: call.id.clone(),
+                            },
+                        );
+                    });
+                }
+                runtime_step.push_agent_message(AgentMessage::tool(
+                    call.id.clone(),
+                    call.name.clone(),
+                    result.model_content(),
+                ));
+                runtime_step.push_history_message(PromptMessage::tool_with_ui(
+                    result.history_content(&call.id, &call.name),
+                    result.ui_event.clone(),
+                ));
+                append_committed_activity_cells(
+                    tx,
+                    vec![activity_cell_from_tool_ui_event(result.ui_event.clone())],
+                );
+                tool_results.push(format!("{} => {}", call.name, result.summary));
+                if claimed_events_are_terminal(context, &claimed_event_ids) {
+                    if actions.is_empty() {
+                        actions.push(EpisodeActionRecord {
+                            kind: "claimed_events_completed".to_string(),
+                            summary: "claimed events reached terminal state".to_string(),
+                        });
+                    }
+                    break 'agent_loop AgentLoopStepOutput {
+                        observation: if tool_results.is_empty() {
+                            "claimed events reached terminal state".to_string()
+                        } else {
+                            tool_results.join("\n")
+                        },
+                        description: "本轮领取的事件已完成或已交接，turn 在相关 tool 后立即终止。"
+                            .to_string(),
+                        stop_reason: CLAIMED_EVENT_FINISHED_STOP_REASON.to_string(),
+                        current_doing: "等待下一轮工具决策".to_string(),
+                        actions: actions.clone(),
+                    };
+                }
+            }
+            continue 'agent_loop;
+        }
+
+        let content = response_assistant_content.unwrap_or_default();
+        if let RuntimeFollowUpDecision::Continue { reason } =
+            runtime_turn_follow_up_decision(
+                context,
+                response.raw_stream_follow_up,
+                &claimed_event_ids,
+            )
+        {
+            runtime_step.push_agent_message(AgentMessage::system(reason.message().to_string()));
+            continue 'agent_loop;
+        }
+        let current_doing = content
+            .lines()
+            .next()
+            .filter(|line| !line.trim().is_empty())
+            .unwrap_or("等待下一轮工具决策")
+            .to_string();
+        let assistant_action = EpisodeActionRecord {
+            kind: "assistant_message".to_string(),
+            summary: current_doing.clone(),
+        };
+        actions.push(assistant_action.clone());
+        runtime_step.set_current_doing(current_doing.clone());
+        runtime_step.push_history_message(PromptMessage::assistant(content.clone()));
+        if let Some(cell) = assistant_activity_cell(&content) {
+            append_committed_activity_cells(tx, vec![cell]);
+        }
+        break 'agent_loop AgentLoopStepOutput {
+            observation: if tool_results.is_empty() {
+                content.clone()
+            } else {
+                tool_results.join("\n")
+            },
+            description: if tool_results.is_empty() {
+                "模型返回了 assistant 文本，但没有调用 tool。".to_string()
+            } else {
+                content
+            },
+            stop_reason: "assistant_message".to_string(),
+            current_doing,
+            actions: actions.clone(),
+        };
     };
-    if !history_messages.is_empty() {
-        record_runtime_history_messages(
-            context,
-            output.current_doing.clone(),
-            history_messages.clone(),
-        )
-        .await;
+    runtime_step.set_current_doing(output.current_doing.clone());
+    finalize_claimed_runtime_events(context, &claimed_event_ids, &output);
+    finalize_claimed_runtime_device_notices(context, &claimed_device_notices, &output);
+    let history_messages = runtime_step.history_messages().to_vec();
+    if !runtime_step.is_history_empty() {
+        record_runtime_history_messages(context, runtime_step.into_turn_draft()).await;
     }
-    if !matches!(
-        output.primary_action.kind.as_str(),
-        "assistant_message" | "empty_tool_calls"
-    ) {
+    if output
+        .actions
+        .last()
+        .map(|action| !matches!(action.kind.as_str(), "assistant_message" | "empty_tool_calls"))
+        .unwrap_or(false)
+    {
         context.work_state.touch();
     }
     record_runtime_review_turn(context, &snapshot_text, &history_messages, &output).await;
     AgentLoopStepExecution {
         output,
         snapshot_text,
+        history_messages,
     }
 }
 
-fn telegram_requires_tool_action(context: &Context) -> bool {
-    context
-        .devices
-        .state_renders()
-        .into_iter()
-        .any(|(device_id, render)| {
-            matches!(device_id, DeviceId::Telegram)
-                && matches!(render.attention, crate::device::AttentionLevel::Notice)
-        })
+enum ClaimedRuntimeInput {
+    Event(EventView),
+    DeviceNotice { device: DeviceId, reason: String },
 }
 
-fn runtime_turn_requires_tool_progress(context: &Context) -> bool {
-    !runtime_trigger_reasons(context).is_empty()
+fn claim_pending_runtime_inputs(context: &Context, max_events: usize) -> Vec<ClaimedRuntimeInput> {
+    let queued_work = match context.pending_work.claim_batch(max_events) {
+        Ok(items) => items,
+        Err(err) => {
+            tracing::error!("failed to claim pending runtime work batch: {err:?}");
+            return Vec::new();
+        }
+    };
+
+    let mut claimed_inputs = Vec::new();
+    for work in queued_work {
+        match work {
+            PendingWork::Event { event_id } => {
+                match context.events.claim_event_if_pending(event_id) {
+                    Ok(Some(event)) => claimed_inputs.push(ClaimedRuntimeInput::Event(event)),
+                    Ok(None) => {
+                        if let Err(err) = context
+                            .pending_work
+                            .consume(PendingWork::Event { event_id })
+                        {
+                            tracing::error!(
+                                "failed to consume stale runtime event driver {event_id}: {err:?}"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            "failed to claim pending runtime event {event_id}: {err:?}"
+                        );
+                    }
+                }
+            }
+            PendingWork::DeviceNotice { device, reason } => {
+                let render = context
+                    .devices
+                    .state_renders()
+                    .into_iter()
+                    .find(|(device_id, _)| *device_id == device)
+                    .map(|(_, render)| render);
+                let Some(render) = render else {
+                    if let Err(err) = context.pending_work.consume(PendingWork::DeviceNotice {
+                        device,
+                        reason: String::new(),
+                    }) {
+                        tracing::error!(
+                            "failed to consume missing device notice driver for {device}: {err:?}"
+                        );
+                    }
+                    continue;
+                };
+                if !matches!(render.attention, crate::device::AttentionLevel::Notice) {
+                    if let Err(err) = context.pending_work.consume(PendingWork::DeviceNotice {
+                        device,
+                        reason: String::new(),
+                    }) {
+                        tracing::error!(
+                            "failed to consume stale device notice driver for {device}: {err:?}"
+                        );
+                    }
+                    continue;
+                }
+                claimed_inputs.push(ClaimedRuntimeInput::DeviceNotice { device, reason });
+            }
+        }
+    }
+    claimed_inputs
 }
 
+fn requeue_claimed_runtime_events(context: &Context, event_ids: &[String]) {
+    for event_id in event_ids {
+        match context.events.requeue_if_claimed(event_id) {
+            Ok(true) => {
+                if let Ok(event_id) = uuid::Uuid::parse_str(event_id)
+                    && let Err(err) = context
+                        .pending_work
+                        .requeue_front(PendingWork::Event { event_id })
+                {
+                    tracing::error!(
+                        "failed to requeue pending runtime work for event {event_id}: {err:?}"
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::error!("failed to requeue claimed runtime event {event_id}: {err:?}");
+            }
+        }
+    }
+}
+
+fn finalize_claimed_runtime_events(
+    context: &Context,
+    event_ids: &[String],
+    output: &AgentLoopStepOutput,
+) {
+    if event_ids.is_empty() {
+        return;
+    }
+
+    let mut requeued = Vec::new();
+    for event_id in event_ids {
+        match context.events.requeue_if_claimed(event_id) {
+            Ok(true) => {
+                if let Ok(parsed_event_id) = uuid::Uuid::parse_str(event_id)
+                    && let Err(err) = context.pending_work.requeue_front(PendingWork::Event {
+                        event_id: parsed_event_id,
+                    })
+                {
+                    tracing::error!(
+                        "failed to requeue pending runtime work for event {event_id}: {err:?}"
+                    );
+                }
+                requeued.push(event_id.clone());
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::error!("failed to finalize claimed runtime event {event_id}: {err:?}");
+            }
+        }
+    }
+
+    if !requeued.is_empty() {
+        let last_action = output.actions.last();
+        tracing::info!(
+            action_kind = last_action.map(|action| action.kind.as_str()).unwrap_or("none"),
+            action_summary = last_action
+                .map(|action| action.summary.as_str())
+                .unwrap_or(""),
+            requeued_claimed_events = requeued.len(),
+            event_ids = requeued.join(","),
+            "requeued claimed runtime events left unresolved at turn end",
+        );
+    }
+}
+
+fn finalize_claimed_runtime_device_notices(
+    context: &Context,
+    devices: &[DeviceId],
+    output: &AgentLoopStepOutput,
+) {
+    if devices.is_empty() {
+        return;
+    }
+
+    let renders = context.devices.state_renders();
+    let mut released = Vec::new();
+    for device in devices {
+        let still_noticed = renders
+            .iter()
+            .find(|(device_id, _)| device_id == device)
+            .map(|(_, render)| matches!(render.attention, crate::device::AttentionLevel::Notice))
+            .unwrap_or(false);
+        let work = PendingWork::DeviceNotice {
+            device: *device,
+            reason: String::new(),
+        };
+        if still_noticed {
+            match context.pending_work.release_claimed(work) {
+                Ok(true) => released.push(device.to_string()),
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::error!(
+                        "failed to release claimed device notice driver for {device}: {err:?}"
+                    );
+                }
+            }
+        } else if let Err(err) = context.pending_work.consume(work) {
+            tracing::error!("failed to consume device notice driver for {device}: {err:?}");
+        }
+    }
+
+    if !released.is_empty() {
+        let last_action = output.actions.last();
+        tracing::info!(
+            action_kind = last_action.map(|action| action.kind.as_str()).unwrap_or("none"),
+            action_summary = last_action
+                .map(|action| action.summary.as_str())
+                .unwrap_or(""),
+            reactivated_device_notice_drivers = released.len(),
+            devices = released.join(","),
+            "released claimed runtime device notice drivers back into frontier at turn end",
+        );
+    }
+}
+
+fn claimed_events_are_terminal(context: &Context, event_ids: &[String]) -> bool {
+    if event_ids.is_empty() {
+        return false;
+    }
+
+    let statuses = event_ids
+        .iter()
+        .map(|event_id| context.events.view(event_id).map(|event| event.status))
+        .collect::<Result<Vec<_>, _>>()
+        .ok();
+    statuses
+        .as_deref()
+        .map(claimed_event_statuses_are_terminal)
+        .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClaimedEventStatusSummary {
+    has_claimed: bool,
+    all_terminal: bool,
+}
+
+fn summarize_claimed_event_statuses(statuses: &[EventStatus]) -> ClaimedEventStatusSummary {
+    if statuses.is_empty() {
+        return ClaimedEventStatusSummary {
+            has_claimed: false,
+            all_terminal: false,
+        };
+    }
+
+    let mut all_terminal = true;
+    let mut has_claimed = false;
+
+    for status in statuses {
+        match status {
+            EventStatus::Claimed => {
+                has_claimed = true;
+                return ClaimedEventStatusSummary {
+                    has_claimed,
+                    all_terminal: false,
+                };
+            }
+            EventStatus::AwaitingDelivery
+            | EventStatus::Resolved
+            | EventStatus::Dismissed
+            | EventStatus::Failed => {}
+            _ => {
+                all_terminal = false;
+                return ClaimedEventStatusSummary {
+                    has_claimed,
+                    all_terminal,
+                };
+            }
+        }
+    }
+
+    ClaimedEventStatusSummary {
+        has_claimed,
+        all_terminal,
+    }
+}
+
+fn claimed_event_statuses_are_terminal(statuses: &[EventStatus]) -> bool {
+    summarize_claimed_event_statuses(statuses).all_terminal
+}
+
+fn prompt_message_for_claimed_input(
+    _context: &Context,
+    input: &ClaimedRuntimeInput,
+) -> PromptMessage {
+    match input {
+        ClaimedRuntimeInput::Event(event) => match &event.payload {
+            EventPayload::TelegramIncoming(payload) => PromptMessage::user(format!(
+                "<world_event source=\"telegram\" event_id=\"{}\" status=\"{}\">\nfrom: {}\nchat_title: {}\nchat_id: {}\nincoming_text: {}\nlatest_outgoing: {}\n</world_event>",
+                event.event_id,
+                event.status,
+                payload.sender,
+                payload.chat_title,
+                payload.chat_id,
+                payload.incoming_text.trim(),
+                payload
+                    .latest_outgoing_preview
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or("<none>"),
+            )),
+        },
+        ClaimedRuntimeInput::DeviceNotice { device, reason } => PromptMessage::user(format!(
+            "<device_notice device=\"{}\">\nreason: {}\n</device_notice>",
+            device, reason,
+        )),
+    }
+}
+
+enum RuntimeFollowUpDecision {
+    Continue { reason: RuntimeFollowUpReason },
+    AllowFinish,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeFollowUpReason {
+    RawStreamRequestedFollowUp,
+    ClaimedEventNeedsExplicitResolution,
+}
+
+struct RuntimeTurnFollowUpState<'a> {
+    raw_stream_requested_follow_up: bool,
+    claimed_statuses: &'a [EventStatus],
+}
+
+impl RuntimeFollowUpReason {
+    fn message(self) -> &'static str {
+        match self {
+            Self::RawStreamRequestedFollowUp => {
+                "本次采样仍标记为 needs_follow_up；请继续推进当前 turn。"
+            }
+            Self::ClaimedEventNeedsExplicitResolution => {
+                "当前 turn 已领取事件。不要只输出文本回复来结束；请继续调用工具，并在准备好最终答复时显式调用 `finish_and_send` 提交 reply_message。"
+            }
+        }
+    }
+}
+
+fn runtime_turn_follow_up_decision(
+    context: &Context,
+    raw_stream_follow_up: bool,
+    claimed_event_ids: &[String],
+) -> RuntimeFollowUpDecision {
+    let claimed_statuses = claimed_event_ids
+        .iter()
+        .filter_map(|event_id| context.events.view(event_id).ok().map(|event| event.status))
+        .collect::<Vec<_>>();
+
+    let state = RuntimeTurnFollowUpState {
+        raw_stream_requested_follow_up: raw_stream_follow_up,
+        claimed_statuses: &claimed_statuses,
+    };
+
+    runtime_turn_follow_up_decision_from_state(&state)
+}
+
+fn runtime_turn_follow_up_decision_from_state(
+    state: &RuntimeTurnFollowUpState<'_>,
+) -> RuntimeFollowUpDecision {
+    if state.raw_stream_requested_follow_up {
+        return RuntimeFollowUpDecision::Continue {
+            reason: RuntimeFollowUpReason::RawStreamRequestedFollowUp,
+        };
+    }
+
+    if summarize_claimed_event_statuses(state.claimed_statuses).has_claimed {
+        return RuntimeFollowUpDecision::Continue {
+            reason: RuntimeFollowUpReason::ClaimedEventNeedsExplicitResolution,
+        };
+    }
+
+    RuntimeFollowUpDecision::AllowFinish
+}
 fn is_apply_patch_tool_call_event(event: &ToolCallUiEvent) -> bool {
     match event {
         ToolCallUiEvent::Patch(_) => true,
@@ -2766,34 +3304,158 @@ fn append_committed_activity_cells(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claimed_terminal_status_depends_only_on_statuses() {
+        assert!(claimed_event_statuses_are_terminal(&[EventStatus::AwaitingDelivery]));
+        assert!(claimed_event_statuses_are_terminal(&[EventStatus::Resolved]));
+        assert!(claimed_event_statuses_are_terminal(&[EventStatus::Dismissed]));
+        assert!(claimed_event_statuses_are_terminal(&[EventStatus::Failed]));
+        assert!(!claimed_event_statuses_are_terminal(&[EventStatus::Claimed]));
+        assert!(claimed_event_statuses_are_terminal(&[
+            EventStatus::AwaitingDelivery,
+            EventStatus::Resolved,
+        ]));
+        assert!(claimed_event_statuses_are_terminal(&[
+            EventStatus::Resolved,
+            EventStatus::Dismissed,
+        ]));
+        assert!(!claimed_event_statuses_are_terminal(&[
+            EventStatus::AwaitingDelivery,
+            EventStatus::Claimed,
+        ]));
+        assert!(!claimed_event_statuses_are_terminal(&[]));
+    }
+
+    #[test]
+    fn claimed_status_summary_tracks_claimed_and_terminal_reason() {
+        assert_eq!(
+            summarize_claimed_event_statuses(&[EventStatus::Claimed]),
+            ClaimedEventStatusSummary {
+                has_claimed: true,
+                all_terminal: false,
+            }
+        );
+        assert_eq!(
+            summarize_claimed_event_statuses(&[
+                EventStatus::AwaitingDelivery,
+                EventStatus::Resolved,
+            ]),
+            ClaimedEventStatusSummary {
+                has_claimed: false,
+                all_terminal: true,
+            }
+        );
+        assert_eq!(
+            summarize_claimed_event_statuses(&[EventStatus::Resolved, EventStatus::Failed,]),
+            ClaimedEventStatusSummary {
+                has_claimed: false,
+                all_terminal: true,
+            }
+        );
+        assert_eq!(
+            summarize_claimed_event_statuses(&[EventStatus::Resolved, EventStatus::Claimed,]),
+            ClaimedEventStatusSummary {
+                has_claimed: true,
+                all_terminal: false,
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_turn_follow_up_decision_state_machine_prefers_runtime_gate() {
+        let state = RuntimeTurnFollowUpState {
+            raw_stream_requested_follow_up: true,
+            claimed_statuses: &[],
+        };
+        assert!(matches!(
+            runtime_turn_follow_up_decision_from_state(&state),
+            RuntimeFollowUpDecision::Continue { .. }
+        ));
+
+        let state = RuntimeTurnFollowUpState {
+            raw_stream_requested_follow_up: false,
+            claimed_statuses: &[EventStatus::Claimed],
+        };
+        assert!(matches!(
+            runtime_turn_follow_up_decision_from_state(&state),
+            RuntimeFollowUpDecision::Continue { .. }
+        ));
+
+        let state = RuntimeTurnFollowUpState {
+            raw_stream_requested_follow_up: false,
+            claimed_statuses: &[EventStatus::Resolved],
+        };
+        assert!(matches!(
+            runtime_turn_follow_up_decision_from_state(&state),
+            RuntimeFollowUpDecision::AllowFinish
+        ));
+
+        let state = RuntimeTurnFollowUpState {
+            raw_stream_requested_follow_up: false,
+            claimed_statuses: &[EventStatus::Resolved],
+        };
+        assert!(matches!(
+            runtime_turn_follow_up_decision_from_state(&state),
+            RuntimeFollowUpDecision::AllowFinish
+        ));
+    }
+
+    #[test]
+    fn follow_up_reason_messages_are_structured() {
+        assert_eq!(
+            RuntimeFollowUpReason::RawStreamRequestedFollowUp.message(),
+            "本次采样仍标记为 needs_follow_up；请继续推进当前 turn。"
+        );
+    }
+}
+
 async fn run_agent_turn_with_retry(
     context: &Context,
     request: AgentTurnRequest,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
-) -> AgentTurnResponse {
+) -> Result<AgentTurnStreamResult> {
+    let budget = estimate_agent_turn_request(
+        &request.messages,
+        &request.tools,
+        runtime_request_budget_limits(context),
+    );
+    let estimated_input_tokens = budget.total_input_tokens;
+    write_current_turn_messages_dump(&request, &budget, context.llm.model_name().as_deref()).await;
+    if let Some(tx) = tx {
+        tx.send_modify(|state| {
+            state.footer_estimated_input_tokens = Some(estimated_input_tokens);
+            state.footer_context =
+                render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
+        });
+    }
     let mut attempt = 1usize;
     loop {
-        if let Some(tx) = tx {
-            tx.send_modify(|state| state.runtime_status = Some("Working".to_string()));
-        }
+        set_runtime_status(tx, RuntimeStatusLevel::Debug, "Working");
         match context.llm.run_agent_turn(context, request.clone()).await {
             Ok(response) => {
-                if let Some(tx) = tx {
-                    tx.send_modify(|state| state.runtime_status = None);
-                }
-                return response;
+                write_current_turn_response_dump(&response, attempt).await;
+                clear_runtime_status(tx);
+                return Ok(response);
             }
             Err(err) => {
+                let will_retry = !is_context_budget_exceeded(&err);
+                write_current_turn_response_error_dump(&err.to_string(), attempt, will_retry).await;
+                if is_context_budget_exceeded(&err) {
+                    clear_runtime_status(tx);
+                    return Err(err);
+                }
                 let capped_shift = (attempt.saturating_sub(1)).min(6) as u32;
                 let backoff_ms = 300u64.saturating_mul(1u64 << capped_shift).min(30_000);
                 let summary = format!(
                     "请求失败，重试 #{attempt}，等待 {:.1}s",
                     backoff_ms as f64 / 1000.0
                 );
-                if let Some(tx) = tx {
-                    tx.send_modify(|state| state.runtime_status = Some(summary));
-                }
-                eprintln!("run_agent_turn retry #{attempt} after {backoff_ms}ms:\n{err}");
+                set_runtime_status(tx, RuntimeStatusLevel::Warn, summary);
+                tracing::warn!("run_agent_turn retry #{attempt} after {backoff_ms}ms: {err}");
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 attempt += 1;
             }
@@ -2809,35 +3471,13 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
         .work_phase()
         .unwrap_or("investigate")
         .to_string();
-    let task_description = context.work_state.objective().map(str::to_string);
-    let recent_messages = select_recent_trail_lines_for_hindsight(context);
-    let terminal_summary = summarize_terminal_for_hindsight(context);
-    let thread_focus = context.memory.current_thread_focus();
-    let mut query_sections = Vec::new();
-    if let Some(task_description) = task_description
-        && !task_description.trim().is_empty()
-    {
-        query_sections.push(format!("目标：{task_description}"));
-    }
-    query_sections.push(format!("阶段：{phase}"));
-    if let Some(thread_focus) = thread_focus
-        && !thread_focus.trim().is_empty()
-    {
-        query_sections.push(format!("主线：{thread_focus}"));
-    }
-    if let Some(terminal_summary) = terminal_summary
-        && !terminal_summary.trim().is_empty()
-    {
-        query_sections.push(format!("终端摘要：\n{terminal_summary}"));
-    }
-    if !recent_messages.is_empty() {
-        query_sections.push(format!("近期消息：\n{}", recent_messages.join("\n")));
-    }
-    let mut query = "请根据以下当前上下文，召回最相关、最有助于继续推进的长期记忆。\n问题：哪些历史记忆与当前上下文最相关？".to_string();
-    if !query_sections.is_empty() {
-        query.push_str("\n\n当前上下文：\n");
-        query.push_str(&query_sections.join("\n"));
-    }
+    let query = build_hindsight_recall_query(
+        context.work_state.objective(),
+        &phase,
+        context.memory.current_thread_focus().as_deref(),
+        summarize_terminal_for_hindsight(context),
+        select_recent_trail_lines_for_hindsight(context),
+    );
 
     let recall = hindsight
         .recall(
@@ -2853,19 +3493,97 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
             },
         )
         .await;
-    let recalled_memories = recall
-        .ok()
-        .map(|response| {
-            response
+    let recalled_memories = match recall {
+        Ok(response) => {
+            let memories = response
                 .results
                 .into_iter()
                 .take(5)
                 .map(|item| item.text)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+                .collect::<Vec<_>>();
+            tracing::debug!(
+                "hindsight recall returned {} memory item(s) for phase={phase}",
+                memories.len()
+            );
+            memories
+        }
+        Err(err) => {
+            tracing::warn!("hindsight recall failed: {err:?}");
+            Vec::new()
+        }
+    };
 
     PromptMemoryContext { recalled_memories }
+}
+
+fn build_hindsight_recall_query(
+    objective: Option<&str>,
+    phase: &str,
+    thread_focus: Option<&str>,
+    terminal_summary: Option<String>,
+    recent_messages: Vec<String>,
+) -> String {
+    let mut lines = vec![
+        "问题：召回最相关的历史经验，帮助继续推进当前目标。".to_string(),
+        format!("阶段: {}", summarize_hindsight_query_value(phase, 48)),
+    ];
+    if let Some(objective) = objective.filter(|value| !value.trim().is_empty()) {
+        lines.push(format!(
+            "目标: {}",
+            summarize_hindsight_query_value(objective, 120)
+        ));
+    }
+    if let Some(thread_focus) = thread_focus.filter(|value| !value.trim().is_empty()) {
+        lines.push(format!(
+            "主线: {}",
+            summarize_hindsight_query_value(thread_focus, 120)
+        ));
+    }
+
+    let mut sections = Vec::new();
+    if !recent_messages.is_empty() {
+        sections.push((
+            "近期".to_string(),
+            recent_messages
+                .into_iter()
+                .map(|line| format!("- {}", summarize_hindsight_query_value(&line, 120)))
+                .collect::<Vec<_>>(),
+        ));
+    }
+    if let Some(terminal_summary) = terminal_summary.filter(|value| !value.trim().is_empty()) {
+        sections.push((
+            "终端".to_string(),
+            terminal_summary
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .take(3)
+                .map(|line| format!("- {}", summarize_hindsight_query_value(line, 120)))
+                .collect::<Vec<_>>(),
+        ));
+    }
+
+    let mut query = lines.join("\n");
+    for (title, section_lines) in sections {
+        if section_lines.is_empty() {
+            continue;
+        }
+        let candidate = format!("{query}\n{title}:\n{}", section_lines.join("\n"));
+        if approx_token_count(&candidate) > HINDSIGHT_RECALL_QUERY_MAX_TOKENS {
+            continue;
+        }
+        query = candidate;
+    }
+    query
+}
+
+fn summarize_hindsight_query_value(value: &str, max_chars: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let char_count = compact.chars().count();
+    if char_count <= max_chars {
+        return compact;
+    }
+    let head = compact.chars().take(max_chars).collect::<String>();
+    format!("{head}...")
 }
 
 fn summarize_terminal_for_hindsight(context: &Context) -> Option<String> {
@@ -2903,22 +3621,61 @@ async fn spinova_loop(
     refresh_sleep_backlogs(sleep_status).await;
     let forced_sleep_status =
         maybe_start_forced_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await;
-    let trigger_reasons = runtime_trigger_reasons(context);
-    if trigger_reasons.is_empty() {
+    enqueue_device_notice_work(context);
+    sync_driver_frontier_from_sources(context);
+    if context.active_runtime_turn {
+        set_runtime_status(
+            Some(tx),
+            RuntimeStatusLevel::Info,
+            "处理中：runtime turn 正在运行",
+        );
+        sync_dashboard_state(
+            context,
+            tx,
+            sleep_status,
+            Some(cycle_started_at.elapsed().as_millis()),
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        return;
+    }
+    if context.memory.should_block_new_turns_on_retain_backlog() {
+        let retain_backlog = context.memory.retain_backlog_count();
+        set_runtime_status(
+            Some(tx),
+            RuntimeStatusLevel::Info,
+            format!(
+                "处理中：等待 hindsight retain 队列回落（{} turn）",
+                retain_backlog
+            ),
+        );
+        sync_dashboard_state(
+            context,
+            tx,
+            sleep_status,
+            Some(cycle_started_at.elapsed().as_millis()),
+        );
+        match context.hindsight_retain.flush().await {
+            Ok(()) => context.memory.mark_queued_retained(),
+            Err(err) => {
+                tracing::error!("failed to flush hindsight retain queue before new turn: {err:?}");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+        return;
+    }
+    let pending_work_count = context.pending_work.pending_count();
+    if pending_work_count == 0 {
         if context.idle_since.is_none() {
             context.idle_since = Some(std::time::Instant::now());
         }
         if let Some(status) =
             maybe_start_idle_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await
         {
-            tx.send_modify(|state| state.runtime_status = Some(status));
+            set_runtime_status(Some(tx), RuntimeStatusLevel::Info, status);
         } else if let Some(status) = forced_sleep_status {
-            tx.send_modify(|state| state.runtime_status = Some(status));
+            set_runtime_status(Some(tx), RuntimeStatusLevel::Info, status);
         } else {
-            tx.send_modify(|state| {
-                state.runtime_status =
-                    Some("空闲中：没有待处理的工作、义务、项目或设备信号".to_string())
-            });
+            clear_runtime_status(Some(tx));
         }
         sync_dashboard_state(
             context,
@@ -2930,19 +3687,25 @@ async fn spinova_loop(
         return;
     }
     context.idle_since = None;
-    tx.send_modify(|state| {
-        let mut status = format!("处理中：{}", trigger_reasons.join(" | "));
-        if let Some(forced_sleep_status) = forced_sleep_status.as_deref() {
-            status.push_str(" | ");
-            status.push_str(forced_sleep_status);
-        }
-        state.runtime_status = Some(status)
-    });
+    let mut status = format!("处理中：{} 个 pending work", pending_work_count);
+    if let Some(forced_sleep_status) = forced_sleep_status.as_deref() {
+        status.push_str(" | ");
+        status.push_str(forced_sleep_status);
+    }
+    set_runtime_status(Some(tx), RuntimeStatusLevel::Info, status);
     context
         .devices
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
         .await;
+    context.active_runtime_turn = true;
+    sync_dashboard_state(
+        context,
+        tx,
+        sleep_status,
+        Some(cycle_started_at.elapsed().as_millis()),
+    );
     execute_agent_loop_step(context, Some(tx)).await;
+    context.active_runtime_turn = false;
     refresh_sleep_backlogs(sleep_status).await;
     sync_dashboard_state(
         context,
@@ -2950,6 +3713,65 @@ async fn spinova_loop(
         sleep_status,
         Some(cycle_started_at.elapsed().as_millis()),
     );
+}
+
+fn sync_driver_frontier_from_sources(context: &Context) {
+    for (event_id, status) in context.events.driver_event_statuses() {
+        let work = PendingWork::Event { event_id };
+        if matches!(status, crate::events::EventStatus::Pending) {
+            if let Err(err) = context.pending_work.enqueue(work) {
+                tracing::error!("failed to sync pending event driver {event_id}: {err:?}");
+            }
+        } else if let Err(err) = context.pending_work.consume(work) {
+            tracing::error!("failed to remove stale event driver {event_id}: {err:?}");
+        }
+    }
+}
+
+fn enqueue_device_notice_work(context: &mut Context) {
+    let renders = context.devices.state_renders();
+    for (device_id, render) in renders {
+        let noticed = matches!(render.attention, crate::device::AttentionLevel::Notice);
+        if noticed {
+            if context.active_device_notices.insert(device_id) {
+                let reason = summarize_device_notice_reason(device_id, &render);
+                if let Err(err) = context.pending_work.enqueue(PendingWork::DeviceNotice {
+                    device: device_id,
+                    reason,
+                }) {
+                    tracing::error!(
+                        "failed to enqueue device notice work for {device_id}: {err:?}"
+                    );
+                }
+            }
+        } else {
+            context.active_device_notices.remove(&device_id);
+        }
+    }
+}
+
+fn summarize_device_notice_reason(
+    device_id: DeviceId,
+    render: &crate::device::DeviceStateRender,
+) -> String {
+    match device_id {
+        DeviceId::Terminal => {
+            let unread_sessions = numeric_field(&render.lines, "sessions_with_unread_output");
+            if unread_sessions > 0 {
+                format!("{unread_sessions} terminal session(s) have unread output")
+            } else {
+                "terminal requires attention".to_string()
+            }
+        }
+    }
+}
+
+fn numeric_field(lines: &[String], key: &str) -> usize {
+    lines
+        .iter()
+        .find_map(|line| line.strip_prefix(&format!("{key}=")))
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
 }
 
 async fn maybe_start_forced_sleep(
@@ -3000,9 +3822,7 @@ async fn handle_dashboard_control_command(
     match command {
         DashboardControlCommand::RunSleep => {
             if *sleep_running {
-                tx.send_modify(|state| {
-                    state.runtime_status = Some("sleep 已在后台运行".to_string())
-                });
+                set_runtime_status(Some(tx), RuntimeStatusLevel::Info, "sleep 已在后台运行");
                 sync_dashboard_state(context, tx, sleep_status, None);
                 return;
             }
@@ -3071,7 +3891,7 @@ async fn start_background_sleep(
         SleepTrigger::Manual => "manual",
         SleepTrigger::Idle => "automatic",
     });
-    tx.send_modify(|state| state.runtime_status = Some(status.to_string()));
+    set_runtime_status(Some(tx), RuntimeStatusLevel::Info, status.to_string());
     sync_dashboard_state(context, tx, sleep_status, None);
     let config = context.config.clone();
     let compiled_prompts = context.compiled_prompts.clone();
@@ -3094,7 +3914,7 @@ async fn handle_sleep_task_result(
     sleep_status.current_trigger = None;
     match result.result {
         Ok(summary) => {
-            if let Ok(store) = load_compiled_prompts_only().await {
+            if let Ok(store) = load_compiled_prompts_only(&context.config).await {
                 context.compiled_prompts = store;
             }
             let prefix = match result.trigger {
@@ -3105,7 +3925,9 @@ async fn handle_sleep_task_result(
             sleep_status.total_consumed_trace_events += summary.consumed_trace_events;
             sleep_status.total_consumed_runtime_reviews += summary.consumed_runtime_reviews;
             sleep_status.total_runtime_demos += summary.runtime_demos;
+            sleep_status.total_turn_demos += summary.turn_demos;
             sleep_status.total_runtime_demo_evaluations += summary.runtime_demo_evaluations;
+            sleep_status.total_turn_demo_evaluations += summary.turn_demo_evaluations;
             sleep_status.total_runtime_demo_passed += summary.runtime_demo_passed;
             sleep_status.total_runtime_demo_regressions += summary.runtime_demo_regressions;
             sleep_status.total_runtime_prompt_candidates += summary.runtime_prompt_candidates;
@@ -3117,9 +3939,11 @@ async fn handle_sleep_task_result(
             }
             let summary_text = summarize_sleep_summary(&summary);
             sleep_status.last_result = Some(summary_text.clone());
-            tx.send_modify(|state| {
-                state.runtime_status = Some(format!("{prefix}：{summary_text}"))
-            });
+            set_runtime_status(
+                Some(tx),
+                RuntimeStatusLevel::Info,
+                format!("{prefix}：{summary_text}"),
+            );
         }
         Err(err) => {
             let prefix = match result.trigger {
@@ -3127,47 +3951,15 @@ async fn handle_sleep_task_result(
                 SleepTrigger::Idle => "后台 sleep 失败",
             };
             sleep_status.last_result = Some(err.to_string());
-            tx.send_modify(|state| state.runtime_status = Some(format!("{prefix}：{err}")));
+            set_runtime_status(
+                Some(tx),
+                RuntimeStatusLevel::Error,
+                format!("{prefix}：{err}"),
+            );
         }
     }
     refresh_sleep_backlogs(sleep_status).await;
     sync_dashboard_state(context, tx, sleep_status, None);
-}
-
-fn runtime_trigger_reasons(context: &Context) -> Vec<String> {
-    let mut reasons = Vec::new();
-
-    if context.work_state.has_objective() {
-        reasons.push("存在当前工作目标".to_string());
-    }
-
-    let active_obligation_count = context.obligations.active_obligations().count();
-    if active_obligation_count > 0 {
-        reasons.push(format!("存在 {active_obligation_count} 条待处理义务"));
-    }
-
-    let active_project_count = context
-        .projects
-        .projects()
-        .filter(|(_, project)| {
-            matches!(
-                project.status,
-                ProjectStatus::Active | ProjectStatus::Blocked
-            )
-        })
-        .count();
-    if active_project_count > 0 {
-        reasons.push(format!("存在 {active_project_count} 个进行中项目"));
-    }
-
-    for (device_id, render) in context.devices.state_renders() {
-        if !matches!(render.attention, crate::device::AttentionLevel::Notice) {
-            continue;
-        }
-        reasons.push(format!("{device_id} 有待处理信号"));
-    }
-
-    reasons
 }
 
 async fn execute_apply_patch_tool(
@@ -3233,13 +4025,108 @@ fn sync_dashboard_state(
         state.focused_device = context.devices.focused();
         state.status_output = render_status_command_output_for_dashboard(context, &device_renders);
         state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);
-        state.inspect_telegram_output =
-            render_inspect_output_for_dashboard(context, &device_renders, DeviceId::Telegram);
+        state.inspect_telegram_output = render_telegram_status_for_dashboard(context);
         if state.activity_cells.is_empty() {
             state.activity_cells = render_activity_for_dashboard(context);
         }
         state.last_cycle_elapsed_ms = last_cycle_elapsed_ms;
+        state.footer_context =
+            render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
     });
+}
+
+fn render_dashboard_footer_context(
+    context: &Context,
+    estimated_input_tokens: Option<usize>,
+) -> String {
+    let model = context
+        .llm
+        .model_name()
+        .unwrap_or_else(|| context.config.main_model.model_name.clone());
+    let focused_device = context
+        .devices
+        .focused()
+        .map(|device| device.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let effective_window = context
+        .config
+        .main_model
+        .effective_context_window_tokens()
+        .max(1);
+    let Some(info) = context.llm.token_usage_info() else {
+        return format!(
+            "{}",
+            render_footer_context_with_usage(
+                &model,
+                estimated_input_tokens,
+                effective_window,
+                &focused_device
+            )
+        );
+    };
+    let used = usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
+    let footer_usage = if used > 0 {
+        Some((used, false))
+    } else {
+        estimated_input_tokens.map(|value| (value, true))
+    };
+    match footer_usage {
+        Some((used, estimated)) => format!(
+            "{model} · {}{}/{} used · {}",
+            if estimated { "~" } else { "" },
+            format_compact_tokens(used),
+            format_compact_tokens(effective_window),
+            focused_device
+        ),
+        None => format!(
+            "{model} · {} window · {}",
+            format_compact_tokens(effective_window),
+            focused_device
+        ),
+    }
+}
+
+fn render_footer_context_with_usage(
+    model: &str,
+    estimated_input_tokens: Option<usize>,
+    effective_window: usize,
+    focused_device: &str,
+) -> String {
+    match estimated_input_tokens {
+        Some(used) => format!(
+            "{model} · ~{}/{} used · {}",
+            format_compact_tokens(used),
+            format_compact_tokens(effective_window),
+            focused_device
+        ),
+        None => format!(
+            "{model} · {} window · {}",
+            format_compact_tokens(effective_window),
+            focused_device
+        ),
+    }
+}
+
+fn format_compact_tokens(tokens: usize) -> String {
+    if tokens >= 1_000_000 {
+        let major = tokens / 1_000_000;
+        let minor = (tokens % 1_000_000) / 100_000;
+        if minor == 0 {
+            format!("{major}m")
+        } else {
+            format!("{major}.{minor}m")
+        }
+    } else if tokens >= 1_000 {
+        let major = tokens / 1_000;
+        let minor = (tokens % 1_000) / 100;
+        if minor == 0 {
+            format!("{major}k")
+        } else {
+            format!("{major}.{minor}k")
+        }
+    } else {
+        tokens.to_string()
+    }
 }
 
 async fn refresh_sleep_backlogs(sleep_status: &mut SleepDashboardStatus) {
@@ -3284,9 +4171,14 @@ fn render_sleep_status_output_for_dashboard(
             "• Total runtime demos: {}",
             sleep_status.total_runtime_demos
         ),
+        format!("• Total turn demos: {}", sleep_status.total_turn_demos),
         format!(
             "• Total runtime demo evaluations: {}",
             sleep_status.total_runtime_demo_evaluations
+        ),
+        format!(
+            "• Total turn demo evaluations: {}",
+            sleep_status.total_turn_demo_evaluations
         ),
         format!(
             "• Total runtime demo passes: {}",
@@ -3385,10 +4277,15 @@ fn render_status_command_output_for_dashboard(
         .focused()
         .map(|device| device.to_string())
         .unwrap_or_else(|| "none".to_string());
-    let active_projects = context.projects.projects().count();
-    let active_obligations = context.obligations.active_obligations().count();
+    let active_todos = context.todo_board.active_items().count();
+    let active_events = context.pending_work.pending_count();
+    let runtime_turn = if context.active_runtime_turn {
+        "running"
+    } else {
+        "idle"
+    };
     sections.push(format!(
-        "Overview\nFocused device: {focused}\nProjects: {active_projects}\nObligations: {active_obligations}"
+        "Overview\nRuntime turn: {runtime_turn}\nFocused device: {focused}\nTodos: {active_todos}\nEvents: {active_events}"
     ));
 
     sections.push(format!(
@@ -3396,85 +4293,84 @@ fn render_status_command_output_for_dashboard(
         render_work_state_for_dashboard(context).unwrap_or_else(|| "No active work.".to_string())
     ));
 
-    let project_lines = render_status_project_lines(context);
-    sections.push(format!("Projects\n{}", project_lines.join("\n")));
+    let usage_lines = render_status_usage_lines(context);
+    sections.push(format!("Model usage\n{}", usage_lines.join("\n")));
 
-    let obligation_lines = render_status_obligation_lines(context);
-    sections.push(format!("Obligations\n{}", obligation_lines.join("\n")));
+    let todo_lines = render_status_todo_lines(context);
+    sections.push(format!("Todos\n{}", todo_lines.join("\n")));
 
     sections.join("\n\n")
 }
 
-fn render_status_project_lines(context: &Context) -> Vec<String> {
-    let mut projects = context.projects.projects().collect::<Vec<_>>();
-    projects.sort_by_key(|(id, _)| id.to_string());
-    if projects.is_empty() {
-        return vec!["No active projects.".to_string()];
+fn render_status_usage_lines(context: &Context) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (label, llm) in [("main", &context.llm), ("judge", &context.judge_llm)] {
+        let Some(info) = llm.token_usage_info() else {
+            continue;
+        };
+        if info.total_token_usage.is_zero() {
+            continue;
+        }
+        let model = llm.model_name().unwrap_or_else(|| "<unknown>".to_string());
+        let context_window = info
+            .model_context_window
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        lines.push(format!(
+            "• {label}  model={model} total={} input={} output={} cached={} reasoning={} window={context_window}",
+            info.total_token_usage.total_tokens,
+            info.total_token_usage.input_tokens,
+            info.total_token_usage.output_tokens,
+            info.total_token_usage.cached_input_tokens,
+            info.total_token_usage.reasoning_output_tokens,
+        ));
+        lines.push(format!(
+            "  last={} input={} output={}",
+            info.last_token_usage.total_tokens,
+            info.last_token_usage.input_tokens,
+            info.last_token_usage.output_tokens,
+        ));
     }
-    projects
+    if lines.is_empty() {
+        vec!["No token usage recorded yet.".to_string()]
+    } else {
+        lines
+    }
+}
+
+fn render_status_todo_lines(context: &Context) -> Vec<String> {
+    let mut items = context.todo_board.active_items().collect::<Vec<_>>();
+    items.sort_by_key(|(id, _)| id.to_string());
+    if items.is_empty() {
+        return vec!["No active todos.".to_string()];
+    }
+    items
         .into_iter()
         .take(6)
-        .map(|(_, project)| {
-            format!(
-                "• {}  [{} / {}]",
-                project.title, project.status, project.origin
-            )
-        })
+        .map(|(_, item)| format!("• {}  [{} / {}]", item.title, item.status, item.origin))
         .collect()
 }
 
-fn render_status_obligation_lines(context: &Context) -> Vec<String> {
-    let mut obligations = context.obligations.active_obligations().collect::<Vec<_>>();
-    obligations.sort_by_key(|(id, _)| id.to_string());
-    if obligations.is_empty() {
-        return vec!["No active obligations.".to_string()];
-    }
-    obligations
-        .into_iter()
-        .take(6)
-        .map(|(_, obligation)| {
-            format!(
-                "• {}  [{} / {}{}]",
-                obligation.summary,
-                obligation.status,
-                obligation.urgency,
-                if obligation.requires_reply {
-                    " / reply"
-                } else {
-                    ""
-                }
-            )
-        })
-        .collect()
-}
-
-fn render_inspect_output_for_dashboard(
-    context: &Context,
-    renders: &[(DeviceId, crate::device::DeviceStateRender)],
-    target: DeviceId,
-) -> String {
-    match target {
-        DeviceId::Terminal => "unknown inspect target: Terminal".to_string(),
-        DeviceId::Telegram => render_telegram_status_for_dashboard(context, renders),
-    }
-}
-
-fn render_telegram_status_for_dashboard(
-    context: &Context,
-    renders: &[(DeviceId, crate::device::DeviceStateRender)],
-) -> String {
-    let focused = renders
-        .iter()
-        .find(|(device_id, _)| *device_id == DeviceId::Telegram)
-        .map(|(_, render)| render.is_focused)
-        .unwrap_or(false);
+fn render_telegram_status_for_dashboard(context: &Context) -> String {
     let chats = context.telegram.chat_summaries_view();
-    let selected = context.telegram.selected_chat_view(8);
+    let queued_outbound = chats
+        .iter()
+        .map(|chat| chat.pending_outbound_count)
+        .sum::<usize>();
+    let failed_deliveries = chats
+        .iter()
+        .map(|chat| chat.failed_delivery_count)
+        .sum::<usize>();
+    let unread_messages = chats.iter().map(|chat| chat.unread).sum::<usize>();
 
-    let mut lines = vec![format!(
-        "Telegram\nState: {}",
-        if focused { "focused" } else { "background" }
-    )];
+    let mut lines = vec![
+        "Telegram".to_string(),
+        "Role: transport / adapter".to_string(),
+        format!("Known chats: {}", chats.len()),
+        format!("Queued outbound: {queued_outbound}"),
+        format!("Failed deliveries: {failed_deliveries}"),
+        format!("Unread messages: {unread_messages}"),
+    ];
 
     if chats.is_empty() {
         lines.push(String::new());
@@ -3489,11 +4385,11 @@ fn render_telegram_status_for_dashboard(
         if chat.unread > 0 {
             flags.push(format!("{} unread", chat.unread));
         }
-        if chat.pending_resolution {
-            flags.push("needs resolution".to_string());
+        if chat.pending_outbound_count > 0 {
+            flags.push(format!("{} queued", chat.pending_outbound_count));
         }
-        if chat.needs_reply {
-            flags.push("needs reply".to_string());
+        if chat.failed_delivery_count > 0 {
+            flags.push(format!("{} send failed", chat.failed_delivery_count));
         }
         let suffix = if flags.is_empty() {
             String::new()
@@ -3503,41 +4399,11 @@ fn render_telegram_status_for_dashboard(
         format!("• {} ({}){}", chat.title, chat.chat_id, suffix)
     }));
 
-    if let Some(chat) = selected {
-        lines.push(String::new());
-        lines.push(format!("Selected: {} ({})", chat.title, chat.chat_id));
-        let mut flags = Vec::new();
-        if chat.unread > 0 {
-            flags.push(format!("{} unread", chat.unread));
-        }
-        if chat.pending_resolution {
-            flags.push("needs resolution".to_string());
-        }
-        if chat.needs_reply {
-            flags.push("needs reply".to_string());
-        }
-        if !flags.is_empty() {
-            lines.push(format!("Status: {}", flags.join(", ")));
-        }
-        lines.push(String::new());
-        lines.push("Recent messages".to_string());
-        if chat.messages.is_empty() {
-            lines.push("• No messages".to_string());
-        } else {
-            lines.extend(chat.messages.into_iter().map(|message| {
-                format!(
-                    "• [{}|{}] {}: {}",
-                    message.direction, message.delivery, message.sender, message.text
-                )
-            }));
-        }
-    }
-
     lines.join("\n")
 }
 
 fn render_activity_for_dashboard(context: &Context) -> Vec<crate::dashboard::ActivityCell> {
-    render_activity_from_messages(context.memory.prompt_messages())
+    render_activity_from_messages(context.memory.runtime_conversation_messages())
 }
 
 fn render_work_state_for_dashboard(context: &Context) -> Option<String> {
@@ -3545,14 +4411,14 @@ fn render_work_state_for_dashboard(context: &Context) -> Option<String> {
     let objective = truncate_from_left(objective, 56);
     let last_touched = format_last_touched(context.work_state.last_touched_at_ms);
     let mut lines = vec![objective, format!("上次处理: {last_touched}")];
-    if let Some(project_id) = context.work_state.project_id {
-        let project_title = context
-            .projects
-            .projects()
-            .find(|(id, _)| *id == project_id)
-            .map(|(_, project)| project.title.clone())
-            .unwrap_or_else(|| project_id.to_string());
-        lines.push(format!("项目: {}", truncate_from_left(&project_title, 24)));
+    if let Some(item_id) = context.work_state.item_id {
+        let item_title = context
+            .todo_board
+            .items()
+            .find(|(id, _)| *id == item_id)
+            .map(|(_, item)| item.title.clone())
+            .unwrap_or_else(|| item_id.to_string());
+        lines.push(format!("Todo: {}", truncate_from_left(&item_title, 24)));
     }
     if let Some(phase) = context.work_state.work_phase() {
         lines.push(format!("阶段: {phase}"));

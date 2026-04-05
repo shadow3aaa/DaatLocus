@@ -1,20 +1,23 @@
+// This file is being created to confirm its existence.
+// Add your code here.
 //! 本模块包含context，它是spinova自旋循环中承载状态的结构体
 
-use std::{path::PathBuf, time::Instant};
+use std::{collections::HashSet, path::PathBuf, time::Instant};
 
 use crate::{
     config::Config,
     core::LLM,
     dashboard::DashboardState,
-    device::DeviceManager,
+    device::{DeviceId, DeviceManager},
     emotion::Emotion,
+    events::EventStore,
     hindsight::{HindsightClient, HindsightRetainHandle},
     memory::Memory,
-    obligations::Obligations,
-    projects::Projects,
+    pending_work::PendingWorkQueue,
     reasoning::compiled::CompiledPromptStore,
     reasoning::runtime::PromptMemoryContext,
     telegram_device::TelegramDeviceHandle,
+    todo_board::TodoBoard,
     work_state::WorkState,
 };
 
@@ -26,29 +29,35 @@ pub struct Context {
     pub hindsight_retain: HindsightRetainHandle,
     pub memory: Memory,
     pub prompt_memory: PromptMemoryContext,
-    pub obligations: Obligations,
-    pub projects: Projects,
+    pub todo_board: TodoBoard,
     pub work_state: WorkState,
     pub emotion: Emotion,
+    pub events: EventStore,
+    pub pending_work: PendingWorkQueue,
     pub devices: DeviceManager,
     pub telegram: TelegramDeviceHandle,
     pub compiled_prompts: CompiledPromptStore,
     pub execution_cwd: PathBuf,
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
+    pub active_runtime_turn: bool,
+    pub active_device_notices: HashSet<DeviceId>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
     pub record_runtime_reviews: bool,
 }
 
 impl Context {
-    pub async fn shutdown(self) {
-        let _ = self.hindsight_retain.flush().await;
+    pub async fn shutdown(mut self) {
+        if self.hindsight_retain.flush().await.is_ok() {
+            self.memory.mark_queued_retained();
+        }
         self.hindsight_retain.shutdown().await;
         self.memory.shutdown().await;
-        self.obligations.shutdown().await;
-        self.projects.shutdown().await;
+        self.todo_board.shutdown().await;
         self.work_state.shutdown().await;
         self.emotion.shutdown().await;
+        self.events.shutdown().await;
+        self.pending_work.shutdown().await;
         let _ = self.devices.shutdown().await;
     }
 }

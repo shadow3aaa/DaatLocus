@@ -4,14 +4,13 @@ use std::{
     sync::Arc,
 };
 
-use async_trait::async_trait;
 use chrono::Utc;
 use miette::{Result, bail, miette};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::device::{AttentionLevel, Device, DeviceId, DeviceStateRender, DeviceToolScope};
+use crate::events::EventStatus;
 
 const TELEGRAM_DEVICE_FILE_NAME: &str = "telegram_device.json";
 
@@ -27,7 +26,6 @@ struct TelegramInner {
 #[derive(Default)]
 struct TelegramState {
     is_focused: bool,
-    selected_chat: Option<String>,
     order: Vec<String>,
     chats: HashMap<String, TelegramChat>,
     outbox: VecDeque<PendingOutboundMessage>,
@@ -35,7 +33,6 @@ struct TelegramState {
 
 #[derive(Default, Serialize, Deserialize)]
 struct PersistedTelegramState {
-    selected_chat: Option<String>,
     order: Vec<String>,
     chats: HashMap<String, PersistedTelegramChat>,
     outbox: VecDeque<PendingOutboundMessage>,
@@ -45,8 +42,9 @@ struct TelegramChat {
     id: String,
     title: String,
     unread: usize,
-    pending_resolution: bool,
-    needs_reply: bool,
+    latest_incoming_sender: Option<String>,
+    latest_incoming_preview: Option<String>,
+    latest_incoming_at_ms: i64,
     messages: Vec<TelegramMessage>,
 }
 
@@ -55,8 +53,12 @@ struct PersistedTelegramChat {
     id: String,
     title: String,
     unread: usize,
-    pending_resolution: bool,
-    needs_reply: bool,
+    #[serde(default)]
+    latest_incoming_sender: Option<String>,
+    #[serde(default)]
+    latest_incoming_preview: Option<String>,
+    #[serde(default)]
+    latest_incoming_at_ms: i64,
     messages: Vec<PersistedTelegramMessage>,
 }
 
@@ -79,7 +81,7 @@ struct PersistedTelegramMessage {
     timestamp_ms: i64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 enum MessageDirection {
     Incoming,
     Outgoing,
@@ -97,31 +99,16 @@ pub struct TelegramDeviceHandle {
     inner: Arc<TelegramInner>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct TelegramChatSummaryView {
     pub chat_id: String,
     pub title: String,
     pub unread: usize,
-    pub pending_resolution: bool,
-    pub needs_reply: bool,
-}
-
-#[derive(Clone)]
-pub struct TelegramMessageView {
-    pub sender: String,
-    pub text: String,
-    pub direction: &'static str,
-    pub delivery: String,
-}
-
-#[derive(Clone)]
-pub struct TelegramChatView {
-    pub chat_id: String,
-    pub title: String,
-    pub unread: usize,
-    pub pending_resolution: bool,
-    pub needs_reply: bool,
-    pub messages: Vec<TelegramMessageView>,
+    pub last_activity_at_ms: i64,
+    pub latest_incoming_preview: Option<String>,
+    pub latest_outgoing_preview: Option<String>,
+    pub pending_outbound_count: usize,
+    pub failed_delivery_count: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -129,6 +116,8 @@ pub struct PendingOutboundMessage {
     pub local_message_id: String,
     pub chat_id: String,
     pub text: String,
+    pub related_event_id: Option<String>,
+    pub settle_status_on_delivery: Option<EventStatus>,
 }
 
 impl TelegramDevice {
@@ -165,31 +154,23 @@ impl TelegramDeviceHandle {
         persist_telegram_state(&self.inner, &state);
     }
 
-    pub fn ingest_incoming_message(
+    pub fn observe_incoming_message(
         &self,
         chat_id: impl Into<String>,
         chat_title: impl Into<String>,
         sender: impl Into<String>,
         text: impl Into<String>,
+        timestamp_ms: i64,
     ) {
         let chat_id = chat_id.into();
         let mut state = self.inner.state.lock();
-        let should_count_as_unread =
-            !(state.is_focused && state.selected_chat.as_deref() == Some(chat_id.as_str()));
         let chat = state.ensure_chat(chat_id, chat_title.into());
-        if should_count_as_unread {
-            chat.unread += 1;
+        chat.unread += 1;
+        if timestamp_ms >= chat.latest_incoming_at_ms {
+            chat.latest_incoming_sender = Some(sender.into());
+            chat.latest_incoming_preview = Some(text.into());
+            chat.latest_incoming_at_ms = timestamp_ms;
         }
-        chat.pending_resolution = true;
-        chat.needs_reply = true;
-        chat.messages.push(TelegramMessage {
-            id: Uuid::new_v4().to_string(),
-            sender: sender.into(),
-            text: text.into(),
-            direction: MessageDirection::Incoming,
-            delivery: DeliveryState::Delivered,
-            timestamp_ms: Utc::now().timestamp_millis(),
-        });
         persist_telegram_state(&self.inner, &state);
     }
 
@@ -202,44 +183,58 @@ impl TelegramDeviceHandle {
         outbound
     }
 
+    pub fn enqueue_outgoing_message(
+        &self,
+        chat_id: String,
+        text: String,
+        related_event_id: Option<String>,
+        settle_status_on_delivery: Option<EventStatus>,
+    ) -> Result<()> {
+        let mut state = self.inner.state.lock();
+        let Some(chat) = state.chats.get_mut(&chat_id) else {
+            bail!("unknown telegram chat: {chat_id}");
+        };
+        let local_message_id = Uuid::new_v4().to_string();
+        chat.messages.push(TelegramMessage {
+            id: local_message_id.clone(),
+            sender: "Spinova".to_string(),
+            text: text.clone(),
+            direction: MessageDirection::Outgoing,
+            delivery: DeliveryState::PendingTransport,
+            timestamp_ms: Utc::now().timestamp_millis(),
+        });
+        state.outbox.push_back(PendingOutboundMessage {
+            local_message_id,
+            chat_id,
+            text,
+            related_event_id,
+            settle_status_on_delivery,
+        });
+        persist_telegram_state_result(&self.inner, &state)
+    }
+
     pub fn mark_outgoing_delivered(&self, local_message_id: &str) {
-        self.with_message_mut(local_message_id, |chat, message| {
+        self.with_message_mut(local_message_id, |_, message| {
             message.delivery = DeliveryState::Delivered;
-            chat.needs_reply = false;
         });
     }
 
     pub fn mark_outgoing_failed(&self, local_message_id: &str, reason: impl Into<String>) {
         let reason = reason.into();
-        self.with_message_mut(local_message_id, |chat, message| {
+        self.with_message_mut(local_message_id, |_, message| {
             message.delivery = DeliveryState::Failed(reason.clone());
-            chat.needs_reply = true;
         });
     }
 
-    pub fn chat_refs(&self) -> Vec<(String, String)> {
+    pub fn latest_outgoing_preview(&self, chat_id: &str) -> Option<String> {
         let state = self.inner.state.lock();
-        state
-            .order
-            .iter()
-            .filter_map(|id| state.chats.get(id))
-            .map(|chat| (chat.id.clone(), chat.title.clone()))
-            .collect()
-    }
-
-    pub fn list_chat_summaries(&self) -> Vec<String> {
-        let state = self.inner.state.lock();
-        state
-            .sorted_chat_ids()
-            .into_iter()
-            .filter_map(|id| state.chats.get(&id))
-            .map(|chat| {
-                format!(
-                    "chat_id={} title={} unread={} pending_resolution={} needs_reply={}",
-                    chat.id, chat.title, chat.unread, chat.pending_resolution, chat.needs_reply
-                )
-            })
-            .collect()
+        state.chats.get(chat_id).and_then(|chat| {
+            chat.messages
+                .iter()
+                .rev()
+                .find(|message| matches!(message.direction, MessageDirection::Outgoing))
+                .map(|message| message.text.clone())
+        })
     }
 
     pub fn chat_summaries_view(&self) -> Vec<TelegramChatSummaryView> {
@@ -252,124 +247,13 @@ impl TelegramDeviceHandle {
                 chat_id: chat.id.clone(),
                 title: chat.title.clone(),
                 unread: chat.unread,
-                pending_resolution: chat.pending_resolution,
-                needs_reply: chat.needs_reply,
+                last_activity_at_ms: chat.latest_activity_ms(),
+                latest_incoming_preview: chat.latest_incoming_preview(),
+                latest_outgoing_preview: chat.latest_outgoing_preview(),
+                pending_outbound_count: chat.pending_outbound_count(),
+                failed_delivery_count: chat.failed_delivery_count(),
             })
             .collect()
-    }
-
-    pub fn selected_chat_view(&self, max_messages: usize) -> Option<TelegramChatView> {
-        let state = self.inner.state.lock();
-        let selected_chat_id = state.selected_chat.as_ref()?;
-        let chat = state.chats.get(selected_chat_id)?;
-        let start = chat.messages.len().saturating_sub(max_messages);
-        Some(TelegramChatView {
-            chat_id: chat.id.clone(),
-            title: chat.title.clone(),
-            unread: chat.unread,
-            pending_resolution: chat.pending_resolution,
-            needs_reply: chat.needs_reply,
-            messages: chat
-                .messages
-                .iter()
-                .skip(start)
-                .map(|message| TelegramMessageView {
-                    sender: message.sender.clone(),
-                    text: message.text.clone(),
-                    direction: format_direction(&message.direction),
-                    delivery: format_delivery(&message.delivery).to_string(),
-                })
-                .collect(),
-        })
-    }
-
-    pub fn read_chat(&self, chat_id: Option<&str>, max_messages: Option<usize>) -> Result<String> {
-        let state = self.inner.state.lock();
-        let resolved_chat_id = match chat_id {
-            Some(chat_id) => chat_id.to_string(),
-            None => state
-                .selected_chat
-                .clone()
-                .ok_or_else(|| miette!("no telegram chat selected"))?,
-        };
-        let chat = state
-            .chats
-            .get(&resolved_chat_id)
-            .ok_or_else(|| miette!("unknown telegram chat: {resolved_chat_id}"))?;
-        let max_messages = max_messages.unwrap_or(20);
-        let latest_message = chat.messages.last();
-        let latest_incoming = chat
-            .messages
-            .iter()
-            .rev()
-            .find(|message| matches!(message.direction, MessageDirection::Incoming));
-        let latest_outgoing = chat
-            .messages
-            .iter()
-            .rev()
-            .find(|message| matches!(message.direction, MessageDirection::Outgoing));
-        let mut lines = vec![
-            format!("chat_id={}", chat.id),
-            format!("title={}", chat.title),
-            format!("unread={}", chat.unread),
-            format!("pending_resolution={}", chat.pending_resolution),
-            format!("needs_reply={}", chat.needs_reply),
-            format!(
-                "latest_message_direction={}",
-                latest_message
-                    .map(|message| format_direction(&message.direction))
-                    .unwrap_or("none")
-            ),
-            format!(
-                "latest_message_sender={}",
-                latest_message
-                    .map(|message| message.sender.as_str())
-                    .unwrap_or("none")
-            ),
-            format!(
-                "latest_incoming_sender={}",
-                latest_incoming
-                    .map(|message| message.sender.as_str())
-                    .unwrap_or("none")
-            ),
-            format!(
-                "latest_incoming_text={}",
-                latest_incoming
-                    .map(|message| message.text.as_str())
-                    .unwrap_or("<none>")
-            ),
-            format!(
-                "latest_outgoing_text={}",
-                latest_outgoing
-                    .map(|message| message.text.as_str())
-                    .unwrap_or("<none>")
-            ),
-            "messages=".to_string(),
-        ];
-        let start = chat.messages.len().saturating_sub(max_messages);
-        for message in chat.messages.iter().skip(start) {
-            lines.push(format!(
-                "- [{}|{}] {}: {}",
-                format_direction(&message.direction),
-                format_delivery(&message.delivery),
-                message.sender,
-                message.text
-            ));
-        }
-        Ok(lines.join("\n"))
-    }
-
-    pub fn resolve_chat(&self, chat_id: &str, needs_reply: Option<bool>) -> Result<()> {
-        let mut state = self.inner.state.lock();
-        let Some(chat) = state.chats.get_mut(chat_id) else {
-            return Err(miette!("unknown telegram chat: {chat_id}"));
-        };
-        chat.pending_resolution = false;
-        if let Some(needs_reply) = needs_reply {
-            chat.needs_reply = needs_reply;
-        }
-        persist_telegram_state(&self.inner, &state);
-        Ok(())
     }
 
     fn with_message_mut(
@@ -394,113 +278,7 @@ impl TelegramDeviceHandle {
     }
 }
 
-impl TelegramDevice {
-    pub async fn select_chat(&mut self, chat_id: String) -> Result<()> {
-        let mut state = self.inner.state.lock();
-        if !state.chats.contains_key(&chat_id) {
-            bail!("unknown telegram chat: {chat_id}");
-        }
-        state.selected_chat = Some(chat_id.clone());
-        if let Some(chat) = state.chats.get_mut(&chat_id) {
-            chat.unread = 0;
-        }
-        persist_telegram_state_result(&self.inner, &state)
-    }
-
-    pub async fn send_message(&mut self, text: String) -> Result<()> {
-        let mut state = self.inner.state.lock();
-        let Some(selected_chat) = state.selected_chat.clone() else {
-            bail!("no telegram chat selected");
-        };
-        let Some(chat) = state.chats.get_mut(&selected_chat) else {
-            bail!("selected telegram chat missing: {selected_chat}");
-        };
-        let local_message_id = Uuid::new_v4().to_string();
-        chat.messages.push(TelegramMessage {
-            id: local_message_id.clone(),
-            sender: "Spinova".to_string(),
-            text: text.clone(),
-            direction: MessageDirection::Outgoing,
-            delivery: DeliveryState::PendingTransport,
-            timestamp_ms: Utc::now().timestamp_millis(),
-        });
-        chat.needs_reply = false;
-        state.outbox.push_back(PendingOutboundMessage {
-            local_message_id,
-            chat_id: selected_chat,
-            text,
-        });
-        persist_telegram_state_result(&self.inner, &state)
-    }
-}
-
-#[async_trait]
-impl Device for TelegramDevice {
-    fn id(&self) -> DeviceId {
-        DeviceId::Telegram
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
-    fn render_state(&self, is_focused: bool) -> DeviceStateRender {
-        let state = self.inner.state.lock();
-        let pending_resolution = state
-            .chats
-            .values()
-            .filter(|chat| chat.pending_resolution)
-            .count();
-        let pending_reply = state.chats.values().filter(|chat| chat.needs_reply).count();
-        let unread_messages = state.chats.values().map(|chat| chat.unread).sum::<usize>();
-        let selected_chat = state
-            .selected_chat
-            .as_deref()
-            .and_then(|id| state.chats.get(id))
-            .map(|chat| format!("selected_chat={} ({})", chat.id, chat.title))
-            .unwrap_or_else(|| "selected_chat=none".to_string());
-        let attention = if pending_resolution > 0 || pending_reply > 0 {
-            AttentionLevel::Notice
-        } else {
-            AttentionLevel::Quiet
-        };
-        DeviceStateRender {
-            title: "Telegram".to_string(),
-            lines: vec![
-                format!("focused={is_focused}"),
-                "kind=telegram".to_string(),
-                selected_chat,
-                format!("known_chats={}", state.chats.len()),
-                format!("pending_resolution={pending_resolution}"),
-                format!("pending_reply={pending_reply}"),
-                format!("unread_messages={unread_messages}"),
-            ],
-            attention,
-            is_focused,
-        }
-    }
-
-    fn focused_tool_scopes(&self) -> &'static [DeviceToolScope] {
-        &[DeviceToolScope::Telegram]
-    }
-
-    async fn on_focus(&mut self) -> Result<()> {
-        let mut state = self.inner.state.lock();
-        state.is_focused = true;
-        Ok(())
-    }
-
-    async fn on_blur(&mut self) -> Result<()> {
-        let mut state = self.inner.state.lock();
-        state.is_focused = false;
-        Ok(())
-    }
-
-    async fn shutdown(&mut self) -> Result<()> {
-        let state = self.inner.state.lock();
-        persist_telegram_state_result(&self.inner, &state)
-    }
-}
+impl TelegramDevice {}
 
 impl TelegramState {
     fn ensure_chat(&mut self, chat_id: String, title: String) -> &mut TelegramChat {
@@ -512,8 +290,9 @@ impl TelegramState {
                     id: chat_id.clone(),
                     title,
                     unread: 0,
-                    pending_resolution: false,
-                    needs_reply: false,
+                    latest_incoming_sender: None,
+                    latest_incoming_preview: None,
+                    latest_incoming_at_ms: 0,
                     messages: Vec::new(),
                 },
             );
@@ -524,17 +303,6 @@ impl TelegramState {
         self.chats
             .get_mut(&chat_id)
             .expect("chat should exist after ensure_chat")
-    }
-
-    fn sanitize_selected_chat(&mut self) {
-        let is_valid = self
-            .selected_chat
-            .as_deref()
-            .and_then(|id| self.chats.get(id))
-            .is_some();
-        if !is_valid {
-            self.selected_chat = None;
-        }
     }
 
     fn sorted_chat_ids(&self) -> Vec<String> {
@@ -558,27 +326,56 @@ impl TelegramState {
 
 impl TelegramChat {
     fn latest_activity_ms(&self) -> i64 {
-        self.messages
-            .last()
-            .map(|message| message.timestamp_ms)
-            .unwrap_or(0)
+        self.latest_incoming_at_ms.max(
+            self.messages
+                .last()
+                .map(|message| message.timestamp_ms)
+                .unwrap_or(0),
+        )
     }
 
-    fn priority_tuple(&self) -> (u8, u8, u8, i64) {
+    fn latest_incoming_preview(&self) -> Option<String> {
+        self.latest_incoming_preview.clone()
+    }
+
+    fn latest_outgoing_preview(&self) -> Option<String> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.direction, MessageDirection::Outgoing))
+            .map(|message| message.text.clone())
+    }
+
+    fn pending_outbound_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|message| matches!(message.delivery, DeliveryState::PendingTransport))
+            .count()
+    }
+
+    fn failed_delivery_count(&self) -> usize {
+        self.messages
+            .iter()
+            .filter(|message| matches!(message.delivery, DeliveryState::Failed(_)))
+            .count()
+    }
+
+    fn priority_tuple(&self) -> (usize, usize, usize, i64) {
         (
-            self.pending_resolution as u8,
-            self.needs_reply as u8,
-            (self.unread > 0) as u8,
+            self.failed_delivery_count(),
+            self.pending_outbound_count(),
+            self.unread,
             self.latest_activity_ms(),
         )
     }
 }
 
+impl TelegramState {}
+
 impl From<PersistedTelegramState> for TelegramState {
     fn from(value: PersistedTelegramState) -> Self {
-        let mut state = Self {
+        Self {
             is_focused: false,
-            selected_chat: value.selected_chat,
             order: value.order,
             chats: value
                 .chats
@@ -586,16 +383,13 @@ impl From<PersistedTelegramState> for TelegramState {
                 .map(|(id, chat)| (id, chat.into()))
                 .collect(),
             outbox: value.outbox,
-        };
-        state.sanitize_selected_chat();
-        state
+        }
     }
 }
 
 impl From<&TelegramState> for PersistedTelegramState {
     fn from(value: &TelegramState) -> Self {
         Self {
-            selected_chat: value.selected_chat.clone(),
             order: value.order.clone(),
             chats: value
                 .chats
@@ -609,13 +403,30 @@ impl From<&TelegramState> for PersistedTelegramState {
 
 impl From<PersistedTelegramChat> for TelegramChat {
     fn from(value: PersistedTelegramChat) -> Self {
+        let mut latest_incoming_sender = value.latest_incoming_sender;
+        let mut latest_incoming_preview = value.latest_incoming_preview;
+        let mut latest_incoming_at_ms = value.latest_incoming_at_ms;
+        let mut messages = Vec::new();
+        for message in value.messages {
+            match message.direction.clone() {
+                MessageDirection::Incoming => {
+                    if message.timestamp_ms >= latest_incoming_at_ms {
+                        latest_incoming_sender = Some(message.sender);
+                        latest_incoming_preview = Some(message.text);
+                        latest_incoming_at_ms = message.timestamp_ms;
+                    }
+                }
+                MessageDirection::Outgoing => messages.push(message.into()),
+            }
+        }
         Self {
             id: value.id,
             title: value.title,
             unread: value.unread,
-            pending_resolution: value.pending_resolution,
-            needs_reply: value.needs_reply,
-            messages: value.messages.into_iter().map(Into::into).collect(),
+            latest_incoming_sender,
+            latest_incoming_preview,
+            latest_incoming_at_ms,
+            messages,
         }
     }
 }
@@ -626,8 +437,9 @@ impl From<&TelegramChat> for PersistedTelegramChat {
             id: value.id.clone(),
             title: value.title.clone(),
             unread: value.unread,
-            pending_resolution: value.pending_resolution,
-            needs_reply: value.needs_reply,
+            latest_incoming_sender: value.latest_incoming_sender.clone(),
+            latest_incoming_preview: value.latest_incoming_preview.clone(),
+            latest_incoming_at_ms: value.latest_incoming_at_ms,
             messages: value.messages.iter().map(Into::into).collect(),
         }
     }
@@ -666,21 +478,6 @@ impl From<&TelegramMessage> for PersistedTelegramMessage {
     }
 }
 
-fn format_direction(direction: &MessageDirection) -> &'static str {
-    match direction {
-        MessageDirection::Incoming => "incoming",
-        MessageDirection::Outgoing => "outgoing",
-    }
-}
-
-fn format_delivery(delivery: &DeliveryState) -> String {
-    match delivery {
-        DeliveryState::PendingTransport => "pending_transport".to_string(),
-        DeliveryState::Delivered => "delivered".to_string(),
-        DeliveryState::Failed(reason) => format!("failed:{reason}"),
-    }
-}
-
 fn telegram_device_state_path() -> PathBuf {
     spinova_home_sync().join(TELEGRAM_DEVICE_FILE_NAME)
 }
@@ -708,7 +505,7 @@ fn load_telegram_state() -> TelegramState {
 
 fn persist_telegram_state(inner: &TelegramInner, state: &TelegramState) {
     if let Err(err) = persist_telegram_state_result(inner, state) {
-        eprintln!("persist telegram device state failed: {err:?}");
+        tracing::error!("persist telegram device state failed: {err:?}");
     }
 }
 
