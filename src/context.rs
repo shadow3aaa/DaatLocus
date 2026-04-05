@@ -1,8 +1,10 @@
-// This file is being created to confirm its existence.
-// Add your code here.
 //! 本模块包含context，它是spinova自旋循环中承载状态的结构体
 
-use std::{collections::HashSet, path::PathBuf, time::Instant};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use crate::{
     config::Config,
@@ -14,6 +16,7 @@ use crate::{
     hindsight::{HindsightClient, HindsightRetainHandle},
     memory::Memory,
     pending_work::PendingWorkQueue,
+    sandbox::RuntimeSandboxPolicy,
     reasoning::compiled::CompiledPromptStore,
     reasoning::runtime::PromptMemoryContext,
     telegram_device::TelegramDeviceHandle,
@@ -38,6 +41,7 @@ pub struct Context {
     pub telegram: TelegramDeviceHandle,
     pub compiled_prompts: CompiledPromptStore,
     pub execution_cwd: PathBuf,
+    pub sandbox_policy: RuntimeSandboxPolicy,
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
     pub active_runtime_turn: bool,
     pub active_device_notices: HashSet<DeviceId>,
@@ -47,6 +51,10 @@ pub struct Context {
 }
 
 impl Context {
+    pub fn resolve_tool_path(&self, path: &Path, base: Option<&Path>) -> PathBuf {
+        self.sandbox_policy.resolve_path(path, base.or(Some(&self.execution_cwd)))
+    }
+
     pub async fn shutdown(mut self) {
         if self.hindsight_retain.flush().await.is_ok() {
             self.memory.mark_queued_retained();

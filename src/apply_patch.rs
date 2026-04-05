@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use miette::{Result, miette};
 
+use crate::sandbox::RuntimeSandboxPolicy;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PatchOperationKind {
     Add,
@@ -281,8 +283,11 @@ fn find_unique_hunk_start(haystack: &[String], needle: &[String], offset: usize)
 
 pub(crate) async fn apply_patch_in_root(
     root: &Path,
+    sandbox_policy: &RuntimeSandboxPolicy,
     patch_text: &str,
 ) -> Result<ApplyPatchSummary> {
+    let normalized_root = crate::sandbox::normalize_path(root);
+    sandbox_policy.ensure_path_writable(&normalized_root, "apply_patch workspace root")?;
     let ops = parse_apply_patch(patch_text)?;
     let mut summary = summarize_patch_ops(&ops);
     let mut applied_files = Vec::new();
@@ -291,6 +296,7 @@ pub(crate) async fn apply_patch_in_root(
         match op {
             PatchOp::Add { path, lines } => {
                 let file_path = resolve_relative_path_within_root(root, &path, "apply_patch add")?;
+                sandbox_policy.ensure_path_writable(&file_path, "apply_patch add target")?;
                 if tokio::fs::try_exists(&file_path)
                     .await
                     .map_err(|err| miette!("failed to stat {}: {err}", file_path.display()))?
@@ -314,6 +320,8 @@ pub(crate) async fn apply_patch_in_root(
             PatchOp::Delete { path } => {
                 let file_path =
                     resolve_relative_path_within_root(root, &path, "apply_patch delete")?;
+                sandbox_policy.ensure_path_readable(&file_path, "apply_patch delete target")?;
+                sandbox_policy.ensure_path_writable(&file_path, "apply_patch delete target")?;
                 let removed_lines = tokio::fs::read_to_string(&file_path)
                     .await
                     .map(|text| text.lines().count())
@@ -334,6 +342,8 @@ pub(crate) async fn apply_patch_in_root(
             PatchOp::Update { path, hunks } => {
                 let file_path =
                     resolve_relative_path_within_root(root, &path, "apply_patch update")?;
+                sandbox_policy.ensure_path_readable(&file_path, "apply_patch update target")?;
+                sandbox_policy.ensure_path_writable(&file_path, "apply_patch update target")?;
                 let original = tokio::fs::read_to_string(&file_path)
                     .await
                     .map_err(|err| miette!("failed to read {}: {err}", file_path.display()))?;

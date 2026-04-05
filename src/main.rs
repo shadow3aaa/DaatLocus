@@ -15,6 +15,7 @@ mod providers;
 mod reasoning;
 mod runtime_context;
 mod runtime_tools;
+mod sandbox;
 mod snapshot;
 mod system_info;
 mod telegram_acl;
@@ -93,6 +94,7 @@ use crate::{
         ToolExecutionResult, build_runtime_tool_specs, execute_agent_tool_call,
         render_tool_call_ui_event, summarize_action_from_tool_call,
     },
+    sandbox::RuntimeSandboxPolicy,
     snapshot::Snapshot,
     telegram_acl::TelegramAclHandle,
     telegram_device::TelegramDevice,
@@ -389,6 +391,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     let hindsight_retain = hindsight.spawn_retain_worker();
     let execution_cwd =
         env::current_dir().map_err(|err| miette!("failed to determine execution cwd: {err}"))?;
+    let sandbox_policy = sandbox_policy_for_runtime(&execution_cwd).await;
     let mut context = Context {
         llm: Box::new(client),
         judge_llm: Box::new(judge_client),
@@ -406,6 +409,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         telegram: telegram_handle,
         compiled_prompts,
         execution_cwd,
+        sandbox_policy,
         dashboard_tx: None,
         active_runtime_turn: false,
         active_device_notices: std::collections::HashSet::new(),
@@ -554,6 +558,7 @@ async fn clear_mem_state(home: &PathBuf) -> Result<()> {
         .map_err(|err| miette!("failed to construct default devices for mem-reset: {err}"))?;
     let execution_cwd =
         env::current_dir().map_err(|err| miette!("failed to determine execution cwd: {err}"))?;
+    let sandbox_policy = sandbox_policy_for_runtime(&execution_cwd).await;
     let context = Context {
         llm: Box::new(OpenAIClient::new(&config)),
         judge_llm: Box::new(OpenAIClient::from_model_config(&judge_model)),
@@ -571,6 +576,7 @@ async fn clear_mem_state(home: &PathBuf) -> Result<()> {
         telegram: telegram_handle,
         compiled_prompts: CompiledPromptStore::empty(),
         execution_cwd,
+        sandbox_policy,
         dashboard_tx: None,
         active_runtime_turn: false,
         active_device_notices: std::collections::HashSet::new(),
@@ -696,12 +702,25 @@ async fn build_eval_context(config: crate::config::Config) -> Context {
     build_eval_context_with_compiled(config, CompiledPromptStore::empty()).await
 }
 
+async fn sandbox_policy_for_runtime(execution_cwd: &Path) -> RuntimeSandboxPolicy {
+    let spinova_home = get_spinova_home().await;
+    let executable_dir = env::current_exe()
+        .ok()
+        .and_then(|current_exe| current_exe.parent().map(Path::to_path_buf));
+    RuntimeSandboxPolicy::protect_spinova_runtime(
+        execution_cwd,
+        &spinova_home,
+        executable_dir.as_deref(),
+    )
+}
+
 pub(crate) async fn build_eval_context_with_compiled(
     config: crate::config::Config,
     compiled_prompts: CompiledPromptStore,
 ) -> Context {
     let execution_cwd =
         env::current_dir().unwrap_or_else(|err| panic!("failed to determine execution cwd: {err}"));
+    let sandbox_policy = sandbox_policy_for_runtime(&execution_cwd).await;
     let memory = Memory::new().await;
     let todo_board = TodoBoard::new().await;
     let work_state = WorkState::new().await;
@@ -739,6 +758,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         telegram: telegram_handle,
         compiled_prompts,
         execution_cwd,
+        sandbox_policy,
         dashboard_tx: None,
         active_runtime_turn: false,
         active_device_notices: std::collections::HashSet::new(),
@@ -3966,7 +3986,8 @@ async fn execute_apply_patch_tool(
     context: &Context,
     patch_text: &str,
 ) -> miette::Result<ToolExecutionResult> {
-    let summary = apply_patch_in_root(&context.execution_cwd, patch_text).await?;
+    let summary = apply_patch_in_root(&context.execution_cwd, &context.sandbox_policy, patch_text)
+        .await?;
     Ok(ToolExecutionResult::new(
         format!("patched {} file(s)", summary.changed_files),
         json!({
