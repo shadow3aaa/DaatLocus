@@ -28,7 +28,7 @@ pub struct EpisodeTask {
     pub key_anchors: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EpisodeActionRecord {
     pub kind: String,
     pub summary: String,

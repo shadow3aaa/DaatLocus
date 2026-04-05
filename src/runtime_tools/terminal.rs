@@ -3,6 +3,7 @@ use serde_json::json;
 
 use crate::{
     context::Context,
+    context_budget::truncate_text_to_token_budget,
     core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWriteStdinArgs},
     dashboard::{DashboardActivityEvent, apply_activity_event},
     device::DeviceToolScope,
@@ -34,6 +35,29 @@ fn terminal_session_meta(session: &crate::terminal_device::TerminalSessionState)
             .unwrap_or_else(|| "-".to_string()),
         session.cwd.as_deref().unwrap_or("-")
     )
+}
+
+fn model_tool_output_token_budget(context: &Context) -> usize {
+    context.config.main_model.tool_output_max_tokens.max(1)
+}
+
+fn compact_terminal_model_content(
+    summary: &str,
+    session: &crate::terminal_device::TerminalSessionState,
+    output: &str,
+    extra_lines: &[String],
+    max_tokens: usize,
+) -> String {
+    let mut lines = vec![
+        format!("summary={summary}"),
+        format!("session={}", terminal_session_meta(session)),
+    ];
+    lines.extend(extra_lines.iter().cloned());
+    if !output.trim().is_empty() {
+        lines.push("output=".to_string());
+        lines.push(truncate_text_to_token_budget(output, max_tokens));
+    }
+    truncate_text_to_token_budget(&lines.join("\n"), max_tokens)
 }
 
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
@@ -149,6 +173,21 @@ fn execute_terminal_exec_tool<'a>(
                 display_session_label(&result.session.session_id)
             )
         };
+        let model_content = compact_terminal_model_content(
+            &summary,
+            &result.session,
+            &result.output,
+            &[
+                format!("running={running}"),
+                format!(
+                    "yield_time_ms={}",
+                    args.yield_time_ms
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "default".to_string())
+                ),
+            ],
+            model_tool_output_token_budget(context),
+        );
         Ok(ToolExecutionResult::new(
             summary,
             json!({
@@ -171,7 +210,8 @@ fn execute_terminal_exec_tool<'a>(
                     body
                 },
             ),
-        ))
+        )
+        .with_model_content(model_content))
     })
 }
 
@@ -285,6 +325,32 @@ fn execute_terminal_write_stdin_tool<'a>(
                 display_session_label(&result.session.session_id)
             ),
         };
+        let mut extra_lines = vec![
+            format!("mode={mode}"),
+            format!("running={running}"),
+            format!(
+                "yield_time_ms={}",
+                args.yield_time_ms
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "default".to_string())
+            ),
+        ];
+        if !args.text.is_empty() {
+            extra_lines.push(format!(
+                "stdin={}",
+                truncate_text_to_token_budget(
+                    &args.text,
+                    model_tool_output_token_budget(context) / 4
+                )
+            ));
+        }
+        let model_content = compact_terminal_model_content(
+            &summary,
+            &result.session,
+            &result.output,
+            &extra_lines,
+            model_tool_output_token_budget(context),
+        );
         Ok(ToolExecutionResult::new(
             summary,
             json!({
@@ -314,7 +380,8 @@ fn execute_terminal_write_stdin_tool<'a>(
                     body
                 },
             ),
-        ))
+        )
+        .with_model_content(model_content))
     })
 }
 
@@ -342,11 +409,19 @@ fn execute_terminal_terminate_tool<'a>(
     Box::pin(async move {
         let args: TerminalTerminateArgs = parse_tool_args(call)?;
         let session = context.devices.terminal_terminate(&args.session_id).await?;
+        let summary = format!(
+            "terminated session {}",
+            display_session_label(&session.session_id)
+        );
+        let model_content = compact_terminal_model_content(
+            &summary,
+            &session,
+            "",
+            &[],
+            model_tool_output_token_budget(context),
+        );
         Ok(ToolExecutionResult::new(
-            format!(
-                "terminated session {}",
-                display_session_label(&session.session_id)
-            ),
+            summary,
             json!({ "session": session }),
             ToolUiEvent::terminal(
                 TerminalUiAction::Terminate,
@@ -361,6 +436,7 @@ fn execute_terminal_terminate_tool<'a>(
                         .unwrap_or_else(|| "-".to_string())
                 )],
             ),
-        ))
+        )
+        .with_model_content(model_content))
     })
 }

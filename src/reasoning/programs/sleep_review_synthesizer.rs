@@ -1,5 +1,6 @@
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::{
     context::Context,
@@ -31,6 +32,7 @@ pub struct SleepReviewSynthesizerProgram;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum ReflectionKind {
+    #[serde(alias = "TerminationPolicy")]
     TerminalPolicy,
     InteractionBoundary,
     ProjectContinuity,
@@ -48,27 +50,181 @@ pub enum ReflectionStability {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SleepReviewSynthesizerOutput {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lossy_string",
+        alias = "summary"
+    )]
     pub synthesized_summary: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lossy_string",
+        alias = "strategy"
+    )]
     pub strategy_lesson: String,
+    #[serde(default)]
     pub create_failure_pattern: bool,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lossy_string",
+        alias = "failure_pattern"
+    )]
     pub failure_pattern_summary: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lossy_string",
+        alias = "fix_kind",
+        alias = "suggested_fix"
+    )]
     pub suggested_fix_kind: String,
+    #[serde(default, alias = "create_instruction")]
     pub create_instruction_hypothesis: bool,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lossy_string",
+        alias = "instruction"
+    )]
     pub instruction_text: String,
+    #[serde(default, alias = "demo")]
     pub create_bootstrap_demo: bool,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lossy_string",
+        alias = "demo_title"
+    )]
     pub bootstrap_demo_title: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lossy_string",
+        alias = "demo_summary"
+    )]
     pub bootstrap_demo_summary: String,
+    #[serde(default, alias = "stress_case")]
     pub create_stress_case: bool,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lossy_string",
+        alias = "stress_name"
+    )]
     pub stress_case_name: String,
+    #[serde(default, deserialize_with = "deserialize_lossy_string_vec")]
     pub stress_constraints: Vec<String>,
+    #[serde(default)]
     pub retain_reflection: bool,
+    #[serde(default, alias = "kind", alias = "reflect_kind")]
     pub reflection_kind: ReflectionKind,
+    #[serde(default, alias = "stability")]
     pub reflection_stability: ReflectionStability,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lossy_string",
+        alias = "lesson"
+    )]
     pub reflection_lesson: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lossy_string",
+        alias = "evidence"
+    )]
     pub reflection_evidence_summary: String,
+    #[serde(default, deserialize_with = "deserialize_lossy_string")]
     pub reflection_retrieval_text: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_lossy_f64",
+        alias = "confidence"
+    )]
     pub reflection_confidence: f64,
+    #[serde(default, deserialize_with = "deserialize_lossy_string")]
     pub reason: String,
+}
+
+impl Default for ReflectionKind {
+    fn default() -> Self {
+        Self::General
+    }
+}
+
+impl Default for ReflectionStability {
+    fn default() -> Self {
+        Self::Tentative
+    }
+}
+
+fn deserialize_lossy_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(match value {
+        Value::Null => String::new(),
+        Value::String(text) => {
+            if text.eq_ignore_ascii_case("null") {
+                String::new()
+            } else {
+                text
+            }
+        }
+        Value::Bool(flag) => flag.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(&value).unwrap_or_default(),
+    })
+}
+
+fn deserialize_lossy_string_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(match value {
+        Value::Null => Vec::new(),
+        Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() || text.eq_ignore_ascii_case("null") {
+                Vec::new()
+            } else {
+                vec![text.to_string()]
+            }
+        }
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| match item {
+                Value::Null => None,
+                Value::String(text) => {
+                    let text = text.trim();
+                    if text.is_empty() || text.eq_ignore_ascii_case("null") {
+                        None
+                    } else {
+                        Some(text.to_string())
+                    }
+                }
+                Value::Bool(flag) => Some(flag.to_string()),
+                Value::Number(number) => Some(number.to_string()),
+                Value::Array(_) | Value::Object(_) => serde_json::to_string(&item).ok(),
+            })
+            .collect(),
+        other => vec![serde_json::to_string(&other).unwrap_or_default()],
+    })
+}
+
+fn deserialize_lossy_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(match value {
+        Value::Null => 0.0,
+        Value::Number(number) => number.as_f64().unwrap_or(0.0),
+        Value::String(text) => text.trim().parse::<f64>().unwrap_or(0.0),
+        Value::Bool(flag) => {
+            if flag {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Value::Array(_) | Value::Object(_) => 0.0,
+    })
 }
 
 impl Program for SleepReviewSynthesizerProgram {

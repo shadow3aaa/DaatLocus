@@ -152,7 +152,8 @@ pub(crate) fn summarize_apply_patch_error(message: &str) -> String {
     if message.contains("unknown patch directive: ---")
         || message.contains("unknown patch directive: +++")
     {
-        return "不要使用 unified diff 的 `---` / `+++` 文件头；请改用 `*** Update File:`".to_string();
+        return "不要使用 unified diff 的 `---` / `+++` 文件头；请改用 `*** Update File:`"
+            .to_string();
     }
     if message.contains("add file lines must start with `+`") {
         return "新增文件时，每一行都必须以 `+` 开头".to_string();

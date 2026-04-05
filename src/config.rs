@@ -2,9 +2,16 @@ use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::get_spinova_home;
+use crate::{
+    context_budget::{
+        DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS, DEFAULT_CONTEXT_WINDOW_TOKENS,
+        DEFAULT_MAX_COMPLETION_TOKENS, DEFAULT_TOOL_OUTPUT_MAX_TOKENS,
+    },
+    get_spinova_home,
+};
 
 const CONFIG_FILE_NAME: &str = "config.toml";
+const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: i64 = 95;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -49,6 +56,12 @@ pub struct MainModelConfig {
     pub model_name: String,
     pub api_key: String,
     pub temperature: f64,
+    pub context_window_tokens: usize,
+    #[serde(default, alias = "auto_compact_threshold_tokens")]
+    pub auto_compact_token_limit: Option<usize>,
+    pub effective_context_window_percent: i64,
+    pub max_completion_tokens: usize,
+    pub tool_output_max_tokens: usize,
 }
 
 impl Default for MainModelConfig {
@@ -58,7 +71,51 @@ impl Default for MainModelConfig {
             model_name: "gpt-4.1".to_string(),
             api_key: "your-api-key".to_string(),
             temperature: 1.0,
+            context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            auto_compact_token_limit: Some(DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS),
+            effective_context_window_percent: DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
+            max_completion_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
+            tool_output_max_tokens: DEFAULT_TOOL_OUTPUT_MAX_TOKENS,
         }
+    }
+}
+
+impl MainModelConfig {
+    pub fn context_window_tokens(&self) -> usize {
+        self.context_window_tokens.max(1)
+    }
+
+    pub fn effective_context_window_percent(&self) -> i64 {
+        self.effective_context_window_percent.clamp(1, 100)
+    }
+
+    pub fn effective_context_window_tokens(&self) -> usize {
+        let context_window = self.context_window_tokens();
+        let effective = (context_window as u128)
+            .saturating_mul(self.effective_context_window_percent() as u128)
+            / 100;
+        usize::try_from(effective)
+            .unwrap_or(context_window)
+            .clamp(1, context_window)
+    }
+
+    pub fn auto_compact_token_limit(&self) -> usize {
+        let context_window = self.context_window_tokens();
+        let context_default_limit =
+            usize::try_from((context_window as u128).saturating_mul(9) / 10)
+                .unwrap_or(context_window);
+        let configured_limit = self
+            .auto_compact_token_limit
+            .unwrap_or(context_default_limit);
+        configured_limit
+            .min(context_default_limit.max(1))
+            .min(self.effective_context_window_tokens())
+            .max(1)
+    }
+
+    pub fn max_completion_tokens(&self) -> usize {
+        self.max_completion_tokens
+            .clamp(1, self.context_window_tokens())
     }
 }
 
@@ -115,6 +172,11 @@ impl JudgeConfig {
                 self.api_key.clone()
             },
             temperature: self.temperature,
+            context_window_tokens: main_model.context_window_tokens,
+            auto_compact_token_limit: main_model.auto_compact_token_limit,
+            effective_context_window_percent: main_model.effective_context_window_percent,
+            max_completion_tokens: main_model.max_completion_tokens,
+            tool_output_max_tokens: main_model.tool_output_max_tokens,
         }
     }
 }

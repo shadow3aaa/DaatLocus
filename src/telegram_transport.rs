@@ -6,6 +6,8 @@ use serde::Deserialize;
 
 use crate::{
     config::TelegramConfig,
+    events::{EventStatus, EventStore, TelegramIncomingEvent},
+    pending_work::{PendingWork, PendingWorkQueue},
     telegram_acl::{AccessDecision, TelegramAclHandle},
     telegram_device::TelegramDeviceHandle,
 };
@@ -15,6 +17,8 @@ pub struct TelegramTransport {
     config: TelegramConfig,
     acl: TelegramAclHandle,
     handle: TelegramDeviceHandle,
+    events: EventStore,
+    pending_work: PendingWorkQueue,
     offset: Option<i64>,
 }
 
@@ -23,12 +27,16 @@ impl TelegramTransport {
         config: TelegramConfig,
         handle: TelegramDeviceHandle,
         acl: TelegramAclHandle,
+        events: EventStore,
+        pending_work: PendingWorkQueue,
     ) -> Self {
         Self {
             client: Client::new(),
             config,
             acl,
             handle,
+            events,
+            pending_work,
             offset: None,
         }
     }
@@ -36,7 +44,7 @@ impl TelegramTransport {
     pub async fn run(mut self) {
         loop {
             if let Err(err) = self.run_once().await {
-                eprintln!("telegram transport error: {err:?}");
+                tracing::error!("telegram transport error: {err:?}");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
@@ -71,11 +79,28 @@ impl TelegramTransport {
                 Ok(()) => {
                     self.handle
                         .mark_outgoing_delivered(&message.local_message_id);
+                    if let Some(event_id) = message.related_event_id.as_deref()
+                        && let Err(err) = self.events.set_status(
+                            event_id,
+                            message
+                                .settle_status_on_delivery
+                                .unwrap_or(EventStatus::Resolved),
+                            None,
+                        )
+                    {
+                        tracing::error!("mark telegram event delivered failed: {err:?}");
+                    }
                 }
-                Err(err) => self.handle.mark_outgoing_failed(
-                    &message.local_message_id,
-                    truncate_reason(&format!("{err:?}")),
-                ),
+                Err(err) => {
+                    let reason = truncate_reason(&format!("{err:?}"));
+                    self.handle
+                        .mark_outgoing_failed(&message.local_message_id, reason.clone());
+                    if let Some(event_id) = message.related_event_id.as_deref()
+                        && let Err(mark_err) = self.events.mark_delivery_failed(event_id, reason)
+                    {
+                        tracing::error!("mark telegram event failed failed: {mark_err:?}");
+                    }
+                }
             }
         }
         Ok(())
@@ -103,13 +128,40 @@ impl TelegramTransport {
                     truncate_reason(&text),
                     chrono::Utc::now().timestamp_millis(),
                 ) {
-                    eprintln!("update approved telegram chat metadata failed: {err:?}");
+                    tracing::error!("update approved telegram chat metadata failed: {err:?}");
                 }
-                self.handle.ingest_incoming_message(
-                    message.chat.id.to_string(),
+                let chat_id = message.chat.id.to_string();
+                match self
+                    .events
+                    .register_telegram_incoming(TelegramIncomingEvent {
+                        chat_id: chat_id.clone(),
+                        chat_title: chat_title.clone(),
+                        sender: sender.clone(),
+                        incoming_text: text.clone(),
+                        telegram_update_id: update.update_id,
+                        telegram_message_id: message.message_id,
+                        telegram_message_date: message.date,
+                        latest_outgoing_preview: self.handle.latest_outgoing_preview(&chat_id),
+                    }) {
+                    Ok(event_id) => {
+                        if let Err(err) = self.pending_work.enqueue(PendingWork::Event { event_id })
+                        {
+                            tracing::error!("enqueue pending telegram work failed: {err:?}");
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!("register telegram event failed: {err:?}");
+                    }
+                }
+                self.handle.observe_incoming_message(
+                    chat_id,
                     chat_title.clone(),
                     sender,
                     text.clone(),
+                    message
+                        .date
+                        .map(|seconds| seconds.saturating_mul(1000))
+                        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
                 );
             }
             AccessDecision::Blocked => (),
@@ -121,7 +173,7 @@ impl TelegramTransport {
                     truncate_reason(&text),
                     chrono::Utc::now().timestamp_millis(),
                 ) {
-                    eprintln!("register pending telegram chat failed: {err:?}");
+                    tracing::error!("register pending telegram chat failed: {err:?}");
                 }
             }
         }
@@ -213,6 +265,8 @@ struct TelegramUpdate {
 
 #[derive(Deserialize)]
 struct TelegramIncomingMessage {
+    message_id: Option<i64>,
+    date: Option<i64>,
     chat: TelegramChat,
     from: Option<TelegramUser>,
     text: Option<String>,

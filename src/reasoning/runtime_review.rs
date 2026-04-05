@@ -19,7 +19,7 @@ pub struct RuntimeTurnRecord {
     pub current_doing: String,
     pub description: String,
     pub observation: String,
-    pub primary_action: EpisodeActionRecord,
+    pub actions: Vec<EpisodeActionRecord>,
     pub before_snapshot_text: String,
     pub after_snapshot_text: String,
     #[serde(default)]
@@ -169,14 +169,21 @@ fn should_extend_runtime_span(span: &RuntimeReviewSpan, next: &RuntimeTurnRecord
     if next.recorded_at_ms - last.recorded_at_ms > MAX_SPAN_GAP_MS {
         return false;
     }
-    if same_metadata(last, next, "project_id") || same_metadata(last, next, "objective") {
+    if same_metadata(last, next, "item_id") || same_metadata(last, next, "objective") {
         return true;
     }
     if !last.current_doing.trim().is_empty() && last.current_doing == next.current_doing {
         return true;
     }
-    last.primary_action.kind == next.primary_action.kind
-        && last.primary_action.kind != "assistant_message"
+    let last_action = last_runtime_turn_action(last);
+    let next_action = last_runtime_turn_action(next);
+    last_action.kind == next_action.kind && last_action.kind != "assistant_message"
+}
+
+fn last_runtime_turn_action(turn: &RuntimeTurnRecord) -> &EpisodeActionRecord {
+    turn.actions
+        .last()
+        .expect("runtime review turn should contain at least one action")
 }
 
 fn same_metadata(left: &RuntimeTurnRecord, right: &RuntimeTurnRecord, key: &str) -> bool {

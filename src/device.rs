@@ -5,19 +5,17 @@ use miette::{Result, miette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{telegram_device::TelegramDevice, terminal_device::TerminalDevice};
+use crate::terminal_device::TerminalDevice;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
 pub enum DeviceId {
     Terminal,
-    Telegram,
 }
 
 impl Display for DeviceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Terminal => write!(f, "Terminal"),
-            Self::Telegram => write!(f, "Telegram"),
         }
     }
 }
@@ -40,7 +38,6 @@ impl Display for AttentionLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceToolScope {
     Terminal,
-    Telegram,
 }
 
 #[derive(Debug, Clone)]
@@ -252,26 +249,6 @@ impl DeviceManager {
             .downcast_mut::<TerminalDevice>()
             .ok_or_else(|| miette!("focused device is not Terminal: {:?}", focused))?;
         terminal.terminate_session(session_id).await
-    }
-
-    pub async fn telegram_select_chat(&mut self, chat_id: String) -> Result<()> {
-        let focused = self.focused;
-        let device = self.focused_device_mut()?;
-        let telegram = device
-            .as_any_mut()
-            .downcast_mut::<TelegramDevice>()
-            .ok_or_else(|| miette!("focused device is not Telegram: {:?}", focused))?;
-        telegram.select_chat(chat_id).await
-    }
-
-    pub async fn telegram_send_message(&mut self, text: String) -> Result<()> {
-        let focused = self.focused;
-        let device = self.focused_device_mut()?;
-        let telegram = device
-            .as_any_mut()
-            .downcast_mut::<TelegramDevice>()
-            .ok_or_else(|| miette!("focused device is not Telegram: {:?}", focused))?;
-        telegram.send_message(text).await
     }
 
     pub async fn shutdown(mut self) -> Result<()> {

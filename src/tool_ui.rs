@@ -76,7 +76,8 @@ pub struct TelegramUiData {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TelegramUiAction {
     ListChats,
-    ReadChat,
+    #[serde(alias = "ReadChat")]
+    ReadHistory,
     SelectChat,
     SendMessage,
     ResolveChat,
@@ -92,20 +93,6 @@ impl ToolUiEvent {
             title: title.into(),
             summary_line: summary_line.into(),
             files,
-        })
-    }
-
-    pub fn telegram(
-        action: TelegramUiAction,
-        title: impl Into<String>,
-        detail_lines: Vec<String>,
-        message_lines: Vec<String>,
-    ) -> Self {
-        Self::Telegram(TelegramUiData {
-            action,
-            title: title.into(),
-            detail_lines,
-            message_lines,
         })
     }
 
@@ -153,20 +140,6 @@ impl ToolCallUiEvent {
             title: title.into(),
             summary_line: summary_line.into(),
             files,
-        })
-    }
-
-    pub fn telegram(
-        action: TelegramUiAction,
-        title: impl Into<String>,
-        detail_lines: Vec<String>,
-        message_lines: Vec<String>,
-    ) -> Self {
-        Self::Telegram(TelegramUiData {
-            action,
-            title: title.into(),
-            detail_lines,
-            message_lines,
         })
     }
 

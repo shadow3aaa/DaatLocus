@@ -6,45 +6,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     context::Context,
     device::DeviceId,
-    reasoning::runtime::{AgentTurnRequest, AgentTurnResponse, PromptRequest},
+    events::EventDisposition,
+    reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
+    todo_board::TodoStatus,
 };
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(tag = "kind")]
-pub enum TelegramResolution {
-    ReplyOnly {
-        /// 仅做简短回复时要发送的内容
-        reply: String,
-    },
-    AcceptAsProject {
-        /// 如果需要先对外确认接下该工作，可填写回复内容；也可以留空，稍后再回
-        reply: Option<String>,
-        /// 新项目的标题
-        project_title: String,
-        /// 如何判断该项目完成
-        success_criteria: String,
-        /// 接下项目后立即要聚焦的第一条当前工作目标
-        first_next_action: Option<String>,
-    },
-    AskClarification {
-        /// 需要进一步澄清时发送的追问内容
-        reply: String,
-    },
-    Decline {
-        /// 拒绝时发送的回复内容
-        reply: String,
-    },
-    NoReplyNeeded,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct SetWorkObjectiveArgs {
-    pub description: String,
-    pub project_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ClearWorkObjectiveArgs {}
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct FocusDeviceArgs {
@@ -79,34 +44,28 @@ pub struct TerminalTerminateArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct TelegramSelectChatArgs {
-    pub chat_id: String,
+pub struct EventResolveArgs {
+    pub event_id: String,
+    pub disposition: EventDisposition,
+    pub reply_message: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct TelegramListChatsArgs {}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct TelegramReadChatArgs {
-    pub chat_id: Option<String>,
-    pub max_messages: Option<usize>,
+pub struct TodoCreateArgs {
+    pub title: String,
+    pub done_criteria: String,
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ResolveTelegramChatArgs {
-    pub chat_id: String,
-    pub resolution: TelegramResolution,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ObligationSatisfyArgs {
-    pub obligation_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ReportObligationArgs {
-    pub obligation_id: String,
-    pub reply: String,
+pub struct TodoUpdateArgs {
+    pub item_id: String,
+    pub title: Option<String>,
+    pub done_criteria: Option<String>,
+    pub notes: Option<String>,
+    pub clear_notes: Option<bool>,
+    pub status: Option<TodoStatus>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -120,18 +79,56 @@ pub struct DeepRecallArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct CommitToProjectArgs {
-    pub obligation_id: String,
-    pub title: String,
-    pub success_criteria: String,
-    pub initial_next_action: Option<String>,
-    pub acknowledgment: Option<String>,
+pub struct TodoCompleteArgs {
+    pub item_id: String,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ProjectCompleteArgs {
-    pub project_id: String,
-    pub summary: String,
+pub struct TodoDropArgs {
+    pub item_id: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct TokenUsage {
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub reasoning_output_tokens: i64,
+    pub total_tokens: i64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct TokenUsageInfo {
+    pub total_token_usage: TokenUsage,
+    pub last_token_usage: TokenUsage,
+    pub model_context_window: Option<i64>,
+}
+
+impl TokenUsage {
+    pub fn is_zero(&self) -> bool {
+        self.total_tokens == 0
+            && self.input_tokens == 0
+            && self.cached_input_tokens == 0
+            && self.output_tokens == 0
+            && self.reasoning_output_tokens == 0
+    }
+
+    pub fn add_assign(&mut self, other: &TokenUsage) {
+        self.input_tokens += other.input_tokens;
+        self.cached_input_tokens += other.cached_input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.reasoning_output_tokens += other.reasoning_output_tokens;
+        self.total_tokens += other.total_tokens;
+    }
+}
+
+impl TokenUsageInfo {
+    pub fn append_last_usage(&mut self, last: TokenUsage) {
+        self.total_token_usage.add_assign(&last);
+        self.last_token_usage = last;
+    }
 }
 
 /// LLM 负责思考
@@ -145,9 +142,21 @@ pub trait LLM {
     ) -> Result<serde_json::Value>;
 
     /// 执行一轮工具驱动的 agent turn，返回 assistant 文本或 tool calls。
-    async fn run_agent_turn(&self, _: &Context, _: AgentTurnRequest) -> Result<AgentTurnResponse> {
+    async fn run_agent_turn(
+        &self,
+        _: &Context,
+        _: AgentTurnRequest,
+    ) -> Result<AgentTurnStreamResult> {
         Err(miette!(
             "run_agent_turn is not implemented for this provider"
         ))
+    }
+
+    fn token_usage_info(&self) -> Option<TokenUsageInfo> {
+        None
+    }
+
+    fn model_name(&self) -> Option<String> {
+        None
     }
 }

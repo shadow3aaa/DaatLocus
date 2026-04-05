@@ -14,10 +14,13 @@ const BOOTSTRAP_DEMOS_DIR: &str = "bootstrap_demos";
 const STRESS_CASES_DIR: &str = "stress_cases";
 const INSTRUCTION_HYPOTHESES_DIR: &str = "instruction_hypotheses";
 const RUNTIME_DEMOS_DIR: &str = "runtime_demos";
+const TURN_DEMOS_DIR: &str = "turn_demos";
 const RUNTIME_PROMPT_SUGGESTIONS_DIR: &str = "runtime_prompt_suggestions";
 const RUNTIME_DEMO_EVALUATIONS_DIR: &str = "runtime_demo_evaluations";
+const TURN_DEMO_EVALUATIONS_DIR: &str = "turn_demo_evaluations";
 const RUNTIME_PROMPT_CANDIDATES_DIR: &str = "runtime_prompt_candidates";
 const RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR: &str = "runtime_prompt_evolution_reports";
+const MAX_ARTIFACT_FILE_STEM_LEN: usize = 96;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +95,25 @@ pub struct SleepArtifactRuntimeDemo {
     pub confidence: f32,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SleepArtifactTurnDemo {
+    pub compile_key: String,
+    pub title: String,
+    pub scenario_summary: String,
+    #[serde(default)]
+    pub initial_inputs: Vec<ExampleField>,
+    pub expected_behavior: String,
+    #[serde(default)]
+    pub judge_focus: Vec<String>,
+    pub must_use_tools: bool,
+    #[serde(default)]
+    pub must_not_final_answer_patterns: Vec<String>,
+    pub must_end_with_terminal_answer: bool,
+    #[serde(default)]
+    pub source_trace_ids: Vec<String>,
+    pub confidence: f32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SleepArtifactRuntimePromptSuggestion {
     pub compile_key: String,
@@ -115,6 +137,37 @@ pub struct SleepArtifactRuntimeDemoEvaluation {
     #[serde(default)]
     pub needed_changes: Vec<String>,
     pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SleepArtifactTurnDemoEvaluation {
+    pub compile_key: String,
+    pub demo_title: String,
+    pub passed: bool,
+    pub regression_detected: bool,
+    pub confidence: f64,
+    #[serde(default)]
+    pub needed_changes: Vec<String>,
+    pub reason: String,
+    pub trace_summary: String,
+    #[serde(default)]
+    pub incoming_text: String,
+    #[serde(default)]
+    pub expected_behavior: String,
+    #[serde(default)]
+    pub judge_focus: Vec<String>,
+    #[serde(default)]
+    pub must_use_tools: bool,
+    #[serde(default)]
+    pub must_not_final_answer_patterns: Vec<String>,
+    #[serde(default)]
+    pub trace_rendered: String,
+    #[serde(default)]
+    pub final_assistant_message: String,
+    #[serde(default)]
+    pub final_reply_message: String,
+    #[serde(default)]
+    pub actions_rendered: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,15 +222,24 @@ pub struct SleepArtifactsStore {
 
 impl SleepArtifactsStore {
     pub async fn open() -> Result<Self> {
-        let root = get_spinova_home().await.join(SLEEP_ARTIFACTS_DIR_NAME);
+        Self::open_scoped(None).await
+    }
+
+    pub async fn open_scoped(scope: Option<&str>) -> Result<Self> {
+        let mut root = get_spinova_home().await.join(SLEEP_ARTIFACTS_DIR_NAME);
+        if let Some(scope) = scope {
+            root = root.join(artifact_file_stem(scope));
+        }
         ensure_dir(&root).await?;
         ensure_dir(&root.join(FAILURE_PATTERNS_DIR)).await?;
         ensure_dir(&root.join(BOOTSTRAP_DEMOS_DIR)).await?;
         ensure_dir(&root.join(STRESS_CASES_DIR)).await?;
         ensure_dir(&root.join(INSTRUCTION_HYPOTHESES_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_DEMOS_DIR)).await?;
+        ensure_dir(&root.join(TURN_DEMOS_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_SUGGESTIONS_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_DEMO_EVALUATIONS_DIR)).await?;
+        ensure_dir(&root.join(TURN_DEMO_EVALUATIONS_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_CANDIDATES_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR)).await?;
         Ok(Self { root })
@@ -252,6 +314,21 @@ impl SleepArtifactsStore {
         replace_artifacts(&self.root.join(RUNTIME_DEMOS_DIR), artifacts).await
     }
 
+    pub async fn replace_turn_demos(
+        &self,
+        artifacts: &[SleepArtifactTurnDemo],
+    ) -> Result<Vec<PathBuf>> {
+        let artifacts = artifacts
+            .iter()
+            .cloned()
+            .map(|artifact| {
+                let slug = slugify(&artifact.title);
+                (format!("{}-{}", artifact.compile_key, slug), artifact)
+            })
+            .collect::<Vec<_>>();
+        replace_artifacts(&self.root.join(TURN_DEMOS_DIR), artifacts).await
+    }
+
     pub async fn replace_runtime_prompt_suggestions(
         &self,
         artifacts: &[SleepArtifactRuntimePromptSuggestion],
@@ -280,6 +357,21 @@ impl SleepArtifactsStore {
             })
             .collect::<Vec<_>>();
         replace_artifacts(&self.root.join(RUNTIME_DEMO_EVALUATIONS_DIR), artifacts).await
+    }
+
+    pub async fn replace_turn_demo_evaluations(
+        &self,
+        artifacts: &[SleepArtifactTurnDemoEvaluation],
+    ) -> Result<Vec<PathBuf>> {
+        let artifacts = artifacts
+            .iter()
+            .cloned()
+            .map(|artifact| {
+                let slug = slugify(&artifact.demo_title);
+                (format!("{}-{}", artifact.compile_key, slug), artifact)
+            })
+            .collect::<Vec<_>>();
+        replace_artifacts(&self.root.join(TURN_DEMO_EVALUATIONS_DIR), artifacts).await
     }
 
     pub async fn replace_runtime_prompt_candidates(
@@ -335,7 +427,7 @@ async fn save_artifact<T>(dir: &Path, stem: &str, artifact: &T) -> Result<PathBu
 where
     T: Serialize,
 {
-    let file_name = format!("{}-{}.json", slugify(stem), Uuid::new_v4());
+    let file_name = format!("{}-{}.json", artifact_file_stem(stem), Uuid::new_v4());
     let path = dir.join(file_name);
     let bytes = serde_json::to_vec_pretty(artifact)
         .map_err(|err| miette!("failed to serialize sleep artifact: {err}"))?;
@@ -380,6 +472,16 @@ fn slugify(value: &str) -> String {
         }
     }
     slug.trim_matches('-').to_string()
+}
+
+fn artifact_file_stem(value: &str) -> String {
+    let slug = slugify(value);
+    let slug = if slug.is_empty() {
+        "artifact"
+    } else {
+        slug.as_str()
+    };
+    slug.chars().take(MAX_ARTIFACT_FILE_STEM_LEN).collect()
 }
 
 #[cfg(test)]
@@ -429,5 +531,14 @@ mod tests {
         let decoded: SleepArtifactRuntimePromptEvolutionReport =
             serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, report);
+    }
+
+    #[test]
+    fn artifact_file_stem_is_bounded_and_non_empty() {
+        let stem = artifact_file_stem(
+            "tool call when a device is already in foreground state do not call focus device with unknown device id parameter",
+        );
+        assert!(!stem.is_empty());
+        assert!(stem.len() <= MAX_ARTIFACT_FILE_STEM_LEN);
     }
 }

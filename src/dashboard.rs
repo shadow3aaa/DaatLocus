@@ -29,6 +29,8 @@ pub struct DashboardState {
     pub live_activity_cells: Vec<LiveActivityCell>,
     pub last_cycle_elapsed_ms: Option<u128>,
     pub runtime_status: Option<String>,
+    pub footer_context: String,
+    pub footer_estimated_input_tokens: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -171,7 +173,7 @@ fn telegram_cell_from_ui(data: TelegramUiData) -> TelegramActivityCell {
     if detail_lines.is_empty() {
         detail_lines.push(match data.action {
             TelegramUiAction::ListChats => "list chats".to_string(),
-            TelegramUiAction::ReadChat => "read chat".to_string(),
+            TelegramUiAction::ReadHistory => "read history".to_string(),
             TelegramUiAction::SelectChat => "select chat".to_string(),
             TelegramUiAction::SendMessage => "send message".to_string(),
             TelegramUiAction::ResolveChat => "resolve chat".to_string(),
@@ -606,8 +608,12 @@ static TELEGRAM_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
     &TELEGRAM_REJECT_SUBCOMMAND,
 ];
 
-static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 4] =
-    [&QUIT_COMMAND, &STATUS_COMMAND, &SLEEP_COMMAND, &TELEGRAM_COMMAND];
+static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 4] = [
+    &QUIT_COMMAND,
+    &STATUS_COMMAND,
+    &SLEEP_COMMAND,
+    &TELEGRAM_COMMAND,
+];
 
 impl DashboardCommand for QuitCommand {
     fn usage(&self) -> &'static str {
@@ -1054,7 +1060,7 @@ pub async fn run_tui_dashboard(
         terminal.draw(|f| {
             let root = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(18), Constraint::Length(3 + popup_rows + 1)])
+                .constraints([Constraint::Min(18), Constraint::Length(4 + popup_rows)])
                 .split(f.area());
             render_activity_feed(
                 f,
@@ -1070,6 +1076,7 @@ pub async fn run_tui_dashboard(
                 root[1],
                 &command_input,
                 state.runtime_status.as_deref(),
+                &state.footer_context,
                 command_overlay.is_some(),
                 command_popup_selection,
                 command_popup_scroll,
@@ -1685,7 +1692,6 @@ fn render_command_popup(
         .map(|(visible_idx, suggestion)| {
             let idx = scroll + visible_idx;
             let selected = idx == selected_index;
-            let prefix = if selected { "› " } else { "  " };
             let style = if selected {
                 Style::default().fg(Color::Cyan)
             } else {
@@ -1697,14 +1703,7 @@ fn render_command_popup(
                 Style::default().fg(Color::DarkGray)
             };
             Line::from(vec![
-                Span::styled(
-                    prefix,
-                    if selected {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ),
+                Span::raw("  "),
                 Span::styled(suggestion.display, style),
                 Span::raw("  "),
                 Span::styled(suggestion.description, desc_style),
@@ -1723,6 +1722,7 @@ fn render_command_bar(
     area: Rect,
     input: &str,
     runtime_status: Option<&str>,
+    footer_context: &str,
     overlay_open: bool,
     popup_selection: usize,
     popup_scroll: usize,
@@ -1738,14 +1738,28 @@ fn render_command_bar(
         .direction(Direction::Vertical)
         .constraints(if popup_rows > 0 {
             vec![
+                Constraint::Length(1),
                 Constraint::Length(2),
                 Constraint::Length(popup_rows),
                 Constraint::Length(1),
             ]
         } else {
-            vec![Constraint::Length(2), Constraint::Length(1)]
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(2),
+                Constraint::Length(1),
+            ]
         })
         .split(area);
+    let status_line = match runtime_status {
+        Some("Working") => render_working_status_line(),
+        Some(status) if !status.trim().is_empty() => Line::from(vec![Span::styled(
+            status.to_string(),
+            Style::default().fg(Color::DarkGray),
+        )]),
+        _ => Line::from(""),
+    };
+    f.render_widget(Paragraph::new(status_line), rows[0]);
     let prompt = Line::from(vec![
         Span::styled("›", Style::default().fg(Color::Cyan)),
         Span::raw(" "),
@@ -1767,19 +1781,22 @@ fn render_command_bar(
             && completion != input
         {
             Span::styled(
-                completion[input.len()..].to_string(),
+                completion
+                    .strip_prefix(input)
+                    .unwrap_or_default()
+                    .to_string(),
                 Style::default().fg(Color::DarkGray),
             )
         } else {
             Span::raw("")
         },
     ]);
-    f.render_widget(Paragraph::new(prompt), rows[0]);
+    f.render_widget(Paragraph::new(prompt), rows[1]);
     let footer_row = if popup_rows > 0 {
-        render_command_popup(f, rows[1], input, popup_selection, popup_scroll);
-        rows[2]
+        render_command_popup(f, rows[2], input, popup_selection, popup_scroll);
+        rows[3]
     } else {
-        rows[1]
+        rows[2]
     };
     let footer = Paragraph::new(match runtime_status {
         _ if overlay_open => Line::from(vec![
@@ -1790,9 +1807,8 @@ fn render_command_bar(
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
-        Some("Working") => render_working_status_line(),
-        Some(status) if !status.trim().is_empty() => Line::from(vec![Span::styled(
-            status.to_string(),
+        _ if !footer_context.trim().is_empty() => Line::from(vec![Span::styled(
+            footer_context.to_string(),
             Style::default().fg(Color::DarkGray),
         )]),
         _ => Line::from(vec![

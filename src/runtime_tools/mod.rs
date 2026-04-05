@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::{
     context::Context,
+    context_budget::truncate_text_to_token_budget,
     device::DeviceToolScope,
     reasoning::{
         episode::EpisodeActionRecord,
@@ -15,7 +16,6 @@ use crate::{
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 
-mod telegram;
 mod terminal;
 mod work;
 
@@ -83,6 +83,7 @@ fn normalize_tool_input_schema(mut schema: serde_json::Value) -> serde_json::Val
 pub struct ToolExecutionResult {
     pub summary: String,
     pub payload: Value,
+    pub model_content_override: Option<String>,
     pub ui_event: ToolUiEvent,
 }
 
@@ -91,28 +92,50 @@ impl ToolExecutionResult {
         Self {
             summary: summary.into(),
             payload,
+            model_content_override: None,
             ui_event,
         }
     }
 
+    pub fn with_model_content(mut self, model_content: impl Into<String>) -> Self {
+        self.model_content_override = Some(model_content.into());
+        self
+    }
+
     pub fn model_content(&self) -> String {
-        if self.payload.is_null() {
-            format!("summary={}", self.summary)
-        } else {
-            format!(
-                "summary={}\npayload=\n{}",
-                self.summary,
-                serde_json::to_string_pretty(&self.payload)
-                    .unwrap_or_else(|_| self.payload.to_string())
-            )
+        if let Some(model_content) = &self.model_content_override {
+            return model_content.clone();
         }
+        self.default_content_for_payload(&self.payload)
     }
 
     pub fn history_content(&self, tool_call_id: &str, tool_name: &str) -> String {
         format!(
             "tool_call_id={tool_call_id}\nname={tool_name}\n{}",
-            self.model_content()
+            self.default_content_for_payload(&self.payload)
         )
+    }
+
+    fn default_content_for_payload(&self, payload: &Value) -> String {
+        if payload.is_null() {
+            format!("summary={}", self.summary)
+        } else {
+            format!(
+                "summary={}\npayload=\n{}",
+                self.summary,
+                serde_json::to_string_pretty(payload).unwrap_or_else(|_| payload.to_string())
+            )
+        }
+    }
+
+    fn ensure_model_content_with_budget(mut self, max_tokens: usize) -> Self {
+        if self.model_content_override.is_none() {
+            self.model_content_override = Some(truncate_text_to_token_budget(
+                &self.default_content_for_payload(&self.payload),
+                max_tokens,
+            ));
+        }
+        self
     }
 }
 
@@ -333,7 +356,6 @@ pub fn build_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
     let mut tools: Vec<Box<dyn RuntimeTool>> = vec![Box::new(ApplyPatchRuntimeTool)];
     tools.extend(work::register_tools());
     tools.extend(terminal::register_tools());
-    tools.extend(telegram::register_tools());
     tools
 }
 
@@ -356,9 +378,7 @@ pub fn build_runtime_tool_specs(context: &Context) -> Vec<AgentToolSpec> {
         .collect()
 }
 
-pub fn summarize_primary_action_from_tool_call(
-    call: &AgentToolCall,
-) -> Result<EpisodeActionRecord> {
+pub fn summarize_action_from_tool_call(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
     let tools = build_runtime_tools();
     find_runtime_tool(&tools, &call.name)?.summarize_action(call)
 }
@@ -377,5 +397,7 @@ pub async fn execute_agent_tool_call(
     if !tool.is_available(context) {
         return Err(miette!("tool `{}` is not currently available", call.name));
     }
-    tool.execute(context, call).await
+    let result = tool.execute(context, call).await?;
+    Ok(result
+        .ensure_model_content_with_budget(context.config.main_model.tool_output_max_tokens.max(1)))
 }

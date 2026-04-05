@@ -1,22 +1,24 @@
 use std::{collections::HashMap, env, path::PathBuf};
 
-use miette::{Result, miette};
-use serde_json::json;
-
 use crate::{
     context::Context,
     hindsight::{HindsightRecallOptions, HindsightRetainItem},
     reasoning::{
         compiled::{
-            RUNTIME_SYSTEM_PROMPT_COMPILE_KEY, load_previous_compiled_runtime_system_prompt,
-            save_compiled_runtime_system_prompt, save_previous_compiled_runtime_system_prompt,
+            RUNTIME_SYSTEM_PROMPT_COMPILE_KEY,
+            load_previous_compiled_runtime_system_prompt_for_model,
+            save_compiled_runtime_system_prompt_for_model,
+            save_previous_compiled_runtime_system_prompt_for_model,
         },
-        episode::{EpisodeOutcome, EpisodeStatus, EpisodeStep},
+        episode::{EpisodeActionRecord, EpisodeOutcome, EpisodeStatus, EpisodeStep},
         examples::ExampleField,
         runtime::{PromptMessage, PromptRequest, PromptRole},
     },
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
+use miette::{Result, miette};
+use serde_json::json;
+use tracing::warn;
 
 use super::{
     programs::runtime_system_prompt_judge::{
@@ -41,11 +43,21 @@ use super::{
         SleepArtifactRuntimeDemoEvaluation, SleepArtifactRuntimePromptCandidate,
         SleepArtifactRuntimePromptEvolutionReport, SleepArtifactRuntimePromptEvolutionRound,
         SleepArtifactRuntimePromptSuggestion, SleepArtifactStressCase,
-        SleepArtifactSuggestedFixKind, SleepArtifactsStore,
+        SleepArtifactSuggestedFixKind, SleepArtifactTurnDemo, SleepArtifactTurnDemoEvaluation,
+        SleepArtifactsStore,
     },
     trace::{
         ProgramTraceRecord, RuntimeTraceBatch, TraceOrigin, compact_runtime_trace_file,
         load_runtime_trace_batch,
+    },
+    turn_compile::{
+        TurnCompileEngine, apply_runtime_prompt_candidate_shared,
+        build_compiled_runtime_system_prompt_report, build_runtime_prompt_evolution_report,
+        choose_best_non_regressing_prompt_shared,
+        current_runtime_system_prompt_artifact_from_store, generate_turn_prompt_candidates,
+        is_acceptable_turn_round, runtime_system_prompt_text as render_runtime_system_prompt_text,
+        turn_evaluation_stats, turn_evaluation_summary_lines,
+        turn_prompt_suggestions_from_evaluations,
     },
 };
 
@@ -58,9 +70,11 @@ pub struct SleepSummary {
     pub stress_cases: usize,
     pub instruction_hypotheses: usize,
     pub runtime_demos: usize,
+    pub turn_demos: usize,
     pub runtime_prompt_suggestions: usize,
     pub runtime_prompt_candidates: usize,
     pub runtime_demo_evaluations: usize,
+    pub turn_demo_evaluations: usize,
     pub runtime_demo_passed: usize,
     pub runtime_demo_regressions: usize,
     pub runtime_prompt_rolled_back: bool,
@@ -116,14 +130,20 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
         .replace_instruction_hypotheses(&derived.instruction_hypotheses)
         .await?;
     store.replace_runtime_demos(&derived.runtime_demos).await?;
+    store.replace_turn_demos(&derived.turn_demos).await?;
     let runtime_evolution = evolve_runtime_system_prompt(
         context,
         &derived.runtime_demos,
+        &derived.turn_demos,
+        &runtime_review_spans,
         &derived.instruction_hypotheses,
     )
     .await?;
     store
         .replace_runtime_demo_evaluations(&runtime_evolution.evaluations)
+        .await?;
+    store
+        .replace_turn_demo_evaluations(&runtime_evolution.turn_evaluations)
         .await?;
     store
         .replace_runtime_prompt_suggestions(&runtime_evolution.suggestions)
@@ -146,9 +166,11 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
         stress_cases: derived.stress_cases.len(),
         instruction_hypotheses: derived.instruction_hypotheses.len(),
         runtime_demos: derived.runtime_demos.len(),
+        turn_demos: derived.turn_demos.len(),
         runtime_prompt_suggestions: runtime_evolution.suggestions.len(),
         runtime_prompt_candidates: runtime_evolution.candidates.len(),
         runtime_demo_evaluations: runtime_evolution.evaluations.len(),
+        turn_demo_evaluations: runtime_evolution.turn_evaluations.len(),
         runtime_demo_passed: runtime_evolution.passed,
         runtime_demo_regressions: runtime_evolution.regressions,
         runtime_prompt_rolled_back: runtime_evolution.rolled_back,
@@ -163,10 +185,12 @@ struct DerivedSleepArtifacts {
     stress_cases: Vec<SleepArtifactStressCase>,
     instruction_hypotheses: Vec<SleepArtifactInstructionHypothesis>,
     runtime_demos: Vec<SleepArtifactRuntimeDemo>,
+    turn_demos: Vec<SleepArtifactTurnDemo>,
 }
 
 struct RuntimePromptEvolutionResult {
     evaluations: Vec<SleepArtifactRuntimeDemoEvaluation>,
+    turn_evaluations: Vec<SleepArtifactTurnDemoEvaluation>,
     suggestions: Vec<SleepArtifactRuntimePromptSuggestion>,
     candidates: Vec<SleepArtifactRuntimePromptCandidate>,
     report: SleepArtifactRuntimePromptEvolutionReport,
@@ -346,7 +370,7 @@ async fn synthesize_review_inputs(
             review.final_observation.clone(),
             render_related_memories(&related_memories).unwrap_or_else(|| "无".to_string()),
         );
-        let synthesized_outcome = execute_program_with_ir_report(
+        let synthesized_outcome = match execute_program_with_ir_report(
             context.judge_llm.as_ref(),
             context,
             &renderer,
@@ -355,7 +379,17 @@ async fn synthesize_review_inputs(
             &tuning,
             TraceOrigin::Sleep,
         )
-        .await?;
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                warn!(
+                    "sleep review synthesis skipped for {} (label={}): {err:?}",
+                    review.review_id, review.review_label
+                );
+                continue;
+            }
+        };
 
         merge_review_synthesis(
             &mut synthesized,
@@ -424,7 +458,8 @@ fn review_input_from_episode(outcome: &EpisodeOutcome) -> Option<ReviewInput> {
 fn review_input_from_runtime_span(span: &RuntimeReviewSpan) -> Option<ReviewInput> {
     let first_turn = span.turns.first()?;
     let last_turn = span.last_turn();
-    let review_label = review_label_from_action_kind(&last_turn.primary_action.kind, "runtime");
+    let last_action = last_runtime_turn_action(last_turn);
+    let review_label = review_label_from_action_kind(&last_action.kind, "runtime");
     let task_goal = last_turn
         .metadata
         .get("objective")
@@ -433,7 +468,7 @@ fn review_input_from_runtime_span(span: &RuntimeReviewSpan) -> Option<ReviewInpu
         .or_else(|| {
             (!last_turn.current_doing.trim().is_empty()).then(|| last_turn.current_doing.clone())
         })
-        .unwrap_or_else(|| last_turn.primary_action.summary.clone());
+        .unwrap_or_else(|| last_action.summary.clone());
     let outcome_status = infer_runtime_review_status(span);
     let done_criteria = last_turn
         .metadata
@@ -478,8 +513,8 @@ fn review_input_from_runtime_span(span: &RuntimeReviewSpan) -> Option<ReviewInpu
             format!("status:{}", outcome_status.to_ascii_lowercase()),
         ],
         reflection_subject: format!("runtime review {}", span.id),
-        last_action_kind: last_turn.primary_action.kind.clone(),
-        last_action_summary: last_turn.primary_action.summary.clone(),
+        last_action_kind: last_action.kind.clone(),
+        last_action_summary: last_action.summary.clone(),
     })
 }
 
@@ -494,10 +529,8 @@ fn review_label_from_action_kind(action_kind: &str, fallback: &str) -> String {
 
 fn infer_runtime_review_status(span: &RuntimeReviewSpan) -> String {
     if span.turns.iter().all(|turn| {
-        matches!(
-            turn.primary_action.kind.as_str(),
-            "assistant_message" | "empty_tool_calls"
-        )
+        let action = last_runtime_turn_action(turn);
+        matches!(action.kind.as_str(), "assistant_message" | "empty_tool_calls")
     }) {
         return "NoProgress".to_string();
     }
@@ -617,11 +650,10 @@ fn render_recent_runtime_span_steps(span: &RuntimeReviewSpan) -> String {
                 .unwrap_or_else(|| "unknown".to_string());
             let history_summary = render_runtime_turn_history_summary(&turn.history_messages);
             format!(
-                "{}. phase={} action={} ({}) current_doing={} observation={} history={}",
+                "{}. phase={} actions={} current_doing={} observation={} history={}",
                 index + 1,
                 phase,
-                turn.primary_action.kind,
-                turn.primary_action.summary,
+                render_runtime_turn_actions(turn),
                 compact_review_text(&turn.current_doing),
                 compact_review_text(&turn.observation),
                 compact_review_text(&history_summary)
@@ -860,13 +892,28 @@ fn runtime_span_example_inputs(
 }
 
 fn runtime_turn_to_output(turn: &RuntimeTurnRecord) -> SleepActionOutput {
+    let action = last_runtime_turn_action(turn);
     SleepActionOutput {
         observation: turn.observation.clone(),
         description: turn.description.clone(),
         current_doing: turn.current_doing.clone(),
-        action_kind: turn.primary_action.kind.clone(),
-        action_summary: turn.primary_action.summary.clone(),
+        action_kind: action.kind.clone(),
+        action_summary: action.summary.clone(),
     }
+}
+
+fn last_runtime_turn_action(turn: &RuntimeTurnRecord) -> &EpisodeActionRecord {
+    turn.actions
+        .last()
+        .expect("runtime review turn should contain at least one action")
+}
+
+fn render_runtime_turn_actions(turn: &RuntimeTurnRecord) -> String {
+    turn.actions
+        .iter()
+        .map(|action| format!("{}({})", action.kind, compact_review_text(&action.summary)))
+        .collect::<Vec<_>>()
+        .join(" -> ")
 }
 
 struct PatternAccumulator {
@@ -879,7 +926,7 @@ struct PatternAccumulator {
     suggested_fix_kind: SleepArtifactSuggestedFixKind,
 }
 
-fn classify_failure(record: &ProgramTraceRecord, error: &str) -> String {
+fn classify_failure(_record: &ProgramTraceRecord, error: &str) -> String {
     if error.contains("provider_error") {
         return "provider_error".to_string();
     }
@@ -894,9 +941,6 @@ fn classify_failure(record: &ProgramTraceRecord, error: &str) -> String {
     }
     if error.contains("expected value") || error.contains("EOF while parsing") {
         return "malformed_json".to_string();
-    }
-    if record.program_name == "resolve_telegram_chat" && error.contains("action") {
-        return "resolve_chat_schema_drift".to_string();
     }
     "deserialization_error".to_string()
 }
@@ -929,10 +973,6 @@ fn describe_failure(record: &ProgramTraceRecord, error: &str, label: &str) -> St
             "{} 在运行时遇到 provider 级错误，需要区分接口兼容问题与程序语义问题。",
             record.program_name
         ),
-        "resolve_chat_schema_drift" => {
-            "resolve_telegram_chat 在运行时出现了扁平 action/结构漂移，需用 stress case 与 demo 固化输出边界。"
-                .to_string()
-        }
         _ => format!(
             "{} 在运行时出现结构化输出失败：{}",
             record.program_name, error
@@ -992,6 +1032,7 @@ async fn derive_sleep_artifacts(
             stress_cases: Vec::new(),
             instruction_hypotheses: Vec::new(),
             runtime_demos: Vec::new(),
+            turn_demos: Vec::new(),
         });
     }
 
@@ -1057,6 +1098,7 @@ async fn derive_sleep_artifacts(
         stress_cases,
         instruction_hypotheses,
         runtime_demos,
+        turn_demos: Vec::new(),
     })
 }
 
@@ -1072,7 +1114,7 @@ async fn evaluate_runtime_demos(
     let program = RuntimeSystemPromptJudgeProgram;
     let tuning = resolve_program_tuning(context, &program).await;
     let current_system_prompt = current_runtime_system_prompt_text(context);
-    let previous_system_prompt = previous_runtime_system_prompt_text().await?;
+    let previous_system_prompt = previous_runtime_system_prompt_text(context).await?;
     let mut evaluations = Vec::with_capacity(runtime_demos.len());
 
     for demo in runtime_demos.iter().cloned() {
@@ -1110,11 +1152,14 @@ const MAX_RUNTIME_PROMPT_EVOLUTION_ROUNDS: usize = 3;
 async fn evolve_runtime_system_prompt(
     context: &mut Context,
     runtime_demos: &[SleepArtifactRuntimeDemo],
+    turn_demos: &[SleepArtifactTurnDemo],
+    runtime_review_spans: &[RuntimeReviewSpan],
     instruction_hypotheses: &[SleepArtifactInstructionHypothesis],
 ) -> Result<RuntimePromptEvolutionResult> {
-    if runtime_demos.is_empty() {
+    if runtime_demos.is_empty() && turn_demos.is_empty() {
         return Ok(RuntimePromptEvolutionResult {
             evaluations: Vec::new(),
+            turn_evaluations: Vec::new(),
             suggestions: Vec::new(),
             candidates: Vec::new(),
             report: SleepArtifactRuntimePromptEvolutionReport {
@@ -1149,11 +1194,16 @@ async fn evolve_runtime_system_prompt(
     let mut accepted = false;
     let mut all_candidates = Vec::new();
     let mut latest_evaluations = Vec::new();
+    let mut latest_turn_evaluations: Option<Vec<SleepArtifactTurnDemoEvaluation>> = None;
     let mut latest_suggestions = Vec::new();
     let mut latest_regressions = 0usize;
     let mut round_history = Vec::new();
 
-    save_compiled_runtime_system_prompt(&current_prompt).await?;
+    save_compiled_runtime_system_prompt_for_model(
+        &context.config.main_model.model_name,
+        &current_prompt,
+    )
+    .await?;
     context.compiled_prompts = context
         .compiled_prompts
         .clone()
@@ -1162,17 +1212,62 @@ async fn evolve_runtime_system_prompt(
     for _ in 0..MAX_RUNTIME_PROMPT_EVOLUTION_ROUNDS {
         rounds += 1;
         latest_evaluations = evaluate_runtime_demos(context, runtime_demos).await?;
-        latest_suggestions = runtime_prompt_suggestions_from_evaluations(&latest_evaluations);
-        latest_regressions = latest_evaluations
+        latest_turn_evaluations = Some(
+            TurnCompileEngine::evaluate_from_review_spans(
+                context,
+                turn_demos,
+                runtime_review_spans,
+                current_runtime_system_prompt_text(context),
+                previous_runtime_system_prompt_text(context).await?,
+            )
+            .await?,
+        );
+        let latest_turn_evaluations_ref = latest_turn_evaluations
+            .as_ref()
+            .expect("latest_turn_evaluations just populated");
+        let runtime_suggestions = runtime_prompt_suggestions_from_evaluations(&latest_evaluations);
+        let turn_suggestions =
+            turn_prompt_suggestions_from_evaluations(latest_turn_evaluations_ref)
+                .into_iter()
+                .map(|title| SleepArtifactRuntimePromptSuggestion {
+                    compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
+                    title,
+                    rationale: "turn demo failed".to_string(),
+                    suggested_additions: Vec::new(),
+                    source_demo_titles: latest_turn_evaluations_ref
+                        .iter()
+                        .filter(|item| !item.passed)
+                        .map(|item| item.demo_title.clone())
+                        .collect(),
+                    source_pattern_ids: Vec::new(),
+                })
+                .collect::<Vec<_>>();
+        latest_suggestions = runtime_suggestions
+            .into_iter()
+            .chain(turn_suggestions.into_iter())
+            .collect();
+        let runtime_regressions = latest_evaluations
             .iter()
             .filter(|item| item.regression_detected)
             .count();
-        let passed = latest_evaluations.iter().filter(|item| item.passed).count();
+        let (turn_passed, turn_regressions) = turn_evaluation_stats(latest_turn_evaluations_ref);
+        let runtime_passed = latest_evaluations.iter().filter(|item| item.passed).count();
+        let passed = runtime_passed + turn_passed;
+        latest_regressions = runtime_regressions + turn_regressions;
         let has_regression = latest_regressions > 0;
 
-        let round_accepted =
-            is_acceptable_runtime_round(passed, latest_evaluations.len(), has_regression);
-        let (next_best_prompt, next_best_passed) = choose_best_non_regressing_prompt(
+        let runtime_round_accepted = is_acceptable_runtime_round(
+            runtime_passed,
+            latest_evaluations.len(),
+            runtime_regressions > 0,
+        );
+        let turn_round_accepted = is_acceptable_turn_round(
+            turn_passed,
+            latest_turn_evaluations_ref.len(),
+            turn_regressions > 0,
+        );
+        let round_accepted = runtime_round_accepted && turn_round_accepted;
+        let (next_best_prompt, next_best_passed) = choose_best_non_regressing_prompt_shared(
             &best_prompt,
             best_passed,
             &current_prompt,
@@ -1186,7 +1281,7 @@ async fn evolve_runtime_system_prompt(
             round: rounds,
             candidate: current_prompt.best_candidate.clone(),
             passed,
-            total_demos: latest_evaluations.len(),
+            total_demos: latest_evaluations.len() + latest_turn_evaluations_ref.len(),
             regressions: latest_regressions,
             rolled_back,
             accepted: round_accepted,
@@ -1204,18 +1299,31 @@ async fn evolve_runtime_system_prompt(
         }
 
         if has_regression
-            && rollback_runtime_system_prompt_if_regressed(context, &latest_evaluations).await?
+            && rollback_runtime_system_prompt_if_regressed(
+                context,
+                &latest_evaluations,
+                latest_turn_evaluations_ref,
+            )
+            .await?
         {
             rolled_back = true;
             current_prompt = current_runtime_system_prompt_artifact(context);
         }
 
-        let next_candidates = generate_runtime_prompt_candidates(
+        let mut next_candidates = generate_runtime_prompt_candidates(
             context,
             &latest_evaluations,
             instruction_hypotheses,
         )
         .await?;
+        next_candidates.extend(
+            generate_turn_prompt_candidates(
+                context,
+                latest_turn_evaluations_ref,
+                render_runtime_hypotheses(instruction_hypotheses),
+            )
+            .await?,
+        );
         if next_candidates.is_empty() {
             break;
         }
@@ -1228,9 +1336,18 @@ async fn evolve_runtime_system_prompt(
             last_round.candidate_titles = candidate_titles;
         }
 
-        let next_prompt = apply_runtime_prompt_candidate(&current_prompt, &next_candidates[0]);
-        save_previous_compiled_runtime_system_prompt(&current_prompt).await?;
-        save_compiled_runtime_system_prompt(&next_prompt).await?;
+        let next_prompt =
+            apply_runtime_prompt_candidate_shared(&current_prompt, &next_candidates[0]);
+        save_previous_compiled_runtime_system_prompt_for_model(
+            &context.config.main_model.model_name,
+            &current_prompt,
+        )
+        .await?;
+        save_compiled_runtime_system_prompt_for_model(
+            &context.config.main_model.model_name,
+            &next_prompt,
+        )
+        .await?;
         context.compiled_prompts = context
             .compiled_prompts
             .clone()
@@ -1238,29 +1355,61 @@ async fn evolve_runtime_system_prompt(
         current_prompt = next_prompt;
     }
 
-    save_compiled_runtime_system_prompt(&best_prompt).await?;
+    save_compiled_runtime_system_prompt_for_model(
+        &context.config.main_model.model_name,
+        &best_prompt,
+    )
+    .await?;
     context.compiled_prompts = context
         .compiled_prompts
         .clone()
         .with_runtime_system_prompt(Some(best_prompt.clone()));
 
+    let mut best_prompt_with_report = best_prompt.clone();
+    let runtime_summary_lines = latest_evaluations
+        .iter()
+        .map(|item| {
+            format!(
+                "- {}: passed={} regression={} reason={}",
+                item.demo_title,
+                item.passed,
+                item.regression_detected,
+                item.reason.trim()
+            )
+        })
+        .chain(turn_evaluation_summary_lines(
+            latest_turn_evaluations.as_deref().unwrap_or(&[]),
+        ))
+        .collect::<Vec<_>>();
+    best_prompt_with_report.report = Some(build_compiled_runtime_system_prompt_report(
+        best_passed,
+        runtime_demos.len() + turn_demos.len(),
+        &runtime_summary_lines,
+    ));
+    save_compiled_runtime_system_prompt_for_model(
+        &context.config.main_model.model_name,
+        &best_prompt_with_report,
+    )
+    .await?;
+    context.compiled_prompts = context
+        .compiled_prompts
+        .clone()
+        .with_runtime_system_prompt(Some(best_prompt_with_report.clone()));
+
     Ok(RuntimePromptEvolutionResult {
         evaluations: latest_evaluations,
+        turn_evaluations: latest_turn_evaluations.unwrap_or_else(Vec::new),
         suggestions: latest_suggestions,
         candidates: all_candidates,
-        report: SleepArtifactRuntimePromptEvolutionReport {
-            compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-            rounds,
+        report: build_runtime_prompt_evolution_report(
+            runtime_demos.len() + turn_demos.len(),
+            &best_prompt_with_report,
+            &round_history,
             accepted,
             rolled_back,
-            passed: best_passed,
-            total_demos: runtime_demos.len(),
-            regressions: latest_regressions,
-            selected_candidate: best_prompt.best_candidate.clone(),
-            selected_demo_titles: best_prompt.selected_demo_titles.clone(),
-            final_system_additions: best_prompt.system_additions.clone(),
-            round_history,
-        },
+            latest_regressions,
+            best_passed,
+        ),
         passed: best_passed,
         regressions: latest_regressions,
         rolled_back,
@@ -1314,57 +1463,19 @@ async fn generate_runtime_prompt_candidates(
 fn current_runtime_system_prompt_artifact(
     context: &Context,
 ) -> crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
-    crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
-        compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-        best_candidate: "current".to_string(),
-        system_additions: context.compiled_prompts.runtime_system_additions().to_vec(),
-        selected_demo_titles: Vec::new(),
-        report: None,
-    }
-}
-
-fn apply_runtime_prompt_candidate(
-    current: &crate::reasoning::compiled::CompiledRuntimeSystemPrompt,
-    candidate: &SleepArtifactRuntimePromptCandidate,
-) -> crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
-    let mut system_additions = current.system_additions.clone();
-    for patch in &candidate.prompt_patches {
-        if !patch.trim().is_empty() && !system_additions.iter().any(|line| line == patch) {
-            system_additions.push(patch.clone());
-        }
-    }
-    crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
-        compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-        best_candidate: candidate.title.clone(),
-        system_additions,
-        selected_demo_titles: candidate.source_demo_titles.clone(),
-        report: None,
-    }
+    current_runtime_system_prompt_artifact_from_store(&context.compiled_prompts)
 }
 
 fn is_acceptable_runtime_round(passed: usize, total: usize, has_regression: bool) -> bool {
     !has_regression && passed == total
 }
 
-fn choose_best_non_regressing_prompt(
-    best_prompt: &crate::reasoning::compiled::CompiledRuntimeSystemPrompt,
-    best_passed: usize,
-    current_prompt: &crate::reasoning::compiled::CompiledRuntimeSystemPrompt,
-    current_passed: usize,
-    has_regression: bool,
-) -> (
-    crate::reasoning::compiled::CompiledRuntimeSystemPrompt,
-    usize,
-) {
-    if !has_regression && current_passed >= best_passed {
-        (current_prompt.clone(), current_passed)
-    } else {
-        (best_prompt.clone(), best_passed)
-    }
-}
-
-async fn previous_runtime_system_prompt_text() -> Result<String> {
-    let Some(previous) = load_previous_compiled_runtime_system_prompt().await? else {
+async fn previous_runtime_system_prompt_text(context: &Context) -> Result<String> {
+    let Some(previous) = load_previous_compiled_runtime_system_prompt_for_model(
+        &context.config.main_model.model_name,
+    )
+    .await?
+    else {
         return Ok(String::from("none"));
     };
     let mut lines = vec![
@@ -1381,19 +1492,7 @@ async fn previous_runtime_system_prompt_text() -> Result<String> {
 }
 
 fn current_runtime_system_prompt_text(context: &Context) -> String {
-    let mut lines = vec![
-        crate::reasoning::prompts::SYSTEM_PROMPT_KERNEL.to_string(),
-        crate::reasoning::prompts::TOOL_ACTION_PROMPT.to_string(),
-    ];
-    lines.extend(
-        context
-            .compiled_prompts
-            .runtime_system_additions()
-            .iter()
-            .filter(|line| !line.trim().is_empty())
-            .cloned(),
-    );
-    lines.join("\n\n")
+    render_runtime_system_prompt_text(&context.compiled_prompts)
 }
 
 fn runtime_demo_evaluation_from_output(
@@ -1504,14 +1603,22 @@ fn runtime_prompt_candidate_from_output(
 async fn rollback_runtime_system_prompt_if_regressed(
     context: &mut Context,
     evaluations: &[SleepArtifactRuntimeDemoEvaluation],
+    turn_evaluations: &[SleepArtifactTurnDemoEvaluation],
 ) -> Result<bool> {
-    if !evaluations.iter().any(|item| item.regression_detected) {
+    if !evaluations.iter().any(|item| item.regression_detected)
+        && !turn_evaluations.iter().any(|item| item.regression_detected)
+    {
         return Ok(false);
     }
-    let Some(previous) = load_previous_compiled_runtime_system_prompt().await? else {
+    let Some(previous) = load_previous_compiled_runtime_system_prompt_for_model(
+        &context.config.main_model.model_name,
+    )
+    .await?
+    else {
         return Ok(false);
     };
-    save_compiled_runtime_system_prompt(&previous).await?;
+    save_compiled_runtime_system_prompt_for_model(&context.config.main_model.model_name, &previous)
+        .await?;
     context.compiled_prompts = context
         .compiled_prompts
         .clone()
@@ -1752,10 +1859,7 @@ fn derive_success_bootstrap_demos(
     demos
 }
 
-fn infer_runtime_suite(record: &ProgramTraceRecord) -> Option<String> {
-    if record.program_name == "resolve_telegram_chat" {
-        return Some("resolve_telegram_chat".to_string());
-    }
+fn infer_runtime_suite(_record: &ProgramTraceRecord) -> Option<String> {
     None
 }
 
@@ -1898,7 +2002,7 @@ mod tests {
             source_hypotheses: Vec::new(),
         };
 
-        let next = apply_runtime_prompt_candidate(&current, &candidate);
+        let next = apply_runtime_prompt_candidate_shared(&current, &candidate);
         assert_eq!(next.best_candidate, "candidate");
         assert_eq!(next.system_additions, vec!["rule a", "rule b", "rule c"]);
     }
@@ -1946,11 +2050,13 @@ mod tests {
         let best = test_prompt("best", &["rule a"]);
         let current = test_prompt("current", &["rule a", "rule b"]);
 
-        let (selected, passed) = choose_best_non_regressing_prompt(&best, 1, &current, 2, false);
+        let (selected, passed) =
+            choose_best_non_regressing_prompt_shared(&best, 1, &current, 2, false);
         assert_eq!(selected.best_candidate, "current");
         assert_eq!(passed, 2);
 
-        let (selected, passed) = choose_best_non_regressing_prompt(&best, 2, &current, 3, true);
+        let (selected, passed) =
+            choose_best_non_regressing_prompt_shared(&best, 2, &current, 3, true);
         assert_eq!(selected.best_candidate, "best");
         assert_eq!(passed, 2);
     }

@@ -17,6 +17,36 @@ pub const COMPILED_DIR_NAME: &str = "reasoning_compiled";
 pub const RUNTIME_SYSTEM_PROMPT_COMPILE_KEY: &str = "runtime_agent_system";
 pub const RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY: &str = "runtime_agent_system_previous";
 
+fn model_scoped_runtime_compile_key(base: &str, model_name: &str) -> String {
+    let normalized = model_name
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if normalized.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}--{normalized}")
+    }
+}
+
+fn model_scope_suffix(model_name: &str) -> String {
+    model_scoped_runtime_compile_key("", model_name)
+}
+
+fn stem_has_model_scope(stem: &str, model_name: &str) -> bool {
+    let suffix = model_scope_suffix(model_name);
+    !suffix.is_empty() && stem.ends_with(&suffix)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredProgramExample {
     pub title: String,
@@ -149,12 +179,16 @@ impl CompiledPromptStore {
         self
     }
 
+    pub fn has_runtime_system_prompt(&self) -> bool {
+        self.runtime_system_prompt.is_some()
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len() + usize::from(self.runtime_system_prompt.is_some())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.runtime_system_prompt.is_none()
     }
 
     pub fn get_tuning<P: Program>(&self, program: &P) -> Option<PromptTuningConfig<P::Output>> {
@@ -210,11 +244,16 @@ impl StoredPromptTuningConfig {
     }
 }
 
-pub async fn load_all_compiled_programs() -> Result<Vec<CompiledProgram>> {
-    load_all_compiled_programs_from_dir(COMPILED_DIR_NAME).await
+pub async fn load_all_compiled_programs_for_model(
+    model_name: &str,
+) -> Result<Vec<CompiledProgram>> {
+    load_all_compiled_programs_from_dir(COMPILED_DIR_NAME, model_name).await
 }
 
-pub async fn load_all_compiled_programs_from_dir(dir_name: &str) -> Result<Vec<CompiledProgram>> {
+pub async fn load_all_compiled_programs_from_dir(
+    dir_name: &str,
+    model_name: &str,
+) -> Result<Vec<CompiledProgram>> {
     let dir = compiled_dir_named(dir_name).await;
     let Ok(mut entries) = fs::read_dir(&dir).await else {
         return Ok(Vec::new());
@@ -228,6 +267,20 @@ pub async fn load_all_compiled_programs_from_dir(dir_name: &str) -> Result<Vec<C
     {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
+        if stem == RUNTIME_SYSTEM_PROMPT_COMPILE_KEY
+            || stem == RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY
+            || stem.starts_with(&format!("{RUNTIME_SYSTEM_PROMPT_COMPILE_KEY}--"))
+            || stem.starts_with(&format!("{RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY}--"))
+        {
+            continue;
+        }
+        if !stem_has_model_scope(stem, model_name) {
             continue;
         }
         let bytes = fs::read(&path).await.map_err(|err| {
@@ -262,14 +315,18 @@ pub async fn load_all_compiled_programs_from_dir(dir_name: &str) -> Result<Vec<C
         .collect())
 }
 
-pub async fn save_compiled_program(compiled: &CompiledProgram) -> Result<()> {
+pub async fn save_compiled_program_for_model(
+    model_name: &str,
+    compiled: &CompiledProgram,
+) -> Result<()> {
     let dir = compiled_dir_named(COMPILED_DIR_NAME).await;
     if !dir.exists() {
         fs::create_dir_all(&dir)
             .await
             .map_err(|err| miette!("failed to create compiled prompt dir: {err}"))?;
     }
-    let path = dir.join(format!("{}.json", compiled.compile_key));
+    let compile_key = model_scoped_runtime_compile_key(&compiled.compile_key, model_name);
+    let path = dir.join(format!("{compile_key}.json"));
     let bytes = serde_json::to_vec_pretty(compiled)
         .map_err(|err| miette!("failed to serialize compiled prompt config: {err}"))?;
     fs::write(path, bytes)
@@ -278,7 +335,8 @@ pub async fn save_compiled_program(compiled: &CompiledProgram) -> Result<()> {
     Ok(())
 }
 
-pub async fn seed_compiled_program_from_tuning<P: Program>(
+pub async fn seed_compiled_program_from_tuning_for_model<P: Program>(
+    model_name: &str,
     program: &P,
     tuning: &PromptTuningConfig<P::Output>,
 ) -> Result<()> {
@@ -291,30 +349,42 @@ pub async fn seed_compiled_program_from_tuning<P: Program>(
         tuning: StoredPromptTuningConfig::from_typed(tuning),
         report: None,
     };
-    save_compiled_program(&compiled).await
+    save_compiled_program_for_model(model_name, &compiled).await
 }
 
-pub async fn load_compiled_runtime_system_prompt() -> Result<Option<CompiledRuntimeSystemPrompt>> {
-    load_compiled_runtime_system_prompt_by_key(RUNTIME_SYSTEM_PROMPT_COMPILE_KEY).await
+pub async fn load_compiled_runtime_system_prompt_for_model(
+    model_name: &str,
+) -> Result<Option<CompiledRuntimeSystemPrompt>> {
+    let scoped_key =
+        model_scoped_runtime_compile_key(RUNTIME_SYSTEM_PROMPT_COMPILE_KEY, model_name);
+    load_compiled_runtime_system_prompt_by_key(&scoped_key).await
 }
 
-pub async fn save_compiled_runtime_system_prompt(
+pub async fn save_compiled_runtime_system_prompt_for_model(
+    model_name: &str,
     compiled: &CompiledRuntimeSystemPrompt,
 ) -> Result<()> {
-    save_compiled_runtime_system_prompt_by_key(RUNTIME_SYSTEM_PROMPT_COMPILE_KEY, compiled).await
+    let scoped_key =
+        model_scoped_runtime_compile_key(RUNTIME_SYSTEM_PROMPT_COMPILE_KEY, model_name);
+    save_compiled_runtime_system_prompt_by_key(&scoped_key, compiled).await
 }
 
-pub async fn load_previous_compiled_runtime_system_prompt()
--> Result<Option<CompiledRuntimeSystemPrompt>> {
-    load_compiled_runtime_system_prompt_by_key(RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY).await
+pub async fn load_previous_compiled_runtime_system_prompt_for_model(
+    model_name: &str,
+) -> Result<Option<CompiledRuntimeSystemPrompt>> {
+    let scoped_key =
+        model_scoped_runtime_compile_key(RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY, model_name);
+    load_compiled_runtime_system_prompt_by_key(&scoped_key).await
 }
 
 #[allow(dead_code)]
-pub async fn save_previous_compiled_runtime_system_prompt(
+pub async fn save_previous_compiled_runtime_system_prompt_for_model(
+    model_name: &str,
     compiled: &CompiledRuntimeSystemPrompt,
 ) -> Result<()> {
-    save_compiled_runtime_system_prompt_by_key(RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY, compiled)
-        .await
+    let scoped_key =
+        model_scoped_runtime_compile_key(RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY, model_name);
+    save_compiled_runtime_system_prompt_by_key(&scoped_key, compiled).await
 }
 
 async fn load_compiled_runtime_system_prompt_by_key(

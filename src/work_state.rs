@@ -9,7 +9,7 @@ use crate::get_spinova_home;
 pub struct WorkState {
     pub objective: Option<String>,
     #[serde(default)]
-    pub project_id: Option<Uuid>,
+    pub item_id: Option<Uuid>,
     #[serde(default)]
     pub work_phase: Option<String>,
     #[serde(default)]
@@ -49,15 +49,15 @@ impl WorkState {
         self.objective.as_deref()
     }
 
-    pub fn set_objective(&mut self, objective: String, project_id: Option<Uuid>) {
+    pub fn set_objective(&mut self, objective: String, item_id: Option<Uuid>) {
         self.objective = Some(objective);
-        self.project_id = project_id;
+        self.item_id = item_id;
         self.touch();
     }
 
     pub fn clear(&mut self) {
         self.objective = None;
-        self.project_id = None;
+        self.item_id = None;
         self.work_phase = None;
         self.key_anchors.clear();
         self.investigation_plan.clear();
@@ -65,8 +65,8 @@ impl WorkState {
         self.last_touched_at_ms = Some(Utc::now().timestamp_millis());
     }
 
-    pub fn clear_if_project(&mut self, project_id: Uuid) {
-        if self.project_id == Some(project_id) {
+    pub fn clear_if_item(&mut self, item_id: Uuid) {
+        if self.item_id == Some(item_id) {
             self.clear();
         }
     }
@@ -100,8 +100,8 @@ impl Display for WorkState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(objective) = self.objective() {
             writeln!(f, "目标：{objective}")?;
-            if let Some(project_id) = self.project_id {
-                writeln!(f, "关联项目：{project_id}")?;
+            if let Some(item_id) = self.item_id {
+                writeln!(f, "关联 todo：{item_id}")?;
             }
             if let Some(work_phase) = self.work_phase() {
                 writeln!(f, "阶段：{work_phase}")?;

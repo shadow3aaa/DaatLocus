@@ -56,7 +56,7 @@ impl Renderer for OpenAIToolRenderer {
                 Vec::new()
             },
             history_messages: if program.include_history_messages() {
-                context.memory.prompt_messages()
+                context.memory.runtime_conversation_messages()
             } else {
                 Vec::new()
             },

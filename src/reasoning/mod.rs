@@ -17,3 +17,4 @@ pub mod signature;
 pub mod sleep;
 pub mod sleep_artifacts;
 pub mod trace;
+pub mod turn_compile;

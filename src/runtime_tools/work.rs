@@ -3,20 +3,17 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    TelegramResolution,
     apply_patch::{PatchOperationKind, parse_apply_patch, summarize_patch_ops},
     context::Context,
     core::{
-        ClearWorkObjectiveArgs, CommitToProjectArgs, DeepRecallArgs, FocusDeviceArgs,
-        ObligationSatisfyArgs, ProjectCompleteArgs, PutAwayDeviceArgs, ReportObligationArgs,
-        ResolveTelegramChatArgs, SetWorkObjectiveArgs,
+        DeepRecallArgs, EventResolveArgs, FocusDeviceArgs, PutAwayDeviceArgs, TodoCompleteArgs,
+        TodoCreateArgs, TodoDropArgs, TodoUpdateArgs,
     },
-    device::DeviceId,
+    events::{EventDisposition, EventPayload, EventStatus},
     hindsight::HindsightReflectOptions,
-    obligations::{ObligationSource, ObligationStatus},
-    projects::ProjectOrigin,
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
-    tool_ui::{TelegramUiAction, ToolCallUiEvent, ToolUiEvent},
+    todo_board::{TodoOrigin, TodoStatus},
+    tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 
 use super::{
@@ -25,12 +22,18 @@ use super::{
 };
 
 fn extract_apply_patch_text(call: &AgentToolCall) -> Result<String> {
-    if let Some(input) = call.arguments.as_object().and_then(|value| value.get("input"))
+    if let Some(input) = call
+        .arguments
+        .as_object()
+        .and_then(|value| value.get("input"))
         && let Some(text) = input.as_str()
     {
         return Ok(text.to_string());
     }
-    if let Some(patch) = call.arguments.as_object().and_then(|value| value.get("patch"))
+    if let Some(patch) = call
+        .arguments
+        .as_object()
+        .and_then(|value| value.get("patch"))
         && let Some(text) = patch.as_str()
     {
         return Ok(text.to_string());
@@ -45,22 +48,6 @@ fn extract_apply_patch_text(call: &AgentToolCall) -> Result<String> {
 
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![
-        Box::new(StaticRuntimeTool::new::<SetWorkObjectiveArgs>(
-            "set_work_objective",
-            "设置当前单一工作目标。",
-            None,
-            summarize_set_work_objective_tool,
-            render_set_work_objective_call_ui,
-            execute_set_work_objective_tool,
-        )),
-        Box::new(StaticRuntimeTool::new::<ClearWorkObjectiveArgs>(
-            "clear_work_objective",
-            "清空当前工作目标。",
-            None,
-            summarize_clear_work_objective_tool,
-            render_clear_work_objective_call_ui,
-            execute_clear_work_objective_tool,
-        )),
         Box::new(StaticRuntimeTool::new::<FocusDeviceArgs>(
             "focus_device",
             "将指定设备切到前景。",
@@ -77,29 +64,48 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             render_put_away_device_call_ui,
             execute_put_away_device_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<ResolveTelegramChatArgs>(
-            "resolve_telegram_chat",
-            "对 Telegram 会话做语义判断；在 resolution 带 reply 时发送回复，并完成后续 bookkeeping。",
+        Box::new(StaticRuntimeTool::new::<EventResolveArgs>(
+            "finish_and_send",
+            "显式终结一个事件并发送最终回复。对需要回复用户的常规成功收尾，应调用此工具并提供 `reply_message`；dismissed 或 failed 也通过此工具提交。",
             None,
-            summarize_resolve_telegram_chat_tool,
-            render_resolve_telegram_chat_call_ui,
-            execute_resolve_telegram_chat_tool,
+            summarize_event_resolve_tool,
+            render_event_resolve_call_ui,
+            execute_event_resolve_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<ObligationSatisfyArgs>(
-            "obligation_satisfy",
-            "将不需要外部回复的义务标记为完成。",
+        Box::new(StaticRuntimeTool::new::<TodoCreateArgs>(
+            "todo_create",
+            "创建一个新的 todo。",
             None,
-            summarize_obligation_satisfy_tool,
-            render_obligation_satisfy_call_ui,
-            execute_obligation_satisfy_tool,
+            summarize_todo_create_tool,
+            render_todo_create_call_ui,
+            execute_todo_create_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<ReportObligationArgs>(
-            "report_obligation",
-            "向义务的回复目标发送结果，并在成功后将该义务标记为完成。",
+        Box::new(StaticRuntimeTool::new::<TodoUpdateArgs>(
+            "todo_update",
+            "更新一个 todo 的标题、完成标准、备注或状态。",
             None,
-            summarize_report_obligation_tool,
-            render_report_obligation_call_ui,
-            execute_report_obligation_tool,
+            summarize_todo_update_tool,
+            render_todo_update_call_ui,
+            execute_todo_update_tool,
+        )),
+        Box::new(
+            StaticRuntimeTool::new_with_availability::<TodoCompleteArgs>(
+                "todo_complete",
+                "将 todo 标记为完成，仅改变内部 memo 状态。",
+                None,
+                todo_complete_is_available,
+                summarize_todo_complete_tool,
+                render_todo_complete_call_ui,
+                execute_todo_complete_tool,
+            ),
+        ),
+        Box::new(StaticRuntimeTool::new::<TodoDropArgs>(
+            "todo_drop",
+            "将 todo 标记为放弃。",
+            None,
+            summarize_todo_drop_tool,
+            render_todo_drop_call_ui,
+            execute_todo_drop_tool,
         )),
         Box::new(StaticRuntimeTool::new::<DeepRecallArgs>(
             "deep_recall",
@@ -109,123 +115,27 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             render_deep_recall_call_ui,
             execute_deep_recall_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<CommitToProjectArgs>(
-            "commit_to_project",
-            "接受一项义务并将其升级为项目。",
-            None,
-            summarize_commit_to_project_tool,
-            render_commit_to_project_call_ui,
-            execute_commit_to_project_tool,
-        )),
-        Box::new(StaticRuntimeTool::new_with_availability::<ProjectCompleteArgs>(
-            "project_complete",
-            "将项目标记为完成，并记录结果摘要。",
-            None,
-            project_complete_is_available,
-            summarize_project_complete_tool,
-            render_project_complete_call_ui,
-            execute_project_complete_tool,
-        )),
     ]
 }
 
-fn project_complete_is_available(context: &Context) -> bool {
-    context.work_state.project_id.is_some()
+fn todo_complete_is_available(context: &Context) -> bool {
+    context.work_state.item_id.is_some()
 }
 
-fn resolution_kind(resolution: &TelegramResolution) -> &'static str {
-    match resolution {
-        TelegramResolution::ReplyOnly { .. } => "reply_only",
-        TelegramResolution::AcceptAsProject { .. } => "accept_as_project",
-        TelegramResolution::AskClarification { .. } => "ask_clarification",
-        TelegramResolution::Decline { .. } => "decline",
-        TelegramResolution::NoReplyNeeded => "no_reply_needed",
+fn event_disposition_kind(disposition: EventDisposition) -> &'static str {
+    match disposition {
+        EventDisposition::Resolved => "resolved",
+        EventDisposition::Dismissed => "dismissed",
+        EventDisposition::Failed => "failed",
     }
 }
 
-fn summarize_set_work_objective_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: SetWorkObjectiveArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "set_work_objective".to_string(),
-        summary: format!(
-            "description={} project_id={}",
-            summarize_inline_text(&args.description),
-            args.project_id.unwrap_or_else(|| "none".to_string())
-        ),
-    })
-}
-
-fn render_set_work_objective_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: SetWorkObjectiveArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::work(
-        "set_work_objective",
-        vec![
-            summarize_inline_text(&args.description),
-            format!(
-                "project_id={}",
-                args.project_id.unwrap_or_else(|| "none".to_string())
-            ),
-        ],
-    ))
-}
-
-fn execute_set_work_objective_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: SetWorkObjectiveArgs = parse_tool_args(call)?;
-        let project_id = args
-            .project_id
-            .as_deref()
-            .map(|project_id| resolve_project_reference(context, project_id))
-            .transpose()?;
-        context
-            .work_state
-            .set_objective(args.description.clone(), project_id);
-        Ok(ToolExecutionResult::new(
-            format!(
-                "set work objective: {}",
-                summarize_inline_text(&args.description)
-            ),
-            json!({
-                "project_id": project_id.map(|id| id.to_string()),
-                "description": args.description,
-            }),
-            ToolUiEvent::work(
-                format!(
-                    "set work objective: {}",
-                    summarize_inline_text(&args.description)
-                ),
-                vec![args.description],
-            ),
-        ))
-    })
-}
-
-fn summarize_clear_work_objective_tool(_call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    Ok(EpisodeActionRecord {
-        kind: "clear_work_objective".to_string(),
-        summary: "clear current work objective".to_string(),
-    })
-}
-
-fn render_clear_work_objective_call_ui(_call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    Ok(ToolCallUiEvent::work("clear_work_objective", Vec::new()))
-}
-
-fn execute_clear_work_objective_tool<'a>(
-    context: &'a mut Context,
-    _call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        context.work_state.clear();
-        Ok(ToolExecutionResult::new(
-            "cleared current work objective",
-            json!({}),
-            ToolUiEvent::work("cleared current work objective", Vec::new()),
-        ))
-    })
+fn status_for_event_disposition(disposition: EventDisposition) -> EventStatus {
+    match disposition {
+        EventDisposition::Resolved => EventStatus::Resolved,
+        EventDisposition::Dismissed => EventStatus::Dismissed,
+        EventDisposition::Failed => EventStatus::Failed,
+    }
 }
 
 fn summarize_focus_device_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
@@ -287,159 +197,278 @@ fn execute_put_away_device_tool<'a>(
     })
 }
 
-fn summarize_resolve_telegram_chat_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: ResolveTelegramChatArgs = parse_tool_args(call)?;
+fn summarize_event_resolve_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: EventResolveArgs = parse_tool_args(call)?;
+    let reply_summary = args
+        .reply_message
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(summarize_inline_text);
     Ok(EpisodeActionRecord {
-        kind: "resolve_telegram_chat".to_string(),
-        summary: format!(
-            "chat_id={} resolution={}",
-            args.chat_id,
-            resolution_kind(&args.resolution)
-        ),
+        kind: "finish_and_send".to_string(),
+        summary: match reply_summary {
+            Some(reply) => format!(
+                "disposition={} reply={}",
+                event_disposition_kind(args.disposition),
+                reply
+            ),
+            None => format!(
+                "event_id={} disposition={}",
+                args.event_id,
+                event_disposition_kind(args.disposition)
+            ),
+        },
     })
 }
 
-fn execute_resolve_telegram_chat_tool<'a>(
+fn render_event_resolve_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: EventResolveArgs = parse_tool_args(call)?;
+    let mut lines = vec![format!(
+        "disposition={}",
+        event_disposition_kind(args.disposition)
+    )];
+    if let Some(reply_message) = args.reply_message.as_deref()
+        && !reply_message.trim().is_empty()
+    {
+        lines.push(format!("reply={}", summarize_inline_text(reply_message)));
+    }
+    Ok(ToolCallUiEvent::work(
+        format!("finish_and_send {}", args.event_id),
+        lines,
+    ))
+}
+
+fn execute_event_resolve_tool<'a>(
     context: &'a mut Context,
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        let args: ResolveTelegramChatArgs = parse_tool_args(call)?;
-        execute_resolve_telegram_chat(context, &args.chat_id, args.resolution.clone()).await?;
-        Ok(ToolExecutionResult::new(
-            format!(
-                "resolved telegram chat {} via {}",
-                args.chat_id,
-                resolution_kind(&args.resolution)
-            ),
-            json!({
-                "chat_id": args.chat_id,
-                "resolution": resolution_kind(&args.resolution),
-            }),
-            ToolUiEvent::telegram(
-                TelegramUiAction::ResolveChat,
+        let args: EventResolveArgs = parse_tool_args(call)?;
+        let reply_message = trim_optional_field(args.reply_message);
+        let event = context.events.view(&args.event_id)?;
+        let resolved_reply_message = reply_message.clone();
+        let summary = match args.disposition {
+            EventDisposition::Resolved => {
+                let reply_message = resolved_reply_message.ok_or_else(|| {
+                    miette::miette!(
+                        "resolved event {} requires a non-empty reply_message",
+                        args.event_id
+                    )
+                })?;
+                execute_event_resolve_with_reply(
+                    context,
+                    &args.event_id,
+                    &event,
+                    reply_message.clone(),
+                )?;
+                format!("resolved event {} via channel delivery", args.event_id)
+            }
+            EventDisposition::Dismissed | EventDisposition::Failed => {
+                context.events.set_status(
+                    &args.event_id,
+                    status_for_event_disposition(args.disposition),
+                    args.note.clone(),
+                )?;
                 format!(
-                    "resolved telegram chat {} via {}",
-                    args.chat_id,
-                    resolution_kind(&args.resolution)
-                ),
-                vec![
-                    format!("chat_id={}", args.chat_id),
-                    format!("resolution={}", resolution_kind(&args.resolution)),
-                ],
-                Vec::new(),
-            ),
-        ))
-    })
-}
-
-fn render_resolve_telegram_chat_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: ResolveTelegramChatArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::telegram(
-        TelegramUiAction::ResolveChat,
-        format!("resolve_telegram_chat {}", args.chat_id),
-        vec![format!("resolution={}", resolution_kind(&args.resolution))],
-        Vec::new(),
-    ))
-}
-
-fn summarize_obligation_satisfy_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: ObligationSatisfyArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "obligation_satisfy".to_string(),
-        summary: format!("obligation_id={}", args.obligation_id),
-    })
-}
-
-fn summarize_report_obligation_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: ReportObligationArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "report_obligation".to_string(),
-        summary: format!(
-            "obligation_id={} reply={}",
-            args.obligation_id,
-            summarize_inline_text(&args.reply)
-        ),
-    })
-}
-
-fn render_obligation_satisfy_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: ObligationSatisfyArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::work(
-        format!("obligation_satisfy {}", args.obligation_id),
-        Vec::new(),
-    ))
-}
-
-fn render_report_obligation_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: ReportObligationArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::work(
-        format!("report_obligation {}", args.obligation_id),
-        vec![summarize_inline_text(&args.reply)],
-    ))
-}
-
-fn execute_obligation_satisfy_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: ObligationSatisfyArgs = parse_tool_args(call)?;
-        let obligation_id = resolve_obligation_reference(context, &args.obligation_id)?;
-        let Some(obligation) = context.obligations.get(obligation_id).cloned() else {
-            return Err(miette::miette!("unknown obligation: {obligation_id}").into());
+                    "resolved event {} as {}",
+                    args.event_id,
+                    event_disposition_kind(args.disposition)
+                )
+            }
         };
-        if obligation.requires_reply {
-            return Err(miette::miette!(
-                "obligation {obligation_id} requires an external reply; use report_obligation instead"
-            )
-            .into());
-        }
-        context
-            .obligations
-            .set_status(obligation_id, ObligationStatus::Satisfied);
         Ok(ToolExecutionResult::new(
-            format!("satisfied obligation {}", obligation_id),
-            json!({ "obligation_id": obligation_id.to_string() }),
-            ToolUiEvent::work(
-                format!("satisfied obligation {}", obligation_id),
-                vec![obligation_id.to_string()],
-            ),
+            summary.clone(),
+            json!({
+                "event_id": args.event_id,
+                "disposition": event_disposition_kind(args.disposition),
+                "reply_message": reply_message,
+                "note": args.note,
+            }),
+            ToolUiEvent::work(summary, Vec::new()),
         ))
     })
 }
 
-fn execute_report_obligation_tool<'a>(
+fn summarize_todo_create_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: TodoCreateArgs = parse_tool_args(call)?;
+    Ok(EpisodeActionRecord {
+        kind: "todo_create".to_string(),
+        summary: summarize_inline_text(&args.title),
+    })
+}
+
+fn render_todo_create_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: TodoCreateArgs = parse_tool_args(call)?;
+    Ok(ToolCallUiEvent::work(
+        "todo_create",
+        vec![
+            summarize_inline_text(&args.title),
+            summarize_inline_text(&args.done_criteria),
+        ],
+    ))
+}
+
+fn execute_todo_create_tool<'a>(
     context: &'a mut Context,
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        let args: ReportObligationArgs = parse_tool_args(call)?;
-        let obligation_id = resolve_obligation_reference(context, &args.obligation_id)?;
-        execute_report_obligation(context, obligation_id, args.reply.clone()).await?;
+        let args: TodoCreateArgs = parse_tool_args(call)?;
+        let title = require_field(args.title, "title")?;
+        let done_criteria = require_field(args.done_criteria, "done_criteria")?;
+        let notes = trim_optional_field(args.notes);
+        let todo_id = context.todo_board.add(
+            title.clone(),
+            TodoOrigin::SelfInitiated,
+            done_criteria.clone(),
+            notes.clone(),
+        );
         Ok(ToolExecutionResult::new(
-            format!("reported obligation {}", obligation_id),
+            format!("created todo {}", todo_id),
             json!({
-                "obligation_id": obligation_id.to_string(),
-                "reply": args.reply,
+                "item_id": todo_id.to_string(),
+                "title": title,
+                "done_criteria": done_criteria,
+                "notes": notes,
             }),
             ToolUiEvent::work(
-                format!("reported obligation {}", obligation_id),
-                vec![obligation_id.to_string()],
+                format!("created todo {}", todo_id),
+                vec![title, done_criteria],
             ),
         ))
     })
 }
 
-fn summarize_commit_to_project_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: CommitToProjectArgs = parse_tool_args(call)?;
+fn summarize_todo_update_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: TodoUpdateArgs = parse_tool_args(call)?;
     Ok(EpisodeActionRecord {
-        kind: "commit_to_project".to_string(),
+        kind: "todo_update".to_string(),
+        summary: format!("item_id={}", args.item_id),
+    })
+}
+
+fn render_todo_update_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: TodoUpdateArgs = parse_tool_args(call)?;
+    Ok(ToolCallUiEvent::work(
+        format!("todo_update {}", args.item_id),
+        Vec::new(),
+    ))
+}
+
+fn execute_todo_update_tool<'a>(
+    context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let args: TodoUpdateArgs = parse_tool_args(call)?;
+        let item_id = resolve_item_reference(context, &args.item_id)?;
+        let title = args.title.and_then(trim_required_field);
+        let done_criteria = args.done_criteria.and_then(trim_required_field);
+        let notes = if args.clear_notes.unwrap_or(false) {
+            Some(None)
+        } else {
+            args.notes.map(|notes| trim_required_field(notes))
+        };
+        let changed = context
+            .todo_board
+            .update(item_id, title, done_criteria, notes, args.status);
+        if !changed {
+            return Err(miette::miette!("todo {item_id} was not changed").into());
+        }
+        Ok(ToolExecutionResult::new(
+            format!("updated todo {}", item_id),
+            json!({ "item_id": item_id.to_string() }),
+            ToolUiEvent::work(
+                format!("updated todo {}", item_id),
+                vec![item_id.to_string()],
+            ),
+        ))
+    })
+}
+
+fn summarize_todo_complete_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: TodoCompleteArgs = parse_tool_args(call)?;
+    Ok(EpisodeActionRecord {
+        kind: "todo_complete".to_string(),
         summary: format!(
-            "obligation_id={} title={}",
-            args.obligation_id,
-            summarize_inline_text(&args.title)
+            "item_id={} summary={}",
+            args.item_id,
+            summarize_inline_text(&args.summary)
         ),
+    })
+}
+
+fn render_todo_complete_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: TodoCompleteArgs = parse_tool_args(call)?;
+    Ok(ToolCallUiEvent::work(
+        format!("todo_complete {}", args.item_id),
+        vec![summarize_inline_text(&args.summary)],
+    ))
+}
+
+fn execute_todo_complete_tool<'a>(
+    context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let args: TodoCompleteArgs = parse_tool_args(call)?;
+        let item_id = execute_todo_complete(context, &args.item_id, args.summary.clone()).await?;
+        Ok(ToolExecutionResult::new(
+            format!("completed todo {}", item_id),
+            json!({
+                "item_id": item_id.to_string(),
+                "summary": args.summary,
+            }),
+            ToolUiEvent::work(format!("completed todo {}", item_id), vec![args.summary]),
+        ))
+    })
+}
+
+fn summarize_todo_drop_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: TodoDropArgs = parse_tool_args(call)?;
+    Ok(EpisodeActionRecord {
+        kind: "todo_drop".to_string(),
+        summary: format!("item_id={}", args.item_id),
+    })
+}
+
+fn render_todo_drop_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: TodoDropArgs = parse_tool_args(call)?;
+    Ok(ToolCallUiEvent::work(
+        format!("todo_drop {}", args.item_id),
+        Vec::new(),
+    ))
+}
+
+fn execute_todo_drop_tool<'a>(context: &'a mut Context, call: &'a AgentToolCall) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let args: TodoDropArgs = parse_tool_args(call)?;
+        let item_id = resolve_item_reference(context, &args.item_id)?;
+        let note = trim_optional_field(args.note);
+        let note_for_update = note.clone();
+        let changed = context.todo_board.update(
+            item_id,
+            None,
+            None,
+            note_for_update.map(Some),
+            Some(TodoStatus::Dropped),
+        );
+        if !changed {
+            return Err(miette::miette!("todo {item_id} was not changed").into());
+        }
+        context.work_state.clear_if_item(item_id);
+        Ok(ToolExecutionResult::new(
+            format!("dropped todo {}", item_id),
+            json!({
+                "item_id": item_id.to_string(),
+                "note": note,
+            }),
+            ToolUiEvent::work(
+                format!("dropped todo {}", item_id),
+                vec![item_id.to_string()],
+            ),
+        ))
     })
 }
 
@@ -507,96 +536,6 @@ fn execute_deep_recall_tool<'a>(
     })
 }
 
-fn render_commit_to_project_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: CommitToProjectArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::work(
-        format!("commit_to_project {}", args.obligation_id),
-        vec![
-            summarize_inline_text(&args.title),
-            summarize_inline_text(&args.success_criteria),
-        ],
-    ))
-}
-
-fn execute_commit_to_project_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: CommitToProjectArgs = parse_tool_args(call)?;
-        execute_commit_to_project(
-            context,
-            &args.obligation_id,
-            args.title.clone(),
-            args.success_criteria.clone(),
-            args.initial_next_action.clone(),
-            args.acknowledgment.clone(),
-        )
-        .await?;
-        Ok(ToolExecutionResult::new(
-            format!("committed obligation {} to project", args.obligation_id),
-            json!({
-                "obligation_id": args.obligation_id,
-                "title": args.title,
-                "success_criteria": args.success_criteria,
-                "initial_next_action": args.initial_next_action,
-            }),
-            ToolUiEvent::work(
-                format!("committed obligation {} to project", args.obligation_id),
-                vec![
-                    args.title,
-                    args.success_criteria,
-                    args.initial_next_action.unwrap_or_default(),
-                ]
-                .into_iter()
-                .filter(|line| !line.trim().is_empty())
-                .collect(),
-            ),
-        ))
-    })
-}
-
-fn summarize_project_complete_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: ProjectCompleteArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "project_complete".to_string(),
-        summary: format!(
-            "project_id={} summary={}",
-            args.project_id,
-            summarize_inline_text(&args.summary)
-        ),
-    })
-}
-
-fn render_project_complete_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: ProjectCompleteArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::work(
-        format!("project_complete {}", args.project_id),
-        vec![summarize_inline_text(&args.summary)],
-    ))
-}
-
-fn execute_project_complete_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: ProjectCompleteArgs = parse_tool_args(call)?;
-        execute_project_complete(context, &args.project_id, args.summary.clone())?;
-        Ok(ToolExecutionResult::new(
-            format!("completed project {}", args.project_id),
-            json!({
-                "project_id": args.project_id,
-                "summary": args.summary,
-            }),
-            ToolUiEvent::work(
-                format!("completed project {}", args.project_id),
-                vec![args.summary],
-            ),
-        ))
-    })
-}
-
 pub(super) fn summarize_apply_patch_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
     Ok(EpisodeActionRecord {
         kind: "apply_patch".to_string(),
@@ -651,46 +590,15 @@ fn resolve_string_reference<T: Clone>(
         .ok_or_else(|| miette::miette!("unknown {kind}: {reference}"))
 }
 
-fn resolve_obligation_reference(context: &Context, reference: &str) -> miette::Result<Uuid> {
+fn resolve_item_reference(context: &Context, reference: &str) -> miette::Result<Uuid> {
     resolve_string_reference(
-        "obligation",
+        "todo",
         reference,
-        context
-            .obligations
-            .obligations()
-            .flat_map(|(id, obligation)| {
-                [id.to_string(), obligation.summary.clone()]
-                    .into_iter()
-                    .map(move |key| (key, id))
-            }),
-    )
-}
-
-fn resolve_project_reference(context: &Context, reference: &str) -> miette::Result<Uuid> {
-    resolve_string_reference(
-        "project",
-        reference,
-        context.projects.projects().flat_map(|(id, project)| {
-            [id.to_string(), project.title.clone()]
+        context.todo_board.items().flat_map(|(id, item)| {
+            [id.to_string(), item.title.clone()]
                 .into_iter()
                 .map(move |key| (key, id))
         }),
-    )
-}
-
-fn resolve_telegram_chat_reference(context: &Context, reference: &str) -> miette::Result<String> {
-    resolve_string_reference(
-        "telegram chat",
-        reference,
-        context
-            .telegram
-            .chat_refs()
-            .into_iter()
-            .flat_map(|(chat_id, title)| {
-                [chat_id.clone(), title]
-                    .into_iter()
-                    .map(move |key| (key, chat_id.clone()))
-            }),
     )
 }
 
@@ -708,234 +616,46 @@ fn require_field(value: String, field_name: &str) -> miette::Result<String> {
         .ok_or_else(|| miette::miette!("missing required field: {field_name}"))
 }
 
-async fn send_telegram_message(
+fn execute_event_resolve_with_reply(
     context: &mut Context,
-    chat_id: &str,
-    text: String,
+    event_id: &str,
+    event: &crate::events::EventView,
+    reply_message: String,
 ) -> miette::Result<()> {
-    context.devices.focus(DeviceId::Telegram).await?;
-    context
-        .devices
-        .telegram_select_chat(chat_id.to_string())
-        .await?;
-    context.devices.telegram_send_message(text).await?;
-    Ok(())
-}
-
-async fn execute_resolve_telegram_chat(
-    context: &mut Context,
-    chat_reference: &str,
-    resolution: TelegramResolution,
-) -> miette::Result<()> {
-    let chat_id = resolve_telegram_chat_reference(context, chat_reference)?;
-
-    match resolution {
-        TelegramResolution::ReplyOnly { reply } => {
-            let reply = require_field(reply, "reply")?;
-            send_telegram_message(context, &chat_id, reply).await?;
-            context.telegram.resolve_chat(&chat_id, Some(false))?;
-        }
-        TelegramResolution::AskClarification { reply } => {
-            let reply = require_field(reply, "reply")?;
-            send_telegram_message(context, &chat_id, reply).await?;
-            context.telegram.resolve_chat(&chat_id, Some(false))?;
-        }
-        TelegramResolution::Decline { reply } => {
-            let reply = require_field(reply, "reply")?;
-            send_telegram_message(context, &chat_id, reply).await?;
-            context.telegram.resolve_chat(&chat_id, Some(false))?;
-        }
-        TelegramResolution::NoReplyNeeded => {
-            context.telegram.resolve_chat(&chat_id, Some(false))?;
-        }
-        TelegramResolution::AcceptAsProject {
-            reply,
-            project_title,
-            success_criteria,
-            first_next_action,
-        } => {
-            let project_title = require_field(project_title, "project_title")?;
-            let success_criteria = require_field(success_criteria, "success_criteria")?;
-            let project_id = context.projects.add(
-                project_title,
-                ProjectOrigin::Telegram,
-                success_criteria,
-                Some(crate::projects::ReportTarget {
-                    device: DeviceId::Telegram,
-                    target: chat_id.clone(),
-                }),
-            );
-
-            if let Some(next_action) = trim_optional_field(first_next_action) {
-                context
-                    .work_state
-                    .set_objective(next_action, Some(project_id));
-            }
-
-            if let Some(reply) = trim_optional_field(reply) {
-                send_telegram_message(context, &chat_id, reply).await?;
-                context.telegram.resolve_chat(&chat_id, Some(false))?;
-            } else {
-                context.telegram.resolve_chat(&chat_id, None)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn execute_commit_to_project(
-    context: &mut Context,
-    obligation_id: &str,
-    title: String,
-    success_criteria: String,
-    initial_next_action: Option<String>,
-    acknowledgment: Option<String>,
-) -> miette::Result<()> {
-    let obligation_id = resolve_obligation_reference(context, obligation_id)?;
-    let Some(obligation) = context.obligations.get(obligation_id).cloned() else {
-        return Err(miette::miette!("unknown obligation: {obligation_id}"));
-    };
-
-    let project_id = context.projects.add(
-        title,
-        project_origin_from(obligation.source),
-        success_criteria,
-        obligation.reply_target.clone(),
-    );
-    context.obligations.link_project(obligation_id, project_id);
-
-    if let Some(next_action) = initial_next_action.map(|s| s.trim().to_string())
-        && !next_action.is_empty()
-    {
-        context
-            .work_state
-            .set_objective(next_action, Some(project_id));
-    }
-
-    if let Some(ack) = acknowledgment.map(|s| s.trim().to_string())
-        && !ack.is_empty()
-    {
-        enqueue_obligation_acknowledgment(context, obligation_id, &obligation, ack).await?;
-        return Ok(());
-    }
-
-    if obligation.requires_reply {
-        context
-            .obligations
-            .set_status(obligation_id, ObligationStatus::Seen);
-    } else {
-        context
-            .obligations
-            .set_status(obligation_id, ObligationStatus::Satisfied);
-    }
-    Ok(())
-}
-
-async fn enqueue_obligation_acknowledgment(
-    context: &mut Context,
-    obligation_id: Uuid,
-    obligation: &crate::obligations::Obligation,
-    acknowledgment: String,
-) -> miette::Result<()> {
-    let Some(target) = obligation.reply_target.clone() else {
-        return Err(miette::miette!(
-            "obligation {obligation_id} has no reply target"
-        ));
-    };
-
-    match target.device {
-        DeviceId::Telegram => {
-            context.devices.focus(DeviceId::Telegram).await?;
-            context.devices.telegram_select_chat(target.target).await?;
+    match &event.payload {
+        EventPayload::TelegramIncoming(payload) => {
             context
-                .devices
-                .telegram_send_message(acknowledgment)
-                .await?;
-            context
-                .obligations
-                .set_status(obligation_id, ObligationStatus::Seen);
+                .events
+                .prepare_telegram_delivery(event_id, Some(reply_message.clone()))?;
+            context.telegram.enqueue_outgoing_message(
+                payload.chat_id.clone(),
+                reply_message,
+                Some(event_id.to_string()),
+                Some(EventStatus::Resolved),
+            )?;
             Ok(())
         }
-        DeviceId::Terminal => Err(miette::miette!(
-            "terminal obligations do not support external acknowledgment"
-        )),
     }
 }
 
-async fn execute_report_obligation(
+async fn execute_todo_complete(
     context: &mut Context,
-    obligation_id: Uuid,
-    reply: String,
-) -> miette::Result<()> {
-    let Some(obligation) = context.obligations.get(obligation_id).cloned() else {
-        return Err(miette::miette!("unknown obligation: {obligation_id}"));
-    };
-    if !obligation.requires_reply {
-        return Err(miette::miette!(
-            "obligation {obligation_id} does not require an external reply"
-        ));
-    }
-    let Some(target) = obligation.reply_target.clone() else {
-        return Err(miette::miette!(
-            "obligation {obligation_id} has no reply target"
-        ));
-    };
-
-    match target.device {
-        DeviceId::Telegram => {
-            send_telegram_message(context, &target.target, reply).await?;
-            context
-                .obligations
-                .set_status(obligation_id, ObligationStatus::Satisfied);
-            Ok(())
-        }
-        DeviceId::Terminal => Err(miette::miette!(
-            "terminal obligations do not support external reply reporting"
-        )),
-    }
-}
-
-fn project_origin_from(source: ObligationSource) -> ProjectOrigin {
-    match source {
-        ObligationSource::Telegram => ProjectOrigin::Telegram,
-        ObligationSource::Terminal => ProjectOrigin::Terminal,
-        ObligationSource::System => ProjectOrigin::System,
-    }
-}
-
-fn execute_project_complete(
-    context: &mut Context,
-    project_id: &str,
+    item_id: &str,
     summary: String,
-) -> miette::Result<()> {
-    let project_id = resolve_project_reference(context, project_id)?;
-    let Some(project) = context.projects.get(project_id).cloned() else {
-        return Err(miette::miette!("unknown project: {project_id}"));
+) -> miette::Result<Uuid> {
+    let item_id = resolve_item_reference(context, item_id)?;
+    let Some(_item) = context.todo_board.get(item_id).cloned() else {
+        return Err(miette::miette!("unknown todo: {item_id}"));
     };
+    let summary = require_field(summary, "summary")?;
 
-    context
-        .projects
-        .set_status(project_id, crate::projects::ProjectStatus::Completed);
-    context.work_state.clear_if_project(project_id);
-
-    if let Some(target) = project.report_back_to {
-        context.obligations.add(
-            match target.device {
-                DeviceId::Telegram => ObligationSource::Telegram,
-                DeviceId::Terminal => ObligationSource::Terminal,
-            },
-            format!(
-                "把项目《{}》的结果回复给对方：{}",
-                project.title,
-                summary.trim()
-            ),
-            true,
-            crate::obligations::Urgency::High,
-            Some(project_id),
-            Some(target),
-        );
-    }
-
-    Ok(())
+    context.todo_board.update(
+        item_id,
+        None,
+        None,
+        Some(Some(summary)),
+        Some(TodoStatus::Completed),
+    );
+    context.work_state.clear_if_item(item_id);
+    Ok(item_id)
 }
