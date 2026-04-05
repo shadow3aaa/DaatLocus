@@ -26,6 +26,7 @@ pub struct DashboardState {
     pub status_output: String,
     pub sleep_status_output: String,
     pub inspect_telegram_output: String,
+    pub system_prompt_output: String,
     pub activity_cells: Vec<ActivityCell>,
     pub live_activity_cells: Vec<LiveActivityCell>,
     pub last_cycle_elapsed_ms: Option<u128>,
@@ -586,6 +587,7 @@ trait DashboardSubcommand: Sync {
 struct QuitCommand;
 struct ClearCommand;
 struct PersonaCommand;
+struct SystemPromptCommand;
 struct StatusCommand;
 struct SleepCommand;
 struct SleepRunSubcommand;
@@ -598,6 +600,7 @@ struct TelegramRejectSubcommand;
 static QUIT_COMMAND: QuitCommand = QuitCommand;
 static CLEAR_COMMAND: ClearCommand = ClearCommand;
 static PERSONA_COMMAND: PersonaCommand = PersonaCommand;
+static SYSTEM_PROMPT_COMMAND: SystemPromptCommand = SystemPromptCommand;
 static STATUS_COMMAND: StatusCommand = StatusCommand;
 static SLEEP_COMMAND: SleepCommand = SleepCommand;
 static SLEEP_RUN_SUBCOMMAND: SleepRunSubcommand = SleepRunSubcommand;
@@ -614,10 +617,11 @@ static TELEGRAM_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
     &TELEGRAM_REJECT_SUBCOMMAND,
 ];
 
-static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 6] = [
+static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 7] = [
     &QUIT_COMMAND,
     &CLEAR_COMMAND,
     &PERSONA_COMMAND,
+    &SYSTEM_PROMPT_COMMAND,
     &STATUS_COMMAND,
     &SLEEP_COMMAND,
     &TELEGRAM_COMMAND,
@@ -722,6 +726,32 @@ impl DashboardCommand for PersonaCommand {
         DashboardCommandResult::ShowOverlay {
             title: raw.trim().to_uppercase(),
             text,
+        }
+    }
+}
+
+impl DashboardCommand for SystemPromptCommand {
+    fn usage(&self) -> &'static str {
+        "system-prompt"
+    }
+
+    fn description(&self) -> &'static str {
+        "show current runtime system prompt"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["system_prompt"]
+    }
+
+    fn execute(
+        &self,
+        _: &[&str],
+        raw: &str,
+        context: &DashboardCommandContext<'_>,
+    ) -> DashboardCommandResult {
+        DashboardCommandResult::ShowOverlay {
+            title: raw.trim().to_uppercase(),
+            text: fallback_output(&context.state.system_prompt_output),
         }
     }
 }

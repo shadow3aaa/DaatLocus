@@ -412,6 +412,10 @@ const TELEGRAM_BOT_COMMANDS: &[TelegramBotCommand] = &[
         description: "查看当前人格配置",
     },
     TelegramBotCommand {
+        command: "system_prompt",
+        description: "查看当前系统提示词",
+    },
+    TelegramBotCommand {
         command: "sleep",
         description: "sleep run 或 sleep status",
     },
