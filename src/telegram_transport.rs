@@ -416,8 +416,8 @@ const TELEGRAM_BOT_COMMANDS: &[TelegramBotCommand] = &[
         description: "查看当前系统提示词",
     },
     TelegramBotCommand {
-        command: "device_status",
-        description: "查看设备结构化状态与说明",
+        command: "app_status",
+        description: "查看应用结构化状态与说明",
     },
     TelegramBotCommand {
         command: "sleep",

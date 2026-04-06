@@ -8,8 +8,8 @@ use miette::{Result, bail, miette};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    device::{
-        Device, DeviceHowToUse, DeviceId, DeviceStateRender, DeviceToolScope, DeviceUsage,
+    app::{
+        App, AppHowToUse, AppId, AppStateRender, AppToolScope, AppUsage,
     },
     sandbox::RuntimeSandboxPolicy,
     terminal_process::TerminalProcess,
@@ -44,7 +44,7 @@ const TERMINAL_HOW_TO_USE_LINES: &[&str] = &[
     "如果终端已经停在你不该进入的交互式认证/登录提示上，不要继续回答向导问题；应优先中断，再改用非交互方案。",
 ];
 
-pub struct TerminalDevice {
+pub struct TerminalApp {
     sessions: BTreeMap<String, TerminalSession>,
     next_session_index: usize,
 }
@@ -74,7 +74,7 @@ pub struct TerminalSessionState {
     pub last_output_preview: String,
 }
 
-impl TerminalDevice {
+impl TerminalApp {
     const DEFAULT_EXEC_YIELD_TIME_MS: u64 = 10_000;
     const DEFAULT_WRITE_STDIN_YIELD_TIME_MS: u64 = 250;
     const MIN_EMPTY_POLL_YIELD_TIME_MS: u64 = 5_000;
@@ -365,9 +365,9 @@ impl TerminalDevice {
 }
 
 #[async_trait]
-impl Device for TerminalDevice {
-    fn id(&self) -> DeviceId {
-        DeviceId::Terminal
+impl App for TerminalApp {
+    fn id(&self) -> AppId {
+        AppId::Terminal
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -378,7 +378,7 @@ impl Device for TerminalDevice {
         self
     }
 
-    fn render_state(&self) -> DeviceStateRender {
+    fn render_state(&self) -> AppStateRender {
         let running_sessions = self
             .sessions
             .values()
@@ -408,14 +408,14 @@ impl Device for TerminalDevice {
             }
         }
 
-        DeviceStateRender {
+        AppStateRender {
             title: "Terminal".to_string(),
             lines,
         }
     }
 
-    fn usage(&self) -> DeviceUsage {
-        DeviceUsage {
+    fn usage(&self) -> AppUsage {
+        AppUsage {
             purpose: TERMINAL_USAGE_PURPOSE.to_string(),
             when_to_focus: TERMINAL_WHEN_TO_FOCUS
                 .iter()
@@ -424,8 +424,8 @@ impl Device for TerminalDevice {
         }
     }
 
-    fn how_to_use(&self) -> DeviceHowToUse {
-        DeviceHowToUse {
+    fn how_to_use(&self) -> AppHowToUse {
+        AppHowToUse {
             lines: TERMINAL_HOW_TO_USE_LINES
                 .iter()
                 .map(|line| (*line).to_string())
@@ -433,8 +433,8 @@ impl Device for TerminalDevice {
         }
     }
 
-    fn focused_tool_scopes(&self) -> &'static [DeviceToolScope] {
-        &[DeviceToolScope::Terminal]
+    fn focused_tool_scopes(&self) -> &'static [AppToolScope] {
+        &[AppToolScope::Terminal]
     }
 
     async fn wait_until_settled(&self, silence_duration: Duration, timeout: Duration) -> bool {
@@ -595,10 +595,10 @@ mod tests {
 
     #[tokio::test]
     async fn creates_new_sessions_and_lists_them() {
-        let mut device = TerminalDevice::new();
+        let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
 
-        let created = device
+        let created = app
             .exec_command_with_progress(
                 echo_command("session-a"),
                 None,
@@ -612,8 +612,8 @@ mod tests {
             .await
             .expect("create new session should succeed");
 
-        device.refresh_all_sessions();
-        let sessions = device
+        app.refresh_all_sessions();
+        let sessions = app
             .sessions
             .values()
             .map(|session| session.state.clone())
@@ -627,10 +627,10 @@ mod tests {
 
     #[tokio::test]
     async fn terminate_removes_non_main_session() {
-        let mut device = TerminalDevice::new();
+        let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
 
-        let created = device
+        let created = app
             .exec_command_with_progress(
                 long_running_command(),
                 None,
@@ -644,14 +644,14 @@ mod tests {
             .await
             .expect("create long-running session should succeed");
 
-        let terminated = device
+        let terminated = app
             .terminate_session(&created.session.session_id)
             .await
             .expect("terminate should succeed");
         assert_eq!(terminated.session_id, created.session.session_id);
 
-        device.refresh_all_sessions();
-        let sessions = device
+        app.refresh_all_sessions();
+        let sessions = app
             .sessions
             .values()
             .map(|session| session.state.clone())
@@ -666,10 +666,10 @@ mod tests {
 
     #[tokio::test]
     async fn focus_clears_when_last_session_is_terminated() {
-        let mut device = TerminalDevice::new();
+        let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
 
-        let created = device
+        let created = app
             .exec_command_with_progress(
                 long_running_command(),
                 None,
@@ -682,20 +682,20 @@ mod tests {
             )
             .await
             .expect("create long-running session should succeed");
-        device
+        app
             .terminate_session(&created.session.session_id)
             .await
             .expect("terminate should succeed");
-        assert!(device.sessions.is_empty());
+        assert!(app.sessions.is_empty());
     }
 
     #[tokio::test]
     async fn prunes_old_exited_non_main_sessions() {
-        let mut device = TerminalDevice::new();
+        let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
 
-        for idx in 0..(TerminalDevice::MAX_EXITED_SESSION_TOMBSTONES + 2) {
-            let created = device
+        for idx in 0..(TerminalApp::MAX_EXITED_SESSION_TOMBSTONES + 2) {
+            let created = app
                 .exec_command_with_progress(
                     echo_command(&format!("session-{idx}")),
                     None,
@@ -709,12 +709,12 @@ mod tests {
                 .await
                 .expect("create short-lived session should succeed");
             tokio::time::sleep(Duration::from_millis(5)).await;
-            device.refresh_all_sessions();
+            app.refresh_all_sessions();
             let _ = created;
         }
 
-        device.refresh_all_sessions();
-        let sessions = device
+        app.refresh_all_sessions();
+        let sessions = app
             .sessions
             .values()
             .map(|session| session.state.clone())
@@ -723,15 +723,15 @@ mod tests {
             .iter()
             .filter(|session| session.status.starts_with("exited"))
             .count();
-        assert!(exited_sessions <= TerminalDevice::MAX_EXITED_SESSION_TOMBSTONES);
+        assert!(exited_sessions <= TerminalApp::MAX_EXITED_SESSION_TOMBSTONES);
     }
 
     #[tokio::test]
     async fn exec_returns_running_session_when_yield_window_ends_first() {
-        let mut device = TerminalDevice::new();
+        let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
 
-        let result = device
+        let result = app
             .exec_command_with_progress(
                 delayed_output_command(800, "done-late"),
                 None,
@@ -755,10 +755,10 @@ mod tests {
 
     #[tokio::test]
     async fn empty_stdin_poll_continues_running_session_until_output_arrives() {
-        let mut device = TerminalDevice::new();
+        let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
 
-        let started = device
+        let started = app
             .exec_command_with_progress(
                 delayed_output_command(300, "continued-output"),
                 None,
@@ -774,7 +774,7 @@ mod tests {
 
         assert_eq!(started.session.status, "running");
 
-        let polled = device
+        let polled = app
             .write_stdin_with_progress(
                 &started.session.session_id,
                 String::new(),

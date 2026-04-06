@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use crate::{
-    device::DeviceId,
+    app::AppId,
     reasoning::runtime::{PromptMessage, PromptRole},
     spinova_paths::spinova_paths_sync,
     telegram_acl::TelegramAclHandle,
@@ -22,12 +22,12 @@ use crate::{
 };
 
 pub struct DashboardState {
-    pub focused_device: Option<DeviceId>,
+    pub focused_app: Option<AppId>,
     pub status_output: String,
     pub sleep_status_output: String,
     pub inspect_telegram_output: String,
     pub system_prompt_output: String,
-    pub device_status_outputs: Vec<(String, String)>,
+    pub app_status_outputs: Vec<(String, String)>,
     pub activity_cells: Vec<ActivityCell>,
     pub live_activity_cells: Vec<LiveActivityCell>,
     pub last_cycle_elapsed_ms: Option<u128>,
@@ -251,7 +251,7 @@ pub fn activity_cells_from_tool_call_ui_event(ui_event: ToolCallUiEvent) -> Vec<
         ToolCallUiEvent::Telegram(event) => {
             vec![ActivityCell::Telegram(telegram_cell_from_ui(event))]
         }
-        ToolCallUiEvent::Work(event) | ToolCallUiEvent::Device(event) => {
+        ToolCallUiEvent::Work(event) | ToolCallUiEvent::App(event) => {
             vec![ActivityCell::ToolCall(tool_ui_text_cell(ToolUiData {
                 title: event.title,
                 body_lines: event.body_lines,
@@ -371,7 +371,7 @@ pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> ActivityCell {
         }
         ToolUiEvent::Patch(event) => ActivityCell::Patch(patch_cell_from_ui(event)),
         ToolUiEvent::Telegram(event) => ActivityCell::Telegram(telegram_cell_from_ui(event)),
-        ToolUiEvent::Work(event) | ToolUiEvent::Device(event) => {
+        ToolUiEvent::Work(event) | ToolUiEvent::App(event) => {
             ActivityCell::ToolResult(tool_ui_text_cell(ToolUiData {
                 title: event.title,
                 body_lines: event.body_lines,
@@ -597,7 +597,7 @@ struct QuitCommand;
 struct ClearCommand;
 struct PersonaCommand;
 struct SystemPromptCommand;
-struct DeviceStatusCommand;
+struct AppStatusCommand;
 struct StatusCommand;
 struct SleepCommand;
 struct SleepRunSubcommand;
@@ -611,7 +611,7 @@ static QUIT_COMMAND: QuitCommand = QuitCommand;
 static CLEAR_COMMAND: ClearCommand = ClearCommand;
 static PERSONA_COMMAND: PersonaCommand = PersonaCommand;
 static SYSTEM_PROMPT_COMMAND: SystemPromptCommand = SystemPromptCommand;
-static DEVICE_STATUS_COMMAND: DeviceStatusCommand = DeviceStatusCommand;
+static APP_STATUS_COMMAND: AppStatusCommand = AppStatusCommand;
 static STATUS_COMMAND: StatusCommand = StatusCommand;
 static SLEEP_COMMAND: SleepCommand = SleepCommand;
 static SLEEP_RUN_SUBCOMMAND: SleepRunSubcommand = SleepRunSubcommand;
@@ -633,7 +633,7 @@ static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 8] = [
     &CLEAR_COMMAND,
     &PERSONA_COMMAND,
     &SYSTEM_PROMPT_COMMAND,
-    &DEVICE_STATUS_COMMAND,
+    &APP_STATUS_COMMAND,
     &STATUS_COMMAND,
     &SLEEP_COMMAND,
     &TELEGRAM_COMMAND,
@@ -768,17 +768,17 @@ impl DashboardCommand for SystemPromptCommand {
     }
 }
 
-impl DashboardCommand for DeviceStatusCommand {
+impl DashboardCommand for AppStatusCommand {
     fn usage(&self) -> &'static str {
-        "device-status <device>"
+        "app-status <app>"
     }
 
     fn description(&self) -> &'static str {
-        "show current structured device state and llm-facing note"
+        "show current structured app state and llm-facing note"
     }
 
     fn aliases(&self) -> &'static [&'static str] {
-        &["device_status"]
+        &["app_status"]
     }
 
     fn complete_arguments(
@@ -789,7 +789,7 @@ impl DashboardCommand for DeviceStatusCommand {
         let prefix = parts.get(1).copied().unwrap_or_default().trim().to_ascii_lowercase();
         context
             .state
-            .device_status_outputs
+            .app_status_outputs
             .iter()
             .map(|(name, _)| name.as_str())
             .filter(|candidate| candidate.starts_with(&prefix))
@@ -808,25 +808,25 @@ impl DashboardCommand for DeviceStatusCommand {
         context: &DashboardCommandContext<'_>,
     ) -> DashboardCommandResult {
         let Some(target) = parts.get(1).copied() else {
-            let devices = context
+            let apps = context
                 .state
-                .device_status_outputs
+                .app_status_outputs
                 .iter()
                 .map(|(name, _)| name.clone())
                 .collect::<Vec<_>>();
             return DashboardCommandResult::ShowOverlay {
                 title: self.overlay_title(raw),
-                text: if devices.is_empty() {
-                    "available devices: none".to_string()
+                text: if apps.is_empty() {
+                    "available apps: none".to_string()
                 } else {
-                    format!("available devices: {}", devices.join(", "))
+                    format!("available apps: {}", apps.join(", "))
                 },
             };
         };
         let target = target.trim().to_ascii_lowercase();
         let output = context
             .state
-            .device_status_outputs
+            .app_status_outputs
             .iter()
             .find(|(name, _)| name == &target)
             .map(|(_, output)| output.clone());
@@ -835,14 +835,14 @@ impl DashboardCommand for DeviceStatusCommand {
             text: output.unwrap_or_else(|| {
                 let devices = context
                     .state
-                    .device_status_outputs
+                    .app_status_outputs
                     .iter()
                     .map(|(name, _)| name.clone())
                     .collect::<Vec<_>>();
                 if devices.is_empty() {
-                    format!("unknown device: {target}")
+                    format!("unknown app: {target}")
                 } else {
-                    format!("unknown device: {target}\navailable devices: {}", devices.join(", "))
+                    format!("unknown app: {target}\navailable apps: {}", devices.join(", "))
                 }
             }),
         }

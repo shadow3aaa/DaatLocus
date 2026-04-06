@@ -8,7 +8,7 @@ pub enum ToolUiEvent {
     Patch(PatchUiData),
     Telegram(TelegramUiData),
     Work(ToolUiData),
-    Device(ToolUiData),
+    App(ToolUiData),
     Error(ToolUiData),
 }
 
@@ -20,7 +20,7 @@ pub enum ToolCallUiEvent {
     Patch(PatchUiData),
     Telegram(TelegramUiData),
     Work(ToolUiData),
-    Device(ToolUiData),
+    App(ToolUiData),
     Error(ToolUiData),
 }
 
@@ -115,8 +115,8 @@ impl ToolUiEvent {
         })
     }
 
-    pub fn device(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::Device(ToolUiData {
+    pub fn app(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::App(ToolUiData {
             title: title.into(),
             body_lines,
         })
@@ -162,8 +162,8 @@ impl ToolCallUiEvent {
         })
     }
 
-    pub fn device(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::Device(ToolUiData {
+    pub fn app(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::App(ToolUiData {
             title: title.into(),
             body_lines,
         })

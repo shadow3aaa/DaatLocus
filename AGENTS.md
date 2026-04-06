@@ -1,38 +1,38 @@
-Telegram 不是设备，而是事件通道。
+Telegram 不是应用，而是事件通道。
 # Spinova Agent Guidelines
 
 This document defines the core ACI boundary for Spinova. The goal is to keep agent-facing interfaces aligned with the actual strengths of LLMs and avoid pushing deterministic navigation work onto the model.
 
 ## Core Principle
 
-- `Device` means an interactive viewport that requires active attention.
+- `App` means an interactive viewport that requires active attention.
 - `Event` means a newly arrived fact that enters the world passively and needs judgment.
-- `Device` and `Event` are parallel concepts. An event may be produced by a device or by a transport, but it should not be collapsed into device viewport state.
-- Do not model every external system as a `Device`.
+- `App` and `Event` are parallel concepts. An event may be produced by an app or by a transport, but it should not be collapsed into app viewport state.
+- Do not model every external system as an `App`.
 - Do not force the model to perform deterministic navigation just to access facts that code already has.
 
-## Device
+## App
 
-Use a `Device` only when all of the following are true:
+Use an `App` only when all of the following are true:
 
 - The agent must focus it before meaningful operations should be allowed.
 - The visible information is naturally partial and must be explored step by step.
 - The interaction has temporal semantics such as waiting for output, stability, or continuation.
 
-`Device` exists to answer:
+An `App` exists to answer:
 
 - Where should attention go now?
 - What interactive surface is currently visible?
 - What operations are possible only when that surface is focused?
 
-`Device` should carry device state, not agent state.
+An `App` should carry app state, not agent state.
 
-Conceptually, a `Device` is an app inside the Spinova agent OS.
+Conceptually, an `App` is an app inside the Spinova agent OS.
 
-Each device should expose three distinct model-facing layers:
+Each app should expose three distinct model-facing layers:
 
 - `state`: the current structured visible state
-- `usage`: what this device is for, and when it is worth focusing
+- `usage`: what this app is for, and when it is worth focusing
 - `how_to_use`: how to operate it after focus
 
 These layers must stay separate:
@@ -42,17 +42,17 @@ These layers must stay separate:
 - `how_to_use` is post-focus operating guidance
 
 Do not mix operating instructions into viewport state.
-Do not force the model to infer "when should I focus this device" from raw state alone.
+Do not force the model to infer "when should I focus this app" from raw state alone.
 Do not put detailed operating instructions into pre-focus guidance.
 
-Allowed device state examples:
+Allowed app state examples:
 
 - focus / connectivity / health
 - stable object lists and their metadata
 - outbox or transport status
-- concise usage hints for the device
+- concise usage hints for the app
 
-Disallowed device state examples:
+Disallowed app state examples:
 
 - agent cursors such as `selected_chat`, `selected_thread`, or `opened_message`
 - hidden multi-step tool choreography state
@@ -61,7 +61,7 @@ Disallowed device state examples:
 
 Typical example:
 
-- `Terminal` is a `Device`.
+- `Terminal` is an `App`.
 
 ## Event
 
@@ -78,17 +78,17 @@ Typical examples:
 - A newly received Telegram message is an `Event`.
 - A new obligation assignment is an `Event`.
 
-## Device and Event Relationship
+## App and Event Relationship
 
-- A device may produce events.
-- A transport may produce events without exposing a full interactive device workflow.
+- An app may produce events.
+- A transport may produce events without exposing a full interactive app workflow.
 - Events explain why the agent should act.
 - Devices constrain where attention must go before certain classes of actions are allowed.
 
 In short:
 
 - `Event` brings new facts into the prompt.
-- `Device` gates the tool surface used to act on those facts.
+- `App` gates the tool surface used to act on those facts.
 
 ## LLM vs Code
 
@@ -125,13 +125,13 @@ Before introducing a new agent-facing interface, check:
 3. Does the model need exploration, or does code already have the necessary facts?
 4. If the model acts, is it acting on a specific event version?
 
-If the answer is mostly about exploration and focus, prefer `Device`.
+If the answer is mostly about exploration and focus, prefer `App`.
 
 If the answer is mostly about receiving and resolving new facts, prefer `Event`.
 
 ## Tool Shape
 
-- Device-scoped tools may require `focus_device(...)` first. This preserves attention discipline.
+- App-scoped tools may require `focus_app(...)` first. This preserves attention discipline.
 - After focus, a normal operation should usually complete in one explicit tool call.
 - Prefer tools with explicit addressing such as `send(chat_id, message)` over hidden cursor-dependent flows.
 - Avoid tool designs that require the model to mutate viewport state before a basic action becomes possible.
@@ -143,22 +143,22 @@ Avoid the following:
 
 - exposing raw inbox navigation as the primary path for handling new messages
 - requiring the model to manually open a target conversation before it can judge a fresh incoming message
-- storing agent cursor state such as `selected_chat` inside device state
+- storing agent cursor state such as `selected_chat` inside app state
 - making send / resolve depend on hidden viewport state rather than explicit identifiers
 - binding resolve actions only to a chat or container id
 - letting the model repeat deterministic UI navigation that code can perform safely
 
 ## Telegram Example
 
-- `Telegram` as a chat UI can exist as a `Device`.
+- `Telegram` as a chat UI can exist as an `App`.
 - A newly received Telegram message should first appear as a pending `Event`.
-- The Telegram device viewport should show concise device information such as known chats and stable metadata, not agent cursor state.
+- The Telegram app viewport should show concise app information such as known chats and stable metadata, not agent cursor state.
 - The default handling path should inject the pending message into context directly.
-- A standard reply path should look like `focus_device(Telegram)` followed by one explicit action such as `telegram_send_message(chat_id, text)`.
+- A standard reply path should look like `focus_app(Telegram)` followed by one explicit action such as `telegram_send_message(chat_id, text)`.
 - Reading the full chat history should be a secondary tool used only when extra context is actually needed.
-- `selected_chat` is not an acceptable long-lived device state for the agent path.
+- `selected_chat` is not an acceptable long-lived app state for the agent path.
 
 In short:
 
-- `Device` solves "where to look and how to operate".
+- `App` solves "where to look and how to operate".
 - `Event` solves "what happened and whether to respond".

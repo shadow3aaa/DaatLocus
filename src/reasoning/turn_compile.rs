@@ -1189,10 +1189,10 @@ async fn collect_turn_demo_workspace_facts() -> Result<String> {
                 src_entries.join(", ")
             }
         ),
-        "known_runtime_facts: Terminal is the only interactive device; Telegram is an event transport, not a device.".to_string(),
+        "known_runtime_facts: Terminal is the only interactive app; Telegram is an event transport, not a app.".to_string(),
         "known_runtime_facts: Fresh incoming messages arrive as events and are judged semantically; do not invent hidden inbox navigation state.".to_string(),
-        "known_runtime_facts: If a demo depends on todos, events, device health, or repository facts, it should ask about current visible state rather than fabricate specific unseen records.".to_string(),
-        "known_runtime_facts: Runtime snapshot already includes concise TodoBoard summary, event list, and device structural state; read-only questions about those visible summaries do not inherently require tools.".to_string(),
+        "known_runtime_facts: If a demo depends on todos, events, app health, or repository facts, it should ask about current visible state rather than fabricate specific unseen records.".to_string(),
+        "known_runtime_facts: Runtime snapshot already includes concise TodoBoard summary, event list, and app structural state; read-only questions about those visible summaries do not inherently require tools.".to_string(),
         "known_runtime_facts: Repository file existence, file contents, directory structure, and any fact not already rendered in runtime snapshot still require tools.".to_string(),
     ];
 
@@ -1879,7 +1879,7 @@ impl Default for PromptPersonaSpec {
             ],
             tool_use_rules: vec![
                 "代码库文件、目录、内容，以及 runtime snapshot 未直接给出的事实，必须先查证。".to_string(),
-                "TodoBoard 摘要、事件列表、设备结构状态等 runtime snapshot 已直接可见的摘要，可以直接据此回答。".to_string(),
+                "TodoBoard 摘要、事件列表、应用结构状态等 runtime snapshot 已直接可见的摘要，可以直接据此回答。".to_string(),
                 "工具调用要服务于结论，不要为了展示过程而调用。".to_string(),
                 "不要在证据不足时提前停止。".to_string(),
             ],

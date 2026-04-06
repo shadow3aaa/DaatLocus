@@ -6,7 +6,7 @@ use std::fmt::Display;
 use crate::{
     context::Context,
     context_budget::truncate_text_to_token_budget,
-    device::{DeviceId, DeviceStateRender},
+    app::{AppId, AppStateRender},
     events::{EventPayload, EventStatus, EventStore, EventView},
     system_info::SystemInfo,
     todo_board::TodoBoard,
@@ -17,11 +17,11 @@ const SNAPSHOT_SENSORY_MAX_TOKENS: usize = 400;
 const SNAPSHOT_TODO_MAX_TOKENS: usize = 1_600;
 const SNAPSHOT_WORK_STATE_MAX_TOKENS: usize = 700;
 const SNAPSHOT_EVENTS_MAX_TOKENS: usize = 1_800;
-const SNAPSHOT_DEVICES_MAX_TOKENS: usize = 1_600;
+const SNAPSHOT_APPS_MAX_TOKENS: usize = 1_600;
 const SNAPSHOT_TODO_MAX_ITEMS: usize = 8;
 const SNAPSHOT_EVENT_MAX_ITEMS: usize = 8;
-const SNAPSHOT_DEVICE_HINT_MAX_ITEMS: usize = 4;
-const SNAPSHOT_DEVICE_LINES_PER_DEVICE: usize = 8;
+const SNAPSHOT_APP_HINT_MAX_ITEMS: usize = 4;
+const SNAPSHOT_APP_LINES_PER_APP: usize = 8;
 
 /// 快照保存着当前agent的大脑状态
 ///
@@ -31,7 +31,7 @@ pub struct Snapshot {
     todo_board: TodoBoard,
     work_state: WorkState,
     events: EventSnapshot,
-    devices: DeviceSnapshot,
+    apps: AppSnapshot,
 }
 
 impl Snapshot {
@@ -43,13 +43,13 @@ impl Snapshot {
         context: &mut Context,
         claimed_events: &[EventView],
     ) -> Self {
-        let devices = DeviceSnapshot::new(context);
+        let apps = AppSnapshot::new(context);
         Self {
             sensory: Sensory::new(),
             todo_board: context.todo_board.clone(),
             work_state: context.work_state.clone(),
             events: EventSnapshot::new(&context.events, claimed_events),
-            devices,
+            apps,
         }
     }
 
@@ -59,7 +59,7 @@ impl Snapshot {
             ("TodoBoard：", self.render_todo_board_runtime()),
             ("当前工作状态：", self.render_work_state_runtime()),
             ("事件列表：", self.render_events_runtime()),
-            ("设备：", self.render_devices_runtime()),
+            ("应用：", self.render_apps_runtime()),
         ]
         .into_iter()
         .map(|(title, body)| format!("{title}\n{body}"))
@@ -121,11 +121,11 @@ impl Snapshot {
             .render_runtime(SNAPSHOT_EVENT_MAX_ITEMS, SNAPSHOT_EVENTS_MAX_TOKENS)
     }
 
-    fn render_devices_runtime(&self) -> String {
-        self.devices.render_runtime(
-            SNAPSHOT_DEVICE_HINT_MAX_ITEMS,
-            SNAPSHOT_DEVICE_LINES_PER_DEVICE,
-            SNAPSHOT_DEVICES_MAX_TOKENS,
+    fn render_apps_runtime(&self) -> String {
+        self.apps.render_runtime(
+            SNAPSHOT_APP_HINT_MAX_ITEMS,
+            SNAPSHOT_APP_LINES_PER_APP,
+            SNAPSHOT_APPS_MAX_TOKENS,
         )
     }
 }
@@ -140,8 +140,8 @@ impl Display for Snapshot {
         writeln!(f, "{}", self.work_state)?;
         writeln!(f, "事件列表：")?;
         writeln!(f, "{}", self.events)?;
-        writeln!(f, "设备：")?;
-        write!(f, "{}", self.devices)
+        writeln!(f, "应用：")?;
+        write!(f, "{}", self.apps)
     }
 }
 
@@ -169,20 +169,20 @@ impl Display for Sensory {
     }
 }
 
-struct DeviceSnapshot {
-    focused_device: Option<DeviceId>,
-    states: Vec<(DeviceId, DeviceStateRender)>,
+struct AppSnapshot {
+    focused_app: Option<AppId>,
+    states: Vec<(AppId, AppStateRender)>,
 }
 
 struct EventSnapshot {
     events: Vec<EventView>,
 }
 
-impl DeviceSnapshot {
+impl AppSnapshot {
     fn new(context: &Context) -> Self {
         Self {
-            focused_device: context.devices.focused(),
-            states: context.devices.state_renders(),
+            focused_app: context.apps.focused(),
+            states: context.apps.state_renders(),
         }
     }
 }
@@ -207,27 +207,27 @@ impl EventSnapshot {
     }
 }
 
-impl Display for DeviceSnapshot {
+impl Display for AppSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.focused_device {
-            Some(device) => writeln!(f, "当前前景设备：{device}")?,
-            None => writeln!(f, "当前前景设备：无")?,
+        match self.focused_app {
+            Some(app) => writeln!(f, "当前前景应用：{app}")?,
+            None => writeln!(f, "当前前景应用：无")?,
         }
 
         let attention_hints = self
             .states
             .iter()
-            .filter(|(id, _)| self.focused_device != Some(*id))
-            .filter_map(|(id, state)| device_attention_hint(*id, state));
+            .filter(|(id, _)| self.focused_app != Some(*id))
+            .filter_map(|(id, state)| app_attention_hint(*id, state));
         let attention_hints = attention_hints.collect::<Vec<_>>();
         if !attention_hints.is_empty() {
-            writeln!(f, "后台设备提醒：")?;
+            writeln!(f, "后台应用提醒：")?;
             for hint in attention_hints {
                 writeln!(f, "- {hint}")?;
             }
         }
 
-        writeln!(f, "设备结构状态：")?;
+        writeln!(f, "应用结构状态：")?;
         for (id, state) in &self.states {
             writeln!(f, "- {id} / {}：", state.title)?;
             for line in &state.lines {
@@ -278,7 +278,7 @@ impl Display for EventSnapshot {
     }
 }
 
-impl DeviceSnapshot {
+impl AppSnapshot {
     fn render_runtime(
         &self,
         max_hints: usize,
@@ -286,24 +286,24 @@ impl DeviceSnapshot {
         max_tokens: usize,
     ) -> String {
         let mut lines = Vec::new();
-        match self.focused_device {
-            Some(device) => lines.push(format!("当前前景设备：{device}")),
-            None => lines.push("当前前景设备：无".to_string()),
+        match self.focused_app {
+            Some(app) => lines.push(format!("当前前景应用：{app}")),
+            None => lines.push("当前前景应用：无".to_string()),
         }
 
         let attention_hints = self
             .states
             .iter()
-            .filter(|(id, _)| self.focused_device != Some(*id))
-            .filter_map(|(id, state)| device_attention_hint(*id, state))
+            .filter(|(id, _)| self.focused_app != Some(*id))
+            .filter_map(|(id, state)| app_attention_hint(*id, state))
             .take(max_hints)
             .collect::<Vec<_>>();
         if !attention_hints.is_empty() {
-            lines.push("后台设备提醒：".to_string());
+            lines.push("后台应用提醒：".to_string());
             lines.extend(attention_hints.into_iter().map(|hint| format!("- {hint}")));
         }
 
-        lines.push("设备结构状态：".to_string());
+        lines.push("应用结构状态：".to_string());
         for (id, state) in &self.states {
             lines.push(format!("- {id} / {}：", state.title));
             let rendered_lines = state.lines.iter().take(max_lines_per_device);
@@ -366,10 +366,10 @@ impl EventSnapshot {
     }
 }
 
-fn device_attention_hint(device_id: DeviceId, state: &DeviceStateRender) -> Option<String> {
-    match device_id {
-        DeviceId::Browser => None,
-        DeviceId::Terminal => {
+fn app_attention_hint(app_id: AppId, state: &AppStateRender) -> Option<String> {
+    match app_id {
+        AppId::Browser => None,
+        AppId::Terminal => {
             let session_id = state
                 .lines
                 .iter()

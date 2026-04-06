@@ -10,7 +10,7 @@ use crate::{
     config::Config,
     core::LLM,
     dashboard::DashboardState,
-    device::{DeviceId, DeviceManager},
+    app::{AppId, AppManager},
     events::EventStore,
     hindsight::{HindsightClient, HindsightRetainHandle},
     memory::Memory,
@@ -35,14 +35,14 @@ pub struct Context {
     pub work_state: WorkState,
     pub events: EventStore,
     pub pending_work: PendingWorkQueue,
-    pub devices: DeviceManager,
+    pub apps: AppManager,
     pub telegram: TelegramDeviceHandle,
     pub compiled_prompts: CompiledPromptStore,
     pub execution_cwd: PathBuf,
     pub sandbox_policy: RuntimeSandboxPolicy,
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
     pub active_runtime_turn: bool,
-    pub active_device_notices: HashSet<DeviceId>,
+    pub active_app_notices: HashSet<AppId>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
     pub record_runtime_reviews: bool,
@@ -63,6 +63,6 @@ impl Context {
         self.work_state.shutdown().await;
         self.events.shutdown().await;
         self.pending_work.shutdown().await;
-        let _ = self.devices.shutdown().await;
+        let _ = self.apps.shutdown().await;
     }
 }

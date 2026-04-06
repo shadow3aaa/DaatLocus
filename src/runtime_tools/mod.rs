@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::{
     context::Context,
     context_budget::truncate_text_to_token_budget,
-    device::DeviceToolScope,
+    app::AppToolScope,
     reasoning::{
         episode::EpisodeActionRecord,
         runtime::{AgentToolCall, AgentToolInputSpec, AgentToolSpec},
@@ -171,7 +171,7 @@ struct StaticRuntimeTool {
     name: &'static str,
     description: &'static str,
     input_spec: AgentToolInputSpec,
-    scope: Option<DeviceToolScope>,
+    scope: Option<AppToolScope>,
     availability: Option<ToolAvailability>,
     summarize: ToolSummarizer,
     call_ui: ToolCallUiBuilder,
@@ -182,7 +182,7 @@ impl StaticRuntimeTool {
     fn new<T: schemars::JsonSchema>(
         name: &'static str,
         description: &'static str,
-        scope: Option<DeviceToolScope>,
+        scope: Option<AppToolScope>,
         summarize: ToolSummarizer,
         call_ui: ToolCallUiBuilder,
         execute: ToolExecutor,
@@ -204,7 +204,7 @@ impl StaticRuntimeTool {
     fn new_with_availability<T: schemars::JsonSchema>(
         name: &'static str,
         description: &'static str,
-        scope: Option<DeviceToolScope>,
+        scope: Option<AppToolScope>,
         availability: ToolAvailability,
         summarize: ToolSummarizer,
         call_ui: ToolCallUiBuilder,
@@ -233,7 +233,7 @@ impl RuntimeTool for StaticRuntimeTool {
     fn is_available(&self, context: &Context) -> bool {
         let scope_available = match self.scope {
             None => true,
-            Some(scope) => context.devices.focused_tool_scopes().contains(&scope),
+            Some(scope) => context.apps.focused_tool_scopes().contains(&scope),
         };
         scope_available
             && self
@@ -331,9 +331,9 @@ eof_line: "*** End of File" LF
 
     fn is_available(&self, context: &Context) -> bool {
         context
-            .devices
+            .apps
             .focused_tool_scopes()
-            .contains(&DeviceToolScope::Terminal)
+            .contains(&AppToolScope::Terminal)
     }
 
     fn summarize_action(&self, call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {

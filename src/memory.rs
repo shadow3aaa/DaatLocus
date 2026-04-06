@@ -896,7 +896,7 @@ fn summarize_tool_ui_event(event: &ToolUiEvent) -> String {
     match event {
         ToolUiEvent::Exec(data)
         | ToolUiEvent::Work(data)
-        | ToolUiEvent::Device(data)
+        | ToolUiEvent::App(data)
         | ToolUiEvent::Error(data) => summarize_runtime_inline_text(&data.title),
         ToolUiEvent::Terminal(data) => summarize_runtime_inline_text(&data.title),
         ToolUiEvent::Patch(data) => summarize_runtime_inline_text(&data.summary_line),
@@ -908,7 +908,7 @@ fn tool_call_ui_event_title(event: &ToolCallUiEvent) -> &str {
     match event {
         ToolCallUiEvent::Exec(ToolUiData { title, .. })
         | ToolCallUiEvent::Work(ToolUiData { title, .. })
-        | ToolCallUiEvent::Device(ToolUiData { title, .. })
+        | ToolCallUiEvent::App(ToolUiData { title, .. })
         | ToolCallUiEvent::Error(ToolUiData { title, .. }) => title,
         ToolCallUiEvent::Terminal(TerminalUiData { title, .. }) => title,
         ToolCallUiEvent::Patch(PatchUiData { summary_line, .. }) => summary_line,
@@ -1069,7 +1069,7 @@ fn render_tool_call_event_for_retain(event: &ToolCallUiEvent) -> Vec<String> {
         ToolCallUiEvent::Error(data) if data.title == "apply_patch" => Vec::new(),
         ToolCallUiEvent::Exec(data)
         | ToolCallUiEvent::Work(data)
-        | ToolCallUiEvent::Device(data)
+        | ToolCallUiEvent::App(data)
         | ToolCallUiEvent::Error(data) => render_tool_data_for_retain("tool call", data),
         ToolCallUiEvent::Terminal(data) => render_terminal_data_for_retain("tool call", data),
         ToolCallUiEvent::Patch(data) => render_patch_data_for_retain("tool call", data),
@@ -1082,7 +1082,7 @@ fn render_tool_result_event_for_retain(event: &ToolUiEvent) -> Vec<String> {
         ToolUiEvent::Error(data) if data.title == "apply_patch failed" => Vec::new(),
         ToolUiEvent::Exec(data)
         | ToolUiEvent::Work(data)
-        | ToolUiEvent::Device(data)
+        | ToolUiEvent::App(data)
         | ToolUiEvent::Error(data) => render_tool_data_for_retain("tool result", data),
         ToolUiEvent::Terminal(data) => render_terminal_data_for_retain("tool result", data),
         ToolUiEvent::Patch(data) => render_patch_data_for_retain("tool result", data),
@@ -1163,7 +1163,7 @@ fn format_tool_call_ui_event_for_memory(event: &crate::tool_ui::ToolCallUiEvent)
     match event {
         crate::tool_ui::ToolCallUiEvent::Exec(data)
         | crate::tool_ui::ToolCallUiEvent::Work(data)
-        | crate::tool_ui::ToolCallUiEvent::Device(data)
+        | crate::tool_ui::ToolCallUiEvent::App(data)
         | crate::tool_ui::ToolCallUiEvent::Error(data) => {
             let mut lines = vec![format!("tool_call: {}", data.title)];
             lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));

@@ -695,7 +695,7 @@ fn render_tool_call_ui_event_summary(event: &ToolCallUiEvent) -> String {
     match event {
         ToolCallUiEvent::Exec(data)
         | ToolCallUiEvent::Work(data)
-        | ToolCallUiEvent::Device(data)
+        | ToolCallUiEvent::App(data)
         | ToolCallUiEvent::Error(data) => compact_review_text(&data.title),
         ToolCallUiEvent::Terminal(data) => compact_review_text(&data.title),
         ToolCallUiEvent::Patch(data) => compact_review_text(&data.summary_line),
@@ -707,7 +707,7 @@ fn render_tool_ui_event_summary(event: &ToolUiEvent) -> String {
     match event {
         ToolUiEvent::Exec(data)
         | ToolUiEvent::Work(data)
-        | ToolUiEvent::Device(data)
+        | ToolUiEvent::App(data)
         | ToolUiEvent::Error(data) => compact_review_text(&data.title),
         ToolUiEvent::Terminal(data) => compact_review_text(&data.title),
         ToolUiEvent::Patch(data) => compact_review_text(&data.summary_line),

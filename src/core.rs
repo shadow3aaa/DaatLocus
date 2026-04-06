@@ -5,19 +5,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     context::Context,
-    device::DeviceId,
+    app::AppId,
     events::EventDisposition,
     reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
     todo_board::TodoStatus,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct FocusDeviceArgs {
-    pub device: DeviceId,
+pub struct FocusAppArgs {
+    pub app: AppId,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct PutAwayDeviceArgs {}
+pub struct PutAwayAppArgs {}
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TerminalExecArgs {
