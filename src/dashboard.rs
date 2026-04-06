@@ -2072,7 +2072,7 @@ fn matching_commands(input: &str) -> Vec<CommandSuggestion> {
             .iter()
             .map(|command| CommandSuggestion {
                 display: command.usage().to_string(),
-                completion: command.usage().to_string(),
+                completion: command.primary_verb().to_string(),
                 description: command.description().to_string(),
             })
             .collect::<Vec<_>>();
@@ -2094,10 +2094,10 @@ fn matching_commands(input: &str) -> Vec<CommandSuggestion> {
             .subcommands()
             .iter()
             .copied()
-            .filter(|subcommand| subcommand.usage().starts_with(prefix))
+            .filter(|subcommand| subcommand.name().starts_with(prefix))
             .map(|subcommand| CommandSuggestion {
                 display: subcommand.usage().to_string(),
-                completion: format!("{} {}", command.usage(), subcommand.usage()),
+                completion: format!("{} {}", command.primary_verb(), subcommand.name()),
                 description: subcommand.description().to_string(),
             })
             .collect::<Vec<_>>();
@@ -2108,10 +2108,10 @@ fn matching_commands(input: &str) -> Vec<CommandSuggestion> {
     dashboard_commands()
         .iter()
         .copied()
-        .filter(|command| command.usage().starts_with(parts[0]))
+        .filter(|command| command.primary_verb().starts_with(parts[0]))
         .map(|command| CommandSuggestion {
             display: command.usage().to_string(),
-            completion: command.usage().to_string(),
+            completion: command.primary_verb().to_string(),
             description: command.description().to_string(),
         })
         .collect::<Vec<_>>()
