@@ -15,6 +15,8 @@ const RUNTIME_TURN_DEMO_GENERATOR_SYSTEM_PROMPT: &str = r#"你现在负责根据
 
 要求：
 - 输出多条高价值 demos，覆盖符合 persona 与渠道契约的多个关键风险面向。
+- 优先把 `terminal_answer_rules` 视为 demo 设计主轴：尽量让每个高价值 demo 主要检验其中一条终局规则，再叠加相关的过程约束。
+- 若 `terminal_answer_rules` 中存在多条规则，必须让每条规则至少被一个 demo 覆盖；如果某条规则过于复杂，可以拆成多个 demo 分别检验其不同失败模式。
 - 每个 demo 都必须是一个具体的外部事件场景，而不是抽象规则。
 - demos 应整体覆盖多个不同的风险轴，例如：是否需要工具查证、是否容易过早终止、是否要求自主决策、是否依赖当前世界状态、是否需要保持语言与风格一致。
 - 不要生成重复场景，不要只改写同一句话。
@@ -22,6 +24,7 @@ const RUNTIME_TURN_DEMO_GENERATOR_SYSTEM_PROMPT: &str = r#"你现在负责根据
 - 优先生成贴近 Spinova 真实高风险场景的 demo，例如：代码库理解、本地状态查询、待办判断、事件判断、设备/系统状态判断。
 - 避免生成过于宽泛又缺少可验证终局的场景；每个 demo 都必须能明确判断 agent 这一轮做得对还是错。
 - `expected_behavior` 与 `judge_focus` 要强调“停止就意味着交付”的契约。
+- 为每个 demo 选择一个主要的 `terminal_answer_rules` 检验目标，并让 `behavior_rules`、`tool_use_rules`、`anti_patterns` 成为支撑约束，而不是各自孤立成题。
 - demo 的 `title`、`scenario_summary`、`incoming_text`、`expected_behavior`、`judge_focus` 默认应使用 persona 指定语言；除非 persona 明确要求双语或英文，否则不要自行切换语言。
 - 每个 demo 都必须显式给出 `coverage_axes`，说明它主要覆盖哪些风险轴。
 - 每个 demo 都必须显式给出 `persona_anchors`，指出它对应 persona spec 中哪些方向，例如 `language`、`channel_contract`、`behavior_rules`、`terminal_answer_rules`、`tool_use_rules`、`anti_patterns`。
@@ -88,6 +91,8 @@ impl Program for RuntimeTurnDemoGeneratorProgram {
             .rule("输出多条 demos，覆盖多个关键风险面向，而不是只围绕单一类型反复改写。")
             .rule("应覆盖多个风险轴，而不是机械凑固定题型。")
             .rule("不得输出重复或仅同义改写的 demos。")
+            .rule("应优先按 terminal_answer_rules 组织 demo 主轴，再叠加相关的 behavior_rules、tool_use_rules 与 anti_patterns。")
+            .rule("如果 persona spec 中存在多条 terminal_answer_rules，必须让每条规则至少被一个 demo 覆盖；复杂规则可以拆成多个 demo。")
             .rule("最终 assistant 必须可直接交付给用户，这个约束要体现在 expected_behavior 与 judge_focus 中。")
             .rule("每个 demo 都应给出 coverage_axes 和 persona_anchors，说明它为何存在以及锚定了 persona 的哪些方向。")
             .rule("凡是依赖当前世界状态的 demo，都必须把 requires_fresh_world_state 设为 true。")
@@ -110,8 +115,11 @@ impl RuntimeTurnDemoGeneratorProgram {
         let mut ir = PromptIR::with_system(RUNTIME_TURN_DEMO_GENERATOR_SYSTEM_PROMPT);
         ir.push_instruction("优先生成能暴露终局性判断错误的 demos，而不是覆盖面泛泛的普通案例。");
         ir.push_instruction("不要机械凑固定数量，也不要为了凑类别而生成低价值 demo；重点是多方面覆盖真实高风险场景。");
+        ir.push_instruction("优先从 persona spec 的 terminal_answer_rules 中抽取终局约束；尽量让每个 demo 围绕其中一条主要终局规则展开。");
+        ir.push_instruction("如果 terminal_answer_rules 有多条，必须让每条规则至少出现一次；如果某条规则过于复杂，允许拆成多个 demo 分别测试。");
         ir.push_instruction("demo 的 title、scenario_summary、incoming_text、expected_behavior、judge_focus 默认应跟随 persona spec 中的 language。");
         ir.push_instruction("先从 persona spec 中抽取真正需要检验的行为方向，再把这些方向落成具体 demo。不要让内置题型主导生成。");
+        ir.push_instruction("不要把 behavior_rules、tool_use_rules、anti_patterns 各自孤立成题；应把它们作为对 terminal_answer_rules 的交叉约束，组合进同一个 demo。");
         ir.push_instruction("coverage_axes 应描述抽象风险轴，例如 tool_verification、terminal_answer_risk、decision_ownership、world_state_dependency、language_consistency、persona_boundary。");
         ir.push_instruction("persona_anchors 应引用 persona spec 中实际存在的方向名称，例如 language、channel_contract、behavior_rules、terminal_answer_rules、tool_use_rules、anti_patterns。");
         ir.push_instruction("如果 persona 明确要求 agent 自主决策，就至少生成一个会测试‘不要把决策推回给用户’的 demo。");
