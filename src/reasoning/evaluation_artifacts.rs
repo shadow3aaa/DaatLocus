@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn artifact_file_stem_is_bounded_and_non_empty() {
         let stem = artifact_file_stem(
-            "tool call when a device is already in foreground state do not call focus device with unknown device id parameter",
+            "tool call when a app is already in foreground state do not call focus app with unknown app id parameter",
         );
         assert!(!stem.is_empty());
         assert!(stem.len() <= MAX_ARTIFACT_FILE_STEM_LEN);

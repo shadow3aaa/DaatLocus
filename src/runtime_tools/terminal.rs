@@ -8,7 +8,7 @@ use crate::{
     context_budget::truncate_text_to_token_budget,
     core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWriteStdinArgs},
     dashboard::{DashboardActivityEvent, apply_activity_event},
-    device::DeviceToolScope,
+    app::AppToolScope,
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     tool_ui::{TerminalUiAction, ToolCallUiEvent, ToolUiEvent, compact_body_lines},
 };
@@ -26,7 +26,7 @@ fn terminal_progress_mode(text: &str) -> &'static str {
     if text.is_empty() { "poll" } else { "continue" }
 }
 
-fn terminal_session_meta(session: &crate::terminal_device::TerminalSessionState) -> String {
+fn terminal_session_meta(session: &crate::terminal_app::TerminalSessionState) -> String {
     format!(
         "{}  {}  exit={}  cwd={}",
         display_session_label(&session.session_id),
@@ -66,7 +66,7 @@ fn terminal_protection_error(label: &str) -> miette::Report {
 
 fn compact_terminal_model_content(
     summary: &str,
-    session: &crate::terminal_device::TerminalSessionState,
+    session: &crate::terminal_app::TerminalSessionState,
     output: &str,
     extra_lines: &[String],
     max_tokens: usize,
@@ -88,7 +88,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<TerminalExecArgs>(
             "terminal_exec",
             "启动一条终端命令，并在当前输出窗口结束后返回输出。如果提供 `session_id`，则在该 session 中复用执行；如果不提供，则新建 session。若命令仍在运行，结果中会保留 session，后续继续使用 terminal_write_stdin。",
-            Some(DeviceToolScope::Terminal),
+            Some(AppToolScope::Terminal),
             summarize_terminal_exec_tool,
             render_terminal_exec_call_ui,
             execute_terminal_exec_tool,
@@ -96,7 +96,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<TerminalWriteStdinArgs>(
             "terminal_write_stdin",
             "继续一个正在运行的 terminal session。发送文本可写入 stdin；发送空文本可仅等待下一段输出。",
-            Some(DeviceToolScope::Terminal),
+            Some(AppToolScope::Terminal),
             summarize_terminal_write_stdin_tool,
             render_terminal_write_stdin_call_ui,
             execute_terminal_write_stdin_tool,
@@ -104,7 +104,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<TerminalTerminateArgs>(
             "terminal_terminate",
             "终止指定 terminal session 的当前前台进程，并返回更新后的 session 状态。",
-            Some(DeviceToolScope::Terminal),
+            Some(AppToolScope::Terminal),
             summarize_terminal_terminate_tool,
             render_terminal_terminate_call_ui,
             execute_terminal_terminate_tool,
@@ -169,7 +169,7 @@ fn execute_terminal_exec_tool<'a>(
         let sandbox_policy = context.sandbox_policy.clone();
         let dashboard_tx = context.dashboard_tx.clone();
         let result = context
-            .devices
+            .apps
             .terminal_exec_with_progress(
                 args.command.clone(),
                 args.session_id.clone(),
@@ -304,7 +304,7 @@ fn execute_terminal_write_stdin_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: TerminalWriteStdinArgs = parse_tool_args(call)?;
-        let session = context.devices.terminal_session_state(&args.session_id)?;
+        let session = context.apps.terminal_session_state(&args.session_id)?;
         if let Some(cwd) = session.cwd.as_deref() {
             let resolved_cwd = resolve_terminal_path(context, cwd, None);
             context
@@ -317,7 +317,7 @@ fn execute_terminal_write_stdin_tool<'a>(
         }
         let dashboard_tx = context.dashboard_tx.clone();
         let result = context
-            .devices
+            .apps
             .terminal_write_stdin_with_progress(
                 &args.session_id,
                 args.text.clone(),
@@ -453,7 +453,7 @@ fn execute_terminal_terminate_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: TerminalTerminateArgs = parse_tool_args(call)?;
-        let session = context.devices.terminal_terminate(&args.session_id).await?;
+        let session = context.apps.terminal_terminate(&args.session_id).await?;
         let summary = format!(
             "terminated session {}",
             display_session_label(&session.session_id)

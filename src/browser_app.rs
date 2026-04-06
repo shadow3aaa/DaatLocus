@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use viewpoint_core::{AriaSnapshot, Browser, BrowserContext, DocumentLoadState, Page};
 
 use crate::{
-    device::{Device, DeviceHowToUse, DeviceId, DeviceStateRender, DeviceToolScope, DeviceUsage},
+    app::{App, AppHowToUse, AppId, AppStateRender, AppToolScope, AppUsage},
     spinova_paths::spinova_paths_sync,
 };
 
@@ -32,8 +32,8 @@ const BROWSER_HOW_TO_USE_LINES: &[&str] = &[
     "如果已经查到标题、摘要或正文片段，应基于已确认内容回答并明确范围；只有在关键内容确实不可得时才收尾为失败。",
     "Browser 只使用 Spinova 自带的独立浏览器 runtime，不会复用用户日常浏览器 profile；如果 runtime 未安装，浏览器工具会直接报错。",
 ];
-const BROWSER_TOOL_SCOPES: &[DeviceToolScope] = &[DeviceToolScope::Browser];
-pub struct BrowserDevice {
+const BROWSER_TOOL_SCOPES: &[AppToolScope] = &[AppToolScope::Browser];
+pub struct BrowserApp {
     browser: Option<Browser>,
     context: Option<BrowserContext>,
     pages: BTreeMap<String, BrowserPageState>,
@@ -90,7 +90,7 @@ pub struct BrowserWaitResult {
     pub invalidated_snapshot_id: Option<String>,
 }
 
-impl BrowserDevice {
+impl BrowserApp {
     pub fn new() -> Self {
         Self {
             browser: None,
@@ -583,9 +583,9 @@ fn summarize_state_text(text: &str) -> String {
 }
 
 #[async_trait]
-impl Device for BrowserDevice {
-    fn id(&self) -> DeviceId {
-        DeviceId::Browser
+impl App for BrowserApp {
+    fn id(&self) -> AppId {
+        AppId::Browser
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -596,7 +596,7 @@ impl Device for BrowserDevice {
         self
     }
 
-    fn render_state(&self) -> DeviceStateRender {
+    fn render_state(&self) -> AppStateRender {
         let mut lines = vec![
             "kind=browser".to_string(),
             format!("backend_status={}", self.render_backend_status()),
@@ -620,14 +620,14 @@ impl Device for BrowserDevice {
         if let Some(err) = self.init_error.as_deref() {
             lines.push(format!("last_error={}", summarize_state_text(err)));
         }
-        DeviceStateRender {
+        AppStateRender {
             title: "Browser".to_string(),
             lines,
         }
     }
 
-    fn usage(&self) -> DeviceUsage {
-        DeviceUsage {
+    fn usage(&self) -> AppUsage {
+        AppUsage {
             purpose: BROWSER_USAGE_PURPOSE.to_string(),
             when_to_focus: BROWSER_WHEN_TO_FOCUS
                 .iter()
@@ -636,8 +636,8 @@ impl Device for BrowserDevice {
         }
     }
 
-    fn how_to_use(&self) -> DeviceHowToUse {
-        DeviceHowToUse {
+    fn how_to_use(&self) -> AppHowToUse {
+        AppHowToUse {
             lines: BROWSER_HOW_TO_USE_LINES
                 .iter()
                 .map(|line| (*line).to_string())
@@ -645,7 +645,7 @@ impl Device for BrowserDevice {
         }
     }
 
-    fn focused_tool_scopes(&self) -> &'static [DeviceToolScope] {
+    fn focused_tool_scopes(&self) -> &'static [AppToolScope] {
         BROWSER_TOOL_SCOPES
     }
 

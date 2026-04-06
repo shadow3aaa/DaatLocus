@@ -6,7 +6,7 @@ use crate::{
     apply_patch::{PatchOperationKind, parse_apply_patch, summarize_patch_ops},
     context::Context,
     core::{
-        DeepRecallArgs, EventResolveArgs, FocusDeviceArgs, PutAwayDeviceArgs, TodoCompleteArgs,
+        DeepRecallArgs, EventResolveArgs, FocusAppArgs, PutAwayAppArgs, TodoCompleteArgs,
         TodoCreateArgs, TodoDropArgs, TodoUpdateArgs,
     },
     events::{EventDisposition, EventPayload, EventStatus},
@@ -48,21 +48,21 @@ fn extract_apply_patch_text(call: &AgentToolCall) -> Result<String> {
 
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![
-        Box::new(StaticRuntimeTool::new::<FocusDeviceArgs>(
-            "focus_device",
-            "将指定设备切到前景。",
+        Box::new(StaticRuntimeTool::new::<FocusAppArgs>(
+            "focus_app",
+            "将指定应用切到前景。",
             None,
-            summarize_focus_device_tool,
-            render_focus_device_call_ui,
-            execute_focus_device_tool,
+            summarize_focus_app_tool,
+            render_focus_app_call_ui,
+            execute_focus_app_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<PutAwayDeviceArgs>(
-            "put_away_device",
-            "把当前前景设备放回后台。",
+        Box::new(StaticRuntimeTool::new::<PutAwayAppArgs>(
+            "put_away_app",
+            "把当前前景应用放回后台。",
             None,
-            summarize_put_away_device_tool,
-            render_put_away_device_call_ui,
-            execute_put_away_device_tool,
+            summarize_put_away_app_tool,
+            render_put_away_app_call_ui,
+            execute_put_away_app_tool,
         )),
         Box::new(StaticRuntimeTool::new::<EventResolveArgs>(
             "finish_and_send",
@@ -138,61 +138,61 @@ fn status_for_event_disposition(disposition: EventDisposition) -> EventStatus {
     }
 }
 
-fn summarize_focus_device_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: FocusDeviceArgs = parse_tool_args(call)?;
+fn summarize_focus_app_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: FocusAppArgs = parse_tool_args(call)?;
     Ok(EpisodeActionRecord {
-        kind: "focus_device".to_string(),
-        summary: format!("device={}", args.device),
+        kind: "focus_app".to_string(),
+        summary: format!("app={}", args.app),
     })
 }
 
-fn render_focus_device_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: FocusDeviceArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::device(
-        format!("focus_device {}", args.device),
+fn render_focus_app_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: FocusAppArgs = parse_tool_args(call)?;
+    Ok(ToolCallUiEvent::app(
+        format!("focus_app {}", args.app),
         Vec::new(),
     ))
 }
 
-fn execute_focus_device_tool<'a>(
+fn execute_focus_app_tool<'a>(
     context: &'a mut Context,
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        let args: FocusDeviceArgs = parse_tool_args(call)?;
-        context.devices.focus(args.device).await?;
+        let args: FocusAppArgs = parse_tool_args(call)?;
+        context.apps.focus(args.app).await?;
         Ok(ToolExecutionResult::new(
-            format!("focused device {}", args.device),
-            json!({ "device": args.device.to_string() }),
-            ToolUiEvent::device(
-                format!("focused device {}", args.device),
-                vec![args.device.to_string()],
+            format!("focused app {}", args.app),
+            json!({ "app": args.app.to_string() }),
+            ToolUiEvent::app(
+                format!("focused app {}", args.app),
+                vec![args.app.to_string()],
             ),
         ))
     })
 }
 
-fn summarize_put_away_device_tool(_call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+fn summarize_put_away_app_tool(_call: &AgentToolCall) -> Result<EpisodeActionRecord> {
     Ok(EpisodeActionRecord {
-        kind: "put_away_device".to_string(),
-        summary: "put away current focused device".to_string(),
+        kind: "put_away_app".to_string(),
+        summary: "put away current focused app".to_string(),
     })
 }
 
-fn render_put_away_device_call_ui(_call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    Ok(ToolCallUiEvent::device("put_away_device", Vec::new()))
+fn render_put_away_app_call_ui(_call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    Ok(ToolCallUiEvent::app("put_away_app", Vec::new()))
 }
 
-fn execute_put_away_device_tool<'a>(
+fn execute_put_away_app_tool<'a>(
     context: &'a mut Context,
     _call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        context.devices.put_away().await?;
+        context.apps.put_away().await?;
         Ok(ToolExecutionResult::new(
-            "put away focused device",
+            "put away focused app",
             json!({}),
-            ToolUiEvent::device("put away focused device", Vec::new()),
+            ToolUiEvent::app("put away focused app", Vec::new()),
         ))
     })
 }

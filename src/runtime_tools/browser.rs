@@ -2,7 +2,7 @@ use miette::Result;
 use serde_json::json;
 
 use crate::{
-    browser_device::{
+    browser_app::{
         BrowserActionResult, BrowserFindResult, BrowserPageState, BrowserSnapshotResult,
         BrowserWaitResult,
     },
@@ -14,7 +14,7 @@ use crate::{
         BrowserSnapshotArgs, BrowserWaitArgs,
     },
     dashboard::{DashboardActivityEvent, apply_activity_event},
-    device::DeviceToolScope,
+    app::AppToolScope,
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
 };
@@ -33,7 +33,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<BrowserOpenArgs>(
             "browser_open",
             "新建一个浏览器页面并打开指定 URL。返回新的 `page_id`。",
-            Some(DeviceToolScope::Browser),
+            Some(AppToolScope::Browser),
             summarize_browser_open_tool,
             render_browser_open_call_ui,
             execute_browser_open_tool,
@@ -41,7 +41,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<BrowserSnapshotArgs>(
             "browser_snapshot",
             "抓取指定页面的最新语义快照。返回 `snapshot_id` 和可交互元素 `element_ref`。",
-            Some(DeviceToolScope::Browser),
+            Some(AppToolScope::Browser),
             summarize_browser_snapshot_tool,
             render_browser_snapshot_call_ui,
             execute_browser_snapshot_tool,
@@ -49,7 +49,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<BrowserFindInPageArgs>(
             "browser_find_in_page",
             "在指定页面中查找包含目标文本的元素，返回匹配元素的 `element_ref`、角色和文本摘要。",
-            Some(DeviceToolScope::Browser),
+            Some(AppToolScope::Browser),
             summarize_browser_find_in_page_tool,
             render_browser_find_in_page_call_ui,
             execute_browser_find_in_page_tool,
@@ -57,7 +57,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<BrowserWaitArgs>(
             "browser_wait",
             "等待指定页面进入稳定状态。`state` 可用 `dom` 或 `load`；等待后旧 `snapshot_id` 会失效。",
-            Some(DeviceToolScope::Browser),
+            Some(AppToolScope::Browser),
             summarize_browser_wait_tool,
             render_browser_wait_call_ui,
             execute_browser_wait_tool,
@@ -65,7 +65,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<BrowserClickArgs>(
             "browser_click",
             "基于最新快照中的 `element_ref` 点击页面元素。点击后旧 `snapshot_id` 会失效。",
-            Some(DeviceToolScope::Browser),
+            Some(AppToolScope::Browser),
             summarize_browser_click_tool,
             render_browser_click_call_ui,
             execute_browser_click_tool,
@@ -73,7 +73,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<BrowserFillArgs>(
             "browser_fill",
             "基于最新快照中的 `element_ref` 填写输入框。填写后旧 `snapshot_id` 会失效。",
-            Some(DeviceToolScope::Browser),
+            Some(AppToolScope::Browser),
             summarize_browser_fill_tool,
             render_browser_fill_call_ui,
             execute_browser_fill_tool,
@@ -81,7 +81,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<BrowserBackArgs>(
             "browser_back",
             "让指定页面后退。后退后旧 `snapshot_id` 会失效。",
-            Some(DeviceToolScope::Browser),
+            Some(AppToolScope::Browser),
             summarize_browser_back_tool,
             render_browser_back_call_ui,
             execute_browser_back_tool,
@@ -89,7 +89,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<BrowserForwardArgs>(
             "browser_forward",
             "让指定页面前进。前进后旧 `snapshot_id` 会失效。",
-            Some(DeviceToolScope::Browser),
+            Some(AppToolScope::Browser),
             summarize_browser_forward_tool,
             render_browser_forward_call_ui,
             execute_browser_forward_tool,
@@ -97,7 +97,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<BrowserReloadArgs>(
             "browser_reload",
             "刷新指定页面。刷新后旧 `snapshot_id` 会失效。",
-            Some(DeviceToolScope::Browser),
+            Some(AppToolScope::Browser),
             summarize_browser_reload_tool,
             render_browser_reload_call_ui,
             execute_browser_reload_tool,
@@ -105,7 +105,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<BrowserClosePageArgs>(
             "browser_close_page",
             "关闭指定浏览器页面。关闭不再需要的页面以节省内存。",
-            Some(DeviceToolScope::Browser),
+            Some(AppToolScope::Browser),
             summarize_browser_close_page_tool,
             render_browser_close_page_call_ui,
             execute_browser_close_page_tool,
@@ -185,7 +185,7 @@ fn summarize_browser_open_tool(call: &AgentToolCall) -> Result<EpisodeActionReco
 
 fn render_browser_open_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: BrowserOpenArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::device(
+    Ok(ToolCallUiEvent::app(
         "browser_open",
         vec![format!("url={}", summarize_inline_text(&args.url))],
     ))
@@ -197,7 +197,7 @@ fn execute_browser_open_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: BrowserOpenArgs = parse_tool_args(call)?;
-        let result = context.devices.browser_open(&args.url).await?;
+        let result = context.apps.browser_open(&args.url).await?;
         let summary = format!("opened page {}", result.page.page_id);
         let model_content = browser_action_model_content(
             &summary,
@@ -208,7 +208,7 @@ fn execute_browser_open_tool<'a>(
         Ok(ToolExecutionResult::new(
             summary,
             json!({ "page": result.page }),
-            ToolUiEvent::device(
+            ToolUiEvent::app(
                 "opened browser page",
                 vec![
                     format!("page={}", result.page.page_id),
@@ -230,7 +230,7 @@ fn summarize_browser_snapshot_tool(call: &AgentToolCall) -> Result<EpisodeAction
 
 fn render_browser_snapshot_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: BrowserSnapshotArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::device(
+    Ok(ToolCallUiEvent::app(
         "browser_snapshot",
         vec![format!("page={}", args.page_id)],
     ))
@@ -243,7 +243,7 @@ fn execute_browser_snapshot_tool<'a>(
     Box::pin(async move {
         let args: BrowserSnapshotArgs = parse_tool_args(call)?;
         let dashboard_tx = context.dashboard_tx.clone();
-        let result = context.devices.browser_snapshot(&args.page_id).await?;
+        let result = context.apps.browser_snapshot(&args.page_id).await?;
         if let Some(tx) = &dashboard_tx {
             tx.send_modify(|state| {
                 apply_activity_event(
@@ -272,7 +272,7 @@ fn execute_browser_snapshot_tool<'a>(
                 "snapshot_id": result.snapshot_id,
                 "snapshot": result.snapshot,
             }),
-            ToolUiEvent::device(
+            ToolUiEvent::app(
                 "captured browser snapshot",
                 vec![
                     format!("page={}", result.page.page_id),
@@ -298,7 +298,7 @@ fn summarize_browser_find_in_page_tool(call: &AgentToolCall) -> Result<EpisodeAc
 
 fn render_browser_find_in_page_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: BrowserFindInPageArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::device(
+    Ok(ToolCallUiEvent::app(
         "browser_find_in_page",
         vec![
             format!("page={}", args.page_id),
@@ -314,7 +314,7 @@ fn execute_browser_find_in_page_tool<'a>(
     Box::pin(async move {
         let args: BrowserFindInPageArgs = parse_tool_args(call)?;
         let result = context
-            .devices
+            .apps
             .browser_find_in_page(&args.page_id, &args.query, args.max_results.unwrap_or(5))
             .await?;
         let summary = format!(
@@ -331,7 +331,7 @@ fn execute_browser_find_in_page_tool<'a>(
                 "query": result.query,
                 "matches": result.matches,
             }),
-            ToolUiEvent::device(
+            ToolUiEvent::app(
                 "found browser matches",
                 vec![
                     format!("page={}", result.page.page_id),
@@ -357,7 +357,7 @@ fn summarize_browser_wait_tool(call: &AgentToolCall) -> Result<EpisodeActionReco
 
 fn render_browser_wait_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: BrowserWaitArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::device(
+    Ok(ToolCallUiEvent::app(
         "browser_wait",
         vec![
             format!("page={}", args.page_id),
@@ -373,7 +373,7 @@ fn execute_browser_wait_tool<'a>(
     Box::pin(async move {
         let args: BrowserWaitArgs = parse_tool_args(call)?;
         let result = context
-            .devices
+            .apps
             .browser_wait(&args.page_id, args.state.as_deref(), args.timeout_ms)
             .await?;
         browser_wait_tool_result(context, &result)
@@ -393,7 +393,7 @@ fn summarize_browser_click_tool(call: &AgentToolCall) -> Result<EpisodeActionRec
 
 fn render_browser_click_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: BrowserClickArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::device(
+    Ok(ToolCallUiEvent::app(
         "browser_click",
         vec![
             format!("page={}", args.page_id),
@@ -410,7 +410,7 @@ fn execute_browser_click_tool<'a>(
     Box::pin(async move {
         let args: BrowserClickArgs = parse_tool_args(call)?;
         let result = context
-            .devices
+            .apps
             .browser_click(&args.page_id, &args.snapshot_id, &args.element_ref)
             .await?;
         browser_action_tool_result(
@@ -438,7 +438,7 @@ fn summarize_browser_fill_tool(call: &AgentToolCall) -> Result<EpisodeActionReco
 
 fn render_browser_fill_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: BrowserFillArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::device(
+    Ok(ToolCallUiEvent::app(
         "browser_fill",
         vec![
             format!("page={}", args.page_id),
@@ -456,7 +456,7 @@ fn execute_browser_fill_tool<'a>(
     Box::pin(async move {
         let args: BrowserFillArgs = parse_tool_args(call)?;
         let result = context
-            .devices
+            .apps
             .browser_fill(
                 &args.page_id,
                 &args.snapshot_id,
@@ -486,7 +486,7 @@ fn summarize_browser_back_tool(call: &AgentToolCall) -> Result<EpisodeActionReco
 
 fn render_browser_back_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: BrowserBackArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::device(
+    Ok(ToolCallUiEvent::app(
         "browser_back",
         vec![format!("page={}", args.page_id)],
     ))
@@ -498,7 +498,7 @@ fn execute_browser_back_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: BrowserBackArgs = parse_tool_args(call)?;
-        let result = context.devices.browser_back(&args.page_id).await?;
+        let result = context.apps.browser_back(&args.page_id).await?;
         browser_action_tool_result(context, "went back in browser", &result, Vec::new())
     })
 }
@@ -513,7 +513,7 @@ fn summarize_browser_forward_tool(call: &AgentToolCall) -> Result<EpisodeActionR
 
 fn render_browser_forward_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: BrowserForwardArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::device(
+    Ok(ToolCallUiEvent::app(
         "browser_forward",
         vec![format!("page={}", args.page_id)],
     ))
@@ -525,7 +525,7 @@ fn execute_browser_forward_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: BrowserForwardArgs = parse_tool_args(call)?;
-        let result = context.devices.browser_forward(&args.page_id).await?;
+        let result = context.apps.browser_forward(&args.page_id).await?;
         browser_action_tool_result(context, "went forward in browser", &result, Vec::new())
     })
 }
@@ -540,7 +540,7 @@ fn summarize_browser_reload_tool(call: &AgentToolCall) -> Result<EpisodeActionRe
 
 fn render_browser_reload_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: BrowserReloadArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::device(
+    Ok(ToolCallUiEvent::app(
         "browser_reload",
         vec![format!("page={}", args.page_id)],
     ))
@@ -552,7 +552,7 @@ fn execute_browser_reload_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: BrowserReloadArgs = parse_tool_args(call)?;
-        let result = context.devices.browser_reload(&args.page_id).await?;
+        let result = context.apps.browser_reload(&args.page_id).await?;
         browser_action_tool_result(context, "reloaded browser page", &result, Vec::new())
     })
 }
@@ -567,7 +567,7 @@ fn summarize_browser_close_page_tool(call: &AgentToolCall) -> Result<EpisodeActi
 
 fn render_browser_close_page_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: BrowserClosePageArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::device(
+    Ok(ToolCallUiEvent::app(
         "browser_close_page",
         vec![format!("page={}", args.page_id)],
     ))
@@ -579,7 +579,7 @@ fn execute_browser_close_page_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: BrowserClosePageArgs = parse_tool_args(call)?;
-        let result = context.devices.browser_close_page(&args.page_id).await?;
+        let result = context.apps.browser_close_page(&args.page_id).await?;
         browser_action_tool_result(context, "closed browser page", &result, Vec::new())
     })
 }
@@ -605,7 +605,7 @@ fn browser_action_tool_result(
             "page": result.page,
             "invalidated_snapshot_id": result.invalidated_snapshot_id,
         }),
-        ToolUiEvent::device(title, {
+        ToolUiEvent::app(title, {
             let mut lines = vec![format!("page={}", result.page.page_id)];
             lines.extend(extra_lines);
             lines
@@ -635,7 +635,7 @@ fn browser_wait_tool_result(
             "wait_state": result.wait_state,
             "invalidated_snapshot_id": result.invalidated_snapshot_id,
         }),
-        ToolUiEvent::device("waited for browser page", {
+        ToolUiEvent::app("waited for browser page", {
             let mut lines = vec![format!("page={}", result.page.page_id)];
             lines.extend(extra_lines);
             lines

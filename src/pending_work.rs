@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    device::DeviceId,
+    app::AppId,
     spinova_paths::{spinova_paths, spinova_paths_sync},
 };
 
@@ -42,14 +42,14 @@ enum PendingWorkEntryState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PendingWork {
     Event { event_id: Uuid },
-    DeviceNotice { device: DeviceId, reason: String },
+    AppNotice { app: AppId, reason: String },
 }
 
 impl PartialEq for PendingWork {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Event { event_id: a }, Self::Event { event_id: b }) => a == b,
-            (Self::DeviceNotice { device: a, .. }, Self::DeviceNotice { device: b, .. }) => a == b,
+            (Self::AppNotice { app: a, .. }, Self::AppNotice { app: b, .. }) => a == b,
             _ => false,
         }
     }
@@ -61,7 +61,7 @@ impl PendingWork {
     fn priority(&self) -> u8 {
         match self {
             Self::Event { .. } => 0,
-            Self::DeviceNotice { .. } => 1,
+            Self::AppNotice { .. } => 1,
         }
     }
 }
@@ -226,12 +226,12 @@ fn same_work_payload(left: &PendingWork, right: &PendingWork) -> bool {
     match (left, right) {
         (PendingWork::Event { event_id: a }, PendingWork::Event { event_id: b }) => a == b,
         (
-            PendingWork::DeviceNotice {
-                device: a,
+            PendingWork::AppNotice {
+                app: a,
                 reason: ra,
             },
-            PendingWork::DeviceNotice {
-                device: b,
+            PendingWork::AppNotice {
+                app: b,
                 reason: rb,
             },
         ) => a == b && ra == rb,
@@ -256,11 +256,11 @@ mod tests {
         let queue = PendingWorkQueue::empty();
         let event_id = Uuid::new_v4();
         queue
-            .enqueue(PendingWork::DeviceNotice {
-                device: DeviceId::Terminal,
+            .enqueue(PendingWork::AppNotice {
+                app: AppId::Terminal,
                 reason: "terminal changed".to_string(),
             })
-            .expect("enqueue device notice");
+            .expect("enqueue app notice");
         queue
             .enqueue(PendingWork::Event { event_id })
             .expect("enqueue event");

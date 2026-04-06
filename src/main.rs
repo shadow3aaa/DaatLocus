@@ -1,11 +1,11 @@
 mod apply_patch;
-mod browser_device;
+mod browser_app;
 mod config;
 mod context;
 mod context_budget;
 mod core;
 mod dashboard;
-mod device;
+mod app;
 mod events;
 mod hindsight;
 mod logging;
@@ -22,7 +22,7 @@ mod system_info;
 mod telegram_acl;
 mod telegram_device;
 mod telegram_transport;
-mod terminal_device;
+mod terminal_app;
 mod terminal_process;
 mod todo_board;
 mod tool_ui;
@@ -39,7 +39,7 @@ use std::{
 
 use crate::{
     apply_patch::{PatchOperationKind, apply_patch_in_root, summarize_apply_patch_error},
-    browser_device::BrowserDevice,
+    browser_app::BrowserApp,
     config::load_config,
     context::Context,
     context_budget::{approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded},
@@ -49,7 +49,7 @@ use crate::{
         apply_activity_event, assistant_activity_cell, render_activity_from_messages,
         run_tui_dashboard,
     },
-    device::{DeviceId, DeviceManager},
+    app::{AppId, AppManager},
     events::{EventPayload, EventStatus, EventStore, EventView},
     hindsight::{HindsightClient, HindsightRecallOptions},
     logging::{
@@ -102,7 +102,7 @@ use crate::{
     telegram_acl::TelegramAclHandle,
     telegram_device::TelegramDevice,
     telegram_transport::TelegramTransport,
-    terminal_device::TerminalDevice,
+    terminal_app::TerminalApp,
     todo_board::TodoBoard,
     tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
     work_state::WorkState,
@@ -383,13 +383,13 @@ async fn async_main(cli: Cli) -> Result<()> {
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
     let telegram_acl = TelegramAclHandle::load().await;
-    let browser = BrowserDevice::new();
-    let terminal = TerminalDevice::new();
+    let browser = BrowserApp::new();
+    let terminal = TerminalApp::new();
     let telegram = TelegramDevice::new();
     let telegram_handle = telegram.handle();
     bootstrap_telegram_device_from_acl(&telegram_handle, &telegram_acl);
-    let devices = DeviceManager::new(
-        Some(DeviceId::Terminal),
+    let apps = AppManager::new(
+        Some(AppId::Terminal),
         vec![Box::new(browser), Box::new(terminal)],
     )
     .await
@@ -421,30 +421,30 @@ async fn async_main(cli: Cli) -> Result<()> {
         work_state,
         events,
         pending_work,
-        devices,
+        apps,
         telegram: telegram_handle,
         compiled_prompts,
         execution_cwd,
         sandbox_policy,
         dashboard_tx: None,
         active_runtime_turn: false,
-        active_device_notices: std::collections::HashSet::new(),
+        active_app_notices: std::collections::HashSet::new(),
         idle_since: None,
         last_idle_sleep_at: None,
         record_runtime_reviews: true,
     };
-    let device_renders = context.devices.state_renders();
+    let app_renders = context.apps.state_renders();
 
     let (tx, mut rx) = tokio::sync::watch::channel(DashboardState {
-        focused_device: context.devices.focused(),
-        status_output: render_status_command_output_for_dashboard(&context, &device_renders),
+        focused_app: context.apps.focused(),
+        status_output: render_status_command_output_for_dashboard(&context, &app_renders),
         sleep_status_output: render_sleep_status_output_for_dashboard(
             &context,
             &SleepDashboardStatus::default(),
         ),
         inspect_telegram_output: render_telegram_status_for_dashboard(&context),
         system_prompt_output: render_system_prompt_output_for_dashboard(&context),
-        device_status_outputs: render_device_status_outputs_for_dashboard(&context),
+        app_status_outputs: render_app_status_outputs_for_dashboard(&context),
         activity_cells: render_activity_for_dashboard(&context),
         live_activity_cells: Vec::new(),
         last_cycle_elapsed_ms: None,
@@ -962,12 +962,12 @@ pub(crate) async fn build_eval_context_with_compiled(
     let work_state = WorkState::new().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
-    let browser = BrowserDevice::new();
-    let terminal = TerminalDevice::new();
+    let browser = BrowserApp::new();
+    let terminal = TerminalApp::new();
     let telegram = TelegramDevice::new();
     let telegram_handle = telegram.handle();
-    let devices = DeviceManager::new(
-        Some(DeviceId::Terminal),
+    let apps = AppManager::new(
+        Some(AppId::Terminal),
         vec![Box::new(browser), Box::new(terminal)],
     )
     .await
@@ -992,14 +992,14 @@ pub(crate) async fn build_eval_context_with_compiled(
         work_state,
         events,
         pending_work,
-        devices,
+        apps,
         telegram: telegram_handle,
         compiled_prompts,
         execution_cwd,
         sandbox_policy,
         dashboard_tx: None,
         active_runtime_turn: false,
-        active_device_notices: std::collections::HashSet::new(),
+        active_app_notices: std::collections::HashSet::new(),
         idle_since: None,
         last_idle_sleep_at: None,
         record_runtime_reviews: false,
@@ -1027,7 +1027,7 @@ async fn load_compiled_prompts_only(
 
 fn initial_train_source_dashboard_state(status: String) -> DashboardState {
     DashboardState {
-        focused_device: Some(DeviceId::Terminal),
+        focused_app: Some(AppId::Terminal),
         status_output: "Overview\nTrain-source session starting".to_string(),
         sleep_status_output: "Overview\nSleep controls are unavailable in train-source sessions."
             .to_string(),
@@ -1035,9 +1035,9 @@ fn initial_train_source_dashboard_state(status: String) -> DashboardState {
         system_prompt_output:
             "System Prompt\nSystem prompt inspection is unavailable in train-source sessions."
                 .to_string(),
-        device_status_outputs: vec![(
+        app_status_outputs: vec![(
             "terminal".to_string(),
-            "Device Status\nDevice status inspection is unavailable in train-source sessions."
+            "App Status\nApp status inspection is unavailable in train-source sessions."
                 .to_string(),
         )],
         activity_cells: Vec::new(),
@@ -1151,7 +1151,7 @@ async fn run_train_source_rollout(
 
     let mut context = build_eval_context(config).await;
     context.dashboard_tx = dashboard_tx.clone();
-    context.devices.focus(DeviceId::Terminal).await?;
+    context.apps.focus(AppId::Terminal).await?;
     enter_episode_workspace(&mut context, &workspace_dir).await?;
     context
         .work_state
@@ -1460,7 +1460,7 @@ async fn execute_train_source_task(
     run_task.workspace_hint = Some(workspace_dir.display().to_string());
     let mut context = build_eval_context_with_compiled(config.clone(), compiled_prompts).await;
     context.dashboard_tx = dashboard_tx.clone();
-    context.devices.focus(DeviceId::Terminal).await?;
+    context.apps.focus(AppId::Terminal).await?;
     enter_episode_workspace(&mut context, &workspace_dir).await?;
     context
         .work_state
@@ -2863,14 +2863,14 @@ pub(crate) async fn execute_agent_loop_step(
         .iter()
         .filter_map(|input| match input {
             ClaimedRuntimeInput::Event(event) => Some(event.event_id.to_string()),
-            ClaimedRuntimeInput::DeviceNotice { .. } => None,
+            ClaimedRuntimeInput::AppNotice { .. } => None,
         })
         .collect::<Vec<_>>();
-    let claimed_device_notices = claimed_inputs
+    let claimed_app_notices = claimed_inputs
         .iter()
         .filter_map(|input| match input {
             ClaimedRuntimeInput::Event(_) => None,
-            ClaimedRuntimeInput::DeviceNotice { device, .. } => Some(*device),
+            ClaimedRuntimeInput::AppNotice { app, .. } => Some(*app),
         })
         .collect::<Vec<_>>();
     let claimed_input_messages = claimed_inputs
@@ -2881,7 +2881,7 @@ pub(crate) async fn execute_agent_loop_step(
         .iter()
         .filter_map(|input| match input {
             ClaimedRuntimeInput::Event(event) => Some(event.clone()),
-            ClaimedRuntimeInput::DeviceNotice { .. } => None,
+            ClaimedRuntimeInput::AppNotice { .. } => None,
         })
         .collect::<Vec<_>>();
     let snapshot = Snapshot::new_with_claimed_events(context, &claimed_event_views).await;
@@ -3198,7 +3198,7 @@ pub(crate) async fn execute_agent_loop_step(
     };
     runtime_step.set_current_doing(output.current_doing.clone());
     finalize_claimed_runtime_events(context, &claimed_event_ids, &output);
-    finalize_claimed_runtime_device_notices(context, &claimed_device_notices, &output);
+    finalize_claimed_runtime_app_notices(context, &claimed_app_notices, &output);
     let history_messages = runtime_step.history_messages().to_vec();
     if !runtime_step.is_history_empty() {
         record_runtime_history_messages(context, runtime_step.into_turn_draft()).await;
@@ -3226,7 +3226,7 @@ pub(crate) async fn execute_agent_loop_step(
 
 enum ClaimedRuntimeInput {
     Event(EventView),
-    DeviceNotice { device: DeviceId, reason: String },
+    AppNotice { app: AppId, reason: String },
 }
 
 fn claim_pending_runtime_inputs(context: &Context, max_events: usize) -> Vec<ClaimedRuntimeInput> {
@@ -3261,36 +3261,36 @@ fn claim_pending_runtime_inputs(context: &Context, max_events: usize) -> Vec<Cla
                     }
                 }
             }
-            PendingWork::DeviceNotice { device, reason } => {
+            PendingWork::AppNotice { app, reason } => {
                 let render = context
-                    .devices
+                    .apps
                     .state_renders()
                     .into_iter()
-                    .find(|(device_id, _)| *device_id == device)
+                    .find(|(device_id, _)| *device_id == app)
                     .map(|(_, render)| render);
                 let Some(render) = render else {
-                    if let Err(err) = context.pending_work.consume(PendingWork::DeviceNotice {
-                        device,
+                    if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
+                        app,
                         reason: String::new(),
                     }) {
                         tracing::error!(
-                            "failed to consume missing device notice driver for {device}: {err:?}"
+                            "failed to consume missing app notice driver for {app}: {err:?}"
                         );
                     }
                     continue;
                 };
-                if !device_render_requires_attention(device, &render) {
-                    if let Err(err) = context.pending_work.consume(PendingWork::DeviceNotice {
-                        device,
+                if !app_render_requires_attention(app, &render) {
+                    if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
+                        app,
                         reason: String::new(),
                     }) {
                         tracing::error!(
-                            "failed to consume stale device notice driver for {device}: {err:?}"
+                            "failed to consume stale app notice driver for {app}: {err:?}"
                         );
                     }
                     continue;
                 }
-                claimed_inputs.push(ClaimedRuntimeInput::DeviceNotice { device, reason });
+                claimed_inputs.push(ClaimedRuntimeInput::AppNotice { app, reason });
             }
         }
     }
@@ -3366,39 +3366,39 @@ fn finalize_claimed_runtime_events(
     }
 }
 
-fn finalize_claimed_runtime_device_notices(
+fn finalize_claimed_runtime_app_notices(
     context: &Context,
-    devices: &[DeviceId],
+    devices: &[AppId],
     output: &AgentLoopStepOutput,
 ) {
     if devices.is_empty() {
         return;
     }
 
-    let renders = context.devices.state_renders();
+    let renders = context.apps.state_renders();
     let mut released = Vec::new();
-    for device in devices {
+    for app in devices {
         let still_noticed = renders
             .iter()
-            .find(|(device_id, _)| device_id == device)
-            .map(|(device_id, render)| device_render_requires_attention(*device_id, render))
+            .find(|(device_id, _)| device_id == app)
+            .map(|(device_id, render)| app_render_requires_attention(*device_id, render))
             .unwrap_or(false);
-        let work = PendingWork::DeviceNotice {
-            device: *device,
+        let work = PendingWork::AppNotice {
+            app: *app,
             reason: String::new(),
         };
         if still_noticed {
             match context.pending_work.release_claimed(work) {
-                Ok(true) => released.push(device.to_string()),
+                Ok(true) => released.push(app.to_string()),
                 Ok(false) => {}
                 Err(err) => {
                     tracing::error!(
-                        "failed to release claimed device notice driver for {device}: {err:?}"
+                        "failed to release claimed app notice driver for {app}: {err:?}"
                     );
                 }
             }
         } else if let Err(err) = context.pending_work.consume(work) {
-            tracing::error!("failed to consume device notice driver for {device}: {err:?}");
+            tracing::error!("failed to consume app notice driver for {app}: {err:?}");
         }
     }
 
@@ -3413,7 +3413,7 @@ fn finalize_claimed_runtime_device_notices(
                 .unwrap_or(""),
             reactivated_device_notice_drivers = released.len(),
             devices = released.join(","),
-            "released claimed runtime device notice drivers back into frontier at turn end",
+            "released claimed runtime app notice drivers back into frontier at turn end",
         );
     }
 }
@@ -3500,9 +3500,9 @@ fn prompt_message_for_claimed_input(
                 payload.incoming_text.trim(),
             )),
         },
-        ClaimedRuntimeInput::DeviceNotice { device, reason } => PromptMessage::user(format!(
-            "<device_notice device=\"{}\">\nreason: {}\n</device_notice>",
-            device, reason,
+        ClaimedRuntimeInput::AppNotice { app, reason } => PromptMessage::user(format!(
+            "<device_notice app=\"{}\">\nreason: {}\n</device_notice>",
+            app, reason,
         )),
     }
 }
@@ -3887,14 +3887,14 @@ fn summarize_hindsight_query_value(value: &str, max_chars: usize) -> String {
 }
 
 fn summarize_terminal_for_hindsight(context: &Context) -> Option<String> {
-    if context.devices.focused() != Some(crate::device::DeviceId::Terminal) {
+    if context.apps.focused() != Some(crate::app::AppId::Terminal) {
         return None;
     }
     let (_, render) = context
-        .devices
+        .apps
         .state_renders()
         .into_iter()
-        .find(|(device_id, _)| *device_id == crate::device::DeviceId::Terminal)?;
+        .find(|(device_id, _)| *device_id == crate::app::AppId::Terminal)?;
     Some(render.lines.join("\n"))
 }
 
@@ -3921,7 +3921,7 @@ async fn spinova_loop(
     refresh_sleep_backlogs(sleep_status).await;
     let forced_sleep_status =
         maybe_start_forced_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await;
-    enqueue_device_notice_work(context);
+    enqueue_app_notice_work(context);
     sync_driver_frontier_from_sources(context);
     if context.active_runtime_turn {
         set_runtime_status(
@@ -3994,7 +3994,7 @@ async fn spinova_loop(
     }
     set_runtime_status(Some(tx), RuntimeStatusLevel::Info, status);
     context
-        .devices
+        .apps
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
         .await;
     context.active_runtime_turn = true;
@@ -4028,35 +4028,35 @@ fn sync_driver_frontier_from_sources(context: &Context) {
     }
 }
 
-fn enqueue_device_notice_work(context: &mut Context) {
-    let renders = context.devices.state_renders();
+fn enqueue_app_notice_work(context: &mut Context) {
+    let renders = context.apps.state_renders();
     for (device_id, render) in renders {
-        let noticed = device_render_requires_attention(device_id, &render);
+        let noticed = app_render_requires_attention(device_id, &render);
         if noticed {
-            if context.active_device_notices.insert(device_id) {
-                let reason = summarize_device_notice_reason(device_id, &render);
-                if let Err(err) = context.pending_work.enqueue(PendingWork::DeviceNotice {
-                    device: device_id,
+            if context.active_app_notices.insert(device_id) {
+                let reason = summarize_app_notice_reason(device_id, &render);
+                if let Err(err) = context.pending_work.enqueue(PendingWork::AppNotice {
+                    app: device_id,
                     reason,
                 }) {
                     tracing::error!(
-                        "failed to enqueue device notice work for {device_id}: {err:?}"
+                        "failed to enqueue app notice work for {device_id}: {err:?}"
                     );
                 }
             }
         } else {
-            context.active_device_notices.remove(&device_id);
+            context.active_app_notices.remove(&device_id);
         }
     }
 }
 
-fn summarize_device_notice_reason(
-    device_id: DeviceId,
-    render: &crate::device::DeviceStateRender,
+fn summarize_app_notice_reason(
+    device_id: AppId,
+    render: &crate::app::AppStateRender,
 ) -> String {
     match device_id {
-        DeviceId::Browser => "browser requires attention".to_string(),
-        DeviceId::Terminal => {
+        AppId::Browser => "browser requires attention".to_string(),
+        AppId::Terminal => {
             let unread_sessions = numeric_field(&render.lines, "sessions_with_unread_output");
             if unread_sessions > 0 {
                 format!("{unread_sessions} terminal session(s) have unread output")
@@ -4067,13 +4067,13 @@ fn summarize_device_notice_reason(
     }
 }
 
-fn device_render_requires_attention(
-    device_id: DeviceId,
-    render: &crate::device::DeviceStateRender,
+fn app_render_requires_attention(
+    device_id: AppId,
+    render: &crate::app::AppStateRender,
 ) -> bool {
     match device_id {
-        DeviceId::Browser => false,
-        DeviceId::Terminal => numeric_field(&render.lines, "sessions_with_unread_output") > 0,
+        AppId::Browser => false,
+        AppId::Terminal => numeric_field(&render.lines, "sessions_with_unread_output") > 0,
     }
 }
 
@@ -4357,13 +4357,13 @@ fn sync_dashboard_state(
     last_cycle_elapsed_ms: Option<u128>,
 ) {
     tx.send_modify(|state| {
-        let device_renders = context.devices.state_renders();
-        state.focused_device = context.devices.focused();
-        state.status_output = render_status_command_output_for_dashboard(context, &device_renders);
+        let app_renders = context.apps.state_renders();
+        state.focused_app = context.apps.focused();
+        state.status_output = render_status_command_output_for_dashboard(context, &app_renders);
         state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);
         state.inspect_telegram_output = render_telegram_status_for_dashboard(context);
         state.system_prompt_output = render_system_prompt_output_for_dashboard(context);
-        state.device_status_outputs = render_device_status_outputs_for_dashboard(context);
+        state.app_status_outputs = render_app_status_outputs_for_dashboard(context);
         if state.activity_cells.is_empty() {
             state.activity_cells = render_activity_for_dashboard(context);
         }
@@ -4381,10 +4381,10 @@ fn render_dashboard_footer_context(
         .llm
         .model_name()
         .unwrap_or_else(|| context.config.main_model.model_name.clone());
-    let focused_device = context
-        .devices
+    let focused_app = context
+        .apps
         .focused()
-        .map(|device| device.to_string())
+        .map(|app| app.to_string())
         .unwrap_or_else(|| "none".to_string());
     let effective_window = context
         .config
@@ -4398,7 +4398,7 @@ fn render_dashboard_footer_context(
                 &model,
                 estimated_input_tokens,
                 effective_window,
-                &focused_device
+                &focused_app
             )
         );
     };
@@ -4414,12 +4414,12 @@ fn render_dashboard_footer_context(
             if estimated { "~" } else { "" },
             format_compact_tokens(used),
             format_compact_tokens(effective_window),
-            focused_device
+            focused_app
         ),
         None => format!(
             "{model} · {} window · {}",
             format_compact_tokens(effective_window),
-            focused_device
+            focused_app
         ),
     }
 }
@@ -4444,55 +4444,55 @@ fn render_system_prompt_output_for_dashboard(context: &Context) -> String {
     }
 
     lines.push(String::new());
-    lines.push("[device_context]".to_string());
-    lines.push(crate::reasoning::prompts::build_device_context_prompt(
+    lines.push("[app_context]".to_string());
+    lines.push(crate::reasoning::prompts::build_app_context_prompt(
         context,
     ));
     lines.join("\n")
 }
 
-fn render_device_status_outputs_for_dashboard(context: &Context) -> Vec<(String, String)> {
-    let focused = context.devices.focused();
+fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String, String)> {
+    let focused = context.apps.focused();
     context
-        .devices
+        .apps
         .state_renders()
         .into_iter()
-        .map(|(device_id, state)| {
+        .map(|(app_id, state)| {
             let usage = context
-                .devices
-                .usage(device_id)
-                .unwrap_or(crate::device::DeviceUsage {
+                .apps
+                .usage(app_id)
+                .unwrap_or(crate::app::AppUsage {
                     purpose: "No usage available.".to_string(),
                     when_to_focus: Vec::new(),
                 });
             let how_to_use = context
-                .devices
-                .how_to_use(device_id)
-                .unwrap_or(crate::device::DeviceHowToUse { lines: Vec::new() });
+                .apps
+                .how_to_use(app_id)
+                .unwrap_or(crate::app::AppHowToUse { lines: Vec::new() });
             let mut lines = Vec::new();
-            let key = device_id.to_string().to_ascii_lowercase();
-            lines.push(format!("Device Status: {}", state.title));
+            let key = app_id.to_string().to_ascii_lowercase();
+            lines.push(format!("App Status: {}", state.title));
             lines.push(String::new());
             lines.push("[structured_state]".to_string());
-            lines.push(format!("device_id={key}"));
+            lines.push(format!("app_id={key}"));
             lines.push(format!("title={}", state.title));
             lines.extend(state.lines.iter().cloned());
             lines.push(String::new());
             lines.push("[usage]".to_string());
-            lines.push(crate::reasoning::prompts::build_device_usage_prompt(
-                device_id, &usage,
+            lines.push(crate::reasoning::prompts::build_app_usage_prompt(
+                app_id, &usage,
             ));
             lines.push(String::new());
             lines.push("[how_to_use]".to_string());
-            if focused == Some(device_id) {
-                lines.push(crate::reasoning::prompts::build_device_how_to_use_prompt(
-                    device_id,
+            if focused == Some(app_id) {
+                lines.push(crate::reasoning::prompts::build_app_how_to_use_prompt(
+                    app_id,
                     &how_to_use,
                 ));
             } else {
                 lines.push(
-                    crate::reasoning::prompts::build_device_pre_focus_note_prompt(
-                        device_id, &state,
+                    crate::reasoning::prompts::build_app_pre_focus_note_prompt(
+                        app_id, &state,
                     ),
                 );
             }
@@ -4505,19 +4505,19 @@ fn render_footer_context_with_usage(
     model: &str,
     estimated_input_tokens: Option<usize>,
     effective_window: usize,
-    focused_device: &str,
+    focused_app: &str,
 ) -> String {
     match estimated_input_tokens {
         Some(used) => format!(
             "{model} · ~{}/{} used · {}",
             format_compact_tokens(used),
             format_compact_tokens(effective_window),
-            focused_device
+            focused_app
         ),
         None => format!(
             "{model} · {} window · {}",
             format_compact_tokens(effective_window),
-            focused_device
+            focused_app
         ),
     }
 }
@@ -4683,14 +4683,14 @@ fn format_duration(duration: Duration) -> String {
 
 fn render_status_command_output_for_dashboard(
     context: &Context,
-    _: &[(DeviceId, crate::device::DeviceStateRender)],
+    _: &[(AppId, crate::app::AppStateRender)],
 ) -> String {
     let mut sections = Vec::new();
 
     let focused = context
-        .devices
+        .apps
         .focused()
-        .map(|device| device.to_string())
+        .map(|app| app.to_string())
         .unwrap_or_else(|| "none".to_string());
     let active_todos = context.todo_board.active_items().count();
     let active_events = context.pending_work.pending_count();
@@ -4700,7 +4700,7 @@ fn render_status_command_output_for_dashboard(
         "idle"
     };
     sections.push(format!(
-        "Overview\nRuntime turn: {runtime_turn}\nFocused device: {focused}\nTodos: {active_todos}\nEvents: {active_events}"
+        "Overview\nRuntime turn: {runtime_turn}\nFocused app: {focused}\nTodos: {active_todos}\nEvents: {active_events}"
     ));
 
     sections.push(format!(

@@ -10,7 +10,7 @@ use crate::{
     reasoning::{
         prompts::{
             HISTORY_COMPACTION_PROMPT, HISTORY_COMPACTION_SUMMARY_PREFIX, SYSTEM_PROMPT_KERNEL,
-            TOOL_ACTION_PROMPT, build_device_context_prompt,
+            TOOL_ACTION_PROMPT, build_app_context_prompt,
         },
         runtime::{
             AgentMessage, AgentToolSpec, PromptMessage, PromptRequest, PromptRole,
@@ -47,7 +47,7 @@ pub fn build_runtime_request_envelope(
             .filter(|line| !line.trim().is_empty())
             .cloned(),
     );
-    system_messages.push(build_device_context_prompt(context));
+    system_messages.push(build_app_context_prompt(context));
     if !context.prompt_memory.recalled_memories.is_empty() {
         system_messages.push(format!(
             "相关长期记忆：\n{}",
