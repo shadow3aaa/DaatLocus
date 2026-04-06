@@ -413,6 +413,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         ),
         inspect_telegram_output: render_telegram_status_for_dashboard(&context),
         system_prompt_output: render_system_prompt_output_for_dashboard(&context),
+        device_status_outputs: render_device_status_outputs_for_dashboard(&context),
         activity_cells: render_activity_for_dashboard(&context),
         live_activity_cells: Vec::new(),
         last_cycle_elapsed_ms: None,
@@ -807,6 +808,11 @@ fn initial_train_source_dashboard_state(status: String) -> DashboardState {
         system_prompt_output:
             "System Prompt\nSystem prompt inspection is unavailable in train-source sessions."
                 .to_string(),
+        device_status_outputs: vec![(
+            "terminal".to_string(),
+            "Device Status\nDevice status inspection is unavailable in train-source sessions."
+                .to_string(),
+        )],
         activity_cells: Vec::new(),
         live_activity_cells: Vec::new(),
         last_cycle_elapsed_ms: None,
@@ -4103,6 +4109,7 @@ fn sync_dashboard_state(
         state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);
         state.inspect_telegram_output = render_telegram_status_for_dashboard(context);
         state.system_prompt_output = render_system_prompt_output_for_dashboard(context);
+        state.device_status_outputs = render_device_status_outputs_for_dashboard(context);
         if state.activity_cells.is_empty() {
             state.activity_cells = render_activity_for_dashboard(context);
         }
@@ -4186,6 +4193,33 @@ fn render_system_prompt_output_for_dashboard(context: &Context) -> String {
     lines.push("[device_context]".to_string());
     lines.push(crate::reasoning::prompts::build_device_context_prompt(context));
     lines.join("\n")
+}
+
+fn render_device_status_outputs_for_dashboard(context: &Context) -> Vec<(String, String)> {
+    let focused = context.devices.focused();
+    context
+        .devices
+        .state_renders()
+        .into_iter()
+        .map(|(device_id, state)| {
+            let mut lines = Vec::new();
+            let key = device_id.to_string().to_ascii_lowercase();
+            lines.push(format!("Device Status: {}", state.title));
+            lines.push(String::new());
+            lines.push("[structured_state]".to_string());
+            lines.push(format!("device_id={key}"));
+            lines.push(format!("title={}", state.title));
+            lines.push(format!("is_focused={}", state.is_focused));
+            lines.push(format!("attention={}", state.attention));
+            lines.extend(state.lines.iter().cloned());
+            lines.push(String::new());
+            lines.push("[llm_note]".to_string());
+            lines.push(crate::reasoning::prompts::build_device_instruction_prompt(
+                device_id, &state, focused,
+            ));
+            (key, lines.join("\n"))
+        })
+        .collect()
 }
 
 fn render_footer_context_with_usage(

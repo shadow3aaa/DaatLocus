@@ -88,6 +88,28 @@ pub fn build_device_context_prompt(context: &Context) -> String {
     sections.join("\n\n")
 }
 
+pub fn build_device_instruction_prompt(
+    device_id: DeviceId,
+    state: &DeviceStateRender,
+    focused_device: Option<DeviceId>,
+) -> String {
+    if focused_device == Some(device_id) {
+        return match device_id {
+            DeviceId::Terminal => TERMINAL_PROMPT.to_string(),
+        };
+    }
+
+    let mut sections = vec![format!(
+        "当前 `{device_id}` 不在前景；如果你需要操作它，请先调用 `focus_device` 将它切到前景。"
+    )];
+
+    if let Some(hint) = background_attention_hint(device_id, state) {
+        sections.push(hint);
+    }
+
+    sections.join("\n")
+}
+
 fn background_attention_hint(device_id: DeviceId, state: &DeviceStateRender) -> Option<String> {
     if !matches!(state.attention, AttentionLevel::Notice) {
         return None;
