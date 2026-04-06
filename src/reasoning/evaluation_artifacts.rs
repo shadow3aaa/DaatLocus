@@ -105,6 +105,12 @@ pub struct EvaluationArtifactTurnDemo {
     pub expected_behavior: String,
     #[serde(default)]
     pub judge_focus: Vec<String>,
+    #[serde(default)]
+    pub coverage_axes: Vec<String>,
+    #[serde(default)]
+    pub persona_anchors: Vec<String>,
+    #[serde(default)]
+    pub covered_terminal_answer_rules: Vec<String>,
     pub must_use_tools: bool,
     #[serde(default)]
     pub must_not_final_answer_patterns: Vec<String>,

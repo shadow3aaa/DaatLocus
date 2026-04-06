@@ -16,7 +16,7 @@ const RUNTIME_TURN_DEMO_GENERATOR_SYSTEM_PROMPT: &str = r#"你现在负责根据
 要求：
 - 输出多条高价值 demos，覆盖符合 persona 与渠道契约的多个关键风险面向。
 - 优先把 `terminal_answer_rules` 视为 demo 设计主轴：尽量让每个高价值 demo 主要检验其中一条终局规则，再叠加相关的过程约束。
-- 若 `terminal_answer_rules` 中存在多条规则，必须让每条规则至少被一个 demo 覆盖；如果某条规则过于复杂，可以拆成多个 demo 分别检验其不同失败模式。
+- 若 `terminal_answer_rules` 中存在多条规则，必须按规则分组输出：每条规则对应一个 `rule_demo_group`，每个 group 至少包含一个 demo；如果某条规则过于复杂，可以在该 group 下拆成多个 demo 分别检验其不同失败模式。
 - 每个 demo 都必须是一个具体的外部事件场景，而不是抽象规则。
 - demos 应整体覆盖多个不同的风险轴，例如：是否需要工具查证、是否容易过早终止、是否要求自主决策、是否依赖当前世界状态、是否需要保持语言与风格一致。
 - 不要生成重复场景，不要只改写同一句话。
@@ -40,6 +40,13 @@ pub struct RuntimeTurnDemoGeneratorProgram;
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeTurnDemoGeneratorOutput {
     pub rationale: String,
+    pub rule_demo_groups: Vec<GeneratedTurnDemoGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GeneratedTurnDemoGroup {
+    pub terminal_answer_rule: String,
+    #[serde(default)]
     pub demos: Vec<GeneratedTurnDemo>,
 }
 
@@ -87,14 +94,15 @@ impl Program for RuntimeTurnDemoGeneratorProgram {
             .input("persona spec", "人格描述文件内容。")
             .input("workspace facts", "当前仓库与系统可见事实，只能基于这些事实构造需要新鲜世界状态的 demo。")
             .output("rationale", "为什么这组 demos 能覆盖最关键的行为风险。")
-            .output("demos", "用于冷启动编译的 turn demos 列表。")
+            .output("rule_demo_groups", "按 terminal_answer_rules 分组的 turn demos 列表；每条规则一个 group。")
             .rule("输出多条 demos，覆盖多个关键风险面向，而不是只围绕单一类型反复改写。")
             .rule("应覆盖多个风险轴，而不是机械凑固定题型。")
             .rule("不得输出重复或仅同义改写的 demos。")
             .rule("应优先按 terminal_answer_rules 组织 demo 主轴，再叠加相关的 behavior_rules、tool_use_rules 与 anti_patterns。")
-            .rule("如果 persona spec 中存在多条 terminal_answer_rules，必须让每条规则至少被一个 demo 覆盖；复杂规则可以拆成多个 demo。")
+            .rule("如果 persona spec 中存在多条 terminal_answer_rules，必须让每条规则各自对应一个 rule_demo_group；每个 group 至少有一个 demo，复杂规则可以在该 group 下拆成多个 demo。")
             .rule("最终 assistant 必须可直接交付给用户，这个约束要体现在 expected_behavior 与 judge_focus 中。")
             .rule("每个 demo 都应给出 coverage_axes 和 persona_anchors，说明它为何存在以及锚定了 persona 的哪些方向。")
+            .rule("每个 rule_demo_group 都必须给出 terminal_answer_rule，并逐条引用 persona spec 中对应的 terminal_answer_rules 原文。")
             .rule("凡是依赖当前世界状态的 demo，都必须把 requires_fresh_world_state 设为 true。")
             .rule("只有当答案不能直接从当前 runtime snapshot 读取、必须额外探索或执行时，才把 must_use_tools 设为 true。")
             .rule("TodoBoard 摘要、事件列表、设备结构状态这些 runtime snapshot 已直接可见的只读状态，可以 requires_fresh_world_state=true 但 must_use_tools=false。")
@@ -116,7 +124,9 @@ impl RuntimeTurnDemoGeneratorProgram {
         ir.push_instruction("优先生成能暴露终局性判断错误的 demos，而不是覆盖面泛泛的普通案例。");
         ir.push_instruction("不要机械凑固定数量，也不要为了凑类别而生成低价值 demo；重点是多方面覆盖真实高风险场景。");
         ir.push_instruction("优先从 persona spec 的 terminal_answer_rules 中抽取终局约束；尽量让每个 demo 围绕其中一条主要终局规则展开。");
-        ir.push_instruction("如果 terminal_answer_rules 有多条，必须让每条规则至少出现一次；如果某条规则过于复杂，允许拆成多个 demo 分别测试。");
+        ir.push_instruction("如果 terminal_answer_rules 有多条，必须为每条规则输出一个 rule_demo_group；不要把多条规则合并进同一个 group。");
+        ir.push_instruction("每个 rule_demo_group 的 terminal_answer_rule 必须逐字引用 persona spec 中对应的 terminal_answer_rules 原文。");
+        ir.push_instruction("每个 rule_demo_group 至少包含一个 demo；如果某条规则过于复杂，允许在该 group 下输出多个 demos。");
         ir.push_instruction("demo 的 title、scenario_summary、incoming_text、expected_behavior、judge_focus 默认应跟随 persona spec 中的 language。");
         ir.push_instruction("先从 persona spec 中抽取真正需要检验的行为方向，再把这些方向落成具体 demo。不要让内置题型主导生成。");
         ir.push_instruction("不要把 behavior_rules、tool_use_rules、anti_patterns 各自孤立成题；应把它们作为对 terminal_answer_rules 的交叉约束，组合进同一个 demo。");

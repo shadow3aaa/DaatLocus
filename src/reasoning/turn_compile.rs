@@ -875,16 +875,29 @@ fn demos_from_generator_output(
     spec: &PromptPersonaSpec,
     output: &RuntimeTurnDemoGeneratorOutput,
 ) -> Result<Vec<EvaluationArtifactTurnDemo>> {
-    let demos = output
-        .demos
+    let usable_generated_demos = output
+        .rule_demo_groups
         .iter()
-        .filter(|demo| {
-            !demo.title.trim().is_empty()
-                && !demo.scenario_summary.trim().is_empty()
-                && !demo.incoming_text.trim().is_empty()
-                && !demo.expected_behavior.trim().is_empty()
+        .flat_map(|group| {
+            group.demos.iter().filter_map(move |demo| {
+                if demo.title.trim().is_empty()
+                    || demo.scenario_summary.trim().is_empty()
+                    || demo.incoming_text.trim().is_empty()
+                    || demo.expected_behavior.trim().is_empty()
+                {
+                    None
+                } else {
+                    Some((group.terminal_answer_rule.as_str(), demo))
+                }
+            })
         })
-        .map(|demo| normalize_generated_turn_demo(spec, demo))
+        .collect::<Vec<_>>();
+
+    validate_generated_demo_coverage(spec, &output.rule_demo_groups, &usable_generated_demos)?;
+
+    let demos = usable_generated_demos
+        .iter()
+        .map(|(terminal_rule, demo)| normalize_generated_turn_demo(spec, terminal_rule, demo))
         .collect::<Vec<_>>();
 
     if demos.is_empty() {
@@ -892,12 +905,12 @@ fn demos_from_generator_output(
             "runtime_turn_demo_generator produced zero usable demos"
         ));
     }
-    validate_generated_demo_coverage(&output.demos)?;
     Ok(demos)
 }
 
 fn normalize_generated_turn_demo(
     spec: &PromptPersonaSpec,
+    terminal_answer_rule: &str,
     demo: &crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo,
 ) -> EvaluationArtifactTurnDemo {
     let (requires_fresh_world_state, must_use_tools) =
@@ -945,6 +958,19 @@ fn normalize_generated_turn_demo(
         ],
         expected_behavior: demo.expected_behavior.trim().to_string(),
         judge_focus,
+        coverage_axes: demo
+            .coverage_axes
+            .iter()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect(),
+        persona_anchors: demo
+            .persona_anchors
+            .iter()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect(),
+        covered_terminal_answer_rules: vec![terminal_answer_rule.trim().to_string()],
         must_use_tools,
         must_not_final_answer_patterns: demo
             .must_not_final_answer_patterns
@@ -966,7 +992,12 @@ fn normalized_demo_requirements(
 }
 
 fn validate_generated_demo_coverage(
-    demos: &[crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo],
+    spec: &PromptPersonaSpec,
+    groups: &[crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemoGroup],
+    demos: &[(
+        &str,
+        &crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo,
+    )],
 ) -> Result<()> {
     if demos.len() < 2 {
         return Err(miette!(
@@ -975,10 +1006,67 @@ fn validate_generated_demo_coverage(
         ));
     }
 
+    let required_terminal_rules = spec
+        .terminal_answer_rules
+        .iter()
+        .map(|rule| normalize_rule_text(rule))
+        .filter(|rule| !rule.is_empty())
+        .collect::<Vec<_>>();
+    if !required_terminal_rules.is_empty() && groups.len() != required_terminal_rules.len() {
+        return Err(miette!(
+            "runtime_turn_demo_generator produced {} rule_demo_groups, expected exactly terminal_answer_rules count {}",
+            groups.len(),
+            required_terminal_rules.len()
+        ));
+    }
+
     let mut seen_titles = std::collections::HashSet::new();
     let mut seen_axes = std::collections::HashSet::new();
     let mut seen_anchors = std::collections::HashSet::new();
-    for demo in demos {
+    let mut seen_terminal_rules = std::collections::HashSet::new();
+    let required_terminal_rule_set = required_terminal_rules
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut usable_demo_counts_by_rule = std::collections::HashMap::new();
+    for (terminal_rule, _demo) in demos {
+        *usable_demo_counts_by_rule
+            .entry(normalize_rule_text(terminal_rule))
+            .or_insert(0usize) += 1;
+    }
+    for group in groups {
+        let normalized_group_rule = normalize_rule_text(&group.terminal_answer_rule);
+        if normalized_group_rule.is_empty() {
+            return Err(miette!(
+                "runtime_turn_demo_generator produced a rule_demo_group without terminal_answer_rule"
+            ));
+        }
+        if !required_terminal_rule_set.contains(&normalized_group_rule) {
+            return Err(miette!(
+                "runtime_turn_demo_generator produced unknown terminal_answer_rule '{}'",
+                normalized_group_rule
+            ));
+        }
+        if !seen_terminal_rules.insert(normalized_group_rule.clone()) {
+            return Err(miette!(
+                "runtime_turn_demo_generator produced duplicate rule_demo_group for terminal rule '{}'",
+                normalized_group_rule
+            ));
+        }
+        if usable_demo_counts_by_rule
+            .get(&normalized_group_rule)
+            .copied()
+            .unwrap_or_default()
+            == 0
+        {
+            return Err(miette!(
+                "runtime_turn_demo_generator produced rule_demo_group for terminal rule '{}' but no usable demos in that group",
+                normalized_group_rule
+            ));
+        }
+    }
+
+    for (_terminal_rule, demo) in demos {
         let normalized_title = demo.title.trim().to_string();
         if !seen_titles.insert(normalized_title.clone()) {
             return Err(miette!(
@@ -1012,7 +1100,25 @@ fn validate_generated_demo_coverage(
         ));
     }
 
+    if !required_terminal_rule_set.is_empty() {
+        let missing_rules = required_terminal_rules
+            .iter()
+            .filter(|rule| !seen_terminal_rules.contains(*rule))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_rules.is_empty() {
+            return Err(miette!(
+                "runtime_turn_demo_generator did not cover all terminal_answer_rules; missing: {}",
+                missing_rules.join(" | ")
+            ));
+        }
+    }
+
     Ok(())
+}
+
+fn normalize_rule_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn render_persona_spec_for_generator(spec: &PromptPersonaSpec) -> String {
