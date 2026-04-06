@@ -567,6 +567,14 @@ trait DashboardCommand: Sync {
     fn subcommands(&self) -> &'static [&'static dyn DashboardSubcommand] {
         &[]
     }
+
+    fn complete_arguments(
+        &self,
+        _parts: &[&str],
+        _context: &DashboardCommandContext<'_>,
+    ) -> Vec<CommandSuggestion> {
+        Vec::new()
+    }
 }
 
 trait DashboardSubcommand: Sync {
@@ -771,6 +779,26 @@ impl DashboardCommand for DeviceStatusCommand {
 
     fn aliases(&self) -> &'static [&'static str] {
         &["device_status"]
+    }
+
+    fn complete_arguments(
+        &self,
+        parts: &[&str],
+        context: &DashboardCommandContext<'_>,
+    ) -> Vec<CommandSuggestion> {
+        let prefix = parts.get(1).copied().unwrap_or_default().trim().to_ascii_lowercase();
+        context
+            .state
+            .device_status_outputs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .filter(|candidate| candidate.starts_with(&prefix))
+            .map(|candidate| CommandSuggestion {
+                display: candidate.to_string(),
+                completion: format!("{} {}", self.primary_verb(), candidate),
+                description: self.description().to_string(),
+            })
+            .collect()
     }
 
     fn execute(
@@ -1130,8 +1158,19 @@ pub async fn run_tui_dashboard(
                     command_popup_scroll = 0;
                 }
                 KeyCode::Tab => {
+                    let state = rx.borrow();
+                    let command_context = DashboardCommandContext {
+                        requests: &pending_requests,
+                        telegram_acl: &telegram_acl,
+                        state: &state,
+                        control_tx: &control_tx,
+                    };
                     if let Some(completion) =
-                        selected_command_completion(&command_input, command_popup_selection)
+                        selected_command_completion(
+                            &command_input,
+                            command_popup_selection,
+                            &command_context,
+                        )
                     {
                         command_input = completion;
                         command_popup_selection = 0;
@@ -1144,7 +1183,14 @@ pub async fn run_tui_dashboard(
                     command_popup_scroll = 0;
                 }
                 KeyCode::Up => {
-                    let matches = matching_commands(&command_input);
+                    let state = rx.borrow();
+                    let command_context = DashboardCommandContext {
+                        requests: &pending_requests,
+                        telegram_acl: &telegram_acl,
+                        state: &state,
+                        control_tx: &control_tx,
+                    };
+                    let matches = matching_commands(&command_input, &command_context);
                     if !matches.is_empty() {
                         command_popup_selection = command_popup_selection
                             .saturating_sub(1)
@@ -1157,7 +1203,14 @@ pub async fn run_tui_dashboard(
                     }
                 }
                 KeyCode::Down => {
-                    let matches = matching_commands(&command_input);
+                    let state = rx.borrow();
+                    let command_context = DashboardCommandContext {
+                        requests: &pending_requests,
+                        telegram_acl: &telegram_acl,
+                        state: &state,
+                        control_tx: &control_tx,
+                    };
+                    let matches = matching_commands(&command_input, &command_context);
                     if !matches.is_empty() {
                         command_popup_selection =
                             (command_popup_selection + 1).min(matches.len() - 1);
@@ -1174,8 +1227,19 @@ pub async fn run_tui_dashboard(
                     command_popup_scroll = 0;
                 }
                 KeyCode::Enter => {
+                    let state = rx.borrow();
+                    let command_context = DashboardCommandContext {
+                        requests: &pending_requests,
+                        telegram_acl: &telegram_acl,
+                        state: &state,
+                        control_tx: &control_tx,
+                    };
                     if let Some(completion) =
-                        selected_command_completion(&command_input, command_popup_selection)
+                        selected_command_completion(
+                            &command_input,
+                            command_popup_selection,
+                            &command_context,
+                        )
                         && completion != command_input
                     {
                         command_input = completion;
@@ -1213,7 +1277,13 @@ pub async fn run_tui_dashboard(
 
         let state = rx.borrow();
         let popup_rows = if command_overlay.is_none() {
-            command_popup_row_count(&command_input)
+            let command_context = DashboardCommandContext {
+                requests: &pending_requests,
+                telegram_acl: &telegram_acl,
+                state: &state,
+                control_tx: &control_tx,
+            };
+            command_popup_row_count(&command_input, &command_context)
         } else {
             0
         };
@@ -1236,6 +1306,12 @@ pub async fn run_tui_dashboard(
                 f,
                 root[1],
                 &command_input,
+                &DashboardCommandContext {
+                    requests: &pending_requests,
+                    telegram_acl: &telegram_acl,
+                    state: &state,
+                    control_tx: &control_tx,
+                },
                 state.runtime_status.as_deref(),
                 &state.footer_context,
                 command_overlay.is_some(),
@@ -1858,10 +1934,11 @@ fn render_command_popup(
     f: &mut Frame,
     area: Rect,
     input: &str,
+    context: &DashboardCommandContext<'_>,
     selected_index: usize,
     scroll: usize,
 ) {
-    let matches = matching_commands(input);
+    let matches = matching_commands(input, context);
     if matches.is_empty() {
         return;
     }
@@ -1903,18 +1980,19 @@ fn render_command_bar(
     f: &mut Frame,
     area: Rect,
     input: &str,
+    context: &DashboardCommandContext<'_>,
     runtime_status: Option<&str>,
     footer_context: &str,
     overlay_open: bool,
     popup_selection: usize,
     popup_scroll: usize,
 ) {
-    let completion = selected_command_completion(input, 0);
-    let hint = command_hint(input);
+    let completion = selected_command_completion(input, 0, context);
+    let hint = command_hint(input, context);
     let popup_rows = if overlay_open {
         0
     } else {
-        command_popup_row_count(input)
+        command_popup_row_count(input, context)
     };
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -1975,7 +2053,7 @@ fn render_command_bar(
     ]);
     f.render_widget(Paragraph::new(prompt), rows[1]);
     let footer_row = if popup_rows > 0 {
-        render_command_popup(f, rows[2], input, popup_selection, popup_scroll);
+        render_command_popup(f, rows[2], input, context, popup_selection, popup_scroll);
         rows[3]
     } else {
         rows[2]
@@ -2055,8 +2133,12 @@ fn fallback_output(output: &str) -> String {
     }
 }
 
-fn selected_command_completion(input: &str, selected_index: usize) -> Option<String> {
-    let matches = matching_commands(input);
+fn selected_command_completion(
+    input: &str,
+    selected_index: usize,
+    context: &DashboardCommandContext<'_>,
+) -> Option<String> {
+    let matches = matching_commands(input, context);
     if matches.is_empty() {
         return None;
     }
@@ -2064,7 +2146,7 @@ fn selected_command_completion(input: &str, selected_index: usize) -> Option<Str
     Some(matches[index].completion.clone())
 }
 
-fn matching_commands(input: &str) -> Vec<CommandSuggestion> {
+fn matching_commands(input: &str, context: &DashboardCommandContext<'_>) -> Vec<CommandSuggestion> {
     let trimmed = input.trim();
     let trailing_space = input.ends_with(' ');
     if trimmed.is_empty() {
@@ -2082,27 +2164,33 @@ fn matching_commands(input: &str) -> Vec<CommandSuggestion> {
         .iter()
         .copied()
         .find(|command| command.accepts(parts[0]))
-        && !command.subcommands().is_empty()
-        && (parts.len() > 1 || trailing_space)
     {
-        let prefix = if trailing_space {
-            ""
-        } else {
-            parts.get(1).copied().unwrap_or_default()
-        };
-        let direct = command
-            .subcommands()
-            .iter()
-            .copied()
-            .filter(|subcommand| subcommand.name().starts_with(prefix))
-            .map(|subcommand| CommandSuggestion {
-                display: subcommand.usage().to_string(),
-                completion: format!("{} {}", command.primary_verb(), subcommand.name()),
-                description: subcommand.description().to_string(),
-            })
-            .collect::<Vec<_>>();
-        if !direct.is_empty() {
-            return direct;
+        if !command.subcommands().is_empty() && (parts.len() > 1 || trailing_space) {
+            let prefix = if trailing_space {
+                ""
+            } else {
+                parts.get(1).copied().unwrap_or_default()
+            };
+            let direct = command
+                .subcommands()
+                .iter()
+                .copied()
+                .filter(|subcommand| subcommand.name().starts_with(prefix))
+                .map(|subcommand| CommandSuggestion {
+                    display: subcommand.usage().to_string(),
+                    completion: format!("{} {}", command.primary_verb(), subcommand.name()),
+                    description: subcommand.description().to_string(),
+                })
+                .collect::<Vec<_>>();
+            if !direct.is_empty() {
+                return direct;
+            }
+        } else if parts.len() > 1 || trailing_space {
+            let args = command.complete_arguments(&parts, context);
+            if !args.is_empty() {
+                return args;
+            }
+            return Vec::new();
         }
     }
     dashboard_commands()
@@ -2117,8 +2205,8 @@ fn matching_commands(input: &str) -> Vec<CommandSuggestion> {
         .collect::<Vec<_>>()
 }
 
-fn command_popup_row_count(input: &str) -> u16 {
-    let matches = matching_commands(input);
+fn command_popup_row_count(input: &str, context: &DashboardCommandContext<'_>) -> u16 {
+    let matches = matching_commands(input, context);
     if matches.is_empty() {
         0
     } else {
@@ -2140,8 +2228,8 @@ fn adjusted_popup_scroll(current_scroll: usize, selected_index: usize, total: us
     }
 }
 
-fn command_hint(input: &str) -> String {
-    let matches = matching_commands(input);
+fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
+    let matches = matching_commands(input, context);
     if input.trim().is_empty() {
         return "Up/Down select. Tab accept. Enter run. Esc clear.".to_string();
     }
