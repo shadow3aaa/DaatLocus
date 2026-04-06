@@ -5,16 +5,20 @@ use miette::{Result, miette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{sandbox::RuntimeSandboxPolicy, terminal_device::TerminalDevice};
+use crate::{
+    browser_device::BrowserDevice, sandbox::RuntimeSandboxPolicy, terminal_device::TerminalDevice,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
 pub enum DeviceId {
+    Browser,
     Terminal,
 }
 
 impl Display for DeviceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Browser => write!(f, "Browser"),
             Self::Terminal => write!(f, "Terminal"),
         }
     }
@@ -22,6 +26,7 @@ impl Display for DeviceId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceToolScope {
+    Browser,
     Terminal,
 }
 
@@ -256,6 +261,145 @@ impl DeviceManager {
             .downcast_mut::<TerminalDevice>()
             .ok_or_else(|| miette!("focused device is not Terminal: {:?}", focused))?;
         terminal.terminate_session(session_id).await
+    }
+
+    pub async fn browser_open(
+        &mut self,
+        url: &str,
+    ) -> Result<crate::browser_device::BrowserOpenResult> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let browser = device
+            .as_any_mut()
+            .downcast_mut::<BrowserDevice>()
+            .ok_or_else(|| miette!("focused device is not Browser: {:?}", focused))?;
+        browser.open_page(url).await
+    }
+
+    pub async fn browser_snapshot(
+        &mut self,
+        page_id: &str,
+    ) -> Result<crate::browser_device::BrowserSnapshotResult> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let browser = device
+            .as_any_mut()
+            .downcast_mut::<BrowserDevice>()
+            .ok_or_else(|| miette!("focused device is not Browser: {:?}", focused))?;
+        browser.snapshot_page(page_id).await
+    }
+
+    pub async fn browser_find_in_page(
+        &mut self,
+        page_id: &str,
+        query: &str,
+        max_results: usize,
+    ) -> Result<crate::browser_device::BrowserFindResult> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let browser = device
+            .as_any_mut()
+            .downcast_mut::<BrowserDevice>()
+            .ok_or_else(|| miette!("focused device is not Browser: {:?}", focused))?;
+        browser.find_in_page(page_id, query, max_results).await
+    }
+
+    pub async fn browser_wait(
+        &mut self,
+        page_id: &str,
+        state: Option<&str>,
+        timeout_ms: Option<u64>,
+    ) -> Result<crate::browser_device::BrowserWaitResult> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let browser = device
+            .as_any_mut()
+            .downcast_mut::<BrowserDevice>()
+            .ok_or_else(|| miette!("focused device is not Browser: {:?}", focused))?;
+        browser.wait_for_page(page_id, state, timeout_ms).await
+    }
+
+    pub async fn browser_click(
+        &mut self,
+        page_id: &str,
+        snapshot_id: &str,
+        element_ref: &str,
+    ) -> Result<crate::browser_device::BrowserActionResult> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let browser = device
+            .as_any_mut()
+            .downcast_mut::<BrowserDevice>()
+            .ok_or_else(|| miette!("focused device is not Browser: {:?}", focused))?;
+        browser.click(page_id, snapshot_id, element_ref).await
+    }
+
+    pub async fn browser_fill(
+        &mut self,
+        page_id: &str,
+        snapshot_id: &str,
+        element_ref: &str,
+        value: &str,
+    ) -> Result<crate::browser_device::BrowserActionResult> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let browser = device
+            .as_any_mut()
+            .downcast_mut::<BrowserDevice>()
+            .ok_or_else(|| miette!("focused device is not Browser: {:?}", focused))?;
+        browser.fill(page_id, snapshot_id, element_ref, value).await
+    }
+
+    pub async fn browser_back(
+        &mut self,
+        page_id: &str,
+    ) -> Result<crate::browser_device::BrowserActionResult> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let browser = device
+            .as_any_mut()
+            .downcast_mut::<BrowserDevice>()
+            .ok_or_else(|| miette!("focused device is not Browser: {:?}", focused))?;
+        browser.go_back(page_id).await
+    }
+
+    pub async fn browser_forward(
+        &mut self,
+        page_id: &str,
+    ) -> Result<crate::browser_device::BrowserActionResult> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let browser = device
+            .as_any_mut()
+            .downcast_mut::<BrowserDevice>()
+            .ok_or_else(|| miette!("focused device is not Browser: {:?}", focused))?;
+        browser.go_forward(page_id).await
+    }
+
+    pub async fn browser_reload(
+        &mut self,
+        page_id: &str,
+    ) -> Result<crate::browser_device::BrowserActionResult> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let browser = device
+            .as_any_mut()
+            .downcast_mut::<BrowserDevice>()
+            .ok_or_else(|| miette!("focused device is not Browser: {:?}", focused))?;
+        browser.reload(page_id).await
+    }
+
+    pub async fn browser_close_page(
+        &mut self,
+        page_id: &str,
+    ) -> Result<crate::browser_device::BrowserActionResult> {
+        let focused = self.focused;
+        let device = self.focused_device_mut()?;
+        let browser = device
+            .as_any_mut()
+            .downcast_mut::<BrowserDevice>()
+            .ok_or_else(|| miette!("focused device is not Browser: {:?}", focused))?;
+        browser.close_page(page_id).await
     }
 
     pub fn terminal_session_state(

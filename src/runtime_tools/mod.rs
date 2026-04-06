@@ -16,6 +16,7 @@ use crate::{
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 
+mod browser;
 mod terminal;
 mod work;
 
@@ -355,6 +356,7 @@ eof_line: "*** End of File" LF
 pub fn build_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
     let mut tools: Vec<Box<dyn RuntimeTool>> = vec![Box::new(ApplyPatchRuntimeTool)];
     tools.extend(work::register_tools());
+    tools.extend(browser::register_tools());
     tools.extend(terminal::register_tools());
     tools
 }

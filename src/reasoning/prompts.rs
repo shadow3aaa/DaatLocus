@@ -110,6 +110,7 @@ fn background_attention_hint(device_id: DeviceId, state: &DeviceStateRender) -> 
     }
 
     let summary = match device_id {
+        DeviceId::Browser => return None,
         DeviceId::Terminal => {
             let session_id = first_terminal_session_id(state).unwrap_or("unknown");
             if numeric_field(&state.lines, "sessions_with_unread_output") > 0 {
@@ -121,6 +122,7 @@ fn background_attention_hint(device_id: DeviceId, state: &DeviceStateRender) -> 
     };
 
     Some(match device_id {
+        DeviceId::Browser => return None,
         DeviceId::Terminal => format!(
             "- {} 如果你决定处理终端，请先调用 `focus_device` 将 `Terminal` 切到前景。",
             summary
@@ -138,6 +140,7 @@ fn numeric_field(lines: &[String], key: &str) -> usize {
 
 fn device_requires_attention(device_id: DeviceId, state: &DeviceStateRender) -> bool {
     match device_id {
+        DeviceId::Browser => false,
         DeviceId::Terminal => numeric_field(&state.lines, "sessions_with_unread_output") > 0,
     }
 }
@@ -154,20 +157,12 @@ pub fn build_device_usage_prompt(device_id: DeviceId, usage: &DeviceUsage) -> St
     let mut lines = vec![format!("`{device_id}` 的用途：{}", usage.purpose)];
     if !usage.when_to_focus.is_empty() {
         lines.push("适合聚焦它的时机：".to_string());
-        lines.extend(
-            usage
-                .when_to_focus
-                .iter()
-                .map(|line| format!("- {line}")),
-        );
+        lines.extend(usage.when_to_focus.iter().map(|line| format!("- {line}")));
     }
     lines.join("\n")
 }
 
-pub fn build_device_how_to_use_prompt(
-    device_id: DeviceId,
-    how_to_use: &DeviceHowToUse,
-) -> String {
+pub fn build_device_how_to_use_prompt(device_id: DeviceId, how_to_use: &DeviceHowToUse) -> String {
     let mut lines = vec![format!("`{device_id}` 当前在前景，操作说明：")];
     lines.extend(how_to_use.lines.iter().map(|line| format!("- {line}")));
     lines.join("\n")

@@ -1,4 +1,5 @@
 mod apply_patch;
+mod browser_device;
 mod config;
 mod context;
 mod context_budget;
@@ -37,6 +38,7 @@ use std::{
 
 use crate::{
     apply_patch::{PatchOperationKind, apply_patch_in_root, summarize_apply_patch_error},
+    browser_device::BrowserDevice,
     config::load_config,
     context::Context,
     context_budget::{approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded},
@@ -69,6 +71,7 @@ use crate::{
             EpisodeTask,
         },
         episode_harness::EpisodeHarness,
+        evaluation_artifacts::EvaluationArtifactSuggestedFixKind,
         programs::completion_judge::{CompletionJudgeOutput, CompletionJudgeProgram},
         programs::task_understanding::{TaskUnderstandingOutput, TaskUnderstandingProgram},
         render::openai_tools::OpenAIToolRenderer,
@@ -80,7 +83,6 @@ use crate::{
             RuntimeTurnRecord, append_runtime_turn_record, unread_runtime_review_count,
         },
         sleep::run_sleep,
-        evaluation_artifacts::EvaluationArtifactSuggestedFixKind,
         trace::unread_runtime_trace_count,
         turn_compile::TurnCompileEngine,
     },
@@ -363,25 +365,31 @@ async fn async_main(cli: Cli) -> Result<()> {
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
     let telegram_acl = TelegramAclHandle::load().await;
+    let browser = BrowserDevice::new();
     let terminal = TerminalDevice::new();
     let telegram = TelegramDevice::new();
     let telegram_handle = telegram.handle();
     bootstrap_telegram_device_from_acl(&telegram_handle, &telegram_acl);
-    let devices = DeviceManager::new(Some(DeviceId::Terminal), vec![Box::new(terminal)])
-        .await
-        .unwrap();
+    let devices = DeviceManager::new(
+        Some(DeviceId::Terminal),
+        vec![Box::new(browser), Box::new(terminal)],
+    )
+    .await
+    .unwrap();
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
     let hindsight = HindsightClient::connect(&config.hindsight).await?;
     let hindsight_retain = hindsight.spawn_retain_worker();
     let execution_cwd = resolve_runtime_workspace_dir()?;
-    tokio::fs::create_dir_all(&execution_cwd).await.map_err(|err| {
-        miette!(
-            "failed to create runtime workspace {}: {err}",
-            execution_cwd.display()
-        )
-    })?;
+    tokio::fs::create_dir_all(&execution_cwd)
+        .await
+        .map_err(|err| {
+            miette!(
+                "failed to create runtime workspace {}: {err}",
+                execution_cwd.display()
+            )
+        })?;
     let sandbox_policy = sandbox_policy_for_runtime(&execution_cwd).await;
     let mut context = Context {
         llm: Box::new(client),
@@ -432,24 +440,23 @@ async fn async_main(cli: Cli) -> Result<()> {
         tokio::sync::mpsc::unbounded_channel::<DashboardControlCommand>();
     let (sleep_result_tx, mut sleep_result_rx) =
         tokio::sync::mpsc::unbounded_channel::<SleepTaskResult>();
-    let telegram_transport = if context.config.telegram.enabled
-        && context.config.telegram.has_real_credentials()
-    {
-        Some(tokio::spawn(
-            TelegramTransport::new(
-                context.config.telegram.clone(),
-                context.telegram.clone(),
-                telegram_acl.clone(),
-                context.events.clone(),
-                context.pending_work.clone(),
-                tx.subscribe(),
-                dashboard_control_tx.clone(),
-            )
-            .run(),
-        ))
-    } else {
-        None
-    };
+    let telegram_transport =
+        if context.config.telegram.enabled && context.config.telegram.has_real_credentials() {
+            Some(tokio::spawn(
+                TelegramTransport::new(
+                    context.config.telegram.clone(),
+                    context.telegram.clone(),
+                    telegram_acl.clone(),
+                    context.events.clone(),
+                    context.pending_work.clone(),
+                    tx.subscribe(),
+                    dashboard_control_tx.clone(),
+                )
+                .run(),
+            ))
+        } else {
+            None
+        };
 
     let agent_handle = tokio::spawn(async move {
         let mut sleep_running = false;
@@ -547,9 +554,7 @@ async fn run_memory_reset() -> Result<()> {
     println!("[memory-reset] cleared: runtime_conversation, hindsight_queue");
     println!("[memory-reset] cleared: reasoning_traces.jsonl, runtime_reviews.jsonl");
     println!("[memory-reset] cleared: hindsight bank");
-    println!(
-        "[memory-reset] preserved: config/, state/, artifacts/, logs/"
-    );
+    println!("[memory-reset] preserved: config/, state/, artifacts/, logs/");
 
     Ok(())
 }
@@ -561,14 +566,12 @@ async fn clear_memory_state(home: &PathBuf) -> Result<()> {
     let hindsight = HindsightClient::connect(&config.hindsight).await?;
     hindsight.delete_bank().await?;
     let paths = SpinovaPaths::from_root(home.clone());
-    clear_files(
-        &[
-            paths.state_file("runtime_conversation"),
-            paths.state_file("hindsight_queue"),
-            paths.journal_file("reasoning_traces.jsonl"),
-            paths.journal_file("runtime_reviews.jsonl"),
-        ],
-    )
+    clear_files(&[
+        paths.state_file("runtime_conversation"),
+        paths.state_file("hindsight_queue"),
+        paths.journal_file("reasoning_traces.jsonl"),
+        paths.journal_file("runtime_reviews.jsonl"),
+    ])
     .await?;
 
     Ok(())
@@ -578,18 +581,13 @@ async fn run_state_reset() -> Result<()> {
     let home = get_spinova_home().await;
     let cleared = clear_state_files(&home).await?;
 
-    println!(
-        "[state-reset] reset runtime state under {}",
-        home.display()
-    );
+    println!("[state-reset] reset runtime state under {}", home.display());
     if cleared.is_empty() {
         println!("[state-reset] nothing to remove");
     } else {
         println!("[state-reset] cleared: {}", cleared.join(", "));
     }
-    println!(
-        "[state-reset] preserved: config/, memory state, artifacts/, logs/"
-    );
+    println!("[state-reset] preserved: config/, memory state, artifacts/, logs/");
 
     Ok(())
 }
@@ -619,9 +617,7 @@ async fn run_complite_reset() -> Result<()> {
     } else {
         println!("[complite-reset] cleared: {}", cleared.join(", "));
     }
-    println!(
-        "[complite-reset] preserved: config/, state/, memory, logs/"
-    );
+    println!("[complite-reset] preserved: config/, state/, memory, logs/");
 
     Ok(())
 }
@@ -736,8 +732,8 @@ async fn sandbox_policy_for_runtime(execution_cwd: &Path) -> RuntimeSandboxPolic
 }
 
 pub(crate) fn resolve_runtime_workspace_dir() -> Result<PathBuf> {
-    let home =
-        env::home_dir().ok_or_else(|| miette!("failed to determine home directory for workspace"))?;
+    let home = env::home_dir()
+        .ok_or_else(|| miette!("failed to determine home directory for workspace"))?;
     Ok(home.join("spinova-workspace"))
 }
 
@@ -759,12 +755,16 @@ pub(crate) async fn build_eval_context_with_compiled(
     let work_state = WorkState::new().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
+    let browser = BrowserDevice::new();
     let terminal = TerminalDevice::new();
     let telegram = TelegramDevice::new();
     let telegram_handle = telegram.handle();
-    let devices = DeviceManager::new(Some(DeviceId::Terminal), vec![Box::new(terminal)])
-        .await
-        .unwrap();
+    let devices = DeviceManager::new(
+        Some(DeviceId::Terminal),
+        vec![Box::new(browser), Box::new(terminal)],
+    )
+    .await
+    .unwrap();
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
@@ -2838,11 +2838,10 @@ pub(crate) async fn execute_agent_loop_step(
             );
             append_committed_activity_cells(tx, committed_cells);
             for (call, call_ui_event) in calls.iter().zip(tool_call_ui_events.iter()) {
-                let action_record = summarize_action_from_tool_call(call).unwrap_or_else(|_| {
-                        EpisodeActionRecord {
-                            kind: "tool_call".to_string(),
-                            summary: call.name.clone(),
-                        }
+                let action_record =
+                    summarize_action_from_tool_call(call).unwrap_or_else(|_| EpisodeActionRecord {
+                        kind: "tool_call".to_string(),
+                        summary: call.name.clone(),
                     });
                 actions.push(action_record);
                 if let Some(tx) = tx {
@@ -2950,13 +2949,11 @@ pub(crate) async fn execute_agent_loop_step(
         }
 
         let content = response_assistant_content.unwrap_or_default();
-        if let RuntimeFollowUpDecision::Continue { reason } =
-            runtime_turn_follow_up_decision(
-                context,
-                response.raw_stream_follow_up,
-                &claimed_event_ids,
-            )
-        {
+        if let RuntimeFollowUpDecision::Continue { reason } = runtime_turn_follow_up_decision(
+            context,
+            response.raw_stream_follow_up,
+            &claimed_event_ids,
+        ) {
             runtime_step.push_agent_message(AgentMessage::system(reason.message().to_string()));
             continue 'agent_loop;
         }
@@ -3002,7 +2999,12 @@ pub(crate) async fn execute_agent_loop_step(
     if output
         .actions
         .last()
-        .map(|action| !matches!(action.kind.as_str(), "assistant_message" | "empty_tool_calls"))
+        .map(|action| {
+            !matches!(
+                action.kind.as_str(),
+                "assistant_message" | "empty_tool_calls"
+            )
+        })
         .unwrap_or(false)
     {
         context.work_state.touch();
@@ -3144,7 +3146,9 @@ fn finalize_claimed_runtime_events(
     if !requeued.is_empty() {
         let last_action = output.actions.last();
         tracing::info!(
-            action_kind = last_action.map(|action| action.kind.as_str()).unwrap_or("none"),
+            action_kind = last_action
+                .map(|action| action.kind.as_str())
+                .unwrap_or("none"),
             action_summary = last_action
                 .map(|action| action.summary.as_str())
                 .unwrap_or(""),
@@ -3194,7 +3198,9 @@ fn finalize_claimed_runtime_device_notices(
     if !released.is_empty() {
         let last_action = output.actions.last();
         tracing::info!(
-            action_kind = last_action.map(|action| action.kind.as_str()).unwrap_or("none"),
+            action_kind = last_action
+                .map(|action| action.kind.as_str())
+                .unwrap_or("none"),
             action_summary = last_action
                 .map(|action| action.summary.as_str())
                 .unwrap_or(""),
@@ -3389,11 +3395,19 @@ mod tests {
 
     #[test]
     fn claimed_terminal_status_depends_only_on_statuses() {
-        assert!(claimed_event_statuses_are_terminal(&[EventStatus::AwaitingDelivery]));
-        assert!(claimed_event_statuses_are_terminal(&[EventStatus::Resolved]));
-        assert!(claimed_event_statuses_are_terminal(&[EventStatus::Dismissed]));
+        assert!(claimed_event_statuses_are_terminal(&[
+            EventStatus::AwaitingDelivery
+        ]));
+        assert!(claimed_event_statuses_are_terminal(&[
+            EventStatus::Resolved
+        ]));
+        assert!(claimed_event_statuses_are_terminal(&[
+            EventStatus::Dismissed
+        ]));
         assert!(claimed_event_statuses_are_terminal(&[EventStatus::Failed]));
-        assert!(!claimed_event_statuses_are_terminal(&[EventStatus::Claimed]));
+        assert!(!claimed_event_statuses_are_terminal(&[
+            EventStatus::Claimed
+        ]));
         assert!(claimed_event_statuses_are_terminal(&[
             EventStatus::AwaitingDelivery,
             EventStatus::Resolved,
@@ -3834,6 +3848,7 @@ fn summarize_device_notice_reason(
     render: &crate::device::DeviceStateRender,
 ) -> String {
     match device_id {
+        DeviceId::Browser => "browser requires attention".to_string(),
         DeviceId::Terminal => {
             let unread_sessions = numeric_field(&render.lines, "sessions_with_unread_output");
             if unread_sessions > 0 {
@@ -3850,6 +3865,7 @@ fn device_render_requires_attention(
     render: &crate::device::DeviceStateRender,
 ) -> bool {
     match device_id {
+        DeviceId::Browser => false,
         DeviceId::Terminal => numeric_field(&render.lines, "sessions_with_unread_output") > 0,
     }
 }
@@ -3936,7 +3952,9 @@ async fn handle_dashboard_control_command(
                 match context.hindsight_retain.flush().await {
                     Ok(()) => context.memory.mark_queued_retained(),
                     Err(err) => {
-                        tracing::error!("failed to flush hindsight retain queue during clear: {err:?}");
+                        tracing::error!(
+                            "failed to flush hindsight retain queue during clear: {err:?}"
+                        );
                     }
                 }
             }
@@ -4076,8 +4094,8 @@ async fn execute_apply_patch_tool(
     context: &Context,
     patch_text: &str,
 ) -> miette::Result<ToolExecutionResult> {
-    let summary = apply_patch_in_root(&context.execution_cwd, &context.sandbox_policy, patch_text)
-        .await?;
+    let summary =
+        apply_patch_in_root(&context.execution_cwd, &context.sandbox_policy, patch_text).await?;
     Ok(ToolExecutionResult::new(
         format!("patched {} file(s)", summary.changed_files),
         json!({
@@ -4220,7 +4238,9 @@ fn render_system_prompt_output_for_dashboard(context: &Context) -> String {
 
     lines.push(String::new());
     lines.push("[device_context]".to_string());
-    lines.push(crate::reasoning::prompts::build_device_context_prompt(context));
+    lines.push(crate::reasoning::prompts::build_device_context_prompt(
+        context,
+    ));
     lines.join("\n")
 }
 
@@ -4263,10 +4283,11 @@ fn render_device_status_outputs_for_dashboard(context: &Context) -> Vec<(String,
                     &how_to_use,
                 ));
             } else {
-                lines.push(crate::reasoning::prompts::build_device_pre_focus_note_prompt(
-                    device_id,
-                    &state,
-                ));
+                lines.push(
+                    crate::reasoning::prompts::build_device_pre_focus_note_prompt(
+                        device_id, &state,
+                    ),
+                );
             }
             (key, lines.join("\n"))
         })

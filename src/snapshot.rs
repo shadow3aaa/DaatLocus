@@ -368,6 +368,7 @@ impl EventSnapshot {
 
 fn device_attention_hint(device_id: DeviceId, state: &DeviceStateRender) -> Option<String> {
     match device_id {
+        DeviceId::Browser => None,
         DeviceId::Terminal => {
             let session_id = state
                 .lines

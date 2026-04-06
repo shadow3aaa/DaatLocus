@@ -43,6 +43,66 @@ pub struct TerminalTerminateArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BrowserOpenArgs {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BrowserSnapshotArgs {
+    pub page_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BrowserFindInPageArgs {
+    pub page_id: String,
+    pub query: String,
+    pub max_results: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BrowserWaitArgs {
+    pub page_id: String,
+    /// `dom` waits for any parsed DOM, `load` waits for complete readyState.
+    pub state: Option<String>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BrowserClickArgs {
+    pub page_id: String,
+    pub snapshot_id: String,
+    pub element_ref: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BrowserFillArgs {
+    pub page_id: String,
+    pub snapshot_id: String,
+    pub element_ref: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BrowserBackArgs {
+    pub page_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BrowserForwardArgs {
+    pub page_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BrowserReloadArgs {
+    pub page_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BrowserClosePageArgs {
+    pub page_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct EventResolveArgs {
     pub event_id: String,
     pub disposition: EventDisposition,

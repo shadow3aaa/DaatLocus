@@ -9,6 +9,7 @@ const CACHE_DIR_NAME: &str = "cache";
 const ARTIFACTS_DIR_NAME: &str = "artifacts";
 const JOURNALS_DIR_NAME: &str = "journals";
 const LOGS_DIR_NAME: &str = "logs";
+const RUNTIME_DIR_NAME: &str = "runtime";
 
 #[derive(Clone, Debug)]
 pub struct SpinovaPaths {
@@ -64,6 +65,71 @@ impl SpinovaPaths {
         self.root.join(LOGS_DIR_NAME)
     }
 
+    pub fn runtime_dir(&self) -> PathBuf {
+        self.root.join(RUNTIME_DIR_NAME)
+    }
+
+    pub fn browser_runtime_dir(&self) -> PathBuf {
+        self.runtime_dir().join("browser")
+    }
+
+    pub fn browser_executable_path(&self) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        {
+            #[cfg(target_arch = "aarch64")]
+            {
+                return self
+                    .browser_runtime_dir()
+                    .join("chrome-mac-arm64")
+                    .join("Google Chrome for Testing.app")
+                    .join("Contents")
+                    .join("MacOS")
+                    .join("Google Chrome for Testing");
+            }
+
+            #[cfg(target_arch = "x86_64")]
+            {
+                return self
+                    .browser_runtime_dir()
+                    .join("chrome-mac-x64")
+                    .join("Google Chrome for Testing.app")
+                    .join("Contents")
+                    .join("MacOS")
+                    .join("Google Chrome for Testing");
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            return self
+                .browser_runtime_dir()
+                .join("chrome-linux64")
+                .join("chrome");
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            #[cfg(target_arch = "x86_64")]
+            {
+                return self
+                    .browser_runtime_dir()
+                    .join("chrome-win64")
+                    .join("chrome.exe");
+            }
+
+            #[cfg(target_arch = "x86")]
+            {
+                return self
+                    .browser_runtime_dir()
+                    .join("chrome-win32")
+                    .join("chrome.exe");
+            }
+        }
+
+        #[allow(unreachable_code)]
+        self.browser_runtime_dir().join("chromium").join("chrome")
+    }
+
     pub fn logs_file(&self, file_name: &str) -> PathBuf {
         self.logs_dir().join(file_name)
     }
@@ -83,6 +149,7 @@ fn ensure_layout_sync(paths: &SpinovaPaths) {
     let _ = std::fs::create_dir_all(paths.artifacts_dir());
     let _ = std::fs::create_dir_all(paths.journal_dir());
     let _ = std::fs::create_dir_all(paths.logs_dir());
+    let _ = std::fs::create_dir_all(paths.runtime_dir());
 }
 
 fn migrate_legacy_path_sync(from: PathBuf, to: PathBuf) {
@@ -96,7 +163,10 @@ fn migrate_legacy_path_sync(from: PathBuf, to: PathBuf) {
 }
 
 fn migrate_legacy_layout_sync(paths: &SpinovaPaths) {
-    migrate_legacy_path_sync(paths.root.join("config.toml"), paths.config_file("config.toml"));
+    migrate_legacy_path_sync(
+        paths.root.join("config.toml"),
+        paths.config_file("config.toml"),
+    );
     migrate_legacy_path_sync(
         paths.root.join("prompt_persona.toml"),
         paths.config_file("prompt_persona.toml"),
@@ -114,8 +184,14 @@ fn migrate_legacy_layout_sync(paths: &SpinovaPaths) {
         paths.root.join("hindsight_queue"),
         paths.state_file("hindsight_queue"),
     );
-    migrate_legacy_path_sync(paths.root.join("todo_board"), paths.state_file("todo_board"));
-    migrate_legacy_path_sync(paths.root.join("work_state"), paths.state_file("work_state"));
+    migrate_legacy_path_sync(
+        paths.root.join("todo_board"),
+        paths.state_file("todo_board"),
+    );
+    migrate_legacy_path_sync(
+        paths.root.join("work_state"),
+        paths.state_file("work_state"),
+    );
     migrate_legacy_path_sync(paths.root.join("events"), paths.state_file("events"));
     migrate_legacy_path_sync(
         paths.root.join("pending_work_queue"),
