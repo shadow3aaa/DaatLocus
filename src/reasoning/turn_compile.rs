@@ -1050,8 +1050,13 @@ fn render_persona_spec_for_generator(spec: &PromptPersonaSpec) -> String {
 }
 
 async fn collect_turn_demo_workspace_facts() -> Result<String> {
-    let cwd = std::env::current_dir()
-        .map_err(|error| miette!("failed to resolve current directory for turn demos: {error}"))?;
+    let cwd = crate::resolve_runtime_workspace_dir()?;
+    fs::create_dir_all(&cwd).await.map_err(|error| {
+        miette!(
+            "failed to create runtime workspace for turn demos '{}': {error}",
+            cwd.display()
+        )
+    })?;
     let top_level_entries = read_dir_entry_names(&cwd).await?;
     let src_dir = cwd.join("src");
     let src_entries = if src_dir.exists() {

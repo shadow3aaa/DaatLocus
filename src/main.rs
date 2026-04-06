@@ -375,8 +375,13 @@ async fn async_main(cli: Cli) -> Result<()> {
     let judge_client = OpenAIClient::from_model_config(&judge_model);
     let hindsight = HindsightClient::connect(&config.hindsight).await?;
     let hindsight_retain = hindsight.spawn_retain_worker();
-    let execution_cwd =
-        env::current_dir().map_err(|err| miette!("failed to determine execution cwd: {err}"))?;
+    let execution_cwd = resolve_runtime_workspace_dir()?;
+    tokio::fs::create_dir_all(&execution_cwd).await.map_err(|err| {
+        miette!(
+            "failed to create runtime workspace {}: {err}",
+            execution_cwd.display()
+        )
+    })?;
     let sandbox_policy = sandbox_policy_for_runtime(&execution_cwd).await;
     let mut context = Context {
         llm: Box::new(client),
@@ -717,22 +722,37 @@ async fn build_eval_context(config: crate::config::Config) -> Context {
 
 async fn sandbox_policy_for_runtime(execution_cwd: &Path) -> RuntimeSandboxPolicy {
     let spinova_home = get_spinova_home().await;
+    let runtime_dir =
+        env::current_dir().unwrap_or_else(|err| panic!("failed to determine runtime dir: {err}"));
     let executable_dir = env::current_exe()
         .ok()
         .and_then(|current_exe| current_exe.parent().map(Path::to_path_buf));
     RuntimeSandboxPolicy::protect_spinova_runtime(
+        &runtime_dir,
         execution_cwd,
         &spinova_home,
         executable_dir.as_deref(),
     )
 }
 
+pub(crate) fn resolve_runtime_workspace_dir() -> Result<PathBuf> {
+    let home =
+        env::home_dir().ok_or_else(|| miette!("failed to determine home directory for workspace"))?;
+    Ok(home.join("spinova-workspace"))
+}
+
 pub(crate) async fn build_eval_context_with_compiled(
     config: crate::config::Config,
     compiled_prompts: CompiledPromptStore,
 ) -> Context {
-    let execution_cwd =
-        env::current_dir().unwrap_or_else(|err| panic!("failed to determine execution cwd: {err}"));
+    let execution_cwd = resolve_runtime_workspace_dir()
+        .unwrap_or_else(|err| panic!("failed to determine execution cwd: {err}"));
+    std::fs::create_dir_all(&execution_cwd).unwrap_or_else(|err| {
+        panic!(
+            "failed to create runtime workspace {}: {err}",
+            execution_cwd.display()
+        )
+    });
     let sandbox_policy = sandbox_policy_for_runtime(&execution_cwd).await;
     let memory = Memory::new().await;
     let todo_board = TodoBoard::new().await;

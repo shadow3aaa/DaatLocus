@@ -113,11 +113,12 @@ impl FileSystemSandboxPolicy {
 
 impl RuntimeSandboxPolicy {
     pub fn protect_spinova_runtime(
-        execution_cwd: &Path,
+        runtime_dir: &Path,
+        workspace_dir: &Path,
         spinova_home: &Path,
         executable_dir: Option<&Path>,
     ) -> Self {
-        let mut protected_paths = vec![normalize_path(execution_cwd), normalize_path(spinova_home)];
+        let mut protected_paths = vec![normalize_path(runtime_dir), normalize_path(spinova_home)];
         if let Some(executable_dir) = executable_dir {
             protected_paths.push(normalize_path(executable_dir));
         }
@@ -125,6 +126,13 @@ impl RuntimeSandboxPolicy {
         protected_paths.dedup();
 
         let mut writable_roots = Vec::new();
+        let workspace_root = normalize_path(workspace_dir);
+        if !workspace_root.as_os_str().is_empty() {
+            writable_roots.push(WritableRoot {
+                root: workspace_root,
+                read_only_subpaths: Vec::new(),
+            });
+        }
         let temp_root = std::env::temp_dir();
         if !temp_root.as_os_str().is_empty() {
             writable_roots.push(WritableRoot {
@@ -229,20 +237,24 @@ mod tests {
 
     #[test]
     fn default_runtime_policy_protects_runtime_dirs_and_allows_tmp_write() {
-        let execution_cwd = Path::new("/workspace/spinova");
+        let runtime_dir = Path::new("/workspace/spinova");
+        let workspace_dir = Path::new("/Users/test/spinova-workspace");
         let spinova_home = Path::new("/Users/test/.spinova");
         let executable_dir = Some(Path::new("/Applications/Spinova.app/Contents/MacOS"));
         let policy = RuntimeSandboxPolicy::protect_spinova_runtime(
-            execution_cwd,
+            runtime_dir,
+            workspace_dir,
             spinova_home,
             executable_dir,
         );
         let writable_tmp = std::env::temp_dir().join("spinova-sandbox-test");
 
-        assert!(!policy.is_path_readable(execution_cwd));
-        assert!(!policy.is_path_writable(execution_cwd));
+        assert!(!policy.is_path_readable(runtime_dir));
+        assert!(!policy.is_path_writable(runtime_dir));
         assert!(!policy.is_path_readable(spinova_home));
         assert!(!policy.is_path_writable(spinova_home));
+        assert!(policy.is_path_readable(workspace_dir));
+        assert!(policy.is_path_writable(workspace_dir));
         assert!(policy.is_path_readable(&writable_tmp));
         assert!(policy.is_path_writable(&writable_tmp));
     }
@@ -252,6 +264,7 @@ mod tests {
     fn shell_spawn_spec_uses_sandbox_exec_on_macos() {
         let policy = RuntimeSandboxPolicy::protect_spinova_runtime(
             Path::new("/workspace/spinova"),
+            Path::new("/Users/test/spinova-workspace"),
             Path::new("/Users/test/.spinova"),
             Some(Path::new("/Applications/Spinova.app/Contents/MacOS")),
         );
