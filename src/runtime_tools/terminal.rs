@@ -87,7 +87,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![
         Box::new(StaticRuntimeTool::new::<TerminalExecArgs>(
             "terminal_exec",
-            "启动一条终端命令，并在当前输出窗口结束后返回输出。如果命令仍在运行，结果中会保留 session，后续继续使用 terminal_write_stdin。",
+            "启动一条终端命令，并在当前输出窗口结束后返回输出。如果提供 `session_id`，则在该 session 中复用执行；如果不提供，则新建 session。若命令仍在运行，结果中会保留 session，后续继续使用 terminal_write_stdin。",
             Some(DeviceToolScope::Terminal),
             summarize_terminal_exec_tool,
             render_terminal_exec_call_ui,
@@ -117,10 +117,9 @@ fn summarize_terminal_exec_tool(call: &AgentToolCall) -> Result<EpisodeActionRec
     Ok(EpisodeActionRecord {
         kind: "terminal_exec".to_string(),
         summary: format!(
-            "command={} session={} new_session={} workdir={} yield_time_ms={}",
+            "command={} session={} workdir={} yield_time_ms={}",
             summarize_inline_text(&args.command),
-            args.session_id.unwrap_or_else(|| "focused".to_string()),
-            args.create_new_session,
+            args.session_id.unwrap_or_else(|| "new".to_string()),
             args.workdir.unwrap_or_else(|| "none".to_string()),
             args.yield_time_ms
                 .map(|value| value.to_string())
@@ -135,9 +134,8 @@ fn render_terminal_exec_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent>
         TerminalUiAction::Execute,
         summarize_inline_text(&args.command),
         vec![format!(
-            "session={} new_session={} workdir={} yield_time_ms={}",
-            args.session_id.unwrap_or_else(|| "focused".to_string()),
-            args.create_new_session,
+            "session={} workdir={} yield_time_ms={}",
+            args.session_id.unwrap_or_else(|| "new".to_string()),
             args.workdir.unwrap_or_else(|| "-".to_string()),
             args.yield_time_ms
                 .map(|value| value.to_string())
@@ -175,7 +173,6 @@ fn execute_terminal_exec_tool<'a>(
             .terminal_exec_with_progress(
                 args.command.clone(),
                 args.session_id.clone(),
-                args.create_new_session,
                 effective_workdir,
                 &sandbox_policy,
                 args.yield_time_ms,

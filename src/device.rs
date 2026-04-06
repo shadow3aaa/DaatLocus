@@ -20,21 +20,6 @@ impl Display for DeviceId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttentionLevel {
-    Quiet,
-    Notice,
-}
-
-impl Display for AttentionLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Quiet => write!(f, "Quiet"),
-            Self::Notice => write!(f, "Notice"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceToolScope {
     Terminal,
@@ -44,8 +29,17 @@ pub enum DeviceToolScope {
 pub struct DeviceStateRender {
     pub title: String,
     pub lines: Vec<String>,
-    pub attention: AttentionLevel,
-    pub is_focused: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceUsage {
+    pub purpose: String,
+    pub when_to_focus: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceHowToUse {
+    pub lines: Vec<String>,
 }
 
 #[async_trait]
@@ -56,7 +50,11 @@ pub trait Device: Send + Sync {
 
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
-    fn render_state(&self, is_focused: bool) -> DeviceStateRender;
+    fn render_state(&self) -> DeviceStateRender;
+
+    fn usage(&self) -> DeviceUsage;
+
+    fn how_to_use(&self) -> DeviceHowToUse;
 
     fn focused_tool_scopes(&self) -> &'static [DeviceToolScope] {
         &[]
@@ -117,12 +115,19 @@ impl DeviceManager {
         self.order
             .iter()
             .filter_map(|id| {
-                self.devices.get(id).map(|device| {
-                    let is_focused = self.focused == Some(*id);
-                    (*id, device.render_state(is_focused))
-                })
+                self.devices
+                    .get(id)
+                    .map(|device| (*id, device.render_state()))
             })
             .collect()
+    }
+
+    pub fn usage(&self, id: DeviceId) -> Option<DeviceUsage> {
+        self.devices.get(&id).map(|device| device.usage())
+    }
+
+    pub fn how_to_use(&self, id: DeviceId) -> Option<DeviceHowToUse> {
+        self.devices.get(&id).map(|device| device.how_to_use())
     }
 
     pub fn focused_tool_scopes(&self) -> &'static [DeviceToolScope] {
@@ -190,7 +195,6 @@ impl DeviceManager {
         &mut self,
         command: String,
         session_id: Option<String>,
-        create_new_session: bool,
         workdir: Option<String>,
         sandbox_policy: &RuntimeSandboxPolicy,
         yield_time_ms: Option<u64>,
@@ -210,7 +214,6 @@ impl DeviceManager {
             .exec_command_with_progress(
                 command,
                 session_id,
-                create_new_session,
                 workdir,
                 sandbox_policy,
                 yield_time_ms,

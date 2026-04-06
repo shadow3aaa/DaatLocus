@@ -22,9 +22,8 @@ pub struct PutAwayDeviceArgs {}
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TerminalExecArgs {
     pub command: String,
+    /// 显式指定要复用的 session；不填则新建 session
     pub session_id: Option<String>,
-    #[serde(default)]
-    pub create_new_session: bool,
     pub workdir: Option<String>,
     pub yield_time_ms: Option<u64>,
     pub max_chars: Option<usize>,

@@ -8,14 +8,44 @@ use miette::{Result, bail, miette};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    device::{AttentionLevel, Device, DeviceId, DeviceStateRender, DeviceToolScope},
+    device::{
+        Device, DeviceHowToUse, DeviceId, DeviceStateRender, DeviceToolScope, DeviceUsage,
+    },
     sandbox::RuntimeSandboxPolicy,
     terminal_process::TerminalProcess,
 };
 
+const TERMINAL_USAGE_PURPOSE: &str = "Terminal 是本地命令执行与持续进程交互界面。";
+const TERMINAL_WHEN_TO_FOCUS: &[&str] = &[
+    "需要执行本地命令或脚本时。",
+    "需要查看命令输出、错误信息或文件系统探查结果时。",
+    "需要继续与正在运行的进程交互、等待输出或终止会话时。",
+];
+
+#[cfg(windows)]
+const TERMINAL_HOW_TO_USE_LINES: &[&str] = &[
+    "Terminal 通过 terminal tools 操作，不要假设自己要直接输出一段终端输入文本作为动作。",
+    "终端只通过 `terminal_exec / terminal_write_stdin / terminal_terminate` 操作。",
+    "`terminal_exec` 在不提供 `session_id` 时会新建 session；只有显式提供 `session_id` 时才会复用已有 session。",
+    "如果命令仍在运行，后续继续使用 `terminal_write_stdin`，并显式提供目标 `session_id`。当你只是想继续等待输出时，发送空文本即可。",
+    "绝对严禁使用任何交互式全屏终端程序（如 vim, vi, nano, less, top 等）。如果需要查看文件，请使用 `cat`、`grep`、`head`、`tail`、`python -c` 等非交互命令；如果需要修改文件，请优先使用 `apply_patch`，不要依赖 shell 拼接。",
+    "严禁主动启动任何需要人类账号、密码、浏览器授权、设备码授权或交互式登录向导的命令，例如 `gh auth login`、`docker login`、`npm login` 等。优先使用公开可访问的网页、HTTP API、`git clone`、`curl` 或无需认证的查询方式。",
+    "如果终端已经停在你不该进入的交互式认证/登录提示上，不要继续回答向导问题；应优先中断，再改用非交互方案。",
+];
+
+#[cfg(not(windows))]
+const TERMINAL_HOW_TO_USE_LINES: &[&str] = &[
+    "Terminal 通过 terminal tools 操作，不要假设自己要直接输出一段终端输入文本作为动作。",
+    "终端只通过 `terminal_exec / terminal_write_stdin / terminal_terminate` 操作。",
+    "`terminal_exec` 在不提供 `session_id` 时会新建 session；只有显式提供 `session_id` 时才会复用已有 session。",
+    "如果命令仍在运行，后续继续使用 `terminal_write_stdin`，并显式提供目标 `session_id`。当你只是想继续等待输出时，发送空文本即可。",
+    "绝对严禁使用任何交互式全屏终端程序（如 vim, vi, nano, less, top 等）。如果需要查看文件，请使用 `cat`、`grep`、`head`、`tail`、`python -c` 等非交互命令；如果需要修改文件，请优先使用 `apply_patch`，不要依赖 shell 拼接。",
+    "严禁主动启动任何需要人类账号、密码、浏览器授权、设备码授权或交互式登录向导的命令，例如 `gh auth login`、`docker login`、`npm login` 等。优先使用公开可访问的网页、HTTP API、`git clone`、`curl` 或无需认证的查询方式。",
+    "如果终端已经停在你不该进入的交互式认证/登录提示上，不要继续回答向导问题；应优先中断，再改用非交互方案。",
+];
+
 pub struct TerminalDevice {
     sessions: BTreeMap<String, TerminalSession>,
-    focused_session_id: Option<String>,
     next_session_index: usize,
 }
 
@@ -54,7 +84,6 @@ impl TerminalDevice {
     pub fn new() -> Self {
         Self {
             sessions: BTreeMap::new(),
-            focused_session_id: None,
             next_session_index: 1,
         }
     }
@@ -109,7 +138,6 @@ impl TerminalDevice {
         &mut self,
         command: String,
         session_id: Option<String>,
-        create_new_session: bool,
         workdir: Option<String>,
         sandbox_policy: &RuntimeSandboxPolicy,
         yield_time_ms: Option<u64>,
@@ -119,13 +147,7 @@ impl TerminalDevice {
     where
         F: FnMut(&TerminalSessionState, &str) + Send,
     {
-        let target_session_id = if create_new_session {
-            self.create_session()
-        } else {
-            session_id
-                .or_else(|| self.focused_session_id.clone())
-                .unwrap_or_else(|| self.create_session())
-        };
+        let target_session_id = session_id.unwrap_or_else(|| self.create_session());
         if let Some(reason) = Self::forbidden_input_reason(&command) {
             bail!(reason);
         }
@@ -186,7 +208,6 @@ impl TerminalDevice {
         session.last_activity = Instant::now();
         session.state.has_unread_output = false;
         let state = session.state.clone();
-        self.focused_session_id = Some(target_session_id.clone());
         self.prune_exited_sessions();
         Ok(TerminalToolResult {
             session: state,
@@ -263,7 +284,6 @@ impl TerminalDevice {
         session.last_activity = Instant::now();
         session.state.has_unread_output = false;
         let state = session.state.clone();
-        self.focused_session_id = Some(session_id.to_string());
         self.prune_exited_sessions();
         Ok(TerminalToolResult {
             session: state,
@@ -284,9 +304,6 @@ impl TerminalDevice {
             session.state.clone()
         };
         self.sessions.remove(session_id);
-        if self.focused_session_id.as_deref() == Some(session_id) {
-            self.focused_session_id = self.sessions.keys().next().cloned();
-        }
         Ok(state)
     }
 
@@ -330,10 +347,7 @@ impl TerminalDevice {
         let exited_ids = self
             .sessions
             .iter()
-            .filter(|(session_id, session)| {
-                Some((*session_id).clone()) != self.focused_session_id
-                    && session.state.status.starts_with("exited")
-            })
+            .filter(|(_, session)| session.state.status.starts_with("exited"))
             .map(|(session_id, session)| (session_id.clone(), session.last_activity))
             .collect::<Vec<_>>();
 
@@ -364,22 +378,7 @@ impl Device for TerminalDevice {
         self
     }
 
-    fn render_state(&self, is_focused: bool) -> DeviceStateRender {
-        let active_session = self
-            .focused_session_id
-            .as_deref()
-            .and_then(|session_id| self.sessions.get(session_id))
-            .or_else(|| {
-                self.sessions
-                    .values()
-                    .find(|session| session.state.has_unread_output)
-            })
-            .or_else(|| {
-                self.sessions
-                    .values()
-                    .find(|session| session.state.status == "running")
-            })
-            .or_else(|| self.sessions.values().next());
+    fn render_state(&self) -> DeviceStateRender {
         let running_sessions = self
             .sessions
             .values()
@@ -391,64 +390,46 @@ impl Device for TerminalDevice {
             .filter(|session| session.state.has_unread_output)
             .count();
         let mut lines = vec![
-            format!("focused={is_focused}"),
             "kind=terminal".to_string(),
-            format!("active_sessions={}", self.sessions.len()),
+            format!("session_count={}", self.sessions.len()),
             format!("running_sessions={running_sessions}"),
             format!("sessions_with_unread_output={unread_sessions}"),
         ];
 
-        if let Some(session) = active_session {
-            lines.push(format!("active_session={}", session.state.session_id));
-            lines.push(format!(
-                "active_process_id={}",
-                session
-                    .state
-                    .process_id
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string())
-            ));
-            lines.push(format!("active_status={}", session.state.status));
-            lines.push(format!(
-                "active_command={}",
-                session.state.command.as_deref().unwrap_or("<none>")
-            ));
-            lines.push(format!(
-                "active_exit_code={}",
-                session
-                    .state
-                    .exit_code
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "none".to_string())
-            ));
-            lines.push(format!(
-                "active_cwd={}",
-                session.state.cwd.as_deref().unwrap_or("unknown")
-            ));
-            lines.push(format!(
-                "active_has_unread_output={}",
-                session.state.has_unread_output
-            ));
-            lines.push(format!(
-                "active_last_output_preview={}",
-                session.state.last_output_preview
-            ));
+        if self.sessions.is_empty() {
+            lines.push("session_ids=none".to_string());
         } else {
-            lines.push("active_session=none".to_string());
-            lines.push("active_status=idle".to_string());
-            lines.push("active_command=<none>".to_string());
+            lines.push(format!(
+                "session_ids={}",
+                self.sessions.keys().cloned().collect::<Vec<_>>().join(",")
+            ));
+            for session in self.sessions.values() {
+                lines.push(render_session_state_line(&session.state));
+            }
         }
 
-        let attention = if !is_focused && unread_sessions > 0 {
-            AttentionLevel::Notice
-        } else {
-            AttentionLevel::Quiet
-        };
         DeviceStateRender {
             title: "Terminal".to_string(),
             lines,
-            attention,
-            is_focused,
+        }
+    }
+
+    fn usage(&self) -> DeviceUsage {
+        DeviceUsage {
+            purpose: TERMINAL_USAGE_PURPOSE.to_string(),
+            when_to_focus: TERMINAL_WHEN_TO_FOCUS
+                .iter()
+                .map(|line| (*line).to_string())
+                .collect(),
+        }
+    }
+
+    fn how_to_use(&self) -> DeviceHowToUse {
+        DeviceHowToUse {
+            lines: TERMINAL_HOW_TO_USE_LINES
+                .iter()
+                .map(|line| (*line).to_string())
+                .collect(),
         }
     }
 
@@ -458,9 +439,14 @@ impl Device for TerminalDevice {
 
     async fn wait_until_settled(&self, silence_duration: Duration, timeout: Duration) -> bool {
         let Some(session) = self
-            .focused_session_id
-            .as_ref()
-            .and_then(|session_id| self.sessions.get(session_id))
+            .sessions
+            .values()
+            .find(|session| session.state.has_unread_output)
+            .or_else(|| {
+                self.sessions
+                    .values()
+                    .find(|session| session.state.status == "running")
+            })
             .or_else(|| self.sessions.values().next())
         else {
             return true;
@@ -512,6 +498,26 @@ fn refresh_terminal_session(session: &mut TerminalSession) {
             "idle".to_string()
         };
     }
+}
+
+fn render_session_state_line(state: &TerminalSessionState) -> String {
+    format!(
+        "session={} status={} pid={} exit={} cwd={} unread={} command={} preview={}",
+        state.session_id,
+        state.status,
+        state
+            .process_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        state
+            .exit_code
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        state.cwd.as_deref().unwrap_or("unknown"),
+        state.has_unread_output,
+        state.command.as_deref().unwrap_or("<none>"),
+        state.last_output_preview
+    )
 }
 
 fn summarize_terminal_preview(screen: &str) -> String {
@@ -680,7 +686,6 @@ mod tests {
             .terminate_session(&created.session.session_id)
             .await
             .expect("terminate should succeed");
-        assert_eq!(device.focused_session_id, None);
         assert!(device.sessions.is_empty());
     }
 

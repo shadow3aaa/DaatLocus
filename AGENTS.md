@@ -27,6 +27,24 @@ Use a `Device` only when all of the following are true:
 
 `Device` should carry device state, not agent state.
 
+Conceptually, a `Device` is an app inside the Spinova agent OS.
+
+Each device should expose three distinct model-facing layers:
+
+- `state`: the current structured visible state
+- `usage`: what this device is for, and when it is worth focusing
+- `how_to_use`: how to operate it after focus
+
+These layers must stay separate:
+
+- `state` is facts
+- `usage` is pre-focus guidance
+- `how_to_use` is post-focus operating guidance
+
+Do not mix operating instructions into viewport state.
+Do not force the model to infer "when should I focus this device" from raw state alone.
+Do not put detailed operating instructions into pre-focus guidance.
+
 Allowed device state examples:
 
 - focus / connectivity / health
@@ -39,6 +57,7 @@ Disallowed device state examples:
 - agent cursors such as `selected_chat`, `selected_thread`, or `opened_message`
 - hidden multi-step tool choreography state
 - pending semantic judgments that are better represented as events
+- operating manuals or post-focus tool instructions mixed into `state`
 
 Typical example:
 

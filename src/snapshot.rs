@@ -6,7 +6,7 @@ use std::fmt::Display;
 use crate::{
     context::Context,
     context_budget::truncate_text_to_token_budget,
-    device::{AttentionLevel, DeviceId, DeviceStateRender},
+    device::{DeviceId, DeviceStateRender},
     events::{EventPayload, EventStatus, EventStore, EventView},
     system_info::SystemInfo,
     todo_board::TodoBoard,
@@ -217,7 +217,7 @@ impl Display for DeviceSnapshot {
         let attention_hints = self
             .states
             .iter()
-            .filter(|(_, state)| !state.is_focused)
+            .filter(|(id, _)| self.focused_device != Some(*id))
             .filter_map(|(id, state)| device_attention_hint(*id, state));
         let attention_hints = attention_hints.collect::<Vec<_>>();
         if !attention_hints.is_empty() {
@@ -229,12 +229,7 @@ impl Display for DeviceSnapshot {
 
         writeln!(f, "设备结构状态：")?;
         for (id, state) in &self.states {
-            let focus_state = if state.is_focused { "前景" } else { "后台" };
-            writeln!(
-                f,
-                "- {id} / {}：{}，注意力等级={}",
-                state.title, focus_state, state.attention
-            )?;
+            writeln!(f, "- {id} / {}：", state.title)?;
             for line in &state.lines {
                 writeln!(f, "  {line}")?;
             }
@@ -299,7 +294,7 @@ impl DeviceSnapshot {
         let attention_hints = self
             .states
             .iter()
-            .filter(|(_, state)| !state.is_focused)
+            .filter(|(id, _)| self.focused_device != Some(*id))
             .filter_map(|(id, state)| device_attention_hint(*id, state))
             .take(max_hints)
             .collect::<Vec<_>>();
@@ -310,11 +305,7 @@ impl DeviceSnapshot {
 
         lines.push("设备结构状态：".to_string());
         for (id, state) in &self.states {
-            let focus_state = if state.is_focused { "前景" } else { "后台" };
-            lines.push(format!(
-                "- {id} / {}：{}，注意力等级={}",
-                state.title, focus_state, state.attention
-            ));
+            lines.push(format!("- {id} / {}：", state.title));
             let rendered_lines = state.lines.iter().take(max_lines_per_device);
             lines.extend(rendered_lines.map(|line| format!("  {line}")));
             let omitted = state.lines.len().saturating_sub(max_lines_per_device);
@@ -377,21 +368,19 @@ impl EventSnapshot {
 
 fn device_attention_hint(device_id: DeviceId, state: &DeviceStateRender) -> Option<String> {
     match device_id {
-        DeviceId::Terminal
-            if !state.is_focused && matches!(state.attention, AttentionLevel::Notice) =>
-        {
+        DeviceId::Terminal => {
             let session_id = state
                 .lines
                 .iter()
-                .find_map(|line| line.strip_prefix("active_session="))
+                .find_map(|line| line.strip_prefix("session="))
+                .and_then(|line| line.split_whitespace().next())
                 .unwrap_or("unknown");
             if numeric_field(&state.lines, "sessions_with_unread_output") > 0 {
                 Some(format!("Terminal 会话 {session_id} 有未读输出"))
             } else {
-                Some(format!("Terminal 会话 {session_id} 需要注意"))
+                None
             }
         }
-        _ => None,
     }
 }
 

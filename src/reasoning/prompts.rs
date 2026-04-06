@@ -1,6 +1,6 @@
 use crate::{
     context::Context,
-    device::{AttentionLevel, DeviceId, DeviceStateRender},
+    device::{DeviceHowToUse, DeviceId, DeviceStateRender, DeviceUsage},
 };
 
 pub const SYSTEM_PROMPT_KERNEL: &str = r#"你叫 Spinova，一个自主智能体。
@@ -43,31 +43,34 @@ pub const HISTORY_COMPACTION_PROMPT: &str = r#"你正在执行一个上下文检
 pub const HISTORY_COMPACTION_SUMMARY_PREFIX: &str = r#"Earlier runtime context was compacted into the following handoff summary.
 Use it to continue the same thread without redoing already-finished work:"#;
 
-#[cfg(windows)]
-pub const TERMINAL_PROMPT: &str = r#"终端使用提示：
-1. Terminal 通过 terminal tools 操作，不要假设自己要直接输出一段终端输入文本作为动作。
-2. 终端只通过 `terminal_exec / terminal_write_stdin / terminal_terminate` 操作。
-2.5. `terminal_exec` 负责启动命令并返回当前输出窗口；如果命令仍在运行，后续继续使用 `terminal_write_stdin`。当你只是想继续等待输出时，发送空文本即可。
-3. 绝对严禁使用任何交互式全屏终端程序（如 vim, vi, nano, less, top 等）。如果需要查看文件，请使用 `cat`、`grep`、`head`、`tail`、`python -c` 等非交互命令；如果需要修改文件，请优先使用 `apply_patch`，不要依赖 shell 拼接。
-4. 严禁主动启动任何需要人类账号、密码、浏览器授权、设备码授权或交互式登录向导的命令，例如 `gh auth login`、`docker login`、`npm login` 等。优先使用公开可访问的网页、HTTP API、`git clone`、`curl` 或无需认证的查询方式。
-5. 如果终端已经停在你不该进入的交互式认证/登录提示上，不要继续回答向导问题；应优先中断，再改用非交互方案。"#;
-
-#[cfg(not(windows))]
-pub const TERMINAL_PROMPT: &str = r#"终端使用提示：
-1. Terminal 通过 terminal tools 操作，不要假设自己要直接输出一段终端输入文本作为动作。
-2. 终端只通过 `terminal_exec / terminal_write_stdin / terminal_terminate` 操作。
-2.5. `terminal_exec` 负责启动命令并返回当前输出窗口；如果命令仍在运行，后续继续使用 `terminal_write_stdin`。当你只是想继续等待输出时，发送空文本即可。
-3. 绝对严禁使用任何交互式全屏终端程序（如 vim, vi, nano, less, top 等）。如果需要查看文件，请使用 `cat`、`grep`、`head`、`tail`、`python -c` 等非交互命令；如果需要修改文件，请优先使用 `apply_patch`，不要依赖 shell 拼接。
-4. 严禁主动启动任何需要人类账号、密码、浏览器授权、设备码授权或交互式登录向导的命令，例如 `gh auth login`、`docker login`、`npm login` 等。优先使用公开可访问的网页、HTTP API、`git clone`、`curl` 或无需认证的查询方式。
-5. 如果终端已经停在你不该进入的交互式认证/登录提示上，不要继续回答向导问题；应优先中断，再改用非交互方案。"#;
-
 pub fn build_device_context_prompt(context: &Context) -> String {
     let mut sections = vec![String::from(
         "设备动作约束：设备只提供结构状态；具体查看与操作要通过本轮暴露的 tools 完成。如果后台设备更合适，请调用 `focus_device`。",
     )];
 
-    match context.devices.focused() {
-        Some(DeviceId::Terminal) => sections.push(TERMINAL_PROMPT.to_string()),
+    let focused = context.devices.focused();
+    let device_usages = context
+        .devices
+        .state_renders()
+        .into_iter()
+        .filter_map(|(device_id, _state)| {
+            context
+                .devices
+                .usage(device_id)
+                .map(|usage| build_device_usage_prompt(device_id, &usage))
+        })
+        .collect::<Vec<_>>();
+
+    if !device_usages.is_empty() {
+        sections.push(format!("可用设备：\n{}", device_usages.join("\n\n")));
+    }
+
+    match focused {
+        Some(device_id) => {
+            if let Some(how_to_use) = context.devices.how_to_use(device_id) {
+                sections.push(build_device_how_to_use_prompt(device_id, &how_to_use));
+            }
+        }
         None => sections.push(String::from(
             "当前没有任何前景设备。如果你需要操作设备，请先调用 `focus_device`。",
         )),
@@ -77,7 +80,7 @@ pub fn build_device_context_prompt(context: &Context) -> String {
         .devices
         .state_renders()
         .into_iter()
-        .filter(|(_, state)| !state.is_focused)
+        .filter(|(device_id, _)| focused != Some(*device_id))
         .filter_map(|(device_id, state)| background_attention_hint(device_id, &state))
         .collect::<Vec<_>>();
 
@@ -88,40 +91,27 @@ pub fn build_device_context_prompt(context: &Context) -> String {
     sections.join("\n\n")
 }
 
-pub fn build_device_instruction_prompt(
+pub fn build_device_pre_focus_note_prompt(
     device_id: DeviceId,
     state: &DeviceStateRender,
-    focused_device: Option<DeviceId>,
 ) -> String {
-    if focused_device == Some(device_id) {
-        return match device_id {
-            DeviceId::Terminal => TERMINAL_PROMPT.to_string(),
-        };
-    }
-
     let mut sections = vec![format!(
         "当前 `{device_id}` 不在前景；如果你需要操作它，请先调用 `focus_device` 将它切到前景。"
     )];
-
     if let Some(hint) = background_attention_hint(device_id, state) {
         sections.push(hint);
     }
-
-    sections.join("\n")
+    sections.join("\n\n")
 }
 
 fn background_attention_hint(device_id: DeviceId, state: &DeviceStateRender) -> Option<String> {
-    if !matches!(state.attention, AttentionLevel::Notice) {
+    if !device_requires_attention(device_id, state) {
         return None;
     }
 
     let summary = match device_id {
         DeviceId::Terminal => {
-            let session_id = state
-                .lines
-                .iter()
-                .find_map(|line| line.strip_prefix("active_session="))
-                .unwrap_or("unknown");
+            let session_id = first_terminal_session_id(state).unwrap_or("unknown");
             if numeric_field(&state.lines, "sessions_with_unread_output") > 0 {
                 format!("后台终端会话 {session_id} 有未读输出。")
             } else {
@@ -144,4 +134,41 @@ fn numeric_field(lines: &[String], key: &str) -> usize {
         .find_map(|line| line.strip_prefix(&format!("{key}=")))
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0)
+}
+
+fn device_requires_attention(device_id: DeviceId, state: &DeviceStateRender) -> bool {
+    match device_id {
+        DeviceId::Terminal => numeric_field(&state.lines, "sessions_with_unread_output") > 0,
+    }
+}
+
+fn first_terminal_session_id<'a>(state: &'a DeviceStateRender) -> Option<&'a str> {
+    state
+        .lines
+        .iter()
+        .find_map(|line| line.strip_prefix("session="))
+        .and_then(|line| line.split_whitespace().next())
+}
+
+pub fn build_device_usage_prompt(device_id: DeviceId, usage: &DeviceUsage) -> String {
+    let mut lines = vec![format!("`{device_id}` 的用途：{}", usage.purpose)];
+    if !usage.when_to_focus.is_empty() {
+        lines.push("适合聚焦它的时机：".to_string());
+        lines.extend(
+            usage
+                .when_to_focus
+                .iter()
+                .map(|line| format!("- {line}")),
+        );
+    }
+    lines.join("\n")
+}
+
+pub fn build_device_how_to_use_prompt(
+    device_id: DeviceId,
+    how_to_use: &DeviceHowToUse,
+) -> String {
+    let mut lines = vec![format!("`{device_id}` 当前在前景，操作说明：")];
+    lines.extend(how_to_use.lines.iter().map(|line| format!("- {line}")));
+    lines.join("\n")
 }

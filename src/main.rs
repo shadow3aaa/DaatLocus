@@ -3070,7 +3070,7 @@ fn claim_pending_runtime_inputs(context: &Context, max_events: usize) -> Vec<Cla
                     }
                     continue;
                 };
-                if !matches!(render.attention, crate::device::AttentionLevel::Notice) {
+                if !device_render_requires_attention(device, &render) {
                     if let Err(err) = context.pending_work.consume(PendingWork::DeviceNotice {
                         device,
                         reason: String::new(),
@@ -3170,7 +3170,7 @@ fn finalize_claimed_runtime_device_notices(
         let still_noticed = renders
             .iter()
             .find(|(device_id, _)| device_id == device)
-            .map(|(_, render)| matches!(render.attention, crate::device::AttentionLevel::Notice))
+            .map(|(device_id, render)| device_render_requires_attention(*device_id, render))
             .unwrap_or(false);
         let work = PendingWork::DeviceNotice {
             device: *device,
@@ -3673,7 +3673,7 @@ fn summarize_terminal_for_hindsight(context: &Context) -> Option<String> {
         .devices
         .state_renders()
         .into_iter()
-        .find(|(_, render)| render.is_focused)?;
+        .find(|(device_id, _)| *device_id == crate::device::DeviceId::Terminal)?;
     Some(render.lines.join("\n"))
 }
 
@@ -3810,7 +3810,7 @@ fn sync_driver_frontier_from_sources(context: &Context) {
 fn enqueue_device_notice_work(context: &mut Context) {
     let renders = context.devices.state_renders();
     for (device_id, render) in renders {
-        let noticed = matches!(render.attention, crate::device::AttentionLevel::Notice);
+        let noticed = device_render_requires_attention(device_id, &render);
         if noticed {
             if context.active_device_notices.insert(device_id) {
                 let reason = summarize_device_notice_reason(device_id, &render);
@@ -3842,6 +3842,15 @@ fn summarize_device_notice_reason(
                 "terminal requires attention".to_string()
             }
         }
+    }
+}
+
+fn device_render_requires_attention(
+    device_id: DeviceId,
+    render: &crate::device::DeviceStateRender,
+) -> bool {
+    match device_id {
+        DeviceId::Terminal => numeric_field(&render.lines, "sessions_with_unread_output") > 0,
     }
 }
 
@@ -4222,6 +4231,17 @@ fn render_device_status_outputs_for_dashboard(context: &Context) -> Vec<(String,
         .state_renders()
         .into_iter()
         .map(|(device_id, state)| {
+            let usage = context
+                .devices
+                .usage(device_id)
+                .unwrap_or(crate::device::DeviceUsage {
+                    purpose: "No usage available.".to_string(),
+                    when_to_focus: Vec::new(),
+                });
+            let how_to_use = context
+                .devices
+                .how_to_use(device_id)
+                .unwrap_or(crate::device::DeviceHowToUse { lines: Vec::new() });
             let mut lines = Vec::new();
             let key = device_id.to_string().to_ascii_lowercase();
             lines.push(format!("Device Status: {}", state.title));
@@ -4229,14 +4249,25 @@ fn render_device_status_outputs_for_dashboard(context: &Context) -> Vec<(String,
             lines.push("[structured_state]".to_string());
             lines.push(format!("device_id={key}"));
             lines.push(format!("title={}", state.title));
-            lines.push(format!("is_focused={}", state.is_focused));
-            lines.push(format!("attention={}", state.attention));
             lines.extend(state.lines.iter().cloned());
             lines.push(String::new());
-            lines.push("[llm_note]".to_string());
-            lines.push(crate::reasoning::prompts::build_device_instruction_prompt(
-                device_id, &state, focused,
+            lines.push("[usage]".to_string());
+            lines.push(crate::reasoning::prompts::build_device_usage_prompt(
+                device_id, &usage,
             ));
+            lines.push(String::new());
+            lines.push("[how_to_use]".to_string());
+            if focused == Some(device_id) {
+                lines.push(crate::reasoning::prompts::build_device_how_to_use_prompt(
+                    device_id,
+                    &how_to_use,
+                ));
+            } else {
+                lines.push(crate::reasoning::prompts::build_device_pre_focus_note_prompt(
+                    device_id,
+                    &state,
+                ));
+            }
             (key, lines.join("\n"))
         })
         .collect()
