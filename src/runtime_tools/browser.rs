@@ -38,7 +38,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<BrowserSnapshotArgs>(
             "browser_snapshot",
-            "读取指定页面的完整 ARIA 语义快照，返回页面元信息与可交互元素引用。",
+            "读取指定页面的紧凑语义快照，优先保留高价值节点与可交互元素引用。",
             Some(AppToolScope::Browser),
             summarize_browser_snapshot_tool,
             render_browser_snapshot_call_ui,
@@ -129,6 +129,10 @@ fn browser_snapshot_model_content(
     let mut lines = vec![
         format!("summary={summary}"),
         browser_page_meta(&result.page),
+        format!(
+            "snapshot_stats=lines={} refs={} interactive_refs={}",
+            result.line_count, result.ref_count, result.interactive_ref_count
+        ),
         "snapshot=".to_string(),
     ];
     lines.push(result.snapshot.clone());
@@ -214,10 +218,17 @@ fn execute_browser_snapshot_tool<'a>(
             json!({
                 "page": result.page,
                 "snapshot": result.snapshot,
+                "line_count": result.line_count,
+                "ref_count": result.ref_count,
+                "interactive_ref_count": result.interactive_ref_count,
             }),
             ToolUiEvent::app(
                 "captured browser snapshot",
-                vec![format!("page={}", result.page.page_id)],
+                vec![
+                    format!("page={}", result.page.page_id),
+                    format!("lines={}", result.line_count),
+                    format!("refs={}", result.ref_count),
+                ],
             ),
         )
         .with_model_content(model_content))

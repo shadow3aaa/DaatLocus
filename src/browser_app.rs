@@ -1,9 +1,12 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
-use viewpoint_core::{Browser, BrowserContext, DocumentLoadState, Page};
+use viewpoint_core::{AriaSnapshot, Browser, BrowserContext, DocumentLoadState, Page};
 
 use crate::{
     app::{
@@ -23,7 +26,7 @@ const BROWSER_WHEN_TO_FOCUS: &[&str] = &[
 const BROWSER_HOW_TO_USE_LINES: &[&str] = &[
     "Browser 只通过 browser tools 操作；不要假设自己可以直接读取原始 HTML 或像人类一样机械导航。",
     "先用 `browser_open_page` 打开新页面，或在已知 `page_id` 上继续工作。",
-    "如果页面可能仍在加载，先调用 `browser_wait`；如果要理解当前页面内容或拿到可交互元素引用，使用 `browser_snapshot`。",
+    "如果页面可能仍在加载，先调用 `browser_wait`；如果要理解当前页面内容或拿到可交互元素引用，使用 `browser_snapshot` 读取紧凑语义快照。",
     "一切页面交互都必须显式提供 `page_id + element_ref`；不要猜测页面结构。",
     "输入框、搜索框、筛选器等可填写控件都属于基础 Browser 操作；先阅读页面快照拿到 `element_ref`，再用 `browser_fill`。",
     "搜索结果页通常只是定位线索，不应默认把摘要当作最终事实；应优先进入候选目标页继续确认。",
@@ -37,6 +40,7 @@ const BROWSER_SKILL_DEEP_RESEARCH_ID: &str = "browser.deep_research";
 const BROWSER_SKILL_SOURCE_VERIFICATION_ID: &str = "browser.source_verification";
 const BROWSER_SKILL_ARTICLE_READING_ID: &str = "browser.article_reading";
 const BROWSER_TOOL_SCOPES: &[AppToolScope] = &[AppToolScope::Browser];
+const BROWSER_SNAPSHOT_MAX_DEPTH: usize = 6;
 pub struct BrowserApp {
     browser: Option<Browser>,
     context: Option<BrowserContext>,
@@ -60,6 +64,9 @@ pub struct BrowserOpenResult {
 pub struct BrowserSnapshotResult {
     pub page: BrowserPageState,
     pub snapshot: String,
+    pub line_count: usize,
+    pub ref_count: usize,
+    pub interactive_ref_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +78,19 @@ pub struct BrowserActionResult {
 pub struct BrowserWaitResult {
     pub page: BrowserPageState,
     pub wait_state: String,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CompactSnapshotStats {
+    line_count: usize,
+    ref_count: usize,
+    interactive_ref_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedSnapshotLines {
+    lines: Vec<String>,
+    relevant: bool,
 }
 
 impl BrowserApp {
@@ -226,9 +246,13 @@ impl BrowserApp {
             .await
             .map_err(|err| miette!("failed to inspect page `{page_id}`: {err}"))?;
         let state = self.replace_page_state(&page).await;
+        let (snapshot, stats) = compact_browser_snapshot(&snapshot);
         Ok(BrowserSnapshotResult {
             page: state,
-            snapshot: snapshot.to_string(),
+            snapshot,
+            line_count: stats.line_count,
+            ref_count: stats.ref_count,
+            interactive_ref_count: stats.interactive_ref_count,
         })
     }
 
@@ -334,6 +358,326 @@ impl BrowserApp {
             "error"
         } else {
             "not_initialized"
+        }
+    }
+}
+
+fn is_interactive_role(role: &str) -> bool {
+    matches!(
+        role,
+        "button"
+            | "checkbox"
+            | "combobox"
+            | "link"
+            | "listbox"
+            | "menuitem"
+            | "menuitemcheckbox"
+            | "menuitemradio"
+            | "option"
+            | "radio"
+            | "searchbox"
+            | "slider"
+            | "spinbutton"
+            | "switch"
+            | "tab"
+            | "textbox"
+            | "treeitem"
+    )
+}
+
+fn is_content_role(role: &str) -> bool {
+    matches!(
+        role,
+        "article"
+            | "banner"
+            | "cell"
+            | "columnheader"
+            | "complementary"
+            | "form"
+            | "gridcell"
+            | "heading"
+            | "img"
+            | "listitem"
+            | "main"
+            | "navigation"
+            | "paragraph"
+            | "region"
+            | "rowheader"
+            | "search"
+            | "status"
+            | "strong"
+    )
+}
+
+fn is_structural_role(role: &str) -> bool {
+    matches!(
+        role,
+        "application"
+            | "directory"
+            | "document"
+            | "generic"
+            | "grid"
+            | "group"
+            | "ignored"
+            | "list"
+            | "menu"
+            | "menubar"
+            | "none"
+            | "presentation"
+            | "row"
+            | "rowgroup"
+            | "table"
+            | "tablist"
+            | "toolbar"
+            | "tree"
+            | "treegrid"
+    )
+}
+
+fn normalize_snapshot_role(node: &AriaSnapshot) -> String {
+    node.role
+        .as_deref()
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .map(|role| role.to_ascii_lowercase())
+        .unwrap_or_else(|| "generic".to_string())
+}
+
+fn normalized_snapshot_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.replace('\n', " "))
+}
+
+fn compact_snapshot_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let prefix = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
+}
+
+fn escape_snapshot_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn should_create_snapshot_ref(role: &str, name: Option<&str>) -> bool {
+    is_interactive_role(role) || (is_content_role(role) && name.is_some())
+}
+
+fn should_include_snapshot_node(role: &str, name: Option<&str>) -> bool {
+    !(is_structural_role(role) && name.is_none())
+}
+
+fn collect_snapshot_ref_duplicate_counts(
+    node: &AriaSnapshot,
+    counts: &mut HashMap<String, usize>,
+) {
+    let role = normalize_snapshot_role(node);
+    let name = normalized_snapshot_text(node.name.as_deref());
+    if node.node_ref.is_some() && should_create_snapshot_ref(&role, name.as_deref()) {
+        let key = format!("{role}:{}", name.as_deref().unwrap_or(""));
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    for child in &node.children {
+        collect_snapshot_ref_duplicate_counts(child, counts);
+    }
+}
+
+fn build_snapshot_line(
+    node: &AriaSnapshot,
+    role: &str,
+    name: Option<&str>,
+    depth: usize,
+    duplicate_counts: &HashMap<String, usize>,
+    duplicate_seen: &mut HashMap<String, usize>,
+    stats: &mut CompactSnapshotStats,
+) -> String {
+    let indent = "  ".repeat(depth);
+    let mut line = format!("{indent}- {role}");
+    if let Some(name) = name {
+        line.push_str(&format!(
+            " \"{}\"",
+            escape_snapshot_value(&compact_snapshot_text(name, 160))
+        ));
+    }
+
+    if let Some(node_ref) = node.node_ref.as_deref() {
+        if should_create_snapshot_ref(role, name) {
+            let key = format!("{role}:{}", name.unwrap_or(""));
+            let nth = duplicate_seen.entry(key.clone()).or_insert(0);
+            let current_nth = *nth;
+            *nth += 1;
+            line.push_str(&format!(" [ref={node_ref}]"));
+            if duplicate_counts.get(&key).copied().unwrap_or(0) > 1 && current_nth > 0 {
+                line.push_str(&format!(" [nth={current_nth}]"));
+            }
+            stats.ref_count += 1;
+            if is_interactive_role(role) {
+                stats.interactive_ref_count += 1;
+            }
+        }
+    }
+
+    if let Some(value_text) = normalized_snapshot_text(node.value_text.as_deref()) {
+        line.push_str(&format!(
+            " value=\"{}\"",
+            escape_snapshot_value(&compact_snapshot_text(&value_text, 120))
+        ));
+    } else if let Some(value_now) = node.value_now {
+        line.push_str(&format!(" value={value_now}"));
+    }
+
+    if let Some(description) = normalized_snapshot_text(node.description.as_deref()) {
+        line.push_str(&format!(
+            " description=\"{}\"",
+            escape_snapshot_value(&compact_snapshot_text(&description, 120))
+        ));
+    }
+
+    if let Some(level) = node.level {
+        line.push_str(&format!(" level={level}"));
+    }
+    if node.disabled == Some(true) {
+        line.push_str(" disabled");
+    }
+    if node.expanded == Some(true) {
+        line.push_str(" expanded");
+    }
+    if node.selected == Some(true) {
+        line.push_str(" selected");
+    }
+    if let Some(checked) = node.checked {
+        line.push_str(&format!(" checked={checked:?}"));
+    }
+    if node.pressed == Some(true) {
+        line.push_str(" pressed");
+    }
+    if node.is_frame == Some(true) {
+        line.push_str(" frame_boundary");
+    }
+
+    stats.line_count += 1;
+    line
+}
+
+fn render_compact_snapshot_lines(
+    node: &AriaSnapshot,
+    depth: usize,
+    duplicate_counts: &HashMap<String, usize>,
+    duplicate_seen: &mut HashMap<String, usize>,
+    stats: &mut CompactSnapshotStats,
+) -> RenderedSnapshotLines {
+    if depth > BROWSER_SNAPSHOT_MAX_DEPTH {
+        return RenderedSnapshotLines {
+            lines: Vec::new(),
+            relevant: false,
+        };
+    }
+
+    let role = normalize_snapshot_role(node);
+    let name = normalized_snapshot_text(node.name.as_deref());
+
+    let mut child_lines = Vec::new();
+    let mut child_relevant = false;
+    for child in &node.children {
+        let rendered = render_compact_snapshot_lines(
+            child,
+            depth + 1,
+            duplicate_counts,
+            duplicate_seen,
+            stats,
+        );
+        if rendered.relevant {
+            child_relevant = true;
+            child_lines.extend(rendered.lines);
+        }
+    }
+
+    let has_ref = node.node_ref.is_some() && should_create_snapshot_ref(&role, name.as_deref());
+    let has_meaningful_text = name.is_some()
+        || node.value_text.as_deref().is_some_and(|value| !value.trim().is_empty())
+        || node
+            .description
+            .as_deref()
+            .is_some_and(|description| !description.trim().is_empty());
+    let include_node = should_include_snapshot_node(&role, name.as_deref());
+    let include_line = include_node
+        && (!is_structural_role(&role) || has_ref || has_meaningful_text || child_relevant);
+
+    let mut lines = Vec::new();
+    if include_line {
+        lines.push(build_snapshot_line(
+            node,
+            &role,
+            name.as_deref(),
+            depth,
+            duplicate_counts,
+            duplicate_seen,
+            stats,
+        ));
+    }
+    lines.extend(child_lines);
+
+    RenderedSnapshotLines {
+        relevant: include_line || child_relevant,
+        lines,
+    }
+}
+
+fn compact_browser_snapshot(snapshot: &AriaSnapshot) -> (String, CompactSnapshotStats) {
+    let snapshot_root = preferred_snapshot_root(snapshot).unwrap_or(snapshot);
+    let mut duplicate_counts = HashMap::new();
+    collect_snapshot_ref_duplicate_counts(snapshot_root, &mut duplicate_counts);
+
+    let mut duplicate_seen = HashMap::new();
+    let mut stats = CompactSnapshotStats::default();
+    let rendered = render_compact_snapshot_lines(
+        snapshot_root,
+        0,
+        &duplicate_counts,
+        &mut duplicate_seen,
+        &mut stats,
+    );
+
+    let snapshot = if rendered.lines.is_empty() {
+        "- generic".to_string()
+    } else {
+        rendered.lines.join("\n")
+    };
+    (snapshot, stats)
+}
+
+fn preferred_snapshot_root(snapshot: &AriaSnapshot) -> Option<&AriaSnapshot> {
+    let mut best_main = None;
+    let mut best_article = None;
+    collect_preferred_snapshot_root(snapshot, &mut best_main, &mut best_article);
+    best_main.or(best_article)
+}
+
+fn collect_preferred_snapshot_root<'a>(
+    node: &'a AriaSnapshot,
+    best_main: &mut Option<&'a AriaSnapshot>,
+    best_article: &mut Option<&'a AriaSnapshot>,
+) {
+    let role = normalize_snapshot_role(node);
+    if role == "main" && best_main.is_none() {
+        *best_main = Some(node);
+    } else if role == "article" && best_article.is_none() {
+        *best_article = Some(node);
+    }
+
+    if best_main.is_some() && best_article.is_some() {
+        return;
+    }
+
+    for child in &node.children {
+        collect_preferred_snapshot_root(child, best_main, best_article);
+        if best_main.is_some() && best_article.is_some() {
+            break;
         }
     }
 }
