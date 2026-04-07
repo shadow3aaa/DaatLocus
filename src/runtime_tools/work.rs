@@ -6,8 +6,8 @@ use crate::{
     apply_patch::{PatchOperationKind, parse_apply_patch, summarize_patch_ops},
     context::Context,
     core::{
-        DeepRecallArgs, EventResolveArgs, FocusAppArgs, PutAwayAppArgs, TodoCompleteArgs,
-        TodoCreateArgs, TodoDropArgs, TodoUpdateArgs,
+        DeepRecallArgs, EventResolveArgs, FocusAppArgs, PutAwayAppArgs, ReadSkillArgs,
+        TodoCompleteArgs, TodoCreateArgs, TodoDropArgs, TodoUpdateArgs,
     },
     events::{EventDisposition, EventPayload, EventStatus},
     hindsight::HindsightReflectOptions,
@@ -115,6 +115,14 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             render_deep_recall_call_ui,
             execute_deep_recall_tool,
         )),
+        Box::new(StaticRuntimeTool::new::<ReadSkillArgs>(
+            "read_skill",
+            "读取当前前景 app 上指定 skill 的完整说明正文。调用前应先 `focus_app` 到匹配的 app；skill 列表会出现在应用快照里。",
+            None,
+            summarize_read_skill_tool,
+            render_read_skill_call_ui,
+            execute_read_skill_tool,
+        )),
     ]
 }
 
@@ -168,7 +176,11 @@ fn execute_focus_app_tool<'a>(
                 format!("focused app {}", args.app),
                 vec![args.app.to_string()],
             ),
-        ))
+        )
+        .with_turn_boundary(format!(
+            "focused app changed to {}; re-render world state in a new turn",
+            args.app
+        )))
     })
 }
 
@@ -193,6 +205,9 @@ fn execute_put_away_app_tool<'a>(
             "put away focused app",
             json!({}),
             ToolUiEvent::app("put away focused app", Vec::new()),
+        )
+        .with_turn_boundary(
+            "focused app was put away; re-render world state in a new turn",
         ))
     })
 }
@@ -533,6 +548,49 @@ fn execute_deep_recall_tool<'a>(
             }),
             ToolUiEvent::work(title, body_lines),
         ))
+    })
+}
+
+fn summarize_read_skill_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: ReadSkillArgs = parse_tool_args(call)?;
+    Ok(EpisodeActionRecord {
+        kind: "read_skill".to_string(),
+        summary: format!("id={}", args.id),
+    })
+}
+
+fn render_read_skill_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: ReadSkillArgs = parse_tool_args(call)?;
+    Ok(ToolCallUiEvent::work(
+        "read_skill".to_string(),
+        vec![format!("id={}", args.id)],
+    ))
+}
+
+fn execute_read_skill_tool<'a>(
+    context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let args: ReadSkillArgs = parse_tool_args(call)?;
+        let skill = context.apps.read_skill(&args.id)?;
+        let content = format!(
+            "skill_id={}\ntitle={}\nbody=\n{}",
+            skill.id, skill.title, skill.body
+        );
+        Ok(ToolExecutionResult::new(
+            format!("read skill {}", skill.id),
+            json!({
+                "id": skill.id,
+                "title": skill.title,
+                "body": skill.body,
+            }),
+            ToolUiEvent::work(
+                "read skill".to_string(),
+                vec![format!("id={}", args.id)],
+            ),
+        )
+        .with_model_content(content))
     })
 }
 

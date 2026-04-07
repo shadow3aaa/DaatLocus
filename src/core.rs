@@ -138,6 +138,11 @@ pub struct DeepRecallArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ReadSkillArgs {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TodoCompleteArgs {
     pub item_id: String,
     pub summary: String,

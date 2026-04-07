@@ -3131,6 +3131,21 @@ pub(crate) async fn execute_agent_loop_step(
                     vec![activity_cell_from_tool_ui_event(result.ui_event.clone())],
                 );
                 tool_results.push(format!("{} => {}", call.name, result.summary));
+                if let Some(reason) = result.turn_boundary_reason.clone() {
+                    break 'agent_loop AgentLoopStepOutput {
+                        observation: if tool_results.is_empty() {
+                            reason.clone()
+                        } else {
+                            tool_results.join("\n")
+                        },
+                        description: format!(
+                            "某个 tool 改变了后续所需的上下文视图；当前 turn 在该边界后立即结束，并在新 turn 中重新渲染世界状态。原因：{reason}"
+                        ),
+                        stop_reason: "tool_requested_new_turn".to_string(),
+                        current_doing: "等待下一轮工具决策".to_string(),
+                        actions: actions.clone(),
+                    };
+                }
                 if claimed_events_are_terminal(context, &claimed_event_ids) {
                     if actions.is_empty() {
                         actions.push(EpisodeActionRecord {

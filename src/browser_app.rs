@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use viewpoint_core::{AriaSnapshot, Browser, BrowserContext, DocumentLoadState, Page};
 
 use crate::{
-    app::{App, AppHowToUse, AppId, AppStateRender, AppToolScope, AppUsage},
+    app::{
+        App, AppHowToUse, AppId, AppSkillContent, AppSkillSummary, AppStateRender, AppToolScope,
+        AppUsage,
+    },
     spinova_paths::spinova_paths_sync,
 };
 
@@ -22,7 +25,7 @@ const BROWSER_WHEN_TO_FOCUS: &[&str] = &[
 ];
 const BROWSER_HOW_TO_USE_LINES: &[&str] = &[
     "Browser 只通过 browser tools 操作；不要假设自己可以直接读取原始 HTML 或像人类一样机械导航。",
-    "先用 `browser_open` 打开新页面，或在已知 `page_id` 上继续工作。",
+    "先用 `browser_open_page` 打开新页面，或在已知 `page_id` 上继续工作。",
     "读取页面时先调用 `browser_snapshot` 获取最新语义快照。快照会返回 `snapshot_id` 和元素 `element_ref`。",
     "如果页面可能仍在加载，先调用 `browser_wait`；如果要定位正文或某个关键词，优先调用 `browser_find_in_page`。",
     "一切页面交互都必须显式提供 `page_id + snapshot_id + element_ref`；不要猜测页面结构，也不要复用旧快照。",
@@ -32,6 +35,10 @@ const BROWSER_HOW_TO_USE_LINES: &[&str] = &[
     "如果已经查到标题、摘要或正文片段，应基于已确认内容回答并明确范围；只有在关键内容确实不可得时才收尾为失败。",
     "Browser 只使用 Spinova 自带的独立浏览器 runtime，不会复用用户日常浏览器 profile；如果 runtime 未安装，浏览器工具会直接报错。",
 ];
+const BROWSER_SKILL_WEB_SEARCH_BASIC_ID: &str = "browser.web_search_basic";
+const BROWSER_SKILL_SOURCE_VERIFICATION_ID: &str = "browser.source_verification";
+const BROWSER_SKILL_REPORT_RESEARCH_ID: &str = "browser.report_research";
+const BROWSER_SKILL_FORM_FILLING_ID: &str = "browser.form_filling";
 const BROWSER_TOOL_SCOPES: &[AppToolScope] = &[AppToolScope::Browser];
 pub struct BrowserApp {
     browser: Option<Browser>,
@@ -643,6 +650,71 @@ impl App for BrowserApp {
                 .map(|line| (*line).to_string())
                 .collect(),
         }
+    }
+
+    fn skills(&self) -> Vec<AppSkillSummary> {
+        vec![
+            AppSkillSummary {
+                id: BROWSER_SKILL_WEB_SEARCH_BASIC_ID.to_string(),
+                name: "简单搜索求真".to_string(),
+                when_to_use: vec![
+                    "需要先通过搜索引擎定位一个或多个候选来源时。".to_string(),
+                    "用户问的是一般事实、站点入口或需要快速找到目标页面时。".to_string(),
+                ],
+            },
+            AppSkillSummary {
+                id: BROWSER_SKILL_SOURCE_VERIFICATION_ID.to_string(),
+                name: "来源查证".to_string(),
+                when_to_use: vec![
+                    "需要确认某条说法是否真的出现在网页来源中时。".to_string(),
+                    "需要避免只凭搜索结果摘要就下结论时。".to_string(),
+                ],
+            },
+            AppSkillSummary {
+                id: BROWSER_SKILL_REPORT_RESEARCH_ID.to_string(),
+                name: "调查与报告阅读".to_string(),
+                when_to_use: vec![
+                    "需要围绕文章、报告、博客或新闻做多步阅读和总结时。".to_string(),
+                    "需要从网页中提炼论点、事实和出处时。".to_string(),
+                ],
+            },
+            AppSkillSummary {
+                id: BROWSER_SKILL_FORM_FILLING_ID.to_string(),
+                name: "表单填写".to_string(),
+                when_to_use: vec![
+                    "页面上需要填写输入框、勾选项、提交表单时。".to_string(),
+                    "任务目标是登录、搜索、筛选、提交而不是单纯阅读时。".to_string(),
+                ],
+            },
+        ]
+    }
+
+    fn read_skill(&self, id: &str) -> Result<AppSkillContent> {
+        let (title, body) = match id {
+            BROWSER_SKILL_WEB_SEARCH_BASIC_ID => (
+                "Browser Skill: 简单搜索求真",
+                "适用时机：当你需要先通过搜索引擎定位候选来源时。\n\n做法：\n1. 用 `browser_open_page` 打开搜索结果页。\n2. 用 `browser_snapshot` 阅读当前结果页，再结合 `browser_find_in_page` 定位最相关候选。\n3. 搜索结果页通常只用于定位线索，不应默认把摘要当作最终事实。\n4. 一旦识别出最相关候选，优先进入目标页继续确认；不要只把站点链接丢给用户，除非用户要的就是入口链接。",
+            ),
+            BROWSER_SKILL_SOURCE_VERIFICATION_ID => (
+                "Browser Skill: 来源查证",
+                "适用时机：当用户要你确认某条事实、说法或网页内容是否成立时。\n\n做法：\n1. 先打开候选来源，再抓取最新 `browser_snapshot`。\n2. 用 `browser_find_in_page` 辅助定位关键词，但不要把命中本身当作完成。\n3. 继续结合 snapshot 确认该信息所在的具体页面位置与上下文。\n4. 只有在目标页上拿到足够明确的内容后，才可向用户下结论；搜索结果页摘要通常只算线索，不算最终查证。",
+            ),
+            BROWSER_SKILL_REPORT_RESEARCH_ID => (
+                "Browser Skill: 调查与报告阅读",
+                "适用时机：当你需要阅读文章、报告、新闻或博客并提炼结论时。\n\n做法：\n1. 先 `browser_wait` 或重抓 snapshot，避免在页头/导航阶段过早判断失败。\n2. 使用 `browser_find_in_page` 查找关键人物、术语或段落线索。\n3. 如果已经拿到标题、摘要或正文片段，应基于已确认内容总结并说明范围。\n4. 如果任务需要更深确认，继续点击相关链接或页内元素，不要停在搜索页或站点简介页。",
+            ),
+            BROWSER_SKILL_FORM_FILLING_ID => (
+                "Browser Skill: 表单填写",
+                "适用时机：当页面存在输入框、搜索框、选择器或提交按钮时。\n\n做法：\n1. 先 `browser_snapshot` 找到可填写控件与提交对象的 `element_ref`。\n2. 用 `browser_fill` 向目标控件写入值。\n3. 若页面随后发生变化，旧 `snapshot_id` 会失效，必须重新 snapshot。\n4. 对提交按钮、分页按钮或结果项使用 `browser_click`；必要时先 `browser_wait` 再继续。",
+            ),
+            _ => return Err(miette!("unknown Browser skill `{id}`")),
+        };
+
+        Ok(AppSkillContent {
+            id: id.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+        })
     }
 
     fn focused_tool_scopes(&self) -> &'static [AppToolScope] {

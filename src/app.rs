@@ -47,6 +47,20 @@ pub struct AppHowToUse {
     pub lines: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AppSkillSummary {
+    pub id: String,
+    pub name: String,
+    pub when_to_use: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppSkillContent {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+}
+
 #[async_trait]
 pub trait App: Send + Sync {
     fn id(&self) -> AppId;
@@ -60,6 +74,14 @@ pub trait App: Send + Sync {
     fn usage(&self) -> AppUsage;
 
     fn how_to_use(&self) -> AppHowToUse;
+
+    fn skills(&self) -> Vec<AppSkillSummary> {
+        Vec::new()
+    }
+
+    fn read_skill(&self, _id: &str) -> Result<AppSkillContent> {
+        Err(miette!("unknown app skill"))
+    }
 
     fn focused_tool_scopes(&self) -> &'static [AppToolScope] {
         &[]
@@ -133,6 +155,30 @@ impl AppManager {
 
     pub fn how_to_use(&self, id: AppId) -> Option<AppHowToUse> {
         self.apps.get(&id).map(|app| app.how_to_use())
+    }
+
+    pub fn all_skills(&self) -> Vec<(AppId, Vec<AppSkillSummary>)> {
+        self.order
+            .iter()
+            .filter_map(|id| self.apps.get(id).map(|app| (*id, app.skills())))
+            .collect()
+    }
+
+    pub fn read_skill(&self, id: &str) -> Result<AppSkillContent> {
+        let Some(focused) = self.focused else {
+            return Err(miette!(
+                "no focused app; focus the matching app before reading its skill"
+            ));
+        };
+        let app = self
+            .apps
+            .get(&focused)
+            .ok_or_else(|| miette!("focused app missing: {focused}"))?;
+        app.read_skill(id).map_err(|_| {
+            miette!(
+                "skill `{id}` is not available on focused app {focused}; focus the matching app first"
+            )
+        })
     }
 
     pub fn focused_tool_scopes(&self) -> &'static [AppToolScope] {
@@ -263,7 +309,7 @@ impl AppManager {
         terminal.terminate_session(session_id).await
     }
 
-    pub async fn browser_open(
+    pub async fn browser_open_page(
         &mut self,
         url: &str,
     ) -> Result<crate::browser_app::BrowserOpenResult> {

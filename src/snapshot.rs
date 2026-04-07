@@ -6,7 +6,7 @@ use std::fmt::Display;
 use crate::{
     context::Context,
     context_budget::truncate_text_to_token_budget,
-    app::{AppId, AppStateRender},
+    app::{AppId, AppSkillSummary, AppStateRender},
     events::{EventPayload, EventStatus, EventStore, EventView},
     system_info::SystemInfo,
     todo_board::TodoBoard,
@@ -172,6 +172,7 @@ impl Display for Sensory {
 struct AppSnapshot {
     focused_app: Option<AppId>,
     states: Vec<(AppId, AppStateRender)>,
+    skills: Vec<(AppId, Vec<AppSkillSummary>)>,
 }
 
 struct EventSnapshot {
@@ -183,6 +184,7 @@ impl AppSnapshot {
         Self {
             focused_app: context.apps.focused(),
             states: context.apps.state_renders(),
+            skills: context.apps.all_skills(),
         }
     }
 }
@@ -232,6 +234,18 @@ impl Display for AppSnapshot {
             writeln!(f, "- {id} / {}：", state.title)?;
             for line in &state.lines {
                 writeln!(f, "  {line}")?;
+            }
+            if self.focused_app == Some(*id)
+                && let Some((_, skills)) = self.skills.iter().find(|(app_id, _)| app_id == id)
+                && !skills.is_empty()
+            {
+                writeln!(f, "  可用 skills：")?;
+                for skill in skills {
+                    writeln!(f, "    - {}: {}", skill.id, skill.name)?;
+                    for when in &skill.when_to_use {
+                        writeln!(f, "      - {}", summarize_inline_text(when))?;
+                    }
+                }
             }
         }
         Ok(())
@@ -311,6 +325,18 @@ impl AppSnapshot {
             let omitted = state.lines.len().saturating_sub(max_lines_per_device);
             if omitted > 0 {
                 lines.push(format!("  ... 还有 {omitted} 行未展示"));
+            }
+            if self.focused_app == Some(*id)
+                && let Some((_, skills)) = self.skills.iter().find(|(app_id, _)| app_id == id)
+                && !skills.is_empty()
+            {
+                lines.push("  可用 skills：".to_string());
+                for skill in skills {
+                    lines.push(format!("    - {}: {}", skill.id, skill.name));
+                    for when in &skill.when_to_use {
+                        lines.push(format!("      - {}", summarize_inline_text(when)));
+                    }
+                }
             }
         }
 

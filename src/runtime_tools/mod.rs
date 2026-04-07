@@ -86,6 +86,7 @@ pub struct ToolExecutionResult {
     pub payload: Value,
     pub model_content_override: Option<String>,
     pub ui_event: ToolUiEvent,
+    pub turn_boundary_reason: Option<String>,
 }
 
 impl ToolExecutionResult {
@@ -95,11 +96,17 @@ impl ToolExecutionResult {
             payload,
             model_content_override: None,
             ui_event,
+            turn_boundary_reason: None,
         }
     }
 
     pub fn with_model_content(mut self, model_content: impl Into<String>) -> Self {
         self.model_content_override = Some(model_content.into());
+        self
+    }
+
+    pub fn with_turn_boundary(mut self, reason: impl Into<String>) -> Self {
+        self.turn_boundary_reason = Some(reason.into());
         self
     }
 

@@ -31,12 +31,12 @@ fn model_tool_output_token_budget(context: &Context) -> usize {
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![
         Box::new(StaticRuntimeTool::new::<BrowserOpenArgs>(
-            "browser_open",
+            "browser_open_page",
             "新建一个浏览器页面并打开指定 URL。返回新的 `page_id`。",
             Some(AppToolScope::Browser),
-            summarize_browser_open_tool,
-            render_browser_open_call_ui,
-            execute_browser_open_tool,
+            summarize_browser_open_page_tool,
+            render_browser_open_page_call_ui,
+            execute_browser_open_page_tool,
         )),
         Box::new(StaticRuntimeTool::new::<BrowserSnapshotArgs>(
             "browser_snapshot",
@@ -175,29 +175,29 @@ fn browser_find_model_content(
     truncate_text_to_token_budget(&lines.join("\n"), max_tokens)
 }
 
-fn summarize_browser_open_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+fn summarize_browser_open_page_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
     let args: BrowserOpenArgs = parse_tool_args(call)?;
     Ok(EpisodeActionRecord {
-        kind: "browser_open".to_string(),
+        kind: "browser_open_page".to_string(),
         summary: format!("url={}", summarize_inline_text(&args.url)),
     })
 }
 
-fn render_browser_open_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+fn render_browser_open_page_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: BrowserOpenArgs = parse_tool_args(call)?;
     Ok(ToolCallUiEvent::app(
-        "browser_open",
+        "browser_open_page",
         vec![format!("url={}", summarize_inline_text(&args.url))],
     ))
 }
 
-fn execute_browser_open_tool<'a>(
+fn execute_browser_open_page_tool<'a>(
     context: &'a mut Context,
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: BrowserOpenArgs = parse_tool_args(call)?;
-        let result = context.apps.browser_open(&args.url).await?;
+        let result = context.apps.browser_open_page(&args.url).await?;
         let summary = format!("opened page {}", result.page.page_id);
         let model_content = browser_action_model_content(
             &summary,
