@@ -29,10 +29,16 @@ use crate::{
     execute_agent_loop_step,
     pending_work::PendingWork,
     reasoning::{
-        episode::EpisodeActionRecord,
         compiled::{
             CompiledPromptStore, CompiledRuntimeSystemPrompt, CompiledRuntimeSystemPromptReport,
             RUNTIME_SYSTEM_PROMPT_COMPILE_KEY, save_compiled_runtime_system_prompt_for_model,
+        },
+        episode::EpisodeActionRecord,
+        evaluation_artifacts::{
+            EvaluationArtifactRuntimePromptCandidate,
+            EvaluationArtifactRuntimePromptEvolutionReport,
+            EvaluationArtifactRuntimePromptEvolutionRound, EvaluationArtifactTurnDemo,
+            EvaluationArtifactTurnDemoEvaluation, EvaluationArtifactsStore,
         },
         examples::ExampleField,
         programs::runtime_turn_demo_generator::{
@@ -46,11 +52,6 @@ use crate::{
         runtime::{PromptMessage, PromptRole},
         runtime::{execute_program_with_ir_report, resolve_program_tuning},
         runtime_review::{RuntimeReviewSpan, RuntimeTurnRecord},
-        evaluation_artifacts::{
-            EvaluationArtifactRuntimePromptCandidate, EvaluationArtifactRuntimePromptEvolutionReport,
-            EvaluationArtifactRuntimePromptEvolutionRound, EvaluationArtifactTurnDemo,
-            EvaluationArtifactTurnDemoEvaluation, EvaluationArtifactsStore,
-        },
         trace::TraceOrigin,
     },
     spinova_paths::spinova_paths,
@@ -377,10 +378,8 @@ struct IsolatedEvalContext {
 
 impl IsolatedEvalContext {
     async fn new(config: Config, compiled_prompts: CompiledPromptStore) -> Result<Self> {
-        let home_path = std::env::temp_dir().join(format!(
-            "spinova-turn-compile-{}",
-            Uuid::new_v4()
-        ));
+        let home_path =
+            std::env::temp_dir().join(format!("spinova-turn-compile-{}", Uuid::new_v4()));
         fs::create_dir_all(&home_path).await.map_err(|err| {
             miette!(
                 "failed to create isolated turn-compile home '{}': {err}",
@@ -433,7 +432,8 @@ impl TurnRolloutRunner {
             })
             .map(|message| message.content.clone())
             .filter(|message| !message.trim().is_empty());
-        let final_reply_message = last_finish_and_send_reply_message(&span.last_turn().history_messages);
+        let final_reply_message =
+            last_finish_and_send_reply_message(&span.last_turn().history_messages);
         TurnTraceArtifact {
             span_id: span.id.clone(),
             turn_count: span.turns.len(),
@@ -582,7 +582,8 @@ impl TurnCompileEngine {
         config: Config,
         compiled_prompts: CompiledPromptStore,
     ) -> Result<CompiledRuntimeSystemPrompt> {
-        let artifacts = EvaluationArtifactsStore::open_scoped(Some(COLD_START_ARTIFACT_SCOPE)).await?;
+        let artifacts =
+            EvaluationArtifactsStore::open_scoped(Some(COLD_START_ARTIFACT_SCOPE)).await?;
         let mut progress_ui = TurnCompileInlineProgress::try_new();
         let persona_spec = load_or_seed_prompt_persona_spec().await?;
         if let Some(ui) = progress_ui.as_mut() {
@@ -1250,7 +1251,9 @@ pub fn turn_prompt_suggestions_from_evaluations(
         .collect()
 }
 
-pub fn turn_evaluation_stats(evaluations: &[EvaluationArtifactTurnDemoEvaluation]) -> (usize, usize) {
+pub fn turn_evaluation_stats(
+    evaluations: &[EvaluationArtifactTurnDemoEvaluation],
+) -> (usize, usize) {
     let passed = evaluations.iter().filter(|item| item.passed).count();
     let regressions = evaluations
         .iter()
@@ -1485,6 +1488,7 @@ async fn run_cold_start_turn_demo(
         .events
         .register_telegram_incoming(TelegramIncomingEvent {
             chat_id,
+            chat_kind: "private".to_string(),
             chat_title,
             sender,
             incoming_text,
@@ -1591,7 +1595,8 @@ async fn generate_turn_prompt_candidate(
     let renderer = OpenAIToolRenderer;
     let program = RuntimeTurnPromptPatchBuilderProgram;
     let tuning = resolve_program_tuning(&mut isolated_context.context, &program).await;
-    let current_system_prompt = runtime_system_prompt_text(&isolated_context.context.compiled_prompts);
+    let current_system_prompt =
+        runtime_system_prompt_text(&isolated_context.context.compiled_prompts);
     emit_turn_compile_progress(format!(
         "[turn-compile:{}] patch builder start for {} failed demos",
         compile_mode_label(TurnCompileMode::ColdStart),
@@ -1950,8 +1955,20 @@ fn preview_text_from_trace(trace: &TurnTraceArtifact) -> Option<&str> {
         .iter()
         .rev()
         .find_map(|step| step.assistant_message.as_deref())
-        .or_else(|| trace.steps.iter().rev().find_map(|step| step.reply_message.as_deref()))
-        .or_else(|| trace.steps.iter().rev().find_map(|step| step.actions.last().and_then(preview_summary_from_action)))
+        .or_else(|| {
+            trace
+                .steps
+                .iter()
+                .rev()
+                .find_map(|step| step.reply_message.as_deref())
+        })
+        .or_else(|| {
+            trace
+                .steps
+                .iter()
+                .rev()
+                .find_map(|step| step.actions.last().and_then(preview_summary_from_action))
+        })
 }
 
 fn preview_text_from_execution(execution: &AgentLoopStepExecution) -> Option<String> {

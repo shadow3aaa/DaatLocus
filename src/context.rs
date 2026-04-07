@@ -3,21 +3,24 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Instant,
 };
 
+use parking_lot::Mutex;
+
 use crate::{
+    app::{AppId, AppManager},
     config::Config,
     core::LLM,
     dashboard::DashboardState,
-    app::{AppId, AppManager},
     events::EventStore,
     hindsight::{HindsightClient, HindsightRetainHandle},
     memory::Memory,
     pending_work::PendingWorkQueue,
-    sandbox::RuntimeSandboxPolicy,
     reasoning::compiled::CompiledPromptStore,
     reasoning::runtime::PromptMemoryContext,
+    sandbox::RuntimeSandboxPolicy,
     telegram_device::TelegramDeviceHandle,
     todo_board::TodoBoard,
     work_state::WorkState,
@@ -43,6 +46,7 @@ pub struct Context {
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
     pub active_runtime_turn: bool,
     pub active_app_notices: HashSet<AppId>,
+    pub live_assistant_progress_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
     pub record_runtime_reviews: bool,
@@ -50,7 +54,21 @@ pub struct Context {
 
 impl Context {
     pub fn resolve_tool_path(&self, path: &Path, base: Option<&Path>) -> PathBuf {
-        self.sandbox_policy.resolve_path(path, base.or(Some(&self.execution_cwd)))
+        self.sandbox_policy
+            .resolve_path(path, base.or(Some(&self.execution_cwd)))
+    }
+
+    pub fn install_live_assistant_progress(
+        &mut self,
+        tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) {
+        *self.live_assistant_progress_tx.lock() = tx;
+    }
+
+    pub fn emit_live_assistant_progress(&self, content: &str) {
+        if let Some(tx) = self.live_assistant_progress_tx.lock().as_ref() {
+            let _ = tx.send(content.to_string());
+        }
     }
 
     pub async fn shutdown(mut self) {

@@ -6,9 +6,9 @@ use schemars::schema_for;
 use serde_json::Value;
 
 use crate::{
+    app::AppToolScope,
     context::Context,
     context_budget::truncate_text_to_token_budget,
-    app::AppToolScope,
     reasoning::{
         episode::EpisodeActionRecord,
         runtime::{AgentToolCall, AgentToolInputSpec, AgentToolSpec},

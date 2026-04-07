@@ -5,9 +5,7 @@ use miette::{Result, miette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    browser_app::BrowserApp, sandbox::RuntimeSandboxPolicy, terminal_app::TerminalApp,
-};
+use crate::{browser_app::BrowserApp, sandbox::RuntimeSandboxPolicy, terminal_app::TerminalApp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
 pub enum AppId {
@@ -141,11 +139,7 @@ impl AppManager {
     pub fn state_renders(&self) -> Vec<(AppId, AppStateRender)> {
         self.order
             .iter()
-            .filter_map(|id| {
-                self.apps
-                    .get(id)
-                    .map(|app| (*id, app.render_state()))
-            })
+            .filter_map(|id| self.apps.get(id).map(|app| (*id, app.render_state())))
             .collect()
     }
 
@@ -335,21 +329,6 @@ impl AppManager {
         browser.snapshot_page(page_id).await
     }
 
-    pub async fn browser_find_in_page(
-        &mut self,
-        page_id: &str,
-        query: &str,
-        max_results: usize,
-    ) -> Result<crate::browser_app::BrowserFindResult> {
-        let focused = self.focused;
-        let app = self.focused_app_mut()?;
-        let browser = app
-            .as_any_mut()
-            .downcast_mut::<BrowserApp>()
-            .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.find_in_page(page_id, query, max_results).await
-    }
-
     pub async fn browser_wait(
         &mut self,
         page_id: &str,
@@ -368,7 +347,6 @@ impl AppManager {
     pub async fn browser_click(
         &mut self,
         page_id: &str,
-        snapshot_id: &str,
         element_ref: &str,
     ) -> Result<crate::browser_app::BrowserActionResult> {
         let focused = self.focused;
@@ -377,13 +355,12 @@ impl AppManager {
             .as_any_mut()
             .downcast_mut::<BrowserApp>()
             .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.click(page_id, snapshot_id, element_ref).await
+        browser.click(page_id, element_ref).await
     }
 
     pub async fn browser_fill(
         &mut self,
         page_id: &str,
-        snapshot_id: &str,
         element_ref: &str,
         value: &str,
     ) -> Result<crate::browser_app::BrowserActionResult> {
@@ -393,7 +370,7 @@ impl AppManager {
             .as_any_mut()
             .downcast_mut::<BrowserApp>()
             .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.fill(page_id, snapshot_id, element_ref, value).await
+        browser.fill(page_id, element_ref, value).await
     }
 
     pub async fn browser_back(

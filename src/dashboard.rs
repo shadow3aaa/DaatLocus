@@ -786,7 +786,12 @@ impl DashboardCommand for AppStatusCommand {
         parts: &[&str],
         context: &DashboardCommandContext<'_>,
     ) -> Vec<CommandSuggestion> {
-        let prefix = parts.get(1).copied().unwrap_or_default().trim().to_ascii_lowercase();
+        let prefix = parts
+            .get(1)
+            .copied()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
         context
             .state
             .app_status_outputs
@@ -842,7 +847,10 @@ impl DashboardCommand for AppStatusCommand {
                 if devices.is_empty() {
                     format!("unknown app: {target}")
                 } else {
-                    format!("unknown app: {target}\navailable apps: {}", devices.join(", "))
+                    format!(
+                        "unknown app: {target}\navailable apps: {}",
+                        devices.join(", ")
+                    )
                 }
             }),
         }
@@ -1165,13 +1173,11 @@ pub async fn run_tui_dashboard(
                         state: &state,
                         control_tx: &control_tx,
                     };
-                    if let Some(completion) =
-                        selected_command_completion(
-                            &command_input,
-                            command_popup_selection,
-                            &command_context,
-                        )
-                    {
+                    if let Some(completion) = selected_command_completion(
+                        &command_input,
+                        command_popup_selection,
+                        &command_context,
+                    ) {
                         command_input = completion;
                         command_popup_selection = 0;
                         command_popup_scroll = 0;
@@ -1234,13 +1240,11 @@ pub async fn run_tui_dashboard(
                         state: &state,
                         control_tx: &control_tx,
                     };
-                    if let Some(completion) =
-                        selected_command_completion(
-                            &command_input,
-                            command_popup_selection,
-                            &command_context,
-                        )
-                        && completion != command_input
+                    if let Some(completion) = selected_command_completion(
+                        &command_input,
+                        command_popup_selection,
+                        &command_context,
+                    ) && completion != command_input
                     {
                         command_input = completion;
                         command_popup_selection = 0;

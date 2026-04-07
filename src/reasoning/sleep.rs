@@ -21,13 +21,24 @@ use serde_json::json;
 use tracing::warn;
 
 use super::{
+    evaluation_artifacts::{
+        EvaluationArtifactBootstrapDemo, EvaluationArtifactFailurePattern,
+        EvaluationArtifactInstructionHypothesis, EvaluationArtifactRuntimeDemo,
+        EvaluationArtifactRuntimeDemoEvaluation, EvaluationArtifactRuntimePromptCandidate,
+        EvaluationArtifactRuntimePromptEvolutionReport,
+        EvaluationArtifactRuntimePromptEvolutionRound, EvaluationArtifactRuntimePromptSuggestion,
+        EvaluationArtifactStressCase, EvaluationArtifactSuggestedFixKind,
+        EvaluationArtifactTurnDemo, EvaluationArtifactTurnDemoEvaluation, EvaluationArtifactsStore,
+    },
+    programs::evaluation_artifact_builder::{
+        EvaluationArtifactBuilderOutput, EvaluationArtifactBuilderProgram,
+    },
     programs::runtime_system_prompt_judge::{
         RuntimeSystemPromptJudgeOutput, RuntimeSystemPromptJudgeProgram,
     },
     programs::runtime_system_prompt_patch_builder::{
         RuntimeSystemPromptPatchBuilderOutput, RuntimeSystemPromptPatchBuilderProgram,
     },
-    programs::evaluation_artifact_builder::{EvaluationArtifactBuilderOutput, EvaluationArtifactBuilderProgram},
     programs::sleep_review_synthesizer::{
         SleepReviewSynthesizerOutput, SleepReviewSynthesizerProgram,
     },
@@ -36,15 +47,6 @@ use super::{
     runtime_review::{
         RuntimeReviewSpan, RuntimeTurnRecord, build_runtime_review_spans,
         compact_runtime_review_file, load_runtime_review_batch,
-    },
-    evaluation_artifacts::{
-        EvaluationArtifactBootstrapDemo, EvaluationArtifactFailurePattern,
-        EvaluationArtifactInstructionHypothesis, EvaluationArtifactRuntimeDemo,
-        EvaluationArtifactRuntimeDemoEvaluation, EvaluationArtifactRuntimePromptCandidate,
-        EvaluationArtifactRuntimePromptEvolutionReport, EvaluationArtifactRuntimePromptEvolutionRound,
-        EvaluationArtifactRuntimePromptSuggestion, EvaluationArtifactStressCase,
-        EvaluationArtifactSuggestedFixKind, EvaluationArtifactTurnDemo, EvaluationArtifactTurnDemoEvaluation,
-        EvaluationArtifactsStore,
     },
     trace::{
         ProgramTraceRecord, RuntimeTraceBatch, TraceOrigin, compact_runtime_trace_file,
@@ -530,7 +532,10 @@ fn review_label_from_action_kind(action_kind: &str, fallback: &str) -> String {
 fn infer_runtime_review_status(span: &RuntimeReviewSpan) -> String {
     if span.turns.iter().all(|turn| {
         let action = last_runtime_turn_action(turn);
-        matches!(action.kind.as_str(), "assistant_message" | "empty_tool_calls")
+        matches!(
+            action.kind.as_str(),
+            "assistant_message" | "empty_tool_calls"
+        )
     }) {
         return "NoProgress".to_string();
     }
@@ -544,7 +549,9 @@ fn infer_runtime_review_status(span: &RuntimeReviewSpan) -> String {
     "Observed".to_string()
 }
 
-fn derive_failure_patterns(records: &[ProgramTraceRecord]) -> Vec<EvaluationArtifactFailurePattern> {
+fn derive_failure_patterns(
+    records: &[ProgramTraceRecord],
+) -> Vec<EvaluationArtifactFailurePattern> {
     let mut buckets: HashMap<(String, String), PatternAccumulator> = HashMap::new();
 
     for record in records {
@@ -1536,7 +1543,9 @@ fn render_failed_runtime_demos(evaluations: &[EvaluationArtifactRuntimeDemoEvalu
         .join("\n")
 }
 
-fn render_runtime_judge_feedback(evaluations: &[EvaluationArtifactRuntimeDemoEvaluation]) -> String {
+fn render_runtime_judge_feedback(
+    evaluations: &[EvaluationArtifactRuntimeDemoEvaluation],
+) -> String {
     evaluations
         .iter()
         .map(|item| {

@@ -8,9 +8,7 @@ use miette::{Result, bail, miette};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    app::{
-        App, AppHowToUse, AppId, AppStateRender, AppToolScope, AppUsage,
-    },
+    app::{App, AppHowToUse, AppId, AppStateRender, AppToolScope, AppUsage},
     sandbox::RuntimeSandboxPolicy,
     terminal_process::TerminalProcess,
 };
@@ -682,8 +680,7 @@ mod tests {
             )
             .await
             .expect("create long-running session should succeed");
-        app
-            .terminate_session(&created.session.session_id)
+        app.terminate_session(&created.session.session_id)
             .await
             .expect("terminate should succeed");
         assert!(app.sessions.is_empty());

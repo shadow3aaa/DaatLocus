@@ -4,11 +4,11 @@ use miette::{Result, miette};
 use serde_json::json;
 
 use crate::{
+    app::AppToolScope,
     context::Context,
     context_budget::truncate_text_to_token_budget,
     core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWriteStdinArgs},
     dashboard::{DashboardActivityEvent, apply_activity_event},
-    app::AppToolScope,
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     tool_ui::{TerminalUiAction, ToolCallUiEvent, ToolUiEvent, compact_body_lines},
 };
@@ -59,9 +59,7 @@ fn command_mentions_protected_paths(context: &Context, text: &str) -> bool {
 }
 
 fn terminal_protection_error(label: &str) -> miette::Report {
-    miette!(
-        "terminal access to protected runtime path is not allowed ({label})"
-    )
+    miette!("terminal access to protected runtime path is not allowed ({label})")
 }
 
 fn compact_terminal_model_content(
@@ -158,9 +156,13 @@ fn execute_terminal_exec_tool<'a>(
         context
             .sandbox_policy
             .ensure_path_readable(&effective_workdir, "terminal workdir")
-            .map_err(|_| terminal_protection_error(&format!("workdir={}", effective_workdir.display())))?;
+            .map_err(|_| {
+                terminal_protection_error(&format!("workdir={}", effective_workdir.display()))
+            })?;
         if command_mentions_protected_paths(context, &args.command) {
-            return Err(terminal_protection_error("command references protected path"));
+            return Err(terminal_protection_error(
+                "command references protected path",
+            ));
         }
         let effective_workdir = args
             .workdir
@@ -310,7 +312,9 @@ fn execute_terminal_write_stdin_tool<'a>(
             context
                 .sandbox_policy
                 .ensure_path_readable(&resolved_cwd, "terminal session cwd")
-                .map_err(|_| terminal_protection_error(&format!("session cwd={}", resolved_cwd.display())))?;
+                .map_err(|_| {
+                    terminal_protection_error(&format!("session cwd={}", resolved_cwd.display()))
+                })?;
         }
         if command_mentions_protected_paths(context, &args.text) {
             return Err(terminal_protection_error("stdin references protected path"));

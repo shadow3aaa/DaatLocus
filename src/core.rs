@@ -4,8 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    context::Context,
     app::AppId,
+    context::Context,
     events::EventDisposition,
     reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
     todo_board::TodoStatus,
@@ -53,13 +53,6 @@ pub struct BrowserSnapshotArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct BrowserFindInPageArgs {
-    pub page_id: String,
-    pub query: String,
-    pub max_results: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserWaitArgs {
     pub page_id: String,
     /// `dom` waits for any parsed DOM, `load` waits for complete readyState.
@@ -70,14 +63,12 @@ pub struct BrowserWaitArgs {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserClickArgs {
     pub page_id: String,
-    pub snapshot_id: String,
     pub element_ref: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserFillArgs {
     pub page_id: String,
-    pub snapshot_id: String,
     pub element_ref: String,
     pub value: String,
 }
