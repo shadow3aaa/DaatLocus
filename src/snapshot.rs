@@ -4,9 +4,9 @@ use std::collections::HashSet;
 use std::fmt::Display;
 
 use crate::{
+    app::{AppId, AppSkillSummary, AppStateRender},
     context::Context,
     context_budget::truncate_text_to_token_budget,
-    app::{AppId, AppSkillSummary, AppStateRender},
     events::{EventPayload, EventStatus, EventStore, EventView},
     system_info::SystemInfo,
     todo_board::TodoBoard,

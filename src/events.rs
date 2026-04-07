@@ -68,12 +68,18 @@ pub enum EventPayload {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TelegramIncomingEvent {
     pub chat_id: String,
+    #[serde(default = "default_telegram_chat_kind")]
+    pub chat_kind: String,
     pub chat_title: String,
     pub sender: String,
     pub incoming_text: String,
     pub telegram_update_id: i64,
     pub telegram_message_id: Option<i64>,
     pub telegram_message_date: Option<i64>,
+}
+
+fn default_telegram_chat_kind() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Clone)]
@@ -111,6 +117,7 @@ impl EventStore {
         if let Some(existing_id) = find_existing_telegram_event(&inner.state, &event) {
             if let Some(existing) = inner.state.events.get_mut(&existing_id) {
                 let EventPayload::TelegramIncoming(existing_payload) = &mut existing.payload;
+                existing_payload.chat_kind = event.chat_kind;
                 existing_payload.chat_title = event.chat_title;
                 existing_payload.sender = event.sender;
                 existing_payload.incoming_text = event.incoming_text;

@@ -147,8 +147,7 @@ impl TelegramTransport {
                 if let Some(command) =
                     extract_telegram_command(&message, self.bot_username.as_deref())
                 {
-                    if let Err(err) = self.handle_command_message(message.chat.id, &command).await
-                    {
+                    if let Err(err) = self.handle_command_message(message.chat.id, &command).await {
                         tracing::error!("handle telegram command failed: {err:?}");
                     }
                     return;
@@ -167,6 +166,7 @@ impl TelegramTransport {
                     .events
                     .register_telegram_incoming(TelegramIncomingEvent {
                         chat_id: chat_id.clone(),
+                        chat_kind: message.chat.kind.clone(),
                         chat_title: chat_title.clone(),
                         sender: sender.clone(),
                         incoming_text: text.clone(),
@@ -184,10 +184,8 @@ impl TelegramTransport {
                         tracing::error!("register telegram event failed: {err:?}");
                     }
                 }
-                self.handle.observe_incoming_message(
-                    chat_id,
-                    chat_title.clone(),
-                );
+                self.handle
+                    .observe_incoming_message(chat_id, chat_title.clone());
             }
             AccessDecision::Blocked => (),
             AccessDecision::Unknown => {
@@ -338,6 +336,59 @@ impl TelegramTransport {
     }
 }
 
+#[derive(Clone)]
+pub struct TelegramLiveDraftClient {
+    client: Client,
+    config: TelegramConfig,
+}
+
+impl TelegramLiveDraftClient {
+    pub fn new(config: TelegramConfig) -> Self {
+        Self {
+            client: Client::new(),
+            config,
+        }
+    }
+
+    pub async fn send_message_draft(&self, chat_id: i64, draft_id: i64, text: &str) -> Result<()> {
+        let response = self
+            .client
+            .post(self.endpoint("sendMessageDraft"))
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "draft_id": draft_id,
+                "text": text,
+            }))
+            .send()
+            .await
+            .map_err(|err| miette!("telegram sendMessageDraft request failed: {err}"))?
+            .error_for_status()
+            .map_err(|err| miette!("telegram sendMessageDraft http error: {err}"))?;
+
+        let payload: TelegramApiResponse<bool> = response
+            .json()
+            .await
+            .map_err(|err| miette!("telegram sendMessageDraft json decode failed: {err}"))?;
+        if payload.ok {
+            Ok(())
+        } else {
+            bail!(
+                "telegram sendMessageDraft failed: {}",
+                payload
+                    .description
+                    .unwrap_or_else(|| "unknown api error".to_string())
+            );
+        }
+    }
+
+    fn endpoint(&self, method: &str) -> String {
+        format!(
+            "https://api.telegram.org/bot{}/{}",
+            self.config.bot_token, method
+        )
+    }
+}
+
 #[derive(Deserialize)]
 struct TelegramApiResponse<T> {
     ok: bool,
@@ -374,6 +425,8 @@ struct TelegramMessageEntity {
 #[derive(Deserialize)]
 struct TelegramChat {
     id: i64,
+    #[serde(rename = "type")]
+    kind: String,
     title: Option<String>,
     first_name: Option<String>,
     last_name: Option<String>,

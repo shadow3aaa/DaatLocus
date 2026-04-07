@@ -162,10 +162,7 @@ fn render_focus_app_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     ))
 }
 
-fn execute_focus_app_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
+fn execute_focus_app_tool<'a>(context: &'a mut Context, call: &'a AgentToolCall) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: FocusAppArgs = parse_tool_args(call)?;
         context.apps.focus(args.app).await?;
@@ -206,9 +203,7 @@ fn execute_put_away_app_tool<'a>(
             json!({}),
             ToolUiEvent::app("put away focused app", Vec::new()),
         )
-        .with_turn_boundary(
-            "focused app was put away; re-render world state in a new turn",
-        ))
+        .with_turn_boundary("focused app was put away; re-render world state in a new turn"))
     })
 }
 
@@ -585,10 +580,7 @@ fn execute_read_skill_tool<'a>(
                 "title": skill.title,
                 "body": skill.body,
             }),
-            ToolUiEvent::work(
-                "read skill".to_string(),
-                vec![format!("id={}", args.id)],
-            ),
+            ToolUiEvent::work("read skill".to_string(), vec![format!("id={}", args.id)]),
         )
         .with_model_content(content))
     })

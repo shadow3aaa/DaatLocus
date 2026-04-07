@@ -88,11 +88,7 @@ pub async fn write_current_turn_response_dump(response: &AgentTurnStreamResult, 
     write_current_turn_log_file("current_turn_response.txt", body).await;
 }
 
-pub async fn write_current_turn_response_error_dump(
-    error: &str,
-    attempt: usize,
-    will_retry: bool,
-) {
+pub async fn write_current_turn_response_error_dump(error: &str, attempt: usize, will_retry: bool) {
     let mut lines = vec![
         "status=error".to_string(),
         format!("attempt={attempt}"),
@@ -119,7 +115,10 @@ async fn write_current_turn_log_file(file_name: &str, body: String) {
 
     let dump_path = paths.logs_file(file_name);
     if let Err(err) = tokio::fs::write(&dump_path, body).await {
-        tracing::warn!("failed to write current turn dump {}: {err}", dump_path.display());
+        tracing::warn!(
+            "failed to write current turn dump {}: {err}",
+            dump_path.display()
+        );
     }
 }
 

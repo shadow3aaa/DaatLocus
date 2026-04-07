@@ -2,21 +2,19 @@ use miette::Result;
 use serde_json::json;
 
 use crate::{
+    app::AppToolScope,
     browser_app::{
-        BrowserActionResult, BrowserFindResult, BrowserPageState, BrowserSnapshotResult,
-        BrowserWaitResult,
+        BrowserActionResult, BrowserPageState, BrowserSnapshotResult, BrowserWaitResult,
     },
     context::Context,
     context_budget::truncate_text_to_token_budget,
     core::{
         BrowserBackArgs, BrowserClickArgs, BrowserClosePageArgs, BrowserFillArgs,
-        BrowserFindInPageArgs, BrowserForwardArgs, BrowserOpenArgs, BrowserReloadArgs,
-        BrowserSnapshotArgs, BrowserWaitArgs,
+        BrowserForwardArgs, BrowserOpenArgs, BrowserReloadArgs, BrowserSnapshotArgs,
+        BrowserWaitArgs,
     },
-    dashboard::{DashboardActivityEvent, apply_activity_event},
-    app::AppToolScope,
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
-    tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
+    tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 
 use super::{
@@ -40,23 +38,15 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<BrowserSnapshotArgs>(
             "browser_snapshot",
-            "抓取指定页面的最新语义快照。返回 `snapshot_id` 和可交互元素 `element_ref`。",
+            "读取指定页面的完整 ARIA 语义快照，返回页面元信息与可交互元素引用。",
             Some(AppToolScope::Browser),
             summarize_browser_snapshot_tool,
             render_browser_snapshot_call_ui,
             execute_browser_snapshot_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<BrowserFindInPageArgs>(
-            "browser_find_in_page",
-            "在指定页面中查找包含目标文本的元素，返回匹配元素的 `element_ref`、角色和文本摘要。",
-            Some(AppToolScope::Browser),
-            summarize_browser_find_in_page_tool,
-            render_browser_find_in_page_call_ui,
-            execute_browser_find_in_page_tool,
-        )),
         Box::new(StaticRuntimeTool::new::<BrowserWaitArgs>(
             "browser_wait",
-            "等待指定页面进入稳定状态。`state` 可用 `dom` 或 `load`；等待后旧 `snapshot_id` 会失效。",
+            "等待指定页面进入稳定状态。`state` 可用 `dom` 或 `load`。",
             Some(AppToolScope::Browser),
             summarize_browser_wait_tool,
             render_browser_wait_call_ui,
@@ -64,7 +54,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<BrowserClickArgs>(
             "browser_click",
-            "基于最新快照中的 `element_ref` 点击页面元素。点击后旧 `snapshot_id` 会失效。",
+            "基于 `element_ref` 点击页面元素；如果页面变化导致引用失效，tool 会直接报错。",
             Some(AppToolScope::Browser),
             summarize_browser_click_tool,
             render_browser_click_call_ui,
@@ -72,7 +62,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<BrowserFillArgs>(
             "browser_fill",
-            "基于最新快照中的 `element_ref` 填写输入框。填写后旧 `snapshot_id` 会失效。",
+            "基于 `element_ref` 填写输入框；如果页面变化导致引用失效，tool 会直接报错。",
             Some(AppToolScope::Browser),
             summarize_browser_fill_tool,
             render_browser_fill_call_ui,
@@ -80,7 +70,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<BrowserBackArgs>(
             "browser_back",
-            "让指定页面后退。后退后旧 `snapshot_id` 会失效。",
+            "让指定页面后退。",
             Some(AppToolScope::Browser),
             summarize_browser_back_tool,
             render_browser_back_call_ui,
@@ -88,7 +78,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<BrowserForwardArgs>(
             "browser_forward",
-            "让指定页面前进。前进后旧 `snapshot_id` 会失效。",
+            "让指定页面前进。",
             Some(AppToolScope::Browser),
             summarize_browser_forward_tool,
             render_browser_forward_call_ui,
@@ -96,7 +86,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<BrowserReloadArgs>(
             "browser_reload",
-            "刷新指定页面。刷新后旧 `snapshot_id` 会失效。",
+            "刷新指定页面。",
             Some(AppToolScope::Browser),
             summarize_browser_reload_tool,
             render_browser_reload_call_ui,
@@ -115,11 +105,8 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
 
 fn browser_page_meta(page: &BrowserPageState) -> String {
     format!(
-        "page={} title={} url={} snapshot={}",
-        page.page_id,
-        page.title,
-        page.url,
-        page.last_snapshot_id.as_deref().unwrap_or("none")
+        "page={} title={} url={}",
+        page.page_id, page.title, page.url
     )
 }
 
@@ -139,39 +126,12 @@ fn browser_snapshot_model_content(
     result: &BrowserSnapshotResult,
     max_tokens: usize,
 ) -> String {
-    let lines = vec![
-        format!("summary={summary}"),
-        browser_page_meta(&result.page),
-        format!("snapshot_id={}", result.snapshot_id),
-        "snapshot=".to_string(),
-        result.snapshot.clone(),
-    ];
-    truncate_text_to_token_budget(&lines.join("\n"), max_tokens)
-}
-
-fn browser_find_model_content(
-    summary: &str,
-    result: &BrowserFindResult,
-    max_tokens: usize,
-) -> String {
     let mut lines = vec![
         format!("summary={summary}"),
         browser_page_meta(&result.page),
-        format!("query={}", summarize_inline_text(&result.query)),
-        format!("match_count={}", result.matches.len()),
+        "snapshot=".to_string(),
     ];
-    for (index, item) in result.matches.iter().enumerate() {
-        lines.push(format!(
-            "match[{index}]=ref={} role={} name={} text={}",
-            item.element_ref.as_deref().unwrap_or("none"),
-            item.role.as_deref().unwrap_or("none"),
-            item.name
-                .as_deref()
-                .map(summarize_inline_text)
-                .unwrap_or_else(|| "none".to_string()),
-            summarize_inline_text(&item.text_snippet)
-        ));
-    }
+    lines.push(result.snapshot.clone());
     truncate_text_to_token_budget(&lines.join("\n"), max_tokens)
 }
 
@@ -242,24 +202,8 @@ fn execute_browser_snapshot_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: BrowserSnapshotArgs = parse_tool_args(call)?;
-        let dashboard_tx = context.dashboard_tx.clone();
         let result = context.apps.browser_snapshot(&args.page_id).await?;
-        if let Some(tx) = &dashboard_tx {
-            tx.send_modify(|state| {
-                apply_activity_event(
-                    state,
-                    DashboardActivityEvent::ExecUpdate {
-                        key: call.id.clone(),
-                        meta: Some(format!("page={}", result.page.page_id)),
-                        output_lines: compact_body_lines(&result.snapshot, 10),
-                    },
-                );
-            });
-        }
-        let summary = format!(
-            "captured browser snapshot {} for page {}",
-            result.snapshot_id, result.page.page_id
-        );
+        let summary = format!("captured browser snapshot for page {}", result.page.page_id);
         let model_content = browser_snapshot_model_content(
             &summary,
             &result,
@@ -269,74 +213,11 @@ fn execute_browser_snapshot_tool<'a>(
             summary,
             json!({
                 "page": result.page,
-                "snapshot_id": result.snapshot_id,
                 "snapshot": result.snapshot,
             }),
             ToolUiEvent::app(
                 "captured browser snapshot",
-                vec![
-                    format!("page={}", result.page.page_id),
-                    format!("snapshot_id={}", result.snapshot_id),
-                ],
-            ),
-        )
-        .with_model_content(model_content))
-    })
-}
-
-fn summarize_browser_find_in_page_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: BrowserFindInPageArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "browser_find_in_page".to_string(),
-        summary: format!(
-            "page={} query={}",
-            args.page_id,
-            summarize_inline_text(&args.query)
-        ),
-    })
-}
-
-fn render_browser_find_in_page_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: BrowserFindInPageArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::app(
-        "browser_find_in_page",
-        vec![
-            format!("page={}", args.page_id),
-            format!("query={}", summarize_inline_text(&args.query)),
-        ],
-    ))
-}
-
-fn execute_browser_find_in_page_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: BrowserFindInPageArgs = parse_tool_args(call)?;
-        let result = context
-            .apps
-            .browser_find_in_page(&args.page_id, &args.query, args.max_results.unwrap_or(5))
-            .await?;
-        let summary = format!(
-            "found {} browser matches for query on page {}",
-            result.matches.len(),
-            result.page.page_id
-        );
-        let model_content =
-            browser_find_model_content(&summary, &result, model_tool_output_token_budget(context));
-        Ok(ToolExecutionResult::new(
-            summary,
-            json!({
-                "page": result.page,
-                "query": result.query,
-                "matches": result.matches,
-            }),
-            ToolUiEvent::app(
-                "found browser matches",
-                vec![
-                    format!("page={}", result.page.page_id),
-                    format!("matches={}", result.matches.len()),
-                ],
+                vec![format!("page={}", result.page.page_id)],
             ),
         )
         .with_model_content(model_content))
@@ -384,10 +265,7 @@ fn summarize_browser_click_tool(call: &AgentToolCall) -> Result<EpisodeActionRec
     let args: BrowserClickArgs = parse_tool_args(call)?;
     Ok(EpisodeActionRecord {
         kind: "browser_click".to_string(),
-        summary: format!(
-            "page={} snapshot={} ref={}",
-            args.page_id, args.snapshot_id, args.element_ref
-        ),
+        summary: format!("page={} ref={}", args.page_id, args.element_ref),
     })
 }
 
@@ -397,7 +275,6 @@ fn render_browser_click_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent>
         "browser_click",
         vec![
             format!("page={}", args.page_id),
-            format!("snapshot_id={}", args.snapshot_id),
             format!("ref={}", args.element_ref),
         ],
     ))
@@ -411,7 +288,7 @@ fn execute_browser_click_tool<'a>(
         let args: BrowserClickArgs = parse_tool_args(call)?;
         let result = context
             .apps
-            .browser_click(&args.page_id, &args.snapshot_id, &args.element_ref)
+            .browser_click(&args.page_id, &args.element_ref)
             .await?;
         browser_action_tool_result(
             context,
@@ -427,9 +304,8 @@ fn summarize_browser_fill_tool(call: &AgentToolCall) -> Result<EpisodeActionReco
     Ok(EpisodeActionRecord {
         kind: "browser_fill".to_string(),
         summary: format!(
-            "page={} snapshot={} ref={} value={}",
+            "page={} ref={} value={}",
             args.page_id,
-            args.snapshot_id,
             args.element_ref,
             summarize_inline_text(&args.value)
         ),
@@ -442,7 +318,6 @@ fn render_browser_fill_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> 
         "browser_fill",
         vec![
             format!("page={}", args.page_id),
-            format!("snapshot_id={}", args.snapshot_id),
             format!("ref={}", args.element_ref),
             format!("value={}", summarize_inline_text(&args.value)),
         ],
@@ -457,12 +332,7 @@ fn execute_browser_fill_tool<'a>(
         let args: BrowserFillArgs = parse_tool_args(call)?;
         let result = context
             .apps
-            .browser_fill(
-                &args.page_id,
-                &args.snapshot_id,
-                &args.element_ref,
-                &args.value,
-            )
+            .browser_fill(&args.page_id, &args.element_ref, &args.value)
             .await?;
         browser_action_tool_result(
             context,
@@ -588,11 +458,8 @@ fn browser_action_tool_result(
     context: &Context,
     title: &str,
     result: &BrowserActionResult,
-    mut extra_lines: Vec<String>,
+    extra_lines: Vec<String>,
 ) -> Result<ToolExecutionResult> {
-    if let Some(snapshot_id) = result.invalidated_snapshot_id.as_deref() {
-        extra_lines.push(format!("invalidated_snapshot_id={snapshot_id}"));
-    }
     let model_content = browser_action_model_content(
         title,
         &result.page,
@@ -601,10 +468,7 @@ fn browser_action_tool_result(
     );
     Ok(ToolExecutionResult::new(
         title,
-        json!({
-            "page": result.page,
-            "invalidated_snapshot_id": result.invalidated_snapshot_id,
-        }),
+        json!({ "page": result.page }),
         ToolUiEvent::app(title, {
             let mut lines = vec![format!("page={}", result.page.page_id)];
             lines.extend(extra_lines);
@@ -618,10 +482,7 @@ fn browser_wait_tool_result(
     context: &Context,
     result: &BrowserWaitResult,
 ) -> Result<ToolExecutionResult> {
-    let mut extra_lines = vec![format!("wait_state={}", result.wait_state)];
-    if let Some(snapshot_id) = result.invalidated_snapshot_id.as_deref() {
-        extra_lines.push(format!("invalidated_snapshot_id={snapshot_id}"));
-    }
+    let extra_lines = vec![format!("wait_state={}", result.wait_state)];
     let model_content = browser_action_model_content(
         "waited for browser page",
         &result.page,
@@ -633,7 +494,6 @@ fn browser_wait_tool_result(
         json!({
             "page": result.page,
             "wait_state": result.wait_state,
-            "invalidated_snapshot_id": result.invalidated_snapshot_id,
         }),
         ToolUiEvent::app("waited for browser page", {
             let mut lines = vec![format!("page={}", result.page.page_id)];

@@ -1,3 +1,4 @@
+mod app;
 mod apply_patch;
 mod browser_app;
 mod config;
@@ -5,7 +6,6 @@ mod context;
 mod context_budget;
 mod core;
 mod dashboard;
-mod app;
 mod events;
 mod hindsight;
 mod logging;
@@ -38,6 +38,7 @@ use std::{
 };
 
 use crate::{
+    app::{AppId, AppManager},
     apply_patch::{PatchOperationKind, apply_patch_in_root, summarize_apply_patch_error},
     browser_app::BrowserApp,
     config::load_config,
@@ -49,7 +50,6 @@ use crate::{
         apply_activity_event, assistant_activity_cell, render_activity_from_messages,
         run_tui_dashboard,
     },
-    app::{AppId, AppManager},
     events::{EventPayload, EventStatus, EventStore, EventView},
     hindsight::{HindsightClient, HindsightRecallOptions},
     logging::{
@@ -89,8 +89,8 @@ use crate::{
     },
     runtime_context::{
         MID_TURN_COMPACTION_MAX_RECOVERIES, build_runtime_conversation_summary,
-        build_runtime_request_envelope, build_runtime_snapshot_text, maybe_compact_runtime_messages,
-        runtime_request_budget_limits,
+        build_runtime_request_envelope, build_runtime_snapshot_text,
+        maybe_compact_runtime_messages, runtime_request_budget_limits,
     },
     runtime_tools::{
         ToolExecutionResult, build_runtime_tool_specs, execute_agent_tool_call,
@@ -101,7 +101,7 @@ use crate::{
     spinova_paths::{SpinovaPaths, spinova_paths},
     telegram_acl::TelegramAclHandle,
     telegram_device::TelegramDevice,
-    telegram_transport::TelegramTransport,
+    telegram_transport::{TelegramLiveDraftClient, TelegramTransport},
     terminal_app::TerminalApp,
     todo_board::TodoBoard,
     tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
@@ -112,6 +112,7 @@ use clap::{Parser, Subcommand};
 use miette::{Result, miette};
 use serde::Deserialize;
 use serde_json::json;
+use tokio::{sync::mpsc, task::JoinHandle, time::MissedTickBehavior};
 
 const AUTO_SLEEP_IDLE_THRESHOLD: Duration = Duration::from_secs(300);
 const AUTO_SLEEP_MIN_INTERVAL: Duration = Duration::from_secs(300);
@@ -153,6 +154,17 @@ struct SleepDashboardStatus {
 struct SleepTaskResult {
     trigger: SleepTrigger,
     result: Result<crate::reasoning::sleep::SleepSummary>,
+}
+
+struct TelegramLiveDraftSession {
+    join: JoinHandle<()>,
+}
+
+impl TelegramLiveDraftSession {
+    async fn shutdown(self, context: &mut Context) {
+        context.install_live_assistant_progress(None);
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.join).await;
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -429,6 +441,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         dashboard_tx: None,
         active_runtime_turn: false,
         active_app_notices: std::collections::HashSet::new(),
+        live_assistant_progress_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         idle_since: None,
         last_idle_sleep_at: None,
         record_runtime_reviews: true,
@@ -610,8 +623,7 @@ fn browser_runtime_platform() -> Result<&'static str> {
 }
 
 async fn run_browser_runtime_setup() -> Result<()> {
-    const MANIFEST_URL: &str =
-        "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
+    const MANIFEST_URL: &str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
     let platform = browser_runtime_platform()?;
     let paths = spinova_paths().await;
@@ -1000,6 +1012,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         dashboard_tx: None,
         active_runtime_turn: false,
         active_app_notices: std::collections::HashSet::new(),
+        live_assistant_progress_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         idle_since: None,
         last_idle_sleep_at: None,
         record_runtime_reviews: false,
@@ -2853,6 +2866,84 @@ async fn record_runtime_review_turn(
     append_runtime_turn_record(&turn).await;
 }
 
+fn maybe_start_telegram_live_draft_session(
+    context: &mut Context,
+    claimed_event_views: &[EventView],
+) -> Option<TelegramLiveDraftSession> {
+    if claimed_event_views.len() != 1 {
+        return None;
+    }
+    let event = claimed_event_views.first()?;
+    let EventPayload::TelegramIncoming(payload) = &event.payload;
+    if payload.chat_kind != "private" {
+        return None;
+    }
+    if !context.config.telegram.enabled || !context.config.telegram.has_real_credentials() {
+        return None;
+    }
+    let chat_id = payload.chat_id.parse::<i64>().ok()?;
+    let draft_id = Utc::now().timestamp_millis().unsigned_abs().max(1) as i64;
+    let client = TelegramLiveDraftClient::new(context.config.telegram.clone());
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    context.install_live_assistant_progress(Some(tx));
+    let join = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(900));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut latest_text: Option<String> = None;
+        let mut last_sent = String::new();
+        loop {
+            tokio::select! {
+                maybe_text = rx.recv() => {
+                    match maybe_text {
+                        Some(text) => latest_text = Some(text),
+                        None => break,
+                    }
+                }
+                _ = interval.tick() => {
+                    if let Some(text) = latest_text.take() {
+                        let draft_text = format_telegram_live_draft_text(&text);
+                        if draft_text != last_sent {
+                            if let Err(err) = client
+                                .send_message_draft(chat_id, draft_id, &draft_text)
+                                .await
+                            {
+                                tracing::warn!("telegram live draft update failed: {err:?}");
+                            } else {
+                                last_sent = draft_text;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(text) = latest_text.take() {
+            let draft_text = format_telegram_live_draft_text(&text);
+            if draft_text != last_sent
+                && let Err(err) = client
+                    .send_message_draft(chat_id, draft_id, &draft_text)
+                    .await
+            {
+                tracing::warn!("telegram final live draft flush failed: {err:?}");
+            }
+        }
+    });
+    Some(TelegramLiveDraftSession { join })
+}
+
+fn format_telegram_live_draft_text(content: &str) -> String {
+    let trimmed = content.trim();
+    let base = if trimmed.is_empty() {
+        "Working...".to_string()
+    } else {
+        format!("Working...\n{trimmed}")
+    };
+    if base.chars().count() <= 4096 {
+        return base;
+    }
+    let truncated = base.chars().take(4093).collect::<String>();
+    format!("{truncated}...")
+}
+
 pub(crate) async fn execute_agent_loop_step(
     context: &mut Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
@@ -2884,6 +2975,7 @@ pub(crate) async fn execute_agent_loop_step(
             ClaimedRuntimeInput::AppNotice { .. } => None,
         })
         .collect::<Vec<_>>();
+    let live_draft_session = maybe_start_telegram_live_draft_session(context, &claimed_event_views);
     let snapshot = Snapshot::new_with_claimed_events(context, &claimed_event_views).await;
     let snapshot_text = build_runtime_snapshot_text(context, &snapshot.to_runtime_text());
     let request_envelope = build_runtime_request_envelope(context, &snapshot_text);
@@ -3212,6 +3304,11 @@ pub(crate) async fn execute_agent_loop_step(
         };
     };
     runtime_step.set_current_doing(output.current_doing.clone());
+    if let Some(session) = live_draft_session {
+        session.shutdown(context).await;
+    } else {
+        context.install_live_assistant_progress(None);
+    }
     finalize_claimed_runtime_events(context, &claimed_event_ids, &output);
     finalize_claimed_runtime_app_notices(context, &claimed_app_notices, &output);
     let history_messages = runtime_step.history_messages().to_vec();
@@ -4054,9 +4151,7 @@ fn enqueue_app_notice_work(context: &mut Context) {
                     app: device_id,
                     reason,
                 }) {
-                    tracing::error!(
-                        "failed to enqueue app notice work for {device_id}: {err:?}"
-                    );
+                    tracing::error!("failed to enqueue app notice work for {device_id}: {err:?}");
                 }
             }
         } else {
@@ -4065,10 +4160,7 @@ fn enqueue_app_notice_work(context: &mut Context) {
     }
 }
 
-fn summarize_app_notice_reason(
-    device_id: AppId,
-    render: &crate::app::AppStateRender,
-) -> String {
+fn summarize_app_notice_reason(device_id: AppId, render: &crate::app::AppStateRender) -> String {
     match device_id {
         AppId::Browser => "browser requires attention".to_string(),
         AppId::Terminal => {
@@ -4082,10 +4174,7 @@ fn summarize_app_notice_reason(
     }
 }
 
-fn app_render_requires_attention(
-    device_id: AppId,
-    render: &crate::app::AppStateRender,
-) -> bool {
+fn app_render_requires_attention(device_id: AppId, render: &crate::app::AppStateRender) -> bool {
     match device_id {
         AppId::Browser => false,
         AppId::Terminal => numeric_field(&render.lines, "sessions_with_unread_output") > 0,
@@ -4467,13 +4556,10 @@ fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String, St
         .state_renders()
         .into_iter()
         .map(|(app_id, state)| {
-            let usage = context
-                .apps
-                .usage(app_id)
-                .unwrap_or(crate::app::AppUsage {
-                    purpose: "No usage available.".to_string(),
-                    when_to_focus: Vec::new(),
-                });
+            let usage = context.apps.usage(app_id).unwrap_or(crate::app::AppUsage {
+                purpose: "No usage available.".to_string(),
+                when_to_focus: Vec::new(),
+            });
             let how_to_use = context
                 .apps
                 .how_to_use(app_id)
@@ -4499,11 +4585,9 @@ fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String, St
                     &how_to_use,
                 ));
             } else {
-                lines.push(
-                    crate::reasoning::prompts::build_app_pre_focus_note_prompt(
-                        app_id, &state,
-                    ),
-                );
+                lines.push(crate::reasoning::prompts::build_app_pre_focus_note_prompt(
+                    app_id, &state,
+                ));
             }
             (key, lines.join("\n"))
         })

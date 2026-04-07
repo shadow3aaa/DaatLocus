@@ -45,7 +45,12 @@ pub fn wrap_shell_command(
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    let mut sandbox_args = vec!["-p".to_string(), profile, "--".to_string(), program.to_string()];
+    let mut sandbox_args = vec![
+        "-p".to_string(),
+        profile,
+        "--".to_string(),
+        program.to_string(),
+    ];
     sandbox_args.extend(args);
     Ok(SandboxSpawnSpec {
         program: PathBuf::from(SANDBOX_EXECUTABLE),
@@ -109,7 +114,10 @@ fn render_protected_path_denies(policy: &RuntimeSandboxPolicy) -> String {
         ));
     }
     for path in &policy.filesystem.deny_write_paths {
-        lines.push(format!("(deny file-write* (subpath \"{}\"))", path.display()));
+        lines.push(format!(
+            "(deny file-write* (subpath \"{}\"))",
+            path.display()
+        ));
     }
     lines.join("\n")
 }

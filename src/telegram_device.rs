@@ -9,10 +9,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{
-    events::EventStatus,
-    spinova_paths::spinova_paths_sync,
-};
+use crate::{events::EventStatus, spinova_paths::spinova_paths_sync};
 
 const TELEGRAM_TRANSPORT_STATE_FILE_NAME: &str = "telegram_transport_state";
 

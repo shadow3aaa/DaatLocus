@@ -89,7 +89,10 @@ impl FileSystemSandboxPolicy {
             .iter()
             .map(|root| normalize_path(root))
             .any(|root| normalized == root || normalized.starts_with(&root))
-            || self.writable_roots.iter().any(|root| root.is_path_writable(&normalized))
+            || self
+                .writable_roots
+                .iter()
+                .any(|root| root.is_path_writable(&normalized))
     }
 
     pub fn is_path_writable(&self, path: &Path) -> bool {
@@ -185,11 +188,7 @@ impl RuntimeSandboxPolicy {
         self.filesystem.is_path_writable(path)
     }
 
-    pub fn shell_spawn_spec(
-        &self,
-        program: &str,
-        args: Vec<String>,
-    ) -> Result<SandboxSpawnSpec> {
+    pub fn shell_spawn_spec(&self, program: &str, args: Vec<String>) -> Result<SandboxSpawnSpec> {
         #[cfg(target_os = "macos")]
         {
             return macos::wrap_shell_command(self, program, args);

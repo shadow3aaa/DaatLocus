@@ -50,7 +50,9 @@ impl RuntimeReviewSpan {
 
 pub async fn append_runtime_turn_record(turn: &RuntimeTurnRecord) {
     let runtime_review_io_guard = runtime_review_io_lock().lock().await;
-    let path = spinova_paths().await.journal_file(RUNTIME_REVIEWS_FILE_NAME);
+    let path = spinova_paths()
+        .await
+        .journal_file(RUNTIME_REVIEWS_FILE_NAME);
     let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
@@ -71,7 +73,9 @@ pub async fn append_runtime_turn_record(turn: &RuntimeTurnRecord) {
 
 pub async fn load_runtime_review_batch() -> miette::Result<RuntimeReviewBatch> {
     let runtime_review_io_guard = runtime_review_io_lock().lock().await;
-    let path = spinova_paths().await.journal_file(RUNTIME_REVIEWS_FILE_NAME);
+    let path = spinova_paths()
+        .await
+        .journal_file(RUNTIME_REVIEWS_FILE_NAME);
     let bytes = match fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -124,7 +128,9 @@ pub async fn unread_runtime_review_count() -> miette::Result<usize> {
 
 pub async fn compact_runtime_review_file(consumed_offset: u64) -> miette::Result<()> {
     let runtime_review_io_guard = runtime_review_io_lock().lock().await;
-    let path = spinova_paths().await.journal_file(RUNTIME_REVIEWS_FILE_NAME);
+    let path = spinova_paths()
+        .await
+        .journal_file(RUNTIME_REVIEWS_FILE_NAME);
     let bytes = match fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {

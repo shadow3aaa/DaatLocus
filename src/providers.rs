@@ -1,6 +1,10 @@
 //! 本模块实现实际的llm api调用
 
-use std::{error::Error as _, sync::Mutex, time::Duration};
+use std::{
+    error::Error as _,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -383,7 +387,7 @@ impl OpenAIClient {
 
     async fn call_agent_turn(
         &self,
-        _context: &Context,
+        context: &Context,
         request: AgentTurnRequest,
     ) -> Result<AgentTurnStreamResult> {
         let url = self.url();
@@ -457,6 +461,8 @@ impl OpenAIClient {
         let mut content = String::new();
         let mut tool_calls: Vec<StreamingToolCallBuilder> = Vec::new();
         let mut last_usage = None;
+        let mut last_progress_emit_at = Instant::now();
+        let mut last_progress_char_len = 0usize;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|err| miette!("llm streaming chunk read failed: {err}"))?;
@@ -489,6 +495,17 @@ impl OpenAIClient {
                 let delta = &choice["delta"];
                 if let Some(delta_content) = delta["content"].as_str() {
                     content.push_str(delta_content);
+                    let should_emit = content
+                        .chars()
+                        .count()
+                        .saturating_sub(last_progress_char_len)
+                        >= 64
+                        || last_progress_emit_at.elapsed() >= Duration::from_millis(800);
+                    if should_emit && !content.trim().is_empty() {
+                        context.emit_live_assistant_progress(&content);
+                        last_progress_emit_at = Instant::now();
+                        last_progress_char_len = content.chars().count();
+                    }
                 }
                 if let Some(delta_tool_calls) = delta["tool_calls"].as_array() {
                     for tool_call in delta_tool_calls {
@@ -503,6 +520,9 @@ impl OpenAIClient {
                     }
                 }
             }
+        }
+        if !content.trim().is_empty() && content.chars().count() != last_progress_char_len {
+            context.emit_live_assistant_progress(&content);
         }
         if let Some(usage) = last_usage {
             self.record_last_usage(usage);

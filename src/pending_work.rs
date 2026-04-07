@@ -226,14 +226,8 @@ fn same_work_payload(left: &PendingWork, right: &PendingWork) -> bool {
     match (left, right) {
         (PendingWork::Event { event_id: a }, PendingWork::Event { event_id: b }) => a == b,
         (
-            PendingWork::AppNotice {
-                app: a,
-                reason: ra,
-            },
-            PendingWork::AppNotice {
-                app: b,
-                reason: rb,
-            },
+            PendingWork::AppNotice { app: a, reason: ra },
+            PendingWork::AppNotice { app: b, reason: rb },
         ) => a == b && ra == rb,
         _ => false,
     }

@@ -693,9 +693,7 @@ impl HindsightQueueItem {
 
 impl HindsightQueue {
     async fn new() -> Self {
-        let persistence_path = spinova_paths()
-            .await
-            .state_file(HINDSIGHT_QUEUE_FILE_NAME);
+        let persistence_path = spinova_paths().await.state_file(HINDSIGHT_QUEUE_FILE_NAME);
         tokio::fs::read(persistence_path)
             .await
             .ok()
@@ -733,9 +731,7 @@ impl HindsightQueue {
     }
 
     async fn sync_to_disk(&self) {
-        let persistence_path = spinova_paths()
-            .await
-            .state_file(HINDSIGHT_QUEUE_FILE_NAME);
+        let persistence_path = spinova_paths().await.state_file(HINDSIGHT_QUEUE_FILE_NAME);
         let data = match postcard::to_allocvec(self) {
             Ok(data) => data,
             Err(err) => {
