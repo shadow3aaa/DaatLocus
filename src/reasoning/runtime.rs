@@ -22,6 +22,11 @@ pub struct ProgramExecutionOutcome<O> {
     pub output: O,
 }
 
+pub struct ProgramExecutionTelemetry {
+    pub retry_count: usize,
+    pub last_retry_reason: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PromptRequest {
     pub tool_name: String,
@@ -420,9 +425,36 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
     tuning: &PromptTuningConfig<P::Output>,
     trace_origin: TraceOrigin,
 ) -> Result<ProgramExecutionOutcome<P::Output>> {
+    execute_program_with_ir_report_with_retry_hook(
+        llm,
+        context,
+        renderer,
+        program,
+        ir,
+        tuning,
+        trace_origin,
+        |_, _| {},
+    )
+    .await
+}
+
+pub async fn execute_program_with_ir_report_with_retry_hook<P: Program, R: Renderer, F>(
+    llm: &(dyn LLM + Send + Sync),
+    context: &Context,
+    renderer: &R,
+    program: &P,
+    ir: super::ir::PromptIR,
+    tuning: &PromptTuningConfig<P::Output>,
+    trace_origin: TraceOrigin,
+    mut on_retry: F,
+) -> Result<ProgramExecutionOutcome<P::Output>>
+where
+    F: FnMut(ProgramExecutionTelemetry, &PromptRequest),
+{
     let mut request = renderer.render(context, program, ir, tuning);
     let mut last_error = None;
     let signature = program.signature();
+    let mut retry_count = 0usize;
 
     for attempt in 0..2 {
         let value = match llm.run_json(context, request.clone()).await {
@@ -442,6 +474,14 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
                 .await;
                 last_error = Some(error_text.clone());
                 request = request.with_retry_note(error_text);
+                retry_count += 1;
+                on_retry(
+                    ProgramExecutionTelemetry {
+                        retry_count,
+                        last_retry_reason: Some(last_error.clone().unwrap_or_default()),
+                    },
+                    &request,
+                );
                 continue;
             }
         };
@@ -474,6 +514,14 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
                 ))
                 .await;
                 request = request.with_retry_note(err.to_string());
+                retry_count += 1;
+                on_retry(
+                    ProgramExecutionTelemetry {
+                        retry_count,
+                        last_retry_reason: Some(last_error.clone().unwrap_or_default()),
+                    },
+                    &request,
+                );
             }
         }
     }

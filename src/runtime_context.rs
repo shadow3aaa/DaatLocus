@@ -16,6 +16,7 @@ use crate::{
             AgentMessage, AgentToolSpec, PromptMessage, PromptRequest, PromptRole,
             summarize_assistant_tool_call_protocol,
         },
+        turn_compile::current_persona_kernel_system_prompt_sync,
     },
 };
 use schemars::{JsonSchema, schema_for};
@@ -36,6 +37,7 @@ pub fn build_runtime_request_envelope(
 ) -> RuntimeRequestEnvelope {
     let mut system_messages = vec![
         SYSTEM_PROMPT_KERNEL.to_string(),
+        current_persona_kernel_system_prompt_sync(),
         TOOL_ACTION_PROMPT.to_string(),
     ];
     system_messages.extend(

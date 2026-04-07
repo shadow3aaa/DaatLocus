@@ -55,7 +55,7 @@ use super::{
     turn_compile::{
         TurnCompileEngine, apply_runtime_prompt_candidate_shared,
         build_compiled_runtime_system_prompt_report, build_runtime_prompt_evolution_report,
-        choose_best_non_regressing_prompt_shared,
+        choose_best_non_regressing_prompt_shared, current_persona_kernel_system_prompt_sync,
         current_runtime_system_prompt_artifact_from_store, generate_turn_prompt_candidates,
         is_acceptable_turn_round, runtime_system_prompt_text as render_runtime_system_prompt_text,
         turn_evaluation_stats, turn_evaluation_summary_lines,
@@ -1487,6 +1487,7 @@ async fn previous_runtime_system_prompt_text(context: &Context) -> Result<String
     };
     let mut lines = vec![
         crate::reasoning::prompts::SYSTEM_PROMPT_KERNEL.to_string(),
+        current_persona_kernel_system_prompt_sync(),
         crate::reasoning::prompts::TOOL_ACTION_PROMPT.to_string(),
     ];
     lines.extend(

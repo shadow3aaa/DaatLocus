@@ -4535,6 +4535,9 @@ fn render_system_prompt_output_for_dashboard(context: &Context) -> String {
     lines.push("[kernel]".to_string());
     lines.push(crate::reasoning::prompts::SYSTEM_PROMPT_KERNEL.to_string());
     lines.push(String::new());
+    lines.push("[persona_kernel]".to_string());
+    lines.push(crate::reasoning::turn_compile::current_persona_kernel_system_prompt_sync());
+    lines.push(String::new());
     lines.push("[tool_action]".to_string());
     lines.push(crate::reasoning::prompts::TOOL_ACTION_PROMPT.to_string());
 

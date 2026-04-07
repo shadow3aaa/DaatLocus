@@ -106,18 +106,11 @@ pub struct EvaluationArtifactTurnDemo {
     #[serde(default)]
     pub judge_focus: Vec<String>,
     #[serde(default)]
-    pub coverage_axes: Vec<String>,
-    #[serde(default)]
-    pub persona_anchors: Vec<String>,
-    #[serde(default)]
-    pub covered_terminal_answer_rules: Vec<String>,
+    pub covered_tests: Vec<String>,
     pub must_use_tools: bool,
     #[serde(default)]
     pub must_not_final_answer_patterns: Vec<String>,
     pub must_end_with_terminal_answer: bool,
-    #[serde(default)]
-    pub source_trace_ids: Vec<String>,
-    pub confidence: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

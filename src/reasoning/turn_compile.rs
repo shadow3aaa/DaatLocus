@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
@@ -49,12 +48,15 @@ use crate::{
             RuntimeTurnTraceJudgeOutput, RuntimeTurnTraceJudgeProgram,
         },
         render::openai_tools::OpenAIToolRenderer,
+        runtime::{
+            ProgramExecutionTelemetry, execute_program_with_ir_report,
+            execute_program_with_ir_report_with_retry_hook, resolve_program_tuning,
+        },
         runtime::{PromptMessage, PromptRole},
-        runtime::{execute_program_with_ir_report, resolve_program_tuning},
         runtime_review::{RuntimeReviewSpan, RuntimeTurnRecord},
         trace::TraceOrigin,
     },
-    spinova_paths::spinova_paths,
+    spinova_paths::{spinova_paths, spinova_paths_sync},
 };
 
 const MAX_COLD_START_PROMPT_COMPILE_ROUNDS: usize = 8;
@@ -82,6 +84,8 @@ struct TurnCompileInlineProgressState {
     current_demo: usize,
     current_demo_title: String,
     latest_output_preview: String,
+    retry_count: usize,
+    latest_retry_reason: String,
 }
 
 struct TurnCompileInlineProgress {
@@ -166,6 +170,24 @@ impl TurnCompileInlineProgress {
                 .unwrap_or_else(|| "none".to_string());
         }
     }
+
+    fn clear_retry_status(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.retry_count = 0;
+            state.latest_retry_reason.clear();
+        }
+    }
+
+    fn record_retry(&mut self, telemetry: &ProgramExecutionTelemetry) {
+        if let Ok(mut state) = self.state.lock() {
+            state.retry_count = telemetry.retry_count;
+            state.latest_retry_reason = telemetry
+                .last_retry_reason
+                .as_deref()
+                .map(truncate_for_retry_reason)
+                .unwrap_or_default();
+        }
+    }
 }
 
 impl Drop for TurnCompileInlineProgress {
@@ -193,10 +215,27 @@ fn run_turn_compile_inline_renderer(
 fn render_turn_compile_inline_progress(f: &mut Frame, state: &TurnCompileInlineProgressState) {
     let area = f.area();
     if state.phase == "generating demos" {
-        let generating = Paragraph::new(Line::from(vec![Span::styled(
+        let mut spans = vec![Span::styled(
             format!("{} generating demos", inline_working_glyph()),
             Style::default().fg(Color::White),
-        )]));
+        )];
+        if state.retry_count > 0 {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!("retry {}:", state.retry_count),
+                Style::default().fg(Color::Yellow),
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                if state.latest_retry_reason.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    state.latest_retry_reason.clone()
+                },
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        let generating = Paragraph::new(Line::from(spans));
         f.render_widget(generating, area);
         return;
     }
@@ -298,6 +337,17 @@ fn truncate_for_inline_preview(value: &str) -> String {
     }
 }
 
+fn truncate_for_retry_reason(value: &str) -> String {
+    let compact = single_line(value);
+    let mut chars = compact.chars();
+    let prefix = chars.by_ref().take(25).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
+}
+
 fn format_elapsed(duration: Duration) -> String {
     if duration.as_secs() >= 1 {
         format!("{:.1}s", duration.as_secs_f64())
@@ -313,21 +363,16 @@ pub enum TurnCompileMode {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PromptPersonaSpec {
-    pub compile_key: String,
     pub name: String,
     #[serde(default = "default_prompt_persona_language")]
     pub language: String,
     pub identity_summary: String,
-    pub channel_contract: String,
     #[serde(default)]
-    pub behavior_rules: Vec<String>,
+    pub tests: Vec<String>,
     #[serde(default)]
-    pub terminal_answer_rules: Vec<String>,
-    #[serde(default)]
-    pub tool_use_rules: Vec<String>,
-    #[serde(default)]
-    pub anti_patterns: Vec<String>,
+    pub rules: Vec<String>,
 }
 
 fn default_prompt_persona_language() -> String {
@@ -602,6 +647,7 @@ impl TurnCompileEngine {
             config.clone(),
             compiled_prompts.clone(),
             &persona_spec,
+            progress_ui.as_mut(),
         )
         .await?;
         if turn_demos.is_empty() {
@@ -795,6 +841,52 @@ async fn prompt_persona_path() -> PathBuf {
     spinova_paths().await.config_file(PROMPT_PERSONA_FILE_NAME)
 }
 
+fn prompt_persona_path_sync() -> PathBuf {
+    spinova_paths_sync().config_file(PROMPT_PERSONA_FILE_NAME)
+}
+
+pub fn load_prompt_persona_spec_sync() -> PromptPersonaSpec {
+    let path = prompt_persona_path_sync();
+    if !path.exists() {
+        return PromptPersonaSpec::default();
+    }
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            warn!(
+                "failed to read prompt persona spec '{}': {error}",
+                path.display()
+            );
+            return PromptPersonaSpec::default();
+        }
+    };
+
+    match toml::from_str::<PromptPersonaSpec>(&content) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            warn!(
+                "failed to parse prompt persona spec '{}': {error}",
+                path.display()
+            );
+            PromptPersonaSpec::default()
+        }
+    }
+}
+
+pub fn render_persona_kernel_system_prompt(spec: &PromptPersonaSpec) -> String {
+    format!(
+        "人格 kernel:\n- name: {}\n- language: {}\n- identity_summary: {}",
+        spec.name.trim(),
+        spec.language.trim(),
+        spec.identity_summary.trim()
+    )
+}
+
+pub fn current_persona_kernel_system_prompt_sync() -> String {
+    render_persona_kernel_system_prompt(&load_prompt_persona_spec_sync())
+}
+
 async fn load_or_seed_prompt_persona_spec() -> Result<PromptPersonaSpec> {
     let path = prompt_persona_path().await;
     if !path.exists() {
@@ -844,13 +936,17 @@ async fn generate_turn_demos_from_persona_spec(
     config: Config,
     compiled_prompts: CompiledPromptStore,
     spec: &PromptPersonaSpec,
+    mut progress_ui: Option<&mut TurnCompileInlineProgress>,
 ) -> Result<Vec<EvaluationArtifactTurnDemo>> {
     let workspace_facts = collect_turn_demo_workspace_facts().await?;
     let mut isolated_context = IsolatedEvalContext::new(config, compiled_prompts).await?;
     let renderer = OpenAIToolRenderer;
     let program = RuntimeTurnDemoGeneratorProgram;
     let tuning = resolve_program_tuning(&mut isolated_context.context, &program).await;
-    let output = execute_program_with_ir_report(
+    if let Some(ui) = progress_ui.as_deref_mut() {
+        ui.clear_retry_status();
+    }
+    let output = execute_program_with_ir_report_with_retry_hook(
         isolated_context.context.judge_llm.as_ref(),
         &isolated_context.context,
         &renderer,
@@ -866,6 +962,11 @@ async fn generate_turn_demos_from_persona_spec(
         ),
         &tuning,
         TraceOrigin::Sleep,
+        |telemetry, _request| {
+            if let Some(ui) = progress_ui.as_deref_mut() {
+                ui.record_retry(&telemetry);
+            }
+        },
     )
     .await?;
     isolated_context.shutdown().await;
@@ -877,7 +978,7 @@ fn demos_from_generator_output(
     output: &RuntimeTurnDemoGeneratorOutput,
 ) -> Result<Vec<EvaluationArtifactTurnDemo>> {
     let usable_generated_demos = output
-        .rule_demo_groups
+        .test_demo_groups
         .iter()
         .flat_map(|group| {
             group.demos.iter().filter_map(move |demo| {
@@ -888,17 +989,17 @@ fn demos_from_generator_output(
                 {
                     None
                 } else {
-                    Some((group.terminal_answer_rule.as_str(), demo))
+                    Some((group.test.as_str(), demo))
                 }
             })
         })
         .collect::<Vec<_>>();
 
-    validate_generated_demo_coverage(spec, &output.rule_demo_groups, &usable_generated_demos)?;
+    validate_generated_demo_coverage(spec, &output.test_demo_groups, &usable_generated_demos)?;
 
     let demos = usable_generated_demos
         .iter()
-        .map(|(terminal_rule, demo)| normalize_generated_turn_demo(spec, terminal_rule, demo))
+        .map(|(test, demo)| normalize_generated_turn_demo(test, demo))
         .collect::<Vec<_>>();
 
     if demos.is_empty() {
@@ -910,8 +1011,7 @@ fn demos_from_generator_output(
 }
 
 fn normalize_generated_turn_demo(
-    spec: &PromptPersonaSpec,
-    terminal_answer_rule: &str,
+    test: &str,
     demo: &crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo,
 ) -> EvaluationArtifactTurnDemo {
     let (requires_fresh_world_state, must_use_tools) =
@@ -944,34 +1044,16 @@ fn normalize_generated_turn_demo(
     }
 
     EvaluationArtifactTurnDemo {
-        compile_key: spec.compile_key.clone(),
+        compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
         title: demo.title.trim().to_string(),
         scenario_summary: demo.scenario_summary.trim().to_string(),
-        initial_inputs: vec![
-            ExampleField {
-                name: "incoming_text".to_string(),
-                value: demo.incoming_text.trim().to_string(),
-            },
-            ExampleField {
-                name: "chat_title".to_string(),
-                value: spec.name.clone(),
-            },
-        ],
+        initial_inputs: vec![ExampleField {
+            name: "incoming_text".to_string(),
+            value: demo.incoming_text.trim().to_string(),
+        }],
         expected_behavior: demo.expected_behavior.trim().to_string(),
         judge_focus,
-        coverage_axes: demo
-            .coverage_axes
-            .iter()
-            .map(|line| line.trim().to_string())
-            .filter(|line| !line.is_empty())
-            .collect(),
-        persona_anchors: demo
-            .persona_anchors
-            .iter()
-            .map(|line| line.trim().to_string())
-            .filter(|line| !line.is_empty())
-            .collect(),
-        covered_terminal_answer_rules: vec![terminal_answer_rule.trim().to_string()],
+        covered_tests: vec![test.trim().to_string()],
         must_use_tools,
         must_not_final_answer_patterns: demo
             .must_not_final_answer_patterns
@@ -980,8 +1062,6 @@ fn normalize_generated_turn_demo(
             .filter(|line| !line.is_empty())
             .collect(),
         must_end_with_terminal_answer: demo.must_end_with_terminal_answer,
-        source_trace_ids: Vec::new(),
-        confidence: demo.confidence.clamp(0.0, 1.0) as f32,
     }
 }
 
@@ -994,7 +1074,7 @@ fn normalized_demo_requirements(
 
 fn validate_generated_demo_coverage(
     spec: &PromptPersonaSpec,
-    groups: &[crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemoGroup],
+    groups: &[crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTestDemoGroup],
     demos: &[(
         &str,
         &crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo,
@@ -1007,67 +1087,65 @@ fn validate_generated_demo_coverage(
         ));
     }
 
-    let required_terminal_rules = spec
-        .terminal_answer_rules
+    let required_tests = spec
+        .tests
         .iter()
-        .map(|rule| normalize_rule_text(rule))
-        .filter(|rule| !rule.is_empty())
+        .map(|test| normalize_rule_text(test))
+        .filter(|test| !test.is_empty())
         .collect::<Vec<_>>();
-    if !required_terminal_rules.is_empty() && groups.len() != required_terminal_rules.len() {
+    if !required_tests.is_empty() && groups.len() != required_tests.len() {
         return Err(miette!(
-            "runtime_turn_demo_generator produced {} rule_demo_groups, expected exactly terminal_answer_rules count {}",
+            "runtime_turn_demo_generator produced {} test_demo_groups, expected exactly tests count {}",
             groups.len(),
-            required_terminal_rules.len()
+            required_tests.len()
         ));
     }
 
     let mut seen_titles = std::collections::HashSet::new();
-    let mut seen_axes = std::collections::HashSet::new();
-    let mut seen_anchors = std::collections::HashSet::new();
-    let mut seen_terminal_rules = std::collections::HashSet::new();
-    let required_terminal_rule_set = required_terminal_rules
+    let mut seen_tests = std::collections::HashSet::new();
+    let required_test_set = required_tests
         .iter()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    let mut usable_demo_counts_by_rule = std::collections::HashMap::new();
-    for (terminal_rule, _demo) in demos {
-        *usable_demo_counts_by_rule
-            .entry(normalize_rule_text(terminal_rule))
+    let mut usable_demo_counts_by_test = std::collections::HashMap::new();
+    for (test, _demo) in demos {
+        *usable_demo_counts_by_test
+            .entry(normalize_rule_text(test))
             .or_insert(0usize) += 1;
     }
     for group in groups {
-        let normalized_group_rule = normalize_rule_text(&group.terminal_answer_rule);
-        if normalized_group_rule.is_empty() {
+        let normalized_group_test = normalize_rule_text(&group.test);
+        if normalized_group_test.is_empty() {
             return Err(miette!(
-                "runtime_turn_demo_generator produced a rule_demo_group without terminal_answer_rule"
+                "runtime_turn_demo_generator produced a test_demo_group without test"
             ));
         }
-        if !required_terminal_rule_set.contains(&normalized_group_rule) {
+        if !required_test_set.contains(&normalized_group_test) {
             return Err(miette!(
-                "runtime_turn_demo_generator produced unknown terminal_answer_rule '{}'",
-                normalized_group_rule
+                "runtime_turn_demo_generator produced unknown test '{}'",
+                normalized_group_test
             ));
         }
-        if !seen_terminal_rules.insert(normalized_group_rule.clone()) {
+        if !seen_tests.insert(normalized_group_test.clone()) {
             return Err(miette!(
-                "runtime_turn_demo_generator produced duplicate rule_demo_group for terminal rule '{}'",
-                normalized_group_rule
+                "runtime_turn_demo_generator produced duplicate test_demo_group for test '{}'",
+                normalized_group_test
             ));
         }
-        if usable_demo_counts_by_rule
-            .get(&normalized_group_rule)
+        if usable_demo_counts_by_test
+            .get(&normalized_group_test)
             .copied()
             .unwrap_or_default()
             == 0
         {
             return Err(miette!(
-                "runtime_turn_demo_generator produced rule_demo_group for terminal rule '{}' but no usable demos in that group",
-                normalized_group_rule
+                "runtime_turn_demo_generator produced test_demo_group for test '{}' but no usable demos in that group",
+                normalized_group_test
             ));
         }
     }
 
-    for (_terminal_rule, demo) in demos {
+    for (_test, demo) in demos {
         let normalized_title = demo.title.trim().to_string();
         if !seen_titles.insert(normalized_title.clone()) {
             return Err(miette!(
@@ -1075,42 +1153,18 @@ fn validate_generated_demo_coverage(
                 normalized_title
             ));
         }
-        for axis in &demo.coverage_axes {
-            let normalized = axis.trim().to_ascii_lowercase();
-            if !normalized.is_empty() {
-                seen_axes.insert(normalized);
-            }
-        }
-        for anchor in &demo.persona_anchors {
-            let normalized = anchor.trim().to_ascii_lowercase();
-            if !normalized.is_empty() {
-                seen_anchors.insert(normalized);
-            }
-        }
     }
 
-    if seen_axes.len() < 2 {
-        return Err(miette!(
-            "runtime_turn_demo_generator produced demos that are too narrow; expected coverage across multiple risk axes"
-        ));
-    }
-
-    if seen_anchors.len() < 2 {
-        return Err(miette!(
-            "runtime_turn_demo_generator did not anchor demos to enough persona directions"
-        ));
-    }
-
-    if !required_terminal_rule_set.is_empty() {
-        let missing_rules = required_terminal_rules
+    if !required_test_set.is_empty() {
+        let missing_tests = required_tests
             .iter()
-            .filter(|rule| !seen_terminal_rules.contains(*rule))
+            .filter(|test| !seen_tests.contains(*test))
             .cloned()
             .collect::<Vec<_>>();
-        if !missing_rules.is_empty() {
+        if !missing_tests.is_empty() {
             return Err(miette!(
-                "runtime_turn_demo_generator did not cover all terminal_answer_rules; missing: {}",
-                missing_rules.join(" | ")
+                "runtime_turn_demo_generator did not cover all tests; missing: {}",
+                missing_tests.join(" | ")
             ));
         }
     }
@@ -1123,34 +1177,23 @@ fn normalize_rule_text(value: &str) -> String {
 }
 
 fn render_persona_spec_for_generator(spec: &PromptPersonaSpec) -> String {
-    let mut sections = vec![
-        format!("name:\n- {}", spec.name.trim()),
-        format!("language:\n- {}", spec.language.trim()),
-        format!("identity_summary:\n- {}", spec.identity_summary.trim()),
-        format!("channel_contract:\n- {}", spec.channel_contract.trim()),
-    ];
-    if !spec.behavior_rules.is_empty() {
-        sections.push(format!(
-            "behavior_rules:\n{}",
-            render_rule_list(&spec.behavior_rules)
-        ));
+    let mut sections = vec![format!(
+        "persona_kernel:\nname:\n- {}\nlanguage:\n- {}\nidentity_summary:\n- {}",
+        spec.name.trim(),
+        spec.language.trim(),
+        spec.identity_summary.trim()
+    )];
+    let mut calibration_sections = Vec::new();
+    if !spec.tests.is_empty() {
+        calibration_sections.push(format!("tests:\n{}", render_rule_list(&spec.tests)));
     }
-    if !spec.terminal_answer_rules.is_empty() {
-        sections.push(format!(
-            "terminal_answer_rules:\n{}",
-            render_rule_list(&spec.terminal_answer_rules)
-        ));
+    if !spec.rules.is_empty() {
+        calibration_sections.push(format!("rules:\n{}", render_rule_list(&spec.rules)));
     }
-    if !spec.tool_use_rules.is_empty() {
+    if !calibration_sections.is_empty() {
         sections.push(format!(
-            "tool_use_rules:\n{}",
-            render_rule_list(&spec.tool_use_rules)
-        ));
-    }
-    if !spec.anti_patterns.is_empty() {
-        sections.push(format!(
-            "anti_patterns:\n{}",
-            render_rule_list(&spec.anti_patterns)
+            "test_calibration:\n{}",
+            calibration_sections.join("\n")
         ));
     }
     sections.join("\n")
@@ -1330,23 +1373,15 @@ pub async fn evaluate_turn_demos_from_review_spans(
         return Ok(Vec::new());
     }
 
-    let span_by_id = runtime_review_spans
-        .iter()
-        .map(|span| (span.id.as_str(), span))
-        .collect::<HashMap<_, _>>();
     let renderer = OpenAIToolRenderer;
     let program = RuntimeTurnTraceJudgeProgram;
     let tuning = resolve_program_tuning(context, &program).await;
     let mut evaluations = Vec::with_capacity(turn_demos.len());
 
     for demo in turn_demos.iter().cloned() {
-        let Some(span) = demo
-            .source_trace_ids
-            .iter()
-            .find_map(|trace_id| span_by_id.get(trace_id.as_str()).copied())
-        else {
+        let Some(span) = runtime_review_spans.get(evaluations.len()) else {
             warn!(
-                "turn demo '{}' skipped: no matching runtime review span found in source_trace_ids",
+                "turn demo '{}' skipped: no runtime review span available at matching index",
                 demo.title
             );
             continue;
@@ -1475,8 +1510,7 @@ async fn run_cold_start_turn_demo(
     let chat_id = field_value(&spec.initial_inputs, &["chat_id"])
         .and_then(|value| value.parse::<i64>().ok().map(|_| value))
         .unwrap_or_else(|| synthetic_update_id.to_string());
-    let chat_title = field_value(&spec.initial_inputs, &["chat_title"])
-        .unwrap_or_else(|| "Turn Compile Demo".to_string());
+    let chat_title = "Turn Compile Demo".to_string();
     let sender = field_value(&spec.initial_inputs, &["sender", "user_name"])
         .unwrap_or_else(|| "demo-user".to_string());
 
@@ -1775,6 +1809,7 @@ pub fn current_runtime_system_prompt_artifact_from_store(
 pub fn runtime_system_prompt_text(compiled_prompts: &CompiledPromptStore) -> String {
     let mut lines = vec![
         crate::reasoning::prompts::SYSTEM_PROMPT_KERNEL.to_string(),
+        current_persona_kernel_system_prompt_sync(),
         crate::reasoning::prompts::TOOL_ACTION_PROMPT.to_string(),
     ];
     lines.extend(
@@ -1862,19 +1897,10 @@ pub fn turn_evaluation_summary_lines(
 impl Default for PromptPersonaSpec {
     fn default() -> Self {
         Self {
-            compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
             name: "Spinova".to_string(),
             language: default_prompt_persona_language(),
-            identity_summary: "Spinova 是一个冷静、机敏、结果导向的猫娘执行型智能体。它默认使用中文交流，回答要自然带一点猫娘口吻，并在合适位置带“喵”，但不能因此牺牲信息密度与可执行性。".to_string(),
-            channel_contract: "当一轮自然结束时，最后 assistant 文本会直接发送给外部用户；因此停止就意味着交付。除非用户主动闲聊，否则默认使用简洁中文直接作答，保持猫娘口吻并适度带“喵”，但不要展示内部过程。".to_string(),
-            behavior_rules: vec![
-                "先判断问题属于直接答复、查证、执行还是决策，再行动。".to_string(),
-                "信息已在当前上下文或 runtime snapshot 中可得时，直接给结论，不要为了显得谨慎而绕路。".to_string(),
-                "当用户要求你自己决定时，要给出明确选择和理由，不要把决策再推回给用户。".to_string(),
-                "语气保持冷静、具体、短句、少套话；默认使用中文猫娘口吻。".to_string(),
-                "在直接回复用户时，默认应自然带“喵”；但不要每句都机械重复。".to_string(),
-            ],
-            terminal_answer_rules: vec![
+            identity_summary: "Spinova 是一个冷静、机敏、结果导向的猫娘执行型智能体。它默认使用中文交流，表达简洁、具体、少套话，保留轻微猫娘口吻，并在合适位置自然带“喵”，但不能因此牺牲信息密度与可执行性。".to_string(),
+            tests: vec![
                 "最终回复必须像一条可以直接发送给用户的消息，不暴露内部流程。".to_string(),
                 "先给结论，再补必要依据；避免长铺垫。".to_string(),
                 "最终回复应总结已确认事实，而不是描述接下来会做什么。".to_string(),
@@ -1882,20 +1908,24 @@ impl Default for PromptPersonaSpec {
                 "如果关键事实不足，明确指出缺口和下一步查证动作；不要含糊其辞。".to_string(),
                 "只要不是明显不适合卖萌的高风险场景，最终回复应保留轻微猫娘风格，并出现“喵”。".to_string(),
             ],
-            tool_use_rules: vec![
+            rules: vec![
+                "当一轮自然结束时，停止就意味着交付；除非用户主动闲聊，否则最终回复应可直接发送给外部用户，且不要展示内部过程。".to_string(),
+                "先判断问题属于直接答复、查证、执行还是决策，再行动。".to_string(),
                 "代码库文件、目录、内容，以及 runtime snapshot 未直接给出的事实，必须先查证。".to_string(),
+                "信息已在当前上下文或 runtime snapshot 中可得时，直接给结论，不要为了显得谨慎而绕路。".to_string(),
                 "TodoBoard 摘要、事件列表、应用结构状态等 runtime snapshot 已直接可见的摘要，可以直接据此回答。".to_string(),
                 "工具调用要服务于结论，不要为了展示过程而调用。".to_string(),
+                "当用户要求你自己决定时，要给出明确选择和理由，不要把决策再推回给用户。".to_string(),
+                "语气保持冷静、具体、短句、少套话；默认使用中文猫娘口吻。".to_string(),
+                "在直接回复用户时，默认应自然带“喵”；但不要每句都机械重复。".to_string(),
                 "不要在证据不足时提前停止。".to_string(),
-            ],
-            anti_patterns: vec![
-                "完全丢失猫娘口吻，像普通客服或普通助手".to_string(),
-                "把“喵”机械堆在每一句后面".to_string(),
-                "客服式热情寒暄或空泛安抚".to_string(),
-                "阶段性计划伪装成最终回复".to_string(),
-                "浅查一下就交差".to_string(),
-                "为了显得谨慎而机械调用工具".to_string(),
-                "把决策责任推回给用户".to_string(),
+                "避免完全丢失猫娘口吻，像普通客服或普通助手。".to_string(),
+                "避免把“喵”机械堆在每一句后面。".to_string(),
+                "避免客服式热情寒暄或空泛安抚。".to_string(),
+                "避免阶段性计划伪装成最终回复。".to_string(),
+                "避免浅查一下就交差。".to_string(),
+                "避免为了显得谨慎而机械调用工具。".to_string(),
+                "避免把决策责任推回给用户。".to_string(),
             ],
         }
     }

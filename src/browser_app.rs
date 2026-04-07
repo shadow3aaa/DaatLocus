@@ -472,10 +472,7 @@ fn should_include_snapshot_node(role: &str, name: Option<&str>) -> bool {
     !(is_structural_role(role) && name.is_none())
 }
 
-fn collect_snapshot_ref_duplicate_counts(
-    node: &AriaSnapshot,
-    counts: &mut HashMap<String, usize>,
-) {
+fn collect_snapshot_ref_duplicate_counts(node: &AriaSnapshot, counts: &mut HashMap<String, usize>) {
     let role = normalize_snapshot_role(node);
     let name = normalized_snapshot_text(node.name.as_deref());
     if node.node_ref.is_some() && should_create_snapshot_ref(&role, name.as_deref()) {
@@ -599,7 +596,10 @@ fn render_compact_snapshot_lines(
 
     let has_ref = node.node_ref.is_some() && should_create_snapshot_ref(&role, name.as_deref());
     let has_meaningful_text = name.is_some()
-        || node.value_text.as_deref().is_some_and(|value| !value.trim().is_empty())
+        || node
+            .value_text
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
         || node
             .description
             .as_deref()
@@ -760,7 +760,8 @@ impl App for BrowserApp {
                 id: BROWSER_SKILL_DEEP_RESEARCH_ID.to_string(),
                 name: "深度调查".to_string(),
                 when_to_use: vec![
-                    "需要跨多个页面和来源逐步查证，而不是停在单个搜索结果或单篇网页时。".to_string(),
+                    "需要跨多个页面和来源逐步查证，而不是停在单个搜索结果或单篇网页时。"
+                        .to_string(),
                     "任务要求你综合搜索、阅读、交叉比对、逐步收敛结论时。".to_string(),
                 ],
             },
@@ -776,7 +777,8 @@ impl App for BrowserApp {
                 id: BROWSER_SKILL_ARTICLE_READING_ID.to_string(),
                 name: "长文阅读与提炼".to_string(),
                 when_to_use: vec![
-                    "需要阅读文章、报告、博客或新闻，并从中提炼主要论点、事实和出处时。".to_string(),
+                    "需要阅读文章、报告、博客或新闻，并从中提炼主要论点、事实和出处时。"
+                        .to_string(),
                     "任务重点是读懂一个较长网页并做总结，而不是做跨来源交叉查证时。".to_string(),
                 ],
             },
