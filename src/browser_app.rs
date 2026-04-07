@@ -1,12 +1,9 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::{collections::BTreeMap, time::Duration};
 
 use async_trait::async_trait;
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
-use viewpoint_core::{AriaSnapshot, Browser, BrowserContext, DocumentLoadState, Page};
+use viewpoint_core::{Browser, BrowserContext, DocumentLoadState, Page};
 
 use crate::{
     app::{
@@ -17,34 +14,33 @@ use crate::{
 };
 
 const BROWSER_USAGE_PURPOSE: &str =
-    "Browser 是网页查看与交互界面，适合读取页面语义快照、点击元素、填写表单和跟踪多标签页。";
+    "Browser 是网页查看与交互界面，用于在需要主动浏览和探索网页时承载注意力。";
 const BROWSER_WHEN_TO_FOCUS: &[&str] = &[
-    "需要查看网页当前可见内容、文章、搜索结果或表单时。",
-    "需要点击页面元素、填写输入框、前进后退或刷新页面时。",
-    "需要在多个标签页之间保留网页会话，并基于最新页面快照继续操作时。",
+    "需要主动浏览网页，而不是仅根据已注入的事件事实做判断时。",
+    "需要阅读页面当前可见内容、进入候选链接或跨多个页面继续调查时。",
+    "需要在网页会话中继续操作，例如提交搜索、填写控件、前进后退或刷新时。",
 ];
 const BROWSER_HOW_TO_USE_LINES: &[&str] = &[
     "Browser 只通过 browser tools 操作；不要假设自己可以直接读取原始 HTML 或像人类一样机械导航。",
     "先用 `browser_open_page` 打开新页面，或在已知 `page_id` 上继续工作。",
-    "读取页面时先调用 `browser_snapshot` 获取最新语义快照。快照会返回 `snapshot_id` 和元素 `element_ref`。",
-    "如果页面可能仍在加载，先调用 `browser_wait`；如果要定位正文或某个关键词，优先调用 `browser_find_in_page`。",
-    "一切页面交互都必须显式提供 `page_id + snapshot_id + element_ref`；不要猜测页面结构，也不要复用旧快照。",
-    "点击、填写、前进、后退、刷新之后，旧 `snapshot_id` 会失效；继续之前应重新调用 `browser_snapshot`。",
+    "如果页面可能仍在加载，先调用 `browser_wait`；如果要理解当前页面内容或拿到可交互元素引用，使用 `browser_snapshot`。",
+    "一切页面交互都必须显式提供 `page_id + element_ref`；不要猜测页面结构。",
+    "输入框、搜索框、筛选器等可填写控件都属于基础 Browser 操作；先阅读页面快照拿到 `element_ref`，再用 `browser_fill`。",
+    "搜索结果页通常只是定位线索，不应默认把摘要当作最终事实；应优先进入候选目标页继续确认。",
+    "如果元素引用因页面变化而失效，Browser tool 会直接报错；此时应重新读取页面，而不是盲目重试旧引用。",
     "不再需要的页面应调用 `browser_close_page` 关闭，避免标签页长期堆积并浪费内存。",
-    "不要因为第一页快照主要是导航或页头就立刻宣告失败；应先等待、查找正文或关键信息，再决定是否无法完成。",
+    "不要因为第一页主要是导航或页头就立刻宣告失败；应先等待并完整阅读当前页面的语义快照，再决定是否无法完成。",
     "如果已经查到标题、摘要或正文片段，应基于已确认内容回答并明确范围；只有在关键内容确实不可得时才收尾为失败。",
     "Browser 只使用 Spinova 自带的独立浏览器 runtime，不会复用用户日常浏览器 profile；如果 runtime 未安装，浏览器工具会直接报错。",
 ];
-const BROWSER_SKILL_WEB_SEARCH_BASIC_ID: &str = "browser.web_search_basic";
+const BROWSER_SKILL_DEEP_RESEARCH_ID: &str = "browser.deep_research";
 const BROWSER_SKILL_SOURCE_VERIFICATION_ID: &str = "browser.source_verification";
-const BROWSER_SKILL_REPORT_RESEARCH_ID: &str = "browser.report_research";
-const BROWSER_SKILL_FORM_FILLING_ID: &str = "browser.form_filling";
+const BROWSER_SKILL_ARTICLE_READING_ID: &str = "browser.article_reading";
 const BROWSER_TOOL_SCOPES: &[AppToolScope] = &[AppToolScope::Browser];
 pub struct BrowserApp {
     browser: Option<Browser>,
     context: Option<BrowserContext>,
     pages: BTreeMap<String, BrowserPageState>,
-    next_snapshot_index: usize,
     init_error: Option<String>,
 }
 
@@ -53,7 +49,6 @@ pub struct BrowserPageState {
     pub page_id: String,
     pub title: String,
     pub url: String,
-    pub last_snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,37 +59,18 @@ pub struct BrowserOpenResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserSnapshotResult {
     pub page: BrowserPageState,
-    pub snapshot_id: String,
     pub snapshot: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserFindMatch {
-    pub element_ref: Option<String>,
-    pub role: Option<String>,
-    pub name: Option<String>,
-    pub text_snippet: String,
-    pub snapshot: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserFindResult {
-    pub page: BrowserPageState,
-    pub query: String,
-    pub matches: Vec<BrowserFindMatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserActionResult {
     pub page: BrowserPageState,
-    pub invalidated_snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserWaitResult {
     pub page: BrowserPageState,
     pub wait_state: String,
-    pub invalidated_snapshot_id: Option<String>,
 }
 
 impl BrowserApp {
@@ -103,7 +79,6 @@ impl BrowserApp {
             browser: None,
             context: None,
             pages: BTreeMap::new(),
-            next_snapshot_index: 1,
             init_error: None,
         }
     }
@@ -163,33 +138,7 @@ impl BrowserApp {
             .ok_or_else(|| miette!("unknown browser page `{page_id}`"))
     }
 
-    fn next_snapshot_id(&mut self) -> String {
-        let value = self.next_snapshot_index;
-        self.next_snapshot_index += 1;
-        format!("snapshot-{value}")
-    }
-
-    fn require_current_snapshot(&self, page_id: &str, snapshot_id: &str) -> Result<()> {
-        let page = self
-            .pages
-            .get(page_id)
-            .ok_or_else(|| miette!("unknown browser page `{page_id}`"))?;
-        match page.last_snapshot_id.as_deref() {
-            Some(current) if current == snapshot_id => Ok(()),
-            Some(current) => Err(miette!(
-                "stale browser snapshot for page `{page_id}`: expected `{current}`, got `{snapshot_id}`; call `browser_snapshot` again"
-            )),
-            None => Err(miette!(
-                "page `{page_id}` has no active snapshot; call `browser_snapshot` first"
-            )),
-        }
-    }
-
-    async fn capture_page_state(
-        &self,
-        page: &Page,
-        last_snapshot_id: Option<String>,
-    ) -> BrowserPageState {
+    async fn capture_page_state(&self, page: &Page) -> BrowserPageState {
         let title = page
             .title()
             .await
@@ -202,16 +151,11 @@ impl BrowserApp {
             page_id: page.target_id().to_string(),
             title: summarize_state_text(&title),
             url: summarize_state_text(&url),
-            last_snapshot_id,
         }
     }
 
-    async fn replace_page_state(
-        &mut self,
-        page: &Page,
-        last_snapshot_id: Option<String>,
-    ) -> BrowserPageState {
-        let state = self.capture_page_state(page, last_snapshot_id).await;
+    async fn replace_page_state(&mut self, page: &Page) -> BrowserPageState {
+        let state = self.capture_page_state(page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
         state
     }
@@ -233,84 +177,6 @@ impl BrowserApp {
         }
     }
 
-    fn summarize_match_text(text: &str) -> String {
-        const MAX_CHARS: usize = 220;
-        let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let mut chars = compact.chars();
-        let summary = chars.by_ref().take(MAX_CHARS).collect::<String>();
-        if chars.next().is_some() {
-            format!("{summary}...")
-        } else {
-            summary
-        }
-    }
-
-    fn snapshot_search_blob(node: &AriaSnapshot) -> String {
-        let mut fields = Vec::new();
-        if let Some(role) = node.role.as_deref() {
-            fields.push(role.to_string());
-        }
-        if let Some(name) = node.name.as_deref() {
-            fields.push(name.to_string());
-        }
-        if let Some(description) = node.description.as_deref() {
-            fields.push(description.to_string());
-        }
-        if let Some(value_text) = node.value_text.as_deref() {
-            fields.push(value_text.to_string());
-        }
-        for child in &node.children {
-            let child_blob = Self::snapshot_search_blob(child);
-            if !child_blob.is_empty() {
-                fields.push(child_blob);
-            }
-        }
-        fields.join("\n")
-    }
-
-    fn collect_snapshot_matches(
-        node: &AriaSnapshot,
-        query_lower: &str,
-        seen_refs: &mut BTreeSet<String>,
-        matches: &mut Vec<BrowserFindMatch>,
-        max_results: usize,
-    ) {
-        if matches.len() >= max_results {
-            return;
-        }
-
-        let search_blob = Self::snapshot_search_blob(node);
-        if !search_blob.is_empty() && search_blob.to_ascii_lowercase().contains(query_lower) {
-            let node_ref = node.node_ref.clone();
-            let is_new = match node_ref.as_deref() {
-                Some(node_ref) => seen_refs.insert(node_ref.to_string()),
-                None => true,
-            };
-            if is_new {
-                let snippet_source = node
-                    .name
-                    .as_deref()
-                    .or(node.description.as_deref())
-                    .or(node.value_text.as_deref())
-                    .unwrap_or(&search_blob);
-                matches.push(BrowserFindMatch {
-                    element_ref: node_ref,
-                    role: node.role.clone(),
-                    name: node.name.clone(),
-                    text_snippet: Self::summarize_match_text(snippet_source),
-                    snapshot: node.to_yaml(),
-                });
-            }
-        }
-
-        for child in &node.children {
-            if matches.len() >= max_results {
-                break;
-            }
-            Self::collect_snapshot_matches(child, query_lower, seen_refs, matches, max_results);
-        }
-    }
-
     async fn refresh_pages(&mut self) -> Result<()> {
         if self.context.is_none() {
             return Ok(());
@@ -320,13 +186,10 @@ impl BrowserApp {
             .pages()
             .await
             .map_err(|err| miette!("failed to list browser pages: {err}"))?;
-        let previous = std::mem::take(&mut self.pages);
+        self.pages.clear();
         let mut updated = BTreeMap::new();
         for page in pages {
-            let last_snapshot_id = previous
-                .get(page.target_id())
-                .and_then(|state| state.last_snapshot_id.clone());
-            let state = self.capture_page_state(&page, last_snapshot_id).await;
+            let state = self.capture_page_state(&page).await;
             updated.insert(state.page_id.clone(), state);
         }
         self.pages = updated;
@@ -345,7 +208,7 @@ impl BrowserApp {
             .goto()
             .await
             .map_err(|err| miette!("failed to open `{url}`: {err}"))?;
-        let state = self.capture_page_state(&page, None).await;
+        let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
         self.refresh_pages().await?;
         let page = self
@@ -361,55 +224,11 @@ impl BrowserApp {
         let snapshot = page
             .aria_snapshot()
             .await
-            .map_err(|err| miette!("failed to capture browser snapshot for `{page_id}`: {err}"))?;
-        let snapshot_id = self.next_snapshot_id();
-        let state = self
-            .capture_page_state(&page, Some(snapshot_id.clone()))
-            .await;
-        let snapshot = snapshot.to_yaml();
-        self.pages.insert(state.page_id.clone(), state.clone());
+            .map_err(|err| miette!("failed to inspect page `{page_id}`: {err}"))?;
+        let state = self.replace_page_state(&page).await;
         Ok(BrowserSnapshotResult {
             page: state,
-            snapshot_id,
-            snapshot,
-        })
-    }
-
-    pub async fn find_in_page(
-        &mut self,
-        page_id: &str,
-        query: &str,
-        max_results: usize,
-    ) -> Result<BrowserFindResult> {
-        let page = self.find_page(page_id).await?;
-        let limit = max_results.clamp(1, 20);
-        let query_lower = query.trim().to_ascii_lowercase();
-        if query_lower.is_empty() {
-            return Err(miette!("browser_find_in_page requires a non-empty query"));
-        }
-        let snapshot = page
-            .aria_snapshot()
-            .await
-            .map_err(|err| miette!("failed to inspect page `{page_id}`: {err}"))?;
-        let mut seen_refs = BTreeSet::new();
-        let mut matches = Vec::new();
-        Self::collect_snapshot_matches(
-            &snapshot,
-            &query_lower,
-            &mut seen_refs,
-            &mut matches,
-            limit,
-        );
-
-        let last_snapshot_id = self
-            .pages
-            .get(page_id)
-            .and_then(|state| state.last_snapshot_id.clone());
-        let state = self.replace_page_state(&page, last_snapshot_id).await;
-        Ok(BrowserFindResult {
-            page: state,
-            query: query.to_string(),
-            matches,
+            snapshot: snapshot.to_string(),
         })
     }
 
@@ -429,65 +248,38 @@ impl BrowserApp {
             .map_err(|err| {
                 miette!("failed to wait for `{wait_state}` on page `{page_id}`: {err}")
             })?;
-        let invalidated_snapshot_id = self
-            .pages
-            .get(page_id)
-            .and_then(|state| state.last_snapshot_id.clone());
-        let state = self.replace_page_state(&page, None).await;
+        let state = self.replace_page_state(&page).await;
         Ok(BrowserWaitResult {
             page: state,
             wait_state: wait_state.to_string(),
-            invalidated_snapshot_id,
         })
     }
 
-    pub async fn click(
-        &mut self,
-        page_id: &str,
-        snapshot_id: &str,
-        element_ref: &str,
-    ) -> Result<BrowserActionResult> {
-        self.require_current_snapshot(page_id, snapshot_id)?;
+    pub async fn click(&mut self, page_id: &str, element_ref: &str) -> Result<BrowserActionResult> {
         let page = self.find_page(page_id).await?;
         page.locator_from_ref(element_ref)
             .click()
             .await
             .map_err(|err| miette!("failed to click `{element_ref}` on page `{page_id}`: {err}"))?;
-        let invalidated_snapshot_id = self
-            .pages
-            .get(page_id)
-            .and_then(|state| state.last_snapshot_id.clone());
-        let state = self.capture_page_state(&page, None).await;
+        let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
-        Ok(BrowserActionResult {
-            page: state,
-            invalidated_snapshot_id,
-        })
+        Ok(BrowserActionResult { page: state })
     }
 
     pub async fn fill(
         &mut self,
         page_id: &str,
-        snapshot_id: &str,
         element_ref: &str,
         value: &str,
     ) -> Result<BrowserActionResult> {
-        self.require_current_snapshot(page_id, snapshot_id)?;
         let page = self.find_page(page_id).await?;
         page.locator_from_ref(element_ref)
             .fill(value)
             .await
             .map_err(|err| miette!("failed to fill `{element_ref}` on page `{page_id}`: {err}"))?;
-        let invalidated_snapshot_id = self
-            .pages
-            .get(page_id)
-            .and_then(|state| state.last_snapshot_id.clone());
-        let state = self.capture_page_state(&page, None).await;
+        let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
-        Ok(BrowserActionResult {
-            page: state,
-            invalidated_snapshot_id,
-        })
+        Ok(BrowserActionResult { page: state })
     }
 
     pub async fn go_back(&mut self, page_id: &str) -> Result<BrowserActionResult> {
@@ -495,16 +287,9 @@ impl BrowserApp {
         page.go_back()
             .await
             .map_err(|err| miette!("failed to go back on page `{page_id}`: {err}"))?;
-        let invalidated_snapshot_id = self
-            .pages
-            .get(page_id)
-            .and_then(|state| state.last_snapshot_id.clone());
-        let state = self.capture_page_state(&page, None).await;
+        let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
-        Ok(BrowserActionResult {
-            page: state,
-            invalidated_snapshot_id,
-        })
+        Ok(BrowserActionResult { page: state })
     }
 
     pub async fn go_forward(&mut self, page_id: &str) -> Result<BrowserActionResult> {
@@ -512,16 +297,9 @@ impl BrowserApp {
         page.go_forward()
             .await
             .map_err(|err| miette!("failed to go forward on page `{page_id}`: {err}"))?;
-        let invalidated_snapshot_id = self
-            .pages
-            .get(page_id)
-            .and_then(|state| state.last_snapshot_id.clone());
-        let state = self.capture_page_state(&page, None).await;
+        let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
-        Ok(BrowserActionResult {
-            page: state,
-            invalidated_snapshot_id,
-        })
+        Ok(BrowserActionResult { page: state })
     }
 
     pub async fn reload(&mut self, page_id: &str) -> Result<BrowserActionResult> {
@@ -529,24 +307,13 @@ impl BrowserApp {
         page.reload()
             .await
             .map_err(|err| miette!("failed to reload page `{page_id}`: {err}"))?;
-        let invalidated_snapshot_id = self
-            .pages
-            .get(page_id)
-            .and_then(|state| state.last_snapshot_id.clone());
-        let state = self.capture_page_state(&page, None).await;
+        let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
-        Ok(BrowserActionResult {
-            page: state,
-            invalidated_snapshot_id,
-        })
+        Ok(BrowserActionResult { page: state })
     }
 
     pub async fn close_page(&mut self, page_id: &str) -> Result<BrowserActionResult> {
         let mut page = self.find_page(page_id).await?;
-        let invalidated_snapshot_id = self
-            .pages
-            .get(page_id)
-            .and_then(|state| state.last_snapshot_id.clone());
         let state = self
             .pages
             .get(page_id)
@@ -557,13 +324,7 @@ impl BrowserApp {
             .map_err(|err| miette!("failed to close page `{page_id}`: {err}"))?;
         self.pages.remove(page_id);
         self.refresh_pages().await?;
-        Ok(BrowserActionResult {
-            page: BrowserPageState {
-                last_snapshot_id: None,
-                ..state
-            },
-            invalidated_snapshot_id,
-        })
+        Ok(BrowserActionResult { page: state })
     }
 
     fn render_backend_status(&self) -> &'static str {
@@ -616,11 +377,8 @@ impl App for BrowserApp {
             lines.push(format!("page_ids={page_ids}"));
             for page in self.pages.values() {
                 lines.push(format!(
-                    "page={} title={} url={} last_snapshot_id={}",
-                    page.page_id,
-                    page.title,
-                    page.url,
-                    page.last_snapshot_id.as_deref().unwrap_or("none")
+                    "page={} title={} url={}",
+                    page.page_id, page.title, page.url
                 ));
             }
         }
@@ -655,11 +413,11 @@ impl App for BrowserApp {
     fn skills(&self) -> Vec<AppSkillSummary> {
         vec![
             AppSkillSummary {
-                id: BROWSER_SKILL_WEB_SEARCH_BASIC_ID.to_string(),
-                name: "简单搜索求真".to_string(),
+                id: BROWSER_SKILL_DEEP_RESEARCH_ID.to_string(),
+                name: "深度调查".to_string(),
                 when_to_use: vec![
-                    "需要先通过搜索引擎定位一个或多个候选来源时。".to_string(),
-                    "用户问的是一般事实、站点入口或需要快速找到目标页面时。".to_string(),
+                    "需要跨多个页面和来源逐步查证，而不是停在单个搜索结果或单篇网页时。".to_string(),
+                    "任务要求你综合搜索、阅读、交叉比对、逐步收敛结论时。".to_string(),
                 ],
             },
             AppSkillSummary {
@@ -671,19 +429,11 @@ impl App for BrowserApp {
                 ],
             },
             AppSkillSummary {
-                id: BROWSER_SKILL_REPORT_RESEARCH_ID.to_string(),
-                name: "调查与报告阅读".to_string(),
+                id: BROWSER_SKILL_ARTICLE_READING_ID.to_string(),
+                name: "长文阅读与提炼".to_string(),
                 when_to_use: vec![
-                    "需要围绕文章、报告、博客或新闻做多步阅读和总结时。".to_string(),
-                    "需要从网页中提炼论点、事实和出处时。".to_string(),
-                ],
-            },
-            AppSkillSummary {
-                id: BROWSER_SKILL_FORM_FILLING_ID.to_string(),
-                name: "表单填写".to_string(),
-                when_to_use: vec![
-                    "页面上需要填写输入框、勾选项、提交表单时。".to_string(),
-                    "任务目标是登录、搜索、筛选、提交而不是单纯阅读时。".to_string(),
+                    "需要阅读文章、报告、博客或新闻，并从中提炼主要论点、事实和出处时。".to_string(),
+                    "任务重点是读懂一个较长网页并做总结，而不是做跨来源交叉查证时。".to_string(),
                 ],
             },
         ]
@@ -691,21 +441,17 @@ impl App for BrowserApp {
 
     fn read_skill(&self, id: &str) -> Result<AppSkillContent> {
         let (title, body) = match id {
-            BROWSER_SKILL_WEB_SEARCH_BASIC_ID => (
-                "Browser Skill: 简单搜索求真",
-                "适用时机：当你需要先通过搜索引擎定位候选来源时。\n\n做法：\n1. 用 `browser_open_page` 打开搜索结果页。\n2. 用 `browser_snapshot` 阅读当前结果页，再结合 `browser_find_in_page` 定位最相关候选。\n3. 搜索结果页通常只用于定位线索，不应默认把摘要当作最终事实。\n4. 一旦识别出最相关候选，优先进入目标页继续确认；不要只把站点链接丢给用户，除非用户要的就是入口链接。",
+            BROWSER_SKILL_DEEP_RESEARCH_ID => (
+                "Browser Skill: 深度调查",
+                "适用时机：当你需要跨多个网页逐步调查、交叉验证并收敛结论时。\n\n做法：\n1. 先打开一个起始页或搜索入口，但不要把第一页当成终点。\n2. 通过 `browser_snapshot` 识别关键链接、候选来源和下一步应进入的页面。\n3. 在多个页面之间建立调查链：进入来源页、阅读、返回、继续打开新候选。\n4. 只在已读过足够多的目标页、并完成必要交叉验证后再总结；不要把搜索结果摘要或单一页的站点简介当成调查结论。",
             ),
             BROWSER_SKILL_SOURCE_VERIFICATION_ID => (
                 "Browser Skill: 来源查证",
-                "适用时机：当用户要你确认某条事实、说法或网页内容是否成立时。\n\n做法：\n1. 先打开候选来源，再抓取最新 `browser_snapshot`。\n2. 用 `browser_find_in_page` 辅助定位关键词，但不要把命中本身当作完成。\n3. 继续结合 snapshot 确认该信息所在的具体页面位置与上下文。\n4. 只有在目标页上拿到足够明确的内容后，才可向用户下结论；搜索结果页摘要通常只算线索，不算最终查证。",
+                "适用时机：当用户要你确认某条事实、说法或网页内容是否成立时。\n\n做法：\n1. 先打开候选来源。\n2. 用 `browser_snapshot` 完整阅读页面语义结构，直接定位相关段落、标题、链接或控件引用。\n3. 不要只凭搜索结果摘要或零散片段下结论；要结合页面整体上下文确认信息位置。\n4. 只有在目标页上拿到足够明确的内容后，才可向用户下结论；搜索结果页摘要通常只算线索，不算最终查证。",
             ),
-            BROWSER_SKILL_REPORT_RESEARCH_ID => (
-                "Browser Skill: 调查与报告阅读",
-                "适用时机：当你需要阅读文章、报告、新闻或博客并提炼结论时。\n\n做法：\n1. 先 `browser_wait` 或重抓 snapshot，避免在页头/导航阶段过早判断失败。\n2. 使用 `browser_find_in_page` 查找关键人物、术语或段落线索。\n3. 如果已经拿到标题、摘要或正文片段，应基于已确认内容总结并说明范围。\n4. 如果任务需要更深确认，继续点击相关链接或页内元素，不要停在搜索页或站点简介页。",
-            ),
-            BROWSER_SKILL_FORM_FILLING_ID => (
-                "Browser Skill: 表单填写",
-                "适用时机：当页面存在输入框、搜索框、选择器或提交按钮时。\n\n做法：\n1. 先 `browser_snapshot` 找到可填写控件与提交对象的 `element_ref`。\n2. 用 `browser_fill` 向目标控件写入值。\n3. 若页面随后发生变化，旧 `snapshot_id` 会失效，必须重新 snapshot。\n4. 对提交按钮、分页按钮或结果项使用 `browser_click`；必要时先 `browser_wait` 再继续。",
+            BROWSER_SKILL_ARTICLE_READING_ID => (
+                "Browser Skill: 长文阅读与提炼",
+                "适用时机：当你需要阅读单篇文章、报告、博客或新闻并总结其内容时。\n\n做法：\n1. 先 `browser_wait`，避免在页头、导航或未稳定状态下误判内容缺失。\n2. 使用 `browser_snapshot` 阅读整页语义快照，识别标题、正文段落、引用和相关链接。\n3. 如果已经拿到标题、摘要或正文片段，应基于已确认内容总结，并明确哪些部分已经确认、哪些只是部分可见。\n4. 如果当前页仍不足以支持结论，再继续进入页内相关链接或返回上游来源；不要因为刚看到导航块就立刻失败。",
             ),
             _ => return Err(miette!("unknown Browser skill `{id}`")),
         };

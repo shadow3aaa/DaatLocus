@@ -1,6 +1,6 @@
 use crate::{
-    context::Context,
     app::{AppHowToUse, AppId, AppStateRender, AppUsage},
+    context::Context,
 };
 
 pub const SYSTEM_PROMPT_KERNEL: &str = r#"你叫 Spinova，一个自主智能体。
@@ -54,6 +54,7 @@ pub fn build_app_context_prompt(context: &Context) -> String {
         .apps
         .state_renders()
         .into_iter()
+        .filter(|(app_id, _state)| focused != Some(*app_id))
         .filter_map(|(app_id, _state)| {
             context
                 .apps
@@ -92,10 +93,7 @@ pub fn build_app_context_prompt(context: &Context) -> String {
     sections.join("\n\n")
 }
 
-pub fn build_app_pre_focus_note_prompt(
-    app_id: AppId,
-    state: &AppStateRender,
-) -> String {
+pub fn build_app_pre_focus_note_prompt(app_id: AppId, state: &AppStateRender) -> String {
     let mut sections = vec![format!(
         "当前 `{app_id}` 不在前景；如果你需要操作它，请先调用 `focus_app` 将它切到前景。"
     )];
