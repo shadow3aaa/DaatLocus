@@ -25,7 +25,6 @@ const MID_TURN_COMPACTION_KEEP_TOOL_CYCLES: usize = 1;
 const MID_TURN_COMPACTION_KEEP_MESSAGES_WITHOUT_TOOL_CYCLES: usize = 4;
 const MID_TURN_COMPACTION_SUMMARY_MAX_TOKENS: usize = 900;
 pub const MID_TURN_COMPACTION_MAX_RECOVERIES: usize = 3;
-
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct HistoryCompactionOutput {
     summary: String,
@@ -47,14 +46,26 @@ pub fn build_runtime_request_envelope(
             .filter(|line| !line.trim().is_empty())
             .cloned(),
     );
-    system_messages.push(build_app_context_prompt(context));
+    RuntimeRequestEnvelope::from_world_snapshot(system_messages, snapshot_text)
+}
+
+pub fn build_runtime_snapshot_text(context: &Context, snapshot_text: &str) -> String {
+    let mut sections = Vec::new();
+
+    let app_context = build_app_context_prompt(context);
+    if !app_context.trim().is_empty() {
+        sections.push(format!("运行时上下文：\n{app_context}"));
+    }
+
     if !context.prompt_memory.recalled_memories.is_empty() {
-        system_messages.push(format!(
+        sections.push(format!(
             "相关长期记忆：\n{}",
             context.prompt_memory.recalled_memories.join("\n")
         ));
     }
-    RuntimeRequestEnvelope::from_world_snapshot(system_messages, snapshot_text)
+
+    sections.push(snapshot_text.to_string());
+    sections.join("\n\n")
 }
 
 pub fn runtime_request_budget_limits(context: &Context) -> RequestBudgetLimits {

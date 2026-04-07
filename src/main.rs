@@ -89,7 +89,7 @@ use crate::{
     },
     runtime_context::{
         MID_TURN_COMPACTION_MAX_RECOVERIES, build_runtime_conversation_summary,
-        build_runtime_request_envelope, maybe_compact_runtime_messages,
+        build_runtime_request_envelope, build_runtime_snapshot_text, maybe_compact_runtime_messages,
         runtime_request_budget_limits,
     },
     runtime_tools::{
@@ -2885,7 +2885,7 @@ pub(crate) async fn execute_agent_loop_step(
         })
         .collect::<Vec<_>>();
     let snapshot = Snapshot::new_with_claimed_events(context, &claimed_event_views).await;
-    let snapshot_text = snapshot.to_runtime_text();
+    let snapshot_text = build_runtime_snapshot_text(context, &snapshot.to_runtime_text());
     let request_envelope = build_runtime_request_envelope(context, &snapshot_text);
     let initial_tools = build_runtime_tool_specs(context);
     let runtime_conversation_budget = request_envelope
@@ -4442,12 +4442,6 @@ fn render_system_prompt_output_for_dashboard(context: &Context) -> String {
     } else {
         lines.extend(additions.iter().cloned());
     }
-
-    lines.push(String::new());
-    lines.push("[app_context]".to_string());
-    lines.push(crate::reasoning::prompts::build_app_context_prompt(
-        context,
-    ));
     lines.join("\n")
 }
 
