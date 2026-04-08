@@ -47,6 +47,8 @@ use crate::{
         programs::runtime_turn_trace_judge::{
             RuntimeTurnTraceJudgeOutput, RuntimeTurnTraceJudgeProgram,
         },
+        prompt_assembler::{baseline_runtime_contract_doc, runtime_system_prompt_doc_from_additions},
+        prompt_renderer::LlmPromptRenderer,
         render::openai_tools::OpenAIToolRenderer,
         runtime::{
             ProgramExecutionTelemetry, execute_program_with_ir_report,
@@ -874,19 +876,6 @@ pub fn load_prompt_persona_spec_sync() -> PromptPersonaSpec {
     }
 }
 
-pub fn render_persona_kernel_system_prompt(spec: &PromptPersonaSpec) -> String {
-    format!(
-        "人格 kernel:\n- name: {}\n- language: {}\n- identity_summary: {}",
-        spec.name.trim(),
-        spec.language.trim(),
-        spec.identity_summary.trim()
-    )
-}
-
-pub fn current_persona_kernel_system_prompt_sync() -> String {
-    render_persona_kernel_system_prompt(&load_prompt_persona_spec_sync())
-}
-
 async fn load_or_seed_prompt_persona_spec() -> Result<PromptPersonaSpec> {
     let path = prompt_persona_path().await;
     if !path.exists() {
@@ -952,11 +941,7 @@ async fn generate_turn_demos_from_persona_spec(
         &renderer,
         &program,
         program.dataset_ir(
-            format!(
-                "{}\n\n{}",
-                crate::reasoning::prompts::SYSTEM_PROMPT_KERNEL,
-                crate::reasoning::prompts::TOOL_ACTION_PROMPT
-            ),
+            LlmPromptRenderer::render_document(&baseline_runtime_contract_doc()),
             render_persona_spec_for_generator(spec),
             workspace_facts,
         ),
@@ -1235,8 +1220,8 @@ async fn collect_turn_demo_workspace_facts() -> Result<String> {
         ),
         "known_runtime_facts: Terminal is the only interactive app; Telegram is an event transport, not a app.".to_string(),
         "known_runtime_facts: Fresh incoming messages arrive as events and are judged semantically; do not invent hidden inbox navigation state.".to_string(),
-        "known_runtime_facts: If a demo depends on todos, events, app health, or repository facts, it should ask about current visible state rather than fabricate specific unseen records.".to_string(),
-        "known_runtime_facts: Runtime snapshot already includes concise TodoBoard summary, event list, and app structural state; read-only questions about those visible summaries do not inherently require tools.".to_string(),
+        "known_runtime_facts: If a demo depends on plans, events, app health, or repository facts, it should ask about current visible state rather than fabricate specific unseen records.".to_string(),
+        "known_runtime_facts: Runtime snapshot already includes concise Plan summary, event list, and app structural state; read-only questions about those visible summaries do not inherently require tools.".to_string(),
         "known_runtime_facts: Repository file existence, file contents, directory structure, and any fact not already rendered in runtime snapshot still require tools.".to_string(),
     ];
 
@@ -1807,19 +1792,9 @@ pub fn current_runtime_system_prompt_artifact_from_store(
 }
 
 pub fn runtime_system_prompt_text(compiled_prompts: &CompiledPromptStore) -> String {
-    let mut lines = vec![
-        crate::reasoning::prompts::SYSTEM_PROMPT_KERNEL.to_string(),
-        current_persona_kernel_system_prompt_sync(),
-        crate::reasoning::prompts::TOOL_ACTION_PROMPT.to_string(),
-    ];
-    lines.extend(
-        compiled_prompts
-            .runtime_system_additions()
-            .iter()
-            .filter(|line| !line.trim().is_empty())
-            .cloned(),
-    );
-    lines.join("\n\n")
+    LlmPromptRenderer::render_document(&runtime_system_prompt_doc_from_additions(
+        compiled_prompts.runtime_system_additions(),
+    ))
 }
 
 pub fn choose_best_non_regressing_prompt_shared(
@@ -1913,7 +1888,7 @@ impl Default for PromptPersonaSpec {
                 "先判断问题属于直接答复、查证、执行还是决策，再行动。".to_string(),
                 "代码库文件、目录、内容，以及 runtime snapshot 未直接给出的事实，必须先查证。".to_string(),
                 "信息已在当前上下文或 runtime snapshot 中可得时，直接给结论，不要为了显得谨慎而绕路。".to_string(),
-                "TodoBoard 摘要、事件列表、应用结构状态等 runtime snapshot 已直接可见的摘要，可以直接据此回答。".to_string(),
+                "Plan 摘要、事件列表、应用结构状态等 runtime snapshot 已直接可见的摘要，可以直接据此回答。".to_string(),
                 "工具调用要服务于结论，不要为了展示过程而调用。".to_string(),
                 "当用户要求你自己决定时，要给出明确选择和理由，不要把决策再推回给用户。".to_string(),
                 "语气保持冷静、具体、短句、少套话；默认使用中文猫娘口吻。".to_string(),

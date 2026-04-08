@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, path::PathBuf};
+use std::collections::HashMap;
 
 use crate::{
     context::Context,
@@ -10,13 +10,13 @@ use crate::{
             save_compiled_runtime_system_prompt_for_model,
             save_previous_compiled_runtime_system_prompt_for_model,
         },
-        episode::{EpisodeActionRecord, EpisodeOutcome, EpisodeStatus, EpisodeStep},
+        episode::EpisodeActionRecord,
         examples::ExampleField,
         runtime::{PromptMessage, PromptRequest, PromptRole},
     },
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
-use miette::{Result, miette};
+use miette::Result;
 use serde_json::json;
 use tracing::warn;
 
@@ -42,6 +42,8 @@ use super::{
     programs::sleep_review_synthesizer::{
         SleepReviewSynthesizerOutput, SleepReviewSynthesizerProgram,
     },
+    prompt_assembler::runtime_system_prompt_doc_from_additions,
+    prompt_renderer::LlmPromptRenderer,
     render::openai_tools::OpenAIToolRenderer,
     runtime::{execute_program_with_ir_report, resolve_program_tuning},
     runtime_review::{
@@ -55,10 +57,10 @@ use super::{
     turn_compile::{
         TurnCompileEngine, apply_runtime_prompt_candidate_shared,
         build_compiled_runtime_system_prompt_report, build_runtime_prompt_evolution_report,
-        choose_best_non_regressing_prompt_shared, current_persona_kernel_system_prompt_sync,
-        current_runtime_system_prompt_artifact_from_store, generate_turn_prompt_candidates,
-        is_acceptable_turn_round, runtime_system_prompt_text as render_runtime_system_prompt_text,
-        turn_evaluation_stats, turn_evaluation_summary_lines,
+        choose_best_non_regressing_prompt_shared, current_runtime_system_prompt_artifact_from_store,
+        generate_turn_prompt_candidates, is_acceptable_turn_round,
+        runtime_system_prompt_text as render_runtime_system_prompt_text, turn_evaluation_stats,
+        turn_evaluation_summary_lines,
         turn_prompt_suggestions_from_evaluations,
     },
 };
@@ -102,8 +104,7 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let consumed_runtime_reviews = runtime_review_batch.turns.len();
     let runtime_review_spans = build_runtime_review_spans(&runtime_review_batch.turns);
     let mut failure_patterns = derive_failure_patterns(&records);
-    let episode_outcomes = load_recent_learn_episode_outcomes().await?;
-    let review_inputs = collect_review_inputs(&episode_outcomes, &runtime_review_spans);
+    let review_inputs = collect_review_inputs(&runtime_review_spans);
     let review_synthesis = synthesize_review_inputs(context, &review_inputs).await?;
     failure_patterns.extend(review_synthesis.failure_patterns.clone());
     let store = EvaluationArtifactsStore::open().await?;
@@ -207,92 +208,6 @@ async fn load_runtime_trace_records() -> Result<RuntimeTraceBatch> {
     load_runtime_trace_batch().await
 }
 
-async fn latest_train_source_learn_session_root() -> Result<Option<PathBuf>> {
-    let train_root = env::current_dir()
-        .map_err(|err| miette!("failed to get current dir for learn outcomes: {err}"))?
-        .join("tmp")
-        .join("train_source_learn");
-    if !train_root.exists() {
-        return Ok(None);
-    }
-
-    let mut latest_session: Option<(std::time::SystemTime, PathBuf)> = None;
-    let mut entries = tokio::fs::read_dir(&train_root).await.map_err(|err| {
-        miette!(
-            "failed to read train_source_learn dir {}: {err}",
-            train_root.display()
-        )
-    })?;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|err| miette!("failed to read train_source_learn entry: {err}"))?
-    {
-        let path = entry.path();
-        let Ok(metadata) = entry.metadata().await else {
-            continue;
-        };
-        if !metadata.is_dir() {
-            continue;
-        }
-        let Ok(modified) = metadata.modified() else {
-            continue;
-        };
-        if latest_session
-            .as_ref()
-            .is_none_or(|(latest_modified, _)| modified > *latest_modified)
-        {
-            latest_session = Some((modified, path));
-        }
-    }
-
-    Ok(latest_session.map(|(_, path)| path))
-}
-
-async fn load_recent_learn_episode_outcomes() -> Result<Vec<EpisodeOutcome>> {
-    let Some(session_root) = latest_train_source_learn_session_root().await? else {
-        return Ok(Vec::new());
-    };
-    let episodes_root = session_root.join("episodes");
-    if !episodes_root.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut outcomes = Vec::new();
-    let mut episode_dirs = tokio::fs::read_dir(&episodes_root).await.map_err(|err| {
-        miette!(
-            "failed to read learn episodes dir {}: {err}",
-            episodes_root.display()
-        )
-    })?;
-    while let Some(entry) = episode_dirs
-        .next_entry()
-        .await
-        .map_err(|err| miette!("failed to read learn episode entry: {err}"))?
-    {
-        let outcome_path = entry.path().join("episode_outcome.json");
-        let payload = match tokio::fs::read_to_string(&outcome_path).await {
-            Ok(payload) => payload,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => {
-                return Err(miette!(
-                    "failed to read episode outcome {}: {err}",
-                    outcome_path.display()
-                ));
-            }
-        };
-        let outcome = serde_json::from_str::<EpisodeOutcome>(&payload).map_err(|err| {
-            miette!(
-                "failed to parse episode outcome {}: {err}",
-                outcome_path.display()
-            )
-        })?;
-        outcomes.push(outcome);
-    }
-
-    Ok(outcomes)
-}
-
 #[derive(Default)]
 struct ReviewSleepSynthesis {
     failure_patterns: Vec<EvaluationArtifactFailurePattern>,
@@ -332,16 +247,8 @@ struct ReviewInput {
     last_action_summary: String,
 }
 
-fn collect_review_inputs(
-    episode_outcomes: &[EpisodeOutcome],
-    runtime_review_spans: &[RuntimeReviewSpan],
-) -> Vec<ReviewInput> {
+fn collect_review_inputs(runtime_review_spans: &[RuntimeReviewSpan]) -> Vec<ReviewInput> {
     let mut inputs = Vec::new();
-    inputs.extend(
-        episode_outcomes
-            .iter()
-            .filter_map(review_input_from_episode),
-    );
     inputs.extend(
         runtime_review_spans
             .iter()
@@ -404,79 +311,18 @@ async fn synthesize_review_inputs(
     Ok(synthesized)
 }
 
-fn review_input_from_episode(outcome: &EpisodeOutcome) -> Option<ReviewInput> {
-    let step = outcome.steps.last()?.clone();
-    let review_label = review_label_from_action_kind(&step.action.kind, &outcome.environment_name);
-    let task_goal = outcome
-        .task
-        .task_goal
-        .clone()
-        .unwrap_or_else(|| outcome.task.title.clone());
-    let done_criteria = if outcome.task.done_criteria.is_empty() {
-        outcome.task.success_criteria.join("\n")
-    } else {
-        outcome.task.done_criteria.join("\n")
-    };
-    let recent_steps = render_recent_episode_steps(outcome);
-    let final_observation = format!(
-        "{}\n\n{}",
-        outcome.final_observation.summary.trim(),
-        outcome.final_observation.snapshot_text.trim()
-    );
-    let memory_query = format!(
-        "{}\n{}\n{}",
-        task_goal.trim(),
-        outcome.final_observation.summary.trim(),
-        recent_steps.trim()
-    );
-    let review_id = format!("episode:{}", outcome.task.id);
-    Some(ReviewInput {
-        review_id: review_id.clone(),
-        review_label: review_label.clone(),
-        source_kind: "train_episode".to_string(),
-        outcome_status: format!("{:?}", outcome.status),
-        task_goal,
-        done_criteria,
-        recent_steps,
-        final_observation,
-        memory_query,
-        demo_inputs: episode_example_inputs(outcome, &step),
-        expected_output: step_to_output(&step),
-        source_trace_ids: vec![review_id.clone()],
-        repeat_hint: outcome.metric.repeated_actions.max(2),
-        can_create_failure_pattern: !matches!(outcome.status, EpisodeStatus::Succeeded),
-        reflection_tags: vec![
-            "sleep-reflection".to_string(),
-            format!("label:{}", review_label),
-            "source:train_episode".to_string(),
-            format!("status:{:?}", outcome.status).to_ascii_lowercase(),
-        ],
-        reflection_subject: format!("train episode {}", outcome.task.id),
-        last_action_kind: step.action.kind.clone(),
-        last_action_summary: step.action.summary.clone(),
-    })
-}
-
 fn review_input_from_runtime_span(span: &RuntimeReviewSpan) -> Option<ReviewInput> {
     let first_turn = span.turns.first()?;
     let last_turn = span.last_turn();
     let last_action = last_runtime_turn_action(last_turn);
     let review_label = review_label_from_action_kind(&last_action.kind, "runtime");
-    let task_goal = last_turn
-        .metadata
-        .get("objective")
-        .cloned()
-        .filter(|item| !item.trim().is_empty())
-        .or_else(|| {
-            (!last_turn.current_doing.trim().is_empty()).then(|| last_turn.current_doing.clone())
-        })
-        .unwrap_or_else(|| last_action.summary.clone());
+    let task_goal = if last_turn.current_doing.trim().is_empty() {
+        last_action.summary.clone()
+    } else {
+        last_turn.current_doing.clone()
+    };
     let outcome_status = infer_runtime_review_status(span);
-    let done_criteria = last_turn
-        .metadata
-        .get("objective")
-        .map(|objective| format!("推进目标：{objective}"))
-        .unwrap_or_else(|| "推进当前 runtime 世界状态并保持行为边界稳定。".to_string());
+    let done_criteria = "推进当前 runtime 世界状态并保持行为边界稳定。".to_string();
     let recent_steps = render_recent_runtime_span_steps(span);
     let final_observation = format!(
         "{}\n\n{}",
@@ -608,41 +454,6 @@ fn derive_failure_patterns(
     });
 
     patterns
-}
-
-fn render_recent_episode_steps(outcome: &EpisodeOutcome) -> String {
-    outcome
-        .steps
-        .iter()
-        .rev()
-        .take(6)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .enumerate()
-        .map(|(index, step)| {
-            let phase = step
-                .metadata
-                .get("work_phase")
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            let reason = step
-                .metadata
-                .get("completion_reason")
-                .cloned()
-                .unwrap_or_default();
-            format!(
-                "{}. phase={} action={} ({}) observation={} reason={}",
-                index + 1,
-                phase,
-                step.action.kind,
-                step.action.summary,
-                step.observation_summary.trim(),
-                reason.trim()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn render_recent_runtime_span_steps(span: &RuntimeReviewSpan) -> String {
@@ -848,37 +659,6 @@ fn merge_review_synthesis(
             ),
             tags: review.reflection_tags.clone(),
         });
-    }
-}
-
-fn episode_example_inputs(outcome: &EpisodeOutcome, step: &EpisodeStep) -> Vec<ExampleField> {
-    vec![
-        ExampleField {
-            name: "训练任务".to_string(),
-            value: outcome.task.instruction.clone(),
-        },
-        ExampleField {
-            name: "当前状态".to_string(),
-            value: step.snapshot_text.clone(),
-        },
-    ]
-}
-
-fn step_to_output(step: &EpisodeStep) -> SleepActionOutput {
-    SleepActionOutput {
-        observation: step.observation_summary.clone(),
-        description: step
-            .metadata
-            .get("description")
-            .cloned()
-            .unwrap_or_default(),
-        current_doing: step
-            .metadata
-            .get("current_doing")
-            .cloned()
-            .unwrap_or_default(),
-        action_kind: step.action.kind.clone(),
-        action_summary: step.action.summary.clone(),
     }
 }
 
@@ -1485,18 +1265,9 @@ async fn previous_runtime_system_prompt_text(context: &Context) -> Result<String
     else {
         return Ok(String::from("none"));
     };
-    let mut lines = vec![
-        crate::reasoning::prompts::SYSTEM_PROMPT_KERNEL.to_string(),
-        current_persona_kernel_system_prompt_sync(),
-        crate::reasoning::prompts::TOOL_ACTION_PROMPT.to_string(),
-    ];
-    lines.extend(
-        previous
-            .system_additions
-            .into_iter()
-            .filter(|line| !line.trim().is_empty()),
-    );
-    Ok(lines.join("\n\n"))
+    Ok(LlmPromptRenderer::render_document(
+        &runtime_system_prompt_doc_from_additions(&previous.system_additions),
+    ))
 }
 
 fn current_runtime_system_prompt_text(context: &Context) -> String {

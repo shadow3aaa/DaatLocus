@@ -414,7 +414,7 @@ impl App for TerminalApp {
 
     fn usage(&self) -> AppUsage {
         AppUsage {
-            purpose: TERMINAL_USAGE_PURPOSE.to_string(),
+            description: TERMINAL_USAGE_PURPOSE.to_string(),
             when_to_focus: TERMINAL_WHEN_TO_FOCUS
                 .iter()
                 .map(|line| (*line).to_string())

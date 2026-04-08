@@ -1,11 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    context::Context,
-    reasoning::{ir::PromptIR, program::Program, signature::Signature},
-    snapshot::Snapshot,
-};
+use crate::reasoning::{ir::PromptIR, program::Program, signature::Signature};
 
 const RUNTIME_SYSTEM_PROMPT_JUDGE_SYSTEM_PROMPT: &str = r#"你现在不是执行者，而是 runtime system prompt 的评审器。
 你的任务是根据给定的 demo 目标，判断当前 system prompt 是否足以诱导出目标行为。
@@ -56,17 +52,6 @@ impl Program for RuntimeSystemPromptJudgeProgram {
             .output("reason", "简洁说明判断依据。")
             .rule("如果 previous system prompt 为 none，则 regression_detected 必须为 false。")
             .rule("needed_changes 应尽量是 prompt patch，而不是完整重写。")
-    }
-
-    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
-        self.dataset_ir(
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-        )
     }
 }
 

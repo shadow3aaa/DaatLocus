@@ -2,11 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::{
-    context::Context,
-    reasoning::{ir::PromptIR, program::Program, signature::Signature},
-    snapshot::Snapshot,
-};
+use crate::reasoning::{ir::PromptIR, program::Program, signature::Signature};
 
 const SLEEP_REVIEW_SYNTHESIZER_SYSTEM_PROMPT: &str = r#"你现在处于评估整理阶段。
 你的任务是阅读一个 review unit 的结果，并把它抽象成可复用的学习结论。
@@ -280,20 +276,6 @@ impl Program for SleepReviewSynthesizerProgram {
             .rule("如果一个 lesson 可以稳定落成 demo 或 stress case，就不要只生成 instruction。")
             .rule("失败或卡住的 review unit 优先输出收敛策略，不要只复述报错或日志。")
             .rule("如果已经有明确错误对象或状态冲突，strategy_lesson 必须围绕该对象收敛。")
-    }
-
-    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
-        self.dataset_ir(
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-        )
     }
 }
 

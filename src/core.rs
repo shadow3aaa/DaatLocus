@@ -8,7 +8,7 @@ use crate::{
     context::Context,
     events::EventDisposition,
     reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
-    todo_board::TodoStatus,
+    plan::PlanStatus,
 };
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -102,20 +102,15 @@ pub struct EventResolveArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct TodoCreateArgs {
-    pub title: String,
-    pub done_criteria: String,
-    pub notes: Option<String>,
+pub struct UpdatePlanStepArgs {
+    pub step: String,
+    pub status: PlanStatus,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct TodoUpdateArgs {
-    pub item_id: String,
-    pub title: Option<String>,
-    pub done_criteria: Option<String>,
-    pub notes: Option<String>,
-    pub clear_notes: Option<bool>,
-    pub status: Option<TodoStatus>,
+pub struct UpdatePlanArgs {
+    pub explanation: Option<String>,
+    pub plan: Vec<UpdatePlanStepArgs>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -131,18 +126,6 @@ pub struct DeepRecallArgs {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ReadSkillArgs {
     pub id: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct TodoCompleteArgs {
-    pub item_id: String,
-    pub summary: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct TodoDropArgs {
-    pub item_id: String,
-    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]

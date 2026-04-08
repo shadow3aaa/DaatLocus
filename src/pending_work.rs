@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     app::AppId,
-    spinova_paths::{spinova_paths, spinova_paths_sync},
+    spinova_paths::spinova_paths,
 };
 
 const PENDING_WORK_FILE_NAME: &str = "pending_work_queue";
@@ -84,6 +84,7 @@ impl PendingWorkQueue {
         }
     }
 
+    #[cfg(test)]
     pub fn empty() -> Self {
         Self {
             inner: Arc::new(Mutex::new(PendingWorkQueueInner {

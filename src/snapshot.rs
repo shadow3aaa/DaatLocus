@@ -4,34 +4,36 @@ use std::collections::HashSet;
 use std::fmt::Display;
 
 use crate::{
-    app::{AppId, AppSkillSummary, AppStateRender},
+    app::{AppId, AppStateRender},
     context::Context,
     context_budget::truncate_text_to_token_budget,
     events::{EventPayload, EventStatus, EventStore, EventView},
+    plan::Plan,
     system_info::SystemInfo,
-    todo_board::TodoBoard,
-    work_state::WorkState,
 };
 
 const SNAPSHOT_SENSORY_MAX_TOKENS: usize = 400;
-const SNAPSHOT_TODO_MAX_TOKENS: usize = 1_600;
-const SNAPSHOT_WORK_STATE_MAX_TOKENS: usize = 700;
+const SNAPSHOT_PLAN_MAX_TOKENS: usize = 1_600;
 const SNAPSHOT_EVENTS_MAX_TOKENS: usize = 1_800;
-const SNAPSHOT_APPS_MAX_TOKENS: usize = 1_600;
-const SNAPSHOT_TODO_MAX_ITEMS: usize = 8;
+const SNAPSHOT_PLAN_MAX_ITEMS: usize = 8;
 const SNAPSHOT_EVENT_MAX_ITEMS: usize = 8;
-const SNAPSHOT_APP_HINT_MAX_ITEMS: usize = 4;
 const SNAPSHOT_APP_LINES_PER_APP: usize = 8;
 
 /// 快照保存着当前agent的大脑状态
 ///
-/// 这包括 todo、当前工作状态和感官输入。
+/// 这包括 plan、事件和感官输入。
 pub struct Snapshot {
     sensory: Sensory,
-    todo_board: TodoBoard,
-    work_state: WorkState,
+    plan: Plan,
     events: EventSnapshot,
     apps: AppSnapshot,
+}
+
+#[derive(Clone)]
+pub struct SnapshotAppStateEntry {
+    pub app_id: String,
+    pub title: String,
+    pub lines: Vec<String>,
 }
 
 impl Snapshot {
@@ -46,87 +48,48 @@ impl Snapshot {
         let apps = AppSnapshot::new(context);
         Self {
             sensory: Sensory::new(),
-            todo_board: context.todo_board.clone(),
-            work_state: context.work_state.clone(),
+            plan: context.plan.clone(),
             events: EventSnapshot::new(&context.events, claimed_events),
             apps,
         }
     }
 
-    pub fn to_runtime_text(&self) -> String {
-        [
-            ("感官：", self.render_sensory_runtime()),
-            ("TodoBoard：", self.render_todo_board_runtime()),
-            ("当前工作状态：", self.render_work_state_runtime()),
-            ("事件列表：", self.render_events_runtime()),
-            ("应用：", self.render_apps_runtime()),
-        ]
-        .into_iter()
-        .map(|(title, body)| format!("{title}\n{body}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-    }
-
-    fn render_sensory_runtime(&self) -> String {
+    pub fn sensory_runtime_text(&self) -> String {
         truncate_text_to_token_budget(&self.sensory.to_string(), SNAPSHOT_SENSORY_MAX_TOKENS)
     }
 
-    fn render_todo_board_runtime(&self) -> String {
-        let mut items = self.todo_board.active_items().collect::<Vec<_>>();
-        if items.is_empty() {
-            return "当前没有 todo。".to_string();
+    pub fn plan_runtime_text(&self) -> String {
+        let steps = self.plan.steps();
+        if steps.is_empty() {
+            return "当前没有 plan。".to_string();
         }
 
-        items.sort_by(|left, right| {
-            right
-                .1
-                .last_updated_at_ms
-                .cmp(&left.1.last_updated_at_ms)
-                .then_with(|| left.0.cmp(&right.0))
-        });
-
-        let omitted = items.len().saturating_sub(SNAPSHOT_TODO_MAX_ITEMS);
+        let omitted = steps.len().saturating_sub(SNAPSHOT_PLAN_MAX_ITEMS);
         let mut lines = Vec::new();
-        for (index, (id, item)) in items.into_iter().take(SNAPSHOT_TODO_MAX_ITEMS).enumerate() {
+        for (index, step) in steps.iter().take(SNAPSHOT_PLAN_MAX_ITEMS).enumerate() {
             if index > 0 {
                 lines.push(String::new());
             }
-            lines.push(format!(
-                "- {id}. [{} / {}] {}",
-                item.status, item.origin, item.title
-            ));
-            lines.push(format!(
-                "  完成标准：{}",
-                summarize_inline_text(&item.done_criteria)
-            ));
-            if let Some(notes) = item.notes.as_deref()
-                && !notes.trim().is_empty()
-            {
-                lines.push(format!("  备注：{}", summarize_inline_text(notes)));
-            }
+            lines.push(format!("{}. [{}] {}", index + 1, step.status, step.step));
         }
         if omitted > 0 {
             lines.push(String::new());
-            lines.push(format!("... 还有 {omitted} 个 todo 未展示"));
+            lines.push(format!("... 还有 {omitted} 个 plan 未展示"));
         }
-        truncate_text_to_token_budget(&lines.join("\n"), SNAPSHOT_TODO_MAX_TOKENS)
+        truncate_text_to_token_budget(&lines.join("\n"), SNAPSHOT_PLAN_MAX_TOKENS)
     }
 
-    fn render_work_state_runtime(&self) -> String {
-        truncate_text_to_token_budget(&self.work_state.to_string(), SNAPSHOT_WORK_STATE_MAX_TOKENS)
-    }
-
-    fn render_events_runtime(&self) -> String {
+    pub fn events_runtime_text(&self) -> String {
         self.events
             .render_runtime(SNAPSHOT_EVENT_MAX_ITEMS, SNAPSHOT_EVENTS_MAX_TOKENS)
     }
 
-    fn render_apps_runtime(&self) -> String {
-        self.apps.render_runtime(
-            SNAPSHOT_APP_HINT_MAX_ITEMS,
-            SNAPSHOT_APP_LINES_PER_APP,
-            SNAPSHOT_APPS_MAX_TOKENS,
-        )
+    pub fn focused_app_runtime_text(&self) -> String {
+        self.apps.focused_runtime_text()
+    }
+
+    pub fn app_state_entries(&self) -> Vec<SnapshotAppStateEntry> {
+        self.apps.app_state_entries(SNAPSHOT_APP_LINES_PER_APP)
     }
 }
 
@@ -134,10 +97,8 @@ impl Display for Snapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "感官：")?;
         writeln!(f, "{}", self.sensory)?;
-        writeln!(f, "TodoBoard：")?;
-        writeln!(f, "{}", self.todo_board)?;
-        writeln!(f, "当前工作状态：")?;
-        writeln!(f, "{}", self.work_state)?;
+        writeln!(f, "Plan：")?;
+        writeln!(f, "{}", self.plan)?;
         writeln!(f, "事件列表：")?;
         writeln!(f, "{}", self.events)?;
         writeln!(f, "应用：")?;
@@ -172,7 +133,6 @@ impl Display for Sensory {
 struct AppSnapshot {
     focused_app: Option<AppId>,
     states: Vec<(AppId, AppStateRender)>,
-    skills: Vec<(AppId, Vec<AppSkillSummary>)>,
 }
 
 struct EventSnapshot {
@@ -184,7 +144,6 @@ impl AppSnapshot {
         Self {
             focused_app: context.apps.focused(),
             states: context.apps.state_renders(),
-            skills: context.apps.all_skills(),
         }
     }
 }
@@ -235,18 +194,6 @@ impl Display for AppSnapshot {
             for line in &state.lines {
                 writeln!(f, "  {line}")?;
             }
-            if self.focused_app == Some(*id)
-                && let Some((_, skills)) = self.skills.iter().find(|(app_id, _)| app_id == id)
-                && !skills.is_empty()
-            {
-                writeln!(f, "  可用 skills：")?;
-                for skill in skills {
-                    writeln!(f, "    - {}: {}", skill.id, skill.name)?;
-                    for when in &skill.when_to_use {
-                        writeln!(f, "      - {}", summarize_inline_text(when))?;
-                    }
-                }
-            }
         }
         Ok(())
     }
@@ -293,54 +240,39 @@ impl Display for EventSnapshot {
 }
 
 impl AppSnapshot {
-    fn render_runtime(
-        &self,
-        max_hints: usize,
-        max_lines_per_device: usize,
-        max_tokens: usize,
-    ) -> String {
-        let mut lines = Vec::new();
+    fn focused_runtime_text(&self) -> String {
         match self.focused_app {
-            Some(app) => lines.push(format!("当前前景应用：{app}")),
-            None => lines.push("当前前景应用：无".to_string()),
+            Some(app) => app.to_string(),
+            None => "无".to_string(),
         }
+    }
 
-        let attention_hints = self
-            .states
+    fn app_state_entries(&self, max_lines_per_device: usize) -> Vec<SnapshotAppStateEntry> {
+        let Some(focused) = self.focused_app else {
+            return Vec::new();
+        };
+
+        self.states
             .iter()
-            .filter(|(id, _)| self.focused_app != Some(*id))
-            .filter_map(|(id, state)| app_attention_hint(*id, state))
-            .take(max_hints)
-            .collect::<Vec<_>>();
-        if !attention_hints.is_empty() {
-            lines.push("后台应用提醒：".to_string());
-            lines.extend(attention_hints.into_iter().map(|hint| format!("- {hint}")));
-        }
-
-        lines.push("应用结构状态：".to_string());
-        for (id, state) in &self.states {
-            lines.push(format!("- {id} / {}：", state.title));
-            let rendered_lines = state.lines.iter().take(max_lines_per_device);
-            lines.extend(rendered_lines.map(|line| format!("  {line}")));
-            let omitted = state.lines.len().saturating_sub(max_lines_per_device);
-            if omitted > 0 {
-                lines.push(format!("  ... 还有 {omitted} 行未展示"));
-            }
-            if self.focused_app == Some(*id)
-                && let Some((_, skills)) = self.skills.iter().find(|(app_id, _)| app_id == id)
-                && !skills.is_empty()
-            {
-                lines.push("  可用 skills：".to_string());
-                for skill in skills {
-                    lines.push(format!("    - {}: {}", skill.id, skill.name));
-                    for when in &skill.when_to_use {
-                        lines.push(format!("      - {}", summarize_inline_text(when)));
-                    }
+            .filter(|(id, _)| *id == focused)
+            .map(|(id, state)| {
+                let mut lines = state
+                    .lines
+                    .iter()
+                    .take(max_lines_per_device)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let omitted = state.lines.len().saturating_sub(max_lines_per_device);
+                if omitted > 0 {
+                    lines.push(format!("... 还有 {omitted} 行未展示"));
                 }
-            }
-        }
-
-        truncate_text_to_token_budget(&lines.join("\n"), max_tokens)
+                SnapshotAppStateEntry {
+                    app_id: id.to_string(),
+                    title: state.title.clone(),
+                    lines,
+                }
+            })
+            .collect()
     }
 }
 

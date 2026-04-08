@@ -186,11 +186,11 @@ fn migrate_legacy_layout_sync(paths: &SpinovaPaths) {
     );
     migrate_legacy_path_sync(
         paths.root.join("todo_board"),
-        paths.state_file("todo_board"),
+        paths.state_file("plan"),
     );
     migrate_legacy_path_sync(
-        paths.root.join("work_state"),
-        paths.state_file("work_state"),
+        paths.root.join("plan"),
+        paths.state_file("plan"),
     );
     migrate_legacy_path_sync(paths.root.join("events"), paths.state_file("events"));
     migrate_legacy_path_sync(

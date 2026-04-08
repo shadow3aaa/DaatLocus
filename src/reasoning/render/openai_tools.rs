@@ -5,7 +5,10 @@ use crate::reasoning::{
     examples::ProgramExample,
     ir::PromptIR,
     optimizer::PromptTuningConfig,
+    prompt_doc::{PromptBlock, PromptDocument, PromptNode, PromptStateDoc},
+    prompt_text::{PromptTextBuilder, render_bullet_list},
     program::Program,
+    prompt_renderer::LlmPromptRenderer,
     runtime::{PromptMessage, PromptRequest},
     signature::Signature,
 };
@@ -33,16 +36,16 @@ impl Renderer for OpenAIToolRenderer {
             ir.instructions.push(instruction.clone());
         }
 
-        let mut user_sections = Vec::new();
-        user_sections.push(render_signature_block(&signature));
+        let mut user_message = PromptTextBuilder::new();
+        user_message.push_markdown_section("程序签名", render_signature_block(&signature));
         if !examples.is_empty() {
-            user_sections.push(render_examples_block(&examples));
+            user_message.push_markdown_section("示例", render_examples_block(&examples));
         }
         if !ir.instructions.is_empty() {
-            user_sections.push(format!("任务说明：\n{}", ir.instructions.join("\n")));
+            user_message.push_labeled_section("任务说明", render_bullet_list(ir.instructions));
         }
         for section in ir.sections {
-            user_sections.push(format!("## {}\n{}", section.title, section.body));
+            user_message.push_markdown_section(section.title, section.body);
         }
 
         PromptRequest {
@@ -60,55 +63,55 @@ impl Renderer for OpenAIToolRenderer {
             } else {
                 Vec::new()
             },
-            current_user_message: user_sections.join("\n\n"),
+            current_user_message: user_message.build(),
             retry_messages: Vec::new(),
         }
     }
 }
 
 fn build_long_term_memory_messages(context: &Context) -> Vec<PromptMessage> {
-    let mut messages = Vec::new();
-    if !context.prompt_memory.recalled_memories.is_empty() {
-        messages.push(PromptMessage::system(format!(
-            "相关长期记忆：\n{}",
-            context.prompt_memory.recalled_memories.join("\n")
-        )));
+    if context.prompt_memory.recalled_memories.is_empty() {
+        return Vec::new();
     }
-    messages
+
+    let doc = PromptDocument::new(vec![PromptNode::State(PromptStateDoc::new(
+        "recall_memories",
+        vec![PromptBlock::Paragraph(
+            context.prompt_memory.recalled_memories.join("\n"),
+        )],
+    ))]);
+
+    LlmPromptRenderer::render_system_messages(&doc)
+        .into_iter()
+        .map(PromptMessage::system)
+        .collect()
 }
 
 fn render_signature_block(signature: &Signature) -> String {
-    let mut sections = vec![format!("程序目标：\n{}", signature.objective)];
-
+    let mut builder = PromptTextBuilder::new();
+    builder.push_labeled_section("程序目标", signature.objective.clone());
     if !signature.inputs.is_empty() {
-        sections.push(format!(
-            "输入签名：\n{}",
+        builder.push_bullet_list_section(
+            "输入签名",
             signature
                 .inputs
                 .iter()
-                .map(|field| format!("- {}: {}", field.name, field.description))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
+                .map(|field| format!("{}: {}", field.name, field.description)),
+        );
     }
-
     if !signature.outputs.is_empty() {
-        sections.push(format!(
-            "输出签名：\n{}",
+        builder.push_bullet_list_section(
+            "输出签名",
             signature
                 .outputs
                 .iter()
-                .map(|field| format!("- {}: {}", field.name, field.description))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
+                .map(|field| format!("{}: {}", field.name, field.description)),
+        );
     }
-
     if !signature.rules.is_empty() {
-        sections.push(format!("签名约束：\n{}", signature.rules.join("\n")));
+        builder.push_bullet_list_section("签名约束", signature.rules.clone());
     }
-
-    format!("## 程序签名\n{}", sections.join("\n\n"))
+    builder.build()
 }
 
 fn render_examples_block<O: serde::Serialize>(examples: &[ProgramExample<O>]) -> String {
@@ -116,25 +119,27 @@ fn render_examples_block<O: serde::Serialize>(examples: &[ProgramExample<O>]) ->
         .iter()
         .enumerate()
         .map(|(index, example)| {
-            let mut body = vec![format!("### 示例 {}\n{}", index + 1, example.title)];
+            let mut body = PromptTextBuilder::new();
+            body.push_paragraph(format!("### 示例 {}\n{}", index + 1, example.title));
             if !example.inputs.is_empty() {
-                body.push(format!(
-                    "输入：\n{}",
+                body.push_bullet_list_section(
+                    "输入",
                     example
                         .inputs
                         .iter()
-                        .map(|field| format!("- {}: {}", field.name, field.value))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                ));
+                        .map(|field| format!("{}: {}", field.name, field.value)),
+                );
             }
-            body.push(format!(
-                "输出(JSON)：\n```json\n{}\n```",
-                serde_json::to_string_pretty(&example.output).unwrap()
-            ));
-            body.join("\n\n")
+            body.push_labeled_section(
+                "输出(JSON)",
+                format!(
+                    "```json\n{}\n```",
+                    serde_json::to_string_pretty(&example.output).unwrap()
+                ),
+            );
+            body.build()
         })
         .collect::<Vec<_>>();
 
-    format!("## 示例\n{}", sections.join("\n\n"))
+    sections.join("\n\n")
 }

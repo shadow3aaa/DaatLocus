@@ -175,9 +175,6 @@ fn should_extend_runtime_span(span: &RuntimeReviewSpan, next: &RuntimeTurnRecord
     if next.recorded_at_ms - last.recorded_at_ms > MAX_SPAN_GAP_MS {
         return false;
     }
-    if same_metadata(last, next, "item_id") || same_metadata(last, next, "objective") {
-        return true;
-    }
     if !last.current_doing.trim().is_empty() && last.current_doing == next.current_doing {
         return true;
     }
@@ -192,13 +189,6 @@ fn last_runtime_turn_action(turn: &RuntimeTurnRecord) -> &EpisodeActionRecord {
         .expect("runtime review turn should contain at least one action")
 }
 
-fn same_metadata(left: &RuntimeTurnRecord, right: &RuntimeTurnRecord, key: &str) -> bool {
-    left.metadata
-        .get(key)
-        .zip(right.metadata.get(key))
-        .map(|(left_value, right_value)| !left_value.trim().is_empty() && left_value == right_value)
-        .unwrap_or(false)
-}
 
 fn runtime_review_io_lock() -> &'static tokio::sync::Mutex<()> {
     RUNTIME_REVIEW_IO_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
