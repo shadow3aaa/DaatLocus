@@ -6,7 +6,6 @@ use crate::{
     context::Context,
     core::LLM,
     logging::{RuntimeStatusLevel, set_runtime_status},
-    snapshot::Snapshot,
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 
@@ -340,18 +339,6 @@ fn summarize_agent_inline_text(text: &str) -> String {
     }
 }
 
-pub async fn execute_program<P: Program, R: Renderer>(
-    llm: &(dyn LLM + Send + Sync),
-    context: &Context,
-    snapshot: &Snapshot,
-    renderer: &R,
-    program: &P,
-) -> Result<P::Output> {
-    let ir = program.build_ir(context, snapshot);
-    let tuning = resolve_program_tuning(context, program).await;
-    execute_program_with_ir(llm, context, renderer, program, ir, &tuning).await
-}
-
 pub async fn resolve_program_tuning<P: Program>(
     context: &Context,
     program: &P,
@@ -393,27 +380,6 @@ fn log_prompt_compile_event(context: &Context, message: String) {
         RuntimeStatusLevel::Info,
         message,
     );
-}
-
-pub async fn execute_program_with_ir<P: Program, R: Renderer>(
-    llm: &(dyn LLM + Send + Sync),
-    context: &Context,
-    renderer: &R,
-    program: &P,
-    ir: super::ir::PromptIR,
-    tuning: &PromptTuningConfig<P::Output>,
-) -> Result<P::Output> {
-    execute_program_with_ir_report(
-        llm,
-        context,
-        renderer,
-        program,
-        ir,
-        tuning,
-        TraceOrigin::Runtime,
-    )
-    .await
-    .map(|outcome| outcome.output)
 }
 
 pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(

@@ -1,11 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    context::Context,
-    reasoning::{ir::PromptIR, program::Program, signature::Signature},
-    snapshot::Snapshot,
-};
+use crate::reasoning::{ir::PromptIR, program::Program, signature::Signature};
 
 const RUNTIME_TURN_PROMPT_PATCH_BUILDER_SYSTEM_PROMPT: &str = r#"你现在负责为 runtime system prompt 生成下一版最小 patch 候选。
 目标不是重写整段 prompt，而是在已有 prompt 基础上提出尽量少、但足够修复 turn-level failed demos 的增量规则。
@@ -61,10 +57,6 @@ impl Program for RuntimeTurnPromptPatchBuilderProgram {
             .rule("每条 patch 应是稳定的运行时行为规则，而不是 case 特化描述。")
             .rule("优先修复过早终止、阶段性话术误结案、遗漏必要工具推进这三类问题。")
             .rule("不要重写整个 prompt。")
-    }
-
-    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
-        self.dataset_ir(String::new(), String::new(), String::new(), String::new())
     }
 }
 

@@ -1,10 +1,8 @@
 use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::{context::Context, snapshot::Snapshot};
-
 use super::{
-    examples::ProgramExample, ir::PromptIR, optimizer::PromptTuningConfig, signature::Signature,
+    examples::ProgramExample, optimizer::PromptTuningConfig, signature::Signature,
 };
 
 pub trait Program {
@@ -38,6 +36,4 @@ pub trait Program {
     fn include_long_term_memory_messages(&self) -> bool {
         false
     }
-
-    fn build_ir(&self, context: &Context, snapshot: &Snapshot) -> PromptIR;
 }

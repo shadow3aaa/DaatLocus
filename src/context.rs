@@ -18,12 +18,18 @@ use crate::{
     hindsight::{HindsightClient, HindsightRetainHandle},
     memory::Memory,
     pending_work::PendingWorkQueue,
-    reasoning::compiled::CompiledPromptStore,
+    reasoning::{
+        compiled::CompiledPromptStore,
+        prompt_assembler::{
+            SnapshotAssembler, SystemPromptAssembler,
+        },
+        prompt_doc::PromptDocument,
+    },
     reasoning::runtime::PromptMemoryContext,
     sandbox::RuntimeSandboxPolicy,
+    snapshot::Snapshot,
     telegram_device::TelegramDeviceHandle,
-    todo_board::TodoBoard,
-    work_state::WorkState,
+    plan::Plan,
 };
 
 pub struct Context {
@@ -34,8 +40,7 @@ pub struct Context {
     pub hindsight_retain: HindsightRetainHandle,
     pub memory: Memory,
     pub prompt_memory: PromptMemoryContext,
-    pub todo_board: TodoBoard,
-    pub work_state: WorkState,
+    pub plan: Plan,
     pub events: EventStore,
     pub pending_work: PendingWorkQueue,
     pub apps: AppManager,
@@ -53,6 +58,14 @@ pub struct Context {
 }
 
 impl Context {
+    pub fn runtime_system_prompt_doc(&self) -> PromptDocument {
+        SystemPromptAssembler::default_runtime().assemble(self)
+    }
+
+    pub fn runtime_snapshot_doc(&self, snapshot: &Snapshot) -> PromptDocument {
+        SnapshotAssembler::default_runtime().assemble(self, snapshot)
+    }
+
     pub fn resolve_tool_path(&self, path: &Path, base: Option<&Path>) -> PathBuf {
         self.sandbox_policy
             .resolve_path(path, base.or(Some(&self.execution_cwd)))
@@ -77,8 +90,7 @@ impl Context {
         }
         self.hindsight_retain.shutdown().await;
         self.memory.shutdown().await;
-        self.todo_board.shutdown().await;
-        self.work_state.shutdown().await;
+        self.plan.shutdown().await;
         self.events.shutdown().await;
         self.pending_work.shutdown().await;
         let _ = self.apps.shutdown().await;

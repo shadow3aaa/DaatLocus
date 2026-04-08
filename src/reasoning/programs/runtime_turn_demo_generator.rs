@@ -1,11 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    context::Context,
-    reasoning::{ir::PromptIR, program::Program, signature::Signature},
-    snapshot::Snapshot,
-};
+use crate::reasoning::{ir::PromptIR, program::Program, signature::Signature};
 
 const RUNTIME_TURN_DEMO_GENERATOR_SYSTEM_PROMPT: &str = r#"你现在负责根据人格 kernel 与测试校正规范生成 turn rollout demos。
 这些 demos 会被用于冷启动 prompt 编译，检验 agent 在 event-driven turn 中是否会：
@@ -17,6 +13,10 @@ const RUNTIME_TURN_DEMO_GENERATOR_SYSTEM_PROMPT: &str = r#"你现在负责根据
 - 输出多条高价值 demos，覆盖符合 persona kernel、`tests` 与 `rules` 的多个关键风险面向。
 - 优先把 `tests` 视为 demo 设计主轴：尽量让每个高价值 demo 主要检验其中一条 test，再叠加 `rules` 作为过程约束。
 - 若 `tests` 中存在多条测试项，必须按测试项分组输出：每条测试项对应一个 `test_demo_group`，每个 group 至少包含一个 demo；如果某条测试项过于复杂，可以在该 group 下拆成多个 demo 分别检验其不同失败模式。
+- `test_demo_groups` 的数量必须与 `tests` 数量严格相等，既不能少，也不能多。
+- 只允许输出 `tests` 中出现过的测试项；禁止新增任何额外的 `test_demo_group`，也禁止把 `rules`、风险轴或题型名称单独升格为新的 group。
+- 如果想覆盖更多风险面，只能在已有测试项对应的 group 下面增加 demos，不能新增 group。
+- 输出前自行核对：`test_demo_groups[*].test` 与输入 `tests` 必须一一对应，集合完全相同，且每条 test 只出现一次。
 - 每个 demo 都必须是一个具体的外部事件场景，而不是抽象规则。
 - demos 应整体覆盖多个不同的风险轴，例如：是否需要工具查证、是否容易过早终止、是否要求自主决策、是否依赖当前世界状态、是否需要保持语言与风格一致。
 - 不要生成重复场景，不要只改写同一句话。
@@ -28,7 +28,7 @@ const RUNTIME_TURN_DEMO_GENERATOR_SYSTEM_PROMPT: &str = r#"你现在负责根据
 - demo 的 `title`、`scenario_summary`、`incoming_text`、`expected_behavior`、`judge_focus` 默认应使用 persona 指定语言；除非 persona 明确要求双语或英文，否则不要自行切换语言。
 - 对于依赖当前世界状态的场景，`requires_fresh_world_state` 必须为 true。
 - `must_use_tools` 只在答案不能直接从当前 runtime snapshot 读取、必须额外探索或执行时才设为 true。
-- TodoBoard 摘要、事件列表、应用结构状态本来就会出现在 runtime snapshot 里；如果 demo 只是读取这些当前可见摘要并直接作答，可以 `requires_fresh_world_state=true` 且 `must_use_tools=false`。
+- Plan 摘要、事件列表、应用结构状态本来就会出现在 runtime snapshot 里；如果 demo 只是读取这些当前可见摘要并直接作答，可以 `requires_fresh_world_state=true` 且 `must_use_tools=false`。
 - 代码库文件、目录、内容，以及任何 runtime snapshot 里没有直接给出的事实，必须设为 `must_use_tools=true`。
 - 只有像问候、无需查询当前世界状态的极短直接问答，`requires_fresh_world_state` 才可以为 false。
 - `must_not_final_answer_patterns` 只写高风险的终局反模式短语。
@@ -96,15 +96,14 @@ impl Program for RuntimeTurnDemoGeneratorProgram {
             .rule("不得输出重复或仅同义改写的 demos。")
             .rule("应优先按 tests 组织 demo 主轴，再叠加 rules 作为横切约束。")
             .rule("如果 persona spec 中存在多条 tests，必须让每条测试项各自对应一个 test_demo_group；每个 group 至少有一个 demo，复杂测试项可以在该 group 下拆成多个 demo。")
+            .rule("test_demo_groups 的数量必须与 persona spec 中的 tests 数量严格相等；不得缺失、不得新增。")
+            .rule("只允许输出 persona spec 的 tests 原文对应的 groups；不得把 rules、风险轴或题型名称额外生成为新的 group。")
+            .rule("如果需要覆盖更多风险面，只能向已有 group 增加 demos，不能新增 group。")
             .rule("最终 assistant 必须可直接交付给用户，这个约束要体现在 expected_behavior 与 judge_focus 中。")
             .rule("每个 test_demo_group 都必须给出 test，并逐条引用 persona spec 中对应的 tests 原文。")
             .rule("凡是依赖当前世界状态的 demo，都必须把 requires_fresh_world_state 设为 true。")
             .rule("只有当答案不能直接从当前 runtime snapshot 读取、必须额外探索或执行时，才把 must_use_tools 设为 true。")
-            .rule("TodoBoard 摘要、事件列表、应用结构状态这些 runtime snapshot 已直接可见的只读状态，可以 requires_fresh_world_state=true 但 must_use_tools=false。")
-    }
-
-    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
-        self.dataset_ir(String::new(), String::new(), String::new())
+            .rule("Plan 摘要、事件列表、应用结构状态这些 runtime snapshot 已直接可见的只读状态，可以 requires_fresh_world_state=true 但 must_use_tools=false。")
     }
 }
 
@@ -121,10 +120,14 @@ impl RuntimeTurnDemoGeneratorProgram {
         ir.push_instruction("先读取 persona_kernel，把握身份、语言与风格；再读取 test_calibration，把握 tests 与 rules。");
         ir.push_instruction("优先从 persona spec 的 tests 中抽取终局约束；尽量让每个 demo 围绕其中一条主要测试项展开。");
         ir.push_instruction("如果 tests 有多条，必须为每条测试项输出一个 test_demo_group；不要把多条测试项合并进同一个 group。");
+        ir.push_instruction("test_demo_groups 的数量必须与 tests 数量严格相等；不得多出任何额外 group。");
+        ir.push_instruction("只能使用 persona spec 中 tests 的原文作为 group.test；不要把 rules、风险轴、题型或你自己的总结词生成额外 group。");
+        ir.push_instruction("如果某条 test 需要覆盖多个失败模式，请把多个 demos 放进同一个 group，而不是拆成多个 groups。");
         ir.push_instruction(
             "每个 test_demo_group 的 test 必须逐字引用 persona spec 中对应的 tests 原文。",
         );
         ir.push_instruction("每个 test_demo_group 至少包含一个 demo；如果某条测试项过于复杂，允许在该 group 下输出多个 demos。");
+        ir.push_instruction("输出前请自行检查：每条 test 恰好对应一个 group，group.test 集合与 tests 集合完全相同。");
         ir.push_instruction("demo 的 title、scenario_summary、incoming_text、expected_behavior、judge_focus 默认应跟随 persona spec 中的 language。");
         ir.push_instruction("先从 persona spec 中抽取真正需要检验的行为方向，再把这些方向落成具体 demo。不要让内置题型主导生成。");
         ir.push_instruction(
@@ -141,7 +144,7 @@ impl RuntimeTurnDemoGeneratorProgram {
             "只有当答案不能直接从当前 runtime snapshot 读取、必须额外探索或执行时，才把 must_use_tools 设为 true。",
         );
         ir.push_instruction(
-            "像 TodoBoard 摘要、事件列表、应用结构状态这类已直接出现在 runtime snapshot 的只读状态，不要机械地要求工具；除非 demo 明确需要额外探索、刷新或执行动作。",
+            "像 Plan 摘要、事件列表、应用结构状态这类已直接出现在 runtime snapshot 的只读状态，不要机械地要求工具；除非 demo 明确需要额外探索、刷新或执行动作。",
         );
         ir.push_instruction(
             "每个 demo 都应包含清晰、可验证的正确收尾条件；避免那种即使 agent 做得很浅也难以判错的宽泛请求。",

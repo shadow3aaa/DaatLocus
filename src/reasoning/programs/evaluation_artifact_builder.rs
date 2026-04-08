@@ -1,11 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    context::Context,
-    reasoning::{ir::PromptIR, program::Program, signature::Signature},
-    snapshot::Snapshot,
-};
+use crate::reasoning::{ir::PromptIR, program::Program, signature::Signature};
 
 const EVALUATION_ARTIFACT_BUILDER_SYSTEM_PROMPT: &str = r#"你现在处于评估整理阶段。
 你的任务是把运行期 failure pattern 和相关记忆，转成 compile 可消费的优化产物建议。
@@ -86,20 +82,6 @@ impl Program for EvaluationArtifactBuilderProgram {
             .rule("如果 pattern 能稳定转成 worked example 或 stress case，就优先生成它们，不要默认生成 instruction hypothesis。")
             .rule("如果 pattern 更适合通过 worked example 修复，就生成 bootstrap demo。")
             .rule("如果 pattern 更适合拉开候选差异，就生成 stress case。")
-    }
-
-    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
-        self.dataset_ir(
-            String::new(),
-            String::new(),
-            String::new(),
-            0,
-            0,
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-        )
     }
 }
 

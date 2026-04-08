@@ -737,7 +737,7 @@ impl App for BrowserApp {
 
     fn usage(&self) -> AppUsage {
         AppUsage {
-            purpose: BROWSER_USAGE_PURPOSE.to_string(),
+            description: BROWSER_USAGE_PURPOSE.to_string(),
             when_to_focus: BROWSER_WHEN_TO_FOCUS
                 .iter()
                 .map(|line| (*line).to_string())

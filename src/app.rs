@@ -36,7 +36,7 @@ pub struct AppStateRender {
 
 #[derive(Debug, Clone)]
 pub struct AppUsage {
-    pub purpose: String,
+    pub description: String,
     pub when_to_focus: Vec<String>,
 }
 

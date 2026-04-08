@@ -207,20 +207,6 @@ impl StaticRuntimeTool {
             execute,
         }
     }
-
-    fn new_with_availability<T: schemars::JsonSchema>(
-        name: &'static str,
-        description: &'static str,
-        scope: Option<AppToolScope>,
-        availability: ToolAvailability,
-        summarize: ToolSummarizer,
-        call_ui: ToolCallUiBuilder,
-        execute: ToolExecutor,
-    ) -> Self {
-        let mut tool = Self::new::<T>(name, description, scope, summarize, call_ui, execute);
-        tool.availability = Some(availability);
-        tool
-    }
 }
 
 #[async_trait]

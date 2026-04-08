@@ -1,30 +1,56 @@
 use crate::{
-    app::{AppHowToUse, AppId, AppStateRender, AppUsage},
+    app::{AppHowToUse, AppId, AppSkillSummary, AppStateRender, AppUsage},
     context::Context,
 };
 
-pub const SYSTEM_PROMPT_KERNEL: &str = r#"你是一个自主智能体。
-外部用户通过事件渠道与你交流。对 event-driven turn 而言，你输出的文本回复本身不会自动发送给外部用户。
-只有当你显式调用工具终结事件时，世界才会真正改变；对需要回复用户的常规成功收尾，应调用 `finish_and_send` 并提供 `reply_message`。
-如果你还没有准备好给出最终答复，就继续调用工具；不要用计划、承诺或阶段性判断冒充完成。
-记忆流、TodoBoard、当前工作状态、事件列表、应用结构状态就是你当前可见的世界。
-TodoBoard 是你的长期工作板，不是制度层；当前工作状态只是你此刻聚焦推进的单一目标，不是任务列表。
-Telegram 原始消息首先是事件，不自动等于 todo。只有你显式创建的长期工作，才会进入 TodoBoard。
-输入中的 `<world_snapshot> ... </world_snapshot>` 片段不是用户在和你对话，而是当前世界状态的上下文注入。不要回复这个片段，也不要对它提出“下一步建议”；只能依据它分析局面并调用工具改变世界。
-被当前 turn 正式领取的结构化事件或应用 notice，也可能以前序 `user` 消息的形式进入线程上下文；它们同样不是人类在和你闲聊，而是待你处理的世界输入。
-如果某个应用已经列出了与当前任务明显匹配的 skill，你应先调用 `focus_app` 聚焦该应用，再调用 `read_skill(id)` 读取对应 skill，然后才开始该应用内的具体操作；不要在明知有匹配 skill 的情况下跳过它直接盲目试探。
-你通过 tools 与世界交互；不要输出结构化动作对象。
-凡是动作参数中的 `item_id`、`event_id`，都应优先填写快照中显示的 UUID；不要把中文描述、标题或摘要直接塞进这些字段。
-如果当前仍然存在可推进的目标、todo、事件或应用信号，那么仅输出文本回复不会改变世界，不构成有效推进；应直接调用工具。
+use super::prompt_text::{render_bullet_list, PromptTextBuilder};
+
+pub const EVENT_UNIT_WHAT: &str = r#"外部输入主要通过事件进入当前 turn。对 event-driven turn 而言，你输出的普通文本不会自动发送给外部用户。
+`<world_snapshot> ... </world_snapshot>` 片段不是用户在和你对话，而是当前世界状态的上下文注入。被当前 turn 正式领取的结构化事件或应用 notice，也可能以前序 `user` 消息的形式进入线程上下文；它们同样是待处理的世界输入，不是普通闲聊。"#;
+
+pub const EVENT_UNIT_HOW: &str = r#"只有当你显式调用工具时，世界才会真正改变；对需要回复用户的常规成功收尾，应调用 `finish_and_send` 并提供 `reply_message`。
+如果还需要继续推进，就不要调用 `finish_and_send`；应继续调用工具。
+当你明显完成了某个中间步骤时，应直接输出文本来解释并记录当前进度；但这类中间记录不是最终提交，不能使用 `finish_and_send` 发送。
+凡是动作参数中的 `event_id`，都应优先填写快照中显示的 UUID；不要把中文描述、标题或摘要直接塞进这些字段。
+如果当前仍然存在可推进的目标、事件或应用信号，那么仅输出文本回复不会改变世界，不构成有效推进；应直接调用工具。
 对于 event-driven turn：
 - 只有在准备好最终回复后，才调用 `finish_and_send` 终结当前事件。
-- 如果仍需继续推进，就继续调用工具；不要输出“接下来我会”“稍后继续”“后续将”等计划式收尾。
+- 如果仍需继续推进，就继续调用工具。
 - 不要把文本回复本身当作发送动作；真正的回复提交必须通过工具完成。
-不要让 event-driven turn 以空 tool call 结束。
-自动长期记忆只会提供较快的相关记忆摘录；如果你确实需要更深入的回忆，应显式调用 `deep_recall`，不要默认依赖它。
 你必须仔细阅读当前快照，分析所处情况，先做事，再给结论。"#;
 
-pub const TOOL_ACTION_PROMPT: &str = "动作必须通过调用提供的 tools 表达；不要输出结构化动作对象。";
+pub const APPS_UNIT_WHAT: &str =
+    "App 是一类功能的封装单元。每个 App 都提供独一无二的功能封装。";
+
+pub const APPS_UNIT_WHEN: &str = "当你判定某个任务必须依赖某个 app 时，或者使用这个 app 可以更好地解决任务时，应当切换到这个 app。如果 app 主动向你发出信号，也应当结合当前任务与该信号的重要程度，考虑切换到这个 app 处理。";
+
+pub const APPS_UNIT_HOW: &str =
+    "使用 `focus_app` 切换到目标 app。";
+
+pub const SKILLS_UNIT_WHAT: &str =
+    "每个 skill 都是一份针对特定类任务的执行规范说明。";
+
+pub const SKILLS_UNIT_WHEN: &str =
+    "任务开始执行时或执行过程中，只要出现与任务相关或有帮助的 skill，就应先读取它，以确定你接下来如何完成任务的说明。";
+
+pub const SKILLS_UNIT_HOW: &str = "使用 `read_skill(id)` 读取 skill 的完整说明。";
+
+pub const MEMORIES_UNIT_WHAT: &str =
+    "自动召回记忆（对应 `<recall_memories>` 标记）是系统基于当前任务上下文提供的相关长期记忆摘录；`deep_recall` 是显式触发的更深层回忆。";
+
+pub const MEMORIES_UNIT_WHEN: &str =
+    "当你需要上下文中不明确的信息时，应优先尝试 `deep_recall`，先确认这些信息是否已经存在于记忆中；只有在深度回忆仍不足时，才再尝试其他方式。";
+
+pub const MEMORIES_UNIT_HOW: &str = "使用 `deep_recall` 触发更深层回忆。构造 query 时，应使用自然语言问题，并尽量写清你正在寻找的对象、事实、时间范围、任务背景或相关线索，避免只写空泛关键词；query 越具体，越容易召回真正相关的记忆。";
+
+pub const PLAN_UNIT_WHAT: &str =
+    "plan 是任务的最新分步计划。它用于记录完成当前任务所需的步骤顺序，以及每一步的当前进展。";
+
+pub const PLAN_UNIT_WHEN: &str =
+    "当任务是非平凡、多步骤、需要持续跟踪推进时，应维护 plan，使当前进展、下一步要做什么，以及整体剩余工作始终清晰。";
+
+pub const PLAN_UNIT_HOW: &str =
+    "使用 `update_plan` 持续维护 plan。每次调用时，都应提交当前完整的 plan，而不是只提交某一个步骤的增量修改。plan 中的步骤应是简短的一句话，尽量控制在 5 到 7 个词，且必须具体、可执行、可验证。只要还有未完成步骤，plan 中就应恰好有一个步骤是 `in_progress`；已完成步骤标记为 `completed`，后续步骤标记为 `pending`。当全部完成时，应确保整个 plan 已反映最终完成状态。";
 
 pub const HISTORY_COMPACTION_PROMPT: &str = r#"你正在执行一个上下文检查点压缩任务。
 请为另一个将继续当前线程的模型生成一段 handoff summary。
@@ -44,63 +70,70 @@ pub const HISTORY_COMPACTION_PROMPT: &str = r#"你正在执行一个上下文检
 pub const HISTORY_COMPACTION_SUMMARY_PREFIX: &str = r#"Earlier runtime context was compacted into the following handoff summary.
 Use it to continue the same thread without redoing already-finished work:"#;
 
-pub fn build_app_context_prompt(context: &Context) -> String {
-    let mut sections = vec![String::from(
-        "应用动作约束：应用只提供结构状态；具体查看与操作要通过本轮暴露的 tools 完成。如果后台应用更合适，请调用 `focus_app`。若应用列出了 skills，应先聚焦对应应用，再通过 `read_skill(id)` 按需读取某个 skill 的完整说明。",
-    )];
-
+pub fn build_runtime_app_usages(context: &Context) -> Vec<(AppId, AppUsage)> {
     let focused = context.apps.focused();
-    let app_usages = context
+    context
         .apps
         .state_renders()
         .into_iter()
         .filter(|(app_id, _state)| focused != Some(*app_id))
         .filter_map(|(app_id, _state)| {
-            context
-                .apps
-                .usage(app_id)
-                .map(|usage| build_app_usage_prompt(app_id, &usage))
+            context.apps.usage(app_id).map(|usage| (app_id, usage))
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
 
-    if !app_usages.is_empty() {
-        sections.push(format!("可用应用：\n{}", app_usages.join("\n\n")));
+pub fn build_runtime_focused_app_how_to_use_prompt(context: &Context) -> Option<String> {
+    let app_id = context.apps.focused()?;
+    let how_to_use = context.apps.how_to_use(app_id)?;
+    Some(build_app_how_to_use_prompt(app_id, &how_to_use))
+}
+
+pub fn build_runtime_focused_app_skills_prompt(context: &Context) -> Option<String> {
+    let app_id = context.apps.focused()?;
+    let (_, skills) = context
+        .apps
+        .all_skills()
+        .into_iter()
+        .find(|(id, _)| *id == app_id)?;
+    if skills.is_empty() {
+        None
+    } else {
+        Some(render_app_skill_summaries(skills))
     }
+}
 
-    match focused {
-        Some(app_id) => {
-            if let Some(how_to_use) = context.apps.how_to_use(app_id) {
-                sections.push(build_app_how_to_use_prompt(app_id, &how_to_use));
-            }
-        }
-        None => sections.push(String::from(
-            "当前没有任何前景应用。如果你需要操作应用，请先调用 `focus_app`。",
-        )),
-    }
-
-    let attention_hints = context
+pub fn build_runtime_background_hint_items(context: &Context) -> Vec<String> {
+    let focused = context.apps.focused();
+    context
         .apps
         .state_renders()
         .into_iter()
         .filter(|(app_id, _)| focused != Some(*app_id))
         .filter_map(|(app_id, state)| background_app_attention_hint(app_id, &state))
-        .collect::<Vec<_>>();
+        .collect()
+}
 
-    if !attention_hints.is_empty() {
-        sections.push(format!("后台应用提醒：\n{}", attention_hints.join("\n")));
+fn render_app_skill_summaries(skills: Vec<AppSkillSummary>) -> String {
+    let mut lines = Vec::new();
+    for skill in skills {
+        lines.push(format!("- {}: {}", skill.id, skill.name));
+        for when in skill.when_to_use {
+            lines.push(format!("  - {}", render_inline_summary(&when)));
+        }
     }
-
-    sections.join("\n\n")
+    lines.join("\n")
 }
 
 pub fn build_app_pre_focus_note_prompt(app_id: AppId, state: &AppStateRender) -> String {
-    let mut sections = vec![format!(
+    let mut builder = PromptTextBuilder::new();
+    builder.push_paragraph(format!(
         "当前 `{app_id}` 不在前景；如果你需要操作它，请先调用 `focus_app` 将它切到前景。"
-    )];
+    ));
     if let Some(hint) = background_app_attention_hint(app_id, state) {
-        sections.push(hint);
+        builder.push_paragraph(hint);
     }
-    sections.join("\n\n")
+    builder.build()
 }
 
 fn background_app_attention_hint(app_id: AppId, state: &AppStateRender) -> Option<String> {
@@ -123,7 +156,7 @@ fn background_app_attention_hint(app_id: AppId, state: &AppStateRender) -> Optio
     Some(match app_id {
         AppId::Browser => return None,
         AppId::Terminal => format!(
-            "- {} 如果你决定处理终端，请先调用 `focus_app` 将 `Terminal` 切到前景。",
+            "{} 如果你决定处理终端，请先调用 `focus_app` 将 `Terminal` 切到前景。",
             summary
         ),
     })
@@ -144,6 +177,18 @@ fn app_requires_attention(app_id: AppId, state: &AppStateRender) -> bool {
     }
 }
 
+fn render_inline_summary(text: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let compact = text.replace('\n', "\\n");
+    let mut chars = compact.chars();
+    let summary = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{summary}...")
+    } else {
+        summary
+    }
+}
+
 fn first_terminal_session_id<'a>(state: &'a AppStateRender) -> Option<&'a str> {
     state
         .lines
@@ -152,17 +197,18 @@ fn first_terminal_session_id<'a>(state: &'a AppStateRender) -> Option<&'a str> {
         .and_then(|line| line.split_whitespace().next())
 }
 
-pub fn build_app_usage_prompt(app_id: AppId, usage: &AppUsage) -> String {
-    let mut lines = vec![format!("`{app_id}` 的用途：{}", usage.purpose)];
+pub fn build_app_usage_prompt(_app_id: AppId, usage: &AppUsage) -> String {
+    let mut builder = PromptTextBuilder::new();
+    builder.push_labeled_section("what", usage.description.clone());
     if !usage.when_to_focus.is_empty() {
-        lines.push("适合聚焦它的时机：".to_string());
-        lines.extend(usage.when_to_focus.iter().map(|line| format!("- {line}")));
+        builder.push_labeled_section("when", render_bullet_list(usage.when_to_focus.clone()));
     }
-    lines.join("\n")
+    builder.build()
 }
 
 pub fn build_app_how_to_use_prompt(app_id: AppId, how_to_use: &AppHowToUse) -> String {
-    let mut lines = vec![format!("`{app_id}` 当前在前景，操作说明：")];
-    lines.extend(how_to_use.lines.iter().map(|line| format!("- {line}")));
-    lines.join("\n")
+    let mut builder = PromptTextBuilder::new();
+    let _ = app_id;
+    builder.push_paragraph(render_bullet_list(how_to_use.lines.clone()));
+    builder.build()
 }

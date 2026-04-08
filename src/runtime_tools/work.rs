@@ -1,18 +1,17 @@
 use miette::Result;
 use serde_json::json;
-use uuid::Uuid;
 
 use crate::{
     apply_patch::{PatchOperationKind, parse_apply_patch, summarize_patch_ops},
     context::Context,
     core::{
         DeepRecallArgs, EventResolveArgs, FocusAppArgs, PutAwayAppArgs, ReadSkillArgs,
-        TodoCompleteArgs, TodoCreateArgs, TodoDropArgs, TodoUpdateArgs,
+        UpdatePlanArgs,
     },
     events::{EventDisposition, EventPayload, EventStatus},
     hindsight::HindsightReflectOptions,
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
-    todo_board::{TodoOrigin, TodoStatus},
+    plan::{Plan, PlanStatus, PlanStep},
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 
@@ -72,40 +71,13 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             render_event_resolve_call_ui,
             execute_event_resolve_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<TodoCreateArgs>(
-            "todo_create",
-            "创建一个新的 todo。",
+        Box::new(StaticRuntimeTool::new::<UpdatePlanArgs>(
+            "update_plan",
+            "提交当前任务的完整分步 plan。",
             None,
-            summarize_todo_create_tool,
-            render_todo_create_call_ui,
-            execute_todo_create_tool,
-        )),
-        Box::new(StaticRuntimeTool::new::<TodoUpdateArgs>(
-            "todo_update",
-            "更新一个 todo 的标题、完成标准、备注或状态。",
-            None,
-            summarize_todo_update_tool,
-            render_todo_update_call_ui,
-            execute_todo_update_tool,
-        )),
-        Box::new(
-            StaticRuntimeTool::new_with_availability::<TodoCompleteArgs>(
-                "todo_complete",
-                "将 todo 标记为完成，仅改变内部 memo 状态。",
-                None,
-                todo_complete_is_available,
-                summarize_todo_complete_tool,
-                render_todo_complete_call_ui,
-                execute_todo_complete_tool,
-            ),
-        ),
-        Box::new(StaticRuntimeTool::new::<TodoDropArgs>(
-            "todo_drop",
-            "将 todo 标记为放弃。",
-            None,
-            summarize_todo_drop_tool,
-            render_todo_drop_call_ui,
-            execute_todo_drop_tool,
+            summarize_update_plan_tool,
+            render_update_plan_call_ui,
+            execute_update_plan_tool,
         )),
         Box::new(StaticRuntimeTool::new::<DeepRecallArgs>(
             "deep_recall",
@@ -124,10 +96,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             execute_read_skill_tool,
         )),
     ]
-}
-
-fn todo_complete_is_available(context: &Context) -> bool {
-    context.work_state.item_id.is_some()
 }
 
 fn event_disposition_kind(disposition: EventDisposition) -> &'static str {
@@ -300,184 +268,45 @@ fn execute_event_resolve_tool<'a>(
     })
 }
 
-fn summarize_todo_create_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: TodoCreateArgs = parse_tool_args(call)?;
+fn summarize_update_plan_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: UpdatePlanArgs = parse_tool_args(call)?;
     Ok(EpisodeActionRecord {
-        kind: "todo_create".to_string(),
-        summary: summarize_inline_text(&args.title),
+        kind: "update_plan".to_string(),
+        summary: format!("steps={}", args.plan.len()),
     })
 }
 
-fn render_todo_create_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: TodoCreateArgs = parse_tool_args(call)?;
+fn render_update_plan_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: UpdatePlanArgs = parse_tool_args(call)?;
     Ok(ToolCallUiEvent::work(
-        "todo_create",
-        vec![
-            summarize_inline_text(&args.title),
-            summarize_inline_text(&args.done_criteria),
-        ],
+        "update_plan",
+        args.plan
+            .into_iter()
+            .take(6)
+            .map(|step| format!("[{}] {}", step.status, summarize_inline_text(&step.step)))
+            .collect(),
     ))
 }
 
-fn execute_todo_create_tool<'a>(
+fn execute_update_plan_tool<'a>(
     context: &'a mut Context,
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        let args: TodoCreateArgs = parse_tool_args(call)?;
-        let title = require_field(args.title, "title")?;
-        let done_criteria = require_field(args.done_criteria, "done_criteria")?;
-        let notes = trim_optional_field(args.notes);
-        let todo_id = context.todo_board.add(
-            title.clone(),
-            TodoOrigin::SelfInitiated,
-            done_criteria.clone(),
-            notes.clone(),
-        );
-        Ok(ToolExecutionResult::new(
-            format!("created todo {}", todo_id),
-            json!({
-                "item_id": todo_id.to_string(),
-                "title": title,
-                "done_criteria": done_criteria,
-                "notes": notes,
-            }),
-            ToolUiEvent::work(
-                format!("created todo {}", todo_id),
-                vec![title, done_criteria],
-            ),
-        ))
-    })
-}
-
-fn summarize_todo_update_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: TodoUpdateArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "todo_update".to_string(),
-        summary: format!("item_id={}", args.item_id),
-    })
-}
-
-fn render_todo_update_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: TodoUpdateArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::work(
-        format!("todo_update {}", args.item_id),
-        Vec::new(),
-    ))
-}
-
-fn execute_todo_update_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: TodoUpdateArgs = parse_tool_args(call)?;
-        let item_id = resolve_item_reference(context, &args.item_id)?;
-        let title = args.title.and_then(trim_required_field);
-        let done_criteria = args.done_criteria.and_then(trim_required_field);
-        let notes = if args.clear_notes.unwrap_or(false) {
-            Some(None)
+        let args: UpdatePlanArgs = parse_tool_args(call)?;
+        let plan = build_plan_from_args(args)?;
+        let changed = context.plan.replace(plan.steps().to_vec());
+        let summary = if changed {
+            format!("updated plan with {} steps", plan.steps().len())
         } else {
-            args.notes.map(|notes| trim_required_field(notes))
+            format!("plan unchanged with {} steps", plan.steps().len())
         };
-        let changed = context
-            .todo_board
-            .update(item_id, title, done_criteria, notes, args.status);
-        if !changed {
-            return Err(miette::miette!("todo {item_id} was not changed").into());
-        }
         Ok(ToolExecutionResult::new(
-            format!("updated todo {}", item_id),
-            json!({ "item_id": item_id.to_string() }),
-            ToolUiEvent::work(
-                format!("updated todo {}", item_id),
-                vec![item_id.to_string()],
-            ),
-        ))
-    })
-}
-
-fn summarize_todo_complete_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: TodoCompleteArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "todo_complete".to_string(),
-        summary: format!(
-            "item_id={} summary={}",
-            args.item_id,
-            summarize_inline_text(&args.summary)
-        ),
-    })
-}
-
-fn render_todo_complete_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: TodoCompleteArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::work(
-        format!("todo_complete {}", args.item_id),
-        vec![summarize_inline_text(&args.summary)],
-    ))
-}
-
-fn execute_todo_complete_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: TodoCompleteArgs = parse_tool_args(call)?;
-        let item_id = execute_todo_complete(context, &args.item_id, args.summary.clone()).await?;
-        Ok(ToolExecutionResult::new(
-            format!("completed todo {}", item_id),
+            summary.clone(),
             json!({
-                "item_id": item_id.to_string(),
-                "summary": args.summary,
+                "plan": plan.steps(),
             }),
-            ToolUiEvent::work(format!("completed todo {}", item_id), vec![args.summary]),
-        ))
-    })
-}
-
-fn summarize_todo_drop_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: TodoDropArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "todo_drop".to_string(),
-        summary: format!("item_id={}", args.item_id),
-    })
-}
-
-fn render_todo_drop_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: TodoDropArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::work(
-        format!("todo_drop {}", args.item_id),
-        Vec::new(),
-    ))
-}
-
-fn execute_todo_drop_tool<'a>(context: &'a mut Context, call: &'a AgentToolCall) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: TodoDropArgs = parse_tool_args(call)?;
-        let item_id = resolve_item_reference(context, &args.item_id)?;
-        let note = trim_optional_field(args.note);
-        let note_for_update = note.clone();
-        let changed = context.todo_board.update(
-            item_id,
-            None,
-            None,
-            note_for_update.map(Some),
-            Some(TodoStatus::Dropped),
-        );
-        if !changed {
-            return Err(miette::miette!("todo {item_id} was not changed").into());
-        }
-        context.work_state.clear_if_item(item_id);
-        Ok(ToolExecutionResult::new(
-            format!("dropped todo {}", item_id),
-            json!({
-                "item_id": item_id.to_string(),
-                "note": note,
-            }),
-            ToolUiEvent::work(
-                format!("dropped todo {}", item_id),
-                vec![item_id.to_string()],
-            ),
+            ToolUiEvent::work(summary, render_plan_ui_lines(&plan)),
         ))
     })
 }
@@ -629,29 +458,6 @@ pub(super) fn execute_apply_patch_runtime_tool<'a>(
     })
 }
 
-fn resolve_string_reference<T: Clone>(
-    kind: &str,
-    reference: &str,
-    refs: impl IntoIterator<Item = (String, T)>,
-) -> miette::Result<T> {
-    refs.into_iter()
-        .find(|(key, _)| key == reference)
-        .map(|(_, value)| value)
-        .ok_or_else(|| miette::miette!("unknown {kind}: {reference}"))
-}
-
-fn resolve_item_reference(context: &Context, reference: &str) -> miette::Result<Uuid> {
-    resolve_string_reference(
-        "todo",
-        reference,
-        context.todo_board.items().flat_map(|(id, item)| {
-            [id.to_string(), item.title.clone()]
-                .into_iter()
-                .map(move |key| (key, id))
-        }),
-    )
-}
-
 fn trim_optional_field(value: Option<String>) -> Option<String> {
     value.and_then(trim_required_field)
 }
@@ -686,24 +492,60 @@ fn execute_event_resolve_with_reply(
     }
 }
 
-async fn execute_todo_complete(
-    context: &mut Context,
-    item_id: &str,
-    summary: String,
-) -> miette::Result<Uuid> {
-    let item_id = resolve_item_reference(context, item_id)?;
-    let Some(_item) = context.todo_board.get(item_id).cloned() else {
-        return Err(miette::miette!("unknown todo: {item_id}"));
-    };
-    let summary = require_field(summary, "summary")?;
+fn build_plan_from_args(args: UpdatePlanArgs) -> miette::Result<Plan> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let steps = args
+        .plan
+        .into_iter()
+        .map(|step| {
+            Ok(PlanStep {
+                step: require_field(step.step, "plan[].step")?,
+                status: step.status,
+                created_at_ms: now,
+                last_updated_at_ms: now,
+            })
+        })
+        .collect::<miette::Result<Vec<_>>>()?;
 
-    context.todo_board.update(
-        item_id,
-        None,
-        None,
-        Some(Some(summary)),
-        Some(TodoStatus::Completed),
-    );
-    context.work_state.clear_if_item(item_id);
-    Ok(item_id)
+    validate_plan_steps(&steps)?;
+    let mut plan = Plan::default();
+    let _ = plan.replace(steps);
+    Ok(plan)
+}
+
+fn validate_plan_steps(steps: &[PlanStep]) -> miette::Result<()> {
+    let in_progress = steps
+        .iter()
+        .filter(|step| matches!(step.status, PlanStatus::InProgress))
+        .count();
+    let all_completed = !steps.is_empty()
+        && steps
+            .iter()
+            .all(|step| matches!(step.status, PlanStatus::Completed));
+
+    if steps.is_empty() {
+        return Ok(());
+    }
+    if all_completed {
+        if in_progress != 0 {
+            return Err(miette::miette!(
+                "update_plan cannot contain `in_progress` steps when all steps are completed"
+            ));
+        }
+        return Ok(());
+    }
+    if in_progress != 1 {
+        return Err(miette::miette!(
+            "update_plan must contain exactly one `in_progress` step until all steps are completed"
+        ));
+    }
+    Ok(())
+}
+
+fn render_plan_ui_lines(plan: &Plan) -> Vec<String> {
+    plan.steps()
+        .iter()
+        .take(8)
+        .map(|step| format!("[{}] {}", step.status, summarize_inline_text(&step.step)))
+        .collect()
 }

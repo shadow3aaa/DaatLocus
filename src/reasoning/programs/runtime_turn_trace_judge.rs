@@ -1,11 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    context::Context,
-    reasoning::{ir::PromptIR, program::Program, signature::Signature},
-    snapshot::Snapshot,
-};
+use crate::reasoning::{ir::PromptIR, program::Program, signature::Signature};
 
 const RUNTIME_TURN_TRACE_JUDGE_SYSTEM_PROMPT: &str = r#"你现在不是执行者，而是 runtime turn trace 的评审器。
 你的任务是根据给定的 turn demo 目标，判断当前 system prompt 是否会诱导出正确的多轮 ReAct 行为。
@@ -58,18 +54,6 @@ impl Program for RuntimeTurnTraceJudgeProgram {
             .rule("如果 previous system prompt 为 none，则 regression_detected 必须为 false。")
             .rule("needed_changes 应尽量是 prompt patch，而不是完整重写。")
             .rule("不要把阶段性计划、承诺或'接下来我会继续'类文本视为天然合格的最终答复。")
-    }
-
-    fn build_ir(&self, _: &Context, _: &Snapshot) -> PromptIR {
-        self.dataset_ir(
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-        )
     }
 }
 

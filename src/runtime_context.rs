@@ -8,15 +8,14 @@ use crate::{
         RuntimeStepConversation,
     },
     reasoning::{
+        prompt_renderer::LlmPromptRenderer,
         prompts::{
-            HISTORY_COMPACTION_PROMPT, HISTORY_COMPACTION_SUMMARY_PREFIX, SYSTEM_PROMPT_KERNEL,
-            TOOL_ACTION_PROMPT, build_app_context_prompt,
+            HISTORY_COMPACTION_PROMPT, HISTORY_COMPACTION_SUMMARY_PREFIX,
         },
         runtime::{
             AgentMessage, AgentToolSpec, PromptMessage, PromptRequest, PromptRole,
             summarize_assistant_tool_call_protocol,
         },
-        turn_compile::current_persona_kernel_system_prompt_sync,
     },
 };
 use schemars::{JsonSchema, schema_for};
@@ -35,39 +34,13 @@ pub fn build_runtime_request_envelope(
     context: &Context,
     snapshot_text: &str,
 ) -> RuntimeRequestEnvelope {
-    let mut system_messages = vec![
-        SYSTEM_PROMPT_KERNEL.to_string(),
-        current_persona_kernel_system_prompt_sync(),
-        TOOL_ACTION_PROMPT.to_string(),
-    ];
-    system_messages.extend(
-        context
-            .compiled_prompts
-            .runtime_system_additions()
-            .iter()
-            .filter(|line| !line.trim().is_empty())
-            .cloned(),
-    );
+    let system_messages =
+        LlmPromptRenderer::render_system_messages(&context.runtime_system_prompt_doc());
     RuntimeRequestEnvelope::from_world_snapshot(system_messages, snapshot_text)
 }
 
-pub fn build_runtime_snapshot_text(context: &Context, snapshot_text: &str) -> String {
-    let mut sections = Vec::new();
-
-    let app_context = build_app_context_prompt(context);
-    if !app_context.trim().is_empty() {
-        sections.push(format!("运行时上下文：\n{app_context}"));
-    }
-
-    if !context.prompt_memory.recalled_memories.is_empty() {
-        sections.push(format!(
-            "相关长期记忆：\n{}",
-            context.prompt_memory.recalled_memories.join("\n")
-        ));
-    }
-
-    sections.push(snapshot_text.to_string());
-    sections.join("\n\n")
+pub fn build_runtime_snapshot_text(context: &Context, snapshot: &crate::snapshot::Snapshot) -> String {
+    LlmPromptRenderer::render_document_with_root(&context.runtime_snapshot_doc(snapshot), Some("runtime_snapshot"))
 }
 
 pub fn runtime_request_budget_limits(context: &Context) -> RequestBudgetLimits {
