@@ -55,7 +55,8 @@ use crate::{
         render::openai_tools::OpenAIToolRenderer,
         runtime::{
             ProgramExecutionTelemetry, execute_program_with_ir_report,
-            execute_program_with_ir_report_with_retry_hook, resolve_program_tuning,
+            execute_program_with_ir_report_with_retry_hook_and_validator,
+            resolve_program_tuning,
         },
         runtime::{PromptMessage, PromptRole},
         runtime_review::{RuntimeReviewSpan, RuntimeTurnRecord},
@@ -68,6 +69,7 @@ const PROMPT_PERSONA_FILE_NAME: &str = "prompt_persona.toml";
 const INLINE_TURN_COMPILE_VIEWPORT_HEIGHT: u16 = 5;
 const INLINE_TURN_COMPILE_PROGRESS_MAX_WIDTH: u16 = 56;
 const COLD_START_ARTIFACT_SCOPE: &str = "cold_start";
+const TURN_DEMO_GENERATOR_RETRY_COUNT: usize = 5;
 
 static INLINE_TURN_COMPILE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -939,7 +941,7 @@ async fn generate_turn_demos_from_persona_spec(
     if let Some(ui) = progress_ui.as_deref_mut() {
         ui.clear_retry_status();
     }
-    let output = execute_program_with_ir_report_with_retry_hook(
+    let output = execute_program_with_ir_report_with_retry_hook_and_validator(
         isolated_context.context.judge_llm.as_ref(),
         &isolated_context.context,
         &renderer,
@@ -951,6 +953,12 @@ async fn generate_turn_demos_from_persona_spec(
         ),
         &tuning,
         TraceOrigin::Sleep,
+        TURN_DEMO_GENERATOR_RETRY_COUNT,
+        |output| {
+            demos_from_generator_output(spec, output)
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        },
         |telemetry, _request| {
             if let Some(ui) = progress_ui.as_deref_mut() {
                 ui.record_retry(&telemetry);
@@ -1082,14 +1090,6 @@ fn validate_generated_demo_coverage(
         .map(|test| normalize_rule_text(test))
         .filter(|test| !test.is_empty())
         .collect::<Vec<_>>();
-    if !required_tests.is_empty() && groups.len() != required_tests.len() {
-        return Err(miette!(
-            "runtime_turn_demo_generator produced {} test_demo_groups, expected exactly tests count {}",
-            groups.len(),
-            required_tests.len()
-        ));
-    }
-
     let mut seen_titles = std::collections::HashSet::new();
     let mut seen_tests = std::collections::HashSet::new();
     let required_test_set = required_tests
@@ -2050,5 +2050,51 @@ mod tests {
     fn unique_synthetic_telegram_id_is_positive_and_nonzero() {
         let id = unique_synthetic_telegram_id();
         assert!(id > 0);
+    }
+
+    #[test]
+    fn validate_generated_demo_coverage_reports_missing_test_instead_of_group_count() {
+        let spec = PromptPersonaSpec {
+            name: "test".to_string(),
+            language: "zh-CN".to_string(),
+            identity_summary: "identity".to_string(),
+            tests: vec!["test a".to_string(), "test b".to_string()],
+            rules: Vec::new(),
+        };
+        let groups = vec![crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTestDemoGroup {
+            test: "test a".to_string(),
+            demos: vec![
+                crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo {
+                    title: "demo a".to_string(),
+                    scenario_summary: "summary".to_string(),
+                    incoming_text: "incoming".to_string(),
+                    expected_behavior: "expected".to_string(),
+                    judge_focus: Vec::new(),
+                    requires_fresh_world_state: false,
+                    must_use_tools: false,
+                    must_not_final_answer_patterns: Vec::new(),
+                    must_end_with_terminal_answer: true,
+                },
+                crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo {
+                    title: "demo a 2".to_string(),
+                    scenario_summary: "summary".to_string(),
+                    incoming_text: "incoming".to_string(),
+                    expected_behavior: "expected".to_string(),
+                    judge_focus: Vec::new(),
+                    requires_fresh_world_state: false,
+                    must_use_tools: false,
+                    must_not_final_answer_patterns: Vec::new(),
+                    must_end_with_terminal_answer: true,
+                },
+            ],
+        }];
+        let demos = groups
+            .iter()
+            .flat_map(|group| group.demos.iter().map(|demo| (group.test.as_str(), demo)))
+            .collect::<Vec<_>>();
+
+        let err = validate_generated_demo_coverage(&spec, &groups, &demos).unwrap_err();
+
+        assert!(err.to_string().contains("missing: test b"));
     }
 }
