@@ -26,6 +26,12 @@ pub const APPS_UNIT_WHEN: &str = "当你判定某个任务必须依赖某个 app
 
 pub const APPS_UNIT_HOW: &str = "使用 `focus_app` 切换到目标 app。";
 
+pub const WORKSPACE_UNIT_WHEN: &str = "当你需要进行任何属于你自己的文件操作时，都应默认在这个 workspace 目录下进行。";
+
+pub const WORKSPACE_UNIT_WHY: &str = "一个固定的 workspace 可以让你拥有一片自己的固定空间。让你更好地完成需要操作文件的任务。";
+
+pub const WORKSPACE_UNIT_HOW: &str = "使用相对路径时，不要把 workspace 目录名再写进路径里。快照已经告诉你 workspace 的绝对路径；相对路径默认就是相对于该目录。";
+
 pub const SKILLS_UNIT_WHAT: &str = "每个 skill 都是一份针对特定类任务的执行规范说明。";
 
 pub const SKILLS_UNIT_WHEN: &str = "任务开始执行时或执行过程中，只要快照里出现与任务相关或有帮助的 skill，在继续执行前就必须先调用 `read_skill` 读取它；不要凭猜测直接开始实现。";
@@ -62,6 +68,10 @@ pub const HISTORY_COMPACTION_PROMPT: &str = r#"你正在执行一个上下文检
 
 pub const HISTORY_COMPACTION_SUMMARY_PREFIX: &str = r#"Earlier runtime context was compacted into the following handoff summary.
 Use it to continue the same thread without redoing already-finished work:"#;
+
+pub fn build_workspace_unit_what(context: &Context) -> String {
+    format!("你的 workspace 绝对路径是 `{}`。", context.execution_cwd.display())
+}
 
 pub fn build_runtime_app_usages(context: &Context) -> Vec<(AppId, AppUsage)> {
     let focused = context.apps.focused();

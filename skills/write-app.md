@@ -15,7 +15,7 @@ when_to_use:
 ## Start From This Exact Shape
 
 ```text
-~/daat-locus-workspace/apps/<app-name>/
+apps/<app-name>/
   app.toml
   runtime/
     app.lua
@@ -28,6 +28,8 @@ when_to_use:
 规则：
 
 - `app_id` 直接等于文件夹名 `<app-name>`
+- 第三方 app 必须直接位于你的 workspace 目录下的 `apps/<app-name>/`
+- 不要把 workspace 目录名再写进相对路径里
 - `app.toml` 可以省略；如果保留，内容必须是顶层 `entry = "runtime/app.lua"`
 - `runtime/app.lua` 必须返回一个 Lua table
 - `prompt/usage.md` 和 `prompt/how_to_use.md` 必须存在
@@ -290,11 +292,12 @@ return {
 优先排查这些错误：
 
 1. `app.toml` 写成嵌套表，导致 app 根本无法加载
-2. `runtime/app.lua` 没有 `return app`
-3. `list_tools` 里的 schema 不是 JSON object schema
-4. `call_tool` 把结果写到 `result` 之类的顶层字段，而不是 `payload`
-5. tool 更新了 Lua 局部变量，却没把 `state = next_state` 返回给宿主
-6. 把“何时使用这个 app”的说明塞进 skill，而不是 `usage.md`
+2. 把 workspace 目录名又写进相对路径，结果在 workspace 里面又嵌套出一层同名目录
+3. `runtime/app.lua` 没有 `return app`
+4. `list_tools` 里的 schema 不是 JSON object schema
+5. `call_tool` 把结果写到 `result` 之类的顶层字段，而不是 `payload`
+6. tool 更新了 Lua 局部变量，却没把 `state = next_state` 返回给宿主
+7. 把“何时使用这个 app”的说明塞进 skill，而不是 `usage.md`
 
 如果 app 连 focus 都做不到，先检查 1 和 2，不要先怀疑 tool 逻辑。
 
@@ -306,7 +309,8 @@ return {
 
 先检查这些点：
 
-- app 是否放在 `~/daat-locus-workspace/apps/<app-name>/`
+- app 是否直接放在你的 workspace 目录下的 `apps/<app-name>/`
+- 是否误把 workspace 目录名又写进路径里，导致在 workspace 内再嵌套出一层同名目录
 - `app.toml` 是否写成了顶层 `entry = "runtime/app.lua"`，而不是 `[entry]` 或别的嵌套表
 - `runtime/app.lua` 是否真的存在
 - `runtime/app.lua` 是否 `return` 了一个 Lua table

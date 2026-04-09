@@ -194,7 +194,7 @@ Daat Locus 有显式的自我改进闭环：
 - 当前 runtime workspace 默认由 `resolve_runtime_workspace_dir()` 决定，即 `~/daat-locus-workspace`
 - `app_id` 直接等于文件夹名 `<app-name>`
 - `~/.daat-locus` 是受保护 runtime 目录，不存放第三方 App 源码
-- 之所以这样设计，是因为 `~/.daat-locus` 在 sandbox 中被视为 protected runtime path，而 workspace 是可写根
+- 之所以这样设计，是因为 `~/.daat-locus` 在 sandbox 中被视为 protected runtime path，而 workspace 是默认的工作区
 
 ### Package Layout
 

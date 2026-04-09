@@ -25,12 +25,15 @@ impl TerminalProcess {
         workdir: Option<&str>,
         sandbox_policy: &RuntimeSandboxPolicy,
     ) -> std::io::Result<Self> {
-        let (shell_program, shell_args) = shell_invocation(command, workdir);
+        let (shell_program, shell_args) = shell_invocation(command);
         let spawn_spec = sandbox_policy
             .shell_spawn_spec(shell_program, shell_args)
             .map_err(std::io::Error::other)?;
         let mut process = Command::new(&spawn_spec.program);
         process.args(&spawn_spec.args);
+        if let Some(workdir) = workdir {
+            process.current_dir(workdir);
+        }
 
         process
             .stdin(Stdio::piped())
@@ -141,8 +144,8 @@ where
     });
 }
 
-fn shell_invocation(command: &str, workdir: Option<&str>) -> (&'static str, Vec<String>) {
-    let shell_command = shell_command(command, workdir);
+fn shell_invocation(command: &str) -> (&'static str, Vec<String>) {
+    let shell_command = shell_command(command);
     if cfg!(windows) {
         (
             "powershell.exe",
@@ -158,16 +161,16 @@ fn shell_invocation(command: &str, workdir: Option<&str>) -> (&'static str, Vec<
     }
 }
 
-fn shell_command(command: &str, workdir: Option<&str>) -> String {
-    if let Some(workdir) = workdir {
-        if cfg!(windows) {
-            let escaped = workdir.replace('\'', "''");
-            format!("Set-Location -LiteralPath '{escaped}'; {command}")
-        } else {
-            let escaped = workdir.replace('\'', "'\"'\"'");
-            format!("cd -- '{escaped}' && {command}")
-        }
-    } else {
-        command.to_string()
+fn shell_command(command: &str) -> String {
+    command.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_command;
+
+    #[test]
+    fn shell_command_does_not_wrap_command_in_cd() {
+        assert_eq!(shell_command("pwd"), "pwd");
     }
 }

@@ -115,53 +115,14 @@ impl FileSystemSandboxPolicy {
 }
 
 impl RuntimeSandboxPolicy {
-    pub fn protect_daat_locus_runtime(
-        runtime_dir: &Path,
-        workspace_dir: &Path,
-        daat_locus_home: &Path,
-        executable_dir: Option<&Path>,
-    ) -> Self {
-        let mut protected_paths =
-            vec![normalize_path(runtime_dir), normalize_path(daat_locus_home)];
-        if let Some(executable_dir) = executable_dir {
-            protected_paths.push(normalize_path(executable_dir));
-        }
-        protected_paths.sort();
-        protected_paths.dedup();
-
-        let mut writable_roots = Vec::new();
-        let workspace_root = normalize_path(workspace_dir);
-        if !workspace_root.as_os_str().is_empty() {
-            writable_roots.push(WritableRoot {
-                root: workspace_root,
-                read_only_subpaths: Vec::new(),
-            });
-        }
-        let temp_root = std::env::temp_dir();
-        if !temp_root.as_os_str().is_empty() {
-            writable_roots.push(WritableRoot {
-                root: normalize_path(&temp_root),
-                read_only_subpaths: Vec::new(),
-            });
-        }
-        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
-            let tmpdir = PathBuf::from(tmpdir);
-            if !tmpdir.as_os_str().is_empty() {
-                writable_roots.push(WritableRoot {
-                    root: normalize_path(&tmpdir),
-                    read_only_subpaths: Vec::new(),
-                });
-            }
-        }
-        writable_roots.sort_by(|a, b| a.root.cmp(&b.root));
-        writable_roots.dedup_by(|left, right| left.root == right.root);
-
+    pub fn protect_daat_locus_runtime(daat_locus_home: &Path) -> Self {
+        let protected_paths = vec![normalize_path(daat_locus_home)];
         Self {
             filesystem: FileSystemSandboxPolicy {
                 full_disk_read: true,
-                full_disk_write: false,
+                full_disk_write: true,
                 readable_roots: Vec::new(),
-                writable_roots,
+                writable_roots: Vec::new(),
                 deny_read_paths: protected_paths.clone(),
                 deny_write_paths: protected_paths,
             },
@@ -236,23 +197,17 @@ mod tests {
     use super::RuntimeSandboxPolicy;
 
     #[test]
-    fn default_runtime_policy_protects_runtime_dirs_and_allows_tmp_write() {
-        let runtime_dir = Path::new("/workspace/daat-locus");
+    fn default_runtime_policy_only_protects_daat_locus_home() {
+        let repo_dir = Path::new("/workspace/daat-locus");
         let workspace_dir = Path::new("/Users/test/daat-locus-workspace");
         let daat_locus_home = Path::new("/Users/test/.daat-locus");
-        let executable_dir = Some(Path::new("/Applications/Daat Locus.app/Contents/MacOS"));
-        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime(
-            runtime_dir,
-            workspace_dir,
-            daat_locus_home,
-            executable_dir,
-        );
+        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime(daat_locus_home);
         let writable_tmp = std::env::temp_dir().join("daat-locus-sandbox-test");
 
-        assert!(!policy.is_path_readable(runtime_dir));
-        assert!(!policy.is_path_writable(runtime_dir));
         assert!(!policy.is_path_readable(daat_locus_home));
         assert!(!policy.is_path_writable(daat_locus_home));
+        assert!(policy.is_path_readable(repo_dir));
+        assert!(policy.is_path_writable(repo_dir));
         assert!(policy.is_path_readable(workspace_dir));
         assert!(policy.is_path_writable(workspace_dir));
         assert!(policy.is_path_readable(&writable_tmp));
@@ -262,12 +217,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn shell_spawn_spec_uses_sandbox_exec_on_macos() {
-        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime(
-            Path::new("/workspace/daat-locus"),
-            Path::new("/Users/test/daat-locus-workspace"),
-            Path::new("/Users/test/.daat-locus"),
-            Some(Path::new("/Applications/Daat Locus.app/Contents/MacOS")),
-        );
+        let policy =
+            RuntimeSandboxPolicy::protect_daat_locus_runtime(Path::new("/Users/test/.daat-locus"));
         let spawn_spec = policy
             .shell_spawn_spec("bash", vec!["-lc".to_string(), "pwd".to_string()])
             .expect("macOS sandbox wrapper should render");
