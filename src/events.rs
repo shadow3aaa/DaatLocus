@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::spinova_paths::spinova_paths;
+use crate::daat_locus_paths::daat_locus_paths;
 
 const EVENTS_FILE_NAME: &str = "events";
 
@@ -94,7 +94,7 @@ pub struct EventView {
 
 impl EventStore {
     pub async fn new() -> Self {
-        let path = spinova_paths().await.state_file(EVENTS_FILE_NAME);
+        let path = daat_locus_paths().await.state_file(EVENTS_FILE_NAME);
         let mut state = tokio::fs::read(&path)
             .await
             .ok()

@@ -21,7 +21,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
-    AgentLoopStepExecution, SpinovaHomeOverride, build_eval_context_with_compiled,
+    AgentLoopStepExecution, DaatLocusHomeOverride, build_eval_context_with_compiled,
     config::Config,
     context::Context,
     events::TelegramIncomingEvent,
@@ -58,7 +58,7 @@ use crate::{
         runtime_review::{RuntimeReviewSpan, RuntimeTurnRecord},
         trace::TraceOrigin,
     },
-    spinova_paths::{spinova_paths, spinova_paths_sync},
+    daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync},
 };
 
 const MAX_COLD_START_PROMPT_COMPILE_ROUNDS: usize = 8;
@@ -419,21 +419,21 @@ pub struct TurnRolloutRunner;
 
 struct IsolatedEvalContext {
     context: Context,
-    home_override: SpinovaHomeOverride,
+    home_override: DaatLocusHomeOverride,
     home_path: PathBuf,
 }
 
 impl IsolatedEvalContext {
     async fn new(config: Config, compiled_prompts: CompiledPromptStore) -> Result<Self> {
         let home_path =
-            std::env::temp_dir().join(format!("spinova-turn-compile-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("daat-locus-turn-compile-{}", Uuid::new_v4()));
         fs::create_dir_all(&home_path).await.map_err(|err| {
             miette!(
                 "failed to create isolated turn-compile home '{}': {err}",
                 home_path.display()
             )
         })?;
-        let home_override = SpinovaHomeOverride::set(home_path.clone());
+        let home_override = DaatLocusHomeOverride::set(home_path.clone());
         let context = build_eval_context_with_compiled(config, compiled_prompts).await;
         Ok(Self {
             context,
@@ -637,7 +637,7 @@ impl TurnCompileEngine {
             ui.set_phase("loading persona");
         }
         emit_turn_compile_progress(format!(
-            "[turn-compile:{}] loaded persona '{}' from ~/.spinova/config/{}",
+            "[turn-compile:{}] loaded persona '{}' from ~/.daat-locus/config/{}",
             compile_mode_label(TurnCompileMode::ColdStart),
             persona_spec.name,
             PROMPT_PERSONA_FILE_NAME
@@ -840,11 +840,11 @@ impl TurnCompileEngine {
 }
 
 async fn prompt_persona_path() -> PathBuf {
-    spinova_paths().await.config_file(PROMPT_PERSONA_FILE_NAME)
+    daat_locus_paths().await.config_file(PROMPT_PERSONA_FILE_NAME)
 }
 
 fn prompt_persona_path_sync() -> PathBuf {
-    spinova_paths_sync().config_file(PROMPT_PERSONA_FILE_NAME)
+    daat_locus_paths_sync().config_file(PROMPT_PERSONA_FILE_NAME)
 }
 
 pub fn load_prompt_persona_spec_sync() -> PromptPersonaSpec {
@@ -1863,9 +1863,9 @@ pub fn turn_evaluation_summary_lines(
 impl Default for PromptPersonaSpec {
     fn default() -> Self {
         Self {
-            name: "Spinova".to_string(),
+            name: "Daat Locus".to_string(),
             language: default_prompt_persona_language(),
-            identity_summary: "Spinova 是一个冷静、机敏、结果导向的猫娘执行型智能体。它默认使用中文交流，表达简洁、具体、少套话，保留轻微猫娘口吻，并在合适位置自然带“喵”，但不能因此牺牲信息密度与可执行性。".to_string(),
+            identity_summary: "Daat Locus 是一个冷静、机敏、结果导向的猫娘执行型智能体。它默认使用中文交流，表达简洁、具体、少套话，保留轻微猫娘口吻，并在合适位置自然带“喵”，但不能因此牺牲信息密度与可执行性。".to_string(),
             tests: vec![
                 "最终回复必须像一条可以直接发送给用户的消息，不暴露内部流程。".to_string(),
                 "先给结论，再补必要依据；避免长铺垫。".to_string(),

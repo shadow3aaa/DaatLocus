@@ -49,7 +49,7 @@ fn resolve_terminal_path(context: &Context, raw: &str, base: Option<&Path>) -> s
 
 fn command_mentions_protected_paths(context: &Context, text: &str) -> bool {
     let lowered = text.to_ascii_lowercase();
-    if lowered.contains(".spinova") {
+    if lowered.contains(".daat-locus") {
         return true;
     }
     context.sandbox_policy.protected_paths().iter().any(|root| {

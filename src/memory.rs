@@ -11,7 +11,7 @@ use crate::{
     },
     hindsight::{HindsightRetainItem, HindsightRetainJob},
     reasoning::runtime::{AgentMessage, AgentToolSpec, PromptMessage, PromptRole},
-    spinova_paths::spinova_paths,
+    daat_locus_paths::daat_locus_paths,
     tool_ui::{
         PatchUiData, TelegramUiData, TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent,
     },
@@ -473,7 +473,7 @@ fn prompt_message_to_agent_message(message: PromptMessage) -> AgentMessage {
 
 impl RuntimeConversation {
     async fn new(bootstrap_focus: Option<String>, bootstrap_messages: Vec<PromptMessage>) -> Self {
-        let persistence_path = spinova_paths()
+        let persistence_path = daat_locus_paths()
             .await
             .state_file(RUNTIME_CONVERSATION_FILE_NAME);
         tokio::fs::read(persistence_path)
@@ -634,7 +634,7 @@ impl RuntimeConversation {
     }
 
     async fn sync_to_disk(&self) {
-        let persistence_path = spinova_paths()
+        let persistence_path = daat_locus_paths()
             .await
             .state_file(RUNTIME_CONVERSATION_FILE_NAME);
         let data = match postcard::to_allocvec(self) {
@@ -686,14 +686,14 @@ impl HindsightQueueItem {
                 ("entry_id".to_string(), self.id.to_string()),
             ])),
             document_id: Some(format!("hindsight-step:{}", self.id)),
-            tags: Some(vec!["spinova".to_string(), "hindsight-step".to_string()]),
+            tags: Some(vec!["daat-locus".to_string(), "hindsight-step".to_string()]),
         }
     }
 }
 
 impl HindsightQueue {
     async fn new() -> Self {
-        let persistence_path = spinova_paths().await.state_file(HINDSIGHT_QUEUE_FILE_NAME);
+        let persistence_path = daat_locus_paths().await.state_file(HINDSIGHT_QUEUE_FILE_NAME);
         tokio::fs::read(persistence_path)
             .await
             .ok()
@@ -731,7 +731,7 @@ impl HindsightQueue {
     }
 
     async fn sync_to_disk(&self) {
-        let persistence_path = spinova_paths().await.state_file(HINDSIGHT_QUEUE_FILE_NAME);
+        let persistence_path = daat_locus_paths().await.state_file(HINDSIGHT_QUEUE_FILE_NAME);
         let data = match postcard::to_allocvec(self) {
             Ok(data) => data,
             Err(err) => {

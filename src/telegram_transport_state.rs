@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::{events::EventStatus, spinova_paths::spinova_paths_sync};
+use crate::{daat_locus_paths::daat_locus_paths_sync, events::EventStatus};
 
 const TELEGRAM_TRANSPORT_STATE_FILE_NAME: &str = "telegram_transport_state";
 
@@ -262,7 +262,7 @@ impl From<&TelegramChat> for PersistedTelegramChat {
 }
 
 fn telegram_transport_state_path() -> PathBuf {
-    spinova_paths_sync().state_file(TELEGRAM_TRANSPORT_STATE_FILE_NAME)
+    daat_locus_paths_sync().state_file(TELEGRAM_TRANSPORT_STATE_FILE_NAME)
 }
 
 fn load_telegram_state() -> TelegramState {

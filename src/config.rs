@@ -7,7 +7,7 @@ use crate::{
         DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS, DEFAULT_CONTEXT_WINDOW_TOKENS,
         DEFAULT_MAX_COMPLETION_TOKENS, DEFAULT_TOOL_OUTPUT_MAX_TOKENS,
     },
-    spinova_paths::spinova_paths,
+    daat_locus_paths::daat_locus_paths,
 };
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -41,7 +41,7 @@ impl Default for HindsightConfig {
             base_url: "http://localhost:8888".to_string(),
             api_key: String::new(),
             namespace: "default".to_string(),
-            bank_id: "spinova".to_string(),
+            bank_id: "daat-locus".to_string(),
             request_timeout_secs: 120,
             default_recall_budget: "mid".to_string(),
             default_reflect_budget: "low".to_string(),
@@ -215,7 +215,7 @@ pub enum ConfigError {
 }
 
 pub async fn load_config() -> Result<Config, ConfigError> {
-    let config_path = spinova_paths().await.config_file(CONFIG_FILE_NAME);
+    let config_path = daat_locus_paths().await.config_file(CONFIG_FILE_NAME);
 
     if !config_path.exists() {
         let default_config = Config::default();

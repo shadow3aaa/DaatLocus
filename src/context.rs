@@ -1,4 +1,4 @@
-//! 本模块包含context，它是spinova自旋循环中承载状态的结构体
+//! 本模块包含 context，它是 Daat Locus 主循环中承载状态的结构体。
 
 use std::{
     collections::HashSet,

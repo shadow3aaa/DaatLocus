@@ -13,7 +13,7 @@ use crate::{
         App, AppHowToUse, AppId, AppSkillContent, AppSkillSummary, AppStateRender, AppToolScope,
         AppUsage,
     },
-    spinova_paths::spinova_paths_sync,
+    daat_locus_paths::daat_locus_paths_sync,
 };
 
 const BROWSER_USAGE_PURPOSE: &str =
@@ -34,7 +34,7 @@ const BROWSER_HOW_TO_USE_LINES: &[&str] = &[
     "不再需要的页面应调用 `browser_close_page` 关闭，避免标签页长期堆积并浪费内存。",
     "不要因为第一页主要是导航或页头就立刻宣告失败；应先等待并完整阅读当前页面的语义快照，再决定是否无法完成。",
     "如果已经查到标题、摘要或正文片段，应基于已确认内容回答并明确范围；只有在关键内容确实不可得时才收尾为失败。",
-    "Browser 只使用 Spinova 自带的独立浏览器 runtime，不会复用用户日常浏览器 profile；如果 runtime 未安装，浏览器工具会直接报错。",
+    "Browser 只使用 Daat Locus 自带的独立浏览器 runtime，不会复用用户日常浏览器 profile；如果 runtime 未安装，浏览器工具会直接报错。",
 ];
 const BROWSER_SKILL_DEEP_RESEARCH_ID: &str = "browser.deep_research";
 const BROWSER_SKILL_SOURCE_VERIFICATION_ID: &str = "browser.source_verification";
@@ -107,7 +107,7 @@ impl BrowserApp {
         if self.context.is_some() {
             return Ok(());
         }
-        let paths = spinova_paths_sync();
+        let paths = daat_locus_paths_sync();
         let executable = paths.browser_executable_path();
         if !executable.exists() {
             let reason = format!(

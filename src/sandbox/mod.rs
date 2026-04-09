@@ -115,13 +115,14 @@ impl FileSystemSandboxPolicy {
 }
 
 impl RuntimeSandboxPolicy {
-    pub fn protect_spinova_runtime(
+    pub fn protect_daat_locus_runtime(
         runtime_dir: &Path,
         workspace_dir: &Path,
-        spinova_home: &Path,
+        daat_locus_home: &Path,
         executable_dir: Option<&Path>,
     ) -> Self {
-        let mut protected_paths = vec![normalize_path(runtime_dir), normalize_path(spinova_home)];
+        let mut protected_paths =
+            vec![normalize_path(runtime_dir), normalize_path(daat_locus_home)];
         if let Some(executable_dir) = executable_dir {
             protected_paths.push(normalize_path(executable_dir));
         }
@@ -236,22 +237,22 @@ mod tests {
 
     #[test]
     fn default_runtime_policy_protects_runtime_dirs_and_allows_tmp_write() {
-        let runtime_dir = Path::new("/workspace/spinova");
-        let workspace_dir = Path::new("/Users/test/spinova-workspace");
-        let spinova_home = Path::new("/Users/test/.spinova");
-        let executable_dir = Some(Path::new("/Applications/Spinova.app/Contents/MacOS"));
-        let policy = RuntimeSandboxPolicy::protect_spinova_runtime(
+        let runtime_dir = Path::new("/workspace/daat-locus");
+        let workspace_dir = Path::new("/Users/test/daat-locus-workspace");
+        let daat_locus_home = Path::new("/Users/test/.daat-locus");
+        let executable_dir = Some(Path::new("/Applications/Daat Locus.app/Contents/MacOS"));
+        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime(
             runtime_dir,
             workspace_dir,
-            spinova_home,
+            daat_locus_home,
             executable_dir,
         );
-        let writable_tmp = std::env::temp_dir().join("spinova-sandbox-test");
+        let writable_tmp = std::env::temp_dir().join("daat-locus-sandbox-test");
 
         assert!(!policy.is_path_readable(runtime_dir));
         assert!(!policy.is_path_writable(runtime_dir));
-        assert!(!policy.is_path_readable(spinova_home));
-        assert!(!policy.is_path_writable(spinova_home));
+        assert!(!policy.is_path_readable(daat_locus_home));
+        assert!(!policy.is_path_writable(daat_locus_home));
         assert!(policy.is_path_readable(workspace_dir));
         assert!(policy.is_path_writable(workspace_dir));
         assert!(policy.is_path_readable(&writable_tmp));
@@ -261,11 +262,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn shell_spawn_spec_uses_sandbox_exec_on_macos() {
-        let policy = RuntimeSandboxPolicy::protect_spinova_runtime(
-            Path::new("/workspace/spinova"),
-            Path::new("/Users/test/spinova-workspace"),
-            Path::new("/Users/test/.spinova"),
-            Some(Path::new("/Applications/Spinova.app/Contents/MacOS")),
+        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime(
+            Path::new("/workspace/daat-locus"),
+            Path::new("/Users/test/daat-locus-workspace"),
+            Path::new("/Users/test/.daat-locus"),
+            Some(Path::new("/Applications/Daat Locus.app/Contents/MacOS")),
         );
         let spawn_spec = policy
             .shell_spawn_spec("bash", vec!["-lc".to_string(), "pwd".to_string()])

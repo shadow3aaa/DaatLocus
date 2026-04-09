@@ -189,7 +189,7 @@ impl HindsightClient {
         let mut body = json!({});
         if !self.config.default_reflect_budget.trim().is_empty() {
             body["reflect_mission"] = serde_json::Value::String(format!(
-                "Use concise {}-budget reflection for Spinova long-term memory retrieval.",
+                "Use concise {}-budget reflection for Daat Locus long-term memory retrieval.",
                 self.config.default_reflect_budget
             ));
         }
@@ -603,7 +603,7 @@ mod tests {
             base_url: "http://localhost:8888".to_string(),
             api_key: String::new(),
             namespace: "default".to_string(),
-            bank_id: "spinova".to_string(),
+            bank_id: "daat-locus".to_string(),
             request_timeout_secs: 120,
             default_recall_budget: "mid".to_string(),
             default_reflect_budget: "low".to_string(),

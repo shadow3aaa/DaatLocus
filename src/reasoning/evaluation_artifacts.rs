@@ -6,7 +6,7 @@ use tokio::fs;
 use uuid::Uuid;
 
 use crate::reasoning::examples::ExampleField;
-use crate::spinova_paths::spinova_paths;
+use crate::daat_locus_paths::daat_locus_paths;
 
 const EVALUATIONS_DIR_NAME: &str = "evaluations";
 const FAILURE_PATTERNS_DIR: &str = "failure_patterns";
@@ -225,7 +225,7 @@ impl EvaluationArtifactsStore {
     }
 
     pub async fn open_scoped(scope: Option<&str>) -> Result<Self> {
-        let mut root = spinova_paths().await.artifact_dir(EVALUATIONS_DIR_NAME);
+        let mut root = daat_locus_paths().await.artifact_dir(EVALUATIONS_DIR_NAME);
         if let Some(scope) = scope {
             root = root.join(artifact_file_stem(scope));
         }
