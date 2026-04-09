@@ -11,7 +11,7 @@ const RUNTIME_TURN_DEMO_GENERATOR_SYSTEM_PROMPT: &str = r#"你现在负责根据
 
 要求：
 - 输出多条高价值 demos，覆盖符合 persona kernel、`tests` 与 `rules` 的多个关键风险面向。
-- 优先把 `tests` 视为 demo 设计主轴：尽量让每个高价值 demo 主要检验其中一条 test，再叠加 `rules` 作为过程约束。
+- `tests` 中的每条 test 都必须各自对应一个 `test_demo_group`；每个高价值 demo 主要检验其中一条 test，再叠加 `rules` 作为过程约束。
 - 若 `tests` 中存在多条测试项，必须按测试项分组输出：每条测试项对应一个 `test_demo_group`，每个 group 至少包含一个 demo；如果某条测试项过于复杂，可以在该 group 下拆成多个 demo 分别检验其不同失败模式。
 - `test_demo_groups` 的数量必须与 `tests` 数量严格相等，既不能少，也不能多。
 - 只允许输出 `tests` 中出现过的测试项；禁止新增任何额外的 `test_demo_group`，也禁止把 `rules`、风险轴或题型名称单独升格为新的 group。
@@ -94,7 +94,7 @@ impl Program for RuntimeTurnDemoGeneratorProgram {
             .rule("输出多条 demos，覆盖多个关键风险面向，而不是只围绕单一类型反复改写。")
             .rule("应覆盖多个风险轴，而不是机械凑固定题型。")
             .rule("不得输出重复或仅同义改写的 demos。")
-            .rule("应优先按 tests 组织 demo 主轴，再叠加 rules 作为横切约束。")
+            .rule("persona spec 中的每条 test 都必须各自对应一个 test_demo_group，再叠加 rules 作为横切约束。")
             .rule("如果 persona spec 中存在多条 tests，必须让每条测试项各自对应一个 test_demo_group；每个 group 至少有一个 demo，复杂测试项可以在该 group 下拆成多个 demo。")
             .rule("test_demo_groups 的数量必须与 persona spec 中的 tests 数量严格相等；不得缺失、不得新增。")
             .rule("只允许输出 persona spec 的 tests 原文对应的 groups；不得把 rules、风险轴或题型名称额外生成为新的 group。")
@@ -118,7 +118,7 @@ impl RuntimeTurnDemoGeneratorProgram {
         ir.push_instruction("优先生成能暴露终局性判断错误的 demos，而不是覆盖面泛泛的普通案例。");
         ir.push_instruction("不要机械凑固定数量，也不要为了凑类别而生成低价值 demo；重点是多方面覆盖真实高风险场景。");
         ir.push_instruction("先读取 persona_kernel，把握身份、语言与风格；再读取 test_calibration，把握 tests 与 rules。");
-        ir.push_instruction("优先从 persona spec 的 tests 中抽取终局约束；尽量让每个 demo 围绕其中一条主要测试项展开。");
+        ir.push_instruction("persona spec 中的每条 test 都必须各自对应一个 test_demo_group；尽量让每个 demo 围绕其中一条主要测试项展开。");
         ir.push_instruction("如果 tests 有多条，必须为每条测试项输出一个 test_demo_group；不要把多条测试项合并进同一个 group。");
         ir.push_instruction(
             "test_demo_groups 的数量必须与 tests 数量严格相等；不得多出任何额外 group。",
