@@ -7,6 +7,7 @@ use std::{
 use miette::{Result, miette};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::{events::EventStatus, spinova_paths::spinova_paths_sync};
@@ -19,6 +20,7 @@ pub struct TelegramTransportState {
 
 struct TelegramInner {
     state: Mutex<TelegramState>,
+    outbound_notify: Notify,
     persistence_path: PathBuf,
 }
 
@@ -77,6 +79,7 @@ impl TelegramTransportState {
         Self {
             inner: Arc::new(TelegramInner {
                 state: Mutex::new(state),
+                outbound_notify: Notify::new(),
                 persistence_path: telegram_transport_state_path(),
             }),
         }
@@ -134,7 +137,13 @@ impl TelegramTransportStateHandle {
             related_event_id,
             settle_status_on_delivery,
         });
-        persist_telegram_state_result(&self.inner, &state)
+        persist_telegram_state_result(&self.inner, &state)?;
+        self.inner.outbound_notify.notify_one();
+        Ok(())
+    }
+
+    pub async fn wait_for_outbound(&self) {
+        self.inner.outbound_notify.notified().await;
     }
 
     pub fn chat_summaries_view(&self) -> Vec<TelegramChatSummaryView> {
