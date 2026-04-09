@@ -5,6 +5,7 @@ use std::{
 
 const CONFIG_DIR_NAME: &str = "config";
 const STATE_DIR_NAME: &str = "state";
+const MEMORY_DIR_NAME: &str = "memory";
 const CACHE_DIR_NAME: &str = "cache";
 const ARTIFACTS_DIR_NAME: &str = "artifacts";
 const JOURNALS_DIR_NAME: &str = "journals";
@@ -33,6 +34,10 @@ impl DaatLocusPaths {
         self.root.join(STATE_DIR_NAME)
     }
 
+    pub fn memory_dir(&self) -> PathBuf {
+        self.root.join(MEMORY_DIR_NAME)
+    }
+
     pub fn cache_dir(&self) -> PathBuf {
         self.root.join(CACHE_DIR_NAME)
     }
@@ -51,6 +56,10 @@ impl DaatLocusPaths {
 
     pub fn state_file(&self, file_name: &str) -> PathBuf {
         self.state_dir().join(file_name)
+    }
+
+    pub fn memory_file(&self, file_name: &str) -> PathBuf {
+        self.memory_dir().join(file_name)
     }
 
     pub fn artifact_dir(&self, dir_name: &str) -> PathBuf {
@@ -145,6 +154,7 @@ fn ensure_layout_sync(paths: &DaatLocusPaths) {
     let _ = std::fs::create_dir_all(paths.root());
     let _ = std::fs::create_dir_all(paths.config_dir());
     let _ = std::fs::create_dir_all(paths.state_dir());
+    let _ = std::fs::create_dir_all(paths.memory_dir());
     let _ = std::fs::create_dir_all(paths.cache_dir());
     let _ = std::fs::create_dir_all(paths.artifacts_dir());
     let _ = std::fs::create_dir_all(paths.journal_dir());
@@ -178,14 +188,23 @@ fn migrate_legacy_layout_sync(paths: &DaatLocusPaths) {
 
     migrate_legacy_path_sync(
         paths.root.join("runtime_conversation"),
-        paths.state_file("runtime_conversation"),
+        paths.memory_file("runtime_conversation"),
     );
     migrate_legacy_path_sync(
         paths.root.join("hindsight_queue"),
-        paths.state_file("hindsight_queue"),
+        paths.memory_file("hindsight_queue"),
     );
-    migrate_legacy_path_sync(paths.root.join("todo_board"), paths.state_file("plan"));
-    migrate_legacy_path_sync(paths.root.join("plan"), paths.state_file("plan"));
+    migrate_legacy_path_sync(paths.root.join("todo_board"), paths.memory_file("plan"));
+    migrate_legacy_path_sync(paths.root.join("plan"), paths.memory_file("plan"));
+    migrate_legacy_path_sync(
+        paths.state_file("runtime_conversation"),
+        paths.memory_file("runtime_conversation"),
+    );
+    migrate_legacy_path_sync(
+        paths.state_file("hindsight_queue"),
+        paths.memory_file("hindsight_queue"),
+    );
+    migrate_legacy_path_sync(paths.state_file("plan"), paths.memory_file("plan"));
     migrate_legacy_path_sync(paths.root.join("events"), paths.state_file("events"));
     migrate_legacy_path_sync(
         paths.root.join("pending_work_queue"),

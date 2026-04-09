@@ -43,8 +43,8 @@ impl Default for PlanStatus {
 impl Plan {
     pub async fn new() -> Self {
         let paths = daat_locus_paths().await;
-        let primary_path = paths.state_file(PLAN_FILE_NAME);
-        let legacy_path = paths.state_file(LEGACY_PLAN_FILE_NAME);
+        let primary_path = paths.memory_file(PLAN_FILE_NAME);
+        let legacy_path = paths.memory_file(LEGACY_PLAN_FILE_NAME);
         let Some(data) = tokio::fs::read(&primary_path)
             .await
             .ok()
@@ -73,12 +73,24 @@ impl Plan {
             }
         }
 
+        if !steps.is_empty()
+            && steps
+                .iter()
+                .all(|step| matches!(step.status, PlanStatus::Completed))
+        {
+            steps.clear();
+        }
+
         if self.steps == steps {
             return false;
         }
 
         self.steps = steps;
         true
+    }
+
+    pub fn clear(&mut self) -> bool {
+        self.replace(Vec::new())
     }
 
     pub fn steps(&self) -> &[PlanStep] {
@@ -92,9 +104,59 @@ impl Plan {
     }
 
     pub async fn shutdown(self) {
-        let persistence_path = daat_locus_paths().await.state_file(PLAN_FILE_NAME);
+        let persistence_path = daat_locus_paths().await.memory_file(PLAN_FILE_NAME);
         let data = postcard::to_allocvec(&self).unwrap();
         tokio::fs::write(persistence_path, data).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replace_clears_plan_when_all_steps_are_completed() {
+        let mut plan = Plan::default();
+        let _ = plan.replace(vec![PlanStep {
+            step: "step zero".to_string(),
+            status: PlanStatus::InProgress,
+            created_at_ms: 0,
+            last_updated_at_ms: 0,
+        }]);
+
+        let changed = plan.replace(vec![
+            PlanStep {
+                step: "step one".to_string(),
+                status: PlanStatus::Completed,
+                created_at_ms: 0,
+                last_updated_at_ms: 0,
+            },
+            PlanStep {
+                step: "step two".to_string(),
+                status: PlanStatus::Completed,
+                created_at_ms: 0,
+                last_updated_at_ms: 0,
+            },
+        ]);
+
+        assert!(changed);
+        assert!(plan.steps().is_empty());
+    }
+
+    #[test]
+    fn clear_empties_existing_plan() {
+        let mut plan = Plan::default();
+        let _ = plan.replace(vec![PlanStep {
+            step: "step one".to_string(),
+            status: PlanStatus::InProgress,
+            created_at_ms: 0,
+            last_updated_at_ms: 0,
+        }]);
+
+        let changed = plan.clear();
+
+        assert!(changed);
+        assert!(plan.steps().is_empty());
     }
 }
 

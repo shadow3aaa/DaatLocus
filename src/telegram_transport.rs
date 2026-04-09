@@ -465,7 +465,7 @@ const TELEGRAM_BOT_COMMANDS: &[TelegramBotCommand] = &[
     },
     TelegramBotCommand {
         command: "clear",
-        description: "清空当前会话消息历史",
+        description: "清空当前会话消息历史与当前 plan",
     },
     TelegramBotCommand {
         command: "persona",

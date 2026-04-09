@@ -475,7 +475,7 @@ impl RuntimeConversation {
     async fn new(bootstrap_focus: Option<String>, bootstrap_messages: Vec<PromptMessage>) -> Self {
         let persistence_path = daat_locus_paths()
             .await
-            .state_file(RUNTIME_CONVERSATION_FILE_NAME);
+            .memory_file(RUNTIME_CONVERSATION_FILE_NAME);
         tokio::fs::read(persistence_path)
             .await
             .ok()
@@ -636,7 +636,7 @@ impl RuntimeConversation {
     async fn sync_to_disk(&self) {
         let persistence_path = daat_locus_paths()
             .await
-            .state_file(RUNTIME_CONVERSATION_FILE_NAME);
+            .memory_file(RUNTIME_CONVERSATION_FILE_NAME);
         let data = match postcard::to_allocvec(self) {
             Ok(data) => data,
             Err(err) => {
@@ -695,7 +695,7 @@ impl HindsightQueue {
     async fn new() -> Self {
         let persistence_path = daat_locus_paths()
             .await
-            .state_file(HINDSIGHT_QUEUE_FILE_NAME);
+            .memory_file(HINDSIGHT_QUEUE_FILE_NAME);
         tokio::fs::read(persistence_path)
             .await
             .ok()
@@ -735,7 +735,7 @@ impl HindsightQueue {
     async fn sync_to_disk(&self) {
         let persistence_path = daat_locus_paths()
             .await
-            .state_file(HINDSIGHT_QUEUE_FILE_NAME);
+            .memory_file(HINDSIGHT_QUEUE_FILE_NAME);
         let data = match postcard::to_allocvec(self) {
             Ok(data) => data,
             Err(err) => {

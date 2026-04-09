@@ -114,7 +114,7 @@
 当前实现要求：
 
 - 非空 plan 在“尚未全部完成”时，必须恰好有一个 `in_progress`
-- 全部完成时，不能再保留 `in_progress`
+- 全部完成时，plan 应直接清空，而不是保留一组已完成步骤
 - 每次 `update_plan` 都提交完整 plan，而不是增量 patch
 
 不要把 plan 用成：

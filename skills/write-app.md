@@ -1,20 +1,18 @@
 ---
 name: 编写第三方 App
 when_to_use:
-  - 需要创建一个新的第三方 app 包时。
-  - 需要修改已有 workspace app 的 Lua 逻辑、prompt 或 app skill 时。
-  - 需要让某类能力以 app 形式进入 Daat Locus，而不是做成 global skill 或内置 Rust app 时。
+  - 需要编写新的 app 来拓展你的能力时。
 ---
 
 # 编写第三方 App
 
 ## Purpose
 
-把能力做成 source-first 的第三方 App，放在 `~/daat-locus-workspace/apps/<app-name>/` 下，由 runtime 自动发现、加载和重载。
+交付一个能被当前 runtime 直接发现、加载、focus 和调用的第三方 app。
 
-## Directory Contract
+不要猜接口。优先从下面的精确模板开始，再按需求改小处。
 
-最小目录结构：
+## Start From This Exact Shape
 
 ```text
 ~/daat-locus-workspace/apps/<app-name>/
@@ -25,47 +23,116 @@ when_to_use:
     usage.md
     how_to_use.md
   skills/
-    <skill-name>.md
 ```
 
 规则：
 
 - `app_id` 直接等于文件夹名 `<app-name>`
-- `app.toml` v1 只负责指定 Lua 入口；默认是 `runtime/app.lua`
-- `prompt/usage.md` 负责 pre-focus 说明
-- `prompt/how_to_use.md` 负责 post-focus 操作说明
-- `skills/*.md` 是这个 app 自己的 app-scoped skills
+- `app.toml` 可以省略；如果保留，内容必须是顶层 `entry = "runtime/app.lua"`
+- `runtime/app.lua` 必须返回一个 Lua table
+- `prompt/usage.md` 和 `prompt/how_to_use.md` 必须存在
+- `skills/` 目录可以为空；只有真的需要 app-scoped skill 时再加 `*.md`
 
-## Workflow
+`app.toml` 的正确写法只有这一种：
 
-1. 先判断这件事是否真的该建模成 `App`
-2. 建立 app 目录并补齐最小文件集
-3. 在 `runtime/app.lua` 实现统一导出接口
-4. 用 `prompt/*.md` 写清用途和操作方式
-5. 只在需要时再添加 `skills/*.md`
-6. 跑测试；至少覆盖加载、工具调用和重载相关路径
+```toml
+entry = "runtime/app.lua"
+```
 
-## Keep It Minimal
+不要写成：
 
-- 先交付最小可加载 app，不要一开始就铺太多 skill、tool 或 notice
-- 只创建 runtime 真会读取的文件；不要额外堆 README、设计说明或占位目录
-- 如果某段 Lua 会反复复用，优先拆成 app 包内可 `require` 的纯 Lua 模块，而不是把 `app.lua` 写成一大块
+- `[entry]`
+- `lua = "..."`
+- 任何别的嵌套表
 
-## App Or Not
+## Minimal Starter
 
-优先做成 `App` 的条件：
+优先从这个最小骨架开始：
 
-- 需要先 `focus_app` 才合理操作
-- 可见信息天然局部，需要逐步探索
-- 操作带时间语义，例如等待、继续交互、会话持续存在
+```lua
+local app = {}
 
-如果只是跨任务通用方法，优先做 global skill，不要做 app。
+function app.init(ctx)
+  return { last_result = nil }
+end
 
-## Lua Contract
+function app.render_state(ctx, state)
+  return {
+    title = "Calculator",
+    lines = {
+      "kind=workspace_app",
+      "app_id=" .. ctx.app_id,
+      "last_result=" .. tostring(state.last_result),
+    },
+  }
+end
 
-`runtime/app.lua` 是唯一入口。不要把宿主协议拆成多个独立脚本入口。
+function app.list_tools(ctx, state)
+  return {
+    {
+      name = "calculate",
+      description = "Run a basic arithmetic operation",
+      input_schema = {
+        type = "object",
+        properties = {
+          a = { type = "number" },
+          b = { type = "number" },
+          op = { type = "string", enum = { "+", "-", "*", "/" } },
+        },
+        required = { "a", "b", "op" },
+      },
+      output_schema = {
+        type = "object",
+        properties = {
+          result = { type = "number" },
+        },
+        required = { "result" },
+      },
+    },
+  }
+end
 
-当前可实现的入口包括：
+function app.call_tool(ctx, state, name, args)
+  if name ~= "calculate" then
+    error("unknown tool: " .. tostring(name))
+  end
+
+  local result
+  if args.op == "+" then
+    result = args.a + args.b
+  elseif args.op == "-" then
+    result = args.a - args.b
+  elseif args.op == "*" then
+    result = args.a * args.b
+  elseif args.op == "/" then
+    result = args.a / args.b
+  else
+    error("unsupported operator: " .. tostring(args.op))
+  end
+
+  local next_state = {
+    last_result = result,
+  }
+
+  return {
+    summary = "calculation complete",
+    payload = {
+      result = result,
+    },
+    state = next_state,
+  }
+end
+
+return app
+```
+
+先让这个骨架能加载和调用，再继续加复杂逻辑。
+
+## Runtime Contract
+
+`runtime/app.lua` 是唯一入口。宿主只会读取这个模块返回的 table。
+
+当前可实现的字段：
 
 - `init(ctx)`
 - `render_state(ctx, state)`
@@ -75,33 +142,234 @@ when_to_use:
 - `on_blur(ctx, state)`
 - `poll_notices(ctx, state)`
 
-工具规则：
+可以缺省；只有实现了才会被调用。
 
-- `list_tools` 返回的 `input_schema` / `output_schema` 会被 runtime 校验
-- `call_tool` 返回的 `summary` 不能为空
-- tool 改状态后，要通过返回 `state` 回写，而不是依赖隐藏宿主状态
+`ctx` 当前可读字段：
+
+- `ctx.app_id`
+- `ctx.app_dir`
+- `ctx.state_dir`
+
+## Exact Return Shapes
+
+### `init(ctx)`
+
+返回初始 state。通常是一个 table。
+
+```lua
+function app.init(ctx)
+  return { count = 0 }
+end
+```
+
+### `render_state(ctx, state)`
+
+返回：
+
+```lua
+{
+  title = "My App",
+  lines = { "key=value", "other=value" },
+  state = optional_next_state,
+}
+```
+
+说明：
+
+- `title` 可省略；默认会退回 app id
+- `lines` 应该是字符串数组
+- 如果要顺手修正 state，可以返回 `state = ...`
+
+### `list_tools(ctx, state)`
+
+返回 tool 描述数组。每个 tool 至少包含：
+
+- `name`
+- `description`
+- `input_schema`
+- 可选 `output_schema`
+
+`input_schema` 和 `output_schema` 必须是 JSON-schema 子集，至少按这种形状写：
+
+```lua
+input_schema = {
+  type = "object",
+  properties = {
+    amount = { type = "integer" },
+  },
+  required = { "amount" },
+}
+```
+
+不要写成：
+
+```lua
+input_schema = { amount = "integer" }
+```
+
+这是错的。
+
+### `call_tool(ctx, state, name, args)`
+
+必须返回一个 object，正确字段是：
+
+- `summary`
+- `payload`
+- 可选 `model_content`
+- 可选 `ui_lines`
+- 可选 `state`
+- 可选 `turn_boundary`
+
+最小合法形状：
+
+```lua
+return {
+  summary = "done",
+  payload = {},
+  state = next_state,
+}
+```
+
+不要写成：
+
+```lua
+return {
+  result = 42,
+  summary = "done",
+}
+```
+
+这是错的。结果必须放进 `payload`，不是顶层随便起字段。
+
+### `poll_notices(ctx, state)`
+
+返回：
+
+```lua
+{
+  notices = { "notice text" },
+  state = optional_next_state,
+}
+```
+
+如果没有 notice，返回空数组或 `nil` 都可以。
+
+## Lua Features You Can Use
+
+当前 runtime 支持：
+
+- app 包内纯 Lua `require(...)`
+- 基本 `io`
+- 基本 `os`
+- `package.path` 指向 app 包内模块
+
+这意味着你可以：
+
+- 读取 `ctx.app_dir` 下的静态文件
+- 读写 `ctx.state_dir` 下自己的运行文件
+- 把复杂逻辑拆到 app 包内的纯 Lua 模块
+- 必要时调用外部二进制
+
+但不要把协议拆成多个宿主入口文件。宿主入口仍然只有 `runtime/app.lua`。
 
 ## Prompt And Skills
 
-`usage.md` 回答：
+`prompt/usage.md` 只回答两件事：
 
 - 这个 app 是干什么的
 - 什么时候值得 focus
 
-`how_to_use.md` 回答：
+`prompt/how_to_use.md` 只回答：
 
 - focus 之后怎么正确操作
 
-`skills/*.md` 只写更细的高阶规范，不要重复 `usage` 或 `how_to_use`。
+`skills/*.md` 只在真的需要更细的 app-scoped 规范时再加。不要把核心接口约定藏进 app skill。
 
-如果某个说明只是为了让 agent 更容易决定“这是不是该用这个 app”，优先放进 `usage.md`，不要埋进 app skill 正文里。
+## Common Failure Modes
 
-## Validation
+优先排查这些错误：
 
-提交前至少确认：
+1. `app.toml` 写成嵌套表，导致 app 根本无法加载
+2. `runtime/app.lua` 没有 `return app`
+3. `list_tools` 里的 schema 不是 JSON object schema
+4. `call_tool` 把结果写到 `result` 之类的顶层字段，而不是 `payload`
+5. tool 更新了 Lua 局部变量，却没把 `state = next_state` 返回给宿主
+6. 把“何时使用这个 app”的说明塞进 skill，而不是 `usage.md`
 
-- app 能被 runtime 发现并加载
-- `app.toml`、prompt、skills frontmatter 都合法
-- `runtime/app.lua` 可以通过加载
-- 如果声明了 tool，schema 合法且调用路径可运行
-- 如果用了 `poll_notices`，notice 能出现也能消失
+如果 app 连 focus 都做不到，先检查 1 和 2，不要先怀疑 tool 逻辑。
+
+## Common Errors
+
+优先按现象排查，不要一上来就怀疑整个 runtime。
+
+### 无法 focus app
+
+先检查这些点：
+
+- app 是否放在 `~/daat-locus-workspace/apps/<app-name>/`
+- `app.toml` 是否写成了顶层 `entry = "runtime/app.lua"`，而不是 `[entry]` 或别的嵌套表
+- `runtime/app.lua` 是否真的存在
+- `runtime/app.lua` 是否 `return` 了一个 Lua table
+
+### app 能加载，但没有任何 tool
+
+先检查这些点：
+
+- 是否实现了 `list_tools(ctx, state)`
+- `list_tools` 是否返回数组，而不是单个 object
+- 每个 tool 是否都带 `name`、`description`、`input_schema`
+- `input_schema` 是否写成了 JSON object schema，而不是 `{ amount = "integer" }` 这种简写
+
+### tool 调用时报 schema 错误
+
+先检查这些点：
+
+- `input_schema` / `output_schema` 是否带 `type`
+- object schema 是否把字段放在 `properties` 里
+- 必填项是否放在 `required = { ... }`
+- `enum` 是否写成数组
+
+### tool 调用成功，但结果丢了
+
+先检查这些点：
+
+- `call_tool` 是否返回了 `summary`
+- 结果是否放进 `payload`
+- 如果 tool 改了状态，是否返回了 `state = next_state`
+
+不要把结果写成：
+
+```lua
+return {
+  result = 42,
+  summary = "done",
+}
+```
+
+应该写成：
+
+```lua
+return {
+  summary = "done",
+  payload = { result = 42 },
+  state = next_state,
+}
+```
+
+### tool 调用了，但前景状态没变化
+
+先检查这些点：
+
+- 是否实现了 `render_state(ctx, state)`
+- `render_state` 是否真的把关键 state 渲染到 `lines`
+- tool 更新后是否把新 state 返回给宿主
+
+### notice 不出现或不消失
+
+先检查这些点：
+
+- 是否实现了 `poll_notices(ctx, state)`
+- 返回值是否是 `{ notices = {...}, state = ... }`
+- notice 被处理后，下一次 `poll_notices` 是否会返回空 notices
+
+不要在第一版里堆太多 tools、skills 或 notices。先交付一个最小可加载、可 focus、可调用的 app。

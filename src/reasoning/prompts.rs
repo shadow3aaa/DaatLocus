@@ -28,9 +28,9 @@ pub const APPS_UNIT_HOW: &str = "使用 `focus_app` 切换到目标 app。";
 
 pub const SKILLS_UNIT_WHAT: &str = "每个 skill 都是一份针对特定类任务的执行规范说明。";
 
-pub const SKILLS_UNIT_WHEN: &str = "任务开始执行时或执行过程中，只要出现与任务相关或有帮助的 skill，就应先读取它，以确定你接下来如何完成任务的说明。";
+pub const SKILLS_UNIT_WHEN: &str = "任务开始执行时或执行过程中，只要快照里出现与任务相关或有帮助的 skill，在继续执行前就必须先调用 `read_skill` 读取它；不要凭猜测直接开始实现。";
 
-pub const SKILLS_UNIT_HOW: &str = "使用 `read_skill(id)` 读取 skill 的完整说明。global skills 会始终出现在快照里；focused app 的 skills 只会在该 app 位于前景时出现。";
+pub const SKILLS_UNIT_HOW: &str = "使用 `read_skill(id)` 读取 skill 的完整说明。global skills 会始终出现在快照里；focused app 的 skills 只会在该 app 位于前景时出现。只要某个可见 skill 与当前任务相关，第一步就应是读取它，而不是先写代码或先调用别的实现工具。";
 
 pub const MEMORIES_UNIT_WHAT: &str = "自动召回记忆（对应 `<recall_memories>` 标记）是系统基于当前任务上下文提供的相关长期记忆摘录；`deep_recall` 是显式触发的更深层回忆。";
 
@@ -43,7 +43,7 @@ pub const PLAN_UNIT_WHAT: &str =
 
 pub const PLAN_UNIT_WHEN: &str = "当任务是非平凡、多步骤、需要持续跟踪推进时，应维护 plan，使当前进展、下一步要做什么，以及整体剩余工作始终清晰。";
 
-pub const PLAN_UNIT_HOW: &str = "使用 `update_plan` 持续维护 plan。每次调用时，都应提交当前完整的 plan，而不是只提交某一个步骤的增量修改。plan 中的步骤应是简短的一句话，尽量控制在 5 到 7 个词，且必须具体、可执行、可验证。只要还有未完成步骤，plan 中就应恰好有一个步骤是 `in_progress`；已完成步骤标记为 `completed`，后续步骤标记为 `pending`。当全部完成时，应确保整个 plan 已反映最终完成状态。";
+pub const PLAN_UNIT_HOW: &str = "使用 `update_plan` 持续维护 plan。每次调用时，都应提交当前完整的 plan，而不是只提交某一个步骤的增量修改。plan 中的步骤应是简短的一句话，尽量控制在 5 到 7 个词，且必须具体、可执行、可验证。只要还有未完成步骤，plan 中就应恰好有一个步骤是 `in_progress`；已完成步骤标记为 `completed`，后续步骤标记为 `pending`。当全部完成时，应将 plan 清空，而不是保留一组已完成步骤。";
 
 pub const HISTORY_COMPACTION_PROMPT: &str = r#"你正在执行一个上下文检查点压缩任务。
 请为另一个将继续当前线程的模型生成一段 handoff summary。
