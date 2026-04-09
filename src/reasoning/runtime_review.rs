@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use tokio::{fs, fs::OpenOptions, io::AsyncWriteExt};
 
 use crate::{
-    reasoning::{episode::EpisodeActionRecord, runtime::PromptMessage},
     daat_locus_paths::daat_locus_paths,
+    reasoning::{episode::EpisodeActionRecord, runtime::PromptMessage},
 };
 
 const RUNTIME_REVIEWS_FILE_NAME: &str = "runtime_reviews.jsonl";
@@ -188,7 +188,6 @@ fn last_runtime_turn_action(turn: &RuntimeTurnRecord) -> &EpisodeActionRecord {
         .last()
         .expect("runtime review turn should contain at least one action")
 }
-
 
 fn runtime_review_io_lock() -> &'static tokio::sync::Mutex<()> {
     RUNTIME_REVIEW_IO_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))

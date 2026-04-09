@@ -5,27 +5,30 @@ mod config;
 mod context;
 mod context_budget;
 mod core;
+mod daat_locus_paths;
 mod dashboard;
 mod events;
 mod hindsight;
 mod logging;
 mod memory;
 mod pending_work;
+mod plan;
 mod providers;
 mod reasoning;
 mod runtime_context;
 mod runtime_tools;
 mod sandbox;
+mod skill;
 mod snapshot;
-mod daat_locus_paths;
 mod system_info;
 mod telegram_acl;
-mod telegram_transport_state;
 mod telegram_transport;
+mod telegram_transport_state;
 mod terminal_app;
 mod terminal_process;
-mod plan;
 mod tool_ui;
+mod workspace_app;
+mod workspace_paths;
 
 use std::{
     env,
@@ -41,6 +44,7 @@ use crate::{
     config::load_config,
     context::Context,
     context_budget::{approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded},
+    daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
     dashboard::{
         DashboardActivityEvent, DashboardControlCommand, DashboardState,
         activity_cell_from_tool_ui_event, activity_cells_from_tool_call_ui_event,
@@ -56,6 +60,7 @@ use crate::{
     },
     memory::{Memory, RuntimeTurnDraft},
     pending_work::{PendingWork, PendingWorkQueue},
+    plan::Plan,
     providers::OpenAIClient,
     reasoning::{
         compiled::{
@@ -85,14 +90,21 @@ use crate::{
         render_tool_call_ui_event, summarize_action_from_tool_call,
     },
     sandbox::RuntimeSandboxPolicy,
+    skill::{
+        WorkspaceGlobalSkillsInvalidation, bootstrap_global_skills,
+        start_workspace_global_skills_watcher,
+    },
     snapshot::Snapshot,
-    daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
     telegram_acl::TelegramAclHandle,
-    telegram_transport_state::TelegramTransportState,
     telegram_transport::{TelegramLiveDraftClient, TelegramTransport},
+    telegram_transport_state::TelegramTransportState,
     terminal_app::TerminalApp,
-    plan::Plan,
     tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
+    workspace_app::{
+        WorkspaceAppInvalidation, WorkspaceAppRegistry, bootstrap_workspace_apps,
+        start_workspace_app_watcher,
+    },
+    workspace_paths::{resolve_runtime_workspace_dir, workspace_apps_dir, workspace_skills_dir},
 };
 use chrono::Utc;
 use clap::{Parser, Subcommand};
@@ -105,6 +117,11 @@ const AUTO_SLEEP_IDLE_THRESHOLD: Duration = Duration::from_secs(300);
 const AUTO_SLEEP_MIN_INTERVAL: Duration = Duration::from_secs(300);
 const FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD: usize = 128;
 const RUNTIME_EVENT_CLAIM_BATCH_SIZE: usize = 1;
+
+struct RuntimeAppsBootstrap {
+    apps: Vec<Box<dyn crate::app::App>>,
+    workspace_registry: WorkspaceAppRegistry,
+}
 
 fn emit_startup_progress(message: impl AsRef<str>) {
     let message = message.as_ref();
@@ -348,17 +365,9 @@ async fn async_main(cli: Cli) -> Result<()> {
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
     let telegram_acl = TelegramAclHandle::load().await;
-    let browser = BrowserApp::new();
-    let terminal = TerminalApp::new();
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
     bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
-    let apps = AppManager::new(
-        Some(AppId::Terminal),
-        vec![Box::new(browser), Box::new(terminal)],
-    )
-    .await
-    .unwrap();
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
@@ -373,6 +382,30 @@ async fn async_main(cli: Cli) -> Result<()> {
                 execution_cwd.display()
             )
         })?;
+    tokio::fs::create_dir_all(workspace_apps_dir(&execution_cwd))
+        .await
+        .map_err(|err| {
+            miette!(
+                "failed to create workspace apps directory {}: {err}",
+                workspace_apps_dir(&execution_cwd).display()
+            )
+        })?;
+    tokio::fs::create_dir_all(workspace_skills_dir(&execution_cwd))
+        .await
+        .map_err(|err| {
+            miette!(
+                "failed to create workspace skills directory {}: {err}",
+                workspace_skills_dir(&execution_cwd).display()
+            )
+        })?;
+    let runtime_apps = build_runtime_apps(&execution_cwd);
+    let global_skills = bootstrap_global_skills(&execution_cwd);
+    for error in &global_skills.errors {
+        tracing::warn!("{error}");
+    }
+    let apps = AppManager::new(Some(AppId::terminal()), runtime_apps.apps)
+        .await
+        .unwrap();
     let sandbox_policy = sandbox_policy_for_runtime(&execution_cwd).await;
     let mut context = Context {
         llm: Box::new(client),
@@ -386,6 +419,8 @@ async fn async_main(cli: Cli) -> Result<()> {
         events,
         pending_work,
         apps,
+        global_skills: global_skills.registry,
+        workspace_apps: runtime_apps.workspace_registry,
         telegram: telegram_handle,
         compiled_prompts,
         execution_cwd,
@@ -423,6 +458,44 @@ async fn async_main(cli: Cli) -> Result<()> {
         tokio::sync::mpsc::unbounded_channel::<DashboardControlCommand>();
     let (sleep_result_tx, mut sleep_result_rx) =
         tokio::sync::mpsc::unbounded_channel::<SleepTaskResult>();
+    let (workspace_app_invalidation_tx, mut workspace_app_invalidation_rx) =
+        tokio::sync::mpsc::unbounded_channel::<WorkspaceAppInvalidation>();
+    let (workspace_skill_invalidation_tx, mut workspace_skill_invalidation_rx) =
+        tokio::sync::mpsc::unbounded_channel::<WorkspaceGlobalSkillsInvalidation>();
+    let workspace_app_watcher = match start_workspace_app_watcher(
+        workspace_apps_dir(&context.execution_cwd),
+        workspace_app_invalidation_tx,
+    ) {
+        Ok(watcher) => {
+            tracing::info!(
+                backend = watcher.backend_name(),
+                root = %workspace_apps_dir(&context.execution_cwd).display(),
+                "workspace app watcher started",
+            );
+            Some(watcher)
+        }
+        Err(err) => {
+            tracing::warn!("failed to start workspace app watcher: {err:?}");
+            None
+        }
+    };
+    let workspace_skill_watcher = match start_workspace_global_skills_watcher(
+        workspace_skills_dir(&context.execution_cwd),
+        workspace_skill_invalidation_tx,
+    ) {
+        Ok(watcher) => {
+            tracing::info!(
+                backend = watcher.backend_name(),
+                root = %workspace_skills_dir(&context.execution_cwd).display(),
+                "workspace skills watcher started",
+            );
+            Some(watcher)
+        }
+        Err(err) => {
+            tracing::warn!("failed to start workspace skills watcher: {err:?}");
+            None
+        }
+    };
     let telegram_transport =
         if context.config.telegram.enabled && context.config.telegram.has_real_credentials() {
             Some(tokio::spawn(
@@ -452,6 +525,8 @@ async fn async_main(cli: Cli) -> Result<()> {
                     &sleep_result_tx,
                     &mut sleep_running,
                     &mut sleep_status,
+                    &mut workspace_app_invalidation_rx,
+                    &mut workspace_skill_invalidation_rx,
                 ) => {}
                 Some(command) = dashboard_control_rx.recv() => {
                     handle_dashboard_control_command(
@@ -477,6 +552,8 @@ async fn async_main(cli: Cli) -> Result<()> {
     run_tui_dashboard(&mut rx, telegram_acl, dashboard_control_tx)
         .await
         .unwrap();
+    drop(workspace_app_watcher);
+    drop(workspace_skill_watcher);
     if let Some(handle) = telegram_transport {
         handle.abort();
     }
@@ -867,10 +944,18 @@ async fn sandbox_policy_for_runtime(execution_cwd: &Path) -> RuntimeSandboxPolic
     )
 }
 
-pub(crate) fn resolve_runtime_workspace_dir() -> Result<PathBuf> {
-    let home = env::home_dir()
-        .ok_or_else(|| miette!("failed to determine home directory for workspace"))?;
-    Ok(home.join("daat-locus-workspace"))
+fn build_runtime_apps(execution_cwd: &Path) -> RuntimeAppsBootstrap {
+    let mut apps: Vec<Box<dyn crate::app::App>> =
+        vec![Box::new(BrowserApp::new()), Box::new(TerminalApp::new())];
+    let bootstrap = bootstrap_workspace_apps(execution_cwd);
+    for error in &bootstrap.errors {
+        tracing::warn!("{error}");
+    }
+    apps.extend(bootstrap.apps);
+    RuntimeAppsBootstrap {
+        apps,
+        workspace_registry: bootstrap.registry,
+    }
 }
 
 pub(crate) async fn build_eval_context_with_compiled(
@@ -885,21 +970,30 @@ pub(crate) async fn build_eval_context_with_compiled(
             execution_cwd.display()
         )
     });
+    std::fs::create_dir_all(workspace_apps_dir(&execution_cwd)).unwrap_or_else(|err| {
+        panic!(
+            "failed to create workspace apps directory {}: {err}",
+            workspace_apps_dir(&execution_cwd).display()
+        )
+    });
+    std::fs::create_dir_all(workspace_skills_dir(&execution_cwd)).unwrap_or_else(|err| {
+        panic!(
+            "failed to create workspace skills directory {}: {err}",
+            workspace_skills_dir(&execution_cwd).display()
+        )
+    });
     let sandbox_policy = sandbox_policy_for_runtime(&execution_cwd).await;
     let memory = Memory::new().await;
     let plan = Plan::new().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
-    let browser = BrowserApp::new();
-    let terminal = TerminalApp::new();
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
-    let apps = AppManager::new(
-        Some(AppId::Terminal),
-        vec![Box::new(browser), Box::new(terminal)],
-    )
-    .await
-    .unwrap();
+    let runtime_apps = build_runtime_apps(&execution_cwd);
+    let global_skills = bootstrap_global_skills(&execution_cwd);
+    let apps = AppManager::new(Some(AppId::terminal()), runtime_apps.apps)
+        .await
+        .unwrap();
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
@@ -920,6 +1014,8 @@ pub(crate) async fn build_eval_context_with_compiled(
         events,
         pending_work,
         apps,
+        global_skills: global_skills.registry,
+        workspace_apps: runtime_apps.workspace_registry,
         telegram: telegram_handle,
         compiled_prompts,
         execution_cwd,
@@ -1012,6 +1108,114 @@ fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> S
             "no"
         }
     )
+}
+
+fn drain_workspace_app_invalidations(
+    workspace_apps: &mut WorkspaceAppRegistry,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<WorkspaceAppInvalidation>,
+) {
+    loop {
+        match rx.try_recv() {
+            Ok(invalidation) => workspace_apps.record_invalidation(invalidation),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+fn drain_workspace_skill_invalidations(
+    global_skills: &mut crate::skill::GlobalSkillRegistry,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<WorkspaceGlobalSkillsInvalidation>,
+) {
+    loop {
+        match rx.try_recv() {
+            Ok(invalidation) => global_skills.record_invalidation(invalidation),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+async fn sync_workspace_apps_from_invalidation(context: &mut Context) {
+    let report = match context
+        .workspace_apps
+        .sync_dirty_apps(&mut context.apps)
+        .await
+    {
+        Ok(report) => report,
+        Err(err) => {
+            tracing::error!("failed to sync workspace apps from invalidation: {err:?}");
+            return;
+        }
+    };
+
+    if report.is_empty() {
+        return;
+    }
+
+    for removed in &report.removed {
+        context.active_app_notices.remove(removed);
+    }
+    if !report.added.is_empty() {
+        tracing::info!(
+            apps = report
+                .added
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            "loaded workspace apps from source changes",
+        );
+    }
+    if !report.reloaded.is_empty() {
+        tracing::info!(
+            apps = report
+                .reloaded
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            "reloaded workspace apps from source changes",
+        );
+    }
+    if !report.removed.is_empty() {
+        tracing::info!(
+            apps = report
+                .removed
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            "unloaded workspace apps removed from source tree",
+        );
+    }
+    for error in report.errors {
+        tracing::warn!("{error}");
+    }
+}
+
+fn sync_global_skills_from_invalidation(context: &mut Context) {
+    let report = match context.global_skills.sync_dirty_workspace_skills() {
+        Ok(report) => report,
+        Err(err) => {
+            tracing::error!("failed to sync workspace skills from invalidation: {err:?}");
+            return;
+        }
+    };
+
+    if report.is_empty() {
+        return;
+    }
+
+    if report.changed {
+        tracing::info!(
+            root = %context.global_skills.workspace_dir().display(),
+            "reloaded workspace global skills from source changes",
+        );
+    }
+    for error in report.errors {
+        tracing::warn!("{error}");
+    }
 }
 
 pub(crate) struct DaatLocusHomeOverride {
@@ -1274,7 +1478,7 @@ pub(crate) async fn execute_agent_loop_step(
         .iter()
         .filter_map(|input| match input {
             ClaimedRuntimeInput::Event(_) => None,
-            ClaimedRuntimeInput::AppNotice { app, .. } => Some(*app),
+            ClaimedRuntimeInput::AppNotice { app, .. } => Some(app.clone()),
         })
         .collect::<Vec<_>>();
     let claimed_input_messages = claimed_inputs
@@ -1398,7 +1602,7 @@ pub(crate) async fn execute_agent_loop_step(
             let tool_call_ui_events = calls
                 .iter()
                 .map(|call| {
-                    render_tool_call_ui_event(call).unwrap_or_else(|_| {
+                    render_tool_call_ui_event(context, call).unwrap_or_else(|_| {
                         if call.name == "apply_patch" {
                             ToolCallUiEvent::error(
                                 "apply_patch".to_string(),
@@ -1451,9 +1655,11 @@ pub(crate) async fn execute_agent_loop_step(
             append_committed_activity_cells(tx, committed_cells);
             for (call, call_ui_event) in calls.iter().zip(tool_call_ui_events.iter()) {
                 let action_record =
-                    summarize_action_from_tool_call(call).unwrap_or_else(|_| EpisodeActionRecord {
-                        kind: "tool_call".to_string(),
-                        summary: call.name.clone(),
+                    summarize_action_from_tool_call(context, call).unwrap_or_else(|_| {
+                        EpisodeActionRecord {
+                            kind: "tool_call".to_string(),
+                            summary: call.name.clone(),
+                        }
                     });
                 actions.push(action_record);
                 if let Some(tx) = tx {
@@ -1623,7 +1829,7 @@ pub(crate) async fn execute_agent_loop_step(
         context.install_live_assistant_progress(None);
     }
     finalize_claimed_runtime_events(context, &claimed_event_ids, &output);
-    finalize_claimed_runtime_app_notices(context, &claimed_app_notices, &output);
+    finalize_claimed_runtime_app_notices(context, &claimed_app_notices, &output).await;
     let history_messages = runtime_step.history_messages().to_vec();
     if !runtime_step.is_history_empty() {
         record_runtime_history_messages(context, runtime_step.into_turn_draft()).await;
@@ -1673,26 +1879,9 @@ fn claim_pending_runtime_inputs(context: &Context, max_events: usize) -> Vec<Cla
                 }
             }
             PendingWork::AppNotice { app, reason } => {
-                let render = context
-                    .apps
-                    .state_renders()
-                    .into_iter()
-                    .find(|(app_id, _)| *app_id == app)
-                    .map(|(_, render)| render);
-                let Some(render) = render else {
+                let Some(current_reason) = context.apps.notice_reason(&app) else {
                     if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
-                        app,
-                        reason: String::new(),
-                    }) {
-                        tracing::error!(
-                            "failed to consume missing app notice driver for {app}: {err:?}"
-                        );
-                    }
-                    continue;
-                };
-                if !app_render_requires_attention(app, &render) {
-                    if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
-                        app,
+                        app: app.clone(),
                         reason: String::new(),
                     }) {
                         tracing::error!(
@@ -1700,7 +1889,12 @@ fn claim_pending_runtime_inputs(context: &Context, max_events: usize) -> Vec<Cla
                         );
                     }
                     continue;
-                }
+                };
+                let reason = if current_reason.trim().is_empty() {
+                    reason
+                } else {
+                    current_reason
+                };
                 claimed_inputs.push(ClaimedRuntimeInput::AppNotice { app, reason });
             }
         }
@@ -1777,8 +1971,8 @@ fn finalize_claimed_runtime_events(
     }
 }
 
-fn finalize_claimed_runtime_app_notices(
-    context: &Context,
+async fn finalize_claimed_runtime_app_notices(
+    context: &mut Context,
     apps: &[AppId],
     output: &AgentLoopStepOutput,
 ) {
@@ -1786,16 +1980,14 @@ fn finalize_claimed_runtime_app_notices(
         return;
     }
 
-    let renders = context.apps.state_renders();
     let mut released = Vec::new();
     for app in apps {
-        let still_noticed = renders
-            .iter()
-            .find(|(app_id, _)| app_id == app)
-            .map(|(app_id, render)| app_render_requires_attention(*app_id, render))
-            .unwrap_or(false);
+        if let Err(err) = context.apps.refresh_notice_for(app).await {
+            tracing::error!("failed to refresh app notice for {app}: {err:?}");
+        }
+        let still_noticed = context.apps.notice_reason(app).is_some();
         let work = PendingWork::AppNotice {
-            app: *app,
+            app: app.clone(),
             reason: String::new(),
         };
         if still_noticed {
@@ -2280,14 +2472,14 @@ fn summarize_hindsight_query_value(value: &str, max_chars: usize) -> String {
 }
 
 fn summarize_terminal_for_hindsight(context: &Context) -> Option<String> {
-    if context.apps.focused() != Some(crate::app::AppId::Terminal) {
+    if context.apps.focused() != Some(crate::app::AppId::terminal()) {
         return None;
     }
     let (_, render) = context
         .apps
         .state_renders()
         .into_iter()
-        .find(|(app_id, _)| *app_id == crate::app::AppId::Terminal)?;
+        .find(|(app_id, _)| app_id == &crate::app::AppId::terminal())?;
     Some(render.lines.join("\n"))
 }
 
@@ -2297,8 +2489,24 @@ async fn daat_locus_loop(
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
     sleep_running: &mut bool,
     sleep_status: &mut SleepDashboardStatus,
+    workspace_app_invalidation_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+        WorkspaceAppInvalidation,
+    >,
+    workspace_skill_invalidation_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+        WorkspaceGlobalSkillsInvalidation,
+    >,
 ) {
     let cycle_started_at = std::time::Instant::now();
+    drain_workspace_app_invalidations(&mut context.workspace_apps, workspace_app_invalidation_rx);
+    drain_workspace_skill_invalidations(
+        &mut context.global_skills,
+        workspace_skill_invalidation_rx,
+    );
+    sync_workspace_apps_from_invalidation(context).await;
+    sync_global_skills_from_invalidation(context);
+    if let Err(err) = context.apps.refresh_all_notices().await {
+        tracing::error!("failed to refresh app notices: {err:?}");
+    }
     refresh_sleep_backlogs(sleep_status).await;
     let forced_sleep_status =
         maybe_start_forced_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await;
@@ -2410,14 +2618,11 @@ fn sync_driver_frontier_from_sources(context: &Context) {
 }
 
 fn enqueue_app_notice_work(context: &mut Context) {
-    let renders = context.apps.state_renders();
-    for (app_id, render) in renders {
-        let noticed = app_render_requires_attention(app_id, &render);
-        if noticed {
-            if context.active_app_notices.insert(app_id) {
-                let reason = summarize_app_notice_reason(app_id, &render);
+    for app_id in context.apps.app_ids() {
+        if let Some(reason) = context.apps.notice_reason(&app_id) {
+            if context.active_app_notices.insert(app_id.clone()) {
                 if let Err(err) = context.pending_work.enqueue(PendingWork::AppNotice {
-                    app: app_id,
+                    app: app_id.clone(),
                     reason,
                 }) {
                     tracing::error!("failed to enqueue app notice work for {app_id}: {err:?}");
@@ -2427,35 +2632,6 @@ fn enqueue_app_notice_work(context: &mut Context) {
             context.active_app_notices.remove(&app_id);
         }
     }
-}
-
-fn summarize_app_notice_reason(app_id: AppId, render: &crate::app::AppStateRender) -> String {
-    match app_id {
-        AppId::Browser => "browser requires attention".to_string(),
-        AppId::Terminal => {
-            let unread_sessions = numeric_field(&render.lines, "sessions_with_unread_output");
-            if unread_sessions > 0 {
-                format!("{unread_sessions} terminal session(s) have unread output")
-            } else {
-                "terminal requires attention".to_string()
-            }
-        }
-    }
-}
-
-fn app_render_requires_attention(app_id: AppId, render: &crate::app::AppStateRender) -> bool {
-    match app_id {
-        AppId::Browser => false,
-        AppId::Terminal => numeric_field(&render.lines, "sessions_with_unread_output") > 0,
-    }
-}
-
-fn numeric_field(lines: &[String], key: &str) -> usize {
-    lines
-        .iter()
-        .find_map(|line| line.strip_prefix(&format!("{key}=")))
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0)
 }
 
 async fn maybe_start_forced_sleep(
@@ -2811,14 +2987,18 @@ fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String, St
         .state_renders()
         .into_iter()
         .map(|(app_id, state)| {
-            let usage = context.apps.usage(app_id).unwrap_or(crate::app::AppUsage {
+            let usage = context.apps.usage(&app_id).unwrap_or(crate::app::AppUsage {
                 description: "No usage available.".to_string(),
                 when_to_focus: Vec::new(),
+                body_markdown: None,
             });
             let how_to_use = context
                 .apps
-                .how_to_use(app_id)
-                .unwrap_or(crate::app::AppHowToUse { lines: Vec::new() });
+                .how_to_use(&app_id)
+                .unwrap_or(crate::app::AppHowToUse {
+                    lines: Vec::new(),
+                    body_markdown: None,
+                });
             let mut lines = Vec::new();
             let key = app_id.to_string().to_ascii_lowercase();
             lines.push(format!("App Status: {}", state.title));
@@ -2830,18 +3010,20 @@ fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String, St
             lines.push(String::new());
             lines.push("[usage]".to_string());
             lines.push(crate::reasoning::prompts::build_app_usage_prompt(
-                app_id, &usage,
+                app_id.clone(),
+                &usage,
             ));
             lines.push(String::new());
             lines.push("[how_to_use]".to_string());
-            if focused == Some(app_id) {
+            if focused.as_ref() == Some(&app_id) {
                 lines.push(crate::reasoning::prompts::build_app_how_to_use_prompt(
-                    app_id,
+                    app_id.clone(),
                     &how_to_use,
                 ));
             } else {
                 lines.push(crate::reasoning::prompts::build_app_pre_focus_note_prompt(
-                    app_id, &state,
+                    app_id.clone(),
+                    &state,
                 ));
             }
             (key, lines.join("\n"))
@@ -3149,7 +3331,6 @@ fn render_telegram_status_for_dashboard(context: &Context) -> String {
 fn render_activity_for_dashboard(context: &Context) -> Vec<crate::dashboard::ActivityCell> {
     render_activity_from_messages(context.memory.runtime_conversation_messages())
 }
-
 
 pub async fn get_daat_locus_home() -> PathBuf {
     daat_locus_paths().await.root().to_path_buf()

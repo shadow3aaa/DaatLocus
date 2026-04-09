@@ -5,10 +5,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{
-    app::AppId,
-    daat_locus_paths::daat_locus_paths,
-};
+use crate::{app::AppId, daat_locus_paths::daat_locus_paths};
 
 const PENDING_WORK_FILE_NAME: &str = "pending_work_queue";
 
@@ -88,7 +85,8 @@ impl PendingWorkQueue {
     pub fn empty() -> Self {
         Self {
             inner: Arc::new(Mutex::new(PendingWorkQueueInner {
-                path: crate::daat_locus_paths::daat_locus_paths_sync().state_file(PENDING_WORK_FILE_NAME),
+                path: crate::daat_locus_paths::daat_locus_paths_sync()
+                    .state_file(PENDING_WORK_FILE_NAME),
                 state: PersistedPendingWorkQueue::default(),
             })),
         }
@@ -252,7 +250,7 @@ mod tests {
         let event_id = Uuid::new_v4();
         queue
             .enqueue(PendingWork::AppNotice {
-                app: AppId::Terminal,
+                app: AppId::terminal(),
                 reason: "terminal changed".to_string(),
             })
             .expect("enqueue app notice");

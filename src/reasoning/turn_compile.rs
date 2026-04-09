@@ -24,6 +24,7 @@ use crate::{
     AgentLoopStepExecution, DaatLocusHomeOverride, build_eval_context_with_compiled,
     config::Config,
     context::Context,
+    daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync},
     events::TelegramIncomingEvent,
     execute_agent_loop_step,
     pending_work::PendingWork,
@@ -47,7 +48,9 @@ use crate::{
         programs::runtime_turn_trace_judge::{
             RuntimeTurnTraceJudgeOutput, RuntimeTurnTraceJudgeProgram,
         },
-        prompt_assembler::{baseline_runtime_contract_doc, runtime_system_prompt_doc_from_additions},
+        prompt_assembler::{
+            baseline_runtime_contract_doc, runtime_system_prompt_doc_from_additions,
+        },
         prompt_renderer::LlmPromptRenderer,
         render::openai_tools::OpenAIToolRenderer,
         runtime::{
@@ -58,7 +61,6 @@ use crate::{
         runtime_review::{RuntimeReviewSpan, RuntimeTurnRecord},
         trace::TraceOrigin,
     },
-    daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync},
 };
 
 const MAX_COLD_START_PROMPT_COMPILE_ROUNDS: usize = 8;
@@ -840,7 +842,9 @@ impl TurnCompileEngine {
 }
 
 async fn prompt_persona_path() -> PathBuf {
-    daat_locus_paths().await.config_file(PROMPT_PERSONA_FILE_NAME)
+    daat_locus_paths()
+        .await
+        .config_file(PROMPT_PERSONA_FILE_NAME)
 }
 
 fn prompt_persona_path_sync() -> PathBuf {

@@ -5,10 +5,10 @@ use crate::reasoning::{
     examples::ProgramExample,
     ir::PromptIR,
     optimizer::PromptTuningConfig,
-    prompt_doc::{PromptBlock, PromptDocument, PromptNode, PromptStateDoc},
-    prompt_text::{PromptTextBuilder, render_bullet_list},
     program::Program,
+    prompt_doc::{PromptBlock, PromptDocument, PromptNode, PromptStateDoc},
     prompt_renderer::LlmPromptRenderer,
+    prompt_text::{PromptTextBuilder, render_bullet_list},
     runtime::{PromptMessage, PromptRequest},
     signature::Signature,
 };

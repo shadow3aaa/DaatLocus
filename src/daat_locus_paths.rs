@@ -184,14 +184,8 @@ fn migrate_legacy_layout_sync(paths: &DaatLocusPaths) {
         paths.root.join("hindsight_queue"),
         paths.state_file("hindsight_queue"),
     );
-    migrate_legacy_path_sync(
-        paths.root.join("todo_board"),
-        paths.state_file("plan"),
-    );
-    migrate_legacy_path_sync(
-        paths.root.join("plan"),
-        paths.state_file("plan"),
-    );
+    migrate_legacy_path_sync(paths.root.join("todo_board"), paths.state_file("plan"));
+    migrate_legacy_path_sync(paths.root.join("plan"), paths.state_file("plan"));
     migrate_legacy_path_sync(paths.root.join("events"), paths.state_file("events"));
     migrate_legacy_path_sync(
         paths.root.join("pending_work_queue"),

@@ -9,11 +9,9 @@ use serde::{Deserialize, Serialize};
 use viewpoint_core::{AriaSnapshot, Browser, BrowserContext, DocumentLoadState, Page};
 
 use crate::{
-    app::{
-        App, AppHowToUse, AppId, AppSkillContent, AppSkillSummary, AppStateRender, AppToolScope,
-        AppUsage,
-    },
+    app::{App, AppHowToUse, AppId, AppStateRender, AppToolScope, AppUsage},
     daat_locus_paths::daat_locus_paths_sync,
+    skill::{SkillContent, SkillSummary},
 };
 
 const BROWSER_USAGE_PURPOSE: &str =
@@ -350,7 +348,6 @@ impl BrowserApp {
         self.refresh_pages().await?;
         Ok(BrowserActionResult { page: state })
     }
-
 }
 
 fn is_interactive_role(role: &str) -> bool {
@@ -688,7 +685,7 @@ fn summarize_state_text(text: &str) -> String {
 #[async_trait]
 impl App for BrowserApp {
     fn id(&self) -> AppId {
-        AppId::Browser
+        AppId::browser()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -724,6 +721,7 @@ impl App for BrowserApp {
                 .iter()
                 .map(|line| (*line).to_string())
                 .collect(),
+            body_markdown: None,
         }
     }
 
@@ -733,12 +731,13 @@ impl App for BrowserApp {
                 .iter()
                 .map(|line| (*line).to_string())
                 .collect(),
+            body_markdown: None,
         }
     }
 
-    fn skills(&self) -> Vec<AppSkillSummary> {
+    fn skills(&self) -> Vec<SkillSummary> {
         vec![
-            AppSkillSummary {
+            SkillSummary {
                 id: BROWSER_SKILL_DEEP_RESEARCH_ID.to_string(),
                 name: "深度调查".to_string(),
                 when_to_use: vec![
@@ -747,7 +746,7 @@ impl App for BrowserApp {
                     "任务要求你综合搜索、阅读、交叉比对、逐步收敛结论时。".to_string(),
                 ],
             },
-            AppSkillSummary {
+            SkillSummary {
                 id: BROWSER_SKILL_SOURCE_VERIFICATION_ID.to_string(),
                 name: "来源查证".to_string(),
                 when_to_use: vec![
@@ -755,7 +754,7 @@ impl App for BrowserApp {
                     "需要避免只凭搜索结果摘要就下结论时。".to_string(),
                 ],
             },
-            AppSkillSummary {
+            SkillSummary {
                 id: BROWSER_SKILL_ARTICLE_READING_ID.to_string(),
                 name: "长文阅读与提炼".to_string(),
                 when_to_use: vec![
@@ -767,7 +766,7 @@ impl App for BrowserApp {
         ]
     }
 
-    fn read_skill(&self, id: &str) -> Result<AppSkillContent> {
+    fn read_skill(&self, id: &str) -> Result<SkillContent> {
         let (title, body) = match id {
             BROWSER_SKILL_DEEP_RESEARCH_ID => (
                 "Browser Skill: 深度调查",
@@ -784,7 +783,7 @@ impl App for BrowserApp {
             _ => return Err(miette!("unknown Browser skill `{id}`")),
         };
 
-        Ok(AppSkillContent {
+        Ok(SkillContent {
             id: id.to_string(),
             title: title.to_string(),
             body: body.to_string(),

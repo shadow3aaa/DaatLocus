@@ -9,9 +9,7 @@ use crate::{
     },
     reasoning::{
         prompt_renderer::LlmPromptRenderer,
-        prompts::{
-            HISTORY_COMPACTION_PROMPT, HISTORY_COMPACTION_SUMMARY_PREFIX,
-        },
+        prompts::{HISTORY_COMPACTION_PROMPT, HISTORY_COMPACTION_SUMMARY_PREFIX},
         runtime::{
             AgentMessage, AgentToolSpec, PromptMessage, PromptRequest, PromptRole,
             summarize_assistant_tool_call_protocol,
@@ -39,8 +37,14 @@ pub fn build_runtime_request_envelope(
     RuntimeRequestEnvelope::from_world_snapshot(system_messages, snapshot_text)
 }
 
-pub fn build_runtime_snapshot_text(context: &Context, snapshot: &crate::snapshot::Snapshot) -> String {
-    LlmPromptRenderer::render_document_with_root(&context.runtime_snapshot_doc(snapshot), Some("runtime_snapshot"))
+pub fn build_runtime_snapshot_text(
+    context: &Context,
+    snapshot: &crate::snapshot::Snapshot,
+) -> String {
+    LlmPromptRenderer::render_document_with_root(
+        &context.runtime_snapshot_doc(snapshot),
+        Some("runtime_snapshot"),
+    )
 }
 
 pub fn runtime_request_budget_limits(context: &Context) -> RequestBudgetLimits {

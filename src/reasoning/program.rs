@@ -1,9 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
 
-use super::{
-    examples::ProgramExample, optimizer::PromptTuningConfig, signature::Signature,
-};
+use super::{examples::ProgramExample, optimizer::PromptTuningConfig, signature::Signature};
 
 pub trait Program {
     type Output: DeserializeOwned + Serialize + JsonSchema + Clone;

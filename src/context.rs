@@ -18,18 +18,18 @@ use crate::{
     hindsight::{HindsightClient, HindsightRetainHandle},
     memory::Memory,
     pending_work::PendingWorkQueue,
+    plan::Plan,
+    reasoning::runtime::PromptMemoryContext,
     reasoning::{
         compiled::CompiledPromptStore,
-        prompt_assembler::{
-            SnapshotAssembler, SystemPromptAssembler,
-        },
+        prompt_assembler::{SnapshotAssembler, SystemPromptAssembler},
         prompt_doc::PromptDocument,
     },
-    reasoning::runtime::PromptMemoryContext,
     sandbox::RuntimeSandboxPolicy,
+    skill::{GlobalSkillRegistry, SkillContent},
     snapshot::Snapshot,
     telegram_transport_state::TelegramTransportStateHandle,
-    plan::Plan,
+    workspace_app::WorkspaceAppRegistry,
 };
 
 pub struct Context {
@@ -44,6 +44,8 @@ pub struct Context {
     pub events: EventStore,
     pub pending_work: PendingWorkQueue,
     pub apps: AppManager,
+    pub global_skills: GlobalSkillRegistry,
+    pub workspace_apps: WorkspaceAppRegistry,
     pub telegram: TelegramTransportStateHandle,
     pub compiled_prompts: CompiledPromptStore,
     pub execution_cwd: PathBuf,
@@ -69,6 +71,24 @@ impl Context {
     pub fn resolve_tool_path(&self, path: &Path, base: Option<&Path>) -> PathBuf {
         self.sandbox_policy
             .resolve_path(path, base.or(Some(&self.execution_cwd)))
+    }
+
+    pub fn read_skill(&self, id: &str) -> Result<SkillContent, miette::Report> {
+        if let Some(skill) = self.apps.read_focused_skill(id)? {
+            return Ok(skill);
+        }
+        if let Some(skill) = self.global_skills.read_skill(id) {
+            return Ok(skill);
+        }
+        if let Some(focused) = self.apps.focused() {
+            Err(miette::miette!(
+                "skill `{id}` is not available as a global skill or on focused app {focused}"
+            ))
+        } else {
+            Err(miette::miette!(
+                "skill `{id}` is not available as a global skill; if you meant an app skill, focus the matching app first"
+            ))
+        }
     }
 
     pub fn install_live_assistant_progress(

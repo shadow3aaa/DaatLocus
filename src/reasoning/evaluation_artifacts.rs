@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::reasoning::examples::ExampleField;
 use crate::daat_locus_paths::daat_locus_paths;
+use crate::reasoning::examples::ExampleField;
 
 const EVALUATIONS_DIR_NAME: &str = "evaluations";
 const FAILURE_PATTERNS_DIR: &str = "failure_patterns";
