@@ -89,7 +89,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<ReadSkillArgs>(
             "read_skill",
-            "读取一个可见 skill 的完整说明正文。global skills 会始终出现在快照里；focused app 的 skills 只在该 app 位于前景时出现。",
+            "读取一个可见 skill 的完整说明正文。当快照里出现与当前任务相关的 skill 时，应先调用这个工具再继续执行。global skills 会始终出现在快照里；focused app 的 skills 只在该 app 位于前景时出现。",
             None,
             summarize_read_skill_tool,
             render_read_skill_call_ui,
@@ -294,17 +294,24 @@ fn execute_update_plan_tool<'a>(
         let args: UpdatePlanArgs = parse_tool_args(call)?;
         let plan = build_plan_from_args(args)?;
         let changed = context.plan.replace(plan.steps().to_vec());
-        let summary = if changed {
-            format!("updated plan with {} steps", plan.steps().len())
+        let effective_steps = context.plan.steps();
+        let summary = if effective_steps.is_empty() {
+            if changed {
+                "cleared plan after completion".to_string()
+            } else {
+                "plan already clear".to_string()
+            }
+        } else if changed {
+            format!("updated plan with {} steps", effective_steps.len())
         } else {
-            format!("plan unchanged with {} steps", plan.steps().len())
+            format!("plan unchanged with {} steps", effective_steps.len())
         };
         Ok(ToolExecutionResult::new(
             summary.clone(),
             json!({
-                "plan": plan.steps(),
+                "plan": effective_steps,
             }),
-            ToolUiEvent::work(summary, render_plan_ui_lines(&plan)),
+            ToolUiEvent::work(summary, render_plan_ui_lines(&context.plan)),
         ))
     })
 }

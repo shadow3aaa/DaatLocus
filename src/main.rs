@@ -761,6 +761,7 @@ async fn run_memory_reset() -> Result<()> {
     println!("[memory-reset] cleared: runtime_conversation, hindsight_queue");
     println!("[memory-reset] cleared: reasoning_traces.jsonl, runtime_reviews.jsonl");
     println!("[memory-reset] cleared: hindsight bank");
+    println!("[memory-reset] cleared: current plan");
     println!("[memory-reset] preserved: config/, state/, artifacts/, logs/");
 
     Ok(())
@@ -774,8 +775,9 @@ async fn clear_memory_state(home: &PathBuf) -> Result<()> {
     hindsight.delete_bank().await?;
     let paths = DaatLocusPaths::from_root(home.clone());
     clear_files(&[
-        paths.state_file("runtime_conversation"),
-        paths.state_file("hindsight_queue"),
+        paths.memory_file("runtime_conversation"),
+        paths.memory_file("hindsight_queue"),
+        paths.memory_file("plan"),
         paths.journal_file("reasoning_traces.jsonl"),
         paths.journal_file("runtime_reviews.jsonl"),
     ])
@@ -794,7 +796,7 @@ async fn run_state_reset() -> Result<()> {
     } else {
         println!("[state-reset] cleared: {}", cleared.join(", "));
     }
-    println!("[state-reset] preserved: config/, memory state, artifacts/, logs/");
+    println!("[state-reset] preserved: config/, memory/, artifacts/, logs/");
 
     Ok(())
 }
@@ -802,7 +804,6 @@ async fn run_state_reset() -> Result<()> {
 async fn clear_state_files(home: &PathBuf) -> Result<Vec<String>> {
     let paths = DaatLocusPaths::from_root(home.clone());
     let files = [
-        "plan",
         "events",
         "pending_work_queue",
         "telegram_transport_state",
@@ -2699,6 +2700,7 @@ async fn handle_dashboard_control_command(
         }
         DashboardControlCommand::ClearConversation => {
             let retain_plan = context.memory.clear_runtime_conversation().await;
+            let _ = context.plan.clear();
             for job in retain_plan.jobs {
                 if let Err(err) = context.hindsight_retain.enqueue(job) {
                     tracing::error!("failed to enqueue hindsight retain job during clear: {err:?}");
@@ -2717,7 +2719,7 @@ async fn handle_dashboard_control_command(
             set_runtime_status(
                 Some(tx),
                 RuntimeStatusLevel::Info,
-                "已将当前会话转入 hindsight，并清空当前会话消息历史",
+                "已将当前会话转入 hindsight，并清空当前会话消息历史与当前 plan",
             );
             sync_dashboard_state(context, tx, sleep_status, None);
         }
