@@ -68,12 +68,19 @@ impl TelegramTransport {
             self.commands_registered = true;
         }
         self.flush_outbox().await?;
-        let updates = self.get_updates().await?;
-        for update in updates {
-            self.offset = Some(update.update_id + 1);
-            self.handle_update(update).await;
+        tokio::select! {
+            updates = self.get_updates() => {
+                let updates = updates?;
+                for update in updates {
+                    self.offset = Some(update.update_id + 1);
+                    self.handle_update(update).await;
+                }
+                self.flush_outbox().await?;
+            }
+            _ = self.handle.wait_for_outbound() => {
+                self.flush_outbox().await?;
+            }
         }
-        self.flush_outbox().await?;
         Ok(())
     }
 
