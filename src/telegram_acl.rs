@@ -8,7 +8,7 @@ use miette::{Result, miette};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::spinova_paths::spinova_paths;
+use crate::daat_locus_paths::daat_locus_paths;
 
 const TELEGRAM_ACL_FILE_NAME: &str = "telegram_acl.json";
 
@@ -60,7 +60,7 @@ pub enum AccessDecision {
 
 impl TelegramAclHandle {
     pub async fn load() -> Self {
-        let path = spinova_paths().await.config_file(TELEGRAM_ACL_FILE_NAME);
+        let path = daat_locus_paths().await.config_file(TELEGRAM_ACL_FILE_NAME);
         let state = tokio::fs::read(&path)
             .await
             .ok()

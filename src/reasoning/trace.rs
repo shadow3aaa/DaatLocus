@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::sync::OnceLock;
 use tokio::{fs, fs::OpenOptions, io::AsyncWriteExt};
 
-use crate::spinova_paths::spinova_paths;
+use crate::daat_locus_paths::daat_locus_paths;
 
 use super::{runtime::PromptRequest, signature::Signature};
 
@@ -46,7 +46,7 @@ pub struct RuntimeTraceBatch {
 
 pub async fn append_program_trace(record: ProgramTraceRecord) {
     let trace_io_guard = trace_io_lock().lock().await;
-    let path = spinova_paths().await.journal_file(TRACE_FILE_NAME);
+    let path = daat_locus_paths().await.journal_file(TRACE_FILE_NAME);
     let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
@@ -92,7 +92,7 @@ impl ProgramTraceRecord {
 
 pub async fn load_runtime_trace_batch() -> miette::Result<RuntimeTraceBatch> {
     let trace_io_guard = trace_io_lock().lock().await;
-    let trace_path = spinova_paths().await.journal_file(TRACE_FILE_NAME);
+    let trace_path = daat_locus_paths().await.journal_file(TRACE_FILE_NAME);
     let bytes = match fs::read(&trace_path).await {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -146,7 +146,7 @@ pub async fn unread_runtime_trace_count() -> miette::Result<usize> {
 
 pub async fn compact_runtime_trace_file(consumed_offset: u64) -> miette::Result<()> {
     let trace_io_guard = trace_io_lock().lock().await;
-    let trace_path = spinova_paths().await.journal_file(TRACE_FILE_NAME);
+    let trace_path = daat_locus_paths().await.journal_file(TRACE_FILE_NAME);
     let bytes = match fs::read(&trace_path).await {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {

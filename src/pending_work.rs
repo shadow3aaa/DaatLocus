@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     app::AppId,
-    spinova_paths::spinova_paths,
+    daat_locus_paths::daat_locus_paths,
 };
 
 const PENDING_WORK_FILE_NAME: &str = "pending_work_queue";
@@ -68,7 +68,7 @@ impl PendingWork {
 
 impl PendingWorkQueue {
     pub async fn new() -> Self {
-        let path = spinova_paths().await.state_file(PENDING_WORK_FILE_NAME);
+        let path = daat_locus_paths().await.state_file(PENDING_WORK_FILE_NAME);
         let mut state = tokio::fs::read(&path)
             .await
             .ok()
@@ -88,7 +88,7 @@ impl PendingWorkQueue {
     pub fn empty() -> Self {
         Self {
             inner: Arc::new(Mutex::new(PendingWorkQueueInner {
-                path: spinova_paths_sync().state_file(PENDING_WORK_FILE_NAME),
+                path: crate::daat_locus_paths::daat_locus_paths_sync().state_file(PENDING_WORK_FILE_NAME),
                 state: PersistedPendingWorkQueue::default(),
             })),
         }

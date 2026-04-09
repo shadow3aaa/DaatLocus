@@ -17,7 +17,7 @@ mod runtime_context;
 mod runtime_tools;
 mod sandbox;
 mod snapshot;
-mod spinova_paths;
+mod daat_locus_paths;
 mod system_info;
 mod telegram_acl;
 mod telegram_transport_state;
@@ -86,7 +86,7 @@ use crate::{
     },
     sandbox::RuntimeSandboxPolicy,
     snapshot::Snapshot,
-    spinova_paths::{SpinovaPaths, spinova_paths},
+    daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
     telegram_acl::TelegramAclHandle,
     telegram_transport_state::TelegramTransportState,
     telegram_transport::{TelegramLiveDraftClient, TelegramTransport},
@@ -155,14 +155,14 @@ impl TelegramLiveDraftSession {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "spinova")]
+#[command(name = "daat-locus")]
 struct Cli {
     #[command(subcommand)]
-    command: Option<SpinovaCommand>,
+    command: Option<DaatLocusCommand>,
 }
 
 #[derive(Debug, Subcommand)]
-enum SpinovaCommand {
+enum DaatLocusCommand {
     Reset {
         #[command(subcommand)]
         target: ResetTarget,
@@ -216,31 +216,31 @@ fn main() {
 
 async fn async_main(cli: Cli) -> Result<()> {
     match cli.command.as_ref() {
-        Some(SpinovaCommand::Reset {
+        Some(DaatLocusCommand::Reset {
             target: ResetTarget::Complite,
         }) => {
             run_complite_reset().await?;
             return Ok(());
         }
-        Some(SpinovaCommand::Reset {
+        Some(DaatLocusCommand::Reset {
             target: ResetTarget::State,
         }) => {
             run_state_reset().await?;
             return Ok(());
         }
-        Some(SpinovaCommand::Reset {
+        Some(DaatLocusCommand::Reset {
             target: ResetTarget::Memory,
         }) => {
             run_memory_reset().await?;
             return Ok(());
         }
-        Some(SpinovaCommand::Reset {
+        Some(DaatLocusCommand::Reset {
             target: ResetTarget::All,
         }) => {
             run_reset_all().await?;
             return Ok(());
         }
-        Some(SpinovaCommand::Setup {
+        Some(DaatLocusCommand::Setup {
             target: SetupTarget::BrowserRuntime,
         }) => {
             run_browser_runtime_setup().await?;
@@ -260,7 +260,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     };
 
     match cli.command.as_ref() {
-        Some(SpinovaCommand::Inspect {
+        Some(DaatLocusCommand::Inspect {
             target: InspectTarget::SystemPrompt,
         }) => {
             let context = build_eval_context_for_inspect(config).await;
@@ -268,7 +268,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             context.shutdown().await;
             return Ok(());
         }
-        Some(SpinovaCommand::Inspect {
+        Some(DaatLocusCommand::Inspect {
             target: InspectTarget::Snapshot,
         }) => {
             let mut context = build_eval_context_for_inspect(config).await;
@@ -280,7 +280,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         _ => {}
     }
 
-    if matches!(cli.command, Some(SpinovaCommand::Sleep)) {
+    if matches!(cli.command, Some(DaatLocusCommand::Sleep)) {
         let mut context = build_eval_context(config).await;
         match run_sleep(&mut context).await {
             Ok(summary) => {
@@ -446,7 +446,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         let mut sleep_status = SleepDashboardStatus::default();
         loop {
             tokio::select! {
-                _ = spinova_loop(
+                _ = daat_locus_loop(
                     &mut context,
                     &tx,
                     &sleep_result_tx,
@@ -537,7 +537,7 @@ async fn run_browser_runtime_setup() -> Result<()> {
     const MANIFEST_URL: &str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
     let platform = browser_runtime_platform()?;
-    let paths = spinova_paths().await;
+    let paths = daat_locus_paths().await;
     let runtime_dir = paths.browser_runtime_dir();
     let executable_path = paths.browser_executable_path();
 
@@ -674,7 +674,7 @@ async fn run_browser_runtime_setup() -> Result<()> {
 }
 
 async fn run_memory_reset() -> Result<()> {
-    let home = get_spinova_home().await;
+    let home = get_daat_locus_home().await;
     clear_memory_state(&home).await?;
 
     println!(
@@ -695,7 +695,7 @@ async fn clear_memory_state(home: &PathBuf) -> Result<()> {
         .map_err(|err| miette!("failed to load config for memory-reset: {err}"))?;
     let hindsight = HindsightClient::connect(&config.hindsight).await?;
     hindsight.delete_bank().await?;
-    let paths = SpinovaPaths::from_root(home.clone());
+    let paths = DaatLocusPaths::from_root(home.clone());
     clear_files(&[
         paths.state_file("runtime_conversation"),
         paths.state_file("hindsight_queue"),
@@ -708,7 +708,7 @@ async fn clear_memory_state(home: &PathBuf) -> Result<()> {
 }
 
 async fn run_state_reset() -> Result<()> {
-    let home = get_spinova_home().await;
+    let home = get_daat_locus_home().await;
     let cleared = clear_state_files(&home).await?;
 
     println!("[state-reset] reset runtime state under {}", home.display());
@@ -723,7 +723,7 @@ async fn run_state_reset() -> Result<()> {
 }
 
 async fn clear_state_files(home: &PathBuf) -> Result<Vec<String>> {
-    let paths = SpinovaPaths::from_root(home.clone());
+    let paths = DaatLocusPaths::from_root(home.clone());
     let files = [
         "plan",
         "events",
@@ -734,7 +734,7 @@ async fn clear_state_files(home: &PathBuf) -> Result<Vec<String>> {
 }
 
 async fn run_complite_reset() -> Result<()> {
-    let home = get_spinova_home().await;
+    let home = get_daat_locus_home().await;
     let cleared = clear_compiled_artifacts(&home).await?;
 
     println!(
@@ -753,7 +753,7 @@ async fn run_complite_reset() -> Result<()> {
 
 async fn clear_compiled_artifacts(home: &PathBuf) -> Result<Vec<String>> {
     let mut cleared = Vec::new();
-    let paths = SpinovaPaths::from_root(home.clone());
+    let paths = DaatLocusPaths::from_root(home.clone());
 
     for dir_name in [COMPILED_DIR_NAME, "evaluations"] {
         let path = paths.artifact_dir(dir_name);
@@ -769,7 +769,7 @@ async fn clear_compiled_artifacts(home: &PathBuf) -> Result<Vec<String>> {
 }
 
 async fn run_reset_all() -> Result<()> {
-    let home = get_spinova_home().await;
+    let home = get_daat_locus_home().await;
     let memory_cleared = clear_memory_state(&home).await;
     let state_cleared = clear_state_files(&home).await?;
     let artifact_cleared = clear_compiled_artifacts(&home).await?;
@@ -805,7 +805,7 @@ async fn run_reset_all() -> Result<()> {
 
 async fn clear_log_dirs(home: &PathBuf) -> Result<Vec<String>> {
     let mut cleared = Vec::new();
-    let paths = SpinovaPaths::from_root(home.clone());
+    let paths = DaatLocusPaths::from_root(home.clone());
     let path = paths.logs_dir();
     if path.exists() {
         tokio::fs::remove_dir_all(&path)
@@ -853,16 +853,16 @@ async fn build_eval_context_for_inspect(config: crate::config::Config) -> Contex
 }
 
 async fn sandbox_policy_for_runtime(execution_cwd: &Path) -> RuntimeSandboxPolicy {
-    let spinova_home = get_spinova_home().await;
+    let daat_locus_home = get_daat_locus_home().await;
     let runtime_dir =
         env::current_dir().unwrap_or_else(|err| panic!("failed to determine runtime dir: {err}"));
     let executable_dir = env::current_exe()
         .ok()
         .and_then(|current_exe| current_exe.parent().map(Path::to_path_buf));
-    RuntimeSandboxPolicy::protect_spinova_runtime(
+    RuntimeSandboxPolicy::protect_daat_locus_runtime(
         &runtime_dir,
         execution_cwd,
-        &spinova_home,
+        &daat_locus_home,
         executable_dir.as_deref(),
     )
 }
@@ -870,7 +870,7 @@ async fn sandbox_policy_for_runtime(execution_cwd: &Path) -> RuntimeSandboxPolic
 pub(crate) fn resolve_runtime_workspace_dir() -> Result<PathBuf> {
     let home = env::home_dir()
         .ok_or_else(|| miette!("failed to determine home directory for workspace"))?;
-    Ok(home.join("spinova-workspace"))
+    Ok(home.join("daat-locus-workspace"))
 }
 
 pub(crate) async fn build_eval_context_with_compiled(
@@ -1014,28 +1014,28 @@ fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> S
     )
 }
 
-pub(crate) struct SpinovaHomeOverride {
+pub(crate) struct DaatLocusHomeOverride {
     previous: Option<String>,
 }
 
-impl SpinovaHomeOverride {
+impl DaatLocusHomeOverride {
     pub(crate) fn set(path: PathBuf) -> Self {
-        let previous = env::var("SPINOVA_HOME").ok();
+        let previous = env::var("DAAT_LOCUS_HOME").ok();
         unsafe {
-            env::set_var("SPINOVA_HOME", path);
+            env::set_var("DAAT_LOCUS_HOME", path);
         }
         Self { previous }
     }
 }
 
-impl Drop for SpinovaHomeOverride {
+impl Drop for DaatLocusHomeOverride {
     fn drop(&mut self) {
         match &self.previous {
             Some(previous) => unsafe {
-                env::set_var("SPINOVA_HOME", previous);
+                env::set_var("DAAT_LOCUS_HOME", previous);
             },
             None => unsafe {
-                env::remove_var("SPINOVA_HOME");
+                env::remove_var("DAAT_LOCUS_HOME");
             },
         }
     }
@@ -1195,6 +1195,15 @@ fn maybe_start_telegram_live_draft_session(
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut latest_text: Option<String> = None;
         let mut last_sent = String::new();
+        let initial_draft_text = format_telegram_live_draft_text("");
+        if let Err(err) = client
+            .send_message_draft(chat_id, draft_id, &initial_draft_text)
+            .await
+        {
+            tracing::warn!("telegram initial live draft send failed: {err:?}");
+        } else {
+            last_sent = initial_draft_text;
+        }
         loop {
             tokio::select! {
                 maybe_text = rx.recv() => {
@@ -2282,7 +2291,7 @@ fn summarize_terminal_for_hindsight(context: &Context) -> Option<String> {
     Some(render.lines.join("\n"))
 }
 
-async fn spinova_loop(
+async fn daat_locus_loop(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
@@ -3142,6 +3151,6 @@ fn render_activity_for_dashboard(context: &Context) -> Vec<crate::dashboard::Act
 }
 
 
-pub async fn get_spinova_home() -> PathBuf {
-    spinova_paths().await.root().to_path_buf()
+pub async fn get_daat_locus_home() -> PathBuf {
+    daat_locus_paths().await.root().to_path_buf()
 }

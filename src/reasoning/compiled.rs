@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::fs;
 
-use crate::spinova_paths::spinova_paths;
+use crate::daat_locus_paths::daat_locus_paths;
 
 use super::{
     examples::{ExampleField, ProgramExample},
@@ -422,5 +422,5 @@ async fn save_compiled_runtime_system_prompt_by_key(
 }
 
 async fn compiled_dir_named(dir_name: &str) -> PathBuf {
-    spinova_paths().await.artifact_dir(dir_name)
+    daat_locus_paths().await.artifact_dir(dir_name)
 }

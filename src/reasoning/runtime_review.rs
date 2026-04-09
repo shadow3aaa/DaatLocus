@@ -5,7 +5,7 @@ use tokio::{fs, fs::OpenOptions, io::AsyncWriteExt};
 
 use crate::{
     reasoning::{episode::EpisodeActionRecord, runtime::PromptMessage},
-    spinova_paths::spinova_paths,
+    daat_locus_paths::daat_locus_paths,
 };
 
 const RUNTIME_REVIEWS_FILE_NAME: &str = "runtime_reviews.jsonl";
@@ -50,7 +50,7 @@ impl RuntimeReviewSpan {
 
 pub async fn append_runtime_turn_record(turn: &RuntimeTurnRecord) {
     let runtime_review_io_guard = runtime_review_io_lock().lock().await;
-    let path = spinova_paths()
+    let path = daat_locus_paths()
         .await
         .journal_file(RUNTIME_REVIEWS_FILE_NAME);
     let Ok(mut file) = OpenOptions::new()
@@ -73,7 +73,7 @@ pub async fn append_runtime_turn_record(turn: &RuntimeTurnRecord) {
 
 pub async fn load_runtime_review_batch() -> miette::Result<RuntimeReviewBatch> {
     let runtime_review_io_guard = runtime_review_io_lock().lock().await;
-    let path = spinova_paths()
+    let path = daat_locus_paths()
         .await
         .journal_file(RUNTIME_REVIEWS_FILE_NAME);
     let bytes = match fs::read(&path).await {
@@ -128,7 +128,7 @@ pub async fn unread_runtime_review_count() -> miette::Result<usize> {
 
 pub async fn compact_runtime_review_file(consumed_offset: u64) -> miette::Result<()> {
     let runtime_review_io_guard = runtime_review_io_lock().lock().await;
-    let path = spinova_paths()
+    let path = daat_locus_paths()
         .await
         .journal_file(RUNTIME_REVIEWS_FILE_NAME);
     let bytes = match fs::read(&path).await {

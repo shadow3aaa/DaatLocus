@@ -12,7 +12,7 @@ use crate::{
         AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult,
         render_assistant_tool_call_protocol_dump,
     },
-    spinova_paths::spinova_paths,
+    daat_locus_paths::daat_locus_paths,
 };
 
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
@@ -26,7 +26,7 @@ pub enum RuntimeStatusLevel {
 }
 
 pub async fn init_logging() {
-    let log_dir = spinova_paths().await.logs_dir();
+    let log_dir = daat_locus_paths().await.logs_dir();
     if let Err(err) = tokio::fs::create_dir_all(&log_dir).await {
         eprintln!(
             "failed to create log directory {}: {err}",
@@ -35,12 +35,13 @@ pub async fn init_logging() {
         return;
     }
 
-    let file_appender = tracing_appender::rolling::never(log_dir, "spinova.log");
+    let file_appender = tracing_appender::rolling::never(log_dir, "daat-locus.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     let _ = LOG_GUARD.set(guard);
 
     let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("spinova=info,warn"));
+        EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("daat_locus=info,warn"));
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
@@ -103,7 +104,7 @@ pub async fn write_current_turn_response_error_dump(error: &str, attempt: usize,
 }
 
 async fn write_current_turn_log_file(file_name: &str, body: String) {
-    let paths = spinova_paths().await;
+    let paths = daat_locus_paths().await;
     let log_dir = paths.logs_dir();
     if let Err(err) = tokio::fs::create_dir_all(&log_dir).await {
         tracing::warn!(

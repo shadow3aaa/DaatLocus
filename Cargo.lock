@@ -685,6 +685,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "daat-locus"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clap",
+ "crossterm",
+ "futures-util",
+ "miette",
+ "parking_lot",
+ "postcard",
+ "ratatui",
+ "reqwest 0.13.2",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2",
+ "sysinfo",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uuid",
+ "viewpoint-core",
+ "zip 4.6.1",
+]
+
+[[package]]
 name = "darling"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3062,37 +3093,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 dependencies = [
  "lock_api",
-]
-
-[[package]]
-name = "spinova"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "clap",
- "crossterm",
- "futures-util",
- "miette",
- "parking_lot",
- "postcard",
- "ratatui",
- "reqwest 0.13.2",
- "schemars",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "sha2",
- "sysinfo",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "uuid",
- "viewpoint-core",
- "zip 4.6.1",
 ]
 
 [[package]]

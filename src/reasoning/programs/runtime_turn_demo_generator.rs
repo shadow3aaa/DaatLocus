@@ -21,7 +21,7 @@ const RUNTIME_TURN_DEMO_GENERATOR_SYSTEM_PROMPT: &str = r#"你现在负责根据
 - demos 应整体覆盖多个不同的风险轴，例如：是否需要工具查证、是否容易过早终止、是否要求自主决策、是否依赖当前世界状态、是否需要保持语言与风格一致。
 - 不要生成重复场景，不要只改写同一句话。
 - 不要把 persona 规则原样改写成 demo；demo 必须像真实用户会发来的消息。
-- 优先生成贴近 Spinova 真实高风险场景的 demo，例如：代码库理解、本地状态查询、待办判断、事件判断、应用/系统状态判断。
+- 优先生成贴近 Daat Locus 真实高风险场景的 demo，例如：代码库理解、本地状态查询、待办判断、事件判断、应用/系统状态判断。
 - 避免生成过于宽泛又缺少可验证终局的场景；每个 demo 都必须能明确判断 agent 这一轮做得对还是错。
 - `expected_behavior` 与 `judge_focus` 要强调“停止就意味着交付”的契约。
 - 为每个 demo 选择一个主要的 `tests` 检验目标，并让 `rules` 成为横切支撑约束，而不是各自孤立成题。
@@ -150,7 +150,7 @@ impl RuntimeTurnDemoGeneratorProgram {
             "每个 demo 都应包含清晰、可验证的正确收尾条件；避免那种即使 agent 做得很浅也难以判错的宽泛请求。",
         );
         ir.push_instruction(
-            "tool_backed_fact_answer 和 long_request_terminal 应尽量锚定 Spinova 当前真实可见的世界状态，如本地代码库、待办、事件、应用或系统状态。",
+            "tool_backed_fact_answer 和 long_request_terminal 应尽量锚定 Daat Locus 当前真实可见的世界状态，如本地代码库、待办、事件、应用或系统状态。",
         );
         ir.push_instruction(
             "对于依赖仓库事实的 demo，只能引用 workspace facts 中明确出现的文件、目录、模块或系统对象；不要编造 main.py、虚构待办、假应用或未给出的系统状态。",

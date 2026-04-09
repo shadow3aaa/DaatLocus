@@ -1,7 +1,7 @@
 Telegram 不是应用，而是事件通道。
-# Spinova Agent Guidelines
+# Daat Locus Agent Guidelines
 
-This document defines the core ACI boundary for Spinova. The goal is to keep agent-facing interfaces aligned with the actual strengths of LLMs and avoid pushing deterministic navigation work onto the model.
+This document defines the core ACI boundary for Daat Locus. The goal is to keep agent-facing interfaces aligned with the actual strengths of LLMs and avoid pushing deterministic navigation work onto the model.
 
 ## Core Principle
 
@@ -27,7 +27,7 @@ An `App` exists to answer:
 
 An `App` should carry app state, not agent state.
 
-Conceptually, an `App` is an app inside the Spinova agent OS.
+Conceptually, an `App` is an app inside the Daat Locus agent OS.
 
 Each app should expose three distinct model-facing layers:
 

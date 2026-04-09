@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::spinova_paths::spinova_paths;
+use crate::daat_locus_paths::daat_locus_paths;
 
 const PLAN_FILE_NAME: &str = "plan";
 const LEGACY_PLAN_FILE_NAME: &str = "todo_board";
@@ -42,7 +42,7 @@ impl Default for PlanStatus {
 
 impl Plan {
     pub async fn new() -> Self {
-        let paths = spinova_paths().await;
+        let paths = daat_locus_paths().await;
         let primary_path = paths.state_file(PLAN_FILE_NAME);
         let legacy_path = paths.state_file(LEGACY_PLAN_FILE_NAME);
         let Some(data) = tokio::fs::read(&primary_path)
@@ -92,7 +92,7 @@ impl Plan {
     }
 
     pub async fn shutdown(self) {
-        let persistence_path = spinova_paths().await.state_file(PLAN_FILE_NAME);
+        let persistence_path = daat_locus_paths().await.state_file(PLAN_FILE_NAME);
         let data = postcard::to_allocvec(&self).unwrap();
         tokio::fs::write(persistence_path, data).await.unwrap();
     }

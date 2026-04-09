@@ -13,7 +13,7 @@ use ratatui::{
 use crate::{
     app::AppId,
     reasoning::runtime::{PromptMessage, PromptRole},
-    spinova_paths::spinova_paths_sync,
+    daat_locus_paths::daat_locus_paths_sync,
     telegram_acl::TelegramAclHandle,
     tool_ui::{
         PatchFileUiData, PatchUiData, TelegramUiAction, TelegramUiData, TerminalUiAction,
@@ -730,7 +730,7 @@ impl DashboardCommand for PersonaCommand {
         raw: &str,
         _: &DashboardCommandContext<'_>,
     ) -> DashboardCommandResult {
-        let path = spinova_paths_sync().config_file("prompt_persona.toml");
+        let path = daat_locus_paths_sync().config_file("prompt_persona.toml");
         let text = match std::fs::read_to_string(&path) {
             Ok(content) => content,
             Err(err) => format!("failed to read {}: {err}", path.display()),
