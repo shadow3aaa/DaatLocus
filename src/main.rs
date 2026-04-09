@@ -406,7 +406,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     let apps = AppManager::new(Some(AppId::terminal()), runtime_apps.apps)
         .await
         .unwrap();
-    let sandbox_policy = sandbox_policy_for_runtime(&execution_cwd).await;
+    let sandbox_policy = sandbox_policy_for_runtime().await;
     let mut context = Context {
         llm: Box::new(client),
         judge_llm: Box::new(judge_client),
@@ -930,19 +930,9 @@ async fn build_eval_context_for_inspect(config: crate::config::Config) -> Contex
     build_eval_context_with_compiled(config, compiled_prompts).await
 }
 
-async fn sandbox_policy_for_runtime(execution_cwd: &Path) -> RuntimeSandboxPolicy {
+async fn sandbox_policy_for_runtime() -> RuntimeSandboxPolicy {
     let daat_locus_home = get_daat_locus_home().await;
-    let runtime_dir =
-        env::current_dir().unwrap_or_else(|err| panic!("failed to determine runtime dir: {err}"));
-    let executable_dir = env::current_exe()
-        .ok()
-        .and_then(|current_exe| current_exe.parent().map(Path::to_path_buf));
-    RuntimeSandboxPolicy::protect_daat_locus_runtime(
-        &runtime_dir,
-        execution_cwd,
-        &daat_locus_home,
-        executable_dir.as_deref(),
-    )
+    RuntimeSandboxPolicy::protect_daat_locus_runtime(&daat_locus_home)
 }
 
 fn build_runtime_apps(execution_cwd: &Path) -> RuntimeAppsBootstrap {
@@ -983,7 +973,7 @@ pub(crate) async fn build_eval_context_with_compiled(
             workspace_skills_dir(&execution_cwd).display()
         )
     });
-    let sandbox_policy = sandbox_policy_for_runtime(&execution_cwd).await;
+    let sandbox_policy = sandbox_policy_for_runtime().await;
     let memory = Memory::new().await;
     let plan = Plan::new().await;
     let events = EventStore::new().await;

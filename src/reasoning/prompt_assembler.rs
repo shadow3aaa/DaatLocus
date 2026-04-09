@@ -6,12 +6,13 @@ use super::{
         AppSnapshotPart, AppsSystemPart, CompiledAdditionsSystemPart, EventSystemPart,
         EventsSnapshotPart, MemoriesSnapshotPart, MemoriesSystemPart, PersonaSystemPart,
         PlanSnapshotPart, PlanSystemPart, SensorySnapshotPart, SkillsSnapshotPart,
-        SkillsSystemPart, SnapshotPart, SystemPromptPart,
+        SkillsSystemPart, SnapshotPart, SystemPromptPart, WorkspaceSystemPart,
     },
     prompts::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
         MEMORIES_UNIT_HOW, MEMORIES_UNIT_WHAT, MEMORIES_UNIT_WHEN, PLAN_UNIT_HOW, PLAN_UNIT_WHAT,
         PLAN_UNIT_WHEN, SKILLS_UNIT_HOW, SKILLS_UNIT_WHAT, SKILLS_UNIT_WHEN,
+        WORKSPACE_UNIT_HOW, WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY,
     },
     turn_compile::load_prompt_persona_spec_sync,
 };
@@ -33,6 +34,7 @@ impl SystemPromptAssembler {
         Self::new(vec![
             Box::new(EventSystemPart),
             Box::new(AppsSystemPart),
+            Box::new(WorkspaceSystemPart),
             Box::new(SkillsSystemPart),
             Box::new(MemoriesSystemPart),
             Box::new(PlanSystemPart),
@@ -93,6 +95,15 @@ pub fn runtime_system_prompt_doc_from_additions(additions: &[String]) -> PromptD
             Vec::new(),
             vec![PromptBlock::Paragraph(APPS_UNIT_WHEN.to_string())],
             vec![PromptBlock::Paragraph(APPS_UNIT_HOW.to_string())],
+        )),
+        PromptNode::Unit(PromptUnitDoc::new(
+            "workspace",
+            vec![PromptBlock::Paragraph(
+                "运行时 workspace 的绝对路径会在实际系统 prompt 中显式注入。".to_string(),
+            )],
+            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHY.to_string())],
+            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHEN.to_string())],
+            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_HOW.to_string())],
         )),
         PromptNode::Unit(PromptUnitDoc::new(
             "skills",
@@ -162,6 +173,15 @@ pub fn baseline_runtime_contract_doc() -> PromptDocument {
             Vec::new(),
             vec![PromptBlock::Paragraph(APPS_UNIT_WHEN.to_string())],
             vec![PromptBlock::Paragraph(APPS_UNIT_HOW.to_string())],
+        )),
+        PromptNode::Unit(PromptUnitDoc::new(
+            "workspace",
+            vec![PromptBlock::Paragraph(
+                "运行时 workspace 的绝对路径会在实际系统 prompt 中显式注入。".to_string(),
+            )],
+            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHY.to_string())],
+            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHEN.to_string())],
+            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_HOW.to_string())],
         )),
         PromptNode::Unit(PromptUnitDoc::new(
             "skills",

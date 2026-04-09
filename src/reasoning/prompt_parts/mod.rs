@@ -6,6 +6,7 @@ use super::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
         MEMORIES_UNIT_HOW, MEMORIES_UNIT_WHAT, MEMORIES_UNIT_WHEN, PLAN_UNIT_HOW, PLAN_UNIT_WHAT,
         PLAN_UNIT_WHEN, SKILLS_UNIT_HOW, SKILLS_UNIT_WHAT, SKILLS_UNIT_WHEN,
+        WORKSPACE_UNIT_HOW, WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY, build_workspace_unit_what,
         build_app_usage_prompt, build_runtime_app_usages, build_runtime_background_hint_items,
         build_runtime_focused_app_how_to_use_prompt, build_runtime_focused_app_skills_prompt,
         build_runtime_global_skills_prompt,
@@ -25,6 +26,7 @@ pub trait SnapshotPart: Send + Sync {
 
 pub struct EventSystemPart;
 pub struct AppsSystemPart;
+pub struct WorkspaceSystemPart;
 pub struct SkillsSystemPart;
 pub struct MemoriesSystemPart;
 pub struct PlanSystemPart;
@@ -66,6 +68,22 @@ impl SystemPromptPart for AppsSystemPart {
             Vec::new(),
             vec![PromptBlock::Paragraph(APPS_UNIT_WHEN.to_string())],
             vec![PromptBlock::Paragraph(APPS_UNIT_HOW.to_string())],
+        ))
+    }
+}
+
+impl SystemPromptPart for WorkspaceSystemPart {
+    fn key(&self) -> &'static str {
+        "workspace"
+    }
+
+    fn build(&self, ctx: &Context) -> Option<PromptUnitDoc> {
+        Some(PromptUnitDoc::new(
+            self.key(),
+            vec![PromptBlock::Paragraph(build_workspace_unit_what(ctx))],
+            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHY.to_string())],
+            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHEN.to_string())],
+            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_HOW.to_string())],
         ))
     }
 }
