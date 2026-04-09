@@ -1200,8 +1200,7 @@ async fn collect_turn_demo_workspace_facts() -> Result<String> {
         Vec::new()
     };
 
-    let mut sections = vec![
-        format!("cwd: {}", cwd.display()),
+    let sections = vec![
         format!(
             "top_level_entries: {}",
             if top_level_entries.is_empty() {
@@ -1218,19 +1217,11 @@ async fn collect_turn_demo_workspace_facts() -> Result<String> {
                 src_entries.join(", ")
             }
         ),
-        "known_runtime_facts: Terminal is the only interactive app; Telegram is an event transport, not a app.".to_string(),
-        "known_runtime_facts: Fresh incoming messages arrive as events and are judged semantically; do not invent hidden inbox navigation state.".to_string(),
-        "known_runtime_facts: If a demo depends on plans, events, app health, or repository facts, it should ask about current visible state rather than fabricate specific unseen records.".to_string(),
-        "known_runtime_facts: Runtime snapshot already includes concise Plan summary, event list, and app structural state; read-only questions about those visible summaries do not inherently require tools.".to_string(),
-        "known_runtime_facts: Repository file existence, file contents, directory structure, and any fact not already rendered in runtime snapshot still require tools.".to_string(),
+        "known_runtime_contracts: Fresh incoming messages arrive as events and are judged semantically; do not invent hidden inbox navigation state.".to_string(),
+        "known_runtime_contracts: If a demo depends on plans, events, app health, or repository facts, it should ask about current visible state rather than fabricate specific unseen records.".to_string(),
+        "known_runtime_contracts: Runtime snapshot already includes concise Plan summary, event list, and app structural state; read-only questions about those visible summaries do not inherently require tools.".to_string(),
+        "known_runtime_contracts: Repository file existence, file contents, directory structure, and any fact not already rendered in runtime snapshot still require tools.".to_string(),
     ];
-
-    if !top_level_entries.iter().any(|entry| entry.ends_with(".py")) {
-        sections.push(
-            "absent_file_types: no top-level Python entrypoints are visible in workspace facts."
-                .to_string(),
-        );
-    }
 
     Ok(sections.join("\n"))
 }

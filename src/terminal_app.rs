@@ -382,25 +382,25 @@ impl App for TerminalApp {
             .values()
             .filter(|session| session.state.status == "running")
             .count();
-        let unread_sessions = self
+        let unread_session_ids = self
             .sessions
             .values()
             .filter(|session| session.state.has_unread_output)
-            .count();
+            .map(|session| session.state.session_id.clone())
+            .collect::<Vec<_>>();
         let mut lines = vec![
             "kind=terminal".to_string(),
-            format!("session_count={}", self.sessions.len()),
-            format!("running_sessions={running_sessions}"),
-            format!("sessions_with_unread_output={unread_sessions}"),
+            if unread_session_ids.is_empty() {
+                "unread_sessions=none".to_string()
+            } else {
+                format!("unread_sessions={}", unread_session_ids.join(","))
+            },
         ];
 
         if self.sessions.is_empty() {
-            lines.push("session_ids=none".to_string());
+            lines.push("sessions=none".to_string());
         } else {
-            lines.push(format!(
-                "session_ids={}",
-                self.sessions.keys().cloned().collect::<Vec<_>>().join(",")
-            ));
+            lines.push(format!("active_sessions={running_sessions}"));
             for session in self.sessions.values() {
                 lines.push(render_session_state_line(&session.state));
             }

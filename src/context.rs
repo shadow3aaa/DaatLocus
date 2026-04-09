@@ -28,7 +28,7 @@ use crate::{
     reasoning::runtime::PromptMemoryContext,
     sandbox::RuntimeSandboxPolicy,
     snapshot::Snapshot,
-    telegram_device::TelegramDeviceHandle,
+    telegram_transport_state::TelegramTransportStateHandle,
     plan::Plan,
 };
 
@@ -44,7 +44,7 @@ pub struct Context {
     pub events: EventStore,
     pub pending_work: PendingWorkQueue,
     pub apps: AppManager,
-    pub telegram: TelegramDeviceHandle,
+    pub telegram: TelegramTransportStateHandle,
     pub compiled_prompts: CompiledPromptStore,
     pub execution_cwd: PathBuf,
     pub sandbox_policy: RuntimeSandboxPolicy,

@@ -13,7 +13,7 @@ use crate::{events::EventStatus, spinova_paths::spinova_paths_sync};
 
 const TELEGRAM_TRANSPORT_STATE_FILE_NAME: &str = "telegram_transport_state";
 
-pub struct TelegramDevice {
+pub struct TelegramTransportState {
     inner: Arc<TelegramInner>,
 }
 
@@ -48,7 +48,7 @@ struct PersistedTelegramChat {
 }
 
 #[derive(Clone)]
-pub struct TelegramDeviceHandle {
+pub struct TelegramTransportStateHandle {
     inner: Arc<TelegramInner>,
 }
 
@@ -68,7 +68,7 @@ pub struct PendingOutboundMessage {
     pub settle_status_on_delivery: Option<EventStatus>,
 }
 
-impl TelegramDevice {
+impl TelegramTransportState {
     pub fn new() -> Self {
         Self::with_state(load_telegram_state())
     }
@@ -77,19 +77,19 @@ impl TelegramDevice {
         Self {
             inner: Arc::new(TelegramInner {
                 state: Mutex::new(state),
-                persistence_path: telegram_device_state_path(),
+                persistence_path: telegram_transport_state_path(),
             }),
         }
     }
 
-    pub fn handle(&self) -> TelegramDeviceHandle {
-        TelegramDeviceHandle {
+    pub fn handle(&self) -> TelegramTransportStateHandle {
+        TelegramTransportStateHandle {
             inner: self.inner.clone(),
         }
     }
 }
 
-impl TelegramDeviceHandle {
+impl TelegramTransportStateHandle {
     pub fn register_known_chat(&self, chat_id: impl Into<String>, chat_title: impl Into<String>) {
         let chat_id = chat_id.into();
         let mut state = self.inner.state.lock();
@@ -252,12 +252,12 @@ impl From<&TelegramChat> for PersistedTelegramChat {
     }
 }
 
-fn telegram_device_state_path() -> PathBuf {
+fn telegram_transport_state_path() -> PathBuf {
     spinova_paths_sync().state_file(TELEGRAM_TRANSPORT_STATE_FILE_NAME)
 }
 
 fn load_telegram_state() -> TelegramState {
-    let path = telegram_device_state_path();
+    let path = telegram_transport_state_path();
     let Ok(bytes) = std::fs::read(&path) else {
         return TelegramState::default();
     };

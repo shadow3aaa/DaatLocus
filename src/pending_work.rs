@@ -247,7 +247,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claim_batch_prioritizes_events_over_device_notices() {
+    fn claim_batch_prioritizes_events_over_app_notices() {
         let queue = PendingWorkQueue::empty();
         let event_id = Uuid::new_v4();
         queue

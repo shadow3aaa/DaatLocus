@@ -838,18 +838,18 @@ impl DashboardCommand for AppStatusCommand {
         DashboardCommandResult::ShowOverlay {
             title: self.overlay_title(raw),
             text: output.unwrap_or_else(|| {
-                let devices = context
+                let apps = context
                     .state
                     .app_status_outputs
                     .iter()
                     .map(|(name, _)| name.clone())
                     .collect::<Vec<_>>();
-                if devices.is_empty() {
+                if apps.is_empty() {
                     format!("unknown app: {target}")
                 } else {
                     format!(
                         "unknown app: {target}\navailable apps: {}",
-                        devices.join(", ")
+                        apps.join(", ")
                     )
                 }
             }),

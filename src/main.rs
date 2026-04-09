@@ -20,7 +20,7 @@ mod snapshot;
 mod spinova_paths;
 mod system_info;
 mod telegram_acl;
-mod telegram_device;
+mod telegram_transport_state;
 mod telegram_transport;
 mod terminal_app;
 mod terminal_process;
@@ -88,7 +88,7 @@ use crate::{
     snapshot::Snapshot,
     spinova_paths::{SpinovaPaths, spinova_paths},
     telegram_acl::TelegramAclHandle,
-    telegram_device::TelegramDevice,
+    telegram_transport_state::TelegramTransportState,
     telegram_transport::{TelegramLiveDraftClient, TelegramTransport},
     terminal_app::TerminalApp,
     plan::Plan,
@@ -350,9 +350,9 @@ async fn async_main(cli: Cli) -> Result<()> {
     let telegram_acl = TelegramAclHandle::load().await;
     let browser = BrowserApp::new();
     let terminal = TerminalApp::new();
-    let telegram = TelegramDevice::new();
+    let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
-    bootstrap_telegram_device_from_acl(&telegram_handle, &telegram_acl);
+    bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
     let apps = AppManager::new(
         Some(AppId::Terminal),
         vec![Box::new(browser), Box::new(terminal)],
@@ -892,7 +892,7 @@ pub(crate) async fn build_eval_context_with_compiled(
     let pending_work = PendingWorkQueue::new().await;
     let browser = BrowserApp::new();
     let terminal = TerminalApp::new();
-    let telegram = TelegramDevice::new();
+    let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
     let apps = AppManager::new(
         Some(AppId::Terminal),
@@ -934,8 +934,8 @@ pub(crate) async fn build_eval_context_with_compiled(
     }
 }
 
-fn bootstrap_telegram_device_from_acl(
-    telegram_handle: &crate::telegram_device::TelegramDeviceHandle,
+fn bootstrap_telegram_transport_state_from_acl(
+    telegram_handle: &crate::telegram_transport_state::TelegramTransportStateHandle,
     telegram_acl: &TelegramAclHandle,
 ) {
     for chat in telegram_acl.approved_chats() {
@@ -1668,7 +1668,7 @@ fn claim_pending_runtime_inputs(context: &Context, max_events: usize) -> Vec<Cla
                     .apps
                     .state_renders()
                     .into_iter()
-                    .find(|(device_id, _)| *device_id == app)
+                    .find(|(app_id, _)| *app_id == app)
                     .map(|(_, render)| render);
                 let Some(render) = render else {
                     if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
@@ -1770,20 +1770,20 @@ fn finalize_claimed_runtime_events(
 
 fn finalize_claimed_runtime_app_notices(
     context: &Context,
-    devices: &[AppId],
+    apps: &[AppId],
     output: &AgentLoopStepOutput,
 ) {
-    if devices.is_empty() {
+    if apps.is_empty() {
         return;
     }
 
     let renders = context.apps.state_renders();
     let mut released = Vec::new();
-    for app in devices {
+    for app in apps {
         let still_noticed = renders
             .iter()
-            .find(|(device_id, _)| device_id == app)
-            .map(|(device_id, render)| app_render_requires_attention(*device_id, render))
+            .find(|(app_id, _)| app_id == app)
+            .map(|(app_id, render)| app_render_requires_attention(*app_id, render))
             .unwrap_or(false);
         let work = PendingWork::AppNotice {
             app: *app,
@@ -1813,8 +1813,8 @@ fn finalize_claimed_runtime_app_notices(
             action_summary = last_action
                 .map(|action| action.summary.as_str())
                 .unwrap_or(""),
-            reactivated_device_notice_drivers = released.len(),
-            devices = released.join(","),
+            reactivated_app_notice_drivers = released.len(),
+            apps = released.join(","),
             "released claimed runtime app notice drivers back into frontier at turn end",
         );
     }
@@ -1903,7 +1903,7 @@ fn prompt_message_for_claimed_input(
             )),
         },
         ClaimedRuntimeInput::AppNotice { app, reason } => PromptMessage::user(format!(
-            "<device_notice app=\"{}\">\nreason: {}\n</device_notice>",
+            "<app_notice app=\"{}\">\nreason: {}\n</app_notice>",
             app, reason,
         )),
     }
@@ -2278,7 +2278,7 @@ fn summarize_terminal_for_hindsight(context: &Context) -> Option<String> {
         .apps
         .state_renders()
         .into_iter()
-        .find(|(device_id, _)| *device_id == crate::app::AppId::Terminal)?;
+        .find(|(app_id, _)| *app_id == crate::app::AppId::Terminal)?;
     Some(render.lines.join("\n"))
 }
 
@@ -2402,26 +2402,26 @@ fn sync_driver_frontier_from_sources(context: &Context) {
 
 fn enqueue_app_notice_work(context: &mut Context) {
     let renders = context.apps.state_renders();
-    for (device_id, render) in renders {
-        let noticed = app_render_requires_attention(device_id, &render);
+    for (app_id, render) in renders {
+        let noticed = app_render_requires_attention(app_id, &render);
         if noticed {
-            if context.active_app_notices.insert(device_id) {
-                let reason = summarize_app_notice_reason(device_id, &render);
+            if context.active_app_notices.insert(app_id) {
+                let reason = summarize_app_notice_reason(app_id, &render);
                 if let Err(err) = context.pending_work.enqueue(PendingWork::AppNotice {
-                    app: device_id,
+                    app: app_id,
                     reason,
                 }) {
-                    tracing::error!("failed to enqueue app notice work for {device_id}: {err:?}");
+                    tracing::error!("failed to enqueue app notice work for {app_id}: {err:?}");
                 }
             }
         } else {
-            context.active_app_notices.remove(&device_id);
+            context.active_app_notices.remove(&app_id);
         }
     }
 }
 
-fn summarize_app_notice_reason(device_id: AppId, render: &crate::app::AppStateRender) -> String {
-    match device_id {
+fn summarize_app_notice_reason(app_id: AppId, render: &crate::app::AppStateRender) -> String {
+    match app_id {
         AppId::Browser => "browser requires attention".to_string(),
         AppId::Terminal => {
             let unread_sessions = numeric_field(&render.lines, "sessions_with_unread_output");
@@ -2434,8 +2434,8 @@ fn summarize_app_notice_reason(device_id: AppId, render: &crate::app::AppStateRe
     }
 }
 
-fn app_render_requires_attention(device_id: AppId, render: &crate::app::AppStateRender) -> bool {
-    match device_id {
+fn app_render_requires_attention(app_id: AppId, render: &crate::app::AppStateRender) -> bool {
+    match app_id {
         AppId::Browser => false,
         AppId::Terminal => numeric_field(&render.lines, "sessions_with_unread_output") > 0,
     }

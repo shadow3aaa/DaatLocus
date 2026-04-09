@@ -150,11 +150,9 @@ Avoid the following:
 
 ## Telegram Example
 
-- `Telegram` as a chat UI can exist as an `App`.
 - A newly received Telegram message should first appear as a pending `Event`.
-- The Telegram app viewport should show concise app information such as known chats and stable metadata, not agent cursor state.
 - The default handling path should inject the pending message into context directly.
-- A standard reply path should look like `focus_app(Telegram)` followed by one explicit action such as `telegram_send_message(chat_id, text)`.
+- A standard reply path should resolve the concrete event and send through the Telegram transport with explicit addressing such as `chat_id`.
 - Reading the full chat history should be a secondary tool used only when extra context is actually needed.
 - `selected_chat` is not an acceptable long-lived app state for the agent path.
 

@@ -144,11 +144,10 @@ fn background_app_attention_hint(app_id: AppId, state: &AppStateRender) -> Optio
     let summary = match app_id {
         AppId::Browser => return None,
         AppId::Terminal => {
-            let session_id = first_terminal_session_id(state).unwrap_or("unknown");
-            if numeric_field(&state.lines, "sessions_with_unread_output") > 0 {
-                format!("后台终端会话 {session_id} 有未读输出。")
+            if !list_field(&state.lines, "unread_sessions").is_empty() {
+                "后台终端有未读输出。".to_string()
             } else {
-                format!("后台终端会话 {session_id} 需要注意。")
+                "后台终端需要注意。".to_string()
             }
         }
     };
@@ -162,18 +161,29 @@ fn background_app_attention_hint(app_id: AppId, state: &AppStateRender) -> Optio
     })
 }
 
-fn numeric_field(lines: &[String], key: &str) -> usize {
+fn list_field(lines: &[String], key: &str) -> Vec<String> {
     lines
         .iter()
         .find_map(|line| line.strip_prefix(&format!("{key}=")))
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0)
+        .map(|value| {
+            if value == "none" {
+                Vec::new()
+            } else {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(ToString::to_string)
+                    .collect()
+            }
+        })
+        .unwrap_or_default()
 }
 
 fn app_requires_attention(app_id: AppId, state: &AppStateRender) -> bool {
     match app_id {
         AppId::Browser => false,
-        AppId::Terminal => numeric_field(&state.lines, "sessions_with_unread_output") > 0,
+        AppId::Terminal => !list_field(&state.lines, "unread_sessions").is_empty(),
     }
 }
 
@@ -187,14 +197,6 @@ fn render_inline_summary(text: &str) -> String {
     } else {
         summary
     }
-}
-
-fn first_terminal_session_id<'a>(state: &'a AppStateRender) -> Option<&'a str> {
-    state
-        .lines
-        .iter()
-        .find_map(|line| line.strip_prefix("session="))
-        .and_then(|line| line.split_whitespace().next())
 }
 
 pub fn build_app_usage_prompt(_app_id: AppId, usage: &AppUsage) -> String {

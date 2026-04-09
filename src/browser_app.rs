@@ -351,15 +351,6 @@ impl BrowserApp {
         Ok(BrowserActionResult { page: state })
     }
 
-    fn render_backend_status(&self) -> &'static str {
-        if self.context.is_some() {
-            "ready"
-        } else if self.init_error.is_some() {
-            "error"
-        } else {
-            "not_initialized"
-        }
-    }
 }
 
 fn is_interactive_role(role: &str) -> bool {
@@ -709,21 +700,12 @@ impl App for BrowserApp {
     }
 
     fn render_state(&self) -> AppStateRender {
-        let mut lines = vec![
-            "kind=browser".to_string(),
-            format!("backend_status={}", self.render_backend_status()),
-            format!("page_count={}", self.pages.len()),
-        ];
+        let mut lines = vec!["kind=browser".to_string()];
         if self.pages.is_empty() {
-            lines.push("page_ids=none".to_string());
+            lines.push("pages=none".to_string());
         } else {
-            let page_ids = self.pages.keys().cloned().collect::<Vec<_>>().join(", ");
-            lines.push(format!("page_ids={page_ids}"));
             for page in self.pages.values() {
-                lines.push(format!(
-                    "page={} title={} url={}",
-                    page.page_id, page.title, page.url
-                ));
+                lines.push(format!("title={} url={}", page.title, page.url));
             }
         }
         if let Some(err) = self.init_error.as_deref() {

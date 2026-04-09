@@ -11,14 +11,14 @@ use crate::{
     events::{EventStatus, EventStore, TelegramIncomingEvent},
     pending_work::{PendingWork, PendingWorkQueue},
     telegram_acl::{AccessDecision, TelegramAclHandle},
-    telegram_device::TelegramDeviceHandle,
+    telegram_transport_state::TelegramTransportStateHandle,
 };
 
 pub struct TelegramTransport {
     client: Client,
     config: TelegramConfig,
     acl: TelegramAclHandle,
-    handle: TelegramDeviceHandle,
+    handle: TelegramTransportStateHandle,
     events: EventStore,
     pending_work: PendingWorkQueue,
     command_state_rx: watch::Receiver<DashboardState>,
@@ -31,7 +31,7 @@ pub struct TelegramTransport {
 impl TelegramTransport {
     pub fn new(
         config: TelegramConfig,
-        handle: TelegramDeviceHandle,
+        handle: TelegramTransportStateHandle,
         acl: TelegramAclHandle,
         events: EventStore,
         pending_work: PendingWorkQueue,
