@@ -117,7 +117,7 @@ impl TelegramTransport {
                             message
                                 .settle_status_on_delivery
                                 .unwrap_or(EventStatus::Resolved),
-                            None,
+                            message.settle_note_on_delivery.clone(),
                         )
                     {
                         tracing::error!("mark telegram event delivered failed: {err:?}");

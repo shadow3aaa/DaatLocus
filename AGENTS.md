@@ -361,7 +361,7 @@ unknown Telegram chat 不进入普通事件处理路径，而是进入 ACL pendi
 
 - 通过 `event_id` 操作事件
 - disposition 明确为 `resolved` / `dismissed` / `failed`
-- `resolved` 时必须提供非空 `reply_message`
+- `resolved` 或 `failed` 时必须提供非空 `reply_message`
 
 事件状态流当前包括：
 
@@ -403,8 +403,8 @@ app-scoped tool 可以要求先 `focus_app`。
 事件终结工具必须：
 
 - 显式接收 `event_id`
-- 对成功收尾显式接收 `reply_message`
-- 允许 `dismissed` / `failed`
+- 对需要向用户提交最终答复的收尾显式接收 `reply_message`
+- `dismissed` 只用于静默结束；`failed` 仍然应向用户发送失败说明
 
 不要把“最终回复”设计成 assistant 文本本身。
 

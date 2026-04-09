@@ -65,7 +65,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<EventResolveArgs>(
             "finish_and_send",
-            "显式终结一个事件并发送最终回复。对需要回复用户的常规成功收尾，应调用此工具并提供 `reply_message`；dismissed 或 failed 也通过此工具提交。",
+            "显式终结一个事件，并在需要回复用户时发送最终回复。`resolved` 和 `failed` 都必须提供 `reply_message`；`dismissed` 用于静默结束而不发送消息。",
             None,
             summarize_event_resolve_tool,
             render_event_resolve_call_ui,
@@ -112,6 +112,13 @@ fn status_for_event_disposition(disposition: EventDisposition) -> EventStatus {
         EventDisposition::Dismissed => EventStatus::Dismissed,
         EventDisposition::Failed => EventStatus::Failed,
     }
+}
+
+fn disposition_requires_reply(disposition: EventDisposition) -> bool {
+    matches!(
+        disposition,
+        EventDisposition::Resolved | EventDisposition::Failed
+    )
 }
 
 fn summarize_focus_app_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
@@ -223,24 +230,37 @@ fn execute_event_resolve_tool<'a>(
         let args: EventResolveArgs = parse_tool_args(call)?;
         let reply_message = trim_optional_field(args.reply_message);
         let event = context.events.view(&args.event_id)?;
-        let resolved_reply_message = reply_message.clone();
+        let required_reply_message = if disposition_requires_reply(args.disposition) {
+            Some(reply_message.clone().ok_or_else(|| {
+                miette::miette!(
+                    "{} event {} requires a non-empty reply_message",
+                    event_disposition_kind(args.disposition),
+                    args.event_id,
+                )
+            })?)
+        } else {
+            None
+        };
         let summary = match args.disposition {
-            EventDisposition::Resolved => {
-                let reply_message = resolved_reply_message.ok_or_else(|| {
-                    miette::miette!(
-                        "resolved event {} requires a non-empty reply_message",
-                        args.event_id
-                    )
-                })?;
+            EventDisposition::Resolved | EventDisposition::Failed => {
+                let reply_message = required_reply_message
+                    .clone()
+                    .expect("reply requirement should be validated above");
                 execute_event_resolve_with_reply(
                     context,
                     &args.event_id,
                     &event,
+                    args.disposition,
                     reply_message.clone(),
+                    args.note.clone(),
                 )?;
-                format!("resolved event {} via channel delivery", args.event_id)
+                format!(
+                    "{} event {} via channel delivery",
+                    event_disposition_kind(args.disposition),
+                    args.event_id
+                )
             }
-            EventDisposition::Dismissed | EventDisposition::Failed => {
+            EventDisposition::Dismissed => {
                 context.events.set_status(
                     &args.event_id,
                     status_for_event_disposition(args.disposition),
@@ -481,7 +501,9 @@ fn execute_event_resolve_with_reply(
     context: &mut Context,
     event_id: &str,
     event: &crate::events::EventView,
+    disposition: EventDisposition,
     reply_message: String,
+    note: Option<String>,
 ) -> miette::Result<()> {
     match &event.payload {
         EventPayload::TelegramIncoming(payload) => {
@@ -490,7 +512,8 @@ fn execute_event_resolve_with_reply(
                 payload.chat_id.clone(),
                 reply_message,
                 Some(event_id.to_string()),
-                Some(EventStatus::Resolved),
+                Some(status_for_event_disposition(disposition)),
+                note.filter(|_| matches!(disposition, EventDisposition::Failed)),
             )?;
             Ok(())
         }
@@ -553,4 +576,16 @@ fn render_plan_ui_lines(plan: &Plan) -> Vec<String> {
         .take(8)
         .map(|step| format!("[{}] {}", step.status, summarize_inline_text(&step.step)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_is_required_for_resolved_and_failed_but_not_dismissed() {
+        assert!(disposition_requires_reply(EventDisposition::Resolved));
+        assert!(disposition_requires_reply(EventDisposition::Failed));
+        assert!(!disposition_requires_reply(EventDisposition::Dismissed));
+    }
 }

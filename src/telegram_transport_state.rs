@@ -68,6 +68,8 @@ pub struct PendingOutboundMessage {
     pub text: String,
     pub related_event_id: Option<String>,
     pub settle_status_on_delivery: Option<EventStatus>,
+    #[serde(default)]
+    pub settle_note_on_delivery: Option<String>,
 }
 
 impl TelegramTransportState {
@@ -126,6 +128,7 @@ impl TelegramTransportStateHandle {
         text: String,
         related_event_id: Option<String>,
         settle_status_on_delivery: Option<EventStatus>,
+        settle_note_on_delivery: Option<String>,
     ) -> Result<()> {
         let mut state = self.inner.state.lock();
         state.ensure_chat(chat_id.clone(), chat_id.clone());
@@ -136,6 +139,7 @@ impl TelegramTransportStateHandle {
             text,
             related_event_id,
             settle_status_on_delivery,
+            settle_note_on_delivery,
         });
         persist_telegram_state_result(&self.inner, &state)?;
         self.inner.outbound_notify.notify_one();
