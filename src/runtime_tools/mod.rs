@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{collections::HashSet, future::Future, pin::Pin};
 
 use async_trait::async_trait;
 use miette::{Result, miette};
@@ -149,8 +149,8 @@ impl ToolExecutionResult {
 
 #[async_trait]
 pub trait RuntimeTool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
     fn input_spec(&self) -> AgentToolInputSpec;
 
     fn is_available(&self, _: &Context) -> bool {
@@ -211,11 +211,11 @@ impl StaticRuntimeTool {
 
 #[async_trait]
 impl RuntimeTool for StaticRuntimeTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         self.name
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         self.description
     }
 
@@ -256,11 +256,11 @@ struct ApplyPatchRuntimeTool;
 
 #[async_trait]
 impl RuntimeTool for ApplyPatchRuntimeTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "apply_patch"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         r#"使用 `apply_patch` 按严格 patch grammar 编辑文件。
 
 补丁必须满足：
@@ -346,12 +346,139 @@ eof_line: "*** End of File" LF
     }
 }
 
-pub fn build_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
+struct DynamicAppRuntimeTool {
+    name: String,
+    description: String,
+    input_spec: AgentToolInputSpec,
+}
+
+#[async_trait]
+impl RuntimeTool for DynamicAppRuntimeTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn input_spec(&self) -> AgentToolInputSpec {
+        self.input_spec.clone()
+    }
+
+    fn summarize_action(&self, call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
+        Ok(EpisodeActionRecord {
+            kind: call.name.clone(),
+            summary: summarize_inline_text(&call.arguments.to_string()),
+        })
+    }
+
+    fn call_ui_event(&self, call: &AgentToolCall) -> miette::Result<ToolCallUiEvent> {
+        Ok(ToolCallUiEvent::app(
+            call.name.clone(),
+            compact_dynamic_tool_ui_lines(&call.arguments),
+        ))
+    }
+
+    async fn execute(
+        &self,
+        context: &mut Context,
+        call: &AgentToolCall,
+    ) -> miette::Result<ToolExecutionResult> {
+        let result = context
+            .apps
+            .execute_dynamic_tool(&self.name, call.arguments.clone())
+            .await?;
+        let mut output = ToolExecutionResult::new(
+            result.summary.clone(),
+            result.payload,
+            ToolUiEvent::app(self.name.clone(), result.ui_lines),
+        );
+        if let Some(model_content) = result.model_content {
+            output = output.with_model_content(model_content);
+        }
+        if let Some(reason) = result.turn_boundary_reason {
+            output = output.with_turn_boundary(reason);
+        }
+        Ok(output)
+    }
+}
+
+fn build_static_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
     let mut tools: Vec<Box<dyn RuntimeTool>> = vec![Box::new(ApplyPatchRuntimeTool)];
     tools.extend(work::register_tools());
     tools.extend(browser::register_tools());
     tools.extend(terminal::register_tools());
     tools
+}
+
+fn build_dynamic_app_runtime_tools(
+    context: &Context,
+    reserved_names: &HashSet<String>,
+) -> Vec<Box<dyn RuntimeTool>> {
+    let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
+    let mut seen_names = reserved_names.clone();
+    let dynamic_tools = match context.apps.dynamic_tools() {
+        Ok(dynamic_tools) => dynamic_tools,
+        Err(err) => {
+            tracing::warn!("failed to list focused app tools: {err:?}");
+            return tools;
+        }
+    };
+    for tool in dynamic_tools {
+        if !is_valid_dynamic_tool_name(&tool.name) {
+            tracing::warn!(
+                "skipping focused app tool `{}` because its name must match [A-Za-z0-9_-]+",
+                tool.name
+            );
+            continue;
+        }
+        if !seen_names.insert(tool.name.clone()) {
+            tracing::warn!(
+                "skipping focused app tool `{}` because its name conflicts with another runtime tool",
+                tool.name
+            );
+            continue;
+        }
+        tools.push(Box::new(DynamicAppRuntimeTool {
+            name: tool.name,
+            description: tool.description,
+            input_spec: AgentToolInputSpec::JsonSchema {
+                schema: normalize_tool_input_schema(tool.input_schema),
+            },
+        }));
+    }
+    tools
+}
+
+pub fn build_runtime_tools(context: &Context) -> Vec<Box<dyn RuntimeTool>> {
+    let mut tools = build_static_runtime_tools();
+    let reserved_names = tools
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect::<HashSet<_>>();
+    tools.extend(build_dynamic_app_runtime_tools(context, &reserved_names));
+    tools
+}
+
+fn is_valid_dynamic_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+}
+
+fn compact_dynamic_tool_ui_lines(arguments: &Value) -> Vec<String> {
+    match arguments {
+        Value::Object(map) if map.is_empty() => Vec::new(),
+        Value::Object(map) => map
+            .iter()
+            .map(|(key, value)| format!("{key}={}", summarize_inline_text(&value.to_string())))
+            .take(8)
+            .collect(),
+        other => vec![summarize_inline_text(&other.to_string())],
+    }
 }
 
 fn find_runtime_tool<'a>(
@@ -366,20 +493,26 @@ fn find_runtime_tool<'a>(
 }
 
 pub fn build_runtime_tool_specs(context: &Context) -> Vec<AgentToolSpec> {
-    build_runtime_tools()
+    build_runtime_tools(context)
         .into_iter()
         .filter(|tool| tool.is_available(context))
         .map(|tool| tool.spec())
         .collect()
 }
 
-pub fn summarize_action_from_tool_call(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let tools = build_runtime_tools();
+pub fn summarize_action_from_tool_call(
+    context: &Context,
+    call: &AgentToolCall,
+) -> Result<EpisodeActionRecord> {
+    let tools = build_runtime_tools(context);
     find_runtime_tool(&tools, &call.name)?.summarize_action(call)
 }
 
-pub fn render_tool_call_ui_event(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let tools = build_runtime_tools();
+pub fn render_tool_call_ui_event(
+    context: &Context,
+    call: &AgentToolCall,
+) -> Result<ToolCallUiEvent> {
+    let tools = build_runtime_tools(context);
     find_runtime_tool(&tools, &call.name)?.call_ui_event(call)
 }
 
@@ -387,7 +520,7 @@ pub async fn execute_agent_tool_call(
     context: &mut Context,
     call: &AgentToolCall,
 ) -> Result<ToolExecutionResult> {
-    let tools = build_runtime_tools();
+    let tools = build_runtime_tools(context);
     let tool = find_runtime_tool(&tools, &call.name)?;
     if !tool.is_available(context) {
         return Err(miette!("tool `{}` is not currently available", call.name));

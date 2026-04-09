@@ -12,8 +12,8 @@ use ratatui::{
 
 use crate::{
     app::AppId,
-    reasoning::runtime::{PromptMessage, PromptRole},
     daat_locus_paths::daat_locus_paths_sync,
+    reasoning::runtime::{PromptMessage, PromptRole},
     telegram_acl::TelegramAclHandle,
     tool_ui::{
         PatchFileUiData, PatchUiData, TelegramUiAction, TelegramUiData, TerminalUiAction,
@@ -847,10 +847,7 @@ impl DashboardCommand for AppStatusCommand {
                 if apps.is_empty() {
                     format!("unknown app: {target}")
                 } else {
-                    format!(
-                        "unknown app: {target}\navailable apps: {}",
-                        apps.join(", ")
-                    )
+                    format!("unknown app: {target}\navailable apps: {}", apps.join(", "))
                 }
             }),
         }

@@ -184,6 +184,144 @@ Daat Locus 有显式的自我改进闭环：
 - 页面变化导致 ref 失效时，应重新读取页面，不应盲重试旧 ref
 - 搜索结果页通常只是线索定位，不是最终事实来源
 
+## Third-Party App Package
+
+未来的第三方 `App` 扩展按 source-first 方式设计，不复制 Codex 的 plugin / connector 结构。
+
+### Directory Placement
+
+- 第三方 App 源码目录固定在 runtime workspace 下：`~/daat-locus-workspace/apps/<app-name>/`
+- 当前 runtime workspace 默认由 `resolve_runtime_workspace_dir()` 决定，即 `~/daat-locus-workspace`
+- `app_id` 直接等于文件夹名 `<app-name>`
+- `~/.daat-locus` 是受保护 runtime 目录，不存放第三方 App 源码
+- 之所以这样设计，是因为 `~/.daat-locus` 在 sandbox 中被视为 protected runtime path，而 workspace 是可写根
+
+### Package Layout
+
+最小目录结构：
+
+```text
+~/daat-locus-workspace/apps/<app-name>/
+  app.toml
+  runtime/
+    app.lua
+  prompt/
+    usage.md
+    how_to_use.md
+  skills/
+    <skill-name>.md
+```
+
+规则：
+
+- `runtime/app.lua` 是唯一的 Lua 主入口
+- `prompt/usage.md` 是 app 的 pre-focus 说明
+- `prompt/how_to_use.md` 是 app 的 post-focus 说明
+- `skills/*.md` 是附着在该 app 上的结构化 skill 文档
+
+### `app.toml`
+
+`app.toml` 在 v1 里极简化，只承担一个职责：指定 Lua 主入口相对路径。
+
+规则：
+
+- 不承载 `id`
+- 不承载权限
+- 不承载 usage/how_to_use/skills 元数据
+- 默认情况下，主入口约定为 `runtime/app.lua`
+
+最小示例：
+
+```toml
+entry = "runtime/app.lua"
+```
+
+身份来自目录名，配置才来自 `app.toml`。
+
+### Lua Runtime
+
+第三方 App 的运行时技术栈固定为：
+
+- Rust 侧使用 `mlua`
+- Lua 方言使用标准 `Lua 5.4`
+- 不使用旧的 `rlua`
+- 不使用 `JS/TS` 作为 v1 App 运行时
+- 不使用 `Wasm` 作为 v1 App 运行时
+
+这样做的原因是：
+
+- agent 需要能够直接编写和修改 app
+- source-first 的 Lua + Markdown 比 ABI-first 的 Wasm 更适合作为 v1 authoring format
+- `mlua` 在 Rust 中对 Lua 5.4 的支持足够成熟，适合做宿主嵌入
+
+### Unified Lua Interface
+
+不要把一个 app 设计成多个彼此独立的 Lua 入口脚本。
+
+正确模型是：
+
+- 一个第三方 `App` = 一个统一的 Lua 模块实例
+- 宿主只加载 `runtime/app.lua`
+- `render_state`、tool 调用、notice 轮询共享同一份 app 实例状态
+
+不要引入额外 IPC 来同步 tool 结果和 render state。
+
+这意味着第三方 app 的行为本体是一个对象模型，不是脚本集合。
+
+### Skills
+
+第三方 app 的 skill 文件位于 `skills/*.md`。
+
+规则：
+
+- 每个 skill 一个 markdown 文件
+- skill 使用 frontmatter schema
+- skill 是附着在 app 上的结构化操作规范
+- skill 不是独立能力单元
+- skill 不定义宿主生命周期、权限或运行时边界
+
+`prompt/*.md` 和 `skills/*.md` 都是 agent-facing 文本资产；`runtime/app.lua` 是宿主执行入口。
+
+## Global Skills
+
+除了 app-scoped skills，runtime 还支持不挂在任何 app 上的 global skills。
+
+规则：
+
+- global skills 始终可见，不需要 `focus_app`
+- 内置 global skills 位于仓库根目录的 `skills/*.md`
+- workspace 拓展 global skills 位于 `~/daat-locus-workspace/skills/*.md`
+- global skills 与 app skills 使用同一套 frontmatter schema
+- workspace `skills/` 走单独的 `notify + digest + safe-point reload`，不与 `apps/` 共用一套目录
+
+这层的作用是承载跨 app 的稳定操作规范，例如未来“编写 app”“编写 skill”这类能力。
+
+### Reload Strategy
+
+第三方 app 不应每轮 turn 全量重解析。
+
+推荐策略：
+
+- 启动时全量扫描一次 `~/daat-locus-workspace/apps`
+- 运行时使用 `notify` 监听该目录变化
+- 根据文件事件定位到受影响的 `<app-name>`
+- 只把该 app 标记为 dirty 并按 app 增量重载
+- watcher 异常或目录状态不可信时，再回退到一次全量 rescan
+
+不要把全量解析作为常规路径。
+
+### State and Cache
+
+v1 不设计专门的第三方 App cache 目录。
+
+当前结论：
+
+- 只定义 source 目录：`~/daat-locus-workspace/apps`
+- 不定义 `cache/apps`
+- 如果未来确实需要宿主持久化某个 app 的运行状态，再使用受保护的 runtime state 体系，例如 `~/.daat-locus/state/apps/<app-name>/`
+
+第三方 app 是 agent 可编辑资产，但不是 agent 直接拥有的运行时状态。
+
 ## Current Event Semantics
 
 ### Telegram
@@ -282,9 +420,10 @@ skill 的职责是补充具体操作规范，不是承载动态世界状态。
 
 当前规则：
 
-- 当前实现里，skill 列表只会随当前前景 app 一起暴露，不是所有 app 的 pre-focus 线索
-- `read_skill` 读取的是当前前景 app 的 skill 正文
-- 因此，是否 `focus_app` 应先由任务需要、app usage 或 app notice 驱动；focus 之后，再决定是否读取该 app 的 skill
+- global skill 列表会始终出现在快照里
+- focused app 的 skill 列表只会随当前前景 app 一起暴露
+- `read_skill` 会先尝试读取当前前景 app 的同名 skill；若当前 app 没有该 skill，再回退到 global skill
+- 因此，是否 `focus_app` 应先由任务需要、app usage 或 app notice 驱动；只有在需要 app-scoped skill 时才需要先 focus
 
 ## What Code Should Do
 

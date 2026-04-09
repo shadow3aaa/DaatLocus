@@ -120,7 +120,9 @@ impl RuntimeTurnDemoGeneratorProgram {
         ir.push_instruction("先读取 persona_kernel，把握身份、语言与风格；再读取 test_calibration，把握 tests 与 rules。");
         ir.push_instruction("优先从 persona spec 的 tests 中抽取终局约束；尽量让每个 demo 围绕其中一条主要测试项展开。");
         ir.push_instruction("如果 tests 有多条，必须为每条测试项输出一个 test_demo_group；不要把多条测试项合并进同一个 group。");
-        ir.push_instruction("test_demo_groups 的数量必须与 tests 数量严格相等；不得多出任何额外 group。");
+        ir.push_instruction(
+            "test_demo_groups 的数量必须与 tests 数量严格相等；不得多出任何额外 group。",
+        );
         ir.push_instruction("只能使用 persona spec 中 tests 的原文作为 group.test；不要把 rules、风险轴、题型或你自己的总结词生成额外 group。");
         ir.push_instruction("如果某条 test 需要覆盖多个失败模式，请把多个 demos 放进同一个 group，而不是拆成多个 groups。");
         ir.push_instruction(

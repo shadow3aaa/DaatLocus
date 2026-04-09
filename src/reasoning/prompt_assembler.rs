@@ -5,13 +5,13 @@ use super::{
     prompt_parts::{
         AppSnapshotPart, AppsSystemPart, CompiledAdditionsSystemPart, EventSystemPart,
         EventsSnapshotPart, MemoriesSnapshotPart, MemoriesSystemPart, PersonaSystemPart,
-        PlanSnapshotPart, PlanSystemPart, SensorySnapshotPart, SkillsSystemPart, SnapshotPart,
-        SystemPromptPart,
+        PlanSnapshotPart, PlanSystemPart, SensorySnapshotPart, SkillsSnapshotPart,
+        SkillsSystemPart, SnapshotPart, SystemPromptPart,
     },
     prompts::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
-        MEMORIES_UNIT_HOW, MEMORIES_UNIT_WHAT, MEMORIES_UNIT_WHEN, PLAN_UNIT_HOW, PLAN_UNIT_WHEN,
-        PLAN_UNIT_WHAT, SKILLS_UNIT_HOW, SKILLS_UNIT_WHAT, SKILLS_UNIT_WHEN,
+        MEMORIES_UNIT_HOW, MEMORIES_UNIT_WHAT, MEMORIES_UNIT_WHEN, PLAN_UNIT_HOW, PLAN_UNIT_WHAT,
+        PLAN_UNIT_WHEN, SKILLS_UNIT_HOW, SKILLS_UNIT_WHAT, SKILLS_UNIT_WHEN,
     },
     turn_compile::load_prompt_persona_spec_sync,
 };
@@ -62,6 +62,7 @@ impl SnapshotAssembler {
             Box::new(SensorySnapshotPart),
             Box::new(PlanSnapshotPart),
             Box::new(EventsSnapshotPart),
+            Box::new(SkillsSnapshotPart),
             Box::new(AppSnapshotPart),
         ])
     }

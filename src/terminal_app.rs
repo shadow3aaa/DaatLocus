@@ -365,7 +365,7 @@ impl TerminalApp {
 #[async_trait]
 impl App for TerminalApp {
     fn id(&self) -> AppId {
-        AppId::Terminal
+        AppId::terminal()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -419,6 +419,7 @@ impl App for TerminalApp {
                 .iter()
                 .map(|line| (*line).to_string())
                 .collect(),
+            body_markdown: None,
         }
     }
 
@@ -428,11 +429,27 @@ impl App for TerminalApp {
                 .iter()
                 .map(|line| (*line).to_string())
                 .collect(),
+            body_markdown: None,
         }
     }
 
     fn focused_tool_scopes(&self) -> &'static [AppToolScope] {
         &[AppToolScope::Terminal]
+    }
+
+    fn notice_reason(&self) -> Option<String> {
+        let unread_count = self
+            .sessions
+            .values()
+            .filter(|session| session.state.has_unread_output)
+            .count();
+        if unread_count > 0 {
+            Some(format!(
+                "{unread_count} terminal session(s) have unread output"
+            ))
+        } else {
+            None
+        }
     }
 
     async fn wait_until_settled(&self, silence_duration: Duration, timeout: Duration) -> bool {
@@ -600,7 +617,6 @@ mod tests {
             .exec_command_with_progress(
                 echo_command("session-a"),
                 None,
-                true,
                 None,
                 &sandbox_policy,
                 None,
@@ -632,7 +648,6 @@ mod tests {
             .exec_command_with_progress(
                 long_running_command(),
                 None,
-                true,
                 None,
                 &sandbox_policy,
                 None,
@@ -671,7 +686,6 @@ mod tests {
             .exec_command_with_progress(
                 long_running_command(),
                 None,
-                true,
                 None,
                 &sandbox_policy,
                 None,
@@ -696,7 +710,6 @@ mod tests {
                 .exec_command_with_progress(
                     echo_command(&format!("session-{idx}")),
                     None,
-                    true,
                     None,
                     &sandbox_policy,
                     None,
@@ -732,7 +745,6 @@ mod tests {
             .exec_command_with_progress(
                 delayed_output_command(800, "done-late"),
                 None,
-                true,
                 None,
                 &sandbox_policy,
                 Some(100),
@@ -759,7 +771,6 @@ mod tests {
             .exec_command_with_progress(
                 delayed_output_command(300, "continued-output"),
                 None,
-                true,
                 None,
                 &sandbox_policy,
                 Some(50),

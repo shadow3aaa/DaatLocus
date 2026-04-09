@@ -7,12 +7,12 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     context_budget::RequestBudgetBreakdown,
+    daat_locus_paths::daat_locus_paths,
     dashboard::DashboardState,
     reasoning::runtime::{
         AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult,
         render_assistant_tool_call_protocol_dump,
     },
-    daat_locus_paths::daat_locus_paths,
 };
 
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
@@ -39,9 +39,8 @@ pub async fn init_logging() {
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     let _ = LOG_GUARD.set(guard);
 
-    let env_filter =
-        EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("daat_locus=info,warn"));
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("daat_locus=info,warn"));
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)

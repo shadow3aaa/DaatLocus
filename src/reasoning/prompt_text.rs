@@ -52,7 +52,8 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    items.into_iter()
+    items
+        .into_iter()
         .map(Into::into)
         .filter(|item| !item.trim().is_empty())
         .map(|item| format!("- {item}"))

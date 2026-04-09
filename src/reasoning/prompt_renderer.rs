@@ -1,6 +1,5 @@
 use super::prompt_doc::{
-    PromptBlock, PromptDocument, PromptGroupChild, PromptGroupDoc, PromptNode, PromptStateDoc,
-    PromptUnitDoc,
+    PromptBlock, PromptDocument, PromptGroupDoc, PromptNode, PromptStateDoc, PromptUnitDoc,
 };
 
 pub struct LlmPromptRenderer;
@@ -57,7 +56,7 @@ fn render_group(group: &PromptGroupDoc) -> String {
     let body = group
         .children
         .iter()
-        .map(render_group_child)
+        .map(LlmPromptRenderer::render_node)
         .filter(|child| !child.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n\n");
@@ -65,14 +64,6 @@ fn render_group(group: &PromptGroupDoc) -> String {
         return String::new();
     }
     format!("<{}>\n{}\n</{}>", group.key, body, group.key)
-}
-
-fn render_group_child(child: &PromptGroupChild) -> String {
-    match child {
-        PromptGroupChild::Unit(unit) => render_unit(unit),
-        PromptGroupChild::State(state) => render_state(state),
-        PromptGroupChild::Group(group) => render_group(group),
-    }
 }
 
 fn render_unit(unit: &PromptUnitDoc) -> String {

@@ -170,7 +170,7 @@ impl EventSnapshot {
 
 impl Display for AppSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.focused_app {
+        match self.focused_app.as_ref() {
             Some(app) => writeln!(f, "当前前景应用：{app}")?,
             None => writeln!(f, "当前前景应用：无")?,
         }
@@ -178,8 +178,8 @@ impl Display for AppSnapshot {
         let attention_hints = self
             .states
             .iter()
-            .filter(|(id, _)| self.focused_app != Some(*id))
-            .filter_map(|(id, state)| app_attention_hint(*id, state));
+            .filter(|(id, _)| self.focused_app.as_ref() != Some(id))
+            .filter_map(|(id, state)| app_attention_hint(id.clone(), state));
         let attention_hints = attention_hints.collect::<Vec<_>>();
         if !attention_hints.is_empty() {
             writeln!(f, "后台应用提醒：")?;
@@ -241,20 +241,20 @@ impl Display for EventSnapshot {
 
 impl AppSnapshot {
     fn focused_runtime_text(&self) -> String {
-        match self.focused_app {
+        match self.focused_app.as_ref() {
             Some(app) => app.to_string(),
             None => "无".to_string(),
         }
     }
 
     fn app_state_entries(&self, max_lines_per_device: usize) -> Vec<SnapshotAppStateEntry> {
-        let Some(focused) = self.focused_app else {
+        let Some(focused) = self.focused_app.as_ref() else {
             return Vec::new();
         };
 
         self.states
             .iter()
-            .filter(|(id, _)| *id == focused)
+            .filter(|(id, _)| id == focused)
             .map(|(id, state)| {
                 let mut lines = state
                     .lines
@@ -325,21 +325,20 @@ impl EventSnapshot {
 }
 
 fn app_attention_hint(app_id: AppId, state: &AppStateRender) -> Option<String> {
-    match app_id {
-        AppId::Browser => None,
-        AppId::Terminal => {
-            let session_id = state
-                .lines
-                .iter()
-                .find_map(|line| line.strip_prefix("session="))
-                .and_then(|line| line.split_whitespace().next())
-                .unwrap_or("unknown");
-            if numeric_field(&state.lines, "sessions_with_unread_output") > 0 {
-                Some(format!("Terminal 会话 {session_id} 有未读输出"))
-            } else {
-                None
-            }
+    if app_id.is_terminal() {
+        let session_id = state
+            .lines
+            .iter()
+            .find_map(|line| line.strip_prefix("session="))
+            .and_then(|line| line.split_whitespace().next())
+            .unwrap_or("unknown");
+        if list_field(&state.lines, "unread_sessions").is_empty() {
+            None
+        } else {
+            Some(format!("Terminal 会话 {session_id} 有未读输出"))
         }
+    } else {
+        None
     }
 }
 
@@ -355,10 +354,21 @@ fn summarize_inline_text(text: &str) -> String {
     }
 }
 
-fn numeric_field(lines: &[String], key: &str) -> usize {
+fn list_field(lines: &[String], key: &str) -> Vec<String> {
     lines
         .iter()
         .find_map(|line| line.strip_prefix(&format!("{key}=")))
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0)
+        .map(|value| {
+            if value == "none" {
+                Vec::new()
+            } else {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(ToString::to_string)
+                    .collect()
+            }
+        })
+        .unwrap_or_default()
 }

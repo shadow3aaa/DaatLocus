@@ -1,15 +1,14 @@
 use crate::{context::Context, snapshot::Snapshot};
 
 use super::{
-    prompt_doc::{
-        PromptBlock, PromptGroupChild, PromptGroupDoc, PromptNode, PromptStateDoc, PromptUnitDoc,
-    },
+    prompt_doc::{PromptBlock, PromptGroupDoc, PromptNode, PromptStateDoc, PromptUnitDoc},
     prompts::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
-        MEMORIES_UNIT_HOW, MEMORIES_UNIT_WHAT, MEMORIES_UNIT_WHEN, PLAN_UNIT_HOW, PLAN_UNIT_WHEN,
-        PLAN_UNIT_WHAT, SKILLS_UNIT_HOW, SKILLS_UNIT_WHAT, SKILLS_UNIT_WHEN,
-        build_runtime_app_usages, build_runtime_background_hint_items,
+        MEMORIES_UNIT_HOW, MEMORIES_UNIT_WHAT, MEMORIES_UNIT_WHEN, PLAN_UNIT_HOW, PLAN_UNIT_WHAT,
+        PLAN_UNIT_WHEN, SKILLS_UNIT_HOW, SKILLS_UNIT_WHAT, SKILLS_UNIT_WHEN,
+        build_app_usage_prompt, build_runtime_app_usages, build_runtime_background_hint_items,
         build_runtime_focused_app_how_to_use_prompt, build_runtime_focused_app_skills_prompt,
+        build_runtime_global_skills_prompt,
     },
     turn_compile::load_prompt_persona_spec_sync,
 };
@@ -36,6 +35,7 @@ pub struct MemoriesSnapshotPart;
 pub struct SensorySnapshotPart;
 pub struct PlanSnapshotPart;
 pub struct EventsSnapshotPart;
+pub struct SkillsSnapshotPart;
 pub struct AppSnapshotPart;
 
 impl SystemPromptPart for EventSystemPart {
@@ -237,6 +237,23 @@ impl SnapshotPart for EventsSnapshotPart {
     }
 }
 
+impl SnapshotPart for SkillsSnapshotPart {
+    fn key(&self) -> &'static str {
+        "skills"
+    }
+
+    fn build(&self, ctx: &Context, _snapshot: &Snapshot) -> Option<PromptNode> {
+        let skills = build_runtime_global_skills_prompt(ctx)?;
+        if skills.trim().is_empty() {
+            return None;
+        }
+        Some(PromptNode::State(PromptStateDoc::new(
+            self.key(),
+            vec![PromptBlock::Paragraph(skills)],
+        )))
+    }
+}
+
 impl SnapshotPart for AppSnapshotPart {
     fn key(&self) -> &'static str {
         "app"
@@ -253,12 +270,11 @@ impl SnapshotPart for AppSnapshotPart {
             let app_groups = app_usages
                 .into_iter()
                 .map(|(app_id, usage)| {
-                    PromptGroupChild::Unit(PromptUnitDoc::new(
+                    PromptNode::State(PromptStateDoc::new(
                         app_id.to_string(),
-                        vec![PromptBlock::Paragraph(usage.description)],
-                        Vec::new(),
-                        vec![PromptBlock::BulletList(usage.when_to_focus)],
-                        Vec::new(),
+                        vec![PromptBlock::Paragraph(build_app_usage_prompt(
+                            app_id, &usage,
+                        ))],
                     ))
                 })
                 .collect::<Vec<_>>();
@@ -267,14 +283,14 @@ impl SnapshotPart for AppSnapshotPart {
 
         let background_hints = build_runtime_background_hint_items(ctx);
         if !background_hints.is_empty() {
-            other_app_children.push(PromptGroupChild::State(PromptStateDoc::new(
+            other_app_children.push(PromptNode::State(PromptStateDoc::new(
                 "background_hints",
                 vec![PromptBlock::BulletList(background_hints)],
             )));
         }
 
         if !other_app_children.is_empty() {
-            children.push(PromptGroupChild::Group(PromptGroupDoc::new(
+            children.push(PromptNode::Group(PromptGroupDoc::new(
                 "other_apps",
                 other_app_children,
             )));
@@ -293,16 +309,13 @@ impl SnapshotPart for AppSnapshotPart {
                     blocks.push(PromptBlock::BulletList(entry.lines));
                 }
             }
-            focused_app_children.push(PromptGroupChild::State(PromptStateDoc::new(
-                "state",
-                blocks,
-            )));
+            focused_app_children.push(PromptNode::State(PromptStateDoc::new("state", blocks)));
         }
 
         if let Some(how_to_use) = build_runtime_focused_app_how_to_use_prompt(ctx)
             && !how_to_use.trim().is_empty()
         {
-            focused_app_children.push(PromptGroupChild::State(PromptStateDoc::new(
+            focused_app_children.push(PromptNode::State(PromptStateDoc::new(
                 "how_to_use",
                 vec![PromptBlock::Paragraph(how_to_use)],
             )));
@@ -311,15 +324,15 @@ impl SnapshotPart for AppSnapshotPart {
         if let Some(skills) = build_runtime_focused_app_skills_prompt(ctx)
             && !skills.trim().is_empty()
         {
-            focused_app_children.push(PromptGroupChild::State(PromptStateDoc::new(
+            focused_app_children.push(PromptNode::State(PromptStateDoc::new(
                 "skills",
                 vec![PromptBlock::Paragraph(skills)],
             )));
         }
         if !focused_app_children.is_empty() {
-            children.push(PromptGroupChild::Group(PromptGroupDoc::new(
+            children.push(PromptNode::Group(PromptGroupDoc::new(
                 "focused_app",
-                vec![PromptGroupChild::Group(PromptGroupDoc::new(
+                vec![PromptNode::Group(PromptGroupDoc::new(
                     focused.clone(),
                     focused_app_children,
                 ))],

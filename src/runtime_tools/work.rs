@@ -10,8 +10,8 @@ use crate::{
     },
     events::{EventDisposition, EventPayload, EventStatus},
     hindsight::HindsightReflectOptions,
-    reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     plan::{Plan, PlanStatus, PlanStep},
+    reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 
@@ -89,7 +89,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<ReadSkillArgs>(
             "read_skill",
-            "读取当前前景 app 上指定 skill 的完整说明正文。调用前应先 `focus_app` 到匹配的 app；skill 列表会出现在应用快照里。",
+            "读取一个可见 skill 的完整说明正文。global skills 会始终出现在快照里；focused app 的 skills 只在该 app 位于前景时出现。",
             None,
             summarize_read_skill_tool,
             render_read_skill_call_ui,
@@ -133,18 +133,16 @@ fn render_focus_app_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
 fn execute_focus_app_tool<'a>(context: &'a mut Context, call: &'a AgentToolCall) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: FocusAppArgs = parse_tool_args(call)?;
-        context.apps.focus(args.app).await?;
+        let app = args.app.clone();
+        context.apps.focus(app.clone()).await?;
         Ok(ToolExecutionResult::new(
-            format!("focused app {}", args.app),
-            json!({ "app": args.app.to_string() }),
-            ToolUiEvent::app(
-                format!("focused app {}", args.app),
-                vec![args.app.to_string()],
-            ),
+            format!("focused app {}", app),
+            json!({ "app": app.to_string() }),
+            ToolUiEvent::app(format!("focused app {}", app), vec![app.to_string()]),
         )
         .with_turn_boundary(format!(
             "focused app changed to {}; re-render world state in a new turn",
-            args.app
+            app
         )))
     })
 }
@@ -397,7 +395,7 @@ fn execute_read_skill_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: ReadSkillArgs = parse_tool_args(call)?;
-        let skill = context.apps.read_skill(&args.id)?;
+        let skill = context.read_skill(&args.id)?;
         let content = format!(
             "skill_id={}\ntitle={}\nbody=\n{}",
             skill.id, skill.title, skill.body
