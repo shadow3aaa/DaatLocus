@@ -81,7 +81,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<DeepRecallArgs>(
             "deep_recall",
-            "对长期记忆执行一次较慢但更深的 reflect 查询，用于高层经验归纳或线程恢复。",
+            "对长期记忆执行一次较慢但更深的 reflect 查询，用于线程恢复、项目状态判断、用户偏好推断，以及需要证据链的高层建议或风险分析。",
             None,
             summarize_deep_recall_tool,
             render_deep_recall_call_ui,
@@ -371,7 +371,9 @@ fn execute_deep_recall_tool<'a>(
                 HindsightReflectOptions {
                     budget: args.budget.clone(),
                     max_tokens: args.max_tokens,
-                    include_facts: false,
+                    include_facts: true,
+                    include_tool_calls: true,
+                    include_tool_call_output: false,
                     ..Default::default()
                 },
             )
@@ -387,6 +389,52 @@ fn execute_deep_recall_tool<'a>(
                 .take(12)
                 .map(ToString::to_string),
         );
+        if let Some(based_on) = &response.based_on {
+            body_lines.push(format!(
+                "sources: memories={} mental_models={} directives={}",
+                based_on.memories.len(),
+                based_on.mental_models.len(),
+                based_on.directives.len()
+            ));
+            body_lines.extend(based_on.mental_models.iter().take(3).map(|model| {
+                format!(
+                    "mental_model: {} ({})",
+                    model.id,
+                    summarize_inline_text(&model.text)
+                )
+            }));
+            body_lines.extend(based_on.memories.iter().take(3).map(|memory| {
+                format!(
+                    "memory: {} [{}] {}",
+                    memory.id,
+                    memory
+                        .r#type
+                        .clone()
+                        .unwrap_or_else(|| "memory".to_string()),
+                    summarize_inline_text(&memory.text)
+                )
+            }));
+            body_lines.extend(
+                based_on
+                    .directives
+                    .iter()
+                    .take(3)
+                    .map(|directive| format!("directive: {} ({})", directive.id, directive.name)),
+            );
+        }
+        if let Some(trace) = &response.trace {
+            body_lines.push(format!(
+                "trace: tool_calls={} llm_calls={}",
+                trace.tool_calls.len(),
+                trace.llm_calls.len()
+            ));
+        }
+        if let Some(usage) = &response.usage {
+            body_lines.push(format!(
+                "usage: input={} output={} total={}",
+                usage.input_tokens, usage.output_tokens, usage.total_tokens
+            ));
+        }
         Ok(ToolExecutionResult::new(
             title.clone(),
             json!({
@@ -394,6 +442,9 @@ fn execute_deep_recall_tool<'a>(
                 "budget": args.budget,
                 "max_tokens": args.max_tokens,
                 "text": response.text,
+                "based_on": response.based_on,
+                "usage": response.usage,
+                "trace": response.trace,
             }),
             ToolUiEvent::work(title, body_lines),
         ))

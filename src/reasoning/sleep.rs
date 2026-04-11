@@ -85,6 +85,7 @@ pub struct SleepSummary {
     pub runtime_prompt_evolution_rounds: usize,
     pub runtime_prompt_accepted: bool,
     pub retained_reflections: usize,
+    pub refreshed_mental_models: usize,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -159,6 +160,24 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
         .await?;
     let retained_reflections =
         retain_sleep_reflections(context, &review_synthesis.reflections).await?;
+    if retained_reflections > 0 {
+        context.hindsight_retain.flush().await?;
+    }
+    let refreshed_mental_models = if context.config.hindsight.mental_models.is_empty() {
+        0
+    } else {
+        match context
+            .hindsight
+            .sync_mental_models(&context.config.hindsight.mental_models, true)
+            .await
+        {
+            Ok(operation_ids) => operation_ids.len(),
+            Err(err) => {
+                warn!("failed to refresh hindsight mental models during sleep: {err:?}");
+                0
+            }
+        }
+    };
     compact_runtime_trace_file(trace_batch.next_offset).await?;
     compact_runtime_review_file(runtime_review_batch.next_offset).await?;
     Ok(SleepSummary {
@@ -180,6 +199,7 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
         runtime_prompt_evolution_rounds: runtime_evolution.rounds,
         runtime_prompt_accepted: runtime_evolution.accepted,
         retained_reflections,
+        refreshed_mental_models,
     })
 }
 
@@ -645,21 +665,65 @@ fn merge_review_synthesis(
         synthesized.runtime_demos.push(runtime_demo);
     }
 
-    if !output.synthesized_summary.trim().is_empty() || !output.strategy_lesson.trim().is_empty() {
+    if output.retain_reflection
+        && (!output.synthesized_summary.trim().is_empty()
+            || !output.strategy_lesson.trim().is_empty())
+    {
+        let mut tags = review.reflection_tags.clone();
+        tags.push(format!(
+            "kind:{}",
+            format!("{:?}", output.reflection_kind).to_ascii_lowercase()
+        ));
+        tags.push(format!(
+            "stability:{}",
+            format!("{:?}", output.reflection_stability).to_ascii_lowercase()
+        ));
         synthesized.reflections.push(SleepReflectionRecord {
             document_id: format!("sleep-reflection:{}", slugify(&review.review_id)),
-            content: format!(
-                "Source: {}\nLabel: {}\nStatus: {}\nSummary: {}\nStrategy lesson: {}\nReason: {}",
-                review.reflection_subject,
-                review.review_label,
-                review.outcome_status,
-                output.synthesized_summary.trim(),
-                output.strategy_lesson.trim(),
-                output.reason.trim(),
-            ),
-            tags: review.reflection_tags.clone(),
+            content: build_sleep_reflection_content(review, output),
+            tags,
         });
     }
+}
+
+fn build_sleep_reflection_content(
+    review: &ReviewInput,
+    output: &SleepReviewSynthesizerOutput,
+) -> String {
+    let retrieval_text = output.reflection_retrieval_text.trim();
+    let evidence = output.reflection_evidence_summary.trim();
+    let summary = output.synthesized_summary.trim();
+    let strategy = output.strategy_lesson.trim();
+    let reason = output.reason.trim();
+    let confidence = output.reflection_confidence.clamp(0.0, 1.0);
+    if !retrieval_text.is_empty() {
+        return format!(
+            "Source: {}\nLabel: {}\nStatus: {}\nKind: {:?}\nStability: {:?}\nConfidence: {:.2}\nLesson: {}\nEvidence: {}\nSummary: {}\nReason: {}",
+            review.reflection_subject,
+            review.review_label,
+            review.outcome_status,
+            output.reflection_kind,
+            output.reflection_stability,
+            confidence,
+            retrieval_text,
+            evidence,
+            summary,
+            reason,
+        );
+    }
+    format!(
+        "Source: {}\nLabel: {}\nStatus: {}\nKind: {:?}\nStability: {:?}\nConfidence: {:.2}\nSummary: {}\nStrategy lesson: {}\nEvidence: {}\nReason: {}",
+        review.reflection_subject,
+        review.review_label,
+        review.outcome_status,
+        output.reflection_kind,
+        output.reflection_stability,
+        confidence,
+        summary,
+        strategy,
+        evidence,
+        reason,
+    )
 }
 
 fn runtime_span_example_inputs(
@@ -1730,11 +1794,38 @@ async fn retain_sleep_reflections(
 }
 
 async fn recall_related_memories(context: &Context, query: &str, top_k: usize) -> Vec<String> {
+    let observations = context
+        .hindsight
+        .recall(
+            query,
+            HindsightRecallOptions {
+                types: vec!["observation".to_string()],
+                max_tokens: 900,
+                budget: Some("low".to_string()),
+                include_source_facts: false,
+                ..Default::default()
+            },
+        )
+        .await;
+    let mut collected = match observations {
+        Ok(response) => response
+            .results
+            .into_iter()
+            .take(top_k)
+            .map(|item| item.text)
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    if collected.len() >= top_k {
+        return collected;
+    }
+
     let response = context
         .hindsight
         .recall(
             query,
             HindsightRecallOptions {
+                types: vec!["world".to_string(), "experience".to_string()],
                 max_tokens: 1200,
                 budget: Some("low".to_string()),
                 include_source_facts: true,
@@ -1744,14 +1835,16 @@ async fn recall_related_memories(context: &Context, query: &str, top_k: usize) -
         )
         .await;
     let Ok(response) = response else {
-        return Vec::new();
+        return collected;
     };
-    response
-        .results
-        .into_iter()
-        .take(top_k)
-        .map(|item| item.text)
-        .collect()
+    collected.extend(
+        response
+            .results
+            .into_iter()
+            .take(top_k.saturating_sub(collected.len()))
+            .map(|item| item.text),
+    );
+    collected
 }
 
 #[cfg(test)]

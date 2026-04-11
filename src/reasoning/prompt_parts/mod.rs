@@ -1,15 +1,19 @@
-use crate::{context::Context, snapshot::Snapshot};
+use crate::{
+    context::Context,
+    reasoning::runtime::{PromptMemoryCitation, PromptMemoryFact, PromptMentalModel},
+    snapshot::Snapshot,
+};
 
 use super::{
     prompt_doc::{PromptBlock, PromptGroupDoc, PromptNode, PromptStateDoc, PromptUnitDoc},
     prompts::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
         MEMORIES_UNIT_HOW, MEMORIES_UNIT_WHAT, MEMORIES_UNIT_WHEN, PLAN_UNIT_HOW, PLAN_UNIT_WHAT,
-        PLAN_UNIT_WHEN, SKILLS_UNIT_HOW, SKILLS_UNIT_WHAT, SKILLS_UNIT_WHEN,
-        WORKSPACE_UNIT_HOW, WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY, build_workspace_unit_what,
-        build_app_usage_prompt, build_runtime_app_usages, build_runtime_background_hint_items,
-        build_runtime_focused_app_how_to_use_prompt, build_runtime_focused_app_skills_prompt,
-        build_runtime_global_skills_prompt,
+        PLAN_UNIT_WHEN, SKILLS_UNIT_HOW, SKILLS_UNIT_WHAT, SKILLS_UNIT_WHEN, WORKSPACE_UNIT_HOW,
+        WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY, build_app_usage_prompt, build_runtime_app_usages,
+        build_runtime_background_hint_items, build_runtime_focused_app_how_to_use_prompt,
+        build_runtime_focused_app_skills_prompt, build_runtime_global_skills_prompt,
+        build_workspace_unit_what,
     },
     turn_compile::load_prompt_persona_spec_sync,
 };
@@ -192,15 +196,43 @@ impl SnapshotPart for MemoriesSnapshotPart {
     }
 
     fn build(&self, ctx: &Context, _snapshot: &Snapshot) -> Option<PromptNode> {
-        if ctx.prompt_memory.recalled_memories.is_empty() {
+        if ctx.prompt_memory.is_empty() {
             return None;
         }
-        Some(PromptNode::State(PromptStateDoc::new(
-            self.key(),
-            vec![PromptBlock::Paragraph(
-                ctx.prompt_memory.recalled_memories.join("\n"),
-            )],
-        )))
+        let mut children = Vec::new();
+
+        if !ctx.prompt_memory.mental_models.is_empty() {
+            children.push(PromptNode::State(PromptStateDoc::new(
+                "mental_models",
+                render_prompt_memory_mental_models(&ctx.prompt_memory.mental_models),
+            )));
+        }
+        if !ctx.prompt_memory.observations.is_empty() {
+            children.push(PromptNode::State(PromptStateDoc::new(
+                "observations",
+                render_prompt_memory_facts(&ctx.prompt_memory.observations),
+            )));
+        }
+        if !ctx.prompt_memory.raw_memories.is_empty() {
+            children.push(PromptNode::State(PromptStateDoc::new(
+                "raw_memories",
+                render_prompt_memory_facts(&ctx.prompt_memory.raw_memories),
+            )));
+        }
+        if !ctx.prompt_memory.citations.is_empty() {
+            children.push(PromptNode::State(PromptStateDoc::new(
+                "citations",
+                vec![PromptBlock::BulletList(render_prompt_memory_citations(
+                    &ctx.prompt_memory.citations,
+                ))],
+            )));
+        }
+
+        if children.is_empty() {
+            None
+        } else {
+            Some(PromptNode::Group(PromptGroupDoc::new(self.key(), children)))
+        }
     }
 }
 
@@ -363,4 +395,50 @@ impl SnapshotPart for AppSnapshotPart {
 
         Some(PromptNode::Group(PromptGroupDoc::new(self.key(), children)))
     }
+}
+
+fn render_prompt_memory_facts(facts: &[PromptMemoryFact]) -> Vec<PromptBlock> {
+    facts
+        .iter()
+        .map(|fact| {
+            let kind = fact
+                .memory_type
+                .clone()
+                .unwrap_or_else(|| "memory".to_string());
+            let context = fact
+                .context
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| format!("\ncontext: {value}"))
+                .unwrap_or_default();
+            PromptBlock::Paragraph(format!(
+                "id: {}\ntype: {}\ntext: {}{}",
+                fact.id,
+                kind,
+                fact.text.trim(),
+                context
+            ))
+        })
+        .collect()
+}
+
+fn render_prompt_memory_mental_models(models: &[PromptMentalModel]) -> Vec<PromptBlock> {
+    models
+        .iter()
+        .map(|model| {
+            PromptBlock::Paragraph(format!(
+                "id: {}\nname: {}\ncontent:\n{}",
+                model.id,
+                model.name,
+                model.content.trim()
+            ))
+        })
+        .collect()
+}
+
+fn render_prompt_memory_citations(citations: &[PromptMemoryCitation]) -> Vec<String> {
+    citations
+        .iter()
+        .map(|citation| format!("[{}] {}: {}", citation.kind, citation.id, citation.summary))
+        .collect()
 }
