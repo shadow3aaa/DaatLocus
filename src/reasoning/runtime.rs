@@ -1,10 +1,12 @@
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 use crate::{
     context::Context,
     core::LLM,
+    hindsight::HindsightRecallResult,
     logging::{RuntimeStatusLevel, set_runtime_status},
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
@@ -115,7 +117,59 @@ pub struct AgentTurnStreamResult {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PromptMemoryContext {
-    pub recalled_memories: Vec<String>,
+    pub observations: Vec<PromptMemoryFact>,
+    pub raw_memories: Vec<PromptMemoryFact>,
+    pub mental_models: Vec<PromptMentalModel>,
+    pub citations: Vec<PromptMemoryCitation>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PromptMemoryFact {
+    pub id: String,
+    pub text: String,
+    pub memory_type: Option<String>,
+    pub document_id: Option<String>,
+    pub context: Option<String>,
+    pub metadata: Option<HashMap<String, String>>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PromptMentalModel {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PromptMemoryCitation {
+    pub kind: String,
+    pub id: String,
+    pub summary: String,
+}
+
+impl PromptMemoryContext {
+    pub fn is_empty(&self) -> bool {
+        self.observations.is_empty()
+            && self.raw_memories.is_empty()
+            && self.mental_models.is_empty()
+            && self.citations.is_empty()
+    }
+}
+
+impl From<HindsightRecallResult> for PromptMemoryFact {
+    fn from(value: HindsightRecallResult) -> Self {
+        Self {
+            id: value.id,
+            text: value.text,
+            memory_type: value.r#type,
+            document_id: value.document_id,
+            context: value.context,
+            metadata: value.metadata,
+            tags: value.tags,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -550,9 +604,7 @@ where
                             on_retry(
                                 ProgramExecutionTelemetry {
                                     retry_count,
-                                    last_retry_reason: Some(
-                                        last_error.clone().unwrap_or_default(),
-                                    ),
+                                    last_retry_reason: Some(last_error.clone().unwrap_or_default()),
                                 },
                                 &request,
                             );

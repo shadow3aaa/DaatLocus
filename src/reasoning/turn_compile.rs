@@ -55,8 +55,7 @@ use crate::{
         render::openai_tools::OpenAIToolRenderer,
         runtime::{
             ProgramExecutionTelemetry, execute_program_with_ir_report,
-            execute_program_with_ir_report_with_retry_hook_and_validator,
-            resolve_program_tuning,
+            execute_program_with_ir_report_with_retry_hook_and_validator, resolve_program_tuning,
         },
         runtime::{PromptMessage, PromptRole},
         runtime_review::{RuntimeReviewSpan, RuntimeTurnRecord},
@@ -2061,33 +2060,35 @@ mod tests {
             tests: vec!["test a".to_string(), "test b".to_string()],
             rules: Vec::new(),
         };
-        let groups = vec![crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTestDemoGroup {
-            test: "test a".to_string(),
-            demos: vec![
-                crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo {
-                    title: "demo a".to_string(),
-                    scenario_summary: "summary".to_string(),
-                    incoming_text: "incoming".to_string(),
-                    expected_behavior: "expected".to_string(),
-                    judge_focus: Vec::new(),
-                    requires_fresh_world_state: false,
-                    must_use_tools: false,
-                    must_not_final_answer_patterns: Vec::new(),
-                    must_end_with_terminal_answer: true,
-                },
-                crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo {
-                    title: "demo a 2".to_string(),
-                    scenario_summary: "summary".to_string(),
-                    incoming_text: "incoming".to_string(),
-                    expected_behavior: "expected".to_string(),
-                    judge_focus: Vec::new(),
-                    requires_fresh_world_state: false,
-                    must_use_tools: false,
-                    must_not_final_answer_patterns: Vec::new(),
-                    must_end_with_terminal_answer: true,
-                },
-            ],
-        }];
+        let groups = vec![
+            crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTestDemoGroup {
+                test: "test a".to_string(),
+                demos: vec![
+                    crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo {
+                        title: "demo a".to_string(),
+                        scenario_summary: "summary".to_string(),
+                        incoming_text: "incoming".to_string(),
+                        expected_behavior: "expected".to_string(),
+                        judge_focus: Vec::new(),
+                        requires_fresh_world_state: false,
+                        must_use_tools: false,
+                        must_not_final_answer_patterns: Vec::new(),
+                        must_end_with_terminal_answer: true,
+                    },
+                    crate::reasoning::programs::runtime_turn_demo_generator::GeneratedTurnDemo {
+                        title: "demo a 2".to_string(),
+                        scenario_summary: "summary".to_string(),
+                        incoming_text: "incoming".to_string(),
+                        expected_behavior: "expected".to_string(),
+                        judge_focus: Vec::new(),
+                        requires_fresh_world_state: false,
+                        must_use_tools: false,
+                        must_not_final_answer_patterns: Vec::new(),
+                        must_end_with_terminal_answer: true,
+                    },
+                ],
+            },
+        ];
         let demos = groups
             .iter()
             .flat_map(|group| group.demos.iter().map(|demo| (group.test.as_str(), demo)))

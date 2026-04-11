@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use crate::config::HindsightConfig;
+use crate::config::{
+    HindsightConfig, HindsightDirectiveConfig, HindsightMentalModelTemplateConfig,
+};
 
 #[derive(Clone)]
 pub struct HindsightClient {
@@ -74,6 +76,115 @@ pub struct HindsightReflectOptions {
     pub tags: Vec<String>,
     pub tags_match: Option<String>,
     pub include_facts: bool,
+    pub include_tool_calls: bool,
+    pub include_tool_call_output: bool,
+    pub response_schema: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HindsightBankConfigEnvelope {
+    pub bank_id: String,
+    pub config: Value,
+    pub overrides: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HindsightDirectiveListResponse {
+    #[serde(default)]
+    pub items: Vec<HindsightDirective>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HindsightDirective {
+    pub id: String,
+    pub bank_id: String,
+    pub name: String,
+    pub content: String,
+    #[serde(default)]
+    pub priority: i64,
+    #[serde(default = "default_true")]
+    pub is_active: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HindsightMentalModelListResponse {
+    #[serde(default)]
+    pub items: Vec<HindsightMentalModel>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HindsightMentalModel {
+    pub id: String,
+    pub bank_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub source_query: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+    #[serde(default)]
+    pub trigger: Option<HindsightMentalModelTrigger>,
+    #[serde(default)]
+    pub last_refreshed_at: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub reflect_response: Option<HindsightReflectResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HindsightMentalModelTrigger {
+    #[serde(default)]
+    pub refresh_after_consolidation: bool,
+    #[serde(default)]
+    pub fact_types: Vec<String>,
+    #[serde(default)]
+    pub exclude_mental_models: bool,
+    #[serde(default)]
+    pub exclude_mental_model_ids: Vec<String>,
+    #[serde(default)]
+    pub tags_match: Option<String>,
+    #[serde(default)]
+    pub tag_groups: Vec<HindsightTagGroup>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HindsightTagGroup {
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub r#match: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HindsightMentalModelCreateResponse {
+    #[serde(default)]
+    pub mental_model_id: Option<String>,
+    pub operation_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HindsightAsyncOperationResponse {
+    pub operation_id: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HindsightDeleteObservationsResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub deleted_count: Option<usize>,
 }
 
 #[allow(dead_code)]
@@ -105,14 +216,103 @@ pub struct HindsightRecallResult {
     pub metadata: Option<HashMap<String, String>>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub occurred_start: Option<String>,
+    #[serde(default)]
+    pub occurred_end: Option<String>,
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HindsightReflectResponse {
     pub text: String,
     #[serde(default)]
     pub structured_output: Option<serde_json::Value>,
+    #[serde(default)]
+    pub based_on: Option<HindsightReflectBasedOn>,
+    #[serde(default)]
+    pub usage: Option<HindsightReflectUsage>,
+    #[serde(default)]
+    pub trace: Option<HindsightReflectTrace>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HindsightReflectBasedOn {
+    #[serde(default)]
+    pub memories: Vec<HindsightReflectMemoryFact>,
+    #[serde(default)]
+    pub mental_models: Vec<HindsightReflectMentalModelFact>,
+    #[serde(default)]
+    pub directives: Vec<HindsightReflectDirectiveFact>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HindsightReflectMemoryFact {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub r#type: Option<String>,
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub occurred_start: Option<String>,
+    #[serde(default)]
+    pub occurred_end: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HindsightReflectMentalModelFact {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub context: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HindsightReflectDirectiveFact {
+    pub id: String,
+    pub name: String,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HindsightReflectUsage {
+    #[serde(default)]
+    pub input_tokens: usize,
+    #[serde(default)]
+    pub output_tokens: usize,
+    #[serde(default)]
+    pub total_tokens: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HindsightReflectTrace {
+    #[serde(default)]
+    pub tool_calls: Vec<HindsightReflectTraceToolCall>,
+    #[serde(default)]
+    pub llm_calls: Vec<HindsightReflectTraceLlmCall>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HindsightReflectTraceToolCall {
+    pub tool: String,
+    #[serde(default)]
+    pub input: Value,
+    #[serde(default)]
+    pub output: Option<Value>,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub iteration: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HindsightReflectTraceLlmCall {
+    pub scope: String,
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -184,14 +384,38 @@ impl HindsightClient {
         HindsightRetainHandle { tx }
     }
 
+    pub async fn bootstrap_bank(&self) -> Result<()> {
+        self.ensure_bank().await?;
+        let updates = configured_bank_updates(&self.config)?;
+        if !updates.is_empty() {
+            match self.update_bank_config(updates).await {
+                Ok(_) => {}
+                Err(err) if err.to_string().contains("404") => {
+                    tracing::warn!(
+                        "hindsight bank config endpoint unavailable; skipping bank config sync: {err}"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        match self.sync_directives(&self.config.directives).await {
+            Ok(_) => {}
+            Err(err) if err.to_string().contains("404") => {
+                tracing::warn!(
+                    "hindsight directives endpoint unavailable; skipping directive sync: {err}"
+                );
+            }
+            Err(err) => return Err(err),
+        }
+        Ok(())
+    }
+
     pub async fn ensure_bank(&self) -> Result<()> {
         let url = self.bank_url();
         let mut body = json!({});
-        if !self.config.default_reflect_budget.trim().is_empty() {
-            body["reflect_mission"] = serde_json::Value::String(format!(
-                "Use concise {}-budget reflection for Daat Locus long-term memory retrieval.",
-                self.config.default_reflect_budget
-            ));
+        if !self.config.reflect_mission.trim().is_empty() {
+            body["reflect_mission"] =
+                serde_json::Value::String(self.config.reflect_mission.clone());
         }
         let response = self.authorized(self.http.put(url)).json(&body).send().await;
         self.expect_success(response, "create/update hindsight bank")
@@ -284,6 +508,233 @@ impl HindsightClient {
             .await;
         self.expect_json_success(response, "reflect hindsight memories")
             .await
+    }
+
+    pub async fn get_bank_config(&self) -> Result<HindsightBankConfigEnvelope> {
+        let url = format!("{}/config", self.bank_url());
+        let response = self.authorized(self.http.get(url)).send().await;
+        self.expect_json_success(response, "get hindsight bank config")
+            .await
+    }
+
+    pub async fn update_bank_config(
+        &self,
+        updates: serde_json::Map<String, Value>,
+    ) -> Result<HindsightBankConfigEnvelope> {
+        let url = format!("{}/config", self.bank_url());
+        let response = self
+            .authorized(self.http.patch(url))
+            .json(&json!({ "updates": updates }))
+            .send()
+            .await;
+        self.expect_json_success(response, "update hindsight bank config")
+            .await
+    }
+
+    pub async fn list_directives(&self, active_only: bool) -> Result<Vec<HindsightDirective>> {
+        let mut url = reqwest::Url::parse(&format!("{}/directives", self.bank_url()))
+            .map_err(|err| miette!("build hindsight directives url failed: {err}"))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("active_only", &active_only.to_string());
+            query.append_pair("limit", "1000");
+            query.append_pair("offset", "0");
+        }
+        let response = self.authorized(self.http.get(url)).send().await;
+        Ok(self
+            .expect_json_success::<HindsightDirectiveListResponse>(
+                response,
+                "list hindsight directives",
+            )
+            .await?
+            .items)
+    }
+
+    pub async fn create_directive(
+        &self,
+        directive: &HindsightDirectiveConfig,
+    ) -> Result<HindsightDirective> {
+        let url = format!("{}/directives", self.bank_url());
+        let response = self
+            .authorized(self.http.post(url))
+            .json(&json!({
+                "name": directive.name,
+                "content": directive.content,
+                "priority": directive.priority,
+                "is_active": directive.is_active,
+                "tags": directive.tags,
+            }))
+            .send()
+            .await;
+        self.expect_json_success(response, "create hindsight directive")
+            .await
+    }
+
+    pub async fn update_directive(
+        &self,
+        directive_id: &str,
+        directive: &HindsightDirectiveConfig,
+    ) -> Result<HindsightDirective> {
+        let url = format!("{}/directives/{}", self.bank_url(), directive_id);
+        let response = self
+            .authorized(self.http.patch(url))
+            .json(&json!({
+                "name": directive.name,
+                "content": directive.content,
+                "priority": directive.priority,
+                "is_active": directive.is_active,
+                "tags": directive.tags,
+            }))
+            .send()
+            .await;
+        self.expect_json_success(response, "update hindsight directive")
+            .await
+    }
+
+    pub async fn sync_directives(
+        &self,
+        directives: &[HindsightDirectiveConfig],
+    ) -> Result<Vec<HindsightDirective>> {
+        let existing = self.list_directives(false).await?;
+        let mut by_name = HashMap::new();
+        for directive in existing {
+            by_name.insert(directive.name.clone(), directive);
+        }
+        let mut synced = Vec::new();
+        for directive in directives
+            .iter()
+            .filter(|item| !item.name.trim().is_empty())
+        {
+            let result = if let Some(existing) = by_name.get(&directive.name) {
+                self.update_directive(&existing.id, directive).await?
+            } else {
+                self.create_directive(directive).await?
+            };
+            synced.push(result);
+        }
+        Ok(synced)
+    }
+
+    pub async fn delete_all_observations(&self) -> Result<HindsightDeleteObservationsResponse> {
+        let url = format!("{}/observations", self.bank_url());
+        let response = self.authorized(self.http.delete(url)).send().await;
+        self.expect_json_success(response, "delete hindsight observations")
+            .await
+    }
+
+    pub async fn list_mental_models(
+        &self,
+        tags: &[String],
+        detail: &str,
+    ) -> Result<Vec<HindsightMentalModel>> {
+        let mut url = reqwest::Url::parse(&format!("{}/mental-models", self.bank_url()))
+            .map_err(|err| miette!("build hindsight mental-model url failed: {err}"))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("detail", detail);
+            query.append_pair("limit", "100");
+            query.append_pair("offset", "0");
+            if !tags.is_empty() {
+                query.append_pair("tags_match", "all");
+                for tag in tags {
+                    query.append_pair("tags", tag);
+                }
+            }
+        }
+        let request = self.authorized(self.http.get(url));
+        let response = request.send().await;
+        Ok(self
+            .expect_json_success::<HindsightMentalModelListResponse>(
+                response,
+                "list hindsight mental models",
+            )
+            .await?
+            .items)
+    }
+
+    pub async fn create_mental_model(
+        &self,
+        template: &HindsightMentalModelTemplateConfig,
+    ) -> Result<HindsightMentalModelCreateResponse> {
+        let url = format!("{}/mental-models", self.bank_url());
+        let response = self
+            .authorized(self.http.post(url))
+            .json(&json!({
+                "id": normalize_optional_id(&template.id),
+                "name": template.name,
+                "source_query": template.source_query,
+                "max_tokens": template.max_tokens,
+                "tags": template.tags,
+                "trigger": {
+                    "refresh_after_consolidation": template.refresh_after_consolidation,
+                },
+            }))
+            .send()
+            .await;
+        self.expect_json_success(response, "create hindsight mental model")
+            .await
+    }
+
+    pub async fn update_mental_model(
+        &self,
+        model_id: &str,
+        template: &HindsightMentalModelTemplateConfig,
+    ) -> Result<HindsightMentalModel> {
+        let url = format!("{}/mental-models/{}", self.bank_url(), model_id);
+        let response = self
+            .authorized(self.http.patch(url))
+            .json(&json!({
+                "name": template.name,
+                "source_query": template.source_query,
+                "max_tokens": template.max_tokens,
+                "tags": template.tags,
+                "trigger": {
+                    "refresh_after_consolidation": template.refresh_after_consolidation,
+                },
+            }))
+            .send()
+            .await;
+        self.expect_json_success(response, "update hindsight mental model")
+            .await
+    }
+
+    pub async fn refresh_mental_model(
+        &self,
+        model_id: &str,
+    ) -> Result<HindsightAsyncOperationResponse> {
+        let url = format!("{}/mental-models/{}/refresh", self.bank_url(), model_id);
+        let response = self.authorized(self.http.post(url)).send().await;
+        self.expect_json_success(response, "refresh hindsight mental model")
+            .await
+    }
+
+    pub async fn sync_mental_models(
+        &self,
+        templates: &[HindsightMentalModelTemplateConfig],
+        refresh_existing: bool,
+    ) -> Result<Vec<String>> {
+        let existing = self.list_mental_models(&[], "metadata").await?;
+        let mut by_id = HashMap::new();
+        for model in existing {
+            by_id.insert(model.id.clone(), model);
+        }
+
+        let mut operation_ids = Vec::new();
+        for template in templates
+            .iter()
+            .filter(|item| !item.id.trim().is_empty() && !item.name.trim().is_empty())
+        {
+            if by_id.contains_key(&template.id) {
+                self.update_mental_model(&template.id, template).await?;
+                if refresh_existing {
+                    operation_ids.push(self.refresh_mental_model(&template.id).await?.operation_id);
+                }
+            } else {
+                let response = self.create_mental_model(template).await?;
+                operation_ids.push(response.operation_id);
+            }
+        }
+        Ok(operation_ids)
     }
 
     fn bank_url(&self) -> String {
@@ -580,6 +1031,9 @@ fn build_reflect_body(
     if let Some(max_tokens) = options.max_tokens {
         body.insert("max_tokens".to_string(), json!(max_tokens.max(1)));
     }
+    if let Some(response_schema) = options.response_schema {
+        body.insert("response_schema".to_string(), response_schema);
+    }
     if !options.tags.is_empty() {
         body.insert("tags".to_string(), json!(options.tags));
     }
@@ -588,10 +1042,97 @@ fn build_reflect_body(
     } else {
         body.insert("tags_match".to_string(), Value::String("any".to_string()));
     }
+    let mut include = serde_json::Map::new();
     if options.include_facts {
-        body.insert("include".to_string(), json!({ "facts": {} }));
+        include.insert("facts".to_string(), json!({}));
+    }
+    if options.include_tool_calls {
+        let output = if options.include_tool_call_output {
+            Value::Bool(true)
+        } else {
+            Value::Bool(false)
+        };
+        include.insert("tool_calls".to_string(), json!({ "output": output }));
+    }
+    if !include.is_empty() {
+        body.insert("include".to_string(), Value::Object(include));
     }
     Value::Object(body)
+}
+
+fn configured_bank_updates(config: &HindsightConfig) -> Result<serde_json::Map<String, Value>> {
+    let mut updates = serde_json::Map::new();
+    if !config.reflect_mission.trim().is_empty() {
+        updates.insert(
+            "reflect_mission".to_string(),
+            Value::String(config.reflect_mission.clone()),
+        );
+    }
+    if !config.retain_mission.trim().is_empty() {
+        updates.insert(
+            "retain_mission".to_string(),
+            Value::String(config.retain_mission.clone()),
+        );
+    }
+    if !config.retain_extraction_mode.trim().is_empty() {
+        updates.insert(
+            "retain_extraction_mode".to_string(),
+            Value::String(config.retain_extraction_mode.clone()),
+        );
+    }
+    if !config.retain_custom_instructions.trim().is_empty() {
+        updates.insert(
+            "retain_custom_instructions".to_string(),
+            Value::String(config.retain_custom_instructions.clone()),
+        );
+    }
+    if !config.observations_mission.trim().is_empty() {
+        updates.insert(
+            "observations_mission".to_string(),
+            Value::String(config.observations_mission.clone()),
+        );
+    }
+    updates.insert(
+        "enable_observations".to_string(),
+        Value::Bool(config.enable_observations),
+    );
+    updates.insert(
+        "disposition_skepticism".to_string(),
+        json!(config.disposition_skepticism),
+    );
+    updates.insert(
+        "disposition_literalism".to_string(),
+        json!(config.disposition_literalism),
+    );
+    updates.insert(
+        "disposition_empathy".to_string(),
+        json!(config.disposition_empathy),
+    );
+    updates.insert(
+        "entities_allow_free_form".to_string(),
+        Value::Bool(config.entities_allow_free_form),
+    );
+    if !config.entity_labels.is_empty() {
+        updates.insert(
+            "entity_labels".to_string(),
+            serde_json::to_value(&config.entity_labels)
+                .map_err(|err| miette!("serialize hindsight entity labels failed: {err}"))?,
+        );
+    }
+    Ok(updates)
+}
+
+fn normalize_optional_id(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -607,6 +1148,19 @@ mod tests {
             request_timeout_secs: 120,
             default_recall_budget: "mid".to_string(),
             default_reflect_budget: "low".to_string(),
+            reflect_mission: "reflect mission".to_string(),
+            retain_mission: "retain mission".to_string(),
+            retain_extraction_mode: "verbose".to_string(),
+            retain_custom_instructions: String::new(),
+            observations_mission: "obs mission".to_string(),
+            enable_observations: true,
+            disposition_skepticism: 4,
+            disposition_literalism: 4,
+            disposition_empathy: 3,
+            entity_labels: Vec::new(),
+            entities_allow_free_form: true,
+            directives: Vec::new(),
+            mental_models: Vec::new(),
         }
     }
 
@@ -621,6 +1175,9 @@ mod tests {
                 tags: Vec::new(),
                 tags_match: None,
                 include_facts: false,
+                include_tool_calls: false,
+                include_tool_call_output: false,
+                response_schema: None,
             },
         );
         let object = body.as_object().expect("reflect body should be an object");
@@ -643,6 +1200,9 @@ mod tests {
                 tags: vec!["user:alice".to_string()],
                 tags_match: Some("any_strict".to_string()),
                 include_facts: true,
+                include_tool_calls: true,
+                include_tool_call_output: false,
+                response_schema: None,
             },
         );
         assert_eq!(
@@ -653,8 +1213,37 @@ mod tests {
                 "max_tokens": 500,
                 "tags": ["user:alice"],
                 "tags_match": "any_strict",
-                "include": { "facts": {} }
+                "include": {
+                    "facts": {},
+                    "tool_calls": { "output": false }
+                }
             })
         );
+    }
+
+    #[test]
+    fn configured_bank_updates_include_new_fields() {
+        let updates = configured_bank_updates(&test_config()).expect("bank config updates");
+        assert_eq!(
+            updates.get("reflect_mission"),
+            Some(&json!("reflect mission"))
+        );
+        assert_eq!(
+            updates.get("retain_mission"),
+            Some(&json!("retain mission"))
+        );
+        assert_eq!(
+            updates.get("retain_extraction_mode"),
+            Some(&json!("verbose"))
+        );
+        assert_eq!(
+            updates.get("observations_mission"),
+            Some(&json!("obs mission"))
+        );
+        assert_eq!(updates.get("enable_observations"), Some(&json!(true)));
+        assert_eq!(updates.get("disposition_skepticism"), Some(&json!(4)));
+        assert_eq!(updates.get("disposition_literalism"), Some(&json!(4)));
+        assert_eq!(updates.get("disposition_empathy"), Some(&json!(3)));
+        assert_eq!(updates.get("entities_allow_free_form"), Some(&json!(true)));
     }
 }

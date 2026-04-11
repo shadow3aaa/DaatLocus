@@ -677,17 +677,79 @@ impl HindsightQueueItem {
     }
 
     fn to_hindsight_item(&self) -> HindsightRetainItem {
+        let tags = self.classification_tags();
+        let mut metadata = std::collections::HashMap::from([
+            ("current_doing".to_string(), self.current_doing.clone()),
+            ("entry_id".to_string(), self.id.to_string()),
+            ("origin".to_string(), "runtime_step".to_string()),
+        ]);
+        if let Some(primary_scope) = tags
+            .iter()
+            .find_map(|tag| tag.strip_prefix("scope:").map(str::to_string))
+        {
+            metadata.insert("primary_scope".to_string(), primary_scope);
+        }
+        if let Some(primary_kind) = tags
+            .iter()
+            .find_map(|tag| tag.strip_prefix("kind:").map(str::to_string))
+        {
+            metadata.insert("primary_kind".to_string(), primary_kind);
+        }
         HindsightRetainItem {
             content: self.render_for_retain(),
             timestamp: None,
             context: Some("runtime hindsight step".to_string()),
-            metadata: Some(std::collections::HashMap::from([
-                ("current_doing".to_string(), self.current_doing.clone()),
-                ("entry_id".to_string(), self.id.to_string()),
-            ])),
+            metadata: Some(metadata),
             document_id: Some(format!("hindsight-step:{}", self.id)),
-            tags: Some(vec!["daat-locus".to_string(), "hindsight-step".to_string()]),
+            tags: Some(tags),
         }
+    }
+
+    fn classification_tags(&self) -> Vec<String> {
+        let mut tags = vec![
+            "daat-locus".to_string(),
+            "hindsight-step".to_string(),
+            "origin:runtime_step".to_string(),
+            "source:runtime_step".to_string(),
+            "scope:runtime".to_string(),
+        ];
+
+        if self.has_telegram_activity() {
+            tags.push("scope:telegram".to_string());
+        }
+        if self.has_workspace_activity() {
+            tags.push("scope:workspace".to_string());
+            tags.push("kind:project_fact".to_string());
+        }
+        if self.has_failure_signal() {
+            tags.push("kind:failure_pattern".to_string());
+        }
+        if self.has_user_preference_signal() {
+            tags.push("kind:user_preference".to_string());
+        }
+        if !tags.iter().any(|tag| tag.starts_with("kind:")) {
+            tags.push("kind:strategy_lesson".to_string());
+        }
+
+        tags.sort();
+        tags.dedup();
+        tags
+    }
+
+    fn has_workspace_activity(&self) -> bool {
+        self.messages.iter().any(message_has_workspace_signal)
+    }
+
+    fn has_telegram_activity(&self) -> bool {
+        self.messages.iter().any(message_has_telegram_signal)
+    }
+
+    fn has_failure_signal(&self) -> bool {
+        self.messages.iter().any(message_has_failure_signal)
+    }
+
+    fn has_user_preference_signal(&self) -> bool {
+        self.messages.iter().any(message_has_preference_signal)
     }
 }
 
@@ -1017,8 +1079,9 @@ fn format_message_for_memory(message: &PromptMessage) -> String {
 impl HindsightQueueItem {
     fn render_for_retain(&self) -> String {
         let mut lines = vec![
-            "runtime step".to_string(),
-            format!("focus: {}", self.current_doing),
+            "runtime step narrative".to_string(),
+            format!("focus: {}", compact_inline_text(&self.current_doing)),
+            "goal: preserve durable facts, decisions, boundaries, preferences, and reusable lessons from this step.".to_string(),
         ];
         for message in &self.messages {
             lines.extend(render_prompt_message_for_retain(message));
@@ -1033,7 +1096,7 @@ fn render_prompt_message_for_retain(message: &PromptMessage) -> Vec<String> {
         PromptRole::Assistant => {
             if !message.content.trim().is_empty() {
                 lines.push(format!(
-                    "assistant action: {}",
+                    "assistant reasoning: {}",
                     compact_inline_text(&message.content)
                 ));
             }
@@ -1046,7 +1109,7 @@ fn render_prompt_message_for_retain(message: &PromptMessage) -> Vec<String> {
                 lines.extend(render_tool_result_event_for_retain(event));
             } else if !message.content.trim().is_empty() {
                 lines.push(format!(
-                    "tool result: {}",
+                    "tool outcome: {}",
                     compact_inline_text(&message.content)
                 ));
             }
@@ -1054,7 +1117,7 @@ fn render_prompt_message_for_retain(message: &PromptMessage) -> Vec<String> {
         PromptRole::User => {
             if !message.content.trim().is_empty() {
                 lines.push(format!(
-                    "user context: {}",
+                    "user/runtime context: {}",
                     compact_inline_text(&message.content)
                 ));
             }
@@ -1091,31 +1154,40 @@ fn render_tool_result_event_for_retain(event: &ToolUiEvent) -> Vec<String> {
 }
 
 fn render_tool_data_for_retain(prefix: &str, data: &ToolUiData) -> Vec<String> {
-    let mut lines = vec![format!("{prefix}: {}", compact_inline_text(&data.title))];
+    let mut lines = vec![format!(
+        "{prefix} action: {}",
+        compact_inline_text(&data.title)
+    )];
     if !data.body_lines.is_empty() {
         lines.push(format!(
-            "{prefix} details: {}",
-            compact_inline_text(&data.body_lines.join(" | "))
+            "{prefix} result: {}",
+            compact_inline_text(&data.body_lines.join(" || "))
         ));
     }
     lines
 }
 
 fn render_terminal_data_for_retain(prefix: &str, data: &TerminalUiData) -> Vec<String> {
-    let mut lines = vec![format!("{prefix}: {}", compact_inline_text(&data.title))];
+    let mut lines = vec![format!(
+        "{prefix} terminal action: {}",
+        compact_inline_text(&data.title)
+    )];
     if !data.body_lines.is_empty() {
         lines.push(format!(
-            "{prefix} output: {}",
-            compact_inline_text(&data.body_lines.join(" | "))
+            "{prefix} terminal output: {}",
+            compact_inline_text(&data.body_lines.join(" || "))
         ));
     }
     lines
 }
 
 fn render_patch_data_for_retain(prefix: &str, data: &PatchUiData) -> Vec<String> {
-    let mut lines = vec![format!("{prefix}: {}", compact_inline_text(&data.title))];
+    let mut lines = vec![format!(
+        "{prefix} patch action: {}",
+        compact_inline_text(&data.title)
+    )];
     lines.push(format!(
-        "{prefix} summary: {}",
+        "{prefix} patch summary: {}",
         compact_inline_text(&data.summary_line)
     ));
     for file in data.files.iter().take(6) {
@@ -1125,7 +1197,7 @@ fn render_patch_data_for_retain(prefix: &str, data: &PatchUiData) -> Vec<String>
             _ => "~",
         };
         lines.push(format!(
-            "{prefix} file: {marker} {} (+{} -{})",
+            "{prefix} changed file: {marker} {} (+{} -{})",
             file.path, file.added_lines, file.removed_lines
         ));
     }
@@ -1133,20 +1205,90 @@ fn render_patch_data_for_retain(prefix: &str, data: &PatchUiData) -> Vec<String>
 }
 
 fn render_telegram_data_for_retain(prefix: &str, data: &TelegramUiData) -> Vec<String> {
-    let mut lines = vec![format!("{prefix}: {}", compact_inline_text(&data.title))];
+    let mut lines = vec![format!(
+        "{prefix} telegram action: {}",
+        compact_inline_text(&data.title)
+    )];
     if !data.detail_lines.is_empty() {
         lines.push(format!(
-            "{prefix} details: {}",
-            compact_inline_text(&data.detail_lines.join(" | "))
+            "{prefix} telegram details: {}",
+            compact_inline_text(&data.detail_lines.join(" || "))
         ));
     }
     if !data.message_lines.is_empty() {
         lines.push(format!(
-            "{prefix} messages: {}",
-            compact_inline_text(&data.message_lines.join(" | "))
+            "{prefix} telegram messages: {}",
+            compact_inline_text(&data.message_lines.join(" || "))
         ));
     }
     lines
+}
+
+fn message_has_workspace_signal(message: &PromptMessage) -> bool {
+    if message
+        .tool_call_ui_events
+        .iter()
+        .any(tool_call_event_is_workspace_signal)
+    {
+        return true;
+    }
+    match &message.tool_ui_event {
+        Some(event) => tool_event_is_workspace_signal(event),
+        None => false,
+    }
+}
+
+fn message_has_telegram_signal(message: &PromptMessage) -> bool {
+    if message
+        .tool_call_ui_events
+        .iter()
+        .any(|event| matches!(event, ToolCallUiEvent::Telegram(_)))
+    {
+        return true;
+    }
+    matches!(message.tool_ui_event, Some(ToolUiEvent::Telegram(_)))
+}
+
+fn message_has_failure_signal(message: &PromptMessage) -> bool {
+    if message.content.to_ascii_lowercase().contains("failed") {
+        return true;
+    }
+    if message
+        .tool_call_ui_events
+        .iter()
+        .any(|event| matches!(event, ToolCallUiEvent::Error(_)))
+    {
+        return true;
+    }
+    matches!(message.tool_ui_event, Some(ToolUiEvent::Error(_)))
+}
+
+fn message_has_preference_signal(message: &PromptMessage) -> bool {
+    let content = message.content.to_ascii_lowercase();
+    content.contains("prefer")
+        || content.contains("偏好")
+        || content.contains("喜欢")
+        || matches!(message.tool_ui_event, Some(ToolUiEvent::Telegram(_)))
+}
+
+fn tool_call_event_is_workspace_signal(event: &ToolCallUiEvent) -> bool {
+    matches!(
+        event,
+        ToolCallUiEvent::Exec(_)
+            | ToolCallUiEvent::Terminal(_)
+            | ToolCallUiEvent::Patch(_)
+            | ToolCallUiEvent::App(_)
+    )
+}
+
+fn tool_event_is_workspace_signal(event: &ToolUiEvent) -> bool {
+    matches!(
+        event,
+        ToolUiEvent::Exec(_)
+            | ToolUiEvent::Terminal(_)
+            | ToolUiEvent::Patch(_)
+            | ToolUiEvent::App(_)
+    )
 }
 
 fn compact_inline_text(text: &str) -> String {

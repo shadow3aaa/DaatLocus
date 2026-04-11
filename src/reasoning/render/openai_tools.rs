@@ -70,16 +70,88 @@ impl Renderer for OpenAIToolRenderer {
 }
 
 fn build_long_term_memory_messages(context: &Context) -> Vec<PromptMessage> {
-    if context.prompt_memory.recalled_memories.is_empty() {
+    if context.prompt_memory.is_empty() {
         return Vec::new();
     }
 
-    let doc = PromptDocument::new(vec![PromptNode::State(PromptStateDoc::new(
-        "recall_memories",
-        vec![PromptBlock::Paragraph(
-            context.prompt_memory.recalled_memories.join("\n"),
-        )],
-    ))]);
+    let mut children = Vec::new();
+    if !context.prompt_memory.mental_models.is_empty() {
+        children.push(PromptNode::State(PromptStateDoc::new(
+            "mental_models",
+            context
+                .prompt_memory
+                .mental_models
+                .iter()
+                .map(|model| {
+                    PromptBlock::Paragraph(format!(
+                        "id: {}\nname: {}\ncontent:\n{}",
+                        model.id,
+                        model.name,
+                        model.content.trim()
+                    ))
+                })
+                .collect(),
+        )));
+    }
+    if !context.prompt_memory.observations.is_empty() {
+        children.push(PromptNode::State(PromptStateDoc::new(
+            "observations",
+            context
+                .prompt_memory
+                .observations
+                .iter()
+                .map(|fact| {
+                    PromptBlock::Paragraph(format!(
+                        "id: {}\ntype: {}\ntext: {}",
+                        fact.id,
+                        fact.memory_type
+                            .clone()
+                            .unwrap_or_else(|| "observation".to_string()),
+                        fact.text.trim()
+                    ))
+                })
+                .collect(),
+        )));
+    }
+    if !context.prompt_memory.raw_memories.is_empty() {
+        children.push(PromptNode::State(PromptStateDoc::new(
+            "raw_memories",
+            context
+                .prompt_memory
+                .raw_memories
+                .iter()
+                .map(|fact| {
+                    PromptBlock::Paragraph(format!(
+                        "id: {}\ntype: {}\ntext: {}",
+                        fact.id,
+                        fact.memory_type
+                            .clone()
+                            .unwrap_or_else(|| "memory".to_string()),
+                        fact.text.trim()
+                    ))
+                })
+                .collect(),
+        )));
+    }
+    if !context.prompt_memory.citations.is_empty() {
+        children.push(PromptNode::State(PromptStateDoc::new(
+            "citations",
+            vec![PromptBlock::BulletList(
+                context
+                    .prompt_memory
+                    .citations
+                    .iter()
+                    .map(|citation| {
+                        format!("[{}] {}: {}", citation.kind, citation.id, citation.summary)
+                    })
+                    .collect(),
+            )],
+        )));
+    }
+
+    let doc = PromptDocument::new(vec![PromptNode::Group(
+        super::super::prompt_doc::PromptGroupDoc::new("recall_memories", children),
+    )]);
 
     LlmPromptRenderer::render_system_messages(&doc)
         .into_iter()

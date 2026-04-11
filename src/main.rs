@@ -71,7 +71,7 @@ use crate::{
         evaluation_artifacts::EvaluationArtifactSuggestedFixKind,
         runtime::{
             AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult,
-            PromptMemoryContext, PromptMessage,
+            PromptMemoryCitation, PromptMemoryContext, PromptMentalModel, PromptMessage,
         },
         runtime_review::{
             RuntimeTurnRecord, append_runtime_turn_record, unread_runtime_review_count,
@@ -189,6 +189,10 @@ enum DaatLocusCommand {
         target: SetupTarget,
     },
     Sleep,
+    Hindsight {
+        #[command(subcommand)]
+        target: HindsightTarget,
+    },
     Inspect {
         #[command(subcommand)]
         target: InspectTarget,
@@ -215,6 +219,18 @@ enum InspectTarget {
     #[command(name = "system-prompt")]
     SystemPrompt,
     Snapshot,
+}
+
+#[derive(Debug, Subcommand)]
+enum HindsightTarget {
+    Config,
+    Directives,
+    #[command(name = "mental-models")]
+    MentalModels,
+    #[command(name = "clear-observations")]
+    ClearObservations,
+    #[command(name = "refresh-mental-models")]
+    RefreshMentalModels,
 }
 
 fn main() {
@@ -277,6 +293,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     };
 
     match cli.command.as_ref() {
+        Some(DaatLocusCommand::Hindsight { target }) => {
+            run_hindsight_command(&config, target).await?;
+            return Ok(());
+        }
         Some(DaatLocusCommand::Inspect {
             target: InspectTarget::SystemPrompt,
         }) => {
@@ -371,7 +391,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
-    let hindsight = HindsightClient::connect(&config.hindsight).await?;
+    let hindsight = connect_bootstrapped_hindsight(&config).await?;
     let hindsight_retain = hindsight.spawn_retain_worker();
     let execution_cwd = resolve_runtime_workspace_dir()?;
     tokio::fs::create_dir_all(&execution_cwd)
@@ -560,6 +580,69 @@ async fn async_main(cli: Cli) -> Result<()> {
     let _ = shutdown_tx.send(());
     let _ = agent_handle.await;
     Ok(())
+}
+
+async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Result<HindsightClient> {
+    let hindsight = HindsightClient::connect(&config.hindsight).await?;
+    hindsight.bootstrap_bank().await?;
+    Ok(hindsight)
+}
+
+async fn run_hindsight_command(
+    config: &crate::config::Config,
+    target: &HindsightTarget,
+) -> Result<()> {
+    let hindsight = connect_bootstrapped_hindsight(config).await?;
+    match target {
+        HindsightTarget::Config => {
+            let config = hindsight.get_bank_config().await?;
+            println!(
+                "{}",
+                to_pretty_json(&json!({
+                    "bank_id": config.bank_id,
+                    "config": config.config,
+                    "overrides": config.overrides,
+                }))?
+            );
+        }
+        HindsightTarget::Directives => {
+            let directives = hindsight.list_directives(false).await?;
+            println!("{}", to_pretty_json(&directives)?);
+        }
+        HindsightTarget::MentalModels => {
+            let models = hindsight.list_mental_models(&[], "content").await?;
+            println!("{}", to_pretty_json(&models)?);
+        }
+        HindsightTarget::ClearObservations => {
+            let response = hindsight.delete_all_observations().await?;
+            println!(
+                "{}",
+                to_pretty_json(&json!({
+                    "success": response.success,
+                    "message": response.message,
+                    "deleted_count": response.deleted_count.unwrap_or(0),
+                }))?
+            );
+        }
+        HindsightTarget::RefreshMentalModels => {
+            let operation_ids = hindsight
+                .sync_mental_models(&config.hindsight.mental_models, true)
+                .await?;
+            println!(
+                "{}",
+                to_pretty_json(&json!({
+                    "refreshed_models": config.hindsight.mental_models.len(),
+                    "operation_ids": operation_ids,
+                }))?
+            );
+        }
+    }
+    Ok(())
+}
+
+fn to_pretty_json<T: serde::Serialize>(value: &T) -> Result<String> {
+    serde_json::to_string_pretty(value)
+        .map_err(|err| miette!("serialize hindsight output failed: {err}"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -760,7 +843,7 @@ async fn run_memory_reset() -> Result<()> {
     );
     println!("[memory-reset] cleared: runtime_conversation, hindsight_queue");
     println!("[memory-reset] cleared: reasoning_traces.jsonl, runtime_reviews.jsonl");
-    println!("[memory-reset] cleared: hindsight bank");
+    println!("[memory-reset] cleared: hindsight bank, observations, directives, mental models");
     println!("[memory-reset] cleared: current plan");
     println!("[memory-reset] preserved: config/, state/, artifacts/, logs/");
 
@@ -803,11 +886,7 @@ async fn run_state_reset() -> Result<()> {
 
 async fn clear_state_files(home: &PathBuf) -> Result<Vec<String>> {
     let paths = DaatLocusPaths::from_root(home.clone());
-    let files = [
-        "events",
-        "pending_work_queue",
-        "telegram_transport_state",
-    ];
+    let files = ["events", "pending_work_queue", "telegram_transport_state"];
     clear_named_files(paths.state_dir(), &files).await
 }
 
@@ -861,7 +940,7 @@ async fn run_reset_all() -> Result<()> {
         println!("[reset] cleared state: {}", state_cleared.join(", "));
     }
     println!(
-        "[reset] cleared memory: runtime_conversation, hindsight_queue, reasoning_traces.jsonl, runtime_reviews.jsonl, hindsight bank"
+        "[reset] cleared memory: runtime_conversation, hindsight_queue, reasoning_traces.jsonl, runtime_reviews.jsonl, hindsight bank, observations, directives, mental models"
     );
     if artifact_cleared.is_empty() {
         println!("[reset] cleared complite artifacts: none");
@@ -988,7 +1067,7 @@ pub(crate) async fn build_eval_context_with_compiled(
     let judge_model = config.judge.resolved_model(&config.main_model);
     let client = OpenAIClient::new(&config);
     let judge_client = OpenAIClient::from_model_config(&judge_model);
-    let hindsight = HindsightClient::connect(&config.hindsight)
+    let hindsight = connect_bootstrapped_hindsight(&config)
         .await
         .unwrap_or_else(|err| panic!("failed to construct hindsight client: {err:?}"));
     let hindsight_retain = hindsight.spawn_retain_worker();
@@ -1042,7 +1121,7 @@ async fn load_compiled_prompts_only(
 
 fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
     println!(
-        "sleep: consumed {} runtime reviews, {} runtime traces; derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, {} runtime demos, {} turn demos, {} runtime prompt suggestions, {} runtime prompt candidates, runtime evals {} / turn evals {} (passed {}, regressed {}, rolled_back {}, rounds {}, accepted {}), retained {} hindsight reflections",
+        "sleep: consumed {} runtime reviews, {} runtime traces; derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, {} runtime demos, {} turn demos, {} runtime prompt suggestions, {} runtime prompt candidates, runtime evals {} / turn evals {} (passed {}, regressed {}, rolled_back {}, rounds {}, accepted {}), retained {} hindsight reflections, refreshed {} mental models",
         summary.consumed_runtime_reviews,
         summary.consumed_trace_events,
         summary.failure_patterns.len(),
@@ -1060,7 +1139,8 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
         summary.runtime_prompt_rolled_back,
         summary.runtime_prompt_evolution_rounds,
         summary.runtime_prompt_accepted,
-        summary.retained_reflections
+        summary.retained_reflections,
+        summary.refreshed_mental_models
     );
     for pattern in &summary.failure_patterns {
         let kind = match pattern.suggested_fix_kind {
@@ -2366,41 +2446,132 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
         select_recent_trail_lines_for_hindsight(context),
     );
 
-    let recall = hindsight
+    let observations = hindsight
         .recall(
             &query,
             HindsightRecallOptions {
-                max_tokens: 1800,
-                budget: None,
+                types: vec!["observation".to_string()],
+                max_tokens: 1200,
+                budget: Some("mid".to_string()),
                 include_chunks: false,
                 max_chunk_tokens: 0,
-                include_source_facts: true,
-                max_source_facts_tokens: 1600,
+                include_source_facts: false,
+                max_source_facts_tokens: 0,
                 ..Default::default()
             },
         )
         .await;
-    let recalled_memories = match recall {
-        Ok(response) => {
-            let memories = response
-                .results
-                .into_iter()
-                .take(5)
-                .map(|item| item.text)
-                .collect::<Vec<_>>();
-            tracing::debug!(
-                "hindsight recall returned {} memory item(s)",
-                memories.len()
-            );
-            memories
-        }
+    let observations = match observations {
+        Ok(response) => response
+            .results
+            .into_iter()
+            .take(4)
+            .map(Into::into)
+            .collect::<Vec<_>>(),
         Err(err) => {
-            tracing::warn!("hindsight recall failed: {err:?}");
+            tracing::warn!("hindsight observation recall failed: {err:?}");
             Vec::new()
         }
     };
 
-    PromptMemoryContext { recalled_memories }
+    let raw_memories = hindsight
+        .recall(
+            &query,
+            HindsightRecallOptions {
+                types: vec!["world".to_string(), "experience".to_string()],
+                max_tokens: 1400,
+                budget: Some("mid".to_string()),
+                include_chunks: false,
+                max_chunk_tokens: 0,
+                include_source_facts: true,
+                max_source_facts_tokens: 1200,
+                ..Default::default()
+            },
+        )
+        .await;
+    let raw_memories = match raw_memories {
+        Ok(response) => response
+            .results
+            .into_iter()
+            .take(4)
+            .map(Into::into)
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            tracing::warn!("hindsight raw memory recall failed: {err:?}");
+            Vec::new()
+        }
+    };
+
+    let mental_models = match hindsight
+        .list_mental_models(&["mental-model".to_string()], "content")
+        .await
+    {
+        Ok(models) => models
+            .into_iter()
+            .filter_map(|model| {
+                let content = model.content?.trim().to_string();
+                if content.is_empty() {
+                    return None;
+                }
+                Some(PromptMentalModel {
+                    id: model.id,
+                    name: model.name,
+                    content,
+                    tags: model.tags,
+                })
+            })
+            .take(4)
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            tracing::warn!("hindsight mental model fetch failed: {err:?}");
+            Vec::new()
+        }
+    };
+
+    let citations = build_prompt_memory_citations(&observations, &raw_memories, &mental_models);
+    tracing::debug!(
+        "hindsight memory context observations={} raw_memories={} mental_models={} citations={}",
+        observations.len(),
+        raw_memories.len(),
+        mental_models.len(),
+        citations.len()
+    );
+
+    PromptMemoryContext {
+        observations,
+        raw_memories,
+        mental_models,
+        citations,
+    }
+}
+
+fn build_prompt_memory_citations(
+    observations: &[crate::reasoning::runtime::PromptMemoryFact],
+    raw_memories: &[crate::reasoning::runtime::PromptMemoryFact],
+    mental_models: &[PromptMentalModel],
+) -> Vec<PromptMemoryCitation> {
+    let mut citations = Vec::new();
+    citations.extend(observations.iter().map(|memory| PromptMemoryCitation {
+        kind: "observation".to_string(),
+        id: memory.id.clone(),
+        summary: summarize_hindsight_query_value(&memory.text, 96),
+    }));
+    citations.extend(raw_memories.iter().map(|memory| {
+        PromptMemoryCitation {
+            kind: memory
+                .memory_type
+                .clone()
+                .unwrap_or_else(|| "memory".to_string()),
+            id: memory.id.clone(),
+            summary: summarize_hindsight_query_value(&memory.text, 96),
+        }
+    }));
+    citations.extend(mental_models.iter().map(|model| PromptMemoryCitation {
+        kind: "mental_model".to_string(),
+        id: model.id.clone(),
+        summary: model.name.clone(),
+    }));
+    citations
 }
 
 fn build_hindsight_recall_query(
