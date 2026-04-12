@@ -20,7 +20,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
 const MID_TURN_COMPACTION_KEEP_TOOL_CYCLES: usize = 1;
-const MID_TURN_COMPACTION_KEEP_MESSAGES_WITHOUT_TOOL_CYCLES: usize = 4;
+const MID_TURN_COMPACTION_KEEP_MESSAGES_WITHOUT_TOOL_CYCLES: usize = 0;
 const MID_TURN_COMPACTION_SUMMARY_MAX_TOKENS: usize = 900;
 pub const MID_TURN_COMPACTION_MAX_RECOVERIES: usize = 3;
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

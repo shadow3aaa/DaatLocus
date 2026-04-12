@@ -6,9 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use crate::config::{
-    HindsightConfig, HindsightDirectiveConfig, HindsightMentalModelTemplateConfig,
-};
+use crate::config::HindsightConfig;
 
 #[derive(Clone)]
 pub struct HindsightClient {
@@ -67,6 +65,215 @@ pub struct HindsightRecallOptions {
     pub max_source_facts_tokens: usize,
     pub tags: Vec<String>,
     pub tags_match: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct HindsightEntityLabelGroupConfig {
+    pub key: String,
+    pub description: String,
+    #[serde(rename = "type")]
+    pub label_type: String,
+    pub optional: bool,
+    pub tag: bool,
+    pub values: Vec<HindsightEntityLabelValueConfig>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct HindsightEntityLabelValueConfig {
+    pub value: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HindsightDirectiveConfig {
+    pub name: String,
+    pub content: String,
+    pub priority: i64,
+    pub is_active: bool,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HindsightMentalModelTemplateConfig {
+    pub id: String,
+    pub name: String,
+    pub source_query: String,
+    pub max_tokens: usize,
+    pub tags: Vec<String>,
+    pub refresh_after_consolidation: bool,
+}
+
+const DEFAULT_HINDSIGHT_RECALL_BUDGET: &str = "mid";
+const DEFAULT_HINDSIGHT_REFLECT_BUDGET: &str = "low";
+
+fn default_hindsight_reflect_mission() -> String {
+    "Reason like a persistent Daat Locus runtime maintainer. Prefer grounded, reviewable judgments about project continuity, runtime boundaries, tool usage, user preferences, and operational risk. Distinguish stable knowledge from transient state, and surface uncertainty when evidence is incomplete.".to_string()
+}
+
+fn default_hindsight_retain_mission() -> String {
+    "Retain durable engineering knowledge for Daat Locus. Prefer architectural boundaries, event/app semantics, user preferences, failure patterns, tool usage constraints, and decisions with future reuse value. Ignore greetings, transient bookkeeping, redundant retries, and low-signal logs unless they materially explain a durable lesson.".to_string()
+}
+
+fn default_hindsight_observations_mission() -> String {
+    "Observations should capture stable facts about the project, runtime behavior, user preferences, and recurring engineering patterns. Consolidate repeated evidence into reusable knowledge. Avoid overfitting to one-off events or transient machine state.".to_string()
+}
+
+fn default_hindsight_entity_labels() -> Vec<HindsightEntityLabelGroupConfig> {
+    vec![
+        HindsightEntityLabelGroupConfig {
+            key: "kind".to_string(),
+            description: "The durable knowledge class represented by this memory.".to_string(),
+            label_type: "value".to_string(),
+            optional: true,
+            tag: true,
+            values: vec![
+                HindsightEntityLabelValueConfig {
+                    value: "project_fact".to_string(),
+                    description: "Stable facts about the Daat Locus codebase or runtime."
+                        .to_string(),
+                },
+                HindsightEntityLabelValueConfig {
+                    value: "user_preference".to_string(),
+                    description: "Persistent user or operator preferences.".to_string(),
+                },
+                HindsightEntityLabelValueConfig {
+                    value: "runtime_boundary".to_string(),
+                    description: "Behavioral contract or boundary the agent should preserve."
+                        .to_string(),
+                },
+                HindsightEntityLabelValueConfig {
+                    value: "failure_pattern".to_string(),
+                    description: "Recurring failure mode or risk pattern.".to_string(),
+                },
+                HindsightEntityLabelValueConfig {
+                    value: "strategy_lesson".to_string(),
+                    description: "Reusable operational lesson or heuristic.".to_string(),
+                },
+            ],
+        },
+        HindsightEntityLabelGroupConfig {
+            key: "scope".to_string(),
+            description: "The runtime surface or subsystem most relevant to the memory."
+                .to_string(),
+            label_type: "value".to_string(),
+            optional: true,
+            tag: true,
+            values: vec![
+                HindsightEntityLabelValueConfig {
+                    value: "runtime".to_string(),
+                    description: "Core runtime loop behavior.".to_string(),
+                },
+                HindsightEntityLabelValueConfig {
+                    value: "telegram".to_string(),
+                    description: "Telegram event or delivery behavior.".to_string(),
+                },
+                HindsightEntityLabelValueConfig {
+                    value: "workspace".to_string(),
+                    description: "Workspace or code editing behavior.".to_string(),
+                },
+                HindsightEntityLabelValueConfig {
+                    value: "sleep".to_string(),
+                    description: "Sleep-time reflection and self-improvement.".to_string(),
+                },
+            ],
+        },
+        HindsightEntityLabelGroupConfig {
+            key: "source".to_string(),
+            description: "How the memory entered the system.".to_string(),
+            label_type: "value".to_string(),
+            optional: true,
+            tag: true,
+            values: vec![
+                HindsightEntityLabelValueConfig {
+                    value: "runtime_step".to_string(),
+                    description: "A runtime step retained from the live agent loop.".to_string(),
+                },
+                HindsightEntityLabelValueConfig {
+                    value: "sleep_reflection".to_string(),
+                    description: "A lesson synthesized during sleep.".to_string(),
+                },
+            ],
+        },
+    ]
+}
+
+pub(crate) fn builtin_hindsight_directives() -> Vec<HindsightDirectiveConfig> {
+    vec![
+        HindsightDirectiveConfig {
+            name: "Ground Claims In Evidence".to_string(),
+            content: "Prefer conclusions that can be tied back to retrieved memories, observations, or mental models. If evidence is weak or mixed, say so explicitly instead of overstating certainty.".to_string(),
+            priority: 100,
+            is_active: true,
+            tags: vec!["runtime".to_string(), "reasoning".to_string()],
+        },
+        HindsightDirectiveConfig {
+            name: "Respect Stable Runtime Boundaries".to_string(),
+            content: "Preserve stable contracts around App, Event, PendingWork, Plan, Memory, and finish_and_send. Do not collapse distinct runtime concepts or rewrite boundaries based on one-off situations.".to_string(),
+            priority: 90,
+            is_active: true,
+            tags: vec!["runtime".to_string(), "architecture".to_string()],
+        },
+        HindsightDirectiveConfig {
+            name: "Avoid Transient Overfitting".to_string(),
+            content: "Do not elevate transient machine state, temporary confusion, or one-off logs into durable preferences or project facts unless the evidence repeats across turns.".to_string(),
+            priority: 80,
+            is_active: true,
+            tags: vec!["memory".to_string(), "retention".to_string()],
+        },
+    ]
+}
+
+pub(crate) fn builtin_hindsight_mental_models() -> Vec<HindsightMentalModelTemplateConfig> {
+    vec![
+        HindsightMentalModelTemplateConfig {
+            id: "project-state".to_string(),
+            name: "Project State".to_string(),
+            source_query: "What is the current project state of Daat Locus, including active workstreams, unresolved technical threads, and recently stabilized decisions?".to_string(),
+            max_tokens: 1600,
+            tags: vec![
+                "mental-model".to_string(),
+                "scope:project".to_string(),
+                "scope:runtime".to_string(),
+            ],
+            refresh_after_consolidation: true,
+        },
+        HindsightMentalModelTemplateConfig {
+            id: "runtime-boundaries".to_string(),
+            name: "Runtime Boundaries".to_string(),
+            source_query: "What stable runtime boundaries and agent-facing contracts define how Daat Locus should treat App, Event, PendingWork, Plan, Memory, and finish_and_send?".to_string(),
+            max_tokens: 1400,
+            tags: vec![
+                "mental-model".to_string(),
+                "scope:runtime".to_string(),
+                "kind:runtime_boundary".to_string(),
+            ],
+            refresh_after_consolidation: true,
+        },
+        HindsightMentalModelTemplateConfig {
+            id: "user-preferences".to_string(),
+            name: "User Preferences".to_string(),
+            source_query: "What stable user preferences, communication expectations, and collaboration patterns should Daat Locus preserve in this workspace?".to_string(),
+            max_tokens: 1200,
+            tags: vec![
+                "mental-model".to_string(),
+                "scope:user".to_string(),
+                "kind:user_preference".to_string(),
+            ],
+            refresh_after_consolidation: true,
+        },
+        HindsightMentalModelTemplateConfig {
+            id: "runtime-strategy".to_string(),
+            name: "Runtime Strategy".to_string(),
+            source_query: "What stable runtime strategies, learned heuristics, and prompt-level lessons should guide Daat Locus when continuing work in this repository?".to_string(),
+            max_tokens: 1400,
+            tags: vec![
+                "mental-model".to_string(),
+                "scope:runtime".to_string(),
+                "kind:strategy_lesson".to_string(),
+            ],
+            refresh_after_consolidation: true,
+        },
+    ]
 }
 
 #[derive(Clone, Debug, Default)]
@@ -362,11 +569,13 @@ impl HindsightClient {
             while let Some(message) = rx.recv().await {
                 match message {
                     RetainWorkerMessage::Retain(job) => {
-                        match retain_job(&client, &bank_ready_for_task, job).await {
+                        match retain_job_with_retry(&client, &bank_ready_for_task, job).await {
                             Ok(()) => {}
                             Err(err) => {
-                                let detail = err.to_string();
-                                tracing::error!("[hindsight] retain failed: {detail}");
+                                tracing::error!(
+                                    "[hindsight] retain failed permanently:\n{}",
+                                    format_report(&err)
+                                );
                                 std::process::exit(1);
                             }
                         }
@@ -386,7 +595,7 @@ impl HindsightClient {
 
     pub async fn bootstrap_bank(&self) -> Result<()> {
         self.ensure_bank().await?;
-        let updates = configured_bank_updates(&self.config)?;
+        let updates = configured_bank_updates()?;
         if !updates.is_empty() {
             match self.update_bank_config(updates).await {
                 Ok(_) => {}
@@ -398,7 +607,7 @@ impl HindsightClient {
                 Err(err) => return Err(err),
             }
         }
-        match self.sync_directives(&self.config.directives).await {
+        match self.sync_directives(&builtin_hindsight_directives()).await {
             Ok(_) => {}
             Err(err) if err.to_string().contains("404") => {
                 tracing::warn!(
@@ -413,10 +622,7 @@ impl HindsightClient {
     pub async fn ensure_bank(&self) -> Result<()> {
         let url = self.bank_url();
         let mut body = json!({});
-        if !self.config.reflect_mission.trim().is_empty() {
-            body["reflect_mission"] =
-                serde_json::Value::String(self.config.reflect_mission.clone());
-        }
+        body["reflect_mission"] = serde_json::Value::String(default_hindsight_reflect_mission());
         let response = self.authorized(self.http.put(url)).json(&body).send().await;
         self.expect_success(response, "create/update hindsight bank")
             .await?;
@@ -468,7 +674,9 @@ impl HindsightClient {
         let body = json!({
             "query": query,
             "types": if options.types.is_empty() { serde_json::Value::Null } else { json!(options.types) },
-            "budget": options.budget.unwrap_or_else(|| self.config.default_recall_budget.clone()),
+            "budget": options
+                .budget
+                .unwrap_or_else(|| DEFAULT_HINDSIGHT_RECALL_BUDGET.to_string()),
             "max_tokens": options.max_tokens.max(1),
             "include": {
                 "chunks": if options.include_chunks {
@@ -500,7 +708,7 @@ impl HindsightClient {
         options: HindsightReflectOptions,
     ) -> Result<HindsightReflectResponse> {
         let url = format!("{}/reflect", self.bank_url());
-        let body = build_reflect_body(query, &self.config, options);
+        let body = build_reflect_body(query, options);
         let response = self
             .authorized(self.http.post(url))
             .json(&body)
@@ -1004,6 +1212,46 @@ async fn retain_job(
     Ok(())
 }
 
+async fn retain_job_with_retry(
+    client: &HindsightClient,
+    bank_ready: &Arc<Mutex<bool>>,
+    job: HindsightRetainJob,
+) -> Result<()> {
+    const MAX_ATTEMPTS: usize = 4;
+    let job_summary = summarize_retain_job(job.clone(), &client.config);
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        match retain_job(client, bank_ready, job.clone()).await {
+            Ok(()) => {
+                if attempt > 1 {
+                    tracing::info!(
+                        "[hindsight] retain succeeded after retry {attempt}/{MAX_ATTEMPTS}: {job_summary}"
+                    );
+                }
+                return Ok(());
+            }
+            Err(err) => {
+                if attempt == MAX_ATTEMPTS {
+                    return Err(miette!(
+                        "retain exhausted retries after {MAX_ATTEMPTS} attempts\njob: {job_summary}\n{}",
+                        format_report(&err)
+                    ));
+                }
+                let delay = hindsight_retain_backoff(attempt);
+                tracing::warn!(
+                    "[hindsight] retain attempt {attempt}/{MAX_ATTEMPTS} failed; retrying in {:.1}s\njob: {}\n{}",
+                    delay.as_secs_f64(),
+                    job_summary,
+                    format_report(&err)
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+
+    unreachable!("retain retry loop must return or error");
+}
+
 fn truncate_for_error(text: &str) -> String {
     const MAX_LEN: usize = 600;
     if text.chars().count() <= MAX_LEN {
@@ -1013,11 +1261,48 @@ fn truncate_for_error(text: &str) -> String {
     format!("{truncated}...")
 }
 
-fn build_reflect_body(
-    query: &str,
-    config: &HindsightConfig,
-    options: HindsightReflectOptions,
-) -> Value {
+fn hindsight_retain_backoff(attempt: usize) -> Duration {
+    let seconds = match attempt {
+        1 => 2,
+        2 => 5,
+        3 => 10,
+        _ => 15,
+    };
+    Duration::from_secs(seconds)
+}
+
+fn summarize_retain_job(job: HindsightRetainJob, config: &HindsightConfig) -> String {
+    let first_document_id = job
+        .document_id
+        .clone()
+        .or_else(|| job.items.first().and_then(|item| item.document_id.clone()))
+        .unwrap_or_else(|| "<none>".to_string());
+    let total_chars = job
+        .items
+        .iter()
+        .map(|item| item.content.chars().count())
+        .sum::<usize>();
+    format!(
+        "namespace={} bank_id={} item_count={} document_id={} total_chars={} timeout_secs={}",
+        config.namespace,
+        config.bank_id,
+        job.items.len(),
+        first_document_id,
+        total_chars,
+        config.request_timeout_secs
+    )
+}
+
+fn format_report(err: &miette::Report) -> String {
+    let debug = format!("{err:?}");
+    if debug.trim().is_empty() {
+        err.to_string()
+    } else {
+        debug
+    }
+}
+
+fn build_reflect_body(query: &str, options: HindsightReflectOptions) -> Value {
     let mut body = serde_json::Map::new();
     body.insert("query".to_string(), Value::String(query.to_string()));
     body.insert(
@@ -1025,7 +1310,7 @@ fn build_reflect_body(
         Value::String(
             options
                 .budget
-                .unwrap_or_else(|| config.default_reflect_budget.clone()),
+                .unwrap_or_else(|| DEFAULT_HINDSIGHT_REFLECT_BUDGET.to_string()),
         ),
     );
     if let Some(max_tokens) = options.max_tokens {
@@ -1060,65 +1345,34 @@ fn build_reflect_body(
     Value::Object(body)
 }
 
-fn configured_bank_updates(config: &HindsightConfig) -> Result<serde_json::Map<String, Value>> {
+fn configured_bank_updates() -> Result<serde_json::Map<String, Value>> {
     let mut updates = serde_json::Map::new();
-    if !config.reflect_mission.trim().is_empty() {
-        updates.insert(
-            "reflect_mission".to_string(),
-            Value::String(config.reflect_mission.clone()),
-        );
-    }
-    if !config.retain_mission.trim().is_empty() {
-        updates.insert(
-            "retain_mission".to_string(),
-            Value::String(config.retain_mission.clone()),
-        );
-    }
-    if !config.retain_extraction_mode.trim().is_empty() {
-        updates.insert(
-            "retain_extraction_mode".to_string(),
-            Value::String(config.retain_extraction_mode.clone()),
-        );
-    }
-    if !config.retain_custom_instructions.trim().is_empty() {
-        updates.insert(
-            "retain_custom_instructions".to_string(),
-            Value::String(config.retain_custom_instructions.clone()),
-        );
-    }
-    if !config.observations_mission.trim().is_empty() {
-        updates.insert(
-            "observations_mission".to_string(),
-            Value::String(config.observations_mission.clone()),
-        );
-    }
     updates.insert(
-        "enable_observations".to_string(),
-        Value::Bool(config.enable_observations),
+        "reflect_mission".to_string(),
+        Value::String(default_hindsight_reflect_mission()),
     );
     updates.insert(
-        "disposition_skepticism".to_string(),
-        json!(config.disposition_skepticism),
+        "retain_mission".to_string(),
+        Value::String(default_hindsight_retain_mission()),
     );
     updates.insert(
-        "disposition_literalism".to_string(),
-        json!(config.disposition_literalism),
+        "retain_extraction_mode".to_string(),
+        Value::String("verbose".to_string()),
     );
     updates.insert(
-        "disposition_empathy".to_string(),
-        json!(config.disposition_empathy),
+        "observations_mission".to_string(),
+        Value::String(default_hindsight_observations_mission()),
     );
+    updates.insert("enable_observations".to_string(), Value::Bool(true));
+    updates.insert("disposition_skepticism".to_string(), json!(4));
+    updates.insert("disposition_literalism".to_string(), json!(4));
+    updates.insert("disposition_empathy".to_string(), json!(3));
+    updates.insert("entities_allow_free_form".to_string(), Value::Bool(true));
     updates.insert(
-        "entities_allow_free_form".to_string(),
-        Value::Bool(config.entities_allow_free_form),
+        "entity_labels".to_string(),
+        serde_json::to_value(default_hindsight_entity_labels())
+            .map_err(|err| miette!("serialize hindsight entity labels failed: {err}"))?,
     );
-    if !config.entity_labels.is_empty() {
-        updates.insert(
-            "entity_labels".to_string(),
-            serde_json::to_value(&config.entity_labels)
-                .map_err(|err| miette!("serialize hindsight entity labels failed: {err}"))?,
-        );
-    }
     Ok(updates)
 }
 
@@ -1139,36 +1393,10 @@ fn default_true() -> bool {
 mod tests {
     use super::*;
 
-    fn test_config() -> HindsightConfig {
-        HindsightConfig {
-            base_url: "http://localhost:8888".to_string(),
-            api_key: String::new(),
-            namespace: "default".to_string(),
-            bank_id: "daat-locus".to_string(),
-            request_timeout_secs: 120,
-            default_recall_budget: "mid".to_string(),
-            default_reflect_budget: "low".to_string(),
-            reflect_mission: "reflect mission".to_string(),
-            retain_mission: "retain mission".to_string(),
-            retain_extraction_mode: "verbose".to_string(),
-            retain_custom_instructions: String::new(),
-            observations_mission: "obs mission".to_string(),
-            enable_observations: true,
-            disposition_skepticism: 4,
-            disposition_literalism: 4,
-            disposition_empathy: 3,
-            entity_labels: Vec::new(),
-            entities_allow_free_form: true,
-            directives: Vec::new(),
-            mental_models: Vec::new(),
-        }
-    }
-
     #[test]
     fn reflect_body_omits_null_only_fields() {
         let body = build_reflect_body(
             "hello",
-            &test_config(),
             HindsightReflectOptions {
                 budget: None,
                 max_tokens: None,
@@ -1193,7 +1421,6 @@ mod tests {
     fn reflect_body_includes_requested_options() {
         let body = build_reflect_body(
             "hello",
-            &test_config(),
             HindsightReflectOptions {
                 budget: Some("high".to_string()),
                 max_tokens: Some(500),
@@ -1223,14 +1450,14 @@ mod tests {
 
     #[test]
     fn configured_bank_updates_include_new_fields() {
-        let updates = configured_bank_updates(&test_config()).expect("bank config updates");
+        let updates = configured_bank_updates().expect("bank config updates");
         assert_eq!(
             updates.get("reflect_mission"),
-            Some(&json!("reflect mission"))
+            Some(&json!(default_hindsight_reflect_mission()))
         );
         assert_eq!(
             updates.get("retain_mission"),
-            Some(&json!("retain mission"))
+            Some(&json!(default_hindsight_retain_mission()))
         );
         assert_eq!(
             updates.get("retain_extraction_mode"),
@@ -1238,7 +1465,7 @@ mod tests {
         );
         assert_eq!(
             updates.get("observations_mission"),
-            Some(&json!("obs mission"))
+            Some(&json!(default_hindsight_observations_mission()))
         );
         assert_eq!(updates.get("enable_observations"), Some(&json!(true)));
         assert_eq!(updates.get("disposition_skepticism"), Some(&json!(4)));

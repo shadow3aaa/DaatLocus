@@ -43,7 +43,10 @@ use crate::{
     browser_app::BrowserApp,
     config::load_config,
     context::Context,
-    context_budget::{approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded},
+    context_budget::{
+        approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded,
+        truncate_text_to_token_budget,
+    },
     daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
     dashboard::{
         DashboardActivityEvent, DashboardControlCommand, DashboardState,
@@ -52,7 +55,10 @@ use crate::{
         run_tui_dashboard,
     },
     events::{EventPayload, EventStatus, EventStore, EventView},
-    hindsight::{HindsightClient, HindsightRecallOptions},
+    hindsight::{
+        HindsightClient, HindsightRecallOptions, HindsightRetainItem, HindsightRetainJob,
+        builtin_hindsight_mental_models,
+    },
     logging::{
         RuntimeStatusLevel, clear_runtime_status, init_logging, set_runtime_status,
         write_current_turn_messages_dump, write_current_turn_response_dump,
@@ -69,15 +75,19 @@ use crate::{
         },
         episode::EpisodeActionRecord,
         evaluation_artifacts::EvaluationArtifactSuggestedFixKind,
+        programs::runtime_retain_preprocessor::{
+            RuntimeRetainPreprocessorOutput, RuntimeRetainPreprocessorProgram,
+        },
         runtime::{
             AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult,
             PromptMemoryCitation, PromptMemoryContext, PromptMentalModel, PromptMessage,
+            execute_program_with_ir_report, resolve_program_tuning,
         },
         runtime_review::{
             RuntimeTurnRecord, append_runtime_turn_record, unread_runtime_review_count,
         },
         sleep::run_sleep,
-        trace::unread_runtime_trace_count,
+        trace::{TraceOrigin, unread_runtime_trace_count},
         turn_compile::TurnCompileEngine,
     },
     runtime_context::{
@@ -109,6 +119,7 @@ use crate::{
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use miette::{Result, miette};
+use reasoning::render::openai_tools::OpenAIToolRenderer;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle, time::MissedTickBehavior};
@@ -625,13 +636,12 @@ async fn run_hindsight_command(
             );
         }
         HindsightTarget::RefreshMentalModels => {
-            let operation_ids = hindsight
-                .sync_mental_models(&config.hindsight.mental_models, true)
-                .await?;
+            let mental_models = builtin_hindsight_mental_models();
+            let operation_ids = hindsight.sync_mental_models(&mental_models, true).await?;
             println!(
                 "{}",
                 to_pretty_json(&json!({
-                    "refreshed_models": config.hindsight.mental_models.len(),
+                    "refreshed_models": mental_models.len(),
                     "operation_ids": operation_ids,
                 }))?
             );
@@ -1329,11 +1339,14 @@ pub(crate) struct AgentLoopStepOutput {
     pub(crate) actions: Vec<EpisodeActionRecord>,
 }
 
-const RUNTIME_HISTORY_MIN_MESSAGES: usize = 4;
+const RUNTIME_HISTORY_MIN_MESSAGES: usize = 0;
 const RUNTIME_HISTORY_SUMMARY_MAX_TOKENS: usize = 800;
 const HINDSIGHT_RECALL_QUERY_MAX_TOKENS: usize = 420;
 const HINDSIGHT_RECENT_MESSAGES_MAX_TOKENS: usize = 160;
 const HINDSIGHT_RECENT_MESSAGES_MIN_ENTRIES: usize = 2;
+const HINDSIGHT_RETAIN_PREPROCESS_INPUT_MAX_TOKENS: usize = 3200;
+const HINDSIGHT_RETAIN_PREPROCESS_OUTPUT_MAX_TOKENS: usize = 900;
+const HINDSIGHT_RETAIN_PREPROCESS_MAX_SPLIT_ITEMS: usize = 4;
 const CLAIMED_EVENT_FINISHED_STOP_REASON: &str = "claimed_event_finished";
 
 fn select_recent_trail_lines_for_hindsight(context: &Context) -> Vec<String> {
@@ -1372,7 +1385,13 @@ where
 
 async fn record_runtime_history_messages(context: &mut Context, draft: RuntimeTurnDraft) {
     let retain_plan = context.memory.commit_runtime_turn(draft).await;
-    for job in retain_plan.jobs {
+    let preprocessing = preprocess_hindsight_retain_jobs(context, retain_plan.jobs).await;
+    if !preprocessing.skipped_document_ids.is_empty() {
+        context
+            .memory
+            .mark_retained_by_document_ids(&preprocessing.skipped_document_ids);
+    }
+    for job in preprocessing.jobs {
         if let Err(err) = context.hindsight_retain.enqueue(job) {
             tracing::error!("failed to enqueue hindsight retain job: {err:?}");
             return;
@@ -1385,6 +1404,267 @@ async fn record_runtime_history_messages(context: &mut Context, draft: RuntimeTu
             context.memory.mark_queued_retained();
         }
     }
+}
+
+struct RetainPreprocessPlan {
+    jobs: Vec<HindsightRetainJob>,
+    skipped_document_ids: Vec<String>,
+}
+
+async fn preprocess_hindsight_retain_jobs(
+    context: &Context,
+    jobs: Vec<HindsightRetainJob>,
+) -> RetainPreprocessPlan {
+    if jobs.is_empty() {
+        return RetainPreprocessPlan {
+            jobs: Vec::new(),
+            skipped_document_ids: Vec::new(),
+        };
+    }
+
+    let renderer = OpenAIToolRenderer;
+    let program = RuntimeRetainPreprocessorProgram;
+    let tuning = resolve_program_tuning(context, &program).await;
+
+    let mut retained_jobs = Vec::new();
+    let mut skipped_document_ids = Vec::new();
+
+    for job in jobs {
+        match preprocess_hindsight_retain_job(context, &renderer, &program, &tuning, job.clone())
+            .await
+        {
+            Ok(Some(job)) => retained_jobs.push(job),
+            Ok(None) => {
+                if let Some(document_id) = job.document_id.clone() {
+                    skipped_document_ids.push(document_id);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "runtime retain preprocessing failed; falling back to raw retain job: {err:?}"
+                );
+                retained_jobs.push(job);
+            }
+        }
+    }
+
+    RetainPreprocessPlan {
+        jobs: retained_jobs,
+        skipped_document_ids,
+    }
+}
+
+async fn preprocess_hindsight_retain_job(
+    context: &Context,
+    renderer: &OpenAIToolRenderer,
+    program: &RuntimeRetainPreprocessorProgram,
+    tuning: &crate::reasoning::optimizer::PromptTuningConfig<RuntimeRetainPreprocessorOutput>,
+    job: HindsightRetainJob,
+) -> Result<Option<HindsightRetainJob>> {
+    let raw_retain_content = render_retain_job_source(&job);
+    let input = truncate_text_to_token_budget(
+        &raw_retain_content,
+        HINDSIGHT_RETAIN_PREPROCESS_INPUT_MAX_TOKENS,
+    );
+    let current_doing = extract_retain_focus(&input).unwrap_or_else(|| "未知".to_string());
+    let document_id = job
+        .document_id
+        .clone()
+        .or_else(|| job.items.first().and_then(|item| item.document_id.clone()))
+        .unwrap_or_else(|| "unknown".to_string());
+    let existing_tags = collect_retain_job_tags(&job);
+    let ir = program.dataset_ir(
+        current_doing,
+        document_id.clone(),
+        existing_tags.clone(),
+        input,
+    );
+    let outcome = execute_program_with_ir_report(
+        context.llm.as_ref(),
+        context,
+        renderer,
+        program,
+        ir,
+        tuning,
+        TraceOrigin::Runtime,
+    )
+    .await?;
+    let output = outcome.output;
+
+    if !output.should_retain {
+        tracing::info!(
+            "runtime retain preprocessing skipped document_id={} reason={}",
+            document_id,
+            if output.reason.trim().is_empty() {
+                "<none>"
+            } else {
+                output.reason.trim()
+            }
+        );
+        return Ok(None);
+    }
+
+    let tags = merge_tags(existing_tags, output.tags.clone());
+    let split_items = build_preprocessed_split_items(&job, &output, &tags);
+    if !split_items.is_empty() {
+        return Ok(Some(HindsightRetainJob {
+            items: split_items,
+            document_id: job.document_id,
+        }));
+    }
+
+    let digest = build_preprocessed_retain_digest(&output);
+    let content =
+        truncate_text_to_token_budget(&digest, HINDSIGHT_RETAIN_PREPROCESS_OUTPUT_MAX_TOKENS);
+    if content.trim().is_empty() {
+        tracing::warn!(
+            "runtime retain preprocessing produced empty digest; falling back to raw retain document_id={}",
+            document_id
+        );
+        return Ok(Some(job));
+    }
+
+    Ok(Some(HindsightRetainJob {
+        items: vec![HindsightRetainItem {
+            content,
+            timestamp: job.items.first().and_then(|item| item.timestamp.clone()),
+            context: Some("runtime retain digest".to_string()),
+            metadata: job.items.first().and_then(|item| item.metadata.clone()),
+            document_id: job
+                .items
+                .first()
+                .and_then(|item| item.document_id.clone())
+                .or_else(|| job.document_id.clone()),
+            tags: Some(tags),
+        }],
+        document_id: job.document_id,
+    }))
+}
+
+fn render_retain_job_source(job: &HindsightRetainJob) -> String {
+    job.items
+        .iter()
+        .map(|item| item.content.trim())
+        .filter(|content| !content.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
+fn extract_retain_focus(content: &str) -> Option<String> {
+    content
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("focus: ")
+                .map(|value| value.trim().to_string())
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn collect_retain_job_tags(job: &HindsightRetainJob) -> Vec<String> {
+    let mut tags = Vec::new();
+    for item in &job.items {
+        if let Some(item_tags) = &item.tags {
+            tags.extend(item_tags.iter().cloned());
+        }
+    }
+    tags
+}
+
+fn merge_tags(existing: Vec<String>, extra: Vec<String>) -> Vec<String> {
+    let mut merged = Vec::new();
+    for tag in existing.into_iter().chain(extra) {
+        let normalized = tag.trim();
+        if normalized.is_empty() || merged.iter().any(|current| current == normalized) {
+            continue;
+        }
+        merged.push(normalized.to_string());
+    }
+    merged
+}
+
+fn build_preprocessed_split_items(
+    job: &HindsightRetainJob,
+    output: &RuntimeRetainPreprocessorOutput,
+    shared_tags: &[String],
+) -> Vec<HindsightRetainItem> {
+    output
+        .split_items
+        .iter()
+        .filter_map(|item| {
+            let mut content = String::new();
+            if !item.title.trim().is_empty() {
+                content.push_str("topic: ");
+                content.push_str(item.title.trim());
+                content.push('\n');
+            }
+            content.push_str(item.content.trim());
+            let content = truncate_text_to_token_budget(
+                &content,
+                HINDSIGHT_RETAIN_PREPROCESS_OUTPUT_MAX_TOKENS,
+            );
+            if content.trim().is_empty() {
+                return None;
+            }
+            let tags = merge_tags(shared_tags.to_vec(), item.tags.clone());
+            let base_document_id = job
+                .items
+                .first()
+                .and_then(|source| source.document_id.clone())
+                .or_else(|| job.document_id.clone())
+                .unwrap_or_else(|| "runtime-retain".to_string());
+            Some(HindsightRetainItem {
+                content,
+                timestamp: job
+                    .items
+                    .first()
+                    .and_then(|source| source.timestamp.clone()),
+                context: Some(if item.context.trim().is_empty() {
+                    "runtime retain digest split".to_string()
+                } else {
+                    item.context.trim().to_string()
+                }),
+                metadata: job.items.first().and_then(|source| source.metadata.clone()),
+                document_id: Some(format!(
+                    "{}:part:{}",
+                    base_document_id,
+                    item.title
+                        .trim()
+                        .replace(char::is_whitespace, "-")
+                        .to_ascii_lowercase()
+                )),
+                tags: Some(tags),
+            })
+        })
+        .take(HINDSIGHT_RETAIN_PREPROCESS_MAX_SPLIT_ITEMS)
+        .collect()
+}
+
+fn build_preprocessed_retain_digest(output: &RuntimeRetainPreprocessorOutput) -> String {
+    let mut lines = Vec::new();
+    if !output.summary.trim().is_empty() {
+        lines.push(format!("summary: {}", output.summary.trim()));
+    }
+    append_digest_section(&mut lines, "facts", &output.facts);
+    append_digest_section(&mut lines, "preferences", &output.preferences);
+    append_digest_section(&mut lines, "failures", &output.failures);
+    append_digest_section(&mut lines, "lessons", &output.lessons);
+    if !output.reason.trim().is_empty() {
+        lines.push(format!("retain_reason: {}", output.reason.trim()));
+    }
+    lines.join("\n")
+}
+
+fn append_digest_section(lines: &mut Vec<String>, title: &str, items: &[String]) {
+    let entries = items
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return;
+    }
+    lines.push(format!("{title}:"));
+    lines.extend(entries.into_iter().map(|item| format!("- {item}")));
 }
 
 async fn record_runtime_review_turn(
@@ -1805,7 +2085,11 @@ pub(crate) async fn execute_agent_loop_step(
                     result.model_content(),
                 ));
                 runtime_step.push_history_message(PromptMessage::tool_with_ui(
-                    result.history_content(&call.id, &call.name),
+                    result.history_content_with_budget(
+                        &call.id,
+                        &call.name,
+                        context.config.main_model.tool_output_max_tokens.max(1),
+                    ),
                     result.ui_event.clone(),
                 ));
                 append_committed_activity_cells(
@@ -2406,16 +2690,53 @@ async fn run_agent_turn_with_retry(
                 render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
         });
     }
+    let request_timeout = Duration::from_secs(context.config.main_model.request_timeout_secs());
+    let model_name = context
+        .llm
+        .model_name()
+        .unwrap_or_else(|| context.config.main_model.model_name.clone());
     let mut attempt = 1usize;
     loop {
         set_runtime_status(tx, RuntimeStatusLevel::Debug, "Working");
-        match context.llm.run_agent_turn(context, request.clone()).await {
-            Ok(response) => {
+        let turn_result = tokio::time::timeout(
+            request_timeout,
+            context.llm.run_agent_turn(context, request.clone()),
+        )
+        .await;
+        match turn_result {
+            Err(_) => {
+                let err = miette!(
+                    "agent turn timed out after {}s (model={}, messages={}, tools={}, estimated_input_tokens={estimated_input_tokens})",
+                    request_timeout.as_secs(),
+                    model_name,
+                    request.messages.len(),
+                    request.tools.len(),
+                );
+                let will_retry = true;
+                write_current_turn_response_error_dump(&err.to_string(), attempt, will_retry).await;
+                let capped_shift = (attempt.saturating_sub(1)).min(6) as u32;
+                let backoff_ms = 300u64.saturating_mul(1u64 << capped_shift).min(30_000);
+                let summary = format!(
+                    "模型请求超时，重试 #{attempt}，等待 {:.1}s",
+                    backoff_ms as f64 / 1000.0
+                );
+                set_runtime_status(tx, RuntimeStatusLevel::Warn, summary);
+                tracing::warn!(
+                    "run_agent_turn timed out after {}s; retry #{attempt} in {backoff_ms}ms (model={}, messages={}, tools={}, estimated_input_tokens={estimated_input_tokens})",
+                    request_timeout.as_secs(),
+                    model_name,
+                    request.messages.len(),
+                    request.tools.len(),
+                );
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                attempt += 1;
+            }
+            Ok(Ok(response)) => {
                 write_current_turn_response_dump(&response, attempt).await;
                 clear_runtime_status(tx);
                 return Ok(response);
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 let will_retry = !is_context_budget_exceeded(&err);
                 write_current_turn_response_error_dump(&err.to_string(), attempt, will_retry).await;
                 if is_context_budget_exceeded(&err) {
@@ -2755,7 +3076,7 @@ async fn daat_locus_loop(
         sleep_status,
         Some(cycle_started_at.elapsed().as_millis()),
     );
-    execute_agent_loop_step(context, Some(tx)).await;
+    let _ = execute_agent_loop_step(context, Some(tx)).await;
     context.active_runtime_turn = false;
     refresh_sleep_backlogs(sleep_status).await;
     sync_dashboard_state(

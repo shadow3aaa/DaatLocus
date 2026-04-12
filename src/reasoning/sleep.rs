@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     context::Context,
-    hindsight::{HindsightRecallOptions, HindsightRetainItem},
+    hindsight::{HindsightRecallOptions, HindsightRetainItem, builtin_hindsight_mental_models},
     reasoning::{
         compiled::{
             RUNTIME_SYSTEM_PROMPT_COMPILE_KEY,
@@ -163,19 +163,16 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     if retained_reflections > 0 {
         context.hindsight_retain.flush().await?;
     }
-    let refreshed_mental_models = if context.config.hindsight.mental_models.is_empty() {
-        0
-    } else {
-        match context
-            .hindsight
-            .sync_mental_models(&context.config.hindsight.mental_models, true)
-            .await
-        {
-            Ok(operation_ids) => operation_ids.len(),
-            Err(err) => {
-                warn!("failed to refresh hindsight mental models during sleep: {err:?}");
-                0
-            }
+    let mental_models = builtin_hindsight_mental_models();
+    let refreshed_mental_models = match context
+        .hindsight
+        .sync_mental_models(&mental_models, true)
+        .await
+    {
+        Ok(operation_ids) => operation_ids.len(),
+        Err(err) => {
+            warn!("failed to refresh hindsight mental models during sleep: {err:?}");
+            0
         }
     };
     compact_runtime_trace_file(trace_batch.next_offset).await?;

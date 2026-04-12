@@ -31,21 +31,6 @@ pub struct HindsightConfig {
     pub namespace: String,
     pub bank_id: String,
     pub request_timeout_secs: u64,
-    pub default_recall_budget: String,
-    pub default_reflect_budget: String,
-    pub reflect_mission: String,
-    pub retain_mission: String,
-    pub retain_extraction_mode: String,
-    pub retain_custom_instructions: String,
-    pub observations_mission: String,
-    pub enable_observations: bool,
-    pub disposition_skepticism: u8,
-    pub disposition_literalism: u8,
-    pub disposition_empathy: u8,
-    pub entity_labels: Vec<HindsightEntityLabelGroupConfig>,
-    pub entities_allow_free_form: bool,
-    pub directives: Vec<HindsightDirectiveConfig>,
-    pub mental_models: Vec<HindsightMentalModelTemplateConfig>,
 }
 
 impl Default for HindsightConfig {
@@ -55,286 +40,9 @@ impl Default for HindsightConfig {
             api_key: String::new(),
             namespace: "default".to_string(),
             bank_id: "daat-locus".to_string(),
-            request_timeout_secs: 120,
-            default_recall_budget: "mid".to_string(),
-            default_reflect_budget: "low".to_string(),
-            reflect_mission: default_hindsight_reflect_mission(),
-            retain_mission: default_hindsight_retain_mission(),
-            retain_extraction_mode: "verbose".to_string(),
-            retain_custom_instructions: String::new(),
-            observations_mission: default_hindsight_observations_mission(),
-            enable_observations: true,
-            disposition_skepticism: 4,
-            disposition_literalism: 4,
-            disposition_empathy: 3,
-            entity_labels: default_hindsight_entity_labels(),
-            entities_allow_free_form: true,
-            directives: default_hindsight_directives(),
-            mental_models: default_hindsight_mental_models(),
+            request_timeout_secs: 180,
         }
     }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HindsightEntityLabelGroupConfig {
-    pub key: String,
-    pub description: String,
-    #[serde(rename = "type")]
-    pub label_type: String,
-    pub optional: bool,
-    pub tag: bool,
-    pub values: Vec<HindsightEntityLabelValueConfig>,
-}
-
-impl Default for HindsightEntityLabelGroupConfig {
-    fn default() -> Self {
-        Self {
-            key: String::new(),
-            description: String::new(),
-            label_type: "value".to_string(),
-            optional: true,
-            tag: false,
-            values: Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HindsightEntityLabelValueConfig {
-    pub value: String,
-    pub description: String,
-}
-
-impl Default for HindsightEntityLabelValueConfig {
-    fn default() -> Self {
-        Self {
-            value: String::new(),
-            description: String::new(),
-        }
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HindsightDirectiveConfig {
-    pub id: String,
-    pub name: String,
-    pub content: String,
-    pub priority: i64,
-    pub is_active: bool,
-    pub tags: Vec<String>,
-}
-
-impl Default for HindsightDirectiveConfig {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            content: String::new(),
-            priority: 0,
-            is_active: true,
-            tags: Vec::new(),
-        }
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HindsightMentalModelTemplateConfig {
-    pub id: String,
-    pub name: String,
-    pub source_query: String,
-    pub max_tokens: usize,
-    pub tags: Vec<String>,
-    pub refresh_after_consolidation: bool,
-}
-
-impl Default for HindsightMentalModelTemplateConfig {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            source_query: String::new(),
-            max_tokens: 2048,
-            tags: Vec::new(),
-            refresh_after_consolidation: false,
-        }
-    }
-}
-
-fn default_hindsight_reflect_mission() -> String {
-    "Reason like a persistent Daat Locus runtime maintainer. Prefer grounded, reviewable judgments about project continuity, runtime boundaries, tool usage, user preferences, and operational risk. Distinguish stable knowledge from transient state, and surface uncertainty when evidence is incomplete.".to_string()
-}
-
-fn default_hindsight_retain_mission() -> String {
-    "Retain durable engineering knowledge for Daat Locus. Prefer architectural boundaries, event/app semantics, user preferences, failure patterns, tool usage constraints, and decisions with future reuse value. Ignore greetings, transient bookkeeping, redundant retries, and low-signal logs unless they materially explain a durable lesson.".to_string()
-}
-
-fn default_hindsight_observations_mission() -> String {
-    "Observations should capture stable facts about the project, runtime behavior, user preferences, and recurring engineering patterns. Consolidate repeated evidence into reusable knowledge. Avoid overfitting to one-off events or transient machine state.".to_string()
-}
-
-fn default_hindsight_entity_labels() -> Vec<HindsightEntityLabelGroupConfig> {
-    vec![
-        HindsightEntityLabelGroupConfig {
-            key: "kind".to_string(),
-            description: "The durable knowledge class represented by this memory.".to_string(),
-            label_type: "value".to_string(),
-            optional: true,
-            tag: true,
-            values: vec![
-                HindsightEntityLabelValueConfig {
-                    value: "project_fact".to_string(),
-                    description: "Stable facts about the Daat Locus codebase or runtime."
-                        .to_string(),
-                },
-                HindsightEntityLabelValueConfig {
-                    value: "user_preference".to_string(),
-                    description: "Persistent user or operator preferences.".to_string(),
-                },
-                HindsightEntityLabelValueConfig {
-                    value: "runtime_boundary".to_string(),
-                    description: "Behavioral contract or boundary the agent should preserve."
-                        .to_string(),
-                },
-                HindsightEntityLabelValueConfig {
-                    value: "failure_pattern".to_string(),
-                    description: "Recurring failure mode or risk pattern.".to_string(),
-                },
-                HindsightEntityLabelValueConfig {
-                    value: "strategy_lesson".to_string(),
-                    description: "Reusable operational lesson or heuristic.".to_string(),
-                },
-            ],
-        },
-        HindsightEntityLabelGroupConfig {
-            key: "scope".to_string(),
-            description: "The runtime surface or subsystem most relevant to the memory."
-                .to_string(),
-            label_type: "value".to_string(),
-            optional: true,
-            tag: true,
-            values: vec![
-                HindsightEntityLabelValueConfig {
-                    value: "runtime".to_string(),
-                    description: "Core runtime loop behavior.".to_string(),
-                },
-                HindsightEntityLabelValueConfig {
-                    value: "telegram".to_string(),
-                    description: "Telegram event or delivery behavior.".to_string(),
-                },
-                HindsightEntityLabelValueConfig {
-                    value: "workspace".to_string(),
-                    description: "Workspace or code editing behavior.".to_string(),
-                },
-                HindsightEntityLabelValueConfig {
-                    value: "sleep".to_string(),
-                    description: "Sleep-time reflection and self-improvement.".to_string(),
-                },
-            ],
-        },
-        HindsightEntityLabelGroupConfig {
-            key: "source".to_string(),
-            description: "How the memory entered the system.".to_string(),
-            label_type: "value".to_string(),
-            optional: true,
-            tag: true,
-            values: vec![
-                HindsightEntityLabelValueConfig {
-                    value: "runtime_step".to_string(),
-                    description: "A runtime step retained from the live agent loop.".to_string(),
-                },
-                HindsightEntityLabelValueConfig {
-                    value: "sleep_reflection".to_string(),
-                    description: "A lesson synthesized during sleep.".to_string(),
-                },
-            ],
-        },
-    ]
-}
-
-fn default_hindsight_directives() -> Vec<HindsightDirectiveConfig> {
-    vec![
-        HindsightDirectiveConfig {
-            id: "ground-claims-in-evidence".to_string(),
-            name: "Ground Claims In Evidence".to_string(),
-            content: "Prefer conclusions that can be tied back to retrieved memories, observations, or mental models. If evidence is weak or mixed, say so explicitly instead of overstating certainty.".to_string(),
-            priority: 100,
-            is_active: true,
-            tags: vec!["runtime".to_string(), "reasoning".to_string()],
-        },
-        HindsightDirectiveConfig {
-            id: "respect-stable-boundaries".to_string(),
-            name: "Respect Stable Runtime Boundaries".to_string(),
-            content: "Preserve stable contracts around App, Event, PendingWork, Plan, Memory, and finish_and_send. Do not collapse distinct runtime concepts or rewrite boundaries based on one-off situations.".to_string(),
-            priority: 90,
-            is_active: true,
-            tags: vec!["runtime".to_string(), "architecture".to_string()],
-        },
-        HindsightDirectiveConfig {
-            id: "avoid-transient-overfitting".to_string(),
-            name: "Avoid Transient Overfitting".to_string(),
-            content: "Do not elevate transient machine state, temporary confusion, or one-off logs into durable preferences or project facts unless the evidence repeats across turns.".to_string(),
-            priority: 80,
-            is_active: true,
-            tags: vec!["memory".to_string(), "retention".to_string()],
-        },
-    ]
-}
-
-fn default_hindsight_mental_models() -> Vec<HindsightMentalModelTemplateConfig> {
-    vec![
-        HindsightMentalModelTemplateConfig {
-            id: "project-state".to_string(),
-            name: "Project State".to_string(),
-            source_query: "What is the current project state of Daat Locus, including active workstreams, unresolved technical threads, and recently stabilized decisions?".to_string(),
-            max_tokens: 1600,
-            tags: vec![
-                "mental-model".to_string(),
-                "scope:project".to_string(),
-                "scope:runtime".to_string(),
-            ],
-            refresh_after_consolidation: true,
-        },
-        HindsightMentalModelTemplateConfig {
-            id: "runtime-boundaries".to_string(),
-            name: "Runtime Boundaries".to_string(),
-            source_query: "What stable runtime boundaries and agent-facing contracts define how Daat Locus should treat App, Event, PendingWork, Plan, Memory, and finish_and_send?".to_string(),
-            max_tokens: 1400,
-            tags: vec![
-                "mental-model".to_string(),
-                "scope:runtime".to_string(),
-                "kind:runtime_boundary".to_string(),
-            ],
-            refresh_after_consolidation: true,
-        },
-        HindsightMentalModelTemplateConfig {
-            id: "user-preferences".to_string(),
-            name: "User Preferences".to_string(),
-            source_query: "What stable user preferences, communication expectations, and collaboration patterns should Daat Locus preserve in this workspace?".to_string(),
-            max_tokens: 1200,
-            tags: vec![
-                "mental-model".to_string(),
-                "scope:user".to_string(),
-                "kind:user_preference".to_string(),
-            ],
-            refresh_after_consolidation: true,
-        },
-        HindsightMentalModelTemplateConfig {
-            id: "runtime-strategy".to_string(),
-            name: "Runtime Strategy".to_string(),
-            source_query: "What stable runtime strategies, learned heuristics, and prompt-level lessons should guide Daat Locus when continuing work in this repository?".to_string(),
-            max_tokens: 1400,
-            tags: vec![
-                "mental-model".to_string(),
-                "scope:runtime".to_string(),
-                "kind:strategy_lesson".to_string(),
-            ],
-            refresh_after_consolidation: true,
-        },
-    ]
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -344,6 +52,8 @@ pub struct MainModelConfig {
     pub model_name: String,
     pub api_key: String,
     pub temperature: f64,
+    pub request_timeout_secs: u64,
+    pub stream_idle_timeout_secs: u64,
     pub context_window_tokens: usize,
     #[serde(default, alias = "auto_compact_threshold_tokens")]
     pub auto_compact_token_limit: Option<usize>,
@@ -359,6 +69,8 @@ impl Default for MainModelConfig {
             model_name: "gpt-4.1".to_string(),
             api_key: "your-api-key".to_string(),
             temperature: 1.0,
+            request_timeout_secs: 300,
+            stream_idle_timeout_secs: 45,
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             auto_compact_token_limit: Some(DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS),
             effective_context_window_percent: DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
@@ -369,6 +81,14 @@ impl Default for MainModelConfig {
 }
 
 impl MainModelConfig {
+    pub fn request_timeout_secs(&self) -> u64 {
+        self.request_timeout_secs.max(1)
+    }
+
+    pub fn stream_idle_timeout_secs(&self) -> u64 {
+        self.stream_idle_timeout_secs.max(1)
+    }
+
     pub fn context_window_tokens(&self) -> usize {
         self.context_window_tokens.max(1)
     }
@@ -460,6 +180,8 @@ impl JudgeConfig {
                 self.api_key.clone()
             },
             temperature: self.temperature,
+            request_timeout_secs: main_model.request_timeout_secs,
+            stream_idle_timeout_secs: main_model.stream_idle_timeout_secs,
             context_window_tokens: main_model.context_window_tokens,
             auto_compact_token_limit: main_model.auto_compact_token_limit,
             effective_context_window_percent: main_model.effective_context_window_percent,
