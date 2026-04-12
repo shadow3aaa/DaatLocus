@@ -32,6 +32,7 @@ pub struct OpenAIClient {
     base_url: String,
     model: String,
     temperature: f64,
+    stream_idle_timeout: Duration,
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
@@ -78,7 +79,12 @@ impl OpenAIClient {
     }
 
     pub fn from_model_config(model_config: &MainModelConfig) -> Self {
-        let client = reqwest::Client::new();
+        let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
+        let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
+        let client = reqwest::Client::builder()
+            .timeout(request_timeout)
+            .build()
+            .expect("failed to build llm http client");
         let api_key = model_config.api_key.clone();
         let base_url = model_config.base_url.clone();
         let model = model_config.model_name.clone();
@@ -93,6 +99,7 @@ impl OpenAIClient {
             base_url,
             model,
             temperature,
+            stream_idle_timeout,
             context_window_tokens,
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
@@ -464,7 +471,21 @@ impl OpenAIClient {
         let mut last_progress_emit_at = Instant::now();
         let mut last_progress_char_len = 0usize;
         let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
+        let mut stream_done = false;
+        while !stream_done {
+            let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
+                .await
+                .map_err(|_| {
+                    miette!(
+                        "llm streaming response stalled for over {}s (model={}, url={})",
+                        self.stream_idle_timeout.as_secs(),
+                        self.model,
+                        url
+                    )
+                })?;
+            let Some(chunk) = next_chunk else {
+                break;
+            };
             let chunk = chunk.map_err(|err| miette!("llm streaming chunk read failed: {err}"))?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             normalize_sse_buffer(&mut buffer);
@@ -479,6 +500,7 @@ impl OpenAIClient {
                     continue;
                 }
                 if data == "[DONE]" {
+                    stream_done = true;
                     break;
                 }
                 let response_json: serde_json::Value =

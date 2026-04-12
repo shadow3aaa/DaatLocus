@@ -8,6 +8,7 @@ use crate::{
     context_budget::{
         RequestBudgetLimits, approx_token_count, estimate_agent_turn_request,
         estimate_runtime_request_envelope, truncate_text_to_token_budget,
+        truncate_text_to_token_budget_with_notice,
     },
     daat_locus_paths::daat_locus_paths,
     hindsight::{HindsightRetainItem, HindsightRetainJob},
@@ -21,6 +22,7 @@ const RUNTIME_HISTORY_SUMMARY_PREFIX: &str = "Earlier runtime history summary:";
 const MID_TURN_SUMMARY_PREFIX: &str = "Earlier tool/context progress summary:";
 const RUNTIME_CONVERSATION_FILE_NAME: &str = "runtime_conversation";
 const HINDSIGHT_QUEUE_FILE_NAME: &str = "hindsight_queue";
+const RUNTIME_HISTORY_TOOL_MESSAGE_MAX_TOKENS: usize = 600;
 
 pub struct Memory {
     runtime_conversation: RuntimeConversation,
@@ -187,6 +189,11 @@ impl Memory {
 
     pub fn mark_queued_retained(&mut self) {
         self.hindsight_queue.mark_queued_retained();
+    }
+
+    pub fn mark_retained_by_document_ids(&mut self, document_ids: &[String]) {
+        self.hindsight_queue
+            .mark_retained_by_document_ids(document_ids);
     }
 
     pub async fn clear_runtime_conversation(&mut self) -> MemoryRetainPlan {
@@ -408,7 +415,7 @@ impl RuntimeStepConversation {
         }
 
         let keep_start = keep_start_for_mid_turn_messages(tail, policy);
-        if keep_start == 0 || keep_start >= tail.len() {
+        if keep_start == 0 || keep_start > tail.len() {
             return false;
         }
 
@@ -845,6 +852,30 @@ impl HindsightQueue {
             self.trail.pop_front();
         }
     }
+
+    fn mark_retained_by_document_ids(&mut self, document_ids: &[String]) {
+        if document_ids.is_empty() {
+            return;
+        }
+        for item in &mut self.trail {
+            let document_id = format!("hindsight-step:{}", item.id);
+            if document_ids
+                .iter()
+                .any(|candidate| candidate == &document_id)
+            {
+                item.queued = false;
+                item.retained = true;
+            }
+        }
+        while self
+            .trail
+            .front()
+            .map(|item| item.retained)
+            .unwrap_or(false)
+        {
+            self.trail.pop_front();
+        }
+    }
 }
 
 fn prompt_message_token_cost(message: &PromptMessage) -> usize {
@@ -925,6 +956,14 @@ fn normalize_runtime_prompt_message(mut message: PromptMessage) -> Option<Prompt
         } else if let Some(tool_ui_event) = &message.tool_ui_event {
             message.content = summarize_tool_ui_event(tool_ui_event);
         }
+    }
+
+    if matches!(message.role, PromptRole::Tool) {
+        message.content = truncate_text_to_token_budget_with_notice(
+            message.content.trim(),
+            RUNTIME_HISTORY_TOOL_MESSAGE_MAX_TOKENS,
+            "... [tool output too long; runtime history truncated]",
+        );
     }
 
     if message.content.trim().is_empty() {

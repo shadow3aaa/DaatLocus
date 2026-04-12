@@ -28,56 +28,27 @@ docker run --rm -it -p 8888:8888 -p 9999:9999 `
 `~/.daat-locus/config.toml` 需要至少这样配置：
 
 ```toml
+[main_model]
+request_timeout_secs = 300
+stream_idle_timeout_secs = 45
+
 [hindsight]
 base_url = "http://localhost:8888"
 api_key = "" # 本地无鉴权服务（默认如此）可留空
 namespace = "default"
 bank_id = "daat-locus"
-request_timeout_secs = 120 # retain 可能较慢，30s 容易误超时
-default_recall_budget = "mid"
-default_reflect_budget = "low" # 显式 `deep_recall` 可按需拉高
-
-# 可选：覆盖内置的 bank contract
-retain_extraction_mode = "verbose"
-retain_custom_instructions = ""
-enable_observations = true
-disposition_skepticism = 4
-disposition_literalism = 4
-disposition_empathy = 3
-entities_allow_free_form = true
-
-# reflect_mission = "..."
-# retain_mission = "..."
-# observations_mission = "..."
+request_timeout_secs = 180 # retain 可能较慢，建议至少 3 分钟
 ```
 
-如果不显式配置，Daat Locus 会自动写入一套默认 bank contract，包括：
+`main_model.request_timeout_secs` 是单次 runtime turn 请求的总超时；`main_model.stream_idle_timeout_secs` 是流式响应连续无新 chunk 的空闲超时。两者都会触发日志和重试，避免 UI 长时间停在“runtime turn 正在运行”。
+
+Hindsight 的 bank contract 现在完全内置在代码里，会自动 bootstrap，包括：
 
 - `reflect_mission`：要求 Hindsight 以 Daat Locus runtime maintainer 的视角做可审查推理。
 - `retain_mission`：优先保留 runtime 边界、项目事实、失败模式、用户偏好和可复用策略。
 - `observations_mission`：把重复证据沉淀成 durable knowledge，而不是保留一次性状态。
 - `directives`：默认同步 3 条高优先级规则，例如基于证据下结论、保持 runtime 边界、避免把瞬时状态固化成长期事实。
 - `mental_models`：默认维护 `Project State`、`Runtime Boundaries`、`User Preferences`、`Runtime Strategy` 四类模型。
-
-如果你想自定义 directives 或 mental models，可以直接在配置里声明：
-
-```toml
-[[hindsight.directives]]
-id = "ground-claims-in-evidence"
-name = "Ground Claims In Evidence"
-content = "Prefer conclusions that can be tied back to retrieved memories, observations, or mental models."
-priority = 100
-is_active = true
-tags = ["runtime", "reasoning"]
-
-[[hindsight.mental_models]]
-id = "project-state"
-name = "Project State"
-source_query = "What is the current project state of Daat Locus, including active workstreams, unresolved technical threads, and recently stabilized decisions?"
-max_tokens = 1600
-tags = ["mental-model", "scope:project", "scope:runtime"]
-refresh_after_consolidation = true
-```
 
 运行时会在连接 Hindsight 后自动 bootstrap bank config 和 directives。mental models 会在 `sleep` 后刷新，也可以手动触发。
 

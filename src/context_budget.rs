@@ -152,6 +152,14 @@ pub fn approx_token_count(text: &str) -> usize {
 }
 
 pub fn truncate_text_to_token_budget(text: &str, max_tokens: usize) -> String {
+    truncate_text_to_token_budget_with_notice(text, max_tokens, "... [truncated for model context]")
+}
+
+pub fn truncate_text_to_token_budget_with_notice(
+    text: &str,
+    max_tokens: usize,
+    notice: &str,
+) -> String {
     let max_chars = max_tokens.saturating_mul(APPROX_BYTES_PER_TOKEN).max(1);
     let total_chars = text.chars().count();
     if total_chars <= max_chars {
@@ -160,7 +168,7 @@ pub fn truncate_text_to_token_budget(text: &str, max_tokens: usize) -> String {
 
     let kept = text.chars().take(max_chars).collect::<String>();
     format!(
-        "{kept}\n... [truncated {} chars for model context]",
+        "{kept}\n{notice} ({} chars omitted)",
         total_chars.saturating_sub(max_chars)
     )
 }

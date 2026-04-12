@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::{
     app::AppToolScope,
     context::Context,
-    context_budget::truncate_text_to_token_budget,
+    context_budget::truncate_text_to_token_budget_with_notice,
     reasoning::{
         episode::EpisodeActionRecord,
         runtime::{AgentToolCall, AgentToolInputSpec, AgentToolSpec},
@@ -124,6 +124,19 @@ impl ToolExecutionResult {
         )
     }
 
+    pub fn history_content_with_budget(
+        &self,
+        tool_call_id: &str,
+        tool_name: &str,
+        max_tokens: usize,
+    ) -> String {
+        truncate_text_to_token_budget_with_notice(
+            &self.history_content(tool_call_id, tool_name),
+            max_tokens.max(1),
+            "... [tool output too long; history content truncated]",
+        )
+    }
+
     fn default_content_for_payload(&self, payload: &Value) -> String {
         if payload.is_null() {
             format!("summary={}", self.summary)
@@ -138,9 +151,10 @@ impl ToolExecutionResult {
 
     fn ensure_model_content_with_budget(mut self, max_tokens: usize) -> Self {
         if self.model_content_override.is_none() {
-            self.model_content_override = Some(truncate_text_to_token_budget(
+            self.model_content_override = Some(truncate_text_to_token_budget_with_notice(
                 &self.default_content_for_payload(&self.payload),
                 max_tokens,
+                "... [tool output too long; model content truncated]",
             ));
         }
         self
