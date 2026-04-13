@@ -1,10 +1,10 @@
 //! 本模块包含 context，它是 Daat Locus 主循环中承载状态的结构体。
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use parking_lot::Mutex;
@@ -32,6 +32,27 @@ use crate::{
     workspace_app::WorkspaceAppRegistry,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeTurnPhase {
+    PreflightMemory,
+    PreflightSnapshot,
+    PreflightCompaction,
+    ModelRequest,
+    ToolExecution,
+}
+
+impl RuntimeTurnPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PreflightMemory => "preflight: hindsight memory",
+            Self::PreflightSnapshot => "preflight: snapshot",
+            Self::PreflightCompaction => "preflight: compaction",
+            Self::ModelRequest => "model request",
+            Self::ToolExecution => "tool execution",
+        }
+    }
+}
+
 pub struct Context {
     pub llm: Box<dyn LLM + Send + Sync>,
     pub judge_llm: Box<dyn LLM + Send + Sync>,
@@ -52,11 +73,20 @@ pub struct Context {
     pub sandbox_policy: RuntimeSandboxPolicy,
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
     pub active_runtime_turn: bool,
+    pub active_runtime_phase: Option<RuntimeTurnPhase>,
     pub active_app_notices: HashSet<AppId>,
+    pub runtime_overflow_failures: Arc<Mutex<HashMap<String, usize>>>,
+    pub suppressed_app_notices: Arc<Mutex<HashMap<AppId, SuppressedAppNotice>>>,
     pub live_assistant_progress_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
     pub record_runtime_reviews: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SuppressedAppNotice {
+    pub reason: String,
+    pub until: Instant,
 }
 
 impl Context {
@@ -102,6 +132,47 @@ impl Context {
         if let Some(tx) = self.live_assistant_progress_tx.lock().as_ref() {
             let _ = tx.send(content.to_string());
         }
+    }
+
+    pub fn set_runtime_phase(&mut self, phase: Option<RuntimeTurnPhase>) {
+        self.active_runtime_phase = phase;
+    }
+
+    pub fn record_runtime_overflow_failure(&self, key: &str) -> usize {
+        let mut failures = self.runtime_overflow_failures.lock();
+        let entry = failures.entry(key.to_string()).or_insert(0);
+        *entry += 1;
+        *entry
+    }
+
+    pub fn clear_runtime_overflow_failure(&self, key: &str) {
+        self.runtime_overflow_failures.lock().remove(key);
+    }
+
+    pub fn suppress_app_notice(&self, app: &AppId, reason: impl Into<String>, duration: Duration) {
+        self.suppressed_app_notices.lock().insert(
+            app.clone(),
+            SuppressedAppNotice {
+                reason: reason.into(),
+                until: Instant::now() + duration,
+            },
+        );
+    }
+
+    pub fn clear_app_notice_suppression(&self, app: &AppId) {
+        self.suppressed_app_notices.lock().remove(app);
+    }
+
+    pub fn is_app_notice_suppressed(&self, app: &AppId, reason: &str) -> bool {
+        let mut suppressed = self.suppressed_app_notices.lock();
+        let Some(entry) = suppressed.get(app) else {
+            return false;
+        };
+        if entry.reason != reason || Instant::now() >= entry.until {
+            suppressed.remove(app);
+            return false;
+        }
+        true
     }
 
     pub async fn shutdown(mut self) {

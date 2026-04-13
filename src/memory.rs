@@ -1,6 +1,7 @@
 //! 此模块定义运行时会话状态与 hindsight retain 队列。
 use std::{collections::VecDeque, fmt::Display, future::Future};
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -23,6 +24,8 @@ const MID_TURN_SUMMARY_PREFIX: &str = "Earlier tool/context progress summary:";
 const RUNTIME_CONVERSATION_FILE_NAME: &str = "runtime_conversation";
 const HINDSIGHT_QUEUE_FILE_NAME: &str = "hindsight_queue";
 const RUNTIME_HISTORY_TOOL_MESSAGE_MAX_TOKENS: usize = 600;
+const MID_TURN_COMPACTION_RETAINED_USER_MAX_TOKENS: usize = 20_000;
+const RUNTIME_COMPACTION_RECORD_LIMIT: usize = 32;
 
 pub struct Memory {
     runtime_conversation: RuntimeConversation,
@@ -37,6 +40,7 @@ pub struct MemoryRetainPlan {
 pub struct RuntimeTurnDraft {
     current_doing: String,
     messages: Vec<PromptMessage>,
+    compaction_records: Vec<RuntimeCompactionRecord>,
 }
 
 pub struct RuntimeRequestEnvelope {
@@ -50,15 +54,54 @@ pub struct RuntimeStepConversation {
 }
 
 pub struct RuntimeConversationCompactionPlan {
-    omitted_prefix: Vec<PromptMessage>,
-    selected_tail: Vec<PromptMessage>,
+    source_messages: Vec<PromptMessage>,
+    retained_user_messages: Vec<PromptMessage>,
     summary_max_tokens: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeCompactionOutcome {
+    pub summary: String,
+    pub record: RuntimeCompactionRecord,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCompactionPhase {
+    PreTurn,
+    MidTurn,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCompactionReason {
+    BudgetThreshold,
+    OverflowRecovery,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeCompactionReinjectionStrategy {
+    RebuildRuntimeEnvelope,
+    PreserveSystemAndRecentUsers,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RuntimeCompactionRecord {
+    pub timestamp_ms: i64,
+    pub phase: RuntimeCompactionPhase,
+    pub reason: RuntimeCompactionReason,
+    pub reinjection_strategy: RuntimeCompactionReinjectionStrategy,
+    pub source_item_count: usize,
+    pub source_message_count: usize,
+    pub trimmed_item_count: usize,
+    pub retained_user_message_count: usize,
+    pub used_fallback_summary: bool,
+    pub summary: String,
 }
 
 #[derive(Clone, Copy)]
 pub struct RuntimeStepCompactionPolicy {
-    pub keep_tool_cycles: usize,
-    pub keep_messages_without_tool_cycles: usize,
     pub summary_max_tokens: usize,
     pub max_recoveries: usize,
 }
@@ -84,9 +127,13 @@ impl Memory {
         &mut self,
         current_doing: String,
         messages: Vec<PromptMessage>,
+        compaction_records: Vec<RuntimeCompactionRecord>,
     ) -> MemoryRetainPlan {
-        self.runtime_conversation_mut()
-            .append_turn(current_doing.clone(), messages.clone());
+        self.runtime_conversation_mut().append_turn(
+            current_doing.clone(),
+            messages.clone(),
+            compaction_records,
+        );
         self.hindsight_queue.push_turn(current_doing, messages);
         let jobs = self.collect_pending_retain_jobs();
         let must_flush_before_continue =
@@ -136,8 +183,9 @@ impl Memory {
     }
 
     pub async fn commit_runtime_turn(&mut self, draft: RuntimeTurnDraft) -> MemoryRetainPlan {
-        let (current_doing, messages) = draft.into_parts();
-        self.record_agent_turn(current_doing, messages).await
+        let (current_doing, messages, compaction_records) = draft.into_parts();
+        self.record_agent_turn(current_doing, messages, compaction_records)
+            .await
     }
 
     pub fn plan_runtime_conversation_compaction(
@@ -153,9 +201,9 @@ impl Memory {
     pub fn apply_runtime_conversation_compaction(
         &mut self,
         plan: RuntimeConversationCompactionPlan,
-        summary: Option<PromptMessage>,
+        outcome: Option<RuntimeCompactionOutcome>,
     ) -> bool {
-        self.runtime_conversation.apply_compaction(plan, summary)
+        self.runtime_conversation.apply_compaction(plan, outcome)
     }
 
     pub fn runtime_conversation_slice(
@@ -232,6 +280,8 @@ impl Memory {
 pub struct RuntimeConversation {
     last_focus: Option<String>,
     messages: Vec<PromptMessage>,
+    #[serde(default)]
+    compaction_records: VecDeque<RuntimeCompactionRecord>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -255,6 +305,7 @@ impl RuntimeTurnDraft {
         Self {
             current_doing,
             messages: Vec::new(),
+            compaction_records: Vec::new(),
         }
     }
 
@@ -277,8 +328,12 @@ impl RuntimeTurnDraft {
         &self.messages
     }
 
-    fn into_parts(self) -> (String, Vec<PromptMessage>) {
-        (self.current_doing, self.messages)
+    pub fn record_compaction(&mut self, record: RuntimeCompactionRecord) {
+        self.compaction_records.push(record);
+    }
+
+    fn into_parts(self) -> (String, Vec<PromptMessage>, Vec<RuntimeCompactionRecord>) {
+        (self.current_doing, self.messages, self.compaction_records)
     }
 }
 
@@ -372,7 +427,7 @@ impl RuntimeStepConversation {
     ) -> bool
     where
         F: FnMut(Vec<AgentMessage>, usize) -> Fut,
-        Fut: Future<Output = Option<String>>,
+        Fut: Future<Output = Option<RuntimeCompactionOutcome>>,
     {
         let mut compacted_any = false;
         for _ in 0..policy.max_recoveries {
@@ -400,71 +455,43 @@ impl RuntimeStepConversation {
     ) -> bool
     where
         F: FnMut(Vec<AgentMessage>, usize) -> Fut,
-        Fut: Future<Output = Option<String>>,
+        Fut: Future<Output = Option<RuntimeCompactionOutcome>>,
     {
-        let Some(last_user_index) = self
-            .agent_messages
+        let source_messages = self.agent_messages.clone();
+        if source_messages.is_empty() {
+            return false;
+        }
+        let has_non_system = source_messages
             .iter()
-            .rposition(|message| matches!(message, AgentMessage::User { .. }))
+            .any(|message| !matches!(message, AgentMessage::System { .. }));
+        if !has_non_system {
+            return false;
+        }
+
+        let Some(outcome) = build_summary(source_messages.clone(), policy.summary_max_tokens).await
         else {
             return false;
         };
-        let tail = &self.agent_messages[last_user_index + 1..];
-        if tail.is_empty() {
-            return false;
-        }
 
-        let keep_start = keep_start_for_mid_turn_messages(tail, policy);
-        if keep_start == 0 || keep_start > tail.len() {
-            return false;
-        }
-
-        let compacted_slice = tail[..keep_start].to_vec();
-        let Some(summary) = build_summary(compacted_slice, policy.summary_max_tokens).await else {
-            return false;
-        };
-
-        self.agent_messages.splice(
-            last_user_index + 1..last_user_index + 1 + keep_start,
-            [AgentMessage::assistant(summary)],
-        );
+        self.agent_messages =
+            rebuild_compacted_agent_messages(&source_messages, outcome.summary.clone());
+        self.turn_draft.record_compaction(outcome.record);
         true
     }
 }
 
 impl RuntimeConversationCompactionPlan {
-    pub fn omitted_prefix(&self) -> &[PromptMessage] {
-        &self.omitted_prefix
+    pub fn source_messages(&self) -> &[PromptMessage] {
+        &self.source_messages
+    }
+
+    pub fn retained_user_messages(&self) -> &[PromptMessage] {
+        &self.retained_user_messages
     }
 
     pub fn summary_max_tokens(&self) -> usize {
         self.summary_max_tokens
     }
-}
-
-fn keep_start_for_mid_turn_messages(
-    messages: &[AgentMessage],
-    policy: RuntimeStepCompactionPolicy,
-) -> usize {
-    let mut cycles_kept = 0usize;
-    for index in (0..messages.len()).rev() {
-        if is_tool_cycle_boundary(&messages[index]) {
-            cycles_kept += 1;
-            if cycles_kept >= policy.keep_tool_cycles {
-                return index;
-            }
-        }
-    }
-    messages
-        .len()
-        .saturating_sub(policy.keep_messages_without_tool_cycles)
-}
-
-fn is_tool_cycle_boundary(message: &AgentMessage) -> bool {
-    matches!(
-        message,
-        AgentMessage::AssistantToolCallProtocol { .. } | AgentMessage::Tool { .. }
-    )
 }
 
 fn prompt_message_to_agent_message(message: PromptMessage) -> AgentMessage {
@@ -476,6 +503,41 @@ fn prompt_message_to_agent_message(message: PromptMessage) -> AgentMessage {
             AgentMessage::tool("historical-tool", "historical_tool", message.content)
         }
     }
+}
+
+fn rebuild_compacted_agent_messages(
+    source_messages: &[AgentMessage],
+    summary: String,
+) -> Vec<AgentMessage> {
+    let mut rebuilt = source_messages
+        .iter()
+        .filter(|message| matches!(message, AgentMessage::System { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    rebuilt.extend(select_recent_user_agent_messages_for_compaction(
+        source_messages,
+    ));
+    rebuilt.push(AgentMessage::assistant(summary));
+    rebuilt
+}
+
+fn select_recent_user_agent_messages_for_compaction(
+    messages: &[AgentMessage],
+) -> Vec<AgentMessage> {
+    let prompt_messages = messages
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::User { content } => Some(PromptMessage::user(content.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    select_recent_user_messages_for_compaction(
+        &prompt_messages,
+        MID_TURN_COMPACTION_RETAINED_USER_MAX_TOKENS,
+    )
+    .into_iter()
+    .map(|message| AgentMessage::user(message.content))
+    .collect()
 }
 
 impl RuntimeConversation {
@@ -490,15 +552,24 @@ impl RuntimeConversation {
             .unwrap_or_else(|| Self {
                 last_focus: bootstrap_focus,
                 messages: bootstrap_messages,
+                compaction_records: VecDeque::new(),
             })
     }
 
-    pub fn append_turn(&mut self, current_doing: String, messages: Vec<PromptMessage>) {
+    pub fn append_turn(
+        &mut self,
+        current_doing: String,
+        messages: Vec<PromptMessage>,
+        compaction_records: Vec<RuntimeCompactionRecord>,
+    ) {
         if !current_doing.trim().is_empty() {
             self.last_focus = Some(current_doing);
         }
         self.messages.extend(messages);
         self.messages = normalize_runtime_prompt_messages(std::mem::take(&mut self.messages));
+        for record in compaction_records {
+            self.push_compaction_record(record);
+        }
     }
 
     pub fn current_focus(&self) -> Option<String> {
@@ -508,6 +579,7 @@ impl RuntimeConversation {
     pub fn clear(&mut self) {
         self.last_focus = None;
         self.messages.clear();
+        self.compaction_records.clear();
     }
 
     pub fn take_for_hindsight(&mut self) -> Option<(String, Vec<PromptMessage>)> {
@@ -530,67 +602,46 @@ impl RuntimeConversation {
     pub fn select_messages_for_runtime(
         &self,
         max_tokens: usize,
-        min_messages: usize,
+        _min_messages: usize,
         summary_max_tokens: usize,
     ) -> Vec<PromptMessage> {
         if max_tokens == 0 {
             return Vec::new();
         }
         let all_messages = self.messages();
-        let selected = select_recent_items_by_token_budget(
-            all_messages.clone(),
-            max_tokens,
-            min_messages,
-            prompt_message_token_cost,
-        );
-        let omitted_count = all_messages.len().saturating_sub(selected.len());
-        if omitted_count == 0 {
-            return selected;
+        if prompt_messages_total_token_cost(&all_messages) <= max_tokens {
+            return all_messages;
         }
 
         let summary_max_tokens = summary_max_tokens.min(max_tokens);
         if summary_max_tokens == 0 {
-            return selected;
+            return Vec::new();
         }
-        let reserved_tail_budget = max_tokens
-            .saturating_sub(summary_max_tokens)
-            .max(min_messages);
-        let selected_tail = select_recent_items_by_token_budget(
-            all_messages.clone(),
-            reserved_tail_budget,
-            min_messages,
-            prompt_message_token_cost,
+        let retained_user_messages = select_recent_user_messages_for_compaction(
+            &all_messages,
+            max_tokens.saturating_sub(summary_max_tokens),
         );
-        let omitted_prefix_len = all_messages.len().saturating_sub(selected_tail.len());
-        let omitted_prefix = &all_messages[..omitted_prefix_len];
         let mut messages = Vec::new();
+        messages.extend(retained_user_messages);
         if let Some(summary) =
-            build_runtime_prompt_history_summary(omitted_prefix, summary_max_tokens)
+            build_runtime_prompt_history_summary(&all_messages, summary_max_tokens)
         {
             messages.push(summary);
         }
-        messages.extend(selected_tail);
         messages
     }
 
     fn plan_compaction(
         &self,
         max_tokens: usize,
-        min_messages: usize,
+        _min_messages: usize,
         summary_max_tokens: usize,
     ) -> Option<RuntimeConversationCompactionPlan> {
         if max_tokens == 0 {
             return None;
         }
         let all_messages = self.messages();
-        let selected = select_recent_items_by_token_budget(
-            all_messages.clone(),
-            max_tokens,
-            min_messages,
-            prompt_message_token_cost,
-        );
-        let omitted_count = all_messages.len().saturating_sub(selected.len());
-        if omitted_count == 0 {
+        if prompt_messages_total_token_cost(&all_messages) <= max_tokens {
             return None;
         }
 
@@ -598,19 +649,13 @@ impl RuntimeConversation {
         if summary_max_tokens == 0 {
             return None;
         }
-        let reserved_tail_budget = max_tokens
-            .saturating_sub(summary_max_tokens)
-            .max(min_messages);
-        let selected_tail = select_recent_items_by_token_budget(
-            all_messages.clone(),
-            reserved_tail_budget,
-            min_messages,
-            prompt_message_token_cost,
+        let retained_user_messages = select_recent_user_messages_for_compaction(
+            &all_messages,
+            max_tokens.saturating_sub(summary_max_tokens),
         );
-        let omitted_prefix_len = all_messages.len().saturating_sub(selected_tail.len());
         Some(RuntimeConversationCompactionPlan {
-            omitted_prefix: all_messages[..omitted_prefix_len].to_vec(),
-            selected_tail,
+            source_messages: all_messages,
+            retained_user_messages,
             summary_max_tokens,
         })
     }
@@ -618,26 +663,40 @@ impl RuntimeConversation {
     fn apply_compaction(
         &mut self,
         plan: RuntimeConversationCompactionPlan,
-        summary: Option<PromptMessage>,
+        outcome: Option<RuntimeCompactionOutcome>,
     ) -> bool {
-        let summary = match summary {
-            Some(summary) => summary,
+        let (summary, record) = match outcome {
+            Some(outcome) => (
+                PromptMessage::assistant(outcome.summary),
+                Some(outcome.record),
+            ),
             None => {
                 let Some(summary) = build_runtime_prompt_history_summary(
-                    &plan.omitted_prefix,
+                    &plan.source_messages,
                     plan.summary_max_tokens,
                 ) else {
                     return false;
                 };
-                summary
+                (summary, None)
             }
         };
 
         self.messages.clear();
+        self.messages.extend(plan.retained_user_messages);
         self.messages.push(summary);
-        self.messages.extend(plan.selected_tail);
         self.messages = normalize_runtime_prompt_messages(std::mem::take(&mut self.messages));
+        if let Some(record) = record {
+            self.push_compaction_record(record);
+        }
         true
+    }
+
+    fn push_compaction_record(&mut self, mut record: RuntimeCompactionRecord) {
+        record.timestamp_ms = Utc::now().timestamp_millis();
+        self.compaction_records.push_back(record);
+        while self.compaction_records.len() > RUNTIME_COMPACTION_RECORD_LIMIT {
+            self.compaction_records.pop_front();
+        }
     }
 
     async fn sync_to_disk(&self) {
@@ -888,29 +947,51 @@ fn prompt_message_token_cost(message: &PromptMessage) -> usize {
     approx_token_count(role) + approx_token_count(&message.content) + 4
 }
 
-fn select_recent_items_by_token_budget<T, F>(
-    items: Vec<T>,
+fn select_recent_user_messages_for_compaction(
+    messages: &[PromptMessage],
     max_tokens: usize,
-    min_items: usize,
-    mut token_cost: F,
-) -> Vec<T>
-where
-    F: FnMut(&T) -> usize,
-{
+) -> Vec<PromptMessage> {
+    if max_tokens == 0 {
+        return Vec::new();
+    }
+
+    let user_messages = messages
+        .iter()
+        .filter(|message| {
+            matches!(message.role, PromptRole::User) && !is_runtime_summary_message(message)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
     let mut selected = Vec::new();
-    let mut total_tokens = 0usize;
-    for item in items.into_iter().rev() {
-        let cost = token_cost(&item);
-        let can_fit = total_tokens.saturating_add(cost) <= max_tokens;
-        if selected.len() < min_items || can_fit {
-            total_tokens = total_tokens.saturating_add(cost);
-            selected.push(item);
-        } else {
+    let mut remaining = max_tokens;
+    for message in user_messages.into_iter().rev() {
+        if remaining == 0 {
             break;
         }
+        let cost = prompt_message_token_cost(&message);
+        if cost <= remaining {
+            remaining = remaining.saturating_sub(cost);
+            selected.push(message);
+            continue;
+        }
+
+        let truncated = truncate_text_to_token_budget_with_notice(
+            message.content.trim(),
+            remaining,
+            "... [user message too long; runtime history truncated]",
+        );
+        if !truncated.trim().is_empty() {
+            selected.push(PromptMessage::user(truncated));
+        }
+        break;
     }
     selected.reverse();
     selected
+}
+
+fn prompt_messages_total_token_cost(messages: &[PromptMessage]) -> usize {
+    messages.iter().map(prompt_message_token_cost).sum()
 }
 
 fn summarize_runtime_inline_text(text: &str) -> String {
@@ -1113,6 +1194,120 @@ fn format_message_for_memory(message: &PromptMessage) -> String {
         parts.push(rendered);
     }
     format!("{role}:\n{}", parts.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_conversation_compaction_rebuilds_history_without_assistant_or_tool_tail() {
+        let mut conversation = RuntimeConversation {
+            last_focus: Some("test".to_string()),
+            messages: vec![
+                PromptMessage::user("user one"),
+                PromptMessage::assistant("assistant one"),
+                PromptMessage::tool_with_ui(
+                    "tool output one",
+                    ToolUiEvent::Exec(ToolUiData {
+                        title: "tool output".to_string(),
+                        body_lines: Vec::new(),
+                    }),
+                ),
+                PromptMessage::user("user two"),
+                PromptMessage::assistant("assistant two"),
+                PromptMessage::tool_with_ui(
+                    "tool output two",
+                    ToolUiEvent::Exec(ToolUiData {
+                        title: "tool output".to_string(),
+                        body_lines: Vec::new(),
+                    }),
+                ),
+            ],
+            compaction_records: VecDeque::new(),
+        };
+
+        let plan = conversation
+            .plan_compaction(
+                /*max_tokens*/ 20, /*min_messages*/ 0, /*summary_max_tokens*/ 8,
+            )
+            .expect("expected compaction plan");
+        assert!(!plan.retained_user_messages.is_empty());
+        assert!(
+            plan.retained_user_messages
+                .iter()
+                .all(|message| matches!(message.role, PromptRole::User))
+        );
+
+        let applied = conversation.apply_compaction(
+            plan,
+            Some(RuntimeCompactionOutcome {
+                summary: "summary".to_string(),
+                record: RuntimeCompactionRecord {
+                    timestamp_ms: 0,
+                    phase: RuntimeCompactionPhase::PreTurn,
+                    reason: RuntimeCompactionReason::BudgetThreshold,
+                    reinjection_strategy:
+                        RuntimeCompactionReinjectionStrategy::RebuildRuntimeEnvelope,
+                    source_item_count: 2,
+                    source_message_count: 6,
+                    trimmed_item_count: 0,
+                    retained_user_message_count: 2,
+                    used_fallback_summary: false,
+                    summary: "summary".to_string(),
+                },
+            }),
+        );
+        assert!(applied);
+        assert!(!conversation.messages.is_empty());
+        assert!(
+            conversation.messages[..conversation.messages.len() - 1]
+                .iter()
+                .all(|message| matches!(message.role, PromptRole::User))
+        );
+        assert!(matches!(
+            conversation.messages.last().map(|message| &message.role),
+            Some(PromptRole::Assistant)
+        ));
+        assert!(
+            conversation
+                .messages
+                .iter()
+                .all(|message| !matches!(message.role, PromptRole::Tool))
+        );
+    }
+
+    #[test]
+    fn select_recent_user_messages_for_compaction_truncates_overlong_user_message() {
+        let messages = vec![PromptMessage::user("word ".repeat(200))];
+        let selected = select_recent_user_messages_for_compaction(&messages, 16);
+        assert_eq!(selected.len(), 1);
+        assert!(selected[0].content.contains("runtime history truncated"));
+    }
+
+    #[test]
+    fn rebuild_compacted_agent_messages_drops_assistant_and_tool_history() {
+        let messages = vec![
+            AgentMessage::system("system"),
+            AgentMessage::user("claimed input"),
+            AgentMessage::user("<world_snapshot>snapshot</world_snapshot>"),
+            AgentMessage::assistant("assistant detail"),
+            AgentMessage::tool("call-1", "shell", "tool output"),
+        ];
+
+        let rebuilt = rebuild_compacted_agent_messages(&messages, "summary".to_string());
+        assert_eq!(rebuilt.len(), 4);
+        assert!(matches!(rebuilt[0], AgentMessage::System { .. }));
+        assert!(matches!(rebuilt[1], AgentMessage::User { .. }));
+        assert!(matches!(rebuilt[2], AgentMessage::User { .. }));
+        assert!(matches!(rebuilt[3], AgentMessage::Assistant { .. }));
+        assert!(rebuilt.iter().all(|message| {
+            !matches!(
+                message,
+                AgentMessage::Tool { .. } | AgentMessage::AssistantToolCallProtocol { .. }
+            )
+        }));
+    }
 }
 
 impl HindsightQueueItem {

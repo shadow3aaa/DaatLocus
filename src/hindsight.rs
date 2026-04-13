@@ -569,14 +569,34 @@ impl HindsightClient {
             while let Some(message) = rx.recv().await {
                 match message {
                     RetainWorkerMessage::Retain(job) => {
-                        match retain_job_with_retry(&client, &bank_ready_for_task, job).await {
-                            Ok(()) => {}
-                            Err(err) => {
-                                tracing::error!(
-                                    "[hindsight] retain failed permanently:\n{}",
-                                    format_report(&err)
-                                );
-                                std::process::exit(1);
+                        let mut outage_cycle = 0usize;
+                        let job_summary = summarize_retain_job(job.clone(), &client.config);
+                        loop {
+                            match retain_job_with_retry(&client, &bank_ready_for_task, job.clone())
+                                .await
+                            {
+                                Ok(()) => {
+                                    if outage_cycle > 0 {
+                                        tracing::info!(
+                                            "[hindsight] retain recovered after extended outage (cycle {}): {}",
+                                            outage_cycle + 1,
+                                            job_summary
+                                        );
+                                    }
+                                    break;
+                                }
+                                Err(err) => {
+                                    outage_cycle += 1;
+                                    let delay = hindsight_retain_outage_backoff(outage_cycle);
+                                    tracing::error!(
+                                        "[hindsight] retain exhausted immediate retries; continuing background retry in {:.1}s (cycle {})\njob: {}\n{}",
+                                        delay.as_secs_f64(),
+                                        outage_cycle,
+                                        job_summary,
+                                        format_report(&err)
+                                    );
+                                    tokio::time::sleep(delay).await;
+                                }
                             }
                         }
                     }
@@ -1267,6 +1287,17 @@ fn hindsight_retain_backoff(attempt: usize) -> Duration {
         2 => 5,
         3 => 10,
         _ => 15,
+    };
+    Duration::from_secs(seconds)
+}
+
+fn hindsight_retain_outage_backoff(cycle: usize) -> Duration {
+    let seconds = match cycle {
+        1 => 30,
+        2 => 60,
+        3 => 120,
+        4 => 300,
+        _ => 600,
     };
     Duration::from_secs(seconds)
 }

@@ -31,6 +31,7 @@ mod workspace_app;
 mod workspace_paths;
 
 use std::{
+    collections::HashMap,
     env,
     io::Cursor,
     path::{Path, PathBuf},
@@ -42,7 +43,7 @@ use crate::{
     apply_patch::{PatchOperationKind, apply_patch_in_root, summarize_apply_patch_error},
     browser_app::BrowserApp,
     config::load_config,
-    context::Context,
+    context::{Context, RuntimeTurnPhase},
     context_budget::{
         approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded,
         truncate_text_to_token_budget,
@@ -91,8 +92,8 @@ use crate::{
         turn_compile::TurnCompileEngine,
     },
     runtime_context::{
-        MID_TURN_COMPACTION_MAX_RECOVERIES, build_runtime_conversation_summary,
-        build_runtime_request_envelope, build_runtime_snapshot_text,
+        MID_TURN_COMPACTION_MAX_RECOVERIES, build_runtime_request_envelope,
+        build_runtime_snapshot_text, execute_pre_turn_runtime_compaction,
         maybe_compact_runtime_messages, runtime_request_budget_limits,
     },
     runtime_tools::{
@@ -128,6 +129,8 @@ const AUTO_SLEEP_IDLE_THRESHOLD: Duration = Duration::from_secs(300);
 const AUTO_SLEEP_MIN_INTERVAL: Duration = Duration::from_secs(300);
 const FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD: usize = 128;
 const RUNTIME_EVENT_CLAIM_BATCH_SIZE: usize = 1;
+const RUNTIME_OVERFLOW_FUSE_THRESHOLD: usize = 3;
+const APP_NOTICE_OVERFLOW_SUPPRESSION: Duration = Duration::from_secs(300);
 
 struct RuntimeAppsBootstrap {
     apps: Vec<Box<dyn crate::app::App>>,
@@ -458,7 +461,10 @@ async fn async_main(cli: Cli) -> Result<()> {
         sandbox_policy,
         dashboard_tx: None,
         active_runtime_turn: false,
+        active_runtime_phase: None,
         active_app_notices: std::collections::HashSet::new(),
+        runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        suppressed_app_notices: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         live_assistant_progress_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         idle_since: None,
         last_idle_sleep_at: None,
@@ -1102,7 +1108,10 @@ pub(crate) async fn build_eval_context_with_compiled(
         sandbox_policy,
         dashboard_tx: None,
         active_runtime_turn: false,
+        active_runtime_phase: None,
         active_app_notices: std::collections::HashSet::new(),
+        runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        suppressed_app_notices: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         live_assistant_progress_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         idle_since: None,
         last_idle_sleep_at: None,
@@ -1348,6 +1357,7 @@ const HINDSIGHT_RETAIN_PREPROCESS_INPUT_MAX_TOKENS: usize = 3200;
 const HINDSIGHT_RETAIN_PREPROCESS_OUTPUT_MAX_TOKENS: usize = 900;
 const HINDSIGHT_RETAIN_PREPROCESS_MAX_SPLIT_ITEMS: usize = 4;
 const CLAIMED_EVENT_FINISHED_STOP_REASON: &str = "claimed_event_finished";
+const RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS: u64 = 60;
 
 fn select_recent_trail_lines_for_hindsight(context: &Context) -> Vec<String> {
     select_recent_items_by_token_budget(
@@ -1812,17 +1822,129 @@ fn format_telegram_live_draft_text(content: &str) -> String {
     format!("{truncated}...")
 }
 
+fn enter_runtime_phase(
+    context: &mut Context,
+    tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+    phase: RuntimeTurnPhase,
+) {
+    context.set_runtime_phase(Some(phase));
+    set_runtime_status(
+        tx,
+        RuntimeStatusLevel::Info,
+        format!("处理中：runtime turn / {}", phase.label()),
+    );
+}
+
+async fn abort_runtime_turn_before_model(
+    context: &mut Context,
+    _tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+    live_draft_session: Option<TelegramLiveDraftSession>,
+    claimed_input_fingerprint: Option<&str>,
+    claimed_event_ids: &[String],
+    claimed_app_notices: &[AppId],
+    observation: String,
+    description: String,
+) -> AgentLoopStepExecution {
+    context.set_runtime_phase(None);
+    if let Some(session) = live_draft_session {
+        session.shutdown(context).await;
+    } else {
+        context.install_live_assistant_progress(None);
+    }
+    if let Some(fingerprint) = claimed_input_fingerprint {
+        context.clear_runtime_overflow_failure(fingerprint);
+    }
+    let output = AgentLoopStepOutput {
+        observation: observation.clone(),
+        description,
+        stop_reason: "runtime_preflight_failed".to_string(),
+        current_doing: "等待下一轮工具决策".to_string(),
+        actions: vec![EpisodeActionRecord {
+            kind: "runtime_preflight_failed".to_string(),
+            summary: observation,
+        }],
+    };
+    finalize_claimed_runtime_events(context, claimed_event_ids, &output);
+    finalize_claimed_runtime_app_notices(context, claimed_app_notices, &output).await;
+    AgentLoopStepExecution {
+        output,
+        history_messages: Vec::new(),
+    }
+}
+
 pub(crate) async fn execute_agent_loop_step(
     context: &mut Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
 ) -> AgentLoopStepExecution {
-    context.prompt_memory = build_hindsight_memory_context(context).await;
+    let preflight_timeout = Duration::from_secs(RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS);
+    enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightMemory);
+    let preflight_started_at = std::time::Instant::now();
+    tracing::info!(
+        "runtime preflight stage started: {}",
+        RuntimeTurnPhase::PreflightMemory.label()
+    );
+    let prompt_memory = match tokio::time::timeout(
+        preflight_timeout,
+        build_hindsight_memory_context(context),
+    )
+    .await
+    {
+        Ok(prompt_memory) => {
+            tracing::info!(
+                elapsed_ms = preflight_started_at.elapsed().as_millis(),
+                "runtime preflight stage completed: {}",
+                RuntimeTurnPhase::PreflightMemory.label()
+            );
+            prompt_memory
+        }
+        Err(_) => {
+            let err = miette!(
+                "runtime preflight stage `{}` timed out after {}s",
+                RuntimeTurnPhase::PreflightMemory.label(),
+                preflight_timeout.as_secs()
+            );
+            set_runtime_status(
+                tx,
+                RuntimeStatusLevel::Error,
+                format!(
+                    "runtime turn preflight 超时：{}",
+                    RuntimeTurnPhase::PreflightMemory.label()
+                ),
+            );
+            tracing::error!(
+                elapsed_ms = preflight_started_at.elapsed().as_millis(),
+                timeout_secs = preflight_timeout.as_secs(),
+                "runtime preflight stage timed out: {}",
+                RuntimeTurnPhase::PreflightMemory.label()
+            );
+            return abort_runtime_turn_before_model(
+                context,
+                tx,
+                None,
+                None,
+                &[],
+                &[],
+                format!("runtime preflight failed: {err}"),
+                "构建 hindsight 记忆上下文失败。".to_string(),
+            )
+            .await;
+        }
+    };
+    context.prompt_memory = prompt_memory;
     let claimed_inputs = claim_pending_runtime_inputs(context, RUNTIME_EVENT_CLAIM_BATCH_SIZE);
+    let claimed_input_fingerprint = claimed_runtime_input_fingerprint(&claimed_inputs);
     let claimed_event_ids = claimed_inputs
         .iter()
         .filter_map(|input| match input {
             ClaimedRuntimeInput::Event(event) => Some(event.event_id.to_string()),
             ClaimedRuntimeInput::AppNotice { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let claimed_app_notice_entries = claimed_inputs
+        .iter()
+        .filter_map(|input| match input {
+            ClaimedRuntimeInput::Event(_) => None,
+            ClaimedRuntimeInput::AppNotice { app, reason } => Some((app.clone(), reason.clone())),
         })
         .collect::<Vec<_>>();
     let claimed_app_notices = claimed_inputs
@@ -1844,7 +1966,59 @@ pub(crate) async fn execute_agent_loop_step(
         })
         .collect::<Vec<_>>();
     let live_draft_session = maybe_start_telegram_live_draft_session(context, &claimed_event_views);
-    let snapshot = Snapshot::new_with_claimed_events(context, &claimed_event_views).await;
+    enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightSnapshot);
+    let snapshot_started_at = std::time::Instant::now();
+    tracing::info!(
+        "runtime preflight stage started: {}",
+        RuntimeTurnPhase::PreflightSnapshot.label()
+    );
+    let snapshot = match tokio::time::timeout(
+        preflight_timeout,
+        Snapshot::new_with_claimed_events(context, &claimed_event_views),
+    )
+    .await
+    {
+        Ok(snapshot) => {
+            tracing::info!(
+                elapsed_ms = snapshot_started_at.elapsed().as_millis(),
+                "runtime preflight stage completed: {}",
+                RuntimeTurnPhase::PreflightSnapshot.label()
+            );
+            snapshot
+        }
+        Err(_) => {
+            let err = miette!(
+                "runtime preflight stage `{}` timed out after {}s",
+                RuntimeTurnPhase::PreflightSnapshot.label(),
+                preflight_timeout.as_secs()
+            );
+            set_runtime_status(
+                tx,
+                RuntimeStatusLevel::Error,
+                format!(
+                    "runtime turn preflight 超时：{}",
+                    RuntimeTurnPhase::PreflightSnapshot.label()
+                ),
+            );
+            tracing::error!(
+                elapsed_ms = snapshot_started_at.elapsed().as_millis(),
+                timeout_secs = preflight_timeout.as_secs(),
+                "runtime preflight stage timed out: {}",
+                RuntimeTurnPhase::PreflightSnapshot.label()
+            );
+            return abort_runtime_turn_before_model(
+                context,
+                tx,
+                live_draft_session,
+                claimed_input_fingerprint.as_deref(),
+                &claimed_event_ids,
+                &claimed_app_notices,
+                format!("runtime preflight failed: {err}"),
+                "构建 runtime 快照失败。".to_string(),
+            )
+            .await;
+        }
+    };
     let snapshot_text = build_runtime_snapshot_text(context, &snapshot);
     let request_envelope = build_runtime_request_envelope(context, &snapshot_text);
     let initial_tools = build_runtime_tool_specs(context);
@@ -1857,7 +2031,59 @@ pub(crate) async fn execute_agent_loop_step(
         RUNTIME_HISTORY_MIN_MESSAGES,
         runtime_conversation_summary_budget,
     ) {
-        let summary = build_runtime_conversation_summary(context, &plan).await;
+        enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightCompaction);
+        let compaction_started_at = std::time::Instant::now();
+        tracing::info!(
+            "runtime preflight stage started: {}",
+            RuntimeTurnPhase::PreflightCompaction.label()
+        );
+        let summary = match tokio::time::timeout(
+            preflight_timeout,
+            execute_pre_turn_runtime_compaction(context, &plan),
+        )
+        .await
+        {
+            Ok(summary) => {
+                tracing::info!(
+                    elapsed_ms = compaction_started_at.elapsed().as_millis(),
+                    "runtime preflight stage completed: {}",
+                    RuntimeTurnPhase::PreflightCompaction.label()
+                );
+                summary
+            }
+            Err(_) => {
+                let err = miette!(
+                    "runtime preflight stage `{}` timed out after {}s",
+                    RuntimeTurnPhase::PreflightCompaction.label(),
+                    preflight_timeout.as_secs()
+                );
+                set_runtime_status(
+                    tx,
+                    RuntimeStatusLevel::Error,
+                    format!(
+                        "runtime turn preflight 超时：{}",
+                        RuntimeTurnPhase::PreflightCompaction.label()
+                    ),
+                );
+                tracing::error!(
+                    elapsed_ms = compaction_started_at.elapsed().as_millis(),
+                    timeout_secs = preflight_timeout.as_secs(),
+                    "runtime preflight stage timed out: {}",
+                    RuntimeTurnPhase::PreflightCompaction.label()
+                );
+                return abort_runtime_turn_before_model(
+                    context,
+                    tx,
+                    live_draft_session,
+                    claimed_input_fingerprint.as_deref(),
+                    &claimed_event_ids,
+                    &claimed_app_notices,
+                    format!("runtime preflight failed: {err}"),
+                    "执行 pre-turn context compaction 失败。".to_string(),
+                )
+                .await;
+            }
+        };
         let _ = context
             .memory
             .apply_runtime_conversation_compaction(plan, summary);
@@ -1884,6 +2110,7 @@ pub(crate) async fn execute_agent_loop_step(
             messages: runtime_step.clone_agent_messages(),
             tools: tools.clone(),
         };
+        enter_runtime_phase(context, tx, RuntimeTurnPhase::ModelRequest);
         let response = match run_agent_turn_with_retry(context, request, tx).await {
             Ok(response) => response,
             Err(err) => {
@@ -1903,7 +2130,19 @@ pub(crate) async fn execute_agent_loop_step(
                     );
                     continue 'agent_loop;
                 }
-                if !claimed_event_ids.is_empty() {
+                let is_overflow = is_context_budget_exceeded(&err);
+                let overflow_fuse_tripped = if is_overflow {
+                    handle_runtime_overflow(
+                        context,
+                        claimed_input_fingerprint.as_deref(),
+                        &claimed_event_ids,
+                        &claimed_app_notice_entries,
+                        &err.to_string(),
+                    )
+                } else {
+                    false
+                };
+                if !is_overflow && !overflow_fuse_tripped && !claimed_event_ids.is_empty() {
                     requeue_claimed_runtime_events(context, &claimed_event_ids);
                 }
                 let observation = format!("agent turn failed: {err}");
@@ -2013,6 +2252,7 @@ pub(crate) async fn execute_agent_loop_step(
                         }
                     });
                 actions.push(action_record);
+                enter_runtime_phase(context, tx, RuntimeTurnPhase::ToolExecution);
                 if let Some(tx) = tx {
                     match call_ui_event.clone() {
                         ToolCallUiEvent::Exec(event) => {
@@ -2178,10 +2418,14 @@ pub(crate) async fn execute_agent_loop_step(
         };
     };
     runtime_step.set_current_doing(output.current_doing.clone());
+    context.set_runtime_phase(None);
     if let Some(session) = live_draft_session {
         session.shutdown(context).await;
     } else {
         context.install_live_assistant_progress(None);
+    }
+    if let Some(fingerprint) = claimed_input_fingerprint.as_deref() {
+        context.clear_runtime_overflow_failure(fingerprint);
     }
     finalize_claimed_runtime_events(context, &claimed_event_ids, &output);
     finalize_claimed_runtime_app_notices(context, &claimed_app_notices, &output).await;
@@ -2199,6 +2443,38 @@ pub(crate) async fn execute_agent_loop_step(
 enum ClaimedRuntimeInput {
     Event(EventView),
     AppNotice { app: AppId, reason: String },
+}
+
+fn claimed_runtime_input_fingerprint(inputs: &[ClaimedRuntimeInput]) -> Option<String> {
+    if inputs.is_empty() {
+        return None;
+    }
+
+    let mut event_ids = inputs
+        .iter()
+        .filter_map(|input| match input {
+            ClaimedRuntimeInput::Event(event) => Some(event.event_id.to_string()),
+            ClaimedRuntimeInput::AppNotice { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    event_ids.sort();
+
+    let mut app_notices = inputs
+        .iter()
+        .filter_map(|input| match input {
+            ClaimedRuntimeInput::Event(_) => None,
+            ClaimedRuntimeInput::AppNotice { app, reason } => {
+                Some(format!("{app}:{}", reason.trim()))
+            }
+        })
+        .collect::<Vec<_>>();
+    app_notices.sort();
+
+    Some(format!(
+        "events=[{}]|app_notices=[{}]",
+        event_ids.join(","),
+        app_notices.join(","),
+    ))
 }
 
 fn claim_pending_runtime_inputs(context: &Context, max_events: usize) -> Vec<ClaimedRuntimeInput> {
@@ -2277,6 +2553,89 @@ fn requeue_claimed_runtime_events(context: &Context, event_ids: &[String]) {
             }
         }
     }
+}
+
+fn handle_runtime_overflow(
+    context: &mut Context,
+    fingerprint: Option<&str>,
+    event_ids: &[String],
+    app_notices: &[(AppId, String)],
+    error_text: &str,
+) -> bool {
+    let Some(fingerprint) = fingerprint else {
+        if !event_ids.is_empty() {
+            requeue_claimed_runtime_events(context, event_ids);
+        }
+        return false;
+    };
+
+    let attempts = context.record_runtime_overflow_failure(fingerprint);
+    if attempts < RUNTIME_OVERFLOW_FUSE_THRESHOLD {
+        tracing::warn!(
+            overflow_attempt = attempts,
+            overflow_threshold = RUNTIME_OVERFLOW_FUSE_THRESHOLD,
+            claimed_events = event_ids.join(","),
+            claimed_app_notices = app_notices
+                .iter()
+                .map(|(app, _)| app.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            "runtime context overflow persisted; requeueing claimed inputs",
+        );
+        if !event_ids.is_empty() {
+            requeue_claimed_runtime_events(context, event_ids);
+        }
+        return false;
+    }
+
+    let failure_note =
+        format!("runtime context overflow persisted after {attempts} attempts: {error_text}");
+    for event_id in event_ids {
+        if let Err(err) =
+            context
+                .events
+                .set_status(event_id, EventStatus::Failed, Some(failure_note.clone()))
+        {
+            tracing::error!("failed to mark overflowed event {event_id} as failed: {err:?}");
+        }
+        if let Ok(parsed_event_id) = uuid::Uuid::parse_str(event_id)
+            && let Err(err) = context.pending_work.consume(PendingWork::Event {
+                event_id: parsed_event_id,
+            })
+        {
+            tracing::error!(
+                "failed to consume overflowed event driver {event_id} after fuse trip: {err:?}"
+            );
+        }
+    }
+
+    for (app, reason) in app_notices {
+        context.suppress_app_notice(app, reason.clone(), APP_NOTICE_OVERFLOW_SUPPRESSION);
+        context.active_app_notices.remove(app);
+        if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
+            app: app.clone(),
+            reason: String::new(),
+        }) {
+            tracing::error!(
+                "failed to consume overflowed app notice driver for {app} after fuse trip: {err:?}"
+            );
+        }
+    }
+
+    context.clear_runtime_overflow_failure(fingerprint);
+    tracing::error!(
+        overflow_attempts = attempts,
+        overflow_threshold = RUNTIME_OVERFLOW_FUSE_THRESHOLD,
+        suppression_secs = APP_NOTICE_OVERFLOW_SUPPRESSION.as_secs(),
+        claimed_events = event_ids.join(","),
+        claimed_app_notices = app_notices
+            .iter()
+            .map(|(app, _)| app.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        "runtime context overflow fuse tripped; claimed inputs were terminated instead of requeued",
+    );
+    true
 }
 
 fn finalize_claimed_runtime_events(
@@ -2663,6 +3022,64 @@ mod tests {
     }
 
     #[test]
+    fn claimed_runtime_input_fingerprint_is_stable_and_sorted() {
+        let event_a = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let event_b = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let inputs = vec![
+            ClaimedRuntimeInput::AppNotice {
+                app: AppId::terminal(),
+                reason: "busy".to_string(),
+            },
+            ClaimedRuntimeInput::Event(EventView {
+                event_id: event_a,
+                source: crate::events::EventSource::Telegram,
+                status: EventStatus::Pending,
+                arrived_at_ms: 0,
+                payload: EventPayload::TelegramIncoming(crate::events::TelegramIncomingEvent {
+                    chat_id: "1".to_string(),
+                    chat_kind: "private".to_string(),
+                    chat_title: "chat".to_string(),
+                    sender: "alice".to_string(),
+                    incoming_text: "hello".to_string(),
+                    telegram_update_id: 1,
+                    telegram_message_id: None,
+                    telegram_message_date: None,
+                }),
+                last_error: None,
+            }),
+            ClaimedRuntimeInput::Event(EventView {
+                event_id: event_b,
+                source: crate::events::EventSource::Telegram,
+                status: EventStatus::Pending,
+                arrived_at_ms: 0,
+                payload: EventPayload::TelegramIncoming(crate::events::TelegramIncomingEvent {
+                    chat_id: "2".to_string(),
+                    chat_kind: "private".to_string(),
+                    chat_title: "chat".to_string(),
+                    sender: "bob".to_string(),
+                    incoming_text: "world".to_string(),
+                    telegram_update_id: 2,
+                    telegram_message_id: None,
+                    telegram_message_date: None,
+                }),
+                last_error: None,
+            }),
+        ];
+
+        assert_eq!(
+            claimed_runtime_input_fingerprint(&inputs).as_deref(),
+            Some(
+                "events=[00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000002]|app_notices=[Terminal:busy]"
+            )
+        );
+    }
+
+    #[test]
+    fn claimed_runtime_input_fingerprint_is_none_for_empty_batch() {
+        assert_eq!(claimed_runtime_input_fingerprint(&[]), None);
+    }
+
+    #[test]
     fn follow_up_reason_messages_are_structured() {
         assert_eq!(
             RuntimeFollowUpReason::RawStreamRequestedFollowUp.message(),
@@ -2996,10 +3413,14 @@ async fn daat_locus_loop(
     enqueue_app_notice_work(context);
     sync_driver_frontier_from_sources(context);
     if context.active_runtime_turn {
+        let phase = context
+            .active_runtime_phase
+            .map(|phase| phase.label())
+            .unwrap_or("running");
         set_runtime_status(
             Some(tx),
             RuntimeStatusLevel::Info,
-            "处理中：runtime turn 正在运行",
+            format!("处理中：runtime turn 正在运行 / {phase}"),
         );
         sync_dashboard_state(
             context,
@@ -3070,6 +3491,7 @@ async fn daat_locus_loop(
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
         .await;
     context.active_runtime_turn = true;
+    context.set_runtime_phase(Some(RuntimeTurnPhase::PreflightMemory));
     sync_dashboard_state(
         context,
         tx,
@@ -3078,6 +3500,7 @@ async fn daat_locus_loop(
     );
     let _ = execute_agent_loop_step(context, Some(tx)).await;
     context.active_runtime_turn = false;
+    context.set_runtime_phase(None);
     refresh_sleep_backlogs(sleep_status).await;
     sync_dashboard_state(
         context,
@@ -3103,6 +3526,18 @@ fn sync_driver_frontier_from_sources(context: &Context) {
 fn enqueue_app_notice_work(context: &mut Context) {
     for app_id in context.apps.app_ids() {
         if let Some(reason) = context.apps.notice_reason(&app_id) {
+            if context.is_app_notice_suppressed(&app_id, &reason) {
+                context.active_app_notices.remove(&app_id);
+                if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
+                    app: app_id.clone(),
+                    reason: String::new(),
+                }) {
+                    tracing::error!(
+                        "failed to remove suppressed app notice work for {app_id}: {err:?}"
+                    );
+                }
+                continue;
+            }
             if context.active_app_notices.insert(app_id.clone()) {
                 if let Err(err) = context.pending_work.enqueue(PendingWork::AppNotice {
                     app: app_id.clone(),
@@ -3113,6 +3548,7 @@ fn enqueue_app_notice_work(context: &mut Context) {
             }
         } else {
             context.active_app_notices.remove(&app_id);
+            context.clear_app_notice_suppression(&app_id);
         }
     }
 }
@@ -3709,9 +4145,12 @@ fn render_status_command_output_for_dashboard(
     let active_plans = context.plan.active_steps().count();
     let active_events = context.pending_work.pending_count();
     let runtime_turn = if context.active_runtime_turn {
-        "running"
+        context
+            .active_runtime_phase
+            .map(|phase| format!("running ({})", phase.label()))
+            .unwrap_or_else(|| "running".to_string())
     } else {
-        "idle"
+        "idle".to_string()
     };
     sections.push(format!(
         "Overview\nRuntime turn: {runtime_turn}\nFocused app: {focused}\nPlans: {active_plans}\nEvents: {active_events}"
