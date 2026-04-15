@@ -12,7 +12,7 @@ use crate::{
         },
         episode::EpisodeActionRecord,
         examples::ExampleField,
-        runtime::{PromptMessage, PromptRequest, PromptRole},
+        runtime::{HistoryMessage, PromptRequest},
     },
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
@@ -498,7 +498,7 @@ fn render_recent_runtime_span_steps(span: &RuntimeReviewSpan) -> String {
         .join("\n")
 }
 
-fn render_runtime_turn_history_summary(messages: &[PromptMessage]) -> String {
+fn render_runtime_turn_history_summary(messages: &[HistoryMessage]) -> String {
     let mut lines = Vec::new();
     for message in messages {
         if let Some(summary) = render_prompt_message_summary_for_review(message) {
@@ -508,10 +508,12 @@ fn render_runtime_turn_history_summary(messages: &[PromptMessage]) -> String {
     lines.join(" | ")
 }
 
-fn render_prompt_message_summary_for_review(message: &PromptMessage) -> Option<String> {
+fn render_prompt_message_summary_for_review(message: &HistoryMessage) -> Option<String> {
     let mut parts = Vec::new();
-    if !message.content.trim().is_empty() {
-        parts.push(compact_review_text(&message.content));
+    if let Some(content) = message.text_content()
+        && !content.trim().is_empty()
+    {
+        parts.push(compact_review_text(content));
     }
     for event in &message.tool_call_ui_events {
         parts.push(render_tool_call_ui_event_summary(event));
@@ -1708,10 +1710,12 @@ fn infer_runtime_suite(_record: &ProgramTraceRecord) -> Option<String> {
 fn extract_inputs_from_request(request: &PromptRequest) -> Vec<ExampleField> {
     let mut inputs = Vec::new();
     for message in request.all_messages() {
-        if !matches!(message.role, PromptRole::User) {
+        if !message.is_user() {
             continue;
         }
-        inputs.extend(parse_user_sections(&message.content));
+        inputs.extend(parse_user_sections(
+            message.text_content().unwrap_or_default(),
+        ));
     }
     inputs
 }

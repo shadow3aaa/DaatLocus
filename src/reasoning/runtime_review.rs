@@ -5,7 +5,7 @@ use tokio::{fs, fs::OpenOptions, io::AsyncWriteExt};
 
 use crate::{
     daat_locus_paths::daat_locus_paths,
-    reasoning::{episode::EpisodeActionRecord, runtime::PromptMessage},
+    reasoning::{episode::EpisodeActionRecord, runtime::HistoryMessage},
 };
 
 const RUNTIME_REVIEWS_FILE_NAME: &str = "runtime_reviews.jsonl";
@@ -23,7 +23,7 @@ pub struct RuntimeTurnRecord {
     pub before_snapshot_text: String,
     pub after_snapshot_text: String,
     #[serde(default)]
-    pub history_messages: Vec<PromptMessage>,
+    pub history_messages: Vec<HistoryMessage>,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
 }

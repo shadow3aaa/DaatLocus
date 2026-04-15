@@ -3,7 +3,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::reasoning::runtime::{
-    AgentMessage, AgentToolInputSpec, AgentToolSpec, PromptMessage, PromptRequest, PromptRole,
+    AgentMessage, AgentToolInputSpec, AgentToolSpec, HistoryMessage, PromptRequest,
     estimate_assistant_tool_call_protocol_tokens,
 };
 
@@ -261,13 +261,15 @@ pub fn estimate_runtime_request_envelope(
             tokens: system_messages
                 .iter()
                 .map(|message| {
-                    estimate_prompt_message_tokens(&PromptMessage::system(message.as_str()))
+                    estimate_history_message_tokens(&HistoryMessage::system(message.as_str()))
                 })
                 .sum(),
         },
         BudgetSection {
             name: "current_user_message",
-            tokens: estimate_prompt_message_tokens(&PromptMessage::user(user_message.to_string())),
+            tokens: estimate_history_message_tokens(&HistoryMessage::user(
+                user_message.to_string(),
+            )),
         },
         BudgetSection {
             name: "tool_specs",
@@ -290,7 +292,7 @@ pub fn estimate_prompt_request(
                 .system_messages
                 .iter()
                 .map(|message| {
-                    estimate_prompt_message_tokens(&PromptMessage::system(message.as_str()))
+                    estimate_history_message_tokens(&HistoryMessage::system(message.as_str()))
                 })
                 .sum(),
         },
@@ -299,7 +301,7 @@ pub fn estimate_prompt_request(
             tokens: request
                 .long_term_memory_messages
                 .iter()
-                .map(estimate_prompt_message_tokens)
+                .map(estimate_history_message_tokens)
                 .sum(),
         },
         BudgetSection {
@@ -307,12 +309,12 @@ pub fn estimate_prompt_request(
             tokens: request
                 .history_messages
                 .iter()
-                .map(estimate_prompt_message_tokens)
+                .map(estimate_history_message_tokens)
                 .sum(),
         },
         BudgetSection {
             name: "current_user_message",
-            tokens: estimate_prompt_message_tokens(&PromptMessage::user(
+            tokens: estimate_history_message_tokens(&HistoryMessage::user(
                 request.current_user_message.clone(),
             )),
         },
@@ -321,7 +323,7 @@ pub fn estimate_prompt_request(
             tokens: request
                 .retry_messages
                 .iter()
-                .map(estimate_prompt_message_tokens)
+                .map(estimate_history_message_tokens)
                 .sum(),
         },
         BudgetSection {
@@ -333,14 +335,8 @@ pub fn estimate_prompt_request(
     RequestBudgetBreakdown::new(sections, limits)
 }
 
-fn estimate_prompt_message_tokens(message: &PromptMessage) -> usize {
-    let role = match message.role {
-        PromptRole::System => "system",
-        PromptRole::User => "user",
-        PromptRole::Assistant => "assistant",
-        PromptRole::Tool => "tool",
-    };
-    approx_token_count(role) + approx_token_count(&message.content) + 4
+fn estimate_history_message_tokens(message: &HistoryMessage) -> usize {
+    estimate_agent_message_tokens(&message.message)
 }
 
 fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {

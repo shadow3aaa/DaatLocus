@@ -18,6 +18,7 @@ mod reasoning;
 mod runtime_context;
 mod runtime_tools;
 mod sandbox;
+mod schema_utils;
 mod skill;
 mod snapshot;
 mod system_info;
@@ -80,8 +81,8 @@ use crate::{
             RuntimeRetainPreprocessorOutput, RuntimeRetainPreprocessorProgram,
         },
         runtime::{
-            AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult,
-            PromptMemoryCitation, PromptMemoryContext, PromptMentalModel, PromptMessage,
+            AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage,
+            PromptMemoryCitation, PromptMemoryContext, PromptMentalModel,
             execute_program_with_ir_report, resolve_program_tuning,
         },
         runtime_review::{
@@ -89,7 +90,7 @@ use crate::{
         },
         sleep::run_sleep,
         trace::{TraceOrigin, unread_runtime_trace_count},
-        turn_compile::TurnCompileEngine,
+        turn_compile::{TurnCompileEngine, should_run_cold_start_turn_compile},
     },
     runtime_context::{
         MID_TURN_COMPACTION_MAX_RECOVERIES, build_runtime_request_envelope,
@@ -356,25 +357,39 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
     };
     if !compiled_prompts.has_runtime_system_prompt() {
-        emit_startup_progress(
-            "[prompt-compile] runtime system prompt missing; running cold-start turn compile...",
-        );
-        match TurnCompileEngine::compile_cold_start(config.clone(), compiled_prompts.clone()).await
-        {
-            Ok(runtime_prompt) => {
-                compiled_prompts =
-                    compiled_prompts.with_runtime_system_prompt(Some(runtime_prompt));
+        match should_run_cold_start_turn_compile().await {
+            Ok(()) => {
                 emit_startup_progress(
-                    "[prompt-compile] cold-start turn compile completed; runtime prompt cached",
+                    "[prompt-compile] runtime system prompt missing; running cold-start turn compile...",
                 );
+                match TurnCompileEngine::compile_cold_start(
+                    config.clone(),
+                    compiled_prompts.clone(),
+                )
+                .await
+                {
+                    Ok(runtime_prompt) => {
+                        compiled_prompts =
+                            compiled_prompts.with_runtime_system_prompt(Some(runtime_prompt));
+                        emit_startup_progress(
+                            "[prompt-compile] cold-start turn compile completed; runtime prompt cached",
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            "cold-start turn compile failed; continuing with baseline runtime prompt: {err:?}"
+                        );
+                        println!(
+                            "[prompt-compile] cold-start turn compile failed; continuing with baseline runtime prompt"
+                        );
+                    }
+                }
             }
             Err(err) => {
-                tracing::error!(
-                    "cold-start turn compile failed; continuing with baseline runtime prompt: {err:?}"
+                tracing::info!(
+                    "skipping cold-start turn compile because prompt persona calibration is incomplete: {err:?}"
                 );
-                println!(
-                    "[prompt-compile] cold-start turn compile failed; continuing with baseline runtime prompt"
-                );
+                emit_startup_progress(format!("[prompt-compile] {err}"));
             }
         }
     }
@@ -1337,7 +1352,7 @@ impl Drop for DaatLocusHomeOverride {
 
 pub(crate) struct AgentLoopStepExecution {
     pub(crate) output: AgentLoopStepOutput,
-    pub(crate) history_messages: Vec<PromptMessage>,
+    pub(crate) history_messages: Vec<HistoryMessage>,
 }
 
 pub(crate) struct AgentLoopStepOutput {
@@ -1680,7 +1695,7 @@ fn append_digest_section(lines: &mut Vec<String>, title: &str, items: &[String])
 async fn record_runtime_review_turn(
     context: &mut Context,
     pre_step_snapshot_text: &str,
-    history_messages: &[PromptMessage],
+    history_messages: &[HistoryMessage],
     output: &AgentLoopStepOutput,
 ) {
     if !context.record_runtime_reviews || history_messages.is_empty() {
@@ -2152,7 +2167,7 @@ pub(crate) async fn execute_agent_loop_step(
                 };
                 let mut terminal_actions = actions.clone();
                 terminal_actions.push(terminal_action.clone());
-                runtime_step.push_history_message(PromptMessage::assistant(observation.clone()));
+                runtime_step.push_history_message(HistoryMessage::assistant(observation.clone()));
                 if let Some(cell) = assistant_activity_cell(&observation) {
                     append_committed_activity_cells(tx, vec![cell]);
                 }
@@ -2214,12 +2229,13 @@ pub(crate) async fn execute_agent_loop_step(
             if let Some(content) = assistant_text.clone()
                 && !content.trim().is_empty()
             {
-                runtime_step.push_history_message(PromptMessage::assistant(content));
+                runtime_step.push_history_message(HistoryMessage::assistant(content));
             }
-            runtime_step.push_history_message(PromptMessage::assistant_with_tool_calls(
-                String::new(),
-                tool_call_ui_events.clone(),
-            ));
+            runtime_step.push_history_message(HistoryMessage {
+                message: AgentMessage::assistant_tool_call_protocol(None, calls.clone()),
+                tool_ui_event: None,
+                tool_call_ui_events: tool_call_ui_events.clone(),
+            });
             let mut committed_cells = Vec::new();
             if let Some(content) = assistant_text.clone()
                 && let Some(cell) = assistant_activity_cell(&content)
@@ -2324,7 +2340,9 @@ pub(crate) async fn execute_agent_loop_step(
                     call.name.clone(),
                     result.model_content(),
                 ));
-                runtime_step.push_history_message(PromptMessage::tool_with_ui(
+                runtime_step.push_history_message(HistoryMessage::tool(
+                    call.id.clone(),
+                    call.name.clone(),
                     result.history_content_with_budget(
                         &call.id,
                         &call.name,
@@ -2397,7 +2415,7 @@ pub(crate) async fn execute_agent_loop_step(
         };
         actions.push(assistant_action.clone());
         runtime_step.set_current_doing(current_doing.clone());
-        runtime_step.push_history_message(PromptMessage::assistant(content.clone()));
+        runtime_step.push_history_message(HistoryMessage::assistant(content.clone()));
         if let Some(cell) = assistant_activity_cell(&content) {
             append_committed_activity_cells(tx, vec![cell]);
         }
@@ -2804,10 +2822,10 @@ fn claimed_event_statuses_are_terminal(statuses: &[EventStatus]) -> bool {
 fn prompt_message_for_claimed_input(
     _context: &Context,
     input: &ClaimedRuntimeInput,
-) -> PromptMessage {
+) -> HistoryMessage {
     match input {
         ClaimedRuntimeInput::Event(event) => match &event.payload {
-            EventPayload::TelegramIncoming(payload) => PromptMessage::user(format!(
+            EventPayload::TelegramIncoming(payload) => HistoryMessage::user(format!(
                 "<world_event source=\"telegram\" event_id=\"{}\" status=\"{}\">\nfrom: {}\nchat_title: {}\nchat_id: {}\nincoming_text: {}\n</world_event>",
                 event.event_id,
                 event.status,
@@ -2817,7 +2835,7 @@ fn prompt_message_for_claimed_input(
                 payload.incoming_text.trim(),
             )),
         },
-        ClaimedRuntimeInput::AppNotice { app, reason } => PromptMessage::user(format!(
+        ClaimedRuntimeInput::AppNotice { app, reason } => HistoryMessage::user(format!(
             "<app_notice app=\"{}\">\nreason: {}\n</app_notice>",
             app, reason,
         )),

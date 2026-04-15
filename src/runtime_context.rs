@@ -17,10 +17,11 @@ use crate::{
         prompt_renderer::LlmPromptRenderer,
         prompts::{HISTORY_COMPACTION_PROMPT, HISTORY_COMPACTION_SUMMARY_PREFIX},
         runtime::{
-            AgentMessage, AgentToolSpec, PromptMessage, PromptRequest, PromptRole,
+            AgentMessage, AgentToolSpec, HistoryMessage, PromptRequest,
             summarize_assistant_tool_call_protocol,
         },
     },
+    schema_utils::normalize_openai_json_schema,
 };
 use chrono::Utc;
 use schemars::{JsonSchema, schema_for};
@@ -41,11 +42,11 @@ struct HistoryCompactionOutput {
 
 #[derive(Clone)]
 struct HistoryCompactionSourceItem {
-    messages: Vec<PromptMessage>,
+    messages: Vec<HistoryMessage>,
 }
 
 struct TrimmedHistoryCompactionInput {
-    messages: Vec<PromptMessage>,
+    messages: Vec<HistoryMessage>,
     source_item_count: usize,
     trimmed_item_count: usize,
 }
@@ -166,12 +167,14 @@ fn judge_request_budget_limits(context: &Context) -> RequestBudgetLimits {
     }
 }
 
-fn build_history_compaction_request(messages: Vec<PromptMessage>) -> Option<PromptRequest> {
+fn build_history_compaction_request(messages: Vec<HistoryMessage>) -> Option<PromptRequest> {
     Some(PromptRequest {
         tool_name: "history_compaction_summary".to_string(),
         tool_description: "Generate a concise handoff summary for compacted runtime context"
             .to_string(),
-        output_schema: serde_json::to_value(schema_for!(HistoryCompactionOutput)).ok()?,
+        output_schema: normalize_openai_json_schema(
+            serde_json::to_value(schema_for!(HistoryCompactionOutput)).ok()?,
+        ),
         system_messages: vec![HISTORY_COMPACTION_PROMPT.to_string()],
         long_term_memory_messages: Vec::new(),
         history_messages: messages,
@@ -181,28 +184,23 @@ fn build_history_compaction_request(messages: Vec<PromptMessage>) -> Option<Prom
     })
 }
 
-fn prompt_message_token_cost(message: &PromptMessage) -> usize {
-    let role = match message.role {
-        PromptRole::System => "system",
-        PromptRole::User => "user",
-        PromptRole::Assistant => "assistant",
-        PromptRole::Tool => "tool",
-    };
-    approx_token_count(role) + approx_token_count(&message.content) + 4
+fn history_message_token_cost(message: &HistoryMessage) -> usize {
+    let role = message.role_name();
+    approx_token_count(role) + approx_token_count(message.text_content().unwrap_or_default()) + 4
 }
 
-fn prompt_messages_total_token_cost(messages: &[PromptMessage]) -> usize {
-    messages.iter().map(prompt_message_token_cost).sum()
+fn history_messages_total_token_cost(messages: &[HistoryMessage]) -> usize {
+    messages.iter().map(history_message_token_cost).sum()
 }
 
 fn build_history_compaction_source_items(
-    messages: &[PromptMessage],
+    messages: &[HistoryMessage],
 ) -> Vec<HistoryCompactionSourceItem> {
     let mut items = Vec::new();
     let mut current = Vec::new();
 
     for message in messages {
-        if matches!(message.role, PromptRole::User) && !current.is_empty() {
+        if message.is_user() && !current.is_empty() {
             items.push(HistoryCompactionSourceItem { messages: current });
             current = Vec::new();
         }
@@ -217,7 +215,7 @@ fn build_history_compaction_source_items(
 
 fn flatten_history_compaction_source_items(
     items: &[HistoryCompactionSourceItem],
-) -> Vec<PromptMessage> {
+) -> Vec<HistoryMessage> {
     items
         .iter()
         .flat_map(|item| item.messages.clone())
@@ -227,7 +225,7 @@ fn flatten_history_compaction_source_items(
 fn collapse_history_compaction_source_item(
     item: &HistoryCompactionSourceItem,
     available_history_tokens: usize,
-) -> Option<PromptMessage> {
+) -> Option<HistoryMessage> {
     if available_history_tokens == 0 {
         return None;
     }
@@ -235,13 +233,11 @@ fn collapse_history_compaction_source_item(
         .messages
         .iter()
         .map(|message| {
-            let role = match message.role {
-                PromptRole::System => "system",
-                PromptRole::User => "user",
-                PromptRole::Assistant => "assistant",
-                PromptRole::Tool => "tool",
-            };
-            format!("{role}: {}", message.content.trim())
+            format!(
+                "{}: {}",
+                message.role_name(),
+                message.text_content().unwrap_or_default().trim()
+            )
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -250,7 +246,7 @@ fn collapse_history_compaction_source_item(
         available_history_tokens,
         "... [compaction input truncated to fit judge model context]",
     );
-    (!truncated_content.trim().is_empty()).then(|| PromptMessage::assistant(truncated_content))
+    (!truncated_content.trim().is_empty()).then(|| HistoryMessage::assistant(truncated_content))
 }
 
 fn trim_compaction_source_items_to_fit_budget(
@@ -309,7 +305,7 @@ fn trim_compaction_source_items_to_fit_budget(
 
 async fn execute_runtime_compaction(
     context: &Context,
-    source_messages: &[PromptMessage],
+    source_messages: &[HistoryMessage],
     retained_user_message_count: usize,
     max_tokens: usize,
     phase: RuntimeCompactionPhase,
@@ -318,7 +314,7 @@ async fn execute_runtime_compaction(
     fallback_summary: String,
 ) -> Option<RuntimeCompactionExecution> {
     let source_items = build_history_compaction_source_items(source_messages);
-    let before_tokens = prompt_messages_total_token_cost(source_messages);
+    let before_tokens = history_messages_total_token_cost(source_messages);
     let trimmed = trim_compaction_source_items_to_fit_budget(
         &source_items,
         judge_request_budget_limits(context),
@@ -464,39 +460,37 @@ fn summarize_runtime_inline_text(text: &str) -> String {
     }
 }
 
-fn prompt_message_for_compaction(role: PromptRole, content: impl Into<String>) -> PromptMessage {
-    PromptMessage {
-        role,
-        content: content.into(),
+fn history_message_for_compaction(message: AgentMessage) -> HistoryMessage {
+    HistoryMessage {
+        message,
         tool_ui_event: None,
         tool_call_ui_events: Vec::new(),
     }
 }
 
-fn agent_message_to_prompt_message_for_compaction(message: &AgentMessage) -> Option<PromptMessage> {
+fn agent_message_to_history_message_for_compaction(
+    message: &AgentMessage,
+) -> Option<HistoryMessage> {
     match message {
-        AgentMessage::System { content } => Some(prompt_message_for_compaction(
-            PromptRole::System,
-            summarize_runtime_inline_text(content),
+        AgentMessage::System { content } => Some(history_message_for_compaction(
+            AgentMessage::system(summarize_runtime_inline_text(content)),
         )),
-        AgentMessage::User { content } => Some(prompt_message_for_compaction(
-            PromptRole::User,
+        AgentMessage::User { content } => Some(history_message_for_compaction(AgentMessage::user(
             summarize_runtime_inline_text(content),
-        )),
-        AgentMessage::Assistant { content } => Some(prompt_message_for_compaction(
-            PromptRole::Assistant,
-            summarize_runtime_inline_text(content),
+        ))),
+        AgentMessage::Assistant { content } => Some(history_message_for_compaction(
+            AgentMessage::assistant(summarize_runtime_inline_text(content)),
         )),
         AgentMessage::AssistantToolCallProtocol { content, calls } => {
-            Some(prompt_message_for_compaction(
-                PromptRole::Assistant,
+            Some(history_message_for_compaction(AgentMessage::assistant(
                 summarize_assistant_tool_call_protocol(content.as_deref(), calls),
-            ))
+            )))
         }
-        AgentMessage::Tool { name, content, .. } => Some(prompt_message_for_compaction(
-            PromptRole::Tool,
-            format!("{name}: {}", summarize_tool_message_content(content)),
-        )),
+        AgentMessage::Tool { name, content, .. } => {
+            Some(history_message_for_compaction(AgentMessage::assistant(
+                format!("{name}: {}", summarize_tool_message_content(content)),
+            )))
+        }
     }
 }
 
@@ -530,28 +524,31 @@ fn build_mid_turn_compaction_summary_fallback(
 }
 
 fn build_runtime_prompt_history_summary_fallback(
-    messages: &[PromptMessage],
+    messages: &[HistoryMessage],
     max_tokens: usize,
 ) -> Option<String> {
     let rendered = messages
         .iter()
-        .filter_map(|message| match message.role {
-            PromptRole::System => Some(format!(
-                "system: {}",
-                summarize_runtime_inline_text(&message.content)
-            )),
-            PromptRole::User => Some(format!(
-                "user: {}",
-                summarize_runtime_inline_text(&message.content)
-            )),
-            PromptRole::Assistant => Some(format!(
-                "assistant: {}",
-                summarize_runtime_inline_text(&message.content)
-            )),
-            PromptRole::Tool => Some(format!(
-                "tool: {}",
-                summarize_tool_message_content(&message.content)
-            )),
+        .filter_map(|message| {
+            let content = message.text_content().unwrap_or_default();
+            match &message.message {
+                AgentMessage::System { .. } => Some(format!(
+                    "system: {}",
+                    summarize_runtime_inline_text(content)
+                )),
+                AgentMessage::User { .. } => {
+                    Some(format!("user: {}", summarize_runtime_inline_text(content)))
+                }
+                AgentMessage::Assistant { .. } | AgentMessage::AssistantToolCallProtocol { .. } => {
+                    Some(format!(
+                        "assistant: {}",
+                        summarize_runtime_inline_text(content)
+                    ))
+                }
+                AgentMessage::Tool { .. } => {
+                    Some(format!("tool: {}", summarize_tool_message_content(content)))
+                }
+            }
         })
         .collect::<Vec<_>>();
     if rendered.is_empty() {
@@ -585,7 +582,7 @@ async fn build_mid_turn_compaction_outcome(
 ) -> Option<RuntimeCompactionOutcome> {
     let compacted_messages = messages
         .iter()
-        .filter_map(agent_message_to_prompt_message_for_compaction)
+        .filter_map(agent_message_to_history_message_for_compaction)
         .collect::<Vec<_>>();
     if compacted_messages.is_empty() {
         return None;
@@ -658,11 +655,11 @@ mod tests {
             reserved_output_tokens: 16,
         };
         let messages = vec![
-            PromptMessage::assistant("a".repeat(800)),
-            PromptMessage::user("user one"),
-            PromptMessage::assistant("b".repeat(24)),
-            PromptMessage::user("user two"),
-            PromptMessage::assistant("c".repeat(24)),
+            HistoryMessage::assistant("a".repeat(800)),
+            HistoryMessage::user("user one"),
+            HistoryMessage::assistant("b".repeat(24)),
+            HistoryMessage::user("user two"),
+            HistoryMessage::assistant("c".repeat(24)),
         ];
 
         let items = build_history_compaction_source_items(&messages);
@@ -670,8 +667,8 @@ mod tests {
         assert!(!trimmed.messages.is_empty());
         assert!(
             trimmed.trimmed_item_count > 0
-                || prompt_messages_total_token_cost(&trimmed.messages)
-                    < prompt_messages_total_token_cost(&messages)
+                || history_messages_total_token_cost(&trimmed.messages)
+                    < history_messages_total_token_cost(&messages)
         );
 
         let request = build_history_compaction_request(trimmed.messages).expect("request");

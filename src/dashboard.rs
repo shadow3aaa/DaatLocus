@@ -13,7 +13,7 @@ use ratatui::{
 use crate::{
     app::AppId,
     daat_locus_paths::daat_locus_paths_sync,
-    reasoning::runtime::{PromptMessage, PromptRole},
+    reasoning::runtime::{AgentMessage, HistoryMessage},
     telegram_acl::TelegramAclHandle,
     tool_ui::{
         PatchFileUiData, PatchUiData, TelegramUiAction, TelegramUiData, TerminalUiAction,
@@ -48,10 +48,10 @@ pub struct LiveActivityCell {
     pub cell: ActivityCell,
 }
 
-pub fn render_activity_from_messages(messages: Vec<PromptMessage>) -> Vec<ActivityCell> {
+pub fn render_activity_from_messages(messages: Vec<HistoryMessage>) -> Vec<ActivityCell> {
     let cells = messages
         .into_iter()
-        .filter(|message| !matches!(message.role, PromptRole::System))
+        .filter(|message| !message.is_system())
         .rev()
         .take(12)
         .collect::<Vec<_>>()
@@ -190,14 +190,14 @@ fn telegram_cell_from_ui(data: TelegramUiData) -> TelegramActivityCell {
     }
 }
 
-fn activity_cells_from_prompt_message(message: PromptMessage) -> Vec<ActivityCell> {
-    match message.role {
-        PromptRole::Assistant => {
+fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<ActivityCell> {
+    match &message.message {
+        AgentMessage::Assistant { content } => {
             let mut cells = Vec::new();
-            if !message.content.trim().is_empty() {
+            if !content.trim().is_empty() {
                 cells.push(ActivityCell::Assistant(text_cell(
-                    first_line_or_fallback(&message.content, "assistant"),
-                    remaining_lines_with_limit(&message.content, 8),
+                    first_line_or_fallback(content, "assistant"),
+                    remaining_lines_with_limit(content, 8),
                 )));
             }
             if !message.tool_call_ui_events.is_empty() {
@@ -209,26 +209,30 @@ fn activity_cells_from_prompt_message(message: PromptMessage) -> Vec<ActivityCel
                 );
                 return cells;
             }
-            if message.content.starts_with("工具调用失败")
-                || message.content.starts_with("tool loop 调用失败")
+            if content.starts_with("工具调用失败") || content.starts_with("tool loop 调用失败")
             {
                 return vec![ActivityCell::Error(text_cell(
-                    first_line_or_fallback(&message.content, "tool invocation error"),
-                    remaining_lines_with_limit(&message.content, 24),
+                    first_line_or_fallback(content, "tool invocation error"),
+                    remaining_lines_with_limit(content, 24),
                 ))];
             }
             cells
         }
-        PromptRole::Tool => vec![activity_cell_from_tool_ui_event(
+        AgentMessage::AssistantToolCallProtocol { .. } => message
+            .tool_call_ui_events
+            .into_iter()
+            .flat_map(activity_cells_from_tool_call_ui_event)
+            .collect(),
+        AgentMessage::Tool { .. } => vec![activity_cell_from_tool_ui_event(
             message
                 .tool_ui_event
-                .expect("tool prompt messages must carry ToolUiEvent"),
+                .expect("tool history messages must carry ToolUiEvent"),
         )],
-        PromptRole::User => vec![ActivityCell::User(text_cell(
-            first_line_or_fallback(&message.content, "user"),
-            remaining_lines_with_limit(&message.content, 8),
+        AgentMessage::User { content } => vec![ActivityCell::User(text_cell(
+            first_line_or_fallback(content, "user"),
+            remaining_lines_with_limit(content, 8),
         ))],
-        PromptRole::System => Vec::new(),
+        AgentMessage::System { .. } => Vec::new(),
     }
 }
 

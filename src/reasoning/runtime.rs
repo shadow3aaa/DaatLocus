@@ -37,11 +37,11 @@ pub struct PromptRequest {
     pub tool_description: String,
     pub output_schema: Value,
     pub system_messages: Vec<String>,
-    pub long_term_memory_messages: Vec<PromptMessage>,
-    pub history_messages: Vec<PromptMessage>,
+    pub long_term_memory_messages: Vec<HistoryMessage>,
+    pub history_messages: Vec<HistoryMessage>,
     pub current_user_message: String,
     #[serde(default)]
-    pub retry_messages: Vec<PromptMessage>,
+    pub retry_messages: Vec<HistoryMessage>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -64,14 +64,14 @@ pub enum AgentToolInputSpec {
     },
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentToolCall {
     pub id: String,
     pub name: String,
     pub arguments: Value,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind")]
 pub enum AgentMessage {
     System {
@@ -173,69 +173,94 @@ impl From<HindsightRecallResult> for PromptMemoryFact {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct PromptMessage {
-    pub role: PromptRole,
-    pub content: String,
+pub struct HistoryMessage {
+    pub message: AgentMessage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_ui_event: Option<ToolUiEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_call_ui_events: Vec<ToolCallUiEvent>,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum PromptRole {
-    System,
-    User,
-    Assistant,
-    Tool,
-}
-
-impl PromptMessage {
+impl HistoryMessage {
     pub fn system(content: impl Into<String>) -> Self {
+        let content = content.into();
         Self {
-            role: PromptRole::System,
-            content: content.into(),
+            message: AgentMessage::system(content.clone()),
             tool_ui_event: None,
             tool_call_ui_events: Vec::new(),
         }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
+        let content = content.into();
         Self {
-            role: PromptRole::User,
-            content: content.into(),
+            message: AgentMessage::user(content.clone()),
             tool_ui_event: None,
             tool_call_ui_events: Vec::new(),
         }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
+        let content = content.into();
         Self {
-            role: PromptRole::Assistant,
-            content: content.into(),
+            message: AgentMessage::assistant(content.clone()),
             tool_ui_event: None,
             tool_call_ui_events: Vec::new(),
         }
     }
 
-    pub fn tool_with_ui(content: impl Into<String>, tool_ui_event: ToolUiEvent) -> Self {
+    pub fn tool(
+        tool_call_id: impl Into<String>,
+        name: impl Into<String>,
+        content: impl Into<String>,
+        tool_ui_event: ToolUiEvent,
+    ) -> Self {
+        let tool_call_id = tool_call_id.into();
+        let name = name.into();
+        let content = content.into();
         Self {
-            role: PromptRole::Tool,
-            content: content.into(),
+            message: AgentMessage::tool(tool_call_id, name, content.clone()),
             tool_ui_event: Some(tool_ui_event),
             tool_call_ui_events: Vec::new(),
         }
     }
 
-    pub fn assistant_with_tool_calls(
-        content: impl Into<String>,
-        tool_call_ui_events: Vec<ToolCallUiEvent>,
-    ) -> Self {
-        Self {
-            role: PromptRole::Assistant,
-            content: content.into(),
-            tool_ui_event: None,
-            tool_call_ui_events,
+    pub fn role_name(&self) -> &'static str {
+        match &self.message {
+            AgentMessage::System { .. } => "system",
+            AgentMessage::User { .. } => "user",
+            AgentMessage::Assistant { .. } => "assistant",
+            AgentMessage::AssistantToolCallProtocol { .. } => "assistant",
+            AgentMessage::Tool { .. } => "tool",
+        }
+    }
+
+    pub fn is_user(&self) -> bool {
+        matches!(self.message, AgentMessage::User { .. })
+    }
+
+    pub fn is_assistant(&self) -> bool {
+        matches!(
+            self.message,
+            AgentMessage::Assistant { .. } | AgentMessage::AssistantToolCallProtocol { .. }
+        )
+    }
+
+    pub fn is_system(&self) -> bool {
+        matches!(self.message, AgentMessage::System { .. })
+    }
+
+    pub fn is_tool(&self) -> bool {
+        matches!(self.message, AgentMessage::Tool { .. })
+    }
+
+    pub fn text_content(&self) -> Option<&str> {
+        match &self.message {
+            AgentMessage::System { content }
+            | AgentMessage::User { content }
+            | AgentMessage::Assistant { content } => Some(content.as_str()),
+            AgentMessage::AssistantToolCallProtocol { content, .. } => content.as_deref(),
+            AgentMessage::Tool { content, .. } => Some(content.as_str()),
         }
     }
 }
@@ -243,7 +268,7 @@ impl PromptMessage {
 impl PromptRequest {
     fn push_retry_message(&self, message: String) -> Self {
         let mut request = self.clone();
-        request.retry_messages.push(PromptMessage::user(message));
+        request.retry_messages.push(HistoryMessage::user(message));
         request
     }
 
@@ -275,16 +300,16 @@ impl PromptRequest {
         ))
     }
 
-    pub fn all_messages(&self) -> Vec<PromptMessage> {
+    pub fn all_messages(&self) -> Vec<HistoryMessage> {
         let mut messages = self
             .system_messages
             .iter()
             .cloned()
-            .map(PromptMessage::system)
+            .map(HistoryMessage::system)
             .collect::<Vec<_>>();
         messages.extend(self.long_term_memory_messages.clone());
         messages.extend(self.history_messages.clone());
-        messages.push(PromptMessage::user(self.current_user_message.clone()));
+        messages.push(HistoryMessage::user(self.current_user_message.clone()));
         messages.extend(self.retry_messages.clone());
         messages
     }

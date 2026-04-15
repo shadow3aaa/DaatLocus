@@ -13,7 +13,7 @@ use crate::{
     },
     daat_locus_paths::daat_locus_paths,
     hindsight::{HindsightRetainItem, HindsightRetainJob},
-    reasoning::runtime::{AgentMessage, AgentToolSpec, PromptMessage, PromptRole},
+    reasoning::runtime::{AgentMessage, AgentToolSpec, HistoryMessage},
     tool_ui::{
         PatchUiData, TelegramUiData, TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent,
     },
@@ -39,7 +39,7 @@ pub struct MemoryRetainPlan {
 
 pub struct RuntimeTurnDraft {
     current_doing: String,
-    messages: Vec<PromptMessage>,
+    messages: Vec<HistoryMessage>,
     compaction_records: Vec<RuntimeCompactionRecord>,
 }
 
@@ -54,8 +54,8 @@ pub struct RuntimeStepConversation {
 }
 
 pub struct RuntimeConversationCompactionPlan {
-    source_messages: Vec<PromptMessage>,
-    retained_user_messages: Vec<PromptMessage>,
+    source_messages: Vec<HistoryMessage>,
+    retained_user_messages: Vec<HistoryMessage>,
     summary_max_tokens: usize,
 }
 
@@ -126,7 +126,7 @@ impl Memory {
     pub async fn record_agent_turn(
         &mut self,
         current_doing: String,
-        messages: Vec<PromptMessage>,
+        messages: Vec<HistoryMessage>,
         compaction_records: Vec<RuntimeCompactionRecord>,
     ) -> MemoryRetainPlan {
         self.runtime_conversation_mut().append_turn(
@@ -159,7 +159,7 @@ impl Memory {
             .collect()
     }
 
-    pub fn runtime_conversation_messages(&self) -> Vec<PromptMessage> {
+    pub fn runtime_conversation_messages(&self) -> Vec<HistoryMessage> {
         self.runtime_conversation().messages()
     }
 
@@ -177,7 +177,7 @@ impl Memory {
     pub fn begin_runtime_step_from_parts(
         &self,
         envelope: RuntimeRequestEnvelope,
-        conversation_messages: Vec<PromptMessage>,
+        conversation_messages: Vec<HistoryMessage>,
     ) -> RuntimeStepConversation {
         self.begin_runtime_step(envelope.into_agent_messages(conversation_messages))
     }
@@ -211,7 +211,7 @@ impl Memory {
         max_tokens: usize,
         min_messages: usize,
         summary_max_tokens: usize,
-    ) -> Vec<PromptMessage> {
+    ) -> Vec<HistoryMessage> {
         self.runtime_conversation.select_messages_for_runtime(
             max_tokens,
             min_messages,
@@ -279,7 +279,7 @@ impl Memory {
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct RuntimeConversation {
     last_focus: Option<String>,
-    messages: Vec<PromptMessage>,
+    messages: Vec<HistoryMessage>,
     #[serde(default)]
     compaction_records: VecDeque<RuntimeCompactionRecord>,
 }
@@ -288,7 +288,7 @@ pub struct RuntimeConversation {
 struct HindsightQueueItem {
     id: Uuid,
     current_doing: String,
-    messages: Vec<PromptMessage>,
+    messages: Vec<HistoryMessage>,
     #[serde(default)]
     queued: bool,
     #[serde(default)]
@@ -316,7 +316,7 @@ impl RuntimeTurnDraft {
         }
     }
 
-    pub fn push(&mut self, message: PromptMessage) {
+    pub fn push(&mut self, message: HistoryMessage) {
         self.messages.push(message);
     }
 
@@ -324,7 +324,7 @@ impl RuntimeTurnDraft {
         self.messages.is_empty()
     }
 
-    pub fn messages(&self) -> &[PromptMessage] {
+    pub fn messages(&self) -> &[HistoryMessage] {
         &self.messages
     }
 
@@ -332,7 +332,7 @@ impl RuntimeTurnDraft {
         self.compaction_records.push(record);
     }
 
-    fn into_parts(self) -> (String, Vec<PromptMessage>, Vec<RuntimeCompactionRecord>) {
+    fn into_parts(self) -> (String, Vec<HistoryMessage>, Vec<RuntimeCompactionRecord>) {
         (self.current_doing, self.messages, self.compaction_records)
     }
 }
@@ -361,7 +361,7 @@ impl RuntimeRequestEnvelope {
             .saturating_sub(envelope_breakdown.total_input_tokens)
     }
 
-    fn into_agent_messages(self, conversation_messages: Vec<PromptMessage>) -> Vec<AgentMessage> {
+    fn into_agent_messages(self, conversation_messages: Vec<HistoryMessage>) -> Vec<AgentMessage> {
         let mut messages = self
             .system_messages
             .into_iter()
@@ -370,7 +370,7 @@ impl RuntimeRequestEnvelope {
         messages.extend(
             conversation_messages
                 .into_iter()
-                .map(prompt_message_to_agent_message),
+                .map(|message| message.message),
         );
         messages.push(AgentMessage::user(self.user_message));
         messages
@@ -397,7 +397,7 @@ impl RuntimeStepConversation {
         self.agent_messages.push(message);
     }
 
-    pub fn push_history_message(&mut self, message: PromptMessage) {
+    pub fn push_history_message(&mut self, message: HistoryMessage) {
         self.turn_draft.push(message);
     }
 
@@ -405,7 +405,7 @@ impl RuntimeStepConversation {
         self.turn_draft.set_current_doing(current_doing);
     }
 
-    pub fn history_messages(&self) -> &[PromptMessage] {
+    pub fn history_messages(&self) -> &[HistoryMessage] {
         self.turn_draft.messages()
     }
 
@@ -481,27 +481,16 @@ impl RuntimeStepConversation {
 }
 
 impl RuntimeConversationCompactionPlan {
-    pub fn source_messages(&self) -> &[PromptMessage] {
+    pub fn source_messages(&self) -> &[HistoryMessage] {
         &self.source_messages
     }
 
-    pub fn retained_user_messages(&self) -> &[PromptMessage] {
+    pub fn retained_user_messages(&self) -> &[HistoryMessage] {
         &self.retained_user_messages
     }
 
     pub fn summary_max_tokens(&self) -> usize {
         self.summary_max_tokens
-    }
-}
-
-fn prompt_message_to_agent_message(message: PromptMessage) -> AgentMessage {
-    match message.role {
-        PromptRole::System => AgentMessage::system(message.content),
-        PromptRole::User => AgentMessage::user(message.content),
-        PromptRole::Assistant => AgentMessage::assistant(message.content),
-        PromptRole::Tool => {
-            AgentMessage::tool("historical-tool", "historical_tool", message.content)
-        }
     }
 }
 
@@ -524,24 +513,27 @@ fn rebuild_compacted_agent_messages(
 fn select_recent_user_agent_messages_for_compaction(
     messages: &[AgentMessage],
 ) -> Vec<AgentMessage> {
-    let prompt_messages = messages
+    let history_messages = messages
         .iter()
         .filter_map(|message| match message {
-            AgentMessage::User { content } => Some(PromptMessage::user(content.clone())),
+            AgentMessage::User { content } => Some(HistoryMessage::user(content.clone())),
             _ => None,
         })
         .collect::<Vec<_>>();
     select_recent_user_messages_for_compaction(
-        &prompt_messages,
+        &history_messages,
         MID_TURN_COMPACTION_RETAINED_USER_MAX_TOKENS,
     )
     .into_iter()
-    .map(|message| AgentMessage::user(message.content))
+    .filter_map(|message| match message.message {
+        AgentMessage::User { content } => Some(AgentMessage::user(content)),
+        _ => None,
+    })
     .collect()
 }
 
 impl RuntimeConversation {
-    async fn new(bootstrap_focus: Option<String>, bootstrap_messages: Vec<PromptMessage>) -> Self {
+    async fn new(bootstrap_focus: Option<String>, bootstrap_messages: Vec<HistoryMessage>) -> Self {
         let persistence_path = daat_locus_paths()
             .await
             .memory_file(RUNTIME_CONVERSATION_FILE_NAME);
@@ -559,7 +551,7 @@ impl RuntimeConversation {
     pub fn append_turn(
         &mut self,
         current_doing: String,
-        messages: Vec<PromptMessage>,
+        messages: Vec<HistoryMessage>,
         compaction_records: Vec<RuntimeCompactionRecord>,
     ) {
         if !current_doing.trim().is_empty() {
@@ -582,7 +574,7 @@ impl RuntimeConversation {
         self.compaction_records.clear();
     }
 
-    pub fn take_for_hindsight(&mut self) -> Option<(String, Vec<PromptMessage>)> {
+    pub fn take_for_hindsight(&mut self) -> Option<(String, Vec<HistoryMessage>)> {
         let messages = self.messages();
         if messages.is_empty() {
             self.clear();
@@ -595,7 +587,7 @@ impl RuntimeConversation {
         Some((current_doing, messages))
     }
 
-    pub fn messages(&self) -> Vec<PromptMessage> {
+    pub fn messages(&self) -> Vec<HistoryMessage> {
         normalize_runtime_prompt_messages(self.messages.clone())
     }
 
@@ -604,12 +596,12 @@ impl RuntimeConversation {
         max_tokens: usize,
         _min_messages: usize,
         summary_max_tokens: usize,
-    ) -> Vec<PromptMessage> {
+    ) -> Vec<HistoryMessage> {
         if max_tokens == 0 {
             return Vec::new();
         }
         let all_messages = self.messages();
-        if prompt_messages_total_token_cost(&all_messages) <= max_tokens {
+        if history_messages_total_token_cost(&all_messages) <= max_tokens {
             return all_messages;
         }
 
@@ -641,7 +633,7 @@ impl RuntimeConversation {
             return None;
         }
         let all_messages = self.messages();
-        if prompt_messages_total_token_cost(&all_messages) <= max_tokens {
+        if history_messages_total_token_cost(&all_messages) <= max_tokens {
             return None;
         }
 
@@ -667,7 +659,7 @@ impl RuntimeConversation {
     ) -> bool {
         let (summary, record) = match outcome {
             Some(outcome) => (
-                PromptMessage::assistant(outcome.summary),
+                HistoryMessage::assistant(outcome.summary),
                 Some(outcome.record),
             ),
             None => {
@@ -738,7 +730,7 @@ impl HindsightQueueItem {
             .collect()
     }
 
-    fn bootstrap_messages(&self) -> Vec<PromptMessage> {
+    fn bootstrap_messages(&self) -> Vec<HistoryMessage> {
         self.messages.clone()
     }
 
@@ -843,14 +835,14 @@ impl HindsightQueue {
         self.trail.back().map(|item| item.current_doing.clone())
     }
 
-    fn bootstrap_messages(&self) -> Vec<PromptMessage> {
+    fn bootstrap_messages(&self) -> Vec<HistoryMessage> {
         self.trail
             .iter()
             .flat_map(|item| item.bootstrap_messages())
             .collect()
     }
 
-    fn push_turn(&mut self, current_doing: String, messages: Vec<PromptMessage>) {
+    fn push_turn(&mut self, current_doing: String, messages: Vec<HistoryMessage>) {
         self.trail.push_back(HindsightQueueItem {
             id: Uuid::new_v4(),
             current_doing,
@@ -937,29 +929,56 @@ impl HindsightQueue {
     }
 }
 
-fn prompt_message_token_cost(message: &PromptMessage) -> usize {
-    let role = match message.role {
-        PromptRole::System => "system",
-        PromptRole::User => "user",
-        PromptRole::Assistant => "assistant",
-        PromptRole::Tool => "tool",
-    };
-    approx_token_count(role) + approx_token_count(&message.content) + 4
+fn history_message_token_cost(message: &HistoryMessage) -> usize {
+    match &message.message {
+        AgentMessage::System { content } => {
+            approx_token_count("system") + approx_token_count(content) + 4
+        }
+        AgentMessage::User { content } => {
+            approx_token_count("user") + approx_token_count(content) + 4
+        }
+        AgentMessage::Assistant { content } => {
+            approx_token_count("assistant") + approx_token_count(content) + 4
+        }
+        AgentMessage::AssistantToolCallProtocol { content, calls } => {
+            approx_token_count("assistant")
+                + approx_token_count(content.as_deref().unwrap_or_default())
+                + calls
+                    .iter()
+                    .map(|call| {
+                        approx_token_count(&call.id)
+                            + approx_token_count(&call.name)
+                            + approx_token_count(&call.arguments.to_string())
+                            + 8
+                    })
+                    .sum::<usize>()
+                + 4
+        }
+        AgentMessage::Tool {
+            tool_call_id,
+            name,
+            content,
+        } => {
+            approx_token_count("tool")
+                + approx_token_count(tool_call_id)
+                + approx_token_count(name)
+                + approx_token_count(content)
+                + 8
+        }
+    }
 }
 
 fn select_recent_user_messages_for_compaction(
-    messages: &[PromptMessage],
+    messages: &[HistoryMessage],
     max_tokens: usize,
-) -> Vec<PromptMessage> {
+) -> Vec<HistoryMessage> {
     if max_tokens == 0 {
         return Vec::new();
     }
 
     let user_messages = messages
         .iter()
-        .filter(|message| {
-            matches!(message.role, PromptRole::User) && !is_runtime_summary_message(message)
-        })
+        .filter(|message| message.is_user() && !is_runtime_summary_message(message))
         .cloned()
         .collect::<Vec<_>>();
 
@@ -969,7 +988,7 @@ fn select_recent_user_messages_for_compaction(
         if remaining == 0 {
             break;
         }
-        let cost = prompt_message_token_cost(&message);
+        let cost = history_message_token_cost(&message);
         if cost <= remaining {
             remaining = remaining.saturating_sub(cost);
             selected.push(message);
@@ -977,12 +996,12 @@ fn select_recent_user_messages_for_compaction(
         }
 
         let truncated = truncate_text_to_token_budget_with_notice(
-            message.content.trim(),
+            history_message_content(&message).trim(),
             remaining,
             "... [user message too long; runtime history truncated]",
         );
         if !truncated.trim().is_empty() {
-            selected.push(PromptMessage::user(truncated));
+            selected.push(HistoryMessage::user(truncated));
         }
         break;
     }
@@ -990,8 +1009,8 @@ fn select_recent_user_messages_for_compaction(
     selected
 }
 
-fn prompt_messages_total_token_cost(messages: &[PromptMessage]) -> usize {
-    messages.iter().map(prompt_message_token_cost).sum()
+fn history_messages_total_token_cost(messages: &[HistoryMessage]) -> usize {
+    messages.iter().map(history_message_token_cost).sum()
 }
 
 fn summarize_runtime_inline_text(text: &str) -> String {
@@ -1006,15 +1025,35 @@ fn summarize_runtime_inline_text(text: &str) -> String {
     }
 }
 
-fn normalize_runtime_prompt_messages(messages: Vec<PromptMessage>) -> Vec<PromptMessage> {
-    let mut normalized: Vec<PromptMessage> = Vec::with_capacity(messages.len());
+fn history_message_content(message: &HistoryMessage) -> &str {
+    message.text_content().unwrap_or_default()
+}
+
+fn trim_history_message_content(mut message: HistoryMessage) -> HistoryMessage {
+    let trimmed = history_message_content(&message).trim().to_string();
+    message.message = match message.message {
+        AgentMessage::System { .. } => AgentMessage::system(trimmed),
+        AgentMessage::User { .. } => AgentMessage::user(trimmed),
+        AgentMessage::Assistant { .. } => AgentMessage::assistant(trimmed),
+        AgentMessage::AssistantToolCallProtocol { calls, .. } => {
+            AgentMessage::assistant_tool_call_protocol(Some(trimmed), calls)
+        }
+        AgentMessage::Tool {
+            tool_call_id, name, ..
+        } => AgentMessage::tool(tool_call_id, name, trimmed),
+    };
+    message
+}
+
+fn normalize_runtime_prompt_messages(messages: Vec<HistoryMessage>) -> Vec<HistoryMessage> {
+    let mut normalized: Vec<HistoryMessage> = Vec::with_capacity(messages.len());
     for message in messages {
         let Some(message) = normalize_runtime_prompt_message(message) else {
             continue;
         };
 
         if let Some(previous) = normalized.last_mut() {
-            if previous.role == message.role && previous.content == message.content {
+            if previous.message == message.message {
                 continue;
             }
 
@@ -1029,34 +1068,37 @@ fn normalize_runtime_prompt_messages(messages: Vec<PromptMessage>) -> Vec<Prompt
     normalized
 }
 
-fn normalize_runtime_prompt_message(mut message: PromptMessage) -> Option<PromptMessage> {
-    let visible_content = message.content.trim();
+fn normalize_runtime_prompt_message(mut message: HistoryMessage) -> Option<HistoryMessage> {
+    let visible_content = history_message_content(&message).trim().to_string();
     if visible_content.is_empty() {
         if !message.tool_call_ui_events.is_empty() {
-            message.content = summarize_tool_call_ui_events(&message.tool_call_ui_events);
+            message.message = AgentMessage::assistant(summarize_tool_call_ui_events(
+                &message.tool_call_ui_events,
+            ));
         } else if let Some(tool_ui_event) = &message.tool_ui_event {
-            message.content = summarize_tool_ui_event(tool_ui_event);
+            message.message = AgentMessage::assistant(summarize_tool_ui_event(tool_ui_event));
         }
     }
 
-    if matches!(message.role, PromptRole::Tool) {
-        message.content = truncate_text_to_token_budget_with_notice(
-            message.content.trim(),
+    if message.is_tool() {
+        let truncated = truncate_text_to_token_budget_with_notice(
+            history_message_content(&message).trim(),
             RUNTIME_HISTORY_TOOL_MESSAGE_MAX_TOKENS,
             "... [tool output too long; runtime history truncated]",
         );
+        if let AgentMessage::Tool {
+            tool_call_id, name, ..
+        } = &message.message
+        {
+            message.message = AgentMessage::tool(tool_call_id.clone(), name.clone(), truncated);
+        }
     }
 
-    if message.content.trim().is_empty() {
+    if history_message_content(&message).trim().is_empty() {
         return None;
     }
 
-    Some(PromptMessage {
-        role: message.role,
-        content: message.content.trim().to_string(),
-        tool_ui_event: message.tool_ui_event,
-        tool_call_ui_events: message.tool_call_ui_events,
-    })
+    Some(trim_history_message_content(message))
 }
 
 fn summarize_tool_call_ui_events(events: &[ToolCallUiEvent]) -> String {
@@ -1098,10 +1140,11 @@ fn tool_call_ui_event_title(event: &ToolCallUiEvent) -> &str {
     }
 }
 
-fn is_runtime_summary_message(message: &PromptMessage) -> bool {
-    matches!(message.role, PromptRole::Assistant)
-        && (message.content.starts_with(RUNTIME_HISTORY_SUMMARY_PREFIX)
-            || message.content.starts_with(MID_TURN_SUMMARY_PREFIX))
+fn is_runtime_summary_message(message: &HistoryMessage) -> bool {
+    let content = history_message_content(message);
+    message.is_assistant()
+        && (content.starts_with(RUNTIME_HISTORY_SUMMARY_PREFIX)
+            || content.starts_with(MID_TURN_SUMMARY_PREFIX))
 }
 
 fn summarize_tool_message_content(content: &str) -> String {
@@ -1121,31 +1164,33 @@ fn summarize_tool_message_content(content: &str) -> String {
         .unwrap_or_else(|| "<no content>".to_string())
 }
 
-fn summarize_prompt_message_for_history_compaction(message: &PromptMessage) -> Option<String> {
-    match message.role {
-        PromptRole::System => Some(format!(
+fn summarize_prompt_message_for_history_compaction(message: &HistoryMessage) -> Option<String> {
+    match &message.message {
+        AgentMessage::System { .. } => Some(format!(
             "system: {}",
-            summarize_runtime_inline_text(&message.content)
+            summarize_runtime_inline_text(history_message_content(message))
         )),
-        PromptRole::User => Some(format!(
+        AgentMessage::User { .. } => Some(format!(
             "user: {}",
-            summarize_runtime_inline_text(&message.content)
+            summarize_runtime_inline_text(history_message_content(message))
         )),
-        PromptRole::Assistant => Some(format!(
-            "assistant: {}",
-            summarize_runtime_inline_text(&message.content)
-        )),
-        PromptRole::Tool => Some(format!(
+        AgentMessage::Assistant { .. } | AgentMessage::AssistantToolCallProtocol { .. } => {
+            Some(format!(
+                "assistant: {}",
+                summarize_runtime_inline_text(history_message_content(message))
+            ))
+        }
+        AgentMessage::Tool { .. } => Some(format!(
             "tool: {}",
-            summarize_tool_message_content(&message.content)
+            summarize_tool_message_content(history_message_content(message))
         )),
     }
 }
 
 fn build_runtime_prompt_history_summary(
-    messages: &[PromptMessage],
+    messages: &[HistoryMessage],
     max_tokens: usize,
-) -> Option<PromptMessage> {
+) -> Option<HistoryMessage> {
     let rendered = messages
         .iter()
         .filter_map(summarize_prompt_message_for_history_compaction)
@@ -1167,22 +1212,17 @@ fn build_runtime_prompt_history_summary(
             "- ... {omitted} earlier history message(s) compacted"
         ));
     }
-    Some(PromptMessage::assistant(truncate_text_to_token_budget(
+    Some(HistoryMessage::assistant(truncate_text_to_token_budget(
         &lines.join("\n"),
         max_tokens.max(1),
     )))
 }
 
-fn format_message_for_memory(message: &PromptMessage) -> String {
-    let role = match message.role {
-        PromptRole::System => "system",
-        PromptRole::User => "user",
-        PromptRole::Assistant => "assistant",
-        PromptRole::Tool => "tool",
-    };
+fn format_message_for_memory(message: &HistoryMessage) -> String {
+    let role = message.role_name();
     let mut parts = Vec::new();
-    if !message.content.trim().is_empty() {
-        parts.push(message.content.clone());
+    if !history_message_content(message).trim().is_empty() {
+        parts.push(history_message_content(message).to_string());
     }
     if !message.tool_call_ui_events.is_empty() {
         let rendered = message
@@ -1205,18 +1245,22 @@ mod tests {
         let mut conversation = RuntimeConversation {
             last_focus: Some("test".to_string()),
             messages: vec![
-                PromptMessage::user("user one"),
-                PromptMessage::assistant("assistant one"),
-                PromptMessage::tool_with_ui(
+                HistoryMessage::user("user one"),
+                HistoryMessage::assistant("assistant one"),
+                HistoryMessage::tool(
+                    "call-1",
+                    "tool-one",
                     "tool output one",
                     ToolUiEvent::Exec(ToolUiData {
                         title: "tool output".to_string(),
                         body_lines: Vec::new(),
                     }),
                 ),
-                PromptMessage::user("user two"),
-                PromptMessage::assistant("assistant two"),
-                PromptMessage::tool_with_ui(
+                HistoryMessage::user("user two"),
+                HistoryMessage::assistant("assistant two"),
+                HistoryMessage::tool(
+                    "call-2",
+                    "tool-two",
                     "tool output two",
                     ToolUiEvent::Exec(ToolUiData {
                         title: "tool output".to_string(),
@@ -1236,7 +1280,7 @@ mod tests {
         assert!(
             plan.retained_user_messages
                 .iter()
-                .all(|message| matches!(message.role, PromptRole::User))
+                .all(HistoryMessage::is_user)
         );
 
         let applied = conversation.apply_compaction(
@@ -1263,26 +1307,29 @@ mod tests {
         assert!(
             conversation.messages[..conversation.messages.len() - 1]
                 .iter()
-                .all(|message| matches!(message.role, PromptRole::User))
+                .all(HistoryMessage::is_user)
         );
-        assert!(matches!(
-            conversation.messages.last().map(|message| &message.role),
-            Some(PromptRole::Assistant)
-        ));
+        assert!(
+            conversation
+                .messages
+                .last()
+                .map(HistoryMessage::is_assistant)
+                .unwrap_or(false)
+        );
         assert!(
             conversation
                 .messages
                 .iter()
-                .all(|message| !matches!(message.role, PromptRole::Tool))
+                .all(|message| !message.is_tool())
         );
     }
 
     #[test]
     fn select_recent_user_messages_for_compaction_truncates_overlong_user_message() {
-        let messages = vec![PromptMessage::user("word ".repeat(200))];
+        let messages = vec![HistoryMessage::user("word ".repeat(200))];
         let selected = select_recent_user_messages_for_compaction(&messages, 16);
         assert_eq!(selected.len(), 1);
-        assert!(selected[0].content.contains("runtime history truncated"));
+        assert!(history_message_content(&selected[0]).contains("runtime history truncated"));
     }
 
     #[test]
@@ -1324,39 +1371,39 @@ impl HindsightQueueItem {
     }
 }
 
-fn render_prompt_message_for_retain(message: &PromptMessage) -> Vec<String> {
+fn render_prompt_message_for_retain(message: &HistoryMessage) -> Vec<String> {
     let mut lines = Vec::new();
-    match message.role {
-        PromptRole::Assistant => {
-            if !message.content.trim().is_empty() {
+    match &message.message {
+        AgentMessage::Assistant { .. } | AgentMessage::AssistantToolCallProtocol { .. } => {
+            if !history_message_content(message).trim().is_empty() {
                 lines.push(format!(
                     "assistant reasoning: {}",
-                    compact_inline_text(&message.content)
+                    compact_inline_text(history_message_content(message))
                 ));
             }
             for event in &message.tool_call_ui_events {
                 lines.extend(render_tool_call_event_for_retain(event));
             }
         }
-        PromptRole::Tool => {
+        AgentMessage::Tool { .. } => {
             if let Some(event) = &message.tool_ui_event {
                 lines.extend(render_tool_result_event_for_retain(event));
-            } else if !message.content.trim().is_empty() {
+            } else if !history_message_content(message).trim().is_empty() {
                 lines.push(format!(
                     "tool outcome: {}",
-                    compact_inline_text(&message.content)
+                    compact_inline_text(history_message_content(message))
                 ));
             }
         }
-        PromptRole::User => {
-            if !message.content.trim().is_empty() {
+        AgentMessage::User { .. } => {
+            if !history_message_content(message).trim().is_empty() {
                 lines.push(format!(
                     "user/runtime context: {}",
-                    compact_inline_text(&message.content)
+                    compact_inline_text(history_message_content(message))
                 ));
             }
         }
-        PromptRole::System => {}
+        AgentMessage::System { .. } => {}
     }
     lines
 }
@@ -1458,7 +1505,7 @@ fn render_telegram_data_for_retain(prefix: &str, data: &TelegramUiData) -> Vec<S
     lines
 }
 
-fn message_has_workspace_signal(message: &PromptMessage) -> bool {
+fn message_has_workspace_signal(message: &HistoryMessage) -> bool {
     if message
         .tool_call_ui_events
         .iter()
@@ -1472,7 +1519,7 @@ fn message_has_workspace_signal(message: &PromptMessage) -> bool {
     }
 }
 
-fn message_has_telegram_signal(message: &PromptMessage) -> bool {
+fn message_has_telegram_signal(message: &HistoryMessage) -> bool {
     if message
         .tool_call_ui_events
         .iter()
@@ -1483,8 +1530,11 @@ fn message_has_telegram_signal(message: &PromptMessage) -> bool {
     matches!(message.tool_ui_event, Some(ToolUiEvent::Telegram(_)))
 }
 
-fn message_has_failure_signal(message: &PromptMessage) -> bool {
-    if message.content.to_ascii_lowercase().contains("failed") {
+fn message_has_failure_signal(message: &HistoryMessage) -> bool {
+    if history_message_content(message)
+        .to_ascii_lowercase()
+        .contains("failed")
+    {
         return true;
     }
     if message
@@ -1497,8 +1547,8 @@ fn message_has_failure_signal(message: &PromptMessage) -> bool {
     matches!(message.tool_ui_event, Some(ToolUiEvent::Error(_)))
 }
 
-fn message_has_preference_signal(message: &PromptMessage) -> bool {
-    let content = message.content.to_ascii_lowercase();
+fn message_has_preference_signal(message: &HistoryMessage) -> bool {
+    let content = history_message_content(message).to_ascii_lowercase();
     content.contains("prefer")
         || content.contains("偏好")
         || content.contains("喜欢")

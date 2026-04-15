@@ -9,9 +9,10 @@ use crate::reasoning::{
     prompt_doc::{PromptBlock, PromptDocument, PromptNode, PromptStateDoc},
     prompt_renderer::LlmPromptRenderer,
     prompt_text::{PromptTextBuilder, render_bullet_list},
-    runtime::{PromptMessage, PromptRequest},
+    runtime::{HistoryMessage, PromptRequest},
     signature::Signature,
 };
+use crate::schema_utils::normalize_openai_json_schema;
 
 use super::Renderer;
 
@@ -51,7 +52,9 @@ impl Renderer for OpenAIToolRenderer {
         PromptRequest {
             tool_name: program.name().to_string(),
             tool_description: program.description().to_string(),
-            output_schema: serde_json::to_value(schema_for!(P::Output)).unwrap(),
+            output_schema: normalize_openai_json_schema(
+                serde_json::to_value(schema_for!(P::Output)).unwrap(),
+            ),
             system_messages: ir.system,
             long_term_memory_messages: if program.include_long_term_memory_messages() {
                 build_long_term_memory_messages(context)
@@ -69,7 +72,7 @@ impl Renderer for OpenAIToolRenderer {
     }
 }
 
-fn build_long_term_memory_messages(context: &Context) -> Vec<PromptMessage> {
+fn build_long_term_memory_messages(context: &Context) -> Vec<HistoryMessage> {
     if context.prompt_memory.is_empty() {
         return Vec::new();
     }
@@ -155,7 +158,7 @@ fn build_long_term_memory_messages(context: &Context) -> Vec<PromptMessage> {
 
     LlmPromptRenderer::render_system_messages(&doc)
         .into_iter()
-        .map(PromptMessage::system)
+        .map(HistoryMessage::system)
         .collect()
 }
 

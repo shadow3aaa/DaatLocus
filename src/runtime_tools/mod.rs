@@ -13,6 +13,7 @@ use crate::{
         episode::EpisodeActionRecord,
         runtime::{AgentToolCall, AgentToolInputSpec, AgentToolSpec},
     },
+    schema_utils::normalize_openai_json_schema,
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 
@@ -67,16 +68,7 @@ fn freeform_string_fallback_schema(description: &'static str) -> Value {
 }
 
 fn normalize_tool_input_schema(mut schema: serde_json::Value) -> serde_json::Value {
-    if let Some(object) = schema.as_object_mut()
-        && object.get("type").and_then(|value| value.as_str()) == Some("object")
-    {
-        object
-            .entry("properties".to_string())
-            .or_insert_with(|| serde_json::json!({}));
-        object
-            .entry("additionalProperties".to_string())
-            .or_insert_with(|| serde_json::json!(false));
-    }
+    schema = normalize_openai_json_schema(schema);
     schema
 }
 

@@ -53,11 +53,11 @@ use crate::{
         },
         prompt_renderer::LlmPromptRenderer,
         render::openai_tools::OpenAIToolRenderer,
+        runtime::HistoryMessage,
         runtime::{
             ProgramExecutionTelemetry, execute_program_with_ir_report,
             execute_program_with_ir_report_with_retry_hook_and_validator, resolve_program_tuning,
         },
-        runtime::{PromptMessage, PromptRole},
         runtime_review::{RuntimeReviewSpan, RuntimeTurnRecord},
         trace::TraceOrigin,
     },
@@ -380,6 +380,30 @@ pub struct PromptPersonaSpec {
     pub rules: Vec<String>,
 }
 
+impl PromptPersonaSpec {
+    pub fn cold_start_compile_enabled(&self) -> bool {
+        !self.tests.is_empty() && !self.rules.is_empty()
+    }
+
+    pub fn cold_start_compile_skip_reason(&self) -> Option<String> {
+        if self.cold_start_compile_enabled() {
+            return None;
+        }
+
+        let mut missing = Vec::new();
+        if self.tests.is_empty() {
+            missing.push("tests");
+        }
+        if self.rules.is_empty() {
+            missing.push("rules");
+        }
+        Some(format!(
+            "prompt persona spec is missing {}; skipping cold-start turn compile",
+            missing.join(" and ")
+        ))
+    }
+}
+
 fn default_prompt_persona_language() -> String {
     "zh-CN".to_string()
 }
@@ -462,6 +486,14 @@ impl IsolatedEvalContext {
     }
 }
 
+pub async fn should_run_cold_start_turn_compile() -> Result<()> {
+    let persona_spec = load_or_seed_prompt_persona_spec().await?;
+    if let Some(reason) = persona_spec.cold_start_compile_skip_reason() {
+        return Err(miette!(reason));
+    }
+    Ok(())
+}
+
 impl TurnRolloutRunner {
     pub fn trace_from_span(span: &RuntimeReviewSpan) -> TurnTraceArtifact {
         let steps = span
@@ -474,13 +506,8 @@ impl TurnRolloutRunner {
             .history_messages
             .iter()
             .rev()
-            .find(|message| {
-                matches!(
-                    message.role,
-                    crate::reasoning::runtime::PromptRole::Assistant
-                )
-            })
-            .map(|message| message.content.clone())
+            .find(|message| message.is_assistant())
+            .and_then(|message| message.text_content().map(str::to_string))
             .filter(|message| !message.trim().is_empty());
         let final_reply_message =
             last_finish_and_send_reply_message(&span.last_turn().history_messages);
@@ -1531,8 +1558,8 @@ async fn run_cold_start_turn_demo(
                 .history_messages
                 .iter()
                 .rev()
-                .find(|message| matches!(message.role, PromptRole::Assistant))
-                .map(|message| message.content.clone())
+                .find(|message| message.is_assistant())
+                .and_then(|message| message.text_content().map(str::to_string))
                 .filter(|message| !message.trim().is_empty()),
             reply_message: last_finish_and_send_reply_message(&execution.history_messages),
         }],
@@ -1540,8 +1567,8 @@ async fn run_cold_start_turn_demo(
             .history_messages
             .iter()
             .rev()
-            .find(|message| matches!(message.role, PromptRole::Assistant))
-            .map(|message| message.content.clone())
+            .find(|message| message.is_assistant())
+            .and_then(|message| message.text_content().map(str::to_string))
             .filter(|message| !message.trim().is_empty()),
         final_reply_message: last_finish_and_send_reply_message(&execution.history_messages),
     })
@@ -1675,13 +1702,12 @@ fn render_failed_turn_demos(evaluations: &[EvaluationArtifactTurnDemoEvaluation]
         .join("\n")
 }
 
-fn prompt_message_finish_and_send_reply_message(message: &PromptMessage) -> Option<String> {
-    if !matches!(message.role, PromptRole::Tool)
-        || !message.content.contains("\nname=finish_and_send\n")
-    {
+fn prompt_message_finish_and_send_reply_message(message: &HistoryMessage) -> Option<String> {
+    let content = message.text_content().unwrap_or_default();
+    if !message.is_tool() || !content.contains("\nname=finish_and_send\n") {
         return None;
     }
-    let payload = message.content.split_once("payload=\n")?.1;
+    let payload = content.split_once("payload=\n")?.1;
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
     value
         .get("reply_message")
@@ -1691,7 +1717,7 @@ fn prompt_message_finish_and_send_reply_message(message: &PromptMessage) -> Opti
         .map(ToOwned::to_owned)
 }
 
-fn last_finish_and_send_reply_message(history_messages: &[PromptMessage]) -> Option<String> {
+fn last_finish_and_send_reply_message(history_messages: &[HistoryMessage]) -> Option<String> {
     history_messages
         .iter()
         .rev()
@@ -1911,13 +1937,12 @@ fn last_assistant_message(turn: &RuntimeTurnRecord) -> Option<String> {
     turn.history_messages
         .iter()
         .rev()
-        .find(|message| {
-            matches!(
-                message.role,
-                crate::reasoning::runtime::PromptRole::Assistant
-            )
+        .find(|message| message.is_assistant())
+        .and_then(|message| {
+            message
+                .text_content()
+                .map(|content| content.trim().to_string())
         })
-        .map(|message| message.content.trim().to_string())
         .filter(|message| !message.is_empty())
 }
 
@@ -1975,8 +2000,12 @@ fn preview_text_from_execution(execution: &AgentLoopStepExecution) -> Option<Str
         .history_messages
         .iter()
         .rev()
-        .find(|message| matches!(message.role, PromptRole::Assistant))
-        .map(|message| message.content.trim().to_string())
+        .find(|message| message.is_assistant())
+        .and_then(|message| {
+            message
+                .text_content()
+                .map(|content| content.trim().to_string())
+        })
         .filter(|text| !text.is_empty())
         .or_else(|| {
             execution
@@ -2005,10 +2034,7 @@ fn field_value(fields: &[ExampleField], names: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::reasoning::{
-        runtime::{PromptMessage, PromptRole},
-        runtime_review::RuntimeReviewSpan,
-    };
+    use crate::reasoning::{runtime::HistoryMessage, runtime_review::RuntimeReviewSpan};
 
     use super::*;
 
@@ -2028,9 +2054,8 @@ mod tests {
                 }],
                 before_snapshot_text: String::new(),
                 after_snapshot_text: String::new(),
-                history_messages: vec![PromptMessage {
-                    role: PromptRole::Assistant,
-                    content: "I will continue.".to_string(),
+                history_messages: vec![HistoryMessage {
+                    message: crate::reasoning::runtime::AgentMessage::assistant("I will continue."),
                     tool_ui_event: None,
                     tool_call_ui_events: Vec::new(),
                 }],
@@ -2049,6 +2074,34 @@ mod tests {
     fn unique_synthetic_telegram_id_is_positive_and_nonzero() {
         let id = unique_synthetic_telegram_id();
         assert!(id > 0);
+    }
+
+    #[test]
+    fn cold_start_compile_requires_non_empty_tests_and_rules() {
+        let mut spec = PromptPersonaSpec::default();
+        assert!(spec.cold_start_compile_enabled());
+
+        spec.tests.clear();
+        assert!(!spec.cold_start_compile_enabled());
+
+        let mut spec = PromptPersonaSpec::default();
+        spec.rules.clear();
+        assert!(!spec.cold_start_compile_enabled());
+    }
+
+    #[test]
+    fn cold_start_compile_skip_reason_names_missing_sections() {
+        let spec = PromptPersonaSpec {
+            name: "test".to_string(),
+            language: "zh-CN".to_string(),
+            identity_summary: "identity".to_string(),
+            tests: Vec::new(),
+            rules: Vec::new(),
+        };
+
+        let reason = spec.cold_start_compile_skip_reason().unwrap();
+        assert!(reason.contains("tests"));
+        assert!(reason.contains("rules"));
     }
 
     #[test]

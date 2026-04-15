@@ -1,6 +1,7 @@
 //! 本模块实现实际的llm api调用
 
 use std::{
+    collections::HashSet,
     error::Error as _,
     sync::Mutex,
     time::{Duration, Instant},
@@ -22,8 +23,10 @@ use crate::{
     core::{LLM, TokenUsage, TokenUsageInfo},
     reasoning::runtime::{
         AgentMessage, AgentToolCall, AgentToolInputSpec, AgentTurnItem, AgentTurnRequest,
-        AgentTurnStreamResult, PromptRequest, PromptRole, assistant_tool_call_protocol_char_count,
+        AgentTurnStreamResult, PromptRequest, assistant_tool_call_protocol_char_count,
+        summarize_assistant_tool_call_protocol,
     },
+    schema_utils::normalize_provider_function_schema,
 };
 
 pub struct OpenAIClient {
@@ -37,7 +40,54 @@ pub struct OpenAIClient {
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
     max_completion_tokens: usize,
+    adapter_state: Mutex<ChatCompletionsAdapterState>,
     token_usage: Mutex<TokenUsageInfo>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptToolChoiceMode {
+    NamedFunction,
+    RequiredString,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChatCompletionsAdapterState {
+    prompt_tool_choice_mode: PromptToolChoiceMode,
+}
+
+impl Default for ChatCompletionsAdapterState {
+    fn default() -> Self {
+        Self {
+            prompt_tool_choice_mode: PromptToolChoiceMode::NamedFunction,
+        }
+    }
+}
+
+trait ChatCompletionsAdapter {
+    fn build_prompt_payload(
+        &self,
+        client: &OpenAIClient,
+        request: &PromptRequest,
+        output_schema: serde_json::Value,
+    ) -> serde_json::Value;
+
+    fn build_agent_turn_payload(
+        &self,
+        client: &OpenAIClient,
+        request: AgentTurnRequest,
+        stream: bool,
+    ) -> serde_json::Value;
+}
+
+struct StandardChatCompletionsAdapter;
+
+struct CompatibleChatCompletionsAdapter {
+    state: ChatCompletionsAdapterState,
+}
+
+enum ActiveChatCompletionsAdapter {
+    Standard(StandardChatCompletionsAdapter),
+    Compatible(CompatibleChatCompletionsAdapter),
 }
 
 #[derive(Default, Clone)]
@@ -104,6 +154,7 @@ impl OpenAIClient {
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
             max_completion_tokens,
+            adapter_state: Mutex::new(ChatCompletionsAdapterState::default()),
             token_usage: Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
@@ -117,6 +168,29 @@ impl OpenAIClient {
             "{}/v1/chat/completions",
             self.base_url.trim_end_matches('/')
         )
+    }
+
+    fn adapter_state_guard(&self) -> ChatCompletionsAdapterState {
+        self.adapter_state
+            .lock()
+            .map(|state| *state)
+            .unwrap_or_default()
+    }
+
+    fn update_adapter_state(&self, next: ChatCompletionsAdapterState) {
+        if let Ok(mut state) = self.adapter_state.lock() {
+            *state = next;
+        }
+    }
+
+    fn current_adapter(&self) -> ActiveChatCompletionsAdapter {
+        if is_standard_openai_base_url(&self.base_url) {
+            ActiveChatCompletionsAdapter::Standard(StandardChatCompletionsAdapter)
+        } else {
+            ActiveChatCompletionsAdapter::Compatible(CompatibleChatCompletionsAdapter {
+                state: self.adapter_state_guard(),
+            })
+        }
     }
 
     fn request_budget_limits(&self) -> RequestBudgetLimits {
@@ -224,9 +298,7 @@ impl OpenAIClient {
 
     async fn call_tool_json(&self, request: PromptRequest) -> Result<serde_json::Value> {
         let url = self.url();
-        let tool_name = request.tool_name.clone();
-        let tool_description = request.tool_description.clone();
-        let output_schema = request.output_schema.clone();
+        let output_schema = normalize_provider_function_schema(request.output_schema.clone());
         let budget = estimate_prompt_request(&request, self.request_budget_limits());
         if !budget.within_context_window() {
             return Err(ContextBudgetExceededError::for_request(
@@ -238,38 +310,24 @@ impl OpenAIClient {
             .into());
         }
         let request_context = summarize_prompt_request(&request, Some(&budget));
-        let messages = prompt_request_to_openai_messages(request);
-        let payload = json!({
-            "model": self.model,
-            "messages": messages,
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "strict": true,
-                        "name": tool_name,
-                        "description": tool_description,
-                        "parameters": output_schema
-                    }
-                }
-            ],
-            "tool_choice": {
-                "type": "function",
-                "function": { "name": tool_name }
-            },
-            "temperature": self.temperature,
-            "max_tokens": self.max_completion_tokens,
-        });
-        let response = self
-            .post_json_with_rate_limit_retry(&url, &payload, &request_context)
-            .await?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|err| miette!("llm response body read failed: {err}"))?;
+        let mut adapter_state = self.adapter_state_guard();
+        let body = loop {
+            let payload =
+                self.current_adapter()
+                    .build_prompt_payload(self, &request, output_schema.clone());
+            let response = self
+                .post_json_with_rate_limit_retry(&url, &payload, &request_context)
+                .await?;
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .map_err(|err| miette!("llm response body read failed: {err}"))?;
 
-        if !status.is_success() {
+            if status.is_success() {
+                break body;
+            }
+
             if looks_like_context_window_error(&body) {
                 return Err(ContextBudgetExceededError::for_request(
                     "prompt request",
@@ -282,12 +340,25 @@ impl OpenAIClient {
                 )
                 .into());
             }
+
+            if should_retry_prompt_request_with_string_tool_choice(&body)
+                && adapter_state.prompt_tool_choice_mode != PromptToolChoiceMode::RequiredString
+            {
+                adapter_state.prompt_tool_choice_mode = PromptToolChoiceMode::RequiredString;
+                self.update_adapter_state(adapter_state);
+                warn!(
+                    "llm provider rejected named function tool_choice; retrying prompt request with string tool_choice\n{}",
+                    request_context.join("\n")
+                );
+                continue;
+            }
+
             return Err(miette!(
                 "llm api returned HTTP {}: {}",
                 status,
                 truncate_for_error(&body)
             ));
-        }
+        };
 
         let response_json: serde_json::Value = serde_json::from_str(&body).map_err(|err| {
             miette!(
@@ -337,61 +408,6 @@ impl OpenAIClient {
         })
     }
 
-    fn build_agent_turn_payload(
-        &self,
-        request: AgentTurnRequest,
-        stream: bool,
-    ) -> serde_json::Value {
-        let messages = request
-            .messages
-            .into_iter()
-            .map(agent_message_to_openai_message)
-            .collect::<Vec<_>>();
-        let tools = request
-            .tools
-            .into_iter()
-            .map(|tool| {
-                let (description, parameters, strict) = match tool.input_spec {
-                    AgentToolInputSpec::JsonSchema { schema } => (tool.description, schema, true),
-                    AgentToolInputSpec::FreeformGrammar {
-                        syntax,
-                        definition,
-                        fallback_schema,
-                    } => (
-                        format!(
-                            "{}\n\n这是一个 FREEFORM grammar tool。当前 provider 回退为单字符串输入：请把完整工具输入放进 `input` 字段。\nsyntax={syntax}\ndefinition=\n{definition}",
-                            tool.description
-                        ),
-                        fallback_schema,
-                        false,
-                    ),
-                };
-                json!({
-                    "type": "function",
-                    "function": {
-                        "strict": strict,
-                        "name": tool.name,
-                        "description": description,
-                        "parameters": parameters,
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        json!({
-            "model": self.model,
-            "messages": messages,
-            "tools": tools,
-            "temperature": self.temperature,
-            "max_tokens": self.max_completion_tokens,
-            "stream": stream,
-            "stream_options": if stream {
-                json!({ "include_usage": true })
-            } else {
-                serde_json::Value::Null
-            },
-        })
-    }
-
     async fn call_agent_turn(
         &self,
         context: &Context,
@@ -413,7 +429,9 @@ impl OpenAIClient {
             .into());
         }
         let request_context = summarize_agent_turn_request(&request, Some(&budget));
-        let payload = self.build_agent_turn_payload(request, true);
+        let payload = self
+            .current_adapter()
+            .build_agent_turn_payload(self, request, true);
         let response = self
             .post_json_with_rate_limit_retry(&url, &payload, &request_context)
             .await?;
@@ -610,6 +628,198 @@ impl OpenAIClient {
             info.append_last_usage(usage);
         }
     }
+}
+
+impl ChatCompletionsAdapter for StandardChatCompletionsAdapter {
+    fn build_prompt_payload(
+        &self,
+        client: &OpenAIClient,
+        request: &PromptRequest,
+        output_schema: serde_json::Value,
+    ) -> serde_json::Value {
+        let messages = prompt_request_to_openai_messages(request.clone(), false);
+        json!({
+            "model": client.model,
+            "messages": messages,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "strict": true,
+                        "name": request.tool_name,
+                        "description": request.tool_description,
+                        "parameters": output_schema
+                    }
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": { "name": request.tool_name }
+            },
+            "temperature": client.temperature,
+            "max_tokens": client.max_completion_tokens,
+        })
+    }
+
+    fn build_agent_turn_payload(
+        &self,
+        client: &OpenAIClient,
+        request: AgentTurnRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        build_agent_turn_payload_common(client, request, stream, false)
+    }
+}
+
+impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
+    fn build_prompt_payload(
+        &self,
+        client: &OpenAIClient,
+        request: &PromptRequest,
+        output_schema: serde_json::Value,
+    ) -> serde_json::Value {
+        let messages = prompt_request_to_openai_messages(request.clone(), true);
+        let tool_choice = match self.state.prompt_tool_choice_mode {
+            PromptToolChoiceMode::NamedFunction => {
+                json!({
+                    "type": "function",
+                    "function": { "name": request.tool_name }
+                })
+            }
+            PromptToolChoiceMode::RequiredString => json!("required"),
+        };
+        json!({
+            "model": client.model,
+            "messages": messages,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "strict": true,
+                        "name": request.tool_name,
+                        "description": request.tool_description,
+                        "parameters": output_schema
+                    }
+                }
+            ],
+            "tool_choice": tool_choice,
+            "temperature": client.temperature,
+            "max_tokens": client.max_completion_tokens,
+        })
+    }
+
+    fn build_agent_turn_payload(
+        &self,
+        client: &OpenAIClient,
+        request: AgentTurnRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        build_agent_turn_payload_common(client, request, stream, true)
+    }
+}
+
+impl ChatCompletionsAdapter for ActiveChatCompletionsAdapter {
+    fn build_prompt_payload(
+        &self,
+        client: &OpenAIClient,
+        request: &PromptRequest,
+        output_schema: serde_json::Value,
+    ) -> serde_json::Value {
+        match self {
+            Self::Standard(adapter) => adapter.build_prompt_payload(client, request, output_schema),
+            Self::Compatible(adapter) => {
+                adapter.build_prompt_payload(client, request, output_schema)
+            }
+        }
+    }
+
+    fn build_agent_turn_payload(
+        &self,
+        client: &OpenAIClient,
+        request: AgentTurnRequest,
+        stream: bool,
+    ) -> serde_json::Value {
+        match self {
+            Self::Standard(adapter) => adapter.build_agent_turn_payload(client, request, stream),
+            Self::Compatible(adapter) => adapter.build_agent_turn_payload(client, request, stream),
+        }
+    }
+}
+
+fn is_standard_openai_base_url(base_url: &str) -> bool {
+    let normalized = base_url.trim_end_matches('/');
+    normalized.contains("api.openai.com") || normalized.contains("chatgpt.com/backend-api/codex")
+}
+
+fn should_retry_prompt_request_with_string_tool_choice(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("unknown parameter: 'tool_choice.function'")
+        || body.contains("unknown parameter: \"tool_choice.function\"")
+}
+
+fn build_agent_turn_payload_common(
+    client: &OpenAIClient,
+    request: AgentTurnRequest,
+    stream: bool,
+    flatten_unmatched_tool_messages: bool,
+) -> serde_json::Value {
+    let allowed_tool_names = request
+        .tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<HashSet<_>>();
+    let messages = agent_turn_request_to_openai_messages(
+        request.messages,
+        flatten_unmatched_tool_messages,
+        &allowed_tool_names,
+    );
+    let tools = request
+        .tools
+        .into_iter()
+        .map(|tool| {
+            let (description, parameters, strict) = match tool.input_spec {
+                AgentToolInputSpec::JsonSchema { schema } => (
+                    tool.description,
+                    normalize_provider_function_schema(schema),
+                    true,
+                ),
+                AgentToolInputSpec::FreeformGrammar {
+                    syntax,
+                    definition,
+                    fallback_schema,
+                } => (
+                    format!(
+                        "{}\n\n这是一个 FREEFORM grammar tool。当前 provider 回退为单字符串输入：请把完整工具输入放进 `input` 字段。\nsyntax={syntax}\ndefinition=\n{definition}",
+                        tool.description
+                    ),
+                    normalize_provider_function_schema(fallback_schema),
+                    false,
+                ),
+            };
+            json!({
+                "type": "function",
+                "function": {
+                    "strict": strict,
+                    "name": tool.name,
+                    "description": description,
+                    "parameters": parameters,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "model": client.model,
+        "messages": messages,
+        "tools": tools,
+        "temperature": client.temperature,
+        "max_tokens": client.max_completion_tokens,
+        "stream": stream,
+        "stream_options": if stream {
+            json!({ "include_usage": true })
+        } else {
+            serde_json::Value::Null
+        },
+    })
 }
 
 fn extract_json_value_from_content(content: &str) -> Option<serde_json::Value> {
@@ -889,21 +1099,17 @@ impl LLM for OpenAIClient {
     }
 }
 
-fn prompt_message_to_openai_message(
-    message: crate::reasoning::runtime::PromptMessage,
+fn history_message_to_openai_message(
+    message: crate::reasoning::runtime::HistoryMessage,
+    flatten_tool_messages: bool,
 ) -> serde_json::Value {
-    json!({
-        "role": match message.role {
-            PromptRole::System => "system",
-            PromptRole::User => "user",
-            PromptRole::Assistant => "assistant",
-            PromptRole::Tool => "tool",
-        },
-        "content": message.content,
-    })
+    provider_message_from_agent_message(&message.message, flatten_tool_messages)
 }
 
-fn prompt_request_to_openai_messages(request: PromptRequest) -> Vec<serde_json::Value> {
+fn prompt_request_to_openai_messages(
+    request: PromptRequest,
+    flatten_tool_messages: bool,
+) -> Vec<serde_json::Value> {
     request
         .system_messages
         .into_iter()
@@ -912,13 +1118,13 @@ fn prompt_request_to_openai_messages(request: PromptRequest) -> Vec<serde_json::
             request
                 .long_term_memory_messages
                 .into_iter()
-                .map(prompt_message_to_openai_message),
+                .map(|message| history_message_to_openai_message(message, flatten_tool_messages)),
         )
         .chain(
             request
                 .history_messages
                 .into_iter()
-                .map(prompt_message_to_openai_message),
+                .map(|message| history_message_to_openai_message(message, flatten_tool_messages)),
         )
         .chain(std::iter::once(json!({
             "role": "user",
@@ -928,7 +1134,7 @@ fn prompt_request_to_openai_messages(request: PromptRequest) -> Vec<serde_json::
             request
                 .retry_messages
                 .into_iter()
-                .map(prompt_message_to_openai_message),
+                .map(|message| history_message_to_openai_message(message, flatten_tool_messages)),
         )
         .collect::<Vec<_>>()
 }
@@ -972,6 +1178,80 @@ fn agent_message_to_openai_message(message: AgentMessage) -> serde_json::Value {
     }
 }
 
+fn provider_message_from_agent_message(
+    message: &AgentMessage,
+    flatten_non_plain_messages: bool,
+) -> serde_json::Value {
+    if flatten_non_plain_messages {
+        match message {
+            AgentMessage::AssistantToolCallProtocol { content, calls } => {
+                return json!({
+                    "role": "assistant",
+                    "content": summarize_assistant_tool_call_protocol(content.as_deref(), calls),
+                });
+            }
+            AgentMessage::Tool { name, content, .. } => {
+                return json!({
+                    "role": "assistant",
+                    "content": flatten_tool_result_as_assistant_text(name, content),
+                });
+            }
+            _ => {}
+        }
+    }
+    agent_message_to_openai_message(message.clone())
+}
+
+fn agent_turn_request_to_openai_messages(
+    messages: Vec<AgentMessage>,
+    flatten_unmatched_tool_messages: bool,
+    allowed_tool_names: &HashSet<String>,
+) -> Vec<serde_json::Value> {
+    let mut valid_tool_call_ids = HashSet::new();
+    let mut serialized = Vec::with_capacity(messages.len());
+    for message in messages {
+        match message {
+            AgentMessage::AssistantToolCallProtocol { content, calls } => {
+                let all_calls_in_scope = calls
+                    .iter()
+                    .all(|call| allowed_tool_names.contains(&call.name));
+                if flatten_unmatched_tool_messages && !all_calls_in_scope {
+                    serialized.push(json!({
+                        "role": "assistant",
+                        "content": summarize_assistant_tool_call_protocol(content.as_deref(), &calls),
+                    }));
+                    continue;
+                }
+                if flatten_unmatched_tool_messages {
+                    valid_tool_call_ids.extend(calls.iter().map(|call| call.id.clone()));
+                }
+                serialized.push(agent_message_to_openai_message(
+                    AgentMessage::AssistantToolCallProtocol { content, calls },
+                ));
+            }
+            AgentMessage::Tool {
+                tool_call_id,
+                name,
+                content,
+            } if flatten_unmatched_tool_messages
+                && (!valid_tool_call_ids.contains(&tool_call_id)
+                    || !allowed_tool_names.contains(&name)) =>
+            {
+                serialized.push(json!({
+                    "role": "assistant",
+                    "content": flatten_tool_result_as_assistant_text(&name, &content),
+                }));
+            }
+            other => serialized.push(agent_message_to_openai_message(other)),
+        }
+    }
+    serialized
+}
+
+fn flatten_tool_result_as_assistant_text(name: &str, content: &str) -> String {
+    format!("historical tool result ({name}):\n{content}")
+}
+
 fn truncate_for_error(text: &str) -> String {
     const MAX_LEN: usize = 600;
     if text.chars().count() <= MAX_LEN {
@@ -1006,4 +1286,106 @@ fn default_rate_limit_backoff(attempt: usize) -> Duration {
         _ => 12,
     };
     Duration::from_secs(seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reasoning::runtime::{AgentToolCall, HistoryMessage};
+    use serde_json::json;
+
+    #[test]
+    fn compatible_agent_messages_flatten_unmatched_tool_results() {
+        let messages = agent_turn_request_to_openai_messages(
+            vec![
+                AgentMessage::assistant("assistant tool-call protocol: update_plan"),
+                AgentMessage::tool("historical-tool", "historical_tool", "summary=updated plan"),
+            ],
+            true,
+            &HashSet::from(["update_plan".to_string()]),
+        );
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert!(
+            messages[1]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("historical tool result")
+        );
+    }
+
+    #[test]
+    fn compatible_agent_messages_keep_matched_tool_results() {
+        let messages = agent_turn_request_to_openai_messages(
+            vec![
+                AgentMessage::assistant_tool_call_protocol(
+                    None,
+                    vec![AgentToolCall {
+                        id: "call_123".to_string(),
+                        name: "update_plan".to_string(),
+                        arguments: json!({"plan": []}),
+                    }],
+                ),
+                AgentMessage::tool("call_123", "update_plan", "{\"ok\":true}"),
+            ],
+            true,
+            &HashSet::from(["update_plan".to_string()]),
+        );
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call_123");
+    }
+
+    #[test]
+    fn compatible_prompt_messages_flatten_historical_tool_role() {
+        let request = PromptRequest {
+            tool_name: "demo".to_string(),
+            tool_description: "demo".to_string(),
+            output_schema: json!({"type":"object","properties":{},"required":[]}),
+            system_messages: vec![],
+            long_term_memory_messages: vec![],
+            history_messages: vec![HistoryMessage::tool(
+                "call_x",
+                "update_plan",
+                "tool_call_id=call_x\nname=update_plan\nsummary=updated plan",
+                crate::tool_ui::ToolUiEvent::error(
+                    "apply_patch".to_string(),
+                    vec!["irrelevant".to_string()],
+                ),
+            )],
+            current_user_message: "hello".to_string(),
+            retry_messages: vec![],
+        };
+
+        let messages = prompt_request_to_openai_messages(request, true);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("historical tool result")
+        );
+    }
+
+    #[test]
+    fn compatible_agent_messages_flatten_out_of_scope_tool_protocol() {
+        let messages = agent_turn_request_to_openai_messages(
+            vec![AgentMessage::assistant_tool_call_protocol(
+                None,
+                vec![AgentToolCall {
+                    id: "call_123".to_string(),
+                    name: "terminal_exec".to_string(),
+                    arguments: json!({"cmd": "pwd"}),
+                }],
+            )],
+            true,
+            &HashSet::from(["finish_and_send".to_string()]),
+        );
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert!(messages[0].get("tool_calls").is_none());
+    }
 }

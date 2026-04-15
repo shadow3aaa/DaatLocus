@@ -22,6 +22,7 @@ use crate::{
         AppManager, AppStateRender, AppUsage,
     },
     daat_locus_paths::daat_locus_paths_sync,
+    schema_utils::normalize_openai_json_schema,
     skill::{SkillContent, SkillDoc, SkillSummary, load_skills_from_dir},
     workspace_paths::workspace_apps_dir,
 };
@@ -708,16 +709,7 @@ fn validate_schema_definition(schema: &JsonValue, label: &str) -> Result<()> {
 }
 
 fn normalize_workspace_input_schema(mut schema: JsonValue) -> JsonValue {
-    if let Some(object) = schema.as_object_mut()
-        && object.get("type").and_then(|value| value.as_str()) == Some("object")
-    {
-        object
-            .entry("properties".to_string())
-            .or_insert_with(|| serde_json::json!({}));
-        object
-            .entry("additionalProperties".to_string())
-            .or_insert_with(|| serde_json::json!(false));
-    }
+    schema = normalize_openai_json_schema(schema);
     schema
 }
 
