@@ -3851,9 +3851,7 @@ fn sync_dashboard_state(
         state.inspect_telegram_output = render_telegram_status_for_dashboard(context);
         state.system_prompt_output = render_system_prompt_output_for_dashboard(context);
         state.app_status_outputs = render_app_status_outputs_for_dashboard(context);
-        if state.activity_cells.is_empty() {
-            state.activity_cells = render_activity_for_dashboard(context);
-        }
+        state.activity_cells = render_activity_for_dashboard(context);
         state.last_cycle_elapsed_ms = last_cycle_elapsed_ms;
         state.footer_context =
             render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
