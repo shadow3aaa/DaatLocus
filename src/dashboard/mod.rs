@@ -1,5 +1,7 @@
 //! Dashboard: activity feed + command console.
 
+pub mod render;
+
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEventKind};

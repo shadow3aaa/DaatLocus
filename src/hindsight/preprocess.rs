@@ -10,7 +10,6 @@
 use crate::{
     context::Context,
     context_budget::{approx_token_count, truncate_text_to_token_budget},
-    hindsight::{HindsightRetainItem, HindsightRetainJob},
     reasoning::{
         programs::runtime_retain_preprocessor::{
             RuntimeRetainPreprocessorOutput, RuntimeRetainPreprocessorProgram,
@@ -19,6 +18,9 @@ use crate::{
         trace::TraceOrigin,
     },
 };
+
+use super::{HindsightRetainItem, HindsightRetainJob};
+
 use miette::Result;
 use crate::reasoning::render::openai_tools::OpenAIToolRenderer;
 

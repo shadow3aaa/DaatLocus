@@ -5,11 +5,14 @@ use std::time::Duration;
 use crate::{
     app::AppId,
     context::Context,
-    dashboard::{DashboardState, render_activity_from_messages},
     reasoning::{
         runtime_review::unread_runtime_review_count,
         trace::unread_runtime_trace_count,
     },
+};
+
+use super::{
+    DashboardState, render_activity_from_messages,
 };
 
 /// Sleep-related constants used in dashboard rendering.

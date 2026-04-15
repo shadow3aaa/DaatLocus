@@ -1,3 +1,7 @@
+//! Hindsight long-term memory system.
+
+pub mod preprocess;
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use miette::{Result, miette};

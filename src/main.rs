@@ -8,12 +8,10 @@ mod context_budget;
 mod core;
 mod daat_locus_paths;
 mod dashboard;
-mod dashboard_render;
 mod events;
 mod hindsight;
 mod logging;
 mod memory;
-mod hindsight_preprocess;
 mod pending_work;
 mod plan;
 mod providers;
@@ -65,7 +63,7 @@ use crate::{
         HindsightClient, HindsightRecallOptions, HindsightRetainItem, HindsightRetainJob,
         builtin_hindsight_mental_models,
     },
-    hindsight_preprocess::{
+    hindsight::preprocess::{
         RetainPreprocessPlan,
         HINDSIGHT_RECENT_MESSAGES_MAX_TOKENS, HINDSIGHT_RECENT_MESSAGES_MIN_ENTRIES,
         HINDSIGHT_RETAIN_PREPROCESS_INPUT_MAX_TOKENS, HINDSIGHT_RETAIN_PREPROCESS_OUTPUT_MAX_TOKENS,
@@ -131,7 +129,7 @@ use crate::{
         start_workspace_app_watcher,
     },
     workspace_paths::{resolve_runtime_workspace_dir, workspace_apps_dir, workspace_skills_dir},
-    dashboard_render::{
+    dashboard::render::{
         sync_dashboard_state, SleepDashboardStatus,
         AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL,
         FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD, refresh_sleep_backlogs,
