@@ -82,6 +82,7 @@ impl PendingWorkQueue {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn empty() -> Self {
         Self {
             inner: Arc::new(Mutex::new(PendingWorkQueueInner {
@@ -243,10 +244,29 @@ fn persist_locked(inner: &PendingWorkQueueInner) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_QUEUE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+    fn test_queue() -> PendingWorkQueue {
+        let unique = TEST_QUEUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "daat-locus-pending-work-test-{}-{}.bin",
+            std::process::id(),
+            unique
+        ));
+        let _ = std::fs::remove_file(&path);
+        PendingWorkQueue {
+            inner: Arc::new(Mutex::new(PendingWorkQueueInner {
+                path,
+                state: PersistedPendingWorkQueue::default(),
+            })),
+        }
+    }
 
     #[test]
     fn claim_batch_prioritizes_events_over_app_notices() {
-        let queue = PendingWorkQueue::empty();
+        let queue = test_queue();
         let event_id = Uuid::new_v4();
         queue
             .enqueue(PendingWork::AppNotice {
@@ -270,7 +290,7 @@ mod tests {
 
     #[test]
     fn requeue_front_reactivates_claimed_event_driver() {
-        let queue = PendingWorkQueue::empty();
+        let queue = test_queue();
         let event_id = Uuid::new_v4();
         let work = PendingWork::Event { event_id };
         queue.enqueue(work.clone()).expect("enqueue event");
