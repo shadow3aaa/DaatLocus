@@ -126,10 +126,18 @@ impl TelegramTransport {
                 Err(err) => {
                     let reason = truncate_reason(&format!("{err:?}"));
                     if let Some(event_id) = message.related_event_id.as_deref()
-                        && let Err(mark_err) = self.events.mark_delivery_failed(event_id, reason)
+                        && let Err(mark_err) = self.events.set_status(
+                            event_id,
+                            EventStatus::AwaitingDelivery,
+                            Some(reason.clone()),
+                        )
                     {
-                        tracing::error!("mark telegram event failed failed: {mark_err:?}");
+                        tracing::error!("mark telegram event awaiting delivery failed: {mark_err:?}");
                     }
+                    if let Err(requeue_err) = self.handle.requeue_outbound_front(message) {
+                        tracing::error!("requeue telegram outbound message failed: {requeue_err:?}");
+                    }
+                    return Err(miette!("telegram outbound delivery failed: {reason}"));
                 }
             }
         }

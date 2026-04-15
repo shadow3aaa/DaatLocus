@@ -261,7 +261,8 @@ impl EventStore {
     ) -> Result<()> {
         self.with_event_mut_from_str(event_id, |event| {
             event.status = status;
-            event.last_error = if matches!(status, EventStatus::Failed) {
+            event.last_error = if matches!(status, EventStatus::Failed | EventStatus::AwaitingDelivery)
+            {
                 note
             } else {
                 None

@@ -146,6 +146,14 @@ impl TelegramTransportStateHandle {
         Ok(())
     }
 
+    pub fn requeue_outbound_front(&self, message: PendingOutboundMessage) -> Result<()> {
+        let mut state = self.inner.state.lock();
+        state.outbox.push_front(message);
+        persist_telegram_state_result(&self.inner, &state)?;
+        self.inner.outbound_notify.notify_one();
+        Ok(())
+    }
+
     pub async fn wait_for_outbound(&self) {
         self.inner.outbound_notify.notified().await;
     }
