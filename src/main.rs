@@ -1,6 +1,7 @@
 mod app;
 mod apply_patch;
 mod browser_app;
+mod commands;
 mod config;
 mod context;
 mod context_budget;
@@ -43,13 +44,14 @@ use crate::{
     app::{AppId, AppManager},
     apply_patch::{PatchOperationKind, apply_patch_in_root, summarize_apply_patch_error},
     browser_app::BrowserApp,
+    commands::reset::{run_complite_reset, run_memory_reset, run_reset_all, run_state_reset},
     config::load_config,
     context::{Context, RuntimeTurnPhase},
     context_budget::{
         approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded,
         truncate_text_to_token_budget,
     },
-    daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
+    daat_locus_paths::daat_locus_paths,
     dashboard::{
         DashboardActivityEvent, DashboardControlCommand, DashboardState,
         activity_cell_from_tool_ui_event, activity_cells_from_tool_call_ui_event,
@@ -72,7 +74,7 @@ use crate::{
     providers::OpenAIClient,
     reasoning::{
         compiled::{
-            COMPILED_DIR_NAME, CompiledPromptStore, load_all_compiled_programs_for_model,
+            CompiledPromptStore, load_all_compiled_programs_for_model,
             load_compiled_runtime_system_prompt_for_model,
         },
         episode::EpisodeActionRecord,
@@ -864,171 +866,6 @@ async fn run_browser_runtime_setup() -> Result<()> {
     Ok(())
 }
 
-async fn run_memory_reset() -> Result<()> {
-    let home = get_daat_locus_home().await;
-    clear_memory_state(&home).await?;
-
-    println!(
-        "[memory-reset] reset memory persistence under {}",
-        home.display()
-    );
-    println!("[memory-reset] cleared: runtime_conversation, hindsight_queue");
-    println!("[memory-reset] cleared: reasoning_traces.jsonl, runtime_reviews.jsonl");
-    println!("[memory-reset] cleared: hindsight bank, observations, directives, mental models");
-    println!("[memory-reset] cleared: current plan");
-    println!("[memory-reset] preserved: config/, state/, artifacts/, logs/");
-
-    Ok(())
-}
-
-async fn clear_memory_state(home: &PathBuf) -> Result<()> {
-    let config = load_config()
-        .await
-        .map_err(|err| miette!("failed to load config for memory-reset: {err}"))?;
-    let hindsight = HindsightClient::connect(&config.hindsight).await?;
-    hindsight.delete_bank().await?;
-    let paths = DaatLocusPaths::from_root(home.clone());
-    clear_files(&[
-        paths.memory_file("runtime_conversation"),
-        paths.memory_file("hindsight_queue"),
-        paths.memory_file("plan"),
-        paths.journal_file("reasoning_traces.jsonl"),
-        paths.journal_file("runtime_reviews.jsonl"),
-    ])
-    .await?;
-
-    Ok(())
-}
-
-async fn run_state_reset() -> Result<()> {
-    let home = get_daat_locus_home().await;
-    let cleared = clear_state_files(&home).await?;
-
-    println!("[state-reset] reset runtime state under {}", home.display());
-    if cleared.is_empty() {
-        println!("[state-reset] nothing to remove");
-    } else {
-        println!("[state-reset] cleared: {}", cleared.join(", "));
-    }
-    println!("[state-reset] preserved: config/, memory/, artifacts/, logs/");
-
-    Ok(())
-}
-
-async fn clear_state_files(home: &PathBuf) -> Result<Vec<String>> {
-    let paths = DaatLocusPaths::from_root(home.clone());
-    let files = ["events", "pending_work_queue", "telegram_transport_state"];
-    clear_named_files(paths.state_dir(), &files).await
-}
-
-async fn run_complite_reset() -> Result<()> {
-    let home = get_daat_locus_home().await;
-    let cleared = clear_compiled_artifacts(&home).await?;
-
-    println!(
-        "[complite-reset] cleared compile/evaluation artifacts under {}",
-        home.display()
-    );
-    if cleared.is_empty() {
-        println!("[complite-reset] nothing to remove");
-    } else {
-        println!("[complite-reset] cleared: {}", cleared.join(", "));
-    }
-    println!("[complite-reset] preserved: config/, state/, memory, logs/");
-
-    Ok(())
-}
-
-async fn clear_compiled_artifacts(home: &PathBuf) -> Result<Vec<String>> {
-    let mut cleared = Vec::new();
-    let paths = DaatLocusPaths::from_root(home.clone());
-
-    for dir_name in [COMPILED_DIR_NAME, "evaluations"] {
-        let path = paths.artifact_dir(dir_name);
-        if path.exists() {
-            tokio::fs::remove_dir_all(&path)
-                .await
-                .map_err(|err| miette!("failed to remove {}: {err}", path.display()))?;
-            cleared.push(dir_name.to_string());
-        }
-    }
-
-    Ok(cleared)
-}
-
-async fn run_reset_all() -> Result<()> {
-    let home = get_daat_locus_home().await;
-    let memory_cleared = clear_memory_state(&home).await;
-    let state_cleared = clear_state_files(&home).await?;
-    let artifact_cleared = clear_compiled_artifacts(&home).await?;
-    let log_cleared = clear_log_dirs(&home).await?;
-    memory_cleared?;
-
-    println!("[reset] reset all state under {}", home.display());
-    if state_cleared.is_empty() {
-        println!("[reset] cleared state: none");
-    } else {
-        println!("[reset] cleared state: {}", state_cleared.join(", "));
-    }
-    println!(
-        "[reset] cleared memory: runtime_conversation, hindsight_queue, reasoning_traces.jsonl, runtime_reviews.jsonl, hindsight bank, observations, directives, mental models"
-    );
-    if artifact_cleared.is_empty() {
-        println!("[reset] cleared complite artifacts: none");
-    } else {
-        println!(
-            "[reset] cleared complite artifacts: {}",
-            artifact_cleared.join(", ")
-        );
-    }
-    if log_cleared.is_empty() {
-        println!("[reset] cleared logs: none");
-    } else {
-        println!("[reset] cleared logs: {}", log_cleared.join(", "));
-    }
-    println!("[reset] preserved: config.toml, telegram_acl.json");
-
-    Ok(())
-}
-
-async fn clear_log_dirs(home: &PathBuf) -> Result<Vec<String>> {
-    let mut cleared = Vec::new();
-    let paths = DaatLocusPaths::from_root(home.clone());
-    let path = paths.logs_dir();
-    if path.exists() {
-        tokio::fs::remove_dir_all(&path)
-            .await
-            .map_err(|err| miette!("failed to remove {}: {err}", path.display()))?;
-        cleared.push("logs".to_string());
-    }
-    Ok(cleared)
-}
-
-async fn clear_named_files(dir: PathBuf, file_names: &[&str]) -> Result<Vec<String>> {
-    let mut cleared = Vec::new();
-    for file_name in file_names {
-        let path = dir.join(file_name);
-        if path.exists() {
-            tokio::fs::remove_file(&path)
-                .await
-                .map_err(|err| miette!("failed to remove {}: {err}", path.display()))?;
-            cleared.push((*file_name).to_string());
-        }
-    }
-    Ok(cleared)
-}
-
-async fn clear_files(paths: &[PathBuf]) -> Result<()> {
-    for path in paths {
-        if path.exists() {
-            tokio::fs::remove_file(path)
-                .await
-                .map_err(|err| miette!("failed to remove {}: {err}", path.display()))?;
-        }
-    }
-    Ok(())
-}
-
 async fn build_eval_context(config: crate::config::Config) -> Context {
     build_eval_context_with_compiled(config, CompiledPromptStore::empty()).await
 }
@@ -1041,7 +878,7 @@ async fn build_eval_context_for_inspect(config: crate::config::Config) -> Contex
 }
 
 async fn sandbox_policy_for_runtime() -> RuntimeSandboxPolicy {
-    let daat_locus_home = get_daat_locus_home().await;
+    let daat_locus_home = daat_locus_paths().await.root().to_path_buf();
     RuntimeSandboxPolicy::protect_daat_locus_runtime(&daat_locus_home)
 }
 
@@ -4271,6 +4108,3 @@ fn render_activity_for_dashboard(context: &Context) -> Vec<crate::dashboard::Act
     render_activity_from_messages(context.memory.runtime_conversation_messages())
 }
 
-pub async fn get_daat_locus_home() -> PathBuf {
-    daat_locus_paths().await.root().to_path_buf()
-}
