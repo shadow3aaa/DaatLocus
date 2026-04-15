@@ -8,10 +8,12 @@ mod context_budget;
 mod core;
 mod daat_locus_paths;
 mod dashboard;
+mod dashboard_render;
 mod events;
 mod hindsight;
 mod logging;
 mod memory;
+mod hindsight_preprocess;
 mod pending_work;
 mod plan;
 mod providers;
@@ -55,13 +57,23 @@ use crate::{
     dashboard::{
         DashboardActivityEvent, DashboardControlCommand, DashboardState,
         activity_cell_from_tool_ui_event, activity_cells_from_tool_call_ui_event,
-        apply_activity_event, assistant_activity_cell, render_activity_from_messages,
+        apply_activity_event, assistant_activity_cell,
         run_tui_dashboard,
     },
     events::{EventPayload, EventStatus, EventStore, EventView},
     hindsight::{
         HindsightClient, HindsightRecallOptions, HindsightRetainItem, HindsightRetainJob,
         builtin_hindsight_mental_models,
+    },
+    hindsight_preprocess::{
+        RetainPreprocessPlan,
+        HINDSIGHT_RECENT_MESSAGES_MAX_TOKENS, HINDSIGHT_RECENT_MESSAGES_MIN_ENTRIES,
+        HINDSIGHT_RETAIN_PREPROCESS_INPUT_MAX_TOKENS, HINDSIGHT_RETAIN_PREPROCESS_OUTPUT_MAX_TOKENS,
+        HINDSIGHT_RETAIN_PREPROCESS_MAX_SPLIT_ITEMS,
+        select_recent_trail_lines_for_hindsight, select_recent_items_by_token_budget,
+        preprocess_hindsight_retain_jobs, preprocess_hindsight_retain_job,
+        render_retain_job_source, extract_retain_focus, collect_retain_job_tags, merge_tags,
+        build_preprocessed_split_items, build_preprocessed_retain_digest,
     },
     logging::{
         RuntimeStatusLevel, clear_runtime_status, init_logging, set_runtime_status,
@@ -88,10 +100,10 @@ use crate::{
             execute_program_with_ir_report, resolve_program_tuning,
         },
         runtime_review::{
-            RuntimeTurnRecord, append_runtime_turn_record, unread_runtime_review_count,
+            RuntimeTurnRecord, append_runtime_turn_record,
         },
         sleep::run_sleep,
-        trace::{TraceOrigin, unread_runtime_trace_count},
+        trace::TraceOrigin,
         turn_compile::{TurnCompileEngine, should_run_cold_start_turn_compile},
     },
     runtime_context::{
@@ -119,6 +131,18 @@ use crate::{
         start_workspace_app_watcher,
     },
     workspace_paths::{resolve_runtime_workspace_dir, workspace_apps_dir, workspace_skills_dir},
+    dashboard_render::{
+        sync_dashboard_state, SleepDashboardStatus,
+        AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL,
+        FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD, refresh_sleep_backlogs,
+        render_system_prompt_output_for_dashboard,
+        render_status_command_output_for_dashboard,
+        render_sleep_status_output_for_dashboard,
+        render_telegram_status_for_dashboard,
+        render_app_status_outputs_for_dashboard,
+        render_activity_for_dashboard,
+        render_dashboard_footer_context,
+    },
 };
 use chrono::Utc;
 use clap::{Parser, Subcommand};
@@ -128,9 +152,6 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle, time::MissedTickBehavior};
 
-const AUTO_SLEEP_IDLE_THRESHOLD: Duration = Duration::from_secs(300);
-const AUTO_SLEEP_MIN_INTERVAL: Duration = Duration::from_secs(300);
-const FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD: usize = 128;
 const RUNTIME_EVENT_CLAIM_BATCH_SIZE: usize = 1;
 const RUNTIME_OVERFLOW_FUSE_THRESHOLD: usize = 3;
 const APP_NOTICE_OVERFLOW_SUPPRESSION: Duration = Duration::from_secs(300);
@@ -146,30 +167,11 @@ fn emit_startup_progress(message: impl AsRef<str>) {
     println!("{message}");
 }
 
+#[derive(Default)]
 enum SleepTrigger {
+    #[default]
     Manual,
     Idle,
-}
-
-#[derive(Default)]
-struct SleepDashboardStatus {
-    running: bool,
-    current_trigger: Option<&'static str>,
-    last_result: Option<String>,
-    unread_trace_backlog: usize,
-    unread_runtime_review_backlog: usize,
-    total_runs: usize,
-    total_consumed_trace_events: usize,
-    total_consumed_runtime_reviews: usize,
-    total_runtime_demos: usize,
-    total_turn_demos: usize,
-    total_runtime_demo_evaluations: usize,
-    total_turn_demo_evaluations: usize,
-    total_runtime_demo_passed: usize,
-    total_runtime_demo_regressions: usize,
-    total_runtime_prompt_candidates: usize,
-    total_runtime_prompt_rollbacks: usize,
-    total_runtime_prompt_accepts: usize,
 }
 
 struct SleepTaskResult {
@@ -1203,47 +1205,8 @@ pub(crate) struct AgentLoopStepOutput {
 const RUNTIME_HISTORY_MIN_MESSAGES: usize = 0;
 const RUNTIME_HISTORY_SUMMARY_MAX_TOKENS: usize = 800;
 const HINDSIGHT_RECALL_QUERY_MAX_TOKENS: usize = 420;
-const HINDSIGHT_RECENT_MESSAGES_MAX_TOKENS: usize = 160;
-const HINDSIGHT_RECENT_MESSAGES_MIN_ENTRIES: usize = 2;
-const HINDSIGHT_RETAIN_PREPROCESS_INPUT_MAX_TOKENS: usize = 3200;
-const HINDSIGHT_RETAIN_PREPROCESS_OUTPUT_MAX_TOKENS: usize = 900;
-const HINDSIGHT_RETAIN_PREPROCESS_MAX_SPLIT_ITEMS: usize = 4;
 const CLAIMED_EVENT_FINISHED_STOP_REASON: &str = "claimed_event_finished";
 const RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS: u64 = 60;
-
-fn select_recent_trail_lines_for_hindsight(context: &Context) -> Vec<String> {
-    select_recent_items_by_token_budget(
-        context.memory.trail(),
-        HINDSIGHT_RECENT_MESSAGES_MAX_TOKENS,
-        HINDSIGHT_RECENT_MESSAGES_MIN_ENTRIES,
-        |line| approx_token_count(line),
-    )
-}
-
-fn select_recent_items_by_token_budget<T, F>(
-    items: Vec<T>,
-    max_tokens: usize,
-    min_items: usize,
-    mut token_cost: F,
-) -> Vec<T>
-where
-    F: FnMut(&T) -> usize,
-{
-    let mut selected = Vec::new();
-    let mut total_tokens = 0usize;
-    for item in items.into_iter().rev() {
-        let cost = token_cost(&item);
-        let can_fit = total_tokens.saturating_add(cost) <= max_tokens;
-        if selected.len() < min_items || can_fit {
-            total_tokens = total_tokens.saturating_add(cost);
-            selected.push(item);
-        } else {
-            break;
-        }
-    }
-    selected.reverse();
-    selected
-}
 
 async fn record_runtime_history_messages(context: &mut Context, draft: RuntimeTurnDraft) {
     let retain_plan = context.memory.commit_runtime_turn(draft).await;
@@ -1266,267 +1229,6 @@ async fn record_runtime_history_messages(context: &mut Context, draft: RuntimeTu
             context.memory.mark_queued_retained();
         }
     }
-}
-
-struct RetainPreprocessPlan {
-    jobs: Vec<HindsightRetainJob>,
-    skipped_document_ids: Vec<String>,
-}
-
-async fn preprocess_hindsight_retain_jobs(
-    context: &Context,
-    jobs: Vec<HindsightRetainJob>,
-) -> RetainPreprocessPlan {
-    if jobs.is_empty() {
-        return RetainPreprocessPlan {
-            jobs: Vec::new(),
-            skipped_document_ids: Vec::new(),
-        };
-    }
-
-    let renderer = OpenAIToolRenderer;
-    let program = RuntimeRetainPreprocessorProgram;
-    let tuning = resolve_program_tuning(context, &program).await;
-
-    let mut retained_jobs = Vec::new();
-    let mut skipped_document_ids = Vec::new();
-
-    for job in jobs {
-        match preprocess_hindsight_retain_job(context, &renderer, &program, &tuning, job.clone())
-            .await
-        {
-            Ok(Some(job)) => retained_jobs.push(job),
-            Ok(None) => {
-                if let Some(document_id) = job.document_id.clone() {
-                    skipped_document_ids.push(document_id);
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "runtime retain preprocessing failed; falling back to raw retain job: {err:?}"
-                );
-                retained_jobs.push(job);
-            }
-        }
-    }
-
-    RetainPreprocessPlan {
-        jobs: retained_jobs,
-        skipped_document_ids,
-    }
-}
-
-async fn preprocess_hindsight_retain_job(
-    context: &Context,
-    renderer: &OpenAIToolRenderer,
-    program: &RuntimeRetainPreprocessorProgram,
-    tuning: &crate::reasoning::optimizer::PromptTuningConfig<RuntimeRetainPreprocessorOutput>,
-    job: HindsightRetainJob,
-) -> Result<Option<HindsightRetainJob>> {
-    let raw_retain_content = render_retain_job_source(&job);
-    let input = truncate_text_to_token_budget(
-        &raw_retain_content,
-        HINDSIGHT_RETAIN_PREPROCESS_INPUT_MAX_TOKENS,
-    );
-    let current_doing = extract_retain_focus(&input).unwrap_or_else(|| "未知".to_string());
-    let document_id = job
-        .document_id
-        .clone()
-        .or_else(|| job.items.first().and_then(|item| item.document_id.clone()))
-        .unwrap_or_else(|| "unknown".to_string());
-    let existing_tags = collect_retain_job_tags(&job);
-    let ir = program.dataset_ir(
-        current_doing,
-        document_id.clone(),
-        existing_tags.clone(),
-        input,
-    );
-    let outcome = execute_program_with_ir_report(
-        context.llm.as_ref(),
-        context,
-        renderer,
-        program,
-        ir,
-        tuning,
-        TraceOrigin::Runtime,
-    )
-    .await?;
-    let output = outcome.output;
-
-    if !output.should_retain {
-        tracing::info!(
-            "runtime retain preprocessing skipped document_id={} reason={}",
-            document_id,
-            if output.reason.trim().is_empty() {
-                "<none>"
-            } else {
-                output.reason.trim()
-            }
-        );
-        return Ok(None);
-    }
-
-    let tags = merge_tags(existing_tags, output.tags.clone());
-    let split_items = build_preprocessed_split_items(&job, &output, &tags);
-    if !split_items.is_empty() {
-        return Ok(Some(HindsightRetainJob {
-            items: split_items,
-            document_id: job.document_id,
-        }));
-    }
-
-    let digest = build_preprocessed_retain_digest(&output);
-    let content =
-        truncate_text_to_token_budget(&digest, HINDSIGHT_RETAIN_PREPROCESS_OUTPUT_MAX_TOKENS);
-    if content.trim().is_empty() {
-        tracing::warn!(
-            "runtime retain preprocessing produced empty digest; falling back to raw retain document_id={}",
-            document_id
-        );
-        return Ok(Some(job));
-    }
-
-    Ok(Some(HindsightRetainJob {
-        items: vec![HindsightRetainItem {
-            content,
-            timestamp: job.items.first().and_then(|item| item.timestamp.clone()),
-            context: Some("runtime retain digest".to_string()),
-            metadata: job.items.first().and_then(|item| item.metadata.clone()),
-            document_id: job
-                .items
-                .first()
-                .and_then(|item| item.document_id.clone())
-                .or_else(|| job.document_id.clone()),
-            tags: Some(tags),
-        }],
-        document_id: job.document_id,
-    }))
-}
-
-fn render_retain_job_source(job: &HindsightRetainJob) -> String {
-    job.items
-        .iter()
-        .map(|item| item.content.trim())
-        .filter(|content| !content.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n")
-}
-
-fn extract_retain_focus(content: &str) -> Option<String> {
-    content
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("focus: ")
-                .map(|value| value.trim().to_string())
-        })
-        .filter(|value| !value.is_empty())
-}
-
-fn collect_retain_job_tags(job: &HindsightRetainJob) -> Vec<String> {
-    let mut tags = Vec::new();
-    for item in &job.items {
-        if let Some(item_tags) = &item.tags {
-            tags.extend(item_tags.iter().cloned());
-        }
-    }
-    tags
-}
-
-fn merge_tags(existing: Vec<String>, extra: Vec<String>) -> Vec<String> {
-    let mut merged = Vec::new();
-    for tag in existing.into_iter().chain(extra) {
-        let normalized = tag.trim();
-        if normalized.is_empty() || merged.iter().any(|current| current == normalized) {
-            continue;
-        }
-        merged.push(normalized.to_string());
-    }
-    merged
-}
-
-fn build_preprocessed_split_items(
-    job: &HindsightRetainJob,
-    output: &RuntimeRetainPreprocessorOutput,
-    shared_tags: &[String],
-) -> Vec<HindsightRetainItem> {
-    output
-        .split_items
-        .iter()
-        .filter_map(|item| {
-            let mut content = String::new();
-            if !item.title.trim().is_empty() {
-                content.push_str("topic: ");
-                content.push_str(item.title.trim());
-                content.push('\n');
-            }
-            content.push_str(item.content.trim());
-            let content = truncate_text_to_token_budget(
-                &content,
-                HINDSIGHT_RETAIN_PREPROCESS_OUTPUT_MAX_TOKENS,
-            );
-            if content.trim().is_empty() {
-                return None;
-            }
-            let tags = merge_tags(shared_tags.to_vec(), item.tags.clone());
-            let base_document_id = job
-                .items
-                .first()
-                .and_then(|source| source.document_id.clone())
-                .or_else(|| job.document_id.clone())
-                .unwrap_or_else(|| "runtime-retain".to_string());
-            Some(HindsightRetainItem {
-                content,
-                timestamp: job
-                    .items
-                    .first()
-                    .and_then(|source| source.timestamp.clone()),
-                context: Some(if item.context.trim().is_empty() {
-                    "runtime retain digest split".to_string()
-                } else {
-                    item.context.trim().to_string()
-                }),
-                metadata: job.items.first().and_then(|source| source.metadata.clone()),
-                document_id: Some(format!(
-                    "{}:part:{}",
-                    base_document_id,
-                    item.title
-                        .trim()
-                        .replace(char::is_whitespace, "-")
-                        .to_ascii_lowercase()
-                )),
-                tags: Some(tags),
-            })
-        })
-        .take(HINDSIGHT_RETAIN_PREPROCESS_MAX_SPLIT_ITEMS)
-        .collect()
-}
-
-fn build_preprocessed_retain_digest(output: &RuntimeRetainPreprocessorOutput) -> String {
-    let mut lines = Vec::new();
-    if !output.summary.trim().is_empty() {
-        lines.push(format!("summary: {}", output.summary.trim()));
-    }
-    append_digest_section(&mut lines, "facts", &output.facts);
-    append_digest_section(&mut lines, "preferences", &output.preferences);
-    append_digest_section(&mut lines, "failures", &output.failures);
-    append_digest_section(&mut lines, "lessons", &output.lessons);
-    if !output.reason.trim().is_empty() {
-        lines.push(format!("retain_reason: {}", output.reason.trim()));
-    }
-    lines.join("\n")
-}
-
-fn append_digest_section(lines: &mut Vec<String>, title: &str, items: &[String]) {
-    let entries = items
-        .iter()
-        .map(|item| item.trim())
-        .filter(|item| !item.is_empty())
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        return;
-    }
-    lines.push(format!("{title}:"));
-    lines.extend(entries.into_iter().map(|item| format!("- {item}")));
 }
 
 async fn record_runtime_review_turn(
@@ -3673,438 +3375,3 @@ async fn execute_apply_patch_tool(
         ),
     ))
 }
-
-fn sync_dashboard_state(
-    context: &Context,
-    tx: &tokio::sync::watch::Sender<DashboardState>,
-    sleep_status: &SleepDashboardStatus,
-    last_cycle_elapsed_ms: Option<u128>,
-) {
-    tx.send_modify(|state| {
-        let app_renders = context.apps.state_renders();
-        state.focused_app = context.apps.focused();
-        state.status_output = render_status_command_output_for_dashboard(context, &app_renders);
-        state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);
-        state.inspect_telegram_output = render_telegram_status_for_dashboard(context);
-        state.system_prompt_output = render_system_prompt_output_for_dashboard(context);
-        state.app_status_outputs = render_app_status_outputs_for_dashboard(context);
-        state.activity_cells = render_activity_for_dashboard(context);
-        state.last_cycle_elapsed_ms = last_cycle_elapsed_ms;
-        state.footer_context =
-            render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
-    });
-}
-
-fn render_dashboard_footer_context(
-    context: &Context,
-    estimated_input_tokens: Option<usize>,
-) -> String {
-    let model = context
-        .llm
-        .model_name()
-        .unwrap_or_else(|| context.config.main_model.model_name.clone());
-    let focused_app = context
-        .apps
-        .focused()
-        .map(|app| app.to_string())
-        .unwrap_or_else(|| "none".to_string());
-    let effective_window = context
-        .config
-        .main_model
-        .effective_context_window_tokens()
-        .max(1);
-    let Some(info) = context.llm.token_usage_info() else {
-        return format!(
-            "{}",
-            render_footer_context_with_usage(
-                &model,
-                estimated_input_tokens,
-                effective_window,
-                &focused_app
-            )
-        );
-    };
-    let used = usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
-    let footer_usage = if used > 0 {
-        Some((used, false))
-    } else {
-        estimated_input_tokens.map(|value| (value, true))
-    };
-    match footer_usage {
-        Some((used, estimated)) => format!(
-            "{model} · {}{}/{} used · {}",
-            if estimated { "~" } else { "" },
-            format_compact_tokens(used),
-            format_compact_tokens(effective_window),
-            focused_app
-        ),
-        None => format!(
-            "{model} · {} window · {}",
-            format_compact_tokens(effective_window),
-            focused_app
-        ),
-    }
-}
-
-fn render_system_prompt_output_for_dashboard(context: &Context) -> String {
-    crate::reasoning::prompt_renderer::DashboardPromptRenderer::render_document(
-        &context.runtime_system_prompt_doc(),
-        "Runtime System Prompt",
-    )
-}
-
-fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String, String)> {
-    let focused = context.apps.focused();
-    context
-        .apps
-        .state_renders()
-        .into_iter()
-        .map(|(app_id, state)| {
-            let usage = context.apps.usage(&app_id).unwrap_or(crate::app::AppUsage {
-                description: "No usage available.".to_string(),
-                when_to_focus: Vec::new(),
-                body_markdown: None,
-            });
-            let how_to_use = context
-                .apps
-                .how_to_use(&app_id)
-                .unwrap_or(crate::app::AppHowToUse {
-                    lines: Vec::new(),
-                    body_markdown: None,
-                });
-            let mut lines = Vec::new();
-            let key = app_id.to_string().to_ascii_lowercase();
-            lines.push(format!("App Status: {}", state.title));
-            lines.push(String::new());
-            lines.push("[structured_state]".to_string());
-            lines.push(format!("app_id={key}"));
-            lines.push(format!("title={}", state.title));
-            lines.extend(state.lines.iter().cloned());
-            lines.push(String::new());
-            lines.push("[usage]".to_string());
-            lines.push(crate::reasoning::prompts::build_app_usage_prompt(
-                app_id.clone(),
-                &usage,
-            ));
-            lines.push(String::new());
-            lines.push("[how_to_use]".to_string());
-            if focused.as_ref() == Some(&app_id) {
-                lines.push(crate::reasoning::prompts::build_app_how_to_use_prompt(
-                    app_id.clone(),
-                    &how_to_use,
-                ));
-            } else {
-                lines.push(crate::reasoning::prompts::build_app_pre_focus_note_prompt(
-                    app_id.clone(),
-                    &state,
-                ));
-            }
-            (key, lines.join("\n"))
-        })
-        .collect()
-}
-
-fn render_footer_context_with_usage(
-    model: &str,
-    estimated_input_tokens: Option<usize>,
-    effective_window: usize,
-    focused_app: &str,
-) -> String {
-    match estimated_input_tokens {
-        Some(used) => format!(
-            "{model} · ~{}/{} used · {}",
-            format_compact_tokens(used),
-            format_compact_tokens(effective_window),
-            focused_app
-        ),
-        None => format!(
-            "{model} · {} window · {}",
-            format_compact_tokens(effective_window),
-            focused_app
-        ),
-    }
-}
-
-fn format_compact_tokens(tokens: usize) -> String {
-    if tokens >= 1_000_000 {
-        let major = tokens / 1_000_000;
-        let minor = (tokens % 1_000_000) / 100_000;
-        if minor == 0 {
-            format!("{major}m")
-        } else {
-            format!("{major}.{minor}m")
-        }
-    } else if tokens >= 1_000 {
-        let major = tokens / 1_000;
-        let minor = (tokens % 1_000) / 100;
-        if minor == 0 {
-            format!("{major}k")
-        } else {
-            format!("{major}.{minor}k")
-        }
-    } else {
-        tokens.to_string()
-    }
-}
-
-async fn refresh_sleep_backlogs(sleep_status: &mut SleepDashboardStatus) {
-    if let Ok(backlog) = unread_runtime_trace_count().await {
-        sleep_status.unread_trace_backlog = backlog;
-    }
-    if let Ok(backlog) = unread_runtime_review_count().await {
-        sleep_status.unread_runtime_review_backlog = backlog;
-    }
-}
-
-fn render_sleep_status_output_for_dashboard(
-    context: &Context,
-    sleep_status: &SleepDashboardStatus,
-) -> String {
-    let mut sections = Vec::new();
-    let state = if sleep_status.running {
-        "running"
-    } else {
-        "idle"
-    };
-    let mut overview_lines = vec![format!("State: {state}")];
-    if let Some(trigger) = sleep_status.current_trigger {
-        overview_lines.push(format!("Trigger: {trigger}"));
-    }
-    if let Some(last_result) = sleep_status.last_result.as_deref() {
-        overview_lines.push(format!("Last result: {last_result}"));
-    }
-    sections.push(format!("Overview\n{}", overview_lines.join("\n")));
-
-    let totals_lines = vec![
-        format!("• Total runs: {}", sleep_status.total_runs),
-        format!(
-            "• Total consumed trace events: {}",
-            sleep_status.total_consumed_trace_events
-        ),
-        format!(
-            "• Total consumed runtime reviews: {}",
-            sleep_status.total_consumed_runtime_reviews
-        ),
-        format!(
-            "• Total runtime demos: {}",
-            sleep_status.total_runtime_demos
-        ),
-        format!("• Total turn demos: {}", sleep_status.total_turn_demos),
-        format!(
-            "• Total runtime demo evaluations: {}",
-            sleep_status.total_runtime_demo_evaluations
-        ),
-        format!(
-            "• Total turn demo evaluations: {}",
-            sleep_status.total_turn_demo_evaluations
-        ),
-        format!(
-            "• Total runtime demo passes: {}",
-            sleep_status.total_runtime_demo_passed
-        ),
-        format!(
-            "• Total runtime demo regressions: {}",
-            sleep_status.total_runtime_demo_regressions
-        ),
-        format!(
-            "• Total prompt candidates: {}",
-            sleep_status.total_runtime_prompt_candidates
-        ),
-        format!(
-            "• Total prompt accepts: {}",
-            sleep_status.total_runtime_prompt_accepts
-        ),
-        format!(
-            "• Total prompt rollbacks: {}",
-            sleep_status.total_runtime_prompt_rollbacks
-        ),
-    ];
-    sections.push(format!("Totals\n{}", totals_lines.join("\n")));
-
-    let mut trigger_lines = vec![
-        format!(
-            "• Force backlog threshold: {} traces",
-            FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD
-        ),
-        format!(
-            "• Current trace backlog: {}",
-            sleep_status.unread_trace_backlog
-        ),
-        format!(
-            "• Current runtime review backlog: {}",
-            sleep_status.unread_runtime_review_backlog
-        ),
-        format!(
-            "• Auto sleep after idle: {}",
-            format_duration(AUTO_SLEEP_IDLE_THRESHOLD)
-        ),
-        format!(
-            "• Minimum idle sleep interval: {}",
-            format_duration(AUTO_SLEEP_MIN_INTERVAL)
-        ),
-    ];
-    match context.idle_since {
-        Some(idle_since) => trigger_lines.push(format!(
-            "• Currently idle for {}",
-            format_duration(idle_since.elapsed())
-        )),
-        None => trigger_lines.push("• Currently not idle".to_string()),
-    }
-    if let Some(last_idle_sleep_at) = context.last_idle_sleep_at {
-        trigger_lines.push(format!(
-            "• Last idle sleep: {} ago",
-            format_duration(last_idle_sleep_at.elapsed())
-        ));
-    }
-    sections.push(format!("Triggers\n{}", trigger_lines.join("\n")));
-
-    sections.join("\n\n")
-}
-
-fn format_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs();
-    if seconds >= 3600 {
-        let hours = seconds / 3600;
-        let minutes = (seconds % 3600) / 60;
-        if minutes == 0 {
-            format!("{hours}h")
-        } else {
-            format!("{hours}h {minutes}m")
-        }
-    } else if seconds >= 60 {
-        let minutes = seconds / 60;
-        let rem = seconds % 60;
-        if rem == 0 {
-            format!("{minutes}m")
-        } else {
-            format!("{minutes}m {rem}s")
-        }
-    } else {
-        format!("{seconds}s")
-    }
-}
-
-fn render_status_command_output_for_dashboard(
-    context: &Context,
-    _: &[(AppId, crate::app::AppStateRender)],
-) -> String {
-    let mut sections = Vec::new();
-
-    let focused = context
-        .apps
-        .focused()
-        .map(|app| app.to_string())
-        .unwrap_or_else(|| "none".to_string());
-    let active_plans = context.plan.active_steps().count();
-    let active_events = context.pending_work.pending_count();
-    let runtime_turn = if context.active_runtime_turn {
-        context
-            .active_runtime_phase
-            .map(|phase| format!("running ({})", phase.label()))
-            .unwrap_or_else(|| "running".to_string())
-    } else {
-        "idle".to_string()
-    };
-    sections.push(format!(
-        "Overview\nRuntime turn: {runtime_turn}\nFocused app: {focused}\nPlans: {active_plans}\nEvents: {active_events}"
-    ));
-
-    let usage_lines = render_status_usage_lines(context);
-    sections.push(format!("Model usage\n{}", usage_lines.join("\n")));
-
-    let plan_lines = render_status_plan_lines(context);
-    sections.push(format!("Plan\n{}", plan_lines.join("\n")));
-
-    sections.join("\n\n")
-}
-
-fn render_status_usage_lines(context: &Context) -> Vec<String> {
-    let mut lines = Vec::new();
-    for (label, llm) in [("main", &context.llm), ("judge", &context.judge_llm)] {
-        let Some(info) = llm.token_usage_info() else {
-            continue;
-        };
-        if info.total_token_usage.is_zero() {
-            continue;
-        }
-        let model = llm.model_name().unwrap_or_else(|| "<unknown>".to_string());
-        let context_window = info
-            .model_context_window
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "?".to_string());
-        lines.push(format!(
-            "• {label}  model={model} total={} input={} output={} cached={} reasoning={} window={context_window}",
-            info.total_token_usage.total_tokens,
-            info.total_token_usage.input_tokens,
-            info.total_token_usage.output_tokens,
-            info.total_token_usage.cached_input_tokens,
-            info.total_token_usage.reasoning_output_tokens,
-        ));
-        lines.push(format!(
-            "  last={} input={} output={}",
-            info.last_token_usage.total_tokens,
-            info.last_token_usage.input_tokens,
-            info.last_token_usage.output_tokens,
-        ));
-    }
-    if lines.is_empty() {
-        vec!["No token usage recorded yet.".to_string()]
-    } else {
-        lines
-    }
-}
-
-fn render_status_plan_lines(context: &Context) -> Vec<String> {
-    let steps = context.plan.steps();
-    if steps.is_empty() {
-        return vec!["No active plan items.".to_string()];
-    }
-    steps
-        .iter()
-        .take(6)
-        .map(|step| format!("• {}  [{}]", step.step, step.status))
-        .collect()
-}
-
-fn render_telegram_status_for_dashboard(context: &Context) -> String {
-    let chats = context.telegram.chat_summaries_view();
-    let queued_outbound = chats
-        .iter()
-        .map(|chat| chat.pending_outbound_count)
-        .sum::<usize>();
-
-    let mut lines = vec![
-        "Telegram".to_string(),
-        "Role: transport / adapter".to_string(),
-        format!("Known chats: {}", chats.len()),
-        format!("Queued outbound: {queued_outbound}"),
-    ];
-
-    if chats.is_empty() {
-        lines.push(String::new());
-        lines.push("No chats.".to_string());
-        return lines.join("\n");
-    }
-
-    lines.push(String::new());
-    lines.push("Chats".to_string());
-    lines.extend(chats.iter().take(8).map(|chat| {
-        let mut flags = Vec::new();
-        if chat.pending_outbound_count > 0 {
-            flags.push(format!("{} queued", chat.pending_outbound_count));
-        }
-        let suffix = if flags.is_empty() {
-            String::new()
-        } else {
-            format!("  [{}]", flags.join(", "))
-        };
-        format!("• {} ({}){}", chat.title, chat.chat_id, suffix)
-    }));
-
-    lines.join("\n")
-}
-
-fn render_activity_for_dashboard(context: &Context) -> Vec<crate::dashboard::ActivityCell> {
-    render_activity_from_messages(context.memory.runtime_conversation_messages())
-}
-
