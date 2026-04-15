@@ -25,12 +25,9 @@ mod snapshot;
 mod system_info;
 mod telegram_acl;
 mod telegram_transport;
-mod telegram_transport_state;
 mod terminal_app;
-mod terminal_process;
 mod tool_ui;
 mod workspace_app;
-mod workspace_paths;
 
 use std::{
     collections::HashMap,
@@ -121,14 +118,14 @@ use crate::{
     snapshot::Snapshot,
     telegram_acl::TelegramAclHandle,
     telegram_transport::{TelegramLiveDraftClient, TelegramTransport},
-    telegram_transport_state::TelegramTransportState,
+    telegram_transport::state::TelegramTransportState,
     terminal_app::TerminalApp,
     tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
     workspace_app::{
         WorkspaceAppInvalidation, WorkspaceAppRegistry, bootstrap_workspace_apps,
         start_workspace_app_watcher,
     },
-    workspace_paths::{resolve_runtime_workspace_dir, workspace_apps_dir, workspace_skills_dir},
+    workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir, workspace_skills_dir},
     dashboard::render::{
         sync_dashboard_state, SleepDashboardStatus,
         AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL,
@@ -972,7 +969,7 @@ pub(crate) async fn build_eval_context_with_compiled(
 }
 
 fn bootstrap_telegram_transport_state_from_acl(
-    telegram_handle: &crate::telegram_transport_state::TelegramTransportStateHandle,
+    telegram_handle: &crate::telegram_transport::state::TelegramTransportStateHandle,
     telegram_acl: &TelegramAclHandle,
 ) {
     for chat in telegram_acl.approved_chats() {

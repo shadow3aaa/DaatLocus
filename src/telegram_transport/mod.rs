@@ -1,3 +1,5 @@
+pub mod state;
+
 use std::time::Duration;
 
 use miette::{Result, bail, miette};
@@ -11,8 +13,9 @@ use crate::{
     events::{EventStatus, EventStore, TelegramIncomingEvent},
     pending_work::{PendingWork, PendingWorkQueue},
     telegram_acl::{AccessDecision, TelegramAclHandle},
-    telegram_transport_state::TelegramTransportStateHandle,
 };
+use crate::telegram_transport::state::TelegramTransportStateHandle;
+
 
 pub struct TelegramTransport {
     client: Client,

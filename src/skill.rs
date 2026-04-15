@@ -11,7 +11,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::workspace_paths::workspace_skills_dir;
+use crate::workspace_app::paths::workspace_skills_dir;
 
 const BUNDLED_SKILLS_DIR_NAME: &str = "skills";
 

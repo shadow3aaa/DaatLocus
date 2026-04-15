@@ -28,7 +28,7 @@ use crate::{
     sandbox::RuntimeSandboxPolicy,
     skill::{GlobalSkillRegistry, SkillContent},
     snapshot::Snapshot,
-    telegram_transport_state::TelegramTransportStateHandle,
+    telegram_transport::state::TelegramTransportStateHandle,
     workspace_app::WorkspaceAppRegistry,
 };
 

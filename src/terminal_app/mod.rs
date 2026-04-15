@@ -1,8 +1,10 @@
+pub mod process;
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
 };
 
+use crate::terminal_app::process::TerminalProcess;
 use async_trait::async_trait;
 use miette::{Result, bail, miette};
 use serde::{Deserialize, Serialize};
@@ -10,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     app::{App, AppHowToUse, AppId, AppStateRender, AppToolScope, AppUsage},
     sandbox::RuntimeSandboxPolicy,
-    terminal_process::TerminalProcess,
 };
 
 const TERMINAL_USAGE_PURPOSE: &str = "Terminal 是本地命令执行与持续进程交互界面。";

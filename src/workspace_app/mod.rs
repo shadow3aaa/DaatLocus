@@ -1,3 +1,4 @@
+pub mod paths;
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet},
@@ -5,6 +6,7 @@ use std::{
     path::{Component, Path, PathBuf},
     time::Duration,
 };
+use crate::workspace_app::paths::workspace_apps_dir;
 
 use async_trait::async_trait;
 use miette::{Context as _, Result, miette};
@@ -24,7 +26,7 @@ use crate::{
     daat_locus_paths::daat_locus_paths_sync,
     schema_utils::normalize_openai_json_schema,
     skill::{SkillContent, SkillDoc, SkillSummary, load_skills_from_dir},
-    workspace_paths::workspace_apps_dir,
+
 };
 
 pub struct WorkspaceAppBootstrap {
