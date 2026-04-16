@@ -31,6 +31,8 @@ docker run --rm -it -p 8888:8888 -p 9999:9999 `
 [main_model]
 request_timeout_secs = 300
 stream_idle_timeout_secs = 45
+thinking_budget = "medium" # 可选；仅对支持“思考预算/effort 等级”的模型生效
+rpm = 30 # 可选；本地每分钟请求上限，避免按次数限流的 provider 上多打无效请求
 
 [hindsight]
 base_url = "http://localhost:8888"
@@ -41,6 +43,10 @@ request_timeout_secs = 180 # retain 可能较慢，建议至少 3 分钟
 ```
 
 `main_model.request_timeout_secs` 是单次 runtime turn 请求的总超时；`main_model.stream_idle_timeout_secs` 是流式响应连续无新 chunk 的空闲超时。两者都会触发日志和重试，避免 UI 长时间停在“runtime turn 正在运行”。
+
+`main_model.thinking_budget` 是可选的思考预算等级，例如 `low` / `medium` / `high`。Daat Locus 会在请求体里按常见兼容格式注入；如果当前 provider 明确拒绝该参数，会自动回退为不带思考预算继续请求，不会把整条链路打断。
+
+`main_model.rpm` 是本地 requests-per-minute 限制。启用后，Daat Locus 会在每次发 HTTP 请求前先做节流，避免对按次数限流的 provider 反复打出必然失败的请求。
 
 Hindsight 的 bank contract 现在完全内置在代码里，会自动 bootstrap，包括：
 

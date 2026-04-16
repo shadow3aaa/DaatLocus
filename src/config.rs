@@ -52,6 +52,8 @@ pub struct MainModelConfig {
     pub model_name: String,
     pub api_key: String,
     pub temperature: f64,
+    pub thinking_budget: Option<String>,
+    pub rpm: Option<u32>,
     pub request_timeout_secs: u64,
     pub stream_idle_timeout_secs: u64,
     pub context_window_tokens: usize,
@@ -69,6 +71,8 @@ impl Default for MainModelConfig {
             model_name: "gpt-4.1".to_string(),
             api_key: "your-api-key".to_string(),
             temperature: 1.0,
+            thinking_budget: None,
+            rpm: None,
             request_timeout_secs: 300,
             stream_idle_timeout_secs: 45,
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -81,6 +85,21 @@ impl Default for MainModelConfig {
 }
 
 impl MainModelConfig {
+    pub fn thinking_budget(&self) -> Option<String> {
+        let budget = self.thinking_budget.as_deref()?.trim();
+        if budget.is_empty() {
+            None
+        } else {
+            Some(budget.to_string())
+        }
+    }
+
+    pub fn rpm(&self) -> Option<usize> {
+        self.rpm
+            .and_then(|rpm| usize::try_from(rpm).ok())
+            .filter(|rpm| *rpm > 0)
+    }
+
     pub fn request_timeout_secs(&self) -> u64 {
         self.request_timeout_secs.max(1)
     }
@@ -180,6 +199,8 @@ impl JudgeConfig {
                 self.api_key.clone()
             },
             temperature: self.temperature,
+            thinking_budget: main_model.thinking_budget.clone(),
+            rpm: main_model.rpm,
             request_timeout_secs: main_model.request_timeout_secs,
             stream_idle_timeout_secs: main_model.stream_idle_timeout_secs,
             context_window_tokens: main_model.context_window_tokens,
