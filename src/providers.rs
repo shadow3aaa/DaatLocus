@@ -1,15 +1,16 @@
 //! 本模块实现实际的llm api调用
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     error::Error as _,
-    sync::Mutex,
+    sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use miette::{Result, miette};
+use parking_lot::Mutex as ParkingLotMutex;
 use serde_json::json;
 use tracing::warn;
 
@@ -35,11 +36,14 @@ pub struct OpenAIClient {
     base_url: String,
     model: String,
     temperature: f64,
+    thinking_budget: Option<String>,
+    rpm: Option<usize>,
     stream_idle_timeout: Duration,
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
     max_completion_tokens: usize,
+    request_rate_limiter: Option<Arc<tokio::sync::Mutex<VecDeque<Instant>>>>,
     adapter_state: Mutex<ChatCompletionsAdapterState>,
     token_usage: Mutex<TokenUsageInfo>,
 }
@@ -51,17 +55,30 @@ enum PromptToolChoiceMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThinkingBudgetMode {
+    ReasoningEffortString,
+    NestedReasoningObject,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ChatCompletionsAdapterState {
     prompt_tool_choice_mode: PromptToolChoiceMode,
+    thinking_budget_mode: ThinkingBudgetMode,
 }
 
 impl Default for ChatCompletionsAdapterState {
     fn default() -> Self {
         Self {
             prompt_tool_choice_mode: PromptToolChoiceMode::NamedFunction,
+            thinking_budget_mode: ThinkingBudgetMode::ReasoningEffortString,
         }
     }
 }
+
+static REQUEST_RATE_LIMITERS: LazyLock<
+    ParkingLotMutex<HashMap<String, Arc<tokio::sync::Mutex<VecDeque<Instant>>>>>,
+> = LazyLock::new(|| ParkingLotMutex::new(HashMap::new()));
 
 trait ChatCompletionsAdapter {
     fn build_prompt_payload(
@@ -139,6 +156,8 @@ impl OpenAIClient {
         let base_url = model_config.base_url.clone();
         let model = model_config.model_name.clone();
         let temperature = model_config.temperature;
+        let thinking_budget = model_config.thinking_budget();
+        let rpm = model_config.rpm();
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
@@ -149,11 +168,14 @@ impl OpenAIClient {
             base_url,
             model,
             temperature,
+            thinking_budget,
+            rpm,
             stream_idle_timeout,
             context_window_tokens,
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
             max_completion_tokens,
+            request_rate_limiter: shared_request_rate_limiter(model_config),
             adapter_state: Mutex::new(ChatCompletionsAdapterState::default()),
             token_usage: Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
@@ -201,6 +223,54 @@ impl OpenAIClient {
         }
     }
 
+    async fn wait_for_request_slot(&self, request_context: &[String]) {
+        let Some(rpm) = self.rpm else {
+            return;
+        };
+        let Some(limiter) = &self.request_rate_limiter else {
+            return;
+        };
+
+        let mut logged_wait = false;
+        loop {
+            let wait_duration = {
+                let mut timestamps = limiter.lock().await;
+                let now = Instant::now();
+                while let Some(front) = timestamps.front().copied() {
+                    if now.duration_since(front) >= Duration::from_secs(60) {
+                        timestamps.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+
+                if timestamps.len() < rpm {
+                    timestamps.push_back(now);
+                    None
+                } else {
+                    timestamps.front().copied().map(|front| {
+                        Duration::from_secs(60).saturating_sub(now.duration_since(front))
+                    })
+                }
+            };
+
+            let Some(delay) = wait_duration else {
+                return;
+            };
+
+            if !logged_wait {
+                warn!(
+                    "llm rpm throttle waiting {} ms before next request (rpm={})\n{}",
+                    delay.as_millis(),
+                    rpm,
+                    request_context.join("\n")
+                );
+                logged_wait = true;
+            }
+            tokio::time::sleep(delay).await;
+        }
+    }
+
     async fn post_json_with_rate_limit_retry(
         &self,
         url: &str,
@@ -213,6 +283,7 @@ impl OpenAIClient {
         let mut rate_limit_attempt = 0usize;
         let mut transient_attempt = 0usize;
         loop {
+            self.wait_for_request_slot(request_context).await;
             let response = self
                 .client
                 .post(url)
@@ -353,6 +424,32 @@ impl OpenAIClient {
                 continue;
             }
 
+            if self.thinking_budget.is_some()
+                && should_retry_prompt_request_with_nested_thinking_budget(&body)
+                && adapter_state.thinking_budget_mode == ThinkingBudgetMode::ReasoningEffortString
+            {
+                adapter_state.thinking_budget_mode = ThinkingBudgetMode::NestedReasoningObject;
+                self.update_adapter_state(adapter_state);
+                warn!(
+                    "llm provider rejected reasoning_effort; retrying prompt request with reasoning.effort\n{}",
+                    request_context.join("\n")
+                );
+                continue;
+            }
+
+            if self.thinking_budget.is_some()
+                && should_retry_request_without_thinking_budget(&body)
+                && adapter_state.thinking_budget_mode != ThinkingBudgetMode::Unsupported
+            {
+                adapter_state.thinking_budget_mode = ThinkingBudgetMode::Unsupported;
+                self.update_adapter_state(adapter_state);
+                warn!(
+                    "llm provider rejected thinking budget parameter; retrying prompt request without it\n{}",
+                    request_context.join("\n")
+                );
+                continue;
+            }
+
             return Err(miette!(
                 "llm api returned HTTP {}: {}",
                 status,
@@ -429,21 +526,26 @@ impl OpenAIClient {
             .into());
         }
         let request_context = summarize_agent_turn_request(&request, Some(&budget));
-        let payload = self
-            .current_adapter()
-            .build_agent_turn_payload(self, request, true);
-        let response = self
-            .post_json_with_rate_limit_retry(&url, &payload, &request_context)
-            .await?;
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
+        let mut adapter_state = self.adapter_state_guard();
+        let (response, content_type) = loop {
+            let payload =
+                self.current_adapter()
+                    .build_agent_turn_payload(self, request.clone(), true);
+            let response = self
+                .post_json_with_rate_limit_retry(&url, &payload, &request_context)
+                .await?;
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
 
-        if !status.is_success() {
+            if status.is_success() {
+                break (response, content_type);
+            }
+
             let body = response
                 .text()
                 .await
@@ -460,12 +562,39 @@ impl OpenAIClient {
                 )
                 .into());
             }
+
+            if self.thinking_budget.is_some()
+                && should_retry_prompt_request_with_nested_thinking_budget(&body)
+                && adapter_state.thinking_budget_mode == ThinkingBudgetMode::ReasoningEffortString
+            {
+                adapter_state.thinking_budget_mode = ThinkingBudgetMode::NestedReasoningObject;
+                self.update_adapter_state(adapter_state);
+                warn!(
+                    "llm provider rejected reasoning_effort; retrying agent turn with reasoning.effort\n{}",
+                    request_context.join("\n")
+                );
+                continue;
+            }
+
+            if self.thinking_budget.is_some()
+                && should_retry_request_without_thinking_budget(&body)
+                && adapter_state.thinking_budget_mode != ThinkingBudgetMode::Unsupported
+            {
+                adapter_state.thinking_budget_mode = ThinkingBudgetMode::Unsupported;
+                self.update_adapter_state(adapter_state);
+                warn!(
+                    "llm provider rejected thinking budget parameter; retrying agent turn without it\n{}",
+                    request_context.join("\n")
+                );
+                continue;
+            }
+
             return Err(miette!(
                 "llm api returned HTTP {}: {}",
                 status,
                 truncate_for_error(&body)
             ));
-        }
+        };
 
         if !content_type.contains("text/event-stream") {
             let body = response
@@ -638,7 +767,7 @@ impl ChatCompletionsAdapter for StandardChatCompletionsAdapter {
         output_schema: serde_json::Value,
     ) -> serde_json::Value {
         let messages = prompt_request_to_openai_messages(request.clone(), false);
-        json!({
+        let mut payload = json!({
             "model": client.model,
             "messages": messages,
             "tools": [
@@ -658,7 +787,13 @@ impl ChatCompletionsAdapter for StandardChatCompletionsAdapter {
             },
             "temperature": client.temperature,
             "max_tokens": client.max_completion_tokens,
-        })
+        });
+        apply_optional_thinking_budget(
+            &mut payload,
+            client.thinking_budget.as_deref(),
+            client.adapter_state_guard().thinking_budget_mode,
+        );
+        payload
     }
 
     fn build_agent_turn_payload(
@@ -688,7 +823,7 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
             }
             PromptToolChoiceMode::RequiredString => json!("required"),
         };
-        json!({
+        let mut payload = json!({
             "model": client.model,
             "messages": messages,
             "tools": [
@@ -705,7 +840,13 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
             "tool_choice": tool_choice,
             "temperature": client.temperature,
             "max_tokens": client.max_completion_tokens,
-        })
+        });
+        apply_optional_thinking_budget(
+            &mut payload,
+            client.thinking_budget.as_deref(),
+            self.state.thinking_budget_mode,
+        );
+        payload
     }
 
     fn build_agent_turn_payload(
@@ -755,6 +896,20 @@ fn should_retry_prompt_request_with_string_tool_choice(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     body.contains("unknown parameter: 'tool_choice.function'")
         || body.contains("unknown parameter: \"tool_choice.function\"")
+}
+
+fn should_retry_prompt_request_with_nested_thinking_budget(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("unknown parameter: 'reasoning_effort'")
+        || body.contains("unknown parameter: \"reasoning_effort\"")
+}
+
+fn should_retry_request_without_thinking_budget(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("unknown parameter: 'reasoning'")
+        || body.contains("unknown parameter: \"reasoning\"")
+        || body.contains("unknown parameter: 'reasoning.effort'")
+        || body.contains("unknown parameter: \"reasoning.effort\"")
 }
 
 fn build_agent_turn_payload_common(
@@ -807,7 +962,7 @@ fn build_agent_turn_payload_common(
             })
         })
         .collect::<Vec<_>>();
-    json!({
+    let mut payload = json!({
         "model": client.model,
         "messages": messages,
         "tools": tools,
@@ -819,7 +974,57 @@ fn build_agent_turn_payload_common(
         } else {
             serde_json::Value::Null
         },
-    })
+    });
+    apply_optional_thinking_budget(
+        &mut payload,
+        client.thinking_budget.as_deref(),
+        client.adapter_state_guard().thinking_budget_mode,
+    );
+    payload
+}
+
+fn apply_optional_thinking_budget(
+    payload: &mut serde_json::Value,
+    thinking_budget: Option<&str>,
+    mode: ThinkingBudgetMode,
+) {
+    let Some(thinking_budget) = thinking_budget else {
+        return;
+    };
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    match mode {
+        ThinkingBudgetMode::ReasoningEffortString => {
+            object.insert("reasoning_effort".to_string(), json!(thinking_budget));
+        }
+        ThinkingBudgetMode::NestedReasoningObject => {
+            object.insert(
+                "reasoning".to_string(),
+                json!({ "effort": thinking_budget }),
+            );
+        }
+        ThinkingBudgetMode::Unsupported => {}
+    }
+}
+
+fn shared_request_rate_limiter(
+    model_config: &MainModelConfig,
+) -> Option<Arc<tokio::sync::Mutex<VecDeque<Instant>>>> {
+    let rpm = model_config.rpm()?;
+    let key = format!(
+        "{}\u{1f}{}\u{1f}{}",
+        model_config.base_url.trim_end_matches('/'),
+        model_config.model_name,
+        rpm
+    );
+    let mut registry = REQUEST_RATE_LIMITERS.lock();
+    Some(
+        registry
+            .entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(VecDeque::new())))
+            .clone(),
+    )
 }
 
 fn extract_json_value_from_content(content: &str) -> Option<serde_json::Value> {
@@ -1291,6 +1496,7 @@ fn default_rate_limit_backoff(attempt: usize) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MainModelConfig;
     use crate::reasoning::runtime::{AgentToolCall, HistoryMessage};
     use serde_json::json;
 
@@ -1387,5 +1593,50 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "assistant");
         assert!(messages[0].get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn thinking_budget_is_injected_as_reasoning_effort_by_default() {
+        let mut config = MainModelConfig::default();
+        config.thinking_budget = Some("medium".to_string());
+        let client = OpenAIClient::from_model_config(&config);
+
+        let payload = build_agent_turn_payload_common(
+            &client,
+            AgentTurnRequest {
+                messages: vec![AgentMessage::user("hello")],
+                tools: vec![],
+            },
+            true,
+            false,
+        );
+
+        assert_eq!(payload["reasoning_effort"], "medium");
+    }
+
+    #[test]
+    fn thinking_budget_can_use_nested_reasoning_payload() {
+        let mut payload = json!({
+            "model": "demo",
+            "messages": [],
+        });
+        apply_optional_thinking_budget(
+            &mut payload,
+            Some("high"),
+            ThinkingBudgetMode::NestedReasoningObject,
+        );
+
+        assert_eq!(payload["reasoning"]["effort"], "high");
+        assert!(payload.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn detect_reasoning_effort_and_nested_reasoning_rejections() {
+        assert!(should_retry_prompt_request_with_nested_thinking_budget(
+            "Unknown parameter: 'reasoning_effort'."
+        ));
+        assert!(should_retry_request_without_thinking_budget(
+            "Unknown parameter: 'reasoning'."
+        ));
     }
 }
