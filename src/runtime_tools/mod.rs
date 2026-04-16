@@ -526,6 +526,22 @@ pub async fn execute_agent_tool_call(
     context: &mut Context,
     call: &AgentToolCall,
 ) -> Result<ToolExecutionResult> {
+    if requires_skill_binding(context) && context.active_skill_id.is_none() {
+        let exempt = matches!(
+            call.name.as_str(),
+            "select_skill"
+                | "create_skill"
+                | "activate_skill"
+                | "update_plan"
+                | "deep_recall"
+        );
+        if !exempt {
+            return Err(miette!(
+                "multi-step execution requires active skill; call select_skill/create_skill and activate_skill first"
+            ));
+        }
+    }
+
     let tools = build_runtime_tools(context);
     let tool = find_runtime_tool(&tools, &call.name)?;
     if !tool.is_available(context) {
@@ -534,4 +550,14 @@ pub async fn execute_agent_tool_call(
     let result = tool.execute(context, call).await?;
     Ok(result
         .ensure_model_content_with_budget(context.config.main_model.tool_output_max_tokens.max(1)))
+}
+
+fn requires_skill_binding(context: &Context) -> bool {
+    context
+        .plan
+        .steps()
+        .iter()
+        .filter(|step| !matches!(step.status, crate::plan::PlanStatus::Completed))
+        .count()
+        > 1
 }

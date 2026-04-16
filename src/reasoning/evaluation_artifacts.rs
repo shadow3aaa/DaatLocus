@@ -20,6 +20,10 @@ const RUNTIME_DEMO_EVALUATIONS_DIR: &str = "runtime_demo_evaluations";
 const TURN_DEMO_EVALUATIONS_DIR: &str = "turn_demo_evaluations";
 const RUNTIME_PROMPT_CANDIDATES_DIR: &str = "runtime_prompt_candidates";
 const RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR: &str = "runtime_prompt_evolution_reports";
+const SKILL_PATCHES_DIR: &str = "skill_patches";
+const SKILL_MERGES_DIR: &str = "skill_merges";
+const SKILL_SPLITS_DIR: &str = "skill_splits";
+const SKILL_DEPRECATIONS_DIR: &str = "skill_deprecations";
 const MAX_ARTIFACT_FILE_STEM_LEN: usize = 96;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,6 +219,60 @@ pub struct EvaluationArtifactRuntimePromptEvolutionReport {
     pub round_history: Vec<EvaluationArtifactRuntimePromptEvolutionRound>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EvaluationArtifactSkillPatch {
+    pub skill_id: String,
+    pub title: String,
+    pub rationale: String,
+    #[serde(default)]
+    pub workflow_step_additions: Vec<String>,
+    #[serde(default)]
+    pub failure_recovery_additions: Vec<String>,
+    #[serde(default)]
+    pub source_review_ids: Vec<String>,
+    pub confidence: f64,
+    pub applied: bool,
+    pub rolled_back: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EvaluationArtifactSkillMerge {
+    pub target_skill_id: String,
+    #[serde(default)]
+    pub source_skill_ids: Vec<String>,
+    pub rationale: String,
+    pub confidence: f64,
+    pub applied: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvaluationArtifactSkillSplitDraft {
+    pub name: String,
+    #[serde(default)]
+    pub workflow_steps: Vec<String>,
+    #[serde(default)]
+    pub done_criteria: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EvaluationArtifactSkillSplit {
+    pub source_skill_id: String,
+    pub rationale: String,
+    #[serde(default)]
+    pub drafts: Vec<EvaluationArtifactSkillSplitDraft>,
+    pub confidence: f64,
+    pub applied: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EvaluationArtifactSkillDeprecate {
+    pub skill_id: String,
+    pub rationale: String,
+    pub replacement_skill_id: Option<String>,
+    pub confidence: f64,
+    pub applied: bool,
+}
+
 pub struct EvaluationArtifactsStore {
     root: PathBuf,
 }
@@ -241,6 +299,10 @@ impl EvaluationArtifactsStore {
         ensure_dir(&root.join(TURN_DEMO_EVALUATIONS_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_CANDIDATES_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR)).await?;
+        ensure_dir(&root.join(SKILL_PATCHES_DIR)).await?;
+        ensure_dir(&root.join(SKILL_MERGES_DIR)).await?;
+        ensure_dir(&root.join(SKILL_SPLITS_DIR)).await?;
+        ensure_dir(&root.join(SKILL_DEPRECATIONS_DIR)).await?;
         Ok(Self { root })
     }
 
@@ -407,6 +469,74 @@ impl EvaluationArtifactsStore {
             artifacts,
         )
         .await
+    }
+
+    pub async fn replace_skill_patches(
+        &self,
+        artifacts: &[EvaluationArtifactSkillPatch],
+    ) -> Result<Vec<PathBuf>> {
+        let artifacts = artifacts
+            .iter()
+            .cloned()
+            .map(|artifact| {
+                (
+                    format!("{}-{}", artifact.skill_id, slugify(&artifact.title)),
+                    artifact,
+                )
+            })
+            .collect::<Vec<_>>();
+        replace_artifacts(&self.root.join(SKILL_PATCHES_DIR), artifacts).await
+    }
+
+    pub async fn replace_skill_merges(
+        &self,
+        artifacts: &[EvaluationArtifactSkillMerge],
+    ) -> Result<Vec<PathBuf>> {
+        let artifacts = artifacts
+            .iter()
+            .cloned()
+            .map(|artifact| {
+                (
+                    format!("{}-merge", artifact.target_skill_id),
+                    artifact,
+                )
+            })
+            .collect::<Vec<_>>();
+        replace_artifacts(&self.root.join(SKILL_MERGES_DIR), artifacts).await
+    }
+
+    pub async fn replace_skill_splits(
+        &self,
+        artifacts: &[EvaluationArtifactSkillSplit],
+    ) -> Result<Vec<PathBuf>> {
+        let artifacts = artifacts
+            .iter()
+            .cloned()
+            .map(|artifact| {
+                (
+                    format!("{}-split", artifact.source_skill_id),
+                    artifact,
+                )
+            })
+            .collect::<Vec<_>>();
+        replace_artifacts(&self.root.join(SKILL_SPLITS_DIR), artifacts).await
+    }
+
+    pub async fn replace_skill_deprecations(
+        &self,
+        artifacts: &[EvaluationArtifactSkillDeprecate],
+    ) -> Result<Vec<PathBuf>> {
+        let artifacts = artifacts
+            .iter()
+            .cloned()
+            .map(|artifact| {
+                (
+                    format!("{}-deprecate", artifact.skill_id),
+                    artifact,
+                )
+            })
+            .collect::<Vec<_>>();
+        replace_artifacts(&self.root.join(SKILL_DEPRECATIONS_DIR), artifacts).await
     }
 }
 

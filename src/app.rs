@@ -6,12 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    browser_app::BrowserApp,
-    sandbox::RuntimeSandboxPolicy,
-    skill::{SkillContent, SkillSummary},
-    terminal_app::TerminalApp,
-};
+use crate::{browser_app::BrowserApp, sandbox::RuntimeSandboxPolicy, terminal_app::TerminalApp};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
 #[serde(transparent)]
@@ -121,14 +116,6 @@ pub trait App: Send + Sync {
 
     fn how_to_use(&self) -> AppHowToUse;
 
-    fn skills(&self) -> Vec<SkillSummary> {
-        Vec::new()
-    }
-
-    fn read_skill(&self, _id: &str) -> Result<SkillContent> {
-        Err(miette!("unknown app skill"))
-    }
-
     fn focused_tool_scopes(&self) -> &'static [AppToolScope] {
         &[]
     }
@@ -227,27 +214,6 @@ impl AppManager {
 
     pub fn how_to_use(&self, id: &AppId) -> Option<AppHowToUse> {
         self.apps.get(id).map(|app| app.how_to_use())
-    }
-
-    pub fn focused_skills(&self) -> Vec<SkillSummary> {
-        let Some(focused) = self.focused.clone() else {
-            return Vec::new();
-        };
-        self.apps
-            .get(&focused)
-            .map(|app| app.skills())
-            .unwrap_or_default()
-    }
-
-    pub fn read_focused_skill(&self, id: &str) -> Result<Option<SkillContent>> {
-        let Some(focused) = self.focused.clone() else {
-            return Ok(None);
-        };
-        let app = self
-            .apps
-            .get(&focused)
-            .ok_or_else(|| miette!("focused app missing: {focused}"))?;
-        Ok(app.read_skill(id).ok())
     }
 
     pub fn focused_tool_scopes(&self) -> &'static [AppToolScope] {

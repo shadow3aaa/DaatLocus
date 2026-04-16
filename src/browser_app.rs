@@ -11,7 +11,6 @@ use viewpoint_core::{AriaSnapshot, Browser, BrowserContext, DocumentLoadState, P
 use crate::{
     app::{App, AppHowToUse, AppId, AppStateRender, AppToolScope, AppUsage},
     daat_locus_paths::daat_locus_paths_sync,
-    skill::{SkillContent, SkillSummary},
 };
 
 const BROWSER_USAGE_PURPOSE: &str =
@@ -34,9 +33,6 @@ const BROWSER_HOW_TO_USE_LINES: &[&str] = &[
     "如果已经查到标题、摘要或正文片段，应基于已确认内容回答并明确范围；只有在关键内容确实不可得时才收尾为失败。",
     "Browser 只使用 Daat Locus 自带的独立浏览器 runtime，不会复用用户日常浏览器 profile；如果 runtime 未安装，浏览器工具会直接报错。",
 ];
-const BROWSER_SKILL_DEEP_RESEARCH_ID: &str = "browser.deep_research";
-const BROWSER_SKILL_SOURCE_VERIFICATION_ID: &str = "browser.source_verification";
-const BROWSER_SKILL_ARTICLE_READING_ID: &str = "browser.article_reading";
 const BROWSER_TOOL_SCOPES: &[AppToolScope] = &[AppToolScope::Browser];
 const BROWSER_SNAPSHOT_MAX_DEPTH: usize = 6;
 pub struct BrowserApp {
@@ -733,61 +729,6 @@ impl App for BrowserApp {
                 .collect(),
             body_markdown: None,
         }
-    }
-
-    fn skills(&self) -> Vec<SkillSummary> {
-        vec![
-            SkillSummary {
-                id: BROWSER_SKILL_DEEP_RESEARCH_ID.to_string(),
-                name: "深度调查".to_string(),
-                when_to_use: vec![
-                    "需要跨多个页面和来源逐步查证，而不是停在单个搜索结果或单篇网页时。"
-                        .to_string(),
-                    "任务要求你综合搜索、阅读、交叉比对、逐步收敛结论时。".to_string(),
-                ],
-            },
-            SkillSummary {
-                id: BROWSER_SKILL_SOURCE_VERIFICATION_ID.to_string(),
-                name: "来源查证".to_string(),
-                when_to_use: vec![
-                    "需要确认某条说法是否真的出现在网页来源中时。".to_string(),
-                    "需要避免只凭搜索结果摘要就下结论时。".to_string(),
-                ],
-            },
-            SkillSummary {
-                id: BROWSER_SKILL_ARTICLE_READING_ID.to_string(),
-                name: "长文阅读与提炼".to_string(),
-                when_to_use: vec![
-                    "需要阅读文章、报告、博客或新闻，并从中提炼主要论点、事实和出处时。"
-                        .to_string(),
-                    "任务重点是读懂一个较长网页并做总结，而不是做跨来源交叉查证时。".to_string(),
-                ],
-            },
-        ]
-    }
-
-    fn read_skill(&self, id: &str) -> Result<SkillContent> {
-        let (title, body) = match id {
-            BROWSER_SKILL_DEEP_RESEARCH_ID => (
-                "Browser Skill: 深度调查",
-                "适用时机：当你需要跨多个网页逐步调查、交叉验证并收敛结论时。\n\n做法：\n1. 先打开一个起始页或搜索入口，但不要把第一页当成终点。\n2. 通过 `browser_snapshot` 识别关键链接、候选来源和下一步应进入的页面。\n3. 在多个页面之间建立调查链：进入来源页、阅读、返回、继续打开新候选。\n4. 只在已读过足够多的目标页、并完成必要交叉验证后再总结；不要把搜索结果摘要或单一页的站点简介当成调查结论。",
-            ),
-            BROWSER_SKILL_SOURCE_VERIFICATION_ID => (
-                "Browser Skill: 来源查证",
-                "适用时机：当用户要你确认某条事实、说法或网页内容是否成立时。\n\n做法：\n1. 先打开候选来源。\n2. 用 `browser_snapshot` 完整阅读页面语义结构，直接定位相关段落、标题、链接或控件引用。\n3. 不要只凭搜索结果摘要或零散片段下结论；要结合页面整体上下文确认信息位置。\n4. 只有在目标页上拿到足够明确的内容后，才可向用户下结论；搜索结果页摘要通常只算线索，不算最终查证。",
-            ),
-            BROWSER_SKILL_ARTICLE_READING_ID => (
-                "Browser Skill: 长文阅读与提炼",
-                "适用时机：当你需要阅读单篇文章、报告、博客或新闻并总结其内容时。\n\n做法：\n1. 先 `browser_wait`，避免在页头、导航或未稳定状态下误判内容缺失。\n2. 使用 `browser_snapshot` 阅读整页语义快照，识别标题、正文段落、引用和相关链接。\n3. 如果已经拿到标题、摘要或正文片段，应基于已确认内容总结，并明确哪些部分已经确认、哪些只是部分可见。\n4. 如果当前页仍不足以支持结论，再继续进入页内相关链接或返回上游来源；不要因为刚看到导航块就立刻失败。",
-            ),
-            _ => return Err(miette!("unknown Browser skill `{id}`")),
-        };
-
-        Ok(SkillContent {
-            id: id.to_string(),
-            title: title.to_string(),
-            body: body.to_string(),
-        })
     }
 
     fn focused_tool_scopes(&self) -> &'static [AppToolScope] {

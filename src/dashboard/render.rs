@@ -37,9 +37,17 @@ pub struct SleepDashboardStatus {
     pub total_turn_demo_evaluations: usize,
     pub total_runtime_demo_passed: usize,
     pub total_runtime_demo_regressions: usize,
-    pub total_runtime_prompt_candidates: usize,
-    pub total_runtime_prompt_rollbacks: usize,
-    pub total_runtime_prompt_accepts: usize,
+    pub total_skill_patch_candidates: usize,
+    pub total_skill_merge_candidates: usize,
+    pub total_skill_split_candidates: usize,
+    pub total_skill_deprecate_candidates: usize,
+    pub total_skill_patch_applied: usize,
+    pub total_skill_merge_applied: usize,
+    pub total_skill_deprecate_applied: usize,
+    pub total_skill_update_rollbacks: usize,
+    pub total_governance_duplicate_pairs: usize,
+    pub total_governance_low_quality_skills: usize,
+    pub total_governance_cold_skills: usize,
 }
 
 pub fn sync_dashboard_state(
@@ -275,16 +283,48 @@ pub fn render_sleep_status_output_for_dashboard(
             sleep_status.total_runtime_demo_regressions
         ),
         format!(
-            "• Total prompt candidates: {}",
-            sleep_status.total_runtime_prompt_candidates
+            "• Total skill patch candidates: {}",
+            sleep_status.total_skill_patch_candidates
         ),
         format!(
-            "• Total prompt accepts: {}",
-            sleep_status.total_runtime_prompt_accepts
+            "• Total skill merge candidates: {}",
+            sleep_status.total_skill_merge_candidates
         ),
         format!(
-            "• Total prompt rollbacks: {}",
-            sleep_status.total_runtime_prompt_rollbacks
+            "• Total skill split candidates: {}",
+            sleep_status.total_skill_split_candidates
+        ),
+        format!(
+            "• Total skill deprecate candidates: {}",
+            sleep_status.total_skill_deprecate_candidates
+        ),
+        format!(
+            "• Total skill patch applied: {}",
+            sleep_status.total_skill_patch_applied
+        ),
+        format!(
+            "• Total skill merge applied: {}",
+            sleep_status.total_skill_merge_applied
+        ),
+        format!(
+            "• Total skill deprecate applied: {}",
+            sleep_status.total_skill_deprecate_applied
+        ),
+        format!(
+            "• Total skill update rollbacks: {}",
+            sleep_status.total_skill_update_rollbacks
+        ),
+        format!(
+            "• Governance duplicate pairs: {}",
+            sleep_status.total_governance_duplicate_pairs
+        ),
+        format!(
+            "• Governance low quality skills: {}",
+            sleep_status.total_governance_low_quality_skills
+        ),
+        format!(
+            "• Governance cold skills: {}",
+            sleep_status.total_governance_cold_skills
         ),
     ];
     sections.push(format!("Totals\n{}", totals_lines.join("\n")));
@@ -365,6 +405,10 @@ pub fn render_status_command_output_for_dashboard(
         .unwrap_or_else(|| "none".to_string());
     let active_plans = context.plan.active_steps().count();
     let active_events = context.pending_work.pending_count();
+    let active_skill = context
+        .active_skill_id
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
     let runtime_turn = if context.active_runtime_turn {
         context
             .active_runtime_phase
@@ -374,7 +418,7 @@ pub fn render_status_command_output_for_dashboard(
         "idle".to_string()
     };
     sections.push(format!(
-        "Overview\nRuntime turn: {runtime_turn}\nFocused app: {focused}\nPlans: {active_plans}\nEvents: {active_events}"
+        "Overview\nRuntime turn: {runtime_turn}\nFocused app: {focused}\nActive skill: {active_skill}\nPlans: {active_plans}\nEvents: {active_events}"
     ));
 
     let usage_lines = render_status_usage_lines(context);

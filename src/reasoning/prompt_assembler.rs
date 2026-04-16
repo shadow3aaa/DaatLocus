@@ -5,13 +5,13 @@ use super::{
     prompt_parts::{
         AppSnapshotPart, AppsSystemPart, CompiledAdditionsSystemPart, EventSystemPart,
         EventsSnapshotPart, MemoriesSnapshotPart, MemoriesSystemPart, PersonaSystemPart,
-        PlanSnapshotPart, PlanSystemPart, SensorySnapshotPart, SkillsSnapshotPart,
-        SkillsSystemPart, SnapshotPart, SystemPromptPart, WorkspaceSystemPart,
+        PlanSnapshotPart, PlanSystemPart, SensorySnapshotPart, SkillSystemPart,
+        SkillsSnapshotPart, SnapshotPart, SystemPromptPart, WorkspaceSystemPart,
     },
     prompts::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
         MEMORIES_UNIT_HOW, MEMORIES_UNIT_WHAT, MEMORIES_UNIT_WHEN, PLAN_UNIT_HOW, PLAN_UNIT_WHAT,
-        PLAN_UNIT_WHEN, SKILLS_UNIT_HOW, SKILLS_UNIT_WHAT, SKILLS_UNIT_WHEN, WORKSPACE_UNIT_HOW,
+        PLAN_UNIT_WHEN, SKILL_UNIT_HOW, SKILL_UNIT_WHAT, SKILL_UNIT_WHEN, WORKSPACE_UNIT_HOW,
         WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY,
     },
     turn_compile::load_prompt_persona_spec_sync,
@@ -35,9 +35,9 @@ impl SystemPromptAssembler {
             Box::new(EventSystemPart),
             Box::new(AppsSystemPart),
             Box::new(WorkspaceSystemPart),
-            Box::new(SkillsSystemPart),
             Box::new(MemoriesSystemPart),
             Box::new(PlanSystemPart),
+            Box::new(SkillSystemPart),
             Box::new(PersonaSystemPart),
             Box::new(CompiledAdditionsSystemPart),
         ])
@@ -63,8 +63,8 @@ impl SnapshotAssembler {
             Box::new(MemoriesSnapshotPart),
             Box::new(SensorySnapshotPart),
             Box::new(PlanSnapshotPart),
-            Box::new(EventsSnapshotPart),
             Box::new(SkillsSnapshotPart),
+            Box::new(EventsSnapshotPart),
             Box::new(AppSnapshotPart),
         ])
     }
@@ -106,13 +106,6 @@ pub fn runtime_system_prompt_doc_from_additions(additions: &[String]) -> PromptD
             vec![PromptBlock::Paragraph(WORKSPACE_UNIT_HOW.to_string())],
         )),
         PromptNode::Unit(PromptUnitDoc::new(
-            "skills",
-            vec![PromptBlock::Paragraph(SKILLS_UNIT_WHAT.to_string())],
-            Vec::new(),
-            vec![PromptBlock::Paragraph(SKILLS_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(SKILLS_UNIT_HOW.to_string())],
-        )),
-        PromptNode::Unit(PromptUnitDoc::new(
             "memories",
             vec![PromptBlock::Paragraph(MEMORIES_UNIT_WHAT.to_string())],
             Vec::new(),
@@ -125,6 +118,13 @@ pub fn runtime_system_prompt_doc_from_additions(additions: &[String]) -> PromptD
             Vec::new(),
             vec![PromptBlock::Paragraph(PLAN_UNIT_WHEN.to_string())],
             vec![PromptBlock::Paragraph(PLAN_UNIT_HOW.to_string())],
+        )),
+        PromptNode::Unit(PromptUnitDoc::new(
+            "skills",
+            vec![PromptBlock::Paragraph(SKILL_UNIT_WHAT.to_string())],
+            Vec::new(),
+            vec![PromptBlock::Paragraph(SKILL_UNIT_WHEN.to_string())],
+            vec![PromptBlock::Paragraph(SKILL_UNIT_HOW.to_string())],
         )),
         PromptNode::Unit(PromptUnitDoc::new(
             "persona",
@@ -184,13 +184,6 @@ pub fn baseline_runtime_contract_doc() -> PromptDocument {
             vec![PromptBlock::Paragraph(WORKSPACE_UNIT_HOW.to_string())],
         )),
         PromptNode::Unit(PromptUnitDoc::new(
-            "skills",
-            vec![PromptBlock::Paragraph(SKILLS_UNIT_WHAT.to_string())],
-            Vec::new(),
-            vec![PromptBlock::Paragraph(SKILLS_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(SKILLS_UNIT_HOW.to_string())],
-        )),
-        PromptNode::Unit(PromptUnitDoc::new(
             "memories",
             vec![PromptBlock::Paragraph(MEMORIES_UNIT_WHAT.to_string())],
             Vec::new(),
@@ -203,6 +196,13 @@ pub fn baseline_runtime_contract_doc() -> PromptDocument {
             Vec::new(),
             vec![PromptBlock::Paragraph(PLAN_UNIT_WHEN.to_string())],
             vec![PromptBlock::Paragraph(PLAN_UNIT_HOW.to_string())],
+        )),
+        PromptNode::Unit(PromptUnitDoc::new(
+            "skills",
+            vec![PromptBlock::Paragraph(SKILL_UNIT_WHAT.to_string())],
+            Vec::new(),
+            vec![PromptBlock::Paragraph(SKILL_UNIT_WHEN.to_string())],
+            vec![PromptBlock::Paragraph(SKILL_UNIT_HOW.to_string())],
         )),
     ])
 }

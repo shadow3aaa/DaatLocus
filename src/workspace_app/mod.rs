@@ -25,8 +25,6 @@ use crate::{
     },
     daat_locus_paths::daat_locus_paths_sync,
     schema_utils::normalize_openai_json_schema,
-    skill::{SkillContent, SkillDoc, SkillSummary, load_skills_from_dir},
-
 };
 
 pub struct WorkspaceAppBootstrap {
@@ -105,7 +103,6 @@ pub struct WorkspaceApp {
     entry_source: String,
     usage_markdown: String,
     how_to_use_markdown: String,
-    skills: Vec<SkillDoc>,
     runtime_state: Mutex<WorkspaceAppRuntimeState>,
 }
 
@@ -516,7 +513,6 @@ fn workspace_app_source_digest(app_dir: &Path) -> Result<String> {
     collect_digest_file(&mut files, app_dir, app_dir.join("app.toml"))?;
     collect_digest_files_under(&mut files, app_dir, &app_dir.join("runtime"), "lua")?;
     collect_digest_files_under(&mut files, app_dir, &app_dir.join("prompt"), "md")?;
-    collect_digest_files_under(&mut files, app_dir, &app_dir.join("skills"), "md")?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
 
     let mut hasher = Sha256::new();
@@ -908,8 +904,6 @@ impl WorkspaceApp {
             .map_err(|err| miette!("failed to read prompt/usage.md for app `{id}`: {err}"))?;
         let how_to_use_markdown = fs::read_to_string(app_dir.join("prompt").join("how_to_use.md"))
             .map_err(|err| miette!("failed to read prompt/how_to_use.md for app `{id}`: {err}"))?;
-        let skills = load_skills_from_dir(&app_dir.join("skills"))
-            .wrap_err_with(|| format!("failed to load skills for app `{id}`"))?;
         let state_dir = state_root.join(id.as_str());
         let state_file = state_dir.join("state.json");
         let runtime_state = load_runtime_state(&state_file)
@@ -924,7 +918,6 @@ impl WorkspaceApp {
             entry_source,
             usage_markdown,
             how_to_use_markdown,
-            skills,
             runtime_state: Mutex::new(runtime_state),
         })
     }
@@ -1111,23 +1104,11 @@ impl WorkspaceApp {
     }
 
     fn default_render_state(&self) -> AppStateRender {
-        let mut lines = vec![
+        let lines = vec![
             "kind=workspace_app".to_string(),
             format!("entry={}", self.entry_relative_path),
             format!("source_dir={}", self.app_dir.display()),
         ];
-        if self.skills.is_empty() {
-            lines.push("skills=none".to_string());
-        } else {
-            lines.push(format!(
-                "skills={}",
-                self.skills
-                    .iter()
-                    .map(|skill| skill.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ));
-        }
         AppStateRender {
             title: self.id.to_string(),
             lines,
@@ -1213,19 +1194,6 @@ impl App for WorkspaceApp {
             lines: Vec::new(),
             body_markdown: Some(self.how_to_use_markdown.clone()),
         }
-    }
-
-    fn skills(&self) -> Vec<SkillSummary> {
-        self.skills.iter().map(SkillDoc::summary).collect()
-    }
-
-    fn read_skill(&self, id: &str) -> Result<SkillContent> {
-        let skill = self
-            .skills
-            .iter()
-            .find(|skill| skill.id == id)
-            .ok_or_else(|| miette!("unknown workspace app skill `{id}`"))?;
-        Ok(skill.content())
     }
 
     fn dynamic_tools(&self) -> Result<Vec<AppDynamicToolSpec>> {
@@ -1496,7 +1464,6 @@ mod tests {
         let app_dir = root.join("apps").join(folder_name);
         fs::create_dir_all(app_dir.join("runtime")).expect("create runtime dir");
         fs::create_dir_all(app_dir.join("prompt")).expect("create prompt dir");
-        fs::create_dir_all(app_dir.join("skills")).expect("create skills dir");
         fs::write(app_dir.join("app.toml"), "entry = \"runtime/app.lua\"\n")
             .expect("write app.toml");
         fs::write(app_dir.join("runtime").join("app.lua"), lua_source).expect("write app.lua");
@@ -1510,25 +1477,10 @@ mod tests {
             "Read the current state, then use the app-specific tools.\n",
         )
         .expect("write how_to_use.md");
-        fs::write(
-            app_dir.join("skills").join("search.md"),
-            r#"---
-name: Search
-when_to_use:
-  - Need to locate a note quickly
----
-
-## Workflow
-
-1. Narrow the note set.
-2. Confirm the target note.
-"#,
-        )
-        .expect("write search skill");
     }
 
     #[tokio::test]
-    async fn loads_workspace_app_prompts_skills_and_lua_hooks() {
+    async fn loads_workspace_app_prompts_and_lua_hooks() {
         let root = TempDir::new().expect("create temp workspace root");
         let state_root = TempDir::new().expect("create temp workspace state root");
         write_workspace_app(
@@ -1597,9 +1549,6 @@ return app
         let app = &mut bootstrap.apps[0];
         assert_eq!(app.id().to_string(), "notes");
         assert_eq!(app.usage().description, "Notes");
-        assert_eq!(app.skills().len(), 1);
-        assert_eq!(app.skills()[0].id, "search");
-        assert_eq!(app.skills()[0].name, "Search");
         assert_eq!(app.render_state().title, "Notes App");
         assert!(
             app.render_state()
@@ -1621,12 +1570,6 @@ return app
                 .lines
                 .iter()
                 .any(|line| line == "count=5")
-        );
-        assert!(
-            app.read_skill("search")
-                .expect("skill should load")
-                .body
-                .contains("Workflow")
         );
     }
 
@@ -2084,77 +2027,4 @@ return app
         assert!(message.contains("must be an integer"));
     }
 
-    #[tokio::test]
-    async fn workspace_app_rejects_skill_frontmatter_with_unknown_fields() {
-        let root = TempDir::new().expect("create temp workspace root");
-        let state_root = TempDir::new().expect("create temp workspace state root");
-        write_workspace_app(
-            root.path(),
-            "bad-skill-meta",
-            r#"local app = {}
-
-function app.render_state(ctx, state)
-  return { title = "Bad Skill Meta", lines = {} }
-end
-
-return app
-"#,
-        );
-        let app_dir = root.path().join("apps").join("bad-skill-meta");
-        fs::write(
-            app_dir.join("skills").join("search.md"),
-            r#"---
-name: Search
-unexpected: true
----
-
-## Workflow
-
-1. Search.
-"#,
-        )
-        .expect("write invalid skill");
-
-        let bootstrap = bootstrap_workspace_apps_with_state_root(root.path(), state_root.path());
-        assert_eq!(bootstrap.apps.len(), 0);
-        assert_eq!(bootstrap.errors.len(), 1);
-        assert!(bootstrap.errors[0].contains("unknown field `unexpected`"));
-    }
-
-    #[tokio::test]
-    async fn workspace_app_rejects_skill_with_empty_content() {
-        let root = TempDir::new().expect("create temp workspace root");
-        let state_root = TempDir::new().expect("create temp workspace state root");
-        write_workspace_app(
-            root.path(),
-            "bad-skill-body",
-            r#"local app = {}
-
-function app.render_state(ctx, state)
-  return { title = "Bad Skill Body", lines = {} }
-end
-
-return app
-"#,
-        );
-        let app_dir = root.path().join("apps").join("bad-skill-body");
-        fs::write(
-            app_dir.join("skills").join("search.md"),
-            r#"---
-name: Search
-when_to_use:
-  - ""
----
-"#,
-        )
-        .expect("write invalid skill body");
-
-        let bootstrap = bootstrap_workspace_apps_with_state_root(root.path(), state_root.path());
-        assert_eq!(bootstrap.apps.len(), 0);
-        assert_eq!(bootstrap.errors.len(), 1);
-        assert!(
-            bootstrap.errors[0].contains("when_to_use")
-                || bootstrap.errors[0].contains("must contain non-empty markdown body")
-        );
-    }
 }

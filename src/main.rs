@@ -44,32 +44,26 @@ use crate::{
     commands::reset::{run_complite_reset, run_memory_reset, run_reset_all, run_state_reset},
     config::load_config,
     context::{Context, RuntimeTurnPhase},
-    context_budget::{
-        approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded,
-        truncate_text_to_token_budget,
-    },
+    context_budget::{approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded},
     daat_locus_paths::daat_locus_paths,
+    dashboard::render::{
+        AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD,
+        SleepDashboardStatus, refresh_sleep_backlogs, render_activity_for_dashboard,
+        render_app_status_outputs_for_dashboard, render_dashboard_footer_context,
+        render_sleep_status_output_for_dashboard, render_status_command_output_for_dashboard,
+        render_system_prompt_output_for_dashboard, render_telegram_status_for_dashboard,
+        sync_dashboard_state,
+    },
     dashboard::{
         DashboardActivityEvent, DashboardControlCommand, DashboardState,
         activity_cell_from_tool_ui_event, activity_cells_from_tool_call_ui_event,
-        apply_activity_event, assistant_activity_cell,
-        run_tui_dashboard,
+        apply_activity_event, assistant_activity_cell, run_tui_dashboard,
     },
     events::{EventPayload, EventStatus, EventStore, EventView},
-    hindsight::{
-        HindsightClient, HindsightRecallOptions, HindsightRetainItem, HindsightRetainJob,
-        builtin_hindsight_mental_models,
-    },
     hindsight::preprocess::{
-        RetainPreprocessPlan,
-        HINDSIGHT_RECENT_MESSAGES_MAX_TOKENS, HINDSIGHT_RECENT_MESSAGES_MIN_ENTRIES,
-        HINDSIGHT_RETAIN_PREPROCESS_INPUT_MAX_TOKENS, HINDSIGHT_RETAIN_PREPROCESS_OUTPUT_MAX_TOKENS,
-        HINDSIGHT_RETAIN_PREPROCESS_MAX_SPLIT_ITEMS,
-        select_recent_trail_lines_for_hindsight, select_recent_items_by_token_budget,
-        preprocess_hindsight_retain_jobs, preprocess_hindsight_retain_job,
-        render_retain_job_source, extract_retain_focus, collect_retain_job_tags, merge_tags,
-        build_preprocessed_split_items, build_preprocessed_retain_digest,
+        preprocess_hindsight_retain_jobs, select_recent_trail_lines_for_hindsight,
     },
+    hindsight::{HindsightClient, HindsightRecallOptions, builtin_hindsight_mental_models},
     logging::{
         RuntimeStatusLevel, clear_runtime_status, init_logging, set_runtime_status,
         write_current_turn_messages_dump, write_current_turn_response_dump,
@@ -86,19 +80,12 @@ use crate::{
         },
         episode::EpisodeActionRecord,
         evaluation_artifacts::EvaluationArtifactSuggestedFixKind,
-        programs::runtime_retain_preprocessor::{
-            RuntimeRetainPreprocessorOutput, RuntimeRetainPreprocessorProgram,
-        },
         runtime::{
             AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage,
             PromptMemoryCitation, PromptMemoryContext, PromptMentalModel,
-            execute_program_with_ir_report, resolve_program_tuning,
         },
-        runtime_review::{
-            RuntimeTurnRecord, append_runtime_turn_record,
-        },
+        runtime_review::{RuntimeTurnRecord, append_runtime_turn_record},
         sleep::run_sleep,
-        trace::TraceOrigin,
         turn_compile::{TurnCompileEngine, should_run_cold_start_turn_compile},
     },
     runtime_context::{
@@ -111,38 +98,22 @@ use crate::{
         render_tool_call_ui_event, summarize_action_from_tool_call,
     },
     sandbox::RuntimeSandboxPolicy,
-    skill::{
-        WorkspaceGlobalSkillsInvalidation, bootstrap_global_skills,
-        start_workspace_global_skills_watcher,
-    },
+    skill::SkillRegistry,
     snapshot::Snapshot,
     telegram_acl::TelegramAclHandle,
-    telegram_transport::{TelegramLiveDraftClient, TelegramTransport},
     telegram_transport::state::TelegramTransportState,
+    telegram_transport::{TelegramLiveDraftClient, TelegramTransport},
     terminal_app::TerminalApp,
     tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
+    workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir},
     workspace_app::{
         WorkspaceAppInvalidation, WorkspaceAppRegistry, bootstrap_workspace_apps,
         start_workspace_app_watcher,
-    },
-    workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir, workspace_skills_dir},
-    dashboard::render::{
-        sync_dashboard_state, SleepDashboardStatus,
-        AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL,
-        FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD, refresh_sleep_backlogs,
-        render_system_prompt_output_for_dashboard,
-        render_status_command_output_for_dashboard,
-        render_sleep_status_output_for_dashboard,
-        render_telegram_status_for_dashboard,
-        render_app_status_outputs_for_dashboard,
-        render_activity_for_dashboard,
-        render_dashboard_footer_context,
     },
 };
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use miette::{Result, miette};
-use reasoning::render::openai_tools::OpenAIToolRenderer;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle, time::MissedTickBehavior};
@@ -412,6 +383,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     let plan = Plan::new().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
+    let skills = SkillRegistry::new().await;
     let telegram_acl = TelegramAclHandle::load().await;
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
@@ -438,19 +410,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 workspace_apps_dir(&execution_cwd).display()
             )
         })?;
-    tokio::fs::create_dir_all(workspace_skills_dir(&execution_cwd))
-        .await
-        .map_err(|err| {
-            miette!(
-                "failed to create workspace skills directory {}: {err}",
-                workspace_skills_dir(&execution_cwd).display()
-            )
-        })?;
     let runtime_apps = build_runtime_apps(&execution_cwd);
-    let global_skills = bootstrap_global_skills(&execution_cwd);
-    for error in &global_skills.errors {
-        tracing::warn!("{error}");
-    }
     let apps = AppManager::new(Some(AppId::terminal()), runtime_apps.apps)
         .await
         .unwrap();
@@ -466,8 +426,9 @@ async fn async_main(cli: Cli) -> Result<()> {
         plan,
         events,
         pending_work,
+        skills,
+        active_skill_id: None,
         apps,
-        global_skills: global_skills.registry,
         workspace_apps: runtime_apps.workspace_registry,
         telegram: telegram_handle,
         compiled_prompts,
@@ -511,8 +472,6 @@ async fn async_main(cli: Cli) -> Result<()> {
         tokio::sync::mpsc::unbounded_channel::<SleepTaskResult>();
     let (workspace_app_invalidation_tx, mut workspace_app_invalidation_rx) =
         tokio::sync::mpsc::unbounded_channel::<WorkspaceAppInvalidation>();
-    let (workspace_skill_invalidation_tx, mut workspace_skill_invalidation_rx) =
-        tokio::sync::mpsc::unbounded_channel::<WorkspaceGlobalSkillsInvalidation>();
     let workspace_app_watcher = match start_workspace_app_watcher(
         workspace_apps_dir(&context.execution_cwd),
         workspace_app_invalidation_tx,
@@ -527,23 +486,6 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         Err(err) => {
             tracing::warn!("failed to start workspace app watcher: {err:?}");
-            None
-        }
-    };
-    let workspace_skill_watcher = match start_workspace_global_skills_watcher(
-        workspace_skills_dir(&context.execution_cwd),
-        workspace_skill_invalidation_tx,
-    ) {
-        Ok(watcher) => {
-            tracing::info!(
-                backend = watcher.backend_name(),
-                root = %workspace_skills_dir(&context.execution_cwd).display(),
-                "workspace skills watcher started",
-            );
-            Some(watcher)
-        }
-        Err(err) => {
-            tracing::warn!("failed to start workspace skills watcher: {err:?}");
             None
         }
     };
@@ -577,7 +519,6 @@ async fn async_main(cli: Cli) -> Result<()> {
                     &mut sleep_running,
                     &mut sleep_status,
                     &mut workspace_app_invalidation_rx,
-                    &mut workspace_skill_invalidation_rx,
                 ) => {}
                 Some(command) = dashboard_control_rx.recv() => {
                     handle_dashboard_control_command(
@@ -604,7 +545,6 @@ async fn async_main(cli: Cli) -> Result<()> {
         .await
         .unwrap();
     drop(workspace_app_watcher);
-    drop(workspace_skill_watcher);
     if let Some(handle) = telegram_transport {
         handle.abort();
     }
@@ -911,21 +851,15 @@ pub(crate) async fn build_eval_context_with_compiled(
             workspace_apps_dir(&execution_cwd).display()
         )
     });
-    std::fs::create_dir_all(workspace_skills_dir(&execution_cwd)).unwrap_or_else(|err| {
-        panic!(
-            "failed to create workspace skills directory {}: {err}",
-            workspace_skills_dir(&execution_cwd).display()
-        )
-    });
     let sandbox_policy = sandbox_policy_for_runtime().await;
     let memory = Memory::new().await;
     let plan = Plan::new().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
+    let skills = SkillRegistry::new().await;
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
     let runtime_apps = build_runtime_apps(&execution_cwd);
-    let global_skills = bootstrap_global_skills(&execution_cwd);
     let apps = AppManager::new(Some(AppId::terminal()), runtime_apps.apps)
         .await
         .unwrap();
@@ -948,8 +882,9 @@ pub(crate) async fn build_eval_context_with_compiled(
         plan,
         events,
         pending_work,
+        skills,
+        active_skill_id: None,
         apps,
-        global_skills: global_skills.registry,
         workspace_apps: runtime_apps.workspace_registry,
         telegram: telegram_handle,
         compiled_prompts,
@@ -989,7 +924,7 @@ async fn load_compiled_prompts_only(
 
 fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
     println!(
-        "sleep: consumed {} runtime reviews, {} runtime traces; derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, {} runtime demos, {} turn demos, {} runtime prompt suggestions, {} runtime prompt candidates, runtime evals {} / turn evals {} (passed {}, regressed {}, rolled_back {}, rounds {}, accepted {}), retained {} hindsight reflections, refreshed {} mental models",
+        "sleep: consumed {} runtime reviews, {} runtime traces; derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, {} runtime demos, {} turn demos, skill artifacts patch/merge/split/deprecate = {}/{}/{}/{}, applied patch/merge/deprecate = {}/{}/{}, rollbacks {}, rounds {}, governance duplicate/low-quality/cold = {}/{}/{}, retained {} hindsight reflections, refreshed {} mental models",
         summary.consumed_runtime_reviews,
         summary.consumed_trace_events,
         summary.failure_patterns.len(),
@@ -998,15 +933,18 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
         summary.instruction_hypotheses,
         summary.runtime_demos,
         summary.turn_demos,
-        summary.runtime_prompt_suggestions,
-        summary.runtime_prompt_candidates,
-        summary.runtime_demo_evaluations,
-        summary.turn_demo_evaluations,
-        summary.runtime_demo_passed,
-        summary.runtime_demo_regressions,
-        summary.runtime_prompt_rolled_back,
-        summary.runtime_prompt_evolution_rounds,
-        summary.runtime_prompt_accepted,
+        summary.skill_patch_candidates,
+        summary.skill_merge_candidates,
+        summary.skill_split_candidates,
+        summary.skill_deprecate_candidates,
+        summary.skill_patch_applied,
+        summary.skill_merge_applied,
+        summary.skill_deprecate_applied,
+        summary.skill_update_rollbacks,
+        summary.skill_optimization_rounds,
+        summary.governance_duplicate_pairs,
+        summary.governance_low_quality_skills,
+        summary.governance_cold_skills,
         summary.retained_reflections,
         summary.refreshed_mental_models
     );
@@ -1030,22 +968,20 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
 
 fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> String {
     format!(
-        "sleep 完成：runtime reviews {}，traces {}，runtime demos {}，turn demos {}，评估 {}/{}（通过 {}，退化 {}），候选 {}，轮次 {}，accepted={}",
+        "sleep 完成：runtime reviews {}，traces {}，skills patch/merge/split/deprecate={}/{}/{}/{}，应用 patch/merge/deprecate={}/{}/{}，回滚 {}，治理 duplicate/low-quality/cold={}/{}/{}",
         summary.consumed_runtime_reviews,
         summary.consumed_trace_events,
-        summary.runtime_demos,
-        summary.turn_demos,
-        summary.runtime_demo_evaluations,
-        summary.turn_demo_evaluations,
-        summary.runtime_demo_passed,
-        summary.runtime_demo_regressions,
-        summary.runtime_prompt_candidates,
-        summary.runtime_prompt_evolution_rounds,
-        if summary.runtime_prompt_accepted {
-            "yes"
-        } else {
-            "no"
-        }
+        summary.skill_patch_candidates,
+        summary.skill_merge_candidates,
+        summary.skill_split_candidates,
+        summary.skill_deprecate_candidates,
+        summary.skill_patch_applied,
+        summary.skill_merge_applied,
+        summary.skill_deprecate_applied,
+        summary.skill_update_rollbacks,
+        summary.governance_duplicate_pairs,
+        summary.governance_low_quality_skills,
+        summary.governance_cold_skills,
     )
 }
 
@@ -1056,19 +992,6 @@ fn drain_workspace_app_invalidations(
     loop {
         match rx.try_recv() {
             Ok(invalidation) => workspace_apps.record_invalidation(invalidation),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-            | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-        }
-    }
-}
-
-fn drain_workspace_skill_invalidations(
-    global_skills: &mut crate::skill::GlobalSkillRegistry,
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<WorkspaceGlobalSkillsInvalidation>,
-) {
-    loop {
-        match rx.try_recv() {
-            Ok(invalidation) => global_skills.record_invalidation(invalidation),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
         }
@@ -1126,30 +1049,6 @@ async fn sync_workspace_apps_from_invalidation(context: &mut Context) {
                 .collect::<Vec<_>>()
                 .join(","),
             "unloaded workspace apps removed from source tree",
-        );
-    }
-    for error in report.errors {
-        tracing::warn!("{error}");
-    }
-}
-
-fn sync_global_skills_from_invalidation(context: &mut Context) {
-    let report = match context.global_skills.sync_dirty_workspace_skills() {
-        Ok(report) => report,
-        Err(err) => {
-            tracing::error!("failed to sync workspace skills from invalidation: {err:?}");
-            return;
-        }
-    };
-
-    if report.is_empty() {
-        return;
-    }
-
-    if report.changed {
-        tracing::info!(
-            root = %context.global_skills.workspace_dir().display(),
-            "reloaded workspace global skills from source changes",
         );
     }
     for error in report.errors {
@@ -1246,6 +1145,39 @@ async fn record_runtime_review_turn(
         "execution_cwd".to_string(),
         context.execution_cwd.display().to_string(),
     );
+    metadata.insert("action_count".to_string(), output.actions.len().to_string());
+    metadata.insert(
+        "tool_action_count".to_string(),
+        output
+            .actions
+            .iter()
+            .filter(|action| {
+                !matches!(
+                    action.kind.as_str(),
+                    "assistant_message" | "empty_tool_calls"
+                )
+            })
+            .count()
+            .to_string(),
+    );
+    metadata.insert(
+        "active_plan_steps".to_string(),
+        context.plan.active_steps().count().to_string(),
+    );
+    metadata.insert(
+        "rollback_detected".to_string(),
+        detect_runtime_rollback(output).to_string(),
+    );
+    metadata.insert(
+        "manual_fix_detected".to_string(),
+        detect_runtime_manual_fix(output).to_string(),
+    );
+    if let Some(failure_type) = classify_runtime_failure_type(output) {
+        metadata.insert("failure_type".to_string(), failure_type);
+    }
+    if let Some(active_skill_id) = context.active_skill_id.as_deref() {
+        metadata.insert("active_skill_id".to_string(), active_skill_id.to_string());
+    }
     if let Some(info) = context.llm.token_usage_info() {
         metadata.insert(
             "main_model_total_tokens".to_string(),
@@ -1282,6 +1214,51 @@ async fn record_runtime_review_turn(
         metadata,
     };
     append_runtime_turn_record(&turn).await;
+}
+
+fn detect_runtime_rollback(output: &AgentLoopStepOutput) -> bool {
+    let text = format!(
+        "{}\n{}\n{}",
+        output.description,
+        output.observation,
+        output
+            .actions
+            .iter()
+            .map(|action| action.summary.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+    .to_ascii_lowercase();
+    text.contains("rollback") || text.contains("回滚") || text.contains("revert")
+}
+
+fn detect_runtime_manual_fix(output: &AgentLoopStepOutput) -> bool {
+    output.actions.iter().any(|action| {
+        matches!(
+            action.kind.as_str(),
+            "apply_patch" | "terminal_exec" | "terminal_write_stdin"
+        )
+    })
+}
+
+fn classify_runtime_failure_type(output: &AgentLoopStepOutput) -> Option<String> {
+    let text = format!("{}\n{}", output.description, output.observation).to_ascii_lowercase();
+    if text.contains("timeout") || text.contains("超时") {
+        return Some("timeout".to_string());
+    }
+    if text.contains("schema") || text.contains("deserialize") || text.contains("json") {
+        return Some("schema_drift".to_string());
+    }
+    if text.contains("permission") || text.contains("forbidden") || text.contains("denied") {
+        return Some("permission".to_string());
+    }
+    if text.contains("tool") && text.contains("failed") {
+        return Some("tool_failure".to_string());
+    }
+    if text.contains("error") || text.contains("失败") {
+        return Some("runtime_error".to_string());
+    }
+    None
 }
 
 fn maybe_start_telegram_live_draft_session(
@@ -2944,18 +2921,10 @@ async fn daat_locus_loop(
     workspace_app_invalidation_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
         WorkspaceAppInvalidation,
     >,
-    workspace_skill_invalidation_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
-        WorkspaceGlobalSkillsInvalidation,
-    >,
 ) {
     let cycle_started_at = std::time::Instant::now();
     drain_workspace_app_invalidations(&mut context.workspace_apps, workspace_app_invalidation_rx);
-    drain_workspace_skill_invalidations(
-        &mut context.global_skills,
-        workspace_skill_invalidation_rx,
-    );
     sync_workspace_apps_from_invalidation(context).await;
-    sync_global_skills_from_invalidation(context);
     if let Err(err) = context.apps.refresh_all_notices().await {
         tracing::error!("failed to refresh app notices: {err:?}");
     }
@@ -3286,13 +3255,17 @@ async fn handle_sleep_task_result(
             sleep_status.total_turn_demo_evaluations += summary.turn_demo_evaluations;
             sleep_status.total_runtime_demo_passed += summary.runtime_demo_passed;
             sleep_status.total_runtime_demo_regressions += summary.runtime_demo_regressions;
-            sleep_status.total_runtime_prompt_candidates += summary.runtime_prompt_candidates;
-            if summary.runtime_prompt_rolled_back {
-                sleep_status.total_runtime_prompt_rollbacks += 1;
-            }
-            if summary.runtime_prompt_accepted {
-                sleep_status.total_runtime_prompt_accepts += 1;
-            }
+            sleep_status.total_skill_patch_candidates += summary.skill_patch_candidates;
+            sleep_status.total_skill_merge_candidates += summary.skill_merge_candidates;
+            sleep_status.total_skill_split_candidates += summary.skill_split_candidates;
+            sleep_status.total_skill_deprecate_candidates += summary.skill_deprecate_candidates;
+            sleep_status.total_skill_patch_applied += summary.skill_patch_applied;
+            sleep_status.total_skill_merge_applied += summary.skill_merge_applied;
+            sleep_status.total_skill_deprecate_applied += summary.skill_deprecate_applied;
+            sleep_status.total_skill_update_rollbacks += summary.skill_update_rollbacks;
+            sleep_status.total_governance_duplicate_pairs += summary.governance_duplicate_pairs;
+            sleep_status.total_governance_low_quality_skills += summary.governance_low_quality_skills;
+            sleep_status.total_governance_cold_skills += summary.governance_cold_skills;
             let summary_text = summarize_sleep_summary(&summary);
             sleep_status.last_result = Some(summary_text.clone());
             set_runtime_status(

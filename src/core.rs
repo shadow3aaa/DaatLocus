@@ -114,6 +114,42 @@ pub struct UpdatePlanArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct SelectSkillArgs {
+    pub query: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct CreateSkillArgs {
+    pub name: String,
+    #[serde(default)]
+    pub trigger_conditions: Vec<String>,
+    #[serde(default)]
+    pub preconditions: Vec<String>,
+    #[serde(default)]
+    pub workflow_steps: Vec<String>,
+    #[serde(default)]
+    pub done_criteria: Vec<String>,
+    #[serde(default)]
+    pub failure_recovery: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ActivateSkillArgs {
+    pub skill_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct LogSkillOutcomeArgs {
+    pub skill_id: Option<String>,
+    pub success: bool,
+    pub steps_executed: Option<u32>,
+    pub regression: Option<bool>,
+    pub summary: Option<String>,
+    pub failure_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct DeepRecallArgs {
     /// 要交给长期记忆后端进行深度回忆/反思的自然语言问题
     pub query: String,
@@ -121,11 +157,6 @@ pub struct DeepRecallArgs {
     pub budget: Option<String>,
     /// 允许返回的最大 token 数
     pub max_tokens: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ReadSkillArgs {
-    pub id: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]

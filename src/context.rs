@@ -26,7 +26,7 @@ use crate::{
         prompt_doc::PromptDocument,
     },
     sandbox::RuntimeSandboxPolicy,
-    skill::{GlobalSkillRegistry, SkillContent},
+    skill::{SkillRecord, SkillRegistry},
     snapshot::Snapshot,
     telegram_transport::state::TelegramTransportStateHandle,
     workspace_app::WorkspaceAppRegistry,
@@ -64,8 +64,9 @@ pub struct Context {
     pub plan: Plan,
     pub events: EventStore,
     pub pending_work: PendingWorkQueue,
+    pub skills: SkillRegistry,
+    pub active_skill_id: Option<String>,
     pub apps: AppManager,
-    pub global_skills: GlobalSkillRegistry,
     pub workspace_apps: WorkspaceAppRegistry,
     pub telegram: TelegramTransportStateHandle,
     pub compiled_prompts: CompiledPromptStore,
@@ -103,22 +104,10 @@ impl Context {
             .resolve_path(path, base.or(Some(&self.execution_cwd)))
     }
 
-    pub fn read_skill(&self, id: &str) -> Result<SkillContent, miette::Report> {
-        if let Some(skill) = self.apps.read_focused_skill(id)? {
-            return Ok(skill);
-        }
-        if let Some(skill) = self.global_skills.read_skill(id) {
-            return Ok(skill);
-        }
-        if let Some(focused) = self.apps.focused() {
-            Err(miette::miette!(
-                "skill `{id}` is not available as a global skill or on focused app {focused}"
-            ))
-        } else {
-            Err(miette::miette!(
-                "skill `{id}` is not available as a global skill; if you meant an app skill, focus the matching app first"
-            ))
-        }
+    pub fn active_skill(&self) -> Option<&SkillRecord> {
+        self.active_skill_id
+            .as_deref()
+            .and_then(|skill_id| self.skills.get(skill_id))
     }
 
     pub fn install_live_assistant_progress(
@@ -180,6 +169,7 @@ impl Context {
             self.memory.mark_queued_retained();
         }
         self.hindsight_retain.shutdown().await;
+        self.skills.shutdown().await;
         self.memory.shutdown().await;
         self.plan.shutdown().await;
         self.events.shutdown().await;

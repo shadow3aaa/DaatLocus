@@ -14,6 +14,7 @@ use crate::{
         examples::ExampleField,
         runtime::{HistoryMessage, PromptRequest},
     },
+    skill::{SkillRecord, SkillRegistry},
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 use miette::Result;
@@ -27,7 +28,10 @@ use super::{
         EvaluationArtifactRuntimeDemoEvaluation, EvaluationArtifactRuntimePromptCandidate,
         EvaluationArtifactRuntimePromptEvolutionReport,
         EvaluationArtifactRuntimePromptEvolutionRound, EvaluationArtifactRuntimePromptSuggestion,
-        EvaluationArtifactStressCase, EvaluationArtifactSuggestedFixKind,
+        EvaluationArtifactSkillDeprecate, EvaluationArtifactSkillMerge,
+        EvaluationArtifactSkillPatch, EvaluationArtifactSkillSplit,
+        EvaluationArtifactSkillSplitDraft, EvaluationArtifactStressCase,
+        EvaluationArtifactSuggestedFixKind,
         EvaluationArtifactTurnDemo, EvaluationArtifactTurnDemoEvaluation, EvaluationArtifactsStore,
     },
     programs::evaluation_artifact_builder::{
@@ -75,15 +79,22 @@ pub struct SleepSummary {
     pub instruction_hypotheses: usize,
     pub runtime_demos: usize,
     pub turn_demos: usize,
-    pub runtime_prompt_suggestions: usize,
-    pub runtime_prompt_candidates: usize,
     pub runtime_demo_evaluations: usize,
     pub turn_demo_evaluations: usize,
     pub runtime_demo_passed: usize,
     pub runtime_demo_regressions: usize,
-    pub runtime_prompt_rolled_back: bool,
-    pub runtime_prompt_evolution_rounds: usize,
-    pub runtime_prompt_accepted: bool,
+    pub skill_patch_candidates: usize,
+    pub skill_merge_candidates: usize,
+    pub skill_split_candidates: usize,
+    pub skill_deprecate_candidates: usize,
+    pub skill_patch_applied: usize,
+    pub skill_merge_applied: usize,
+    pub skill_deprecate_applied: usize,
+    pub skill_update_rollbacks: usize,
+    pub skill_optimization_rounds: usize,
+    pub governance_duplicate_pairs: usize,
+    pub governance_low_quality_skills: usize,
+    pub governance_cold_skills: usize,
     pub retained_reflections: usize,
     pub refreshed_mental_models: usize,
 }
@@ -135,28 +146,34 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
         .await?;
     store.replace_runtime_demos(&derived.runtime_demos).await?;
     store.replace_turn_demos(&derived.turn_demos).await?;
-    let runtime_evolution = evolve_runtime_system_prompt(
-        context,
-        &derived.runtime_demos,
-        &derived.turn_demos,
-        &runtime_review_spans,
-        &derived.instruction_hypotheses,
-    )
-    .await?;
+    let skill_optimization =
+        optimize_skills_from_reviews(&mut context.skills, &runtime_review_spans).await?;
     store
-        .replace_runtime_demo_evaluations(&runtime_evolution.evaluations)
+        .replace_runtime_demo_evaluations(&[])
         .await?;
     store
-        .replace_turn_demo_evaluations(&runtime_evolution.turn_evaluations)
+        .replace_turn_demo_evaluations(&[])
         .await?;
     store
-        .replace_runtime_prompt_suggestions(&runtime_evolution.suggestions)
+        .replace_runtime_prompt_suggestions(&[])
         .await?;
     store
-        .replace_runtime_prompt_candidates(&runtime_evolution.candidates)
+        .replace_runtime_prompt_candidates(&[])
         .await?;
     store
-        .replace_runtime_prompt_evolution_reports(std::slice::from_ref(&runtime_evolution.report))
+        .replace_runtime_prompt_evolution_reports(&[])
+        .await?;
+    store
+        .replace_skill_patches(&skill_optimization.patches)
+        .await?;
+    store
+        .replace_skill_merges(&skill_optimization.merges)
+        .await?;
+    store
+        .replace_skill_splits(&skill_optimization.splits)
+        .await?;
+    store
+        .replace_skill_deprecations(&skill_optimization.deprecations)
         .await?;
     let retained_reflections =
         retain_sleep_reflections(context, &review_synthesis.reflections).await?;
@@ -186,15 +203,22 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
         instruction_hypotheses: derived.instruction_hypotheses.len(),
         runtime_demos: derived.runtime_demos.len(),
         turn_demos: derived.turn_demos.len(),
-        runtime_prompt_suggestions: runtime_evolution.suggestions.len(),
-        runtime_prompt_candidates: runtime_evolution.candidates.len(),
-        runtime_demo_evaluations: runtime_evolution.evaluations.len(),
-        turn_demo_evaluations: runtime_evolution.turn_evaluations.len(),
-        runtime_demo_passed: runtime_evolution.passed,
-        runtime_demo_regressions: runtime_evolution.regressions,
-        runtime_prompt_rolled_back: runtime_evolution.rolled_back,
-        runtime_prompt_evolution_rounds: runtime_evolution.rounds,
-        runtime_prompt_accepted: runtime_evolution.accepted,
+        runtime_demo_evaluations: 0,
+        turn_demo_evaluations: 0,
+        runtime_demo_passed: 0,
+        runtime_demo_regressions: 0,
+        skill_patch_candidates: skill_optimization.patches.len(),
+        skill_merge_candidates: skill_optimization.merges.len(),
+        skill_split_candidates: skill_optimization.splits.len(),
+        skill_deprecate_candidates: skill_optimization.deprecations.len(),
+        skill_patch_applied: skill_optimization.patch_applied,
+        skill_merge_applied: skill_optimization.merge_applied,
+        skill_deprecate_applied: skill_optimization.deprecate_applied,
+        skill_update_rollbacks: skill_optimization.rollbacks,
+        skill_optimization_rounds: skill_optimization.rounds,
+        governance_duplicate_pairs: skill_optimization.governance_duplicate_pairs,
+        governance_low_quality_skills: skill_optimization.governance_low_quality_skills,
+        governance_cold_skills: skill_optimization.governance_cold_skills,
         retained_reflections,
         refreshed_mental_models,
     })
@@ -219,6 +243,35 @@ struct RuntimePromptEvolutionResult {
     rolled_back: bool,
     accepted: bool,
     rounds: usize,
+}
+
+#[derive(Default)]
+struct SleepSkillOptimizationResult {
+    patches: Vec<EvaluationArtifactSkillPatch>,
+    merges: Vec<EvaluationArtifactSkillMerge>,
+    splits: Vec<EvaluationArtifactSkillSplit>,
+    deprecations: Vec<EvaluationArtifactSkillDeprecate>,
+    patch_applied: usize,
+    merge_applied: usize,
+    deprecate_applied: usize,
+    rollbacks: usize,
+    rounds: usize,
+    governance_duplicate_pairs: usize,
+    governance_low_quality_skills: usize,
+    governance_cold_skills: usize,
+}
+
+#[derive(Default)]
+struct SkillExecutionAggregate {
+    skill_id: String,
+    run_count: usize,
+    blocked_count: usize,
+    no_progress_count: usize,
+    action_total: usize,
+    manual_fix_signals: usize,
+    rollback_signals: usize,
+    failure_type_counts: HashMap<String, usize>,
+    source_review_ids: Vec<String>,
 }
 
 async fn load_runtime_trace_records() -> Result<RuntimeTraceBatch> {
@@ -950,6 +1003,337 @@ async fn derive_evaluation_artifacts(
         runtime_demos,
         turn_demos: Vec::new(),
     })
+}
+
+async fn optimize_skills_from_reviews(
+    skills: &mut SkillRegistry,
+    runtime_review_spans: &[RuntimeReviewSpan],
+) -> Result<SleepSkillOptimizationResult> {
+    let mut result = SleepSkillOptimizationResult {
+        rounds: 1,
+        ..Default::default()
+    };
+
+    let aggregates = collect_skill_execution_aggregates(runtime_review_spans);
+    let all_skills = skills.list();
+    let governance = skills.governance_report();
+    result.governance_duplicate_pairs = governance.duplicate_pairs.len();
+    result.governance_low_quality_skills = governance.low_quality_skill_ids.len();
+    result.governance_cold_skills = governance.cold_skill_ids.len();
+
+    result.patches = build_skill_patch_candidates(&aggregates, &all_skills);
+    result.merges = build_skill_merge_candidates(&governance);
+    result.splits = build_skill_split_candidates(&all_skills);
+    result.deprecations = build_skill_deprecate_candidates(&all_skills, &governance);
+
+    for patch in &mut result.patches {
+        if !evaluate_skill_patch_candidate(skills, patch) {
+            patch.rolled_back = true;
+            result.rollbacks += 1;
+            continue;
+        }
+        match skills.apply_sleep_patch(
+            &patch.skill_id,
+            patch.workflow_step_additions.clone(),
+            patch.failure_recovery_additions.clone(),
+        ) {
+            Ok(_) => {
+                patch.applied = true;
+                result.patch_applied += 1;
+            }
+            Err(err) => {
+                patch.rolled_back = true;
+                patch.rationale = format!("{}; rollback={}", patch.rationale, err);
+                result.rollbacks += 1;
+            }
+        }
+    }
+
+    for merge in &mut result.merges {
+        if !evaluate_skill_merge_candidate(skills, merge) {
+            continue;
+        }
+        if merge.confidence < 0.75 {
+            continue;
+        }
+        match skills.merge_skills(
+            &merge.target_skill_id,
+            &merge.source_skill_ids,
+            Some(merge.rationale.clone()),
+        ) {
+            Ok(_) => {
+                merge.applied = true;
+                result.merge_applied += 1;
+            }
+            Err(err) => {
+                merge.rationale = format!("{}; rollback={}", merge.rationale, err);
+                result.rollbacks += 1;
+            }
+        }
+    }
+
+    for deprecate in &mut result.deprecations {
+        if !evaluate_skill_deprecate_candidate(skills, deprecate) {
+            continue;
+        }
+        if deprecate.confidence < 0.7 {
+            continue;
+        }
+        match skills.deprecate_skill(&deprecate.skill_id, Some(deprecate.rationale.clone())) {
+            Ok(_) => {
+                deprecate.applied = true;
+                result.deprecate_applied += 1;
+            }
+            Err(err) => {
+                deprecate.rationale = format!("{}; rollback={}", deprecate.rationale, err);
+                result.rollbacks += 1;
+            }
+        }
+    }
+
+    skills.persist_if_dirty().await?;
+    Ok(result)
+}
+
+fn collect_skill_execution_aggregates(
+    runtime_review_spans: &[RuntimeReviewSpan],
+) -> HashMap<String, SkillExecutionAggregate> {
+    let mut aggregates = HashMap::<String, SkillExecutionAggregate>::new();
+
+    for span in runtime_review_spans {
+        let Some(skill_id) = span
+            .turns
+            .iter()
+            .rev()
+            .find_map(|turn| turn.metadata.get("active_skill_id").cloned())
+        else {
+            continue;
+        };
+
+        let status = infer_runtime_review_status(span);
+        let entry = aggregates
+            .entry(skill_id.clone())
+            .or_insert_with(|| SkillExecutionAggregate {
+                skill_id: skill_id.clone(),
+                ..Default::default()
+            });
+        entry.run_count += 1;
+        entry.source_review_ids.push(format!("runtime_review:{}", span.id));
+
+        if status == "Blocked" {
+            entry.blocked_count += 1;
+        }
+        if status == "NoProgress" {
+            entry.no_progress_count += 1;
+        }
+
+        for turn in &span.turns {
+            if let Some(value) = turn.metadata.get("action_count")
+                && let Ok(parsed) = value.parse::<usize>()
+            {
+                entry.action_total += parsed;
+            }
+            if parse_bool_field(turn.metadata.get("manual_fix_detected")) {
+                entry.manual_fix_signals += 1;
+            }
+            if parse_bool_field(turn.metadata.get("rollback_detected")) {
+                entry.rollback_signals += 1;
+            }
+            if let Some(failure_type) = turn.metadata.get("failure_type") {
+                let failure_type = failure_type.trim();
+                if !failure_type.is_empty() {
+                    *entry
+                        .failure_type_counts
+                        .entry(failure_type.to_string())
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    aggregates
+}
+
+fn build_skill_patch_candidates(
+    aggregates: &HashMap<String, SkillExecutionAggregate>,
+    skills: &[SkillRecord],
+) -> Vec<EvaluationArtifactSkillPatch> {
+    let skill_map = skills
+        .iter()
+        .map(|skill| (skill.id.clone(), skill))
+        .collect::<HashMap<_, _>>();
+
+    let mut patches = Vec::new();
+    for aggregate in aggregates.values() {
+        let Some(skill) = skill_map.get(&aggregate.skill_id) else {
+            continue;
+        };
+        if aggregate.run_count == 0 {
+            continue;
+        }
+        let failure_rate = (aggregate.blocked_count + aggregate.no_progress_count) as f64
+            / aggregate.run_count as f64;
+        let needs_patch = failure_rate >= 0.3
+            || aggregate.manual_fix_signals > 0
+            || aggregate.rollback_signals > 0;
+        if !needs_patch {
+            continue;
+        }
+
+        let mut workflow_step_additions = Vec::new();
+        let mut failure_recovery_additions = Vec::new();
+
+        if aggregate.blocked_count > 0 {
+            workflow_step_additions.push(
+                "sleep patch: 在执行前进行阻塞风险预检，并记录可恢复路径".to_string(),
+            );
+            failure_recovery_additions.push(
+                "sleep patch: 出现阻塞后回退到上一个稳定步骤，再重新验证关键输出".to_string(),
+            );
+        }
+        if aggregate.manual_fix_signals > 0 {
+            workflow_step_additions.push(
+                "sleep patch: 若需手工修复，先固化修复前提，再执行补丁并复验".to_string(),
+            );
+        }
+        if let Some((failure_type, _)) = aggregate
+            .failure_type_counts
+            .iter()
+            .max_by_key(|(_, count)| *count)
+        {
+            failure_recovery_additions.push(format!(
+                "sleep patch: failure_type=`{}` 时优先执行标准恢复流程",
+                failure_type
+            ));
+        }
+
+        patches.push(EvaluationArtifactSkillPatch {
+            skill_id: skill.id.clone(),
+            title: format!("sleep patch {}", skill.name),
+            rationale: format!(
+                "run_count={} blocked={} no_progress={} manual_fix={} rollback={} failure_rate={:.2}",
+                aggregate.run_count,
+                aggregate.blocked_count,
+                aggregate.no_progress_count,
+                aggregate.manual_fix_signals,
+                aggregate.rollback_signals,
+                failure_rate,
+            ),
+            workflow_step_additions,
+            failure_recovery_additions,
+            source_review_ids: aggregate.source_review_ids.clone(),
+            confidence: (0.45 + failure_rate).min(0.95),
+            applied: false,
+            rolled_back: false,
+        });
+    }
+
+    patches
+}
+
+fn build_skill_merge_candidates(
+    governance: &crate::skill::SkillGovernanceReport,
+) -> Vec<EvaluationArtifactSkillMerge> {
+    governance
+        .duplicate_pairs
+        .iter()
+        .map(|(left, right)| EvaluationArtifactSkillMerge {
+            target_skill_id: left.clone(),
+            source_skill_ids: vec![right.clone()],
+            rationale: "governance: duplicated skill names detected".to_string(),
+            confidence: 0.8,
+            applied: false,
+        })
+        .collect()
+}
+
+fn build_skill_split_candidates(skills: &[SkillRecord]) -> Vec<EvaluationArtifactSkillSplit> {
+    let mut candidates = Vec::new();
+
+    for skill in skills {
+        if skill.workflow_steps.len() < 6 {
+            continue;
+        }
+        let midpoint = skill.workflow_steps.len() / 2;
+        if midpoint == 0 || midpoint >= skill.workflow_steps.len() {
+            continue;
+        }
+        let first = skill.workflow_steps[..midpoint].to_vec();
+        let second = skill.workflow_steps[midpoint..].to_vec();
+        if first.is_empty() || second.is_empty() {
+            continue;
+        }
+
+        candidates.push(EvaluationArtifactSkillSplit {
+            source_skill_id: skill.id.clone(),
+            rationale: "workflow too long; suggest split into smaller reusable units".to_string(),
+            drafts: vec![
+                EvaluationArtifactSkillSplitDraft {
+                    name: format!("{} - part 1", skill.name),
+                    workflow_steps: first,
+                    done_criteria: skill.done_criteria.clone(),
+                },
+                EvaluationArtifactSkillSplitDraft {
+                    name: format!("{} - part 2", skill.name),
+                    workflow_steps: second,
+                    done_criteria: skill.done_criteria.clone(),
+                },
+            ],
+            confidence: 0.62,
+            applied: false,
+        });
+    }
+
+    candidates
+}
+
+fn build_skill_deprecate_candidates(
+    skills: &[SkillRecord],
+    governance: &crate::skill::SkillGovernanceReport,
+) -> Vec<EvaluationArtifactSkillDeprecate> {
+    skills
+        .iter()
+        .filter(|skill| governance.cold_skill_ids.contains(&skill.id))
+        .filter(|skill| !matches!(skill.status, crate::skill::SkillStatus::Deprecated))
+        .map(|skill| EvaluationArtifactSkillDeprecate {
+            skill_id: skill.id.clone(),
+            rationale: "cold skill without executions; deprecate to reduce maintenance load"
+                .to_string(),
+            replacement_skill_id: None,
+            confidence: 0.72,
+            applied: false,
+        })
+        .collect()
+}
+
+fn evaluate_skill_patch_candidate(skills: &SkillRegistry, patch: &EvaluationArtifactSkillPatch) -> bool {
+    skills.get(&patch.skill_id).is_some()
+        && (!patch.workflow_step_additions.is_empty()
+            || !patch.failure_recovery_additions.is_empty())
+}
+
+fn evaluate_skill_merge_candidate(skills: &SkillRegistry, merge: &EvaluationArtifactSkillMerge) -> bool {
+    if skills.get(&merge.target_skill_id).is_none() {
+        return false;
+    }
+    !merge.source_skill_ids.is_empty()
+        && merge
+            .source_skill_ids
+            .iter()
+            .all(|source_id| skills.get(source_id).is_some())
+}
+
+fn evaluate_skill_deprecate_candidate(
+    skills: &SkillRegistry,
+    deprecate: &EvaluationArtifactSkillDeprecate,
+) -> bool {
+    skills.get(&deprecate.skill_id).is_some()
+}
+
+fn parse_bool_field(value: Option<&String>) -> bool {
+    value
+        .map(|item| item.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 async fn evaluate_runtime_demos(
@@ -1851,6 +2235,15 @@ async fn recall_related_memories(context: &Context, query: &str, top_k: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use tempfile::TempDir;
+
+    use crate::{
+        reasoning::{episode::EpisodeActionRecord, runtime_review::RuntimeTurnRecord},
+        skill::NewSkillRecord,
+        DaatLocusHomeOverride,
+    };
 
     fn test_prompt(
         best_candidate: &str,
@@ -1934,5 +2327,69 @@ mod tests {
             choose_best_non_regressing_prompt_shared(&best, 2, &current, 3, true);
         assert_eq!(selected.best_candidate, "best");
         assert_eq!(passed, 2);
+    }
+
+    #[tokio::test]
+    async fn sleep_skill_optimizer_updates_skill_version_from_runtime_review_signal() {
+        let temp_home = TempDir::new().expect("create temporary daat locus home");
+        let _home_override = DaatLocusHomeOverride::set(temp_home.path().to_path_buf());
+
+        let mut skills = SkillRegistry::new().await;
+        let created = skills
+            .create_skill(NewSkillRecord {
+                name: "Repair flaky test pipeline".to_string(),
+                trigger_conditions: vec!["test flaky".to_string()],
+                preconditions: vec!["failing test logs available".to_string()],
+                workflow_steps: vec![
+                    "collect flaky failure evidence".to_string(),
+                    "pinpoint unstable assertion".to_string(),
+                ],
+                done_criteria: vec!["test runs stable".to_string()],
+                failure_recovery: vec!["rollback last risky change".to_string()],
+            })
+            .expect("create skill");
+        skills
+            .activate_skill(&created.id)
+            .expect("activate skill");
+
+        let mut metadata = BTreeMap::new();
+        metadata.insert("active_skill_id".to_string(), created.id.clone());
+        metadata.insert("action_count".to_string(), "3".to_string());
+        metadata.insert("manual_fix_detected".to_string(), "true".to_string());
+        metadata.insert("rollback_detected".to_string(), "true".to_string());
+        metadata.insert("failure_type".to_string(), "tool_failure".to_string());
+
+        let span = RuntimeReviewSpan {
+            id: "review-1".to_string(),
+            turns: vec![RuntimeTurnRecord {
+                id: "turn-1".to_string(),
+                recorded_at_ms: chrono::Utc::now().timestamp_millis(),
+                current_doing: "repair flaky pipeline".to_string(),
+                description: "tool failed while applying patch".to_string(),
+                observation: "failed to patch target file".to_string(),
+                actions: vec![EpisodeActionRecord {
+                    kind: "apply_patch".to_string(),
+                    summary: "patched flaky assertion".to_string(),
+                }],
+                before_snapshot_text: "before".to_string(),
+                after_snapshot_text: "after".to_string(),
+                history_messages: Vec::new(),
+                metadata,
+            }],
+        };
+
+        let result = optimize_skills_from_reviews(&mut skills, &[span])
+            .await
+            .expect("optimize skills from runtime review");
+
+        assert_eq!(result.patches.len(), 1);
+        assert_eq!(result.patch_applied, 1);
+        assert_eq!(result.rollbacks, 0);
+
+        let updated = skills.get(&created.id).expect("updated skill should exist");
+        assert!(updated.version > created.version);
+        assert!(updated.workflow_steps.iter().any(|step| {
+            step.contains("sleep patch") || step.contains("阻塞风险预检")
+        }));
     }
 }

@@ -1,7 +1,6 @@
 use crate::{
     app::{AppHowToUse, AppId, AppStateRender, AppUsage},
     context::Context,
-    skill::SkillSummary,
 };
 
 use super::prompt_text::{PromptTextBuilder, render_bullet_list};
@@ -35,12 +34,6 @@ pub const WORKSPACE_UNIT_WHY: &str =
 
 pub const WORKSPACE_UNIT_HOW: &str = "使用相对路径时，不要把 workspace 目录名再写进路径里。快照已经告诉你 workspace 的绝对路径；相对路径默认就是相对于该目录。";
 
-pub const SKILLS_UNIT_WHAT: &str = "每个 skill 都是一份针对特定类任务的执行规范说明。";
-
-pub const SKILLS_UNIT_WHEN: &str = "任务开始执行时或执行过程中，只要快照里出现与任务相关或有帮助的 skill，在继续执行前就必须先调用 `read_skill` 读取它；不要凭猜测直接开始实现。";
-
-pub const SKILLS_UNIT_HOW: &str = "使用 `read_skill(id)` 读取 skill 的完整说明。global skills 会始终出现在快照里；focused app 的 skills 只会在该 app 位于前景时出现。只要某个可见 skill 与当前任务相关，第一步就应是读取它，而不是先写代码或先调用别的实现工具。";
-
 pub const MEMORIES_UNIT_WHAT: &str = "自动召回记忆（对应 `<recall_memories>` 标记）会优先提供长期 consolidated knowledge，例如 mental models 与 observations，并在需要时补充 raw memories 与 citations；`deep_recall` 是显式触发的更深层回忆。";
 
 pub const MEMORIES_UNIT_WHEN: &str = "当自动召回里的 consolidated knowledge 仍不足以支撑判断，或者你需要更强的证据链、来源说明、历史偏好归纳时，应优先尝试 `deep_recall`；只有在深度回忆仍不足时，才再尝试其他方式。";
@@ -53,6 +46,12 @@ pub const PLAN_UNIT_WHAT: &str =
 pub const PLAN_UNIT_WHEN: &str = "当任务是非平凡、多步骤、需要持续跟踪推进时，应维护 plan，使当前进展、下一步要做什么，以及整体剩余工作始终清晰。";
 
 pub const PLAN_UNIT_HOW: &str = "使用 `update_plan` 持续维护 plan。每次调用时，都应提交当前完整的 plan，而不是只提交某一个步骤的增量修改。plan 中的步骤应是简短的一句话，尽量控制在 5 到 7 个词，且必须具体、可执行、可验证。只要还有未完成步骤，plan 中就应恰好有一个步骤是 `in_progress`；已完成步骤标记为 `completed`，后续步骤标记为 `pending`。当全部完成时，应将 plan 清空，而不是保留一组已完成步骤。";
+
+pub const SKILL_UNIT_WHAT: &str = "skill 是可迭代的任务执行资产。每个 skill 都记录触发条件、前置条件、可复用步骤、完成标准、失败恢复策略与质量指标。";
+
+pub const SKILL_UNIT_WHEN: &str = "当任务是多步骤执行时，必须先绑定 skill：先 `select_skill` 检索；若无可复用项则 `create_skill`；随后 `activate_skill` 绑定到当前任务。未绑定 skill 的多步骤执行视为不合规。";
+
+pub const SKILL_UNIT_HOW: &str = "任务推进结束后应调用 `log_skill_outcome` 回写结果（成功/失败、步数、回归标记等），让后续 sleep 与治理环节能够基于真实轨迹优化或合并 skill。";
 
 pub const HISTORY_COMPACTION_PROMPT: &str = r#"你正在执行一个上下文检查点压缩任务。
 请为另一个将继续当前线程的模型生成一段 handoff summary。
@@ -96,24 +95,6 @@ pub fn build_runtime_focused_app_how_to_use_prompt(context: &Context) -> Option<
     Some(build_app_how_to_use_prompt(app_id, &how_to_use))
 }
 
-pub fn build_runtime_global_skills_prompt(context: &Context) -> Option<String> {
-    let skills = context.global_skills.summaries();
-    if skills.is_empty() {
-        None
-    } else {
-        Some(render_skill_summaries(skills))
-    }
-}
-
-pub fn build_runtime_focused_app_skills_prompt(context: &Context) -> Option<String> {
-    let skills = context.apps.focused_skills();
-    if skills.is_empty() {
-        None
-    } else {
-        Some(render_skill_summaries(skills))
-    }
-}
-
 pub fn build_runtime_background_hint_items(context: &Context) -> Vec<String> {
     let focused = context.apps.focused();
     context
@@ -123,17 +104,6 @@ pub fn build_runtime_background_hint_items(context: &Context) -> Vec<String> {
         .filter(|(app_id, _)| focused.as_ref() != Some(app_id))
         .filter_map(|(app_id, state)| background_app_attention_hint(app_id, &state))
         .collect()
-}
-
-fn render_skill_summaries(skills: Vec<SkillSummary>) -> String {
-    let mut lines = Vec::new();
-    for skill in skills {
-        lines.push(format!("- {}: {}", skill.id, skill.name));
-        for when in skill.when_to_use {
-            lines.push(format!("  - {}", render_inline_summary(&when)));
-        }
-    }
-    lines.join("\n")
 }
 
 pub fn build_app_pre_focus_note_prompt(app_id: AppId, state: &AppStateRender) -> String {
@@ -191,18 +161,6 @@ fn app_requires_attention(app_id: AppId, state: &AppStateRender) -> bool {
         !list_field(&state.lines, "unread_sessions").is_empty()
     } else {
         false
-    }
-}
-
-fn render_inline_summary(text: &str) -> String {
-    const MAX_CHARS: usize = 120;
-    let compact = text.replace('\n', "\\n");
-    let mut chars = compact.chars();
-    let summary = chars.by_ref().take(MAX_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        format!("{summary}...")
-    } else {
-        summary
     }
 }
 
