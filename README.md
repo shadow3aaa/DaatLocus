@@ -83,6 +83,19 @@ bank_id = "daat-locus"
 request_timeout_secs = 180 # retain 可能较慢，建议至少 3 分钟
 ```
 
+如果你想启用 Telegram 支持，请继续添加：
+
+```toml
+[telegram]
+enabled = true
+bot_token = "your-telegram-bot-token"
+poll_timeout_secs = 30
+```
+
+只有在 `enabled = true` 且 `bot_token` 非默认占位符时，程序才会启动 Telegram 模块。
+
+Telegram 主要用于接收私人消息事件、准备消息草稿及同步 Telegram 相关状态。
+
 然后运行 Daat Locus：
 
 ```bash
