@@ -1,6 +1,12 @@
+<div align="center">
+
 # Daat Locus
 
+<img src="assets/logo.svg" alt="Logo" style="width:250px; height:auto;" />
+
 Daat Locus 是一个长期运行 agent。目标是让 agent 拥有长期经验，并拥有自我改进能力。
+
+</div>
 
 ## 特性
 
