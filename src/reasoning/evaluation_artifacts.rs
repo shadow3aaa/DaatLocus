@@ -15,15 +15,11 @@ const STRESS_CASES_DIR: &str = "stress_cases";
 const INSTRUCTION_HYPOTHESES_DIR: &str = "instruction_hypotheses";
 const RUNTIME_DEMOS_DIR: &str = "runtime_demos";
 const TURN_DEMOS_DIR: &str = "turn_demos";
-const RUNTIME_PROMPT_SUGGESTIONS_DIR: &str = "runtime_prompt_suggestions";
-const RUNTIME_DEMO_EVALUATIONS_DIR: &str = "runtime_demo_evaluations";
 const TURN_DEMO_EVALUATIONS_DIR: &str = "turn_demo_evaluations";
 const RUNTIME_PROMPT_CANDIDATES_DIR: &str = "runtime_prompt_candidates";
 const RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR: &str = "runtime_prompt_evolution_reports";
-const SKILL_PATCHES_DIR: &str = "skill_patches";
-const SKILL_MERGES_DIR: &str = "skill_merges";
-const SKILL_SPLITS_DIR: &str = "skill_splits";
-const SKILL_DEPRECATIONS_DIR: &str = "skill_deprecations";
+const WORKFLOW_PATCHES_DIR: &str = "workflow_patches";
+const WORKFLOW_MERGES_DIR: &str = "workflow_merges";
 const MAX_ARTIFACT_FILE_STEM_LEN: usize = 96;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,31 +113,6 @@ pub struct EvaluationArtifactTurnDemo {
     pub must_end_with_terminal_answer: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EvaluationArtifactRuntimePromptSuggestion {
-    pub compile_key: String,
-    pub title: String,
-    pub rationale: String,
-    #[serde(default)]
-    pub suggested_additions: Vec<String>,
-    #[serde(default)]
-    pub source_demo_titles: Vec<String>,
-    #[serde(default)]
-    pub source_pattern_ids: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactRuntimeDemoEvaluation {
-    pub compile_key: String,
-    pub demo_title: String,
-    pub passed: bool,
-    pub regression_detected: bool,
-    pub confidence: f64,
-    #[serde(default)]
-    pub needed_changes: Vec<String>,
-    pub reason: String,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct EvaluationArtifactTurnDemoEvaluation {
     pub compile_key: String,
@@ -220,57 +191,49 @@ pub struct EvaluationArtifactRuntimePromptEvolutionReport {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactSkillPatch {
-    pub skill_id: String,
+pub struct EvaluationArtifactWorkflowPatch {
+    pub workflow_id: String,
     pub title: String,
     pub rationale: String,
     #[serde(default)]
+    pub when_to_use_additions: Vec<String>,
+    #[serde(default)]
+    pub precondition_additions: Vec<String>,
+    #[serde(default)]
     pub workflow_step_additions: Vec<String>,
     #[serde(default)]
-    pub failure_recovery_additions: Vec<String>,
+    pub done_criteria_additions: Vec<String>,
     #[serde(default)]
-    pub source_review_ids: Vec<String>,
+    pub recovery_additions: Vec<String>,
+    #[serde(default)]
+    pub source_run_ids: Vec<String>,
     pub confidence: f64,
     pub applied: bool,
     pub rolled_back: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactSkillMerge {
-    pub target_skill_id: String,
+pub struct EvaluationArtifactWorkflowMerge {
+    pub target_workflow_id: String,
     #[serde(default)]
-    pub source_skill_ids: Vec<String>,
+    pub source_workflow_ids: Vec<String>,
     pub rationale: String,
     pub confidence: f64,
     pub applied: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EvaluationArtifactSkillSplitDraft {
-    pub name: String,
-    #[serde(default)]
-    pub workflow_steps: Vec<String>,
-    #[serde(default)]
-    pub done_criteria: Vec<String>,
+pub struct PromptImprovementArtifacts<'a> {
+    pub failure_patterns: &'a [EvaluationArtifactFailurePattern],
+    pub bootstrap_demos: &'a [EvaluationArtifactBootstrapDemo],
+    pub stress_cases: &'a [EvaluationArtifactStressCase],
+    pub instruction_hypotheses: &'a [EvaluationArtifactInstructionHypothesis],
+    pub runtime_demos: &'a [EvaluationArtifactRuntimeDemo],
+    pub turn_demos: &'a [EvaluationArtifactTurnDemo],
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactSkillSplit {
-    pub source_skill_id: String,
-    pub rationale: String,
-    #[serde(default)]
-    pub drafts: Vec<EvaluationArtifactSkillSplitDraft>,
-    pub confidence: f64,
-    pub applied: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactSkillDeprecate {
-    pub skill_id: String,
-    pub rationale: String,
-    pub replacement_skill_id: Option<String>,
-    pub confidence: f64,
-    pub applied: bool,
+pub struct WorkflowImprovementArtifacts<'a> {
+    pub workflow_patches: &'a [EvaluationArtifactWorkflowPatch],
+    pub workflow_merges: &'a [EvaluationArtifactWorkflowMerge],
 }
 
 pub struct EvaluationArtifactsStore {
@@ -294,15 +257,11 @@ impl EvaluationArtifactsStore {
         ensure_dir(&root.join(INSTRUCTION_HYPOTHESES_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_DEMOS_DIR)).await?;
         ensure_dir(&root.join(TURN_DEMOS_DIR)).await?;
-        ensure_dir(&root.join(RUNTIME_PROMPT_SUGGESTIONS_DIR)).await?;
-        ensure_dir(&root.join(RUNTIME_DEMO_EVALUATIONS_DIR)).await?;
         ensure_dir(&root.join(TURN_DEMO_EVALUATIONS_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_CANDIDATES_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR)).await?;
-        ensure_dir(&root.join(SKILL_PATCHES_DIR)).await?;
-        ensure_dir(&root.join(SKILL_MERGES_DIR)).await?;
-        ensure_dir(&root.join(SKILL_SPLITS_DIR)).await?;
-        ensure_dir(&root.join(SKILL_DEPRECATIONS_DIR)).await?;
+        ensure_dir(&root.join(WORKFLOW_PATCHES_DIR)).await?;
+        ensure_dir(&root.join(WORKFLOW_MERGES_DIR)).await?;
         Ok(Self { root })
     }
 
@@ -390,36 +349,6 @@ impl EvaluationArtifactsStore {
         replace_artifacts(&self.root.join(TURN_DEMOS_DIR), artifacts).await
     }
 
-    pub async fn replace_runtime_prompt_suggestions(
-        &self,
-        artifacts: &[EvaluationArtifactRuntimePromptSuggestion],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                let slug = slugify(&artifact.title);
-                (format!("{}-{}", artifact.compile_key, slug), artifact)
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(RUNTIME_PROMPT_SUGGESTIONS_DIR), artifacts).await
-    }
-
-    pub async fn replace_runtime_demo_evaluations(
-        &self,
-        artifacts: &[EvaluationArtifactRuntimeDemoEvaluation],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                let slug = slugify(&artifact.demo_title);
-                (format!("{}-{}", artifact.compile_key, slug), artifact)
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(RUNTIME_DEMO_EVALUATIONS_DIR), artifacts).await
-    }
-
     pub async fn replace_turn_demo_evaluations(
         &self,
         artifacts: &[EvaluationArtifactTurnDemoEvaluation],
@@ -471,72 +400,60 @@ impl EvaluationArtifactsStore {
         .await
     }
 
-    pub async fn replace_skill_patches(
+    pub async fn replace_workflow_patches(
         &self,
-        artifacts: &[EvaluationArtifactSkillPatch],
+        artifacts: &[EvaluationArtifactWorkflowPatch],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
             .cloned()
             .map(|artifact| {
                 (
-                    format!("{}-{}", artifact.skill_id, slugify(&artifact.title)),
+                    format!("{}-{}", artifact.workflow_id, slugify(&artifact.title)),
                     artifact,
                 )
             })
             .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(SKILL_PATCHES_DIR), artifacts).await
+        replace_artifacts(&self.root.join(WORKFLOW_PATCHES_DIR), artifacts).await
     }
 
-    pub async fn replace_skill_merges(
+    pub async fn replace_workflow_merges(
         &self,
-        artifacts: &[EvaluationArtifactSkillMerge],
+        artifacts: &[EvaluationArtifactWorkflowMerge],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
             .cloned()
-            .map(|artifact| {
-                (
-                    format!("{}-merge", artifact.target_skill_id),
-                    artifact,
-                )
-            })
+            .map(|artifact| (format!("{}-merge", artifact.target_workflow_id), artifact))
             .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(SKILL_MERGES_DIR), artifacts).await
+        replace_artifacts(&self.root.join(WORKFLOW_MERGES_DIR), artifacts).await
     }
 
-    pub async fn replace_skill_splits(
+    pub async fn replace_prompt_improvement_artifacts(
         &self,
-        artifacts: &[EvaluationArtifactSkillSplit],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                (
-                    format!("{}-split", artifact.source_skill_id),
-                    artifact,
-                )
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(SKILL_SPLITS_DIR), artifacts).await
+        artifacts: PromptImprovementArtifacts<'_>,
+    ) -> Result<()> {
+        self.replace_failure_patterns(artifacts.failure_patterns)
+            .await?;
+        self.replace_bootstrap_demos(artifacts.bootstrap_demos)
+            .await?;
+        self.replace_stress_cases(artifacts.stress_cases).await?;
+        self.replace_instruction_hypotheses(artifacts.instruction_hypotheses)
+            .await?;
+        self.replace_runtime_demos(artifacts.runtime_demos).await?;
+        self.replace_turn_demos(artifacts.turn_demos).await?;
+        Ok(())
     }
 
-    pub async fn replace_skill_deprecations(
+    pub async fn replace_workflow_improvement_artifacts(
         &self,
-        artifacts: &[EvaluationArtifactSkillDeprecate],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                (
-                    format!("{}-deprecate", artifact.skill_id),
-                    artifact,
-                )
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(SKILL_DEPRECATIONS_DIR), artifacts).await
+        artifacts: WorkflowImprovementArtifacts<'_>,
+    ) -> Result<()> {
+        self.replace_workflow_patches(artifacts.workflow_patches)
+            .await?;
+        self.replace_workflow_merges(artifacts.workflow_merges)
+            .await?;
+        Ok(())
     }
 }
 

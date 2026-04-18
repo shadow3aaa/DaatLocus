@@ -20,13 +20,13 @@ mod runtime_context;
 mod runtime_tools;
 mod sandbox;
 mod schema_utils;
-mod skill;
 mod snapshot;
 mod system_info;
 mod telegram_acl;
 mod telegram_transport;
 mod terminal_app;
 mod tool_ui;
+mod workflow;
 mod workspace_app;
 
 use std::{
@@ -43,7 +43,7 @@ use crate::{
     browser_app::BrowserApp,
     commands::reset::{run_complite_reset, run_memory_reset, run_reset_all, run_state_reset},
     config::load_config,
-    context::{Context, RuntimeTurnPhase},
+    context::{ActiveWorkflowRunSession, Context, PendingWorkflowRunFlush, RuntimeTurnPhase},
     context_budget::{approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded},
     daat_locus_paths::daat_locus_paths,
     dashboard::render::{
@@ -84,7 +84,6 @@ use crate::{
             AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage,
             PromptMemoryCitation, PromptMemoryContext, PromptMentalModel,
         },
-        runtime_review::{RuntimeTurnRecord, append_runtime_turn_record},
         sleep::run_sleep,
         turn_compile::{TurnCompileEngine, should_run_cold_start_turn_compile},
     },
@@ -98,13 +97,13 @@ use crate::{
         render_tool_call_ui_event, summarize_action_from_tool_call,
     },
     sandbox::RuntimeSandboxPolicy,
-    skill::SkillRegistry,
     snapshot::Snapshot,
     telegram_acl::TelegramAclHandle,
     telegram_transport::state::TelegramTransportState,
     telegram_transport::{TelegramLiveDraftClient, TelegramTransport},
     terminal_app::TerminalApp,
     tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
+    workflow::{WorkflowRunRecord, WorkflowStore, append_workflow_run_records},
     workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir},
     workspace_app::{
         WorkspaceAppInvalidation, WorkspaceAppRegistry, bootstrap_workspace_apps,
@@ -383,7 +382,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     let plan = Plan::new().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
-    let skills = SkillRegistry::new().await;
+    let workflows = WorkflowStore::new().await;
     let telegram_acl = TelegramAclHandle::load().await;
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
@@ -426,8 +425,12 @@ async fn async_main(cli: Cli) -> Result<()> {
         plan,
         events,
         pending_work,
-        skills,
-        active_skill_id: None,
+        workflows,
+        bound_workflow_id: None,
+        active_workflow_run: None,
+        pending_workflow_run_flushes: Vec::new(),
+        current_work_origin: None,
+        workflow_step_started_bound_id: None,
         apps,
         workspace_apps: runtime_apps.workspace_registry,
         telegram: telegram_handle,
@@ -443,7 +446,6 @@ async fn async_main(cli: Cli) -> Result<()> {
         live_assistant_progress_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         idle_since: None,
         last_idle_sleep_at: None,
-        record_runtime_reviews: true,
     };
     let app_renders = context.apps.state_renders();
 
@@ -856,7 +858,7 @@ pub(crate) async fn build_eval_context_with_compiled(
     let plan = Plan::new().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
-    let skills = SkillRegistry::new().await;
+    let workflows = WorkflowStore::new().await;
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
     let runtime_apps = build_runtime_apps(&execution_cwd);
@@ -882,8 +884,12 @@ pub(crate) async fn build_eval_context_with_compiled(
         plan,
         events,
         pending_work,
-        skills,
-        active_skill_id: None,
+        workflows,
+        bound_workflow_id: None,
+        active_workflow_run: None,
+        pending_workflow_run_flushes: Vec::new(),
+        current_work_origin: None,
+        workflow_step_started_bound_id: None,
         apps,
         workspace_apps: runtime_apps.workspace_registry,
         telegram: telegram_handle,
@@ -899,7 +905,6 @@ pub(crate) async fn build_eval_context_with_compiled(
         live_assistant_progress_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         idle_since: None,
         last_idle_sleep_at: None,
-        record_runtime_reviews: false,
     }
 }
 
@@ -923,32 +928,29 @@ async fn load_compiled_prompts_only(
 }
 
 fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
+    let prompt = &summary.prompt_improvement;
+    let workflow = &summary.workflow_improvement;
     println!(
-        "sleep: consumed {} runtime reviews, {} runtime traces; derived {} failure patterns, {} bootstrap demos, {} stress cases, {} instruction hypotheses, {} runtime demos, {} turn demos, skill artifacts patch/merge/split/deprecate = {}/{}/{}/{}, applied patch/merge/deprecate = {}/{}/{}, rollbacks {}, rounds {}, governance duplicate/low-quality/cold = {}/{}/{}, retained {} hindsight reflections, refreshed {} mental models",
-        summary.consumed_runtime_reviews,
-        summary.consumed_trace_events,
-        summary.failure_patterns.len(),
-        summary.bootstrap_demos,
-        summary.stress_cases,
-        summary.instruction_hypotheses,
-        summary.runtime_demos,
-        summary.turn_demos,
-        summary.skill_patch_candidates,
-        summary.skill_merge_candidates,
-        summary.skill_split_candidates,
-        summary.skill_deprecate_candidates,
-        summary.skill_patch_applied,
-        summary.skill_merge_applied,
-        summary.skill_deprecate_applied,
-        summary.skill_update_rollbacks,
-        summary.skill_optimization_rounds,
-        summary.governance_duplicate_pairs,
-        summary.governance_low_quality_skills,
-        summary.governance_cold_skills,
-        summary.retained_reflections,
+        "sleep: prompt[traces={} failure_patterns={} bootstrap_demos={} stress_cases={} instruction_hypotheses={} runtime_demos={} turn_demos={} additions={} updated={}] workflow[evidence_run_records={} patch/merge={}/{} applied={}/{} rollbacks={} rounds={}] refreshed {} mental models",
+        prompt.consumed_trace_events,
+        prompt.failure_patterns.len(),
+        prompt.bootstrap_demos,
+        prompt.stress_cases,
+        prompt.instruction_hypotheses,
+        prompt.runtime_demos,
+        prompt.turn_demos,
+        prompt.applied_system_additions,
+        prompt.compiled_prompt_updated,
+        workflow.evidence_run_records,
+        workflow.patch_candidates,
+        workflow.merge_candidates,
+        workflow.patch_applied,
+        workflow.merge_applied,
+        workflow.update_rollbacks,
+        workflow.optimization_rounds,
         summary.refreshed_mental_models
     );
-    for pattern in &summary.failure_patterns {
+    for pattern in &prompt.failure_patterns {
         let kind = match pattern.suggested_fix_kind {
             EvaluationArtifactSuggestedFixKind::Demo => "demo",
             EvaluationArtifactSuggestedFixKind::Instruction => "instruction",
@@ -967,21 +969,19 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
 }
 
 fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> String {
+    let prompt = &summary.prompt_improvement;
+    let workflow = &summary.workflow_improvement;
     format!(
-        "sleep 完成：runtime reviews {}，traces {}，skills patch/merge/split/deprecate={}/{}/{}/{}，应用 patch/merge/deprecate={}/{}/{}，回滚 {}，治理 duplicate/low-quality/cold={}/{}/{}",
-        summary.consumed_runtime_reviews,
-        summary.consumed_trace_events,
-        summary.skill_patch_candidates,
-        summary.skill_merge_candidates,
-        summary.skill_split_candidates,
-        summary.skill_deprecate_candidates,
-        summary.skill_patch_applied,
-        summary.skill_merge_applied,
-        summary.skill_deprecate_applied,
-        summary.skill_update_rollbacks,
-        summary.governance_duplicate_pairs,
-        summary.governance_low_quality_skills,
-        summary.governance_cold_skills,
+        "sleep 完成：prompt traces={}，failure_patterns={}，prompt additions={}，workflow evidence/patch/merge={}/{}/{}，应用 patch/merge={}/{}，回滚 {}",
+        prompt.consumed_trace_events,
+        prompt.failure_patterns.len(),
+        prompt.applied_system_additions,
+        workflow.evidence_run_records,
+        workflow.patch_candidates,
+        workflow.merge_candidates,
+        workflow.patch_applied,
+        workflow.merge_applied,
+        workflow.update_rollbacks,
     )
 }
 
@@ -1091,7 +1091,6 @@ pub(crate) struct AgentLoopStepExecution {
 pub(crate) struct AgentLoopStepOutput {
     pub(crate) observation: String,
     pub(crate) description: String,
-    pub(crate) stop_reason: String,
     pub(crate) current_doing: String,
     pub(crate) actions: Vec<EpisodeActionRecord>,
 }
@@ -1099,7 +1098,6 @@ pub(crate) struct AgentLoopStepOutput {
 const RUNTIME_HISTORY_MIN_MESSAGES: usize = 0;
 const RUNTIME_HISTORY_SUMMARY_MAX_TOKENS: usize = 800;
 const HINDSIGHT_RECALL_QUERY_MAX_TOKENS: usize = 420;
-const CLAIMED_EVENT_FINISHED_STOP_REASON: &str = "claimed_event_finished";
 const RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS: u64 = 60;
 
 async fn record_runtime_history_messages(context: &mut Context, draft: RuntimeTurnDraft) {
@@ -1123,97 +1121,6 @@ async fn record_runtime_history_messages(context: &mut Context, draft: RuntimeTu
             context.memory.mark_queued_retained();
         }
     }
-}
-
-async fn record_runtime_review_turn(
-    context: &mut Context,
-    pre_step_snapshot_text: &str,
-    history_messages: &[HistoryMessage],
-    output: &AgentLoopStepOutput,
-) {
-    if !context.record_runtime_reviews || history_messages.is_empty() {
-        return;
-    }
-    let mut metadata = std::collections::BTreeMap::new();
-    metadata.insert("origin".to_string(), "runtime_agent_loop".to_string());
-    if let Some(action) = output.actions.last() {
-        metadata.insert("action_kind".to_string(), action.kind.clone());
-        metadata.insert("action_summary".to_string(), action.summary.clone());
-    }
-    metadata.insert("stop_reason".to_string(), output.stop_reason.clone());
-    metadata.insert(
-        "execution_cwd".to_string(),
-        context.execution_cwd.display().to_string(),
-    );
-    metadata.insert("action_count".to_string(), output.actions.len().to_string());
-    metadata.insert(
-        "tool_action_count".to_string(),
-        output
-            .actions
-            .iter()
-            .filter(|action| {
-                !matches!(
-                    action.kind.as_str(),
-                    "assistant_message" | "empty_tool_calls"
-                )
-            })
-            .count()
-            .to_string(),
-    );
-    metadata.insert(
-        "active_plan_steps".to_string(),
-        context.plan.active_steps().count().to_string(),
-    );
-    metadata.insert(
-        "rollback_detected".to_string(),
-        detect_runtime_rollback(output).to_string(),
-    );
-    metadata.insert(
-        "manual_fix_detected".to_string(),
-        detect_runtime_manual_fix(output).to_string(),
-    );
-    if let Some(failure_type) = classify_runtime_failure_type(output) {
-        metadata.insert("failure_type".to_string(), failure_type);
-    }
-    if let Some(active_skill_id) = context.active_skill_id.as_deref() {
-        metadata.insert("active_skill_id".to_string(), active_skill_id.to_string());
-    }
-    if let Some(info) = context.llm.token_usage_info() {
-        metadata.insert(
-            "main_model_total_tokens".to_string(),
-            info.total_token_usage.total_tokens.to_string(),
-        );
-        metadata.insert(
-            "main_model_last_tokens".to_string(),
-            info.last_token_usage.total_tokens.to_string(),
-        );
-    }
-    if let Some(info) = context.judge_llm.token_usage_info() {
-        metadata.insert(
-            "judge_model_total_tokens".to_string(),
-            info.total_token_usage.total_tokens.to_string(),
-        );
-        metadata.insert(
-            "judge_model_last_tokens".to_string(),
-            info.last_token_usage.total_tokens.to_string(),
-        );
-    }
-
-    let after_snapshot = Snapshot::new(context).await;
-    let after_snapshot_text = build_runtime_snapshot_text(context, &after_snapshot);
-    let turn = RuntimeTurnRecord {
-        id: format!("runtime-turn:{}", uuid::Uuid::new_v4()),
-        recorded_at_ms: Utc::now().timestamp_millis(),
-        current_doing: output.current_doing.clone(),
-        description: output.description.clone(),
-        observation: output.observation.clone(),
-        actions: output.actions.clone(),
-        before_snapshot_text: pre_step_snapshot_text.to_string(),
-        after_snapshot_text,
-        history_messages: history_messages.to_vec(),
-        metadata,
-    };
-    append_runtime_turn_record(&turn).await;
 }
 
 fn detect_runtime_rollback(output: &AgentLoopStepOutput) -> bool {
@@ -1259,6 +1166,124 @@ fn classify_runtime_failure_type(output: &AgentLoopStepOutput) -> Option<String>
         return Some("runtime_error".to_string());
     }
     None
+}
+
+fn workflow_tool_action_count(output: &AgentLoopStepOutput) -> usize {
+    output
+        .actions
+        .iter()
+        .filter(|action| {
+            !matches!(
+                action.kind.as_str(),
+                "assistant_message" | "empty_tool_calls"
+            )
+        })
+        .count()
+}
+
+fn workflow_run_summary(output: &AgentLoopStepOutput) -> String {
+    format!(
+        "{} | {} | {}",
+        output.current_doing.trim(),
+        output.description.trim(),
+        output.observation.trim()
+    )
+}
+
+fn accumulate_workflow_session_from_output(
+    session: &mut ActiveWorkflowRunSession,
+    output: &AgentLoopStepOutput,
+) {
+    session.turn_count = session.turn_count.saturating_add(1);
+    session.tool_action_count = session
+        .tool_action_count
+        .saturating_add(workflow_tool_action_count(output));
+    session.manual_fix_detected |= detect_runtime_manual_fix(output);
+    session.rollback_detected |= detect_runtime_rollback(output);
+    if let Some(failure_type) = classify_runtime_failure_type(output) {
+        session.failure_types.insert(failure_type);
+    }
+    session.final_summary = workflow_run_summary(output);
+}
+
+fn workflow_run_record_from_pending_flush(
+    flush: PendingWorkflowRunFlush,
+    ended_at_ms: i64,
+) -> WorkflowRunRecord {
+    WorkflowRunRecord {
+        run_id: flush.session.run_id,
+        workflow_id: flush.session.workflow_id,
+        started_at_ms: flush.session.started_at_ms,
+        ended_at_ms,
+        origin: flush.session.origin,
+        outcome: flush.outcome,
+        turn_count: flush.session.turn_count,
+        tool_action_count: flush.session.tool_action_count,
+        manual_fix_detected: flush.session.manual_fix_detected,
+        rollback_detected: flush.session.rollback_detected,
+        failure_types: flush.session.failure_types.into_iter().collect(),
+        final_summary: flush.session.final_summary,
+    }
+}
+
+async fn record_workflow_run_evidence(context: &mut Context, output: &AgentLoopStepOutput) {
+    let target_workflow_id = context
+        .workflow_step_started_bound_id
+        .clone()
+        .or_else(|| context.bound_workflow_id.clone())
+        .or_else(|| {
+            context
+                .pending_workflow_run_flushes
+                .last()
+                .map(|flush| flush.session.workflow_id.clone())
+        });
+
+    if let Some(workflow_id) = target_workflow_id {
+        let mut matched_pending = false;
+        for flush in context.pending_workflow_run_flushes.iter_mut().rev() {
+            if flush.session.workflow_id == workflow_id {
+                accumulate_workflow_session_from_output(&mut flush.session, output);
+                matched_pending = true;
+                break;
+            }
+        }
+        if !matched_pending
+            && let Some(session) = context.active_workflow_run.as_mut()
+            && session.workflow_id == workflow_id
+        {
+            accumulate_workflow_session_from_output(session, output);
+        }
+    }
+
+    if context.pending_workflow_run_flushes.is_empty() {
+        return;
+    }
+
+    let ended_at_ms = Utc::now().timestamp_millis();
+    let records = context
+        .pending_workflow_run_flushes
+        .drain(..)
+        .map(|flush| workflow_run_record_from_pending_flush(flush, ended_at_ms))
+        .collect::<Vec<_>>();
+    if let Err(err) = append_workflow_run_records(&records).await {
+        tracing::error!("failed to append workflow run records at runtime boundary: {err:?}");
+    }
+}
+
+fn runtime_work_origin(inputs: &[ClaimedRuntimeInput]) -> Option<String> {
+    if inputs.is_empty() {
+        return None;
+    }
+    if inputs.len() > 1 {
+        return Some("runtime_work:batch".to_string());
+    }
+    match inputs.first() {
+        Some(ClaimedRuntimeInput::Event(event)) => Some(format!("event:{}", event.event_id)),
+        Some(ClaimedRuntimeInput::AppNotice { app, reason }) => {
+            Some(format!("app_notice:{app}:{}", reason.trim()))
+        }
+        None => None,
+    }
 }
 
 fn maybe_start_telegram_live_draft_session(
@@ -1383,7 +1408,6 @@ async fn abort_runtime_turn_before_model(
     let output = AgentLoopStepOutput {
         observation: observation.clone(),
         description,
-        stop_reason: "runtime_preflight_failed".to_string(),
         current_doing: "等待下一轮工具决策".to_string(),
         actions: vec![EpisodeActionRecord {
             kind: "runtime_preflight_failed".to_string(),
@@ -1392,6 +1416,9 @@ async fn abort_runtime_turn_before_model(
     };
     finalize_claimed_runtime_events(context, claimed_event_ids, &output);
     finalize_claimed_runtime_app_notices(context, claimed_app_notices, &output).await;
+    record_workflow_run_evidence(context, &output).await;
+    context.current_work_origin = None;
+    context.workflow_step_started_bound_id = None;
     AgentLoopStepExecution {
         output,
         history_messages: Vec::new(),
@@ -1458,6 +1485,8 @@ pub(crate) async fn execute_agent_loop_step(
     };
     context.prompt_memory = prompt_memory;
     let claimed_inputs = claim_pending_runtime_inputs(context, RUNTIME_EVENT_CLAIM_BATCH_SIZE);
+    context.current_work_origin = runtime_work_origin(&claimed_inputs);
+    context.workflow_step_started_bound_id = context.bound_workflow_id.clone();
     let claimed_input_fingerprint = claimed_runtime_input_fingerprint(&claimed_inputs);
     let claimed_event_ids = claimed_inputs
         .iter()
@@ -1685,7 +1714,6 @@ pub(crate) async fn execute_agent_loop_step(
                 break 'agent_loop AgentLoopStepOutput {
                     observation: observation.clone(),
                     description: "模型请求失败。".to_string(),
-                    stop_reason: "agent_turn_failed".to_string(),
                     current_doing: "等待下一轮工具决策".to_string(),
                     actions: terminal_actions,
                 };
@@ -1876,7 +1904,6 @@ pub(crate) async fn execute_agent_loop_step(
                         description: format!(
                             "某个 tool 改变了后续所需的上下文视图；当前 turn 在该边界后立即结束，并在新 turn 中重新渲染世界状态。原因：{reason}"
                         ),
-                        stop_reason: "tool_requested_new_turn".to_string(),
                         current_doing: "等待下一轮工具决策".to_string(),
                         actions: actions.clone(),
                     };
@@ -1896,7 +1923,6 @@ pub(crate) async fn execute_agent_loop_step(
                         },
                         description: "本轮领取的事件已完成或已交接，turn 在相关 tool 后立即终止。"
                             .to_string(),
-                        stop_reason: CLAIMED_EVENT_FINISHED_STOP_REASON.to_string(),
                         current_doing: "等待下一轮工具决策".to_string(),
                         actions: actions.clone(),
                     };
@@ -1941,7 +1967,6 @@ pub(crate) async fn execute_agent_loop_step(
             } else {
                 content
             },
-            stop_reason: "assistant_message".to_string(),
             current_doing,
             actions: actions.clone(),
         };
@@ -1962,7 +1987,9 @@ pub(crate) async fn execute_agent_loop_step(
     if !runtime_step.is_history_empty() {
         record_runtime_history_messages(context, runtime_step.into_turn_draft()).await;
     }
-    record_runtime_review_turn(context, &snapshot_text, &history_messages, &output).await;
+    record_workflow_run_evidence(context, &output).await;
+    context.current_work_origin = None;
+    context.workflow_step_started_bound_id = None;
     AgentLoopStepExecution {
         output,
         history_messages,
@@ -3085,16 +3112,10 @@ async fn maybe_start_forced_sleep(
         return None;
     }
     let trace_backlog = sleep_status.unread_trace_backlog;
-    let runtime_review_backlog = sleep_status.unread_runtime_review_backlog;
-    if trace_backlog < FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD
-        && runtime_review_backlog < FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD
-    {
+    if trace_backlog < FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD {
         return None;
     }
-    let status = format!(
-        "backlog 过高（traces={} runtime_reviews={}）：已启动后台 sleep",
-        trace_backlog, runtime_review_backlog
-    );
+    let status = format!("backlog 过高（traces={}）：已启动后台 sleep", trace_backlog);
     start_background_sleep(
         context,
         tx,
@@ -3106,8 +3127,8 @@ async fn maybe_start_forced_sleep(
     )
     .await;
     Some(format!(
-        "backlog 过高（traces={} runtime_reviews={}）：后台 sleep 已启动",
-        trace_backlog, runtime_review_backlog
+        "backlog 过高（traces={}）：后台 sleep 已启动",
+        trace_backlog
     ))
 }
 
@@ -3246,26 +3267,26 @@ async fn handle_sleep_task_result(
                 SleepTrigger::Manual => "sleep 完成",
                 SleepTrigger::Idle => "后台 sleep 完成",
             };
+            let prompt = &summary.prompt_improvement;
+            let workflow = &summary.workflow_improvement;
             sleep_status.total_runs += 1;
-            sleep_status.total_consumed_trace_events += summary.consumed_trace_events;
-            sleep_status.total_consumed_runtime_reviews += summary.consumed_runtime_reviews;
-            sleep_status.total_runtime_demos += summary.runtime_demos;
-            sleep_status.total_turn_demos += summary.turn_demos;
-            sleep_status.total_runtime_demo_evaluations += summary.runtime_demo_evaluations;
-            sleep_status.total_turn_demo_evaluations += summary.turn_demo_evaluations;
-            sleep_status.total_runtime_demo_passed += summary.runtime_demo_passed;
-            sleep_status.total_runtime_demo_regressions += summary.runtime_demo_regressions;
-            sleep_status.total_skill_patch_candidates += summary.skill_patch_candidates;
-            sleep_status.total_skill_merge_candidates += summary.skill_merge_candidates;
-            sleep_status.total_skill_split_candidates += summary.skill_split_candidates;
-            sleep_status.total_skill_deprecate_candidates += summary.skill_deprecate_candidates;
-            sleep_status.total_skill_patch_applied += summary.skill_patch_applied;
-            sleep_status.total_skill_merge_applied += summary.skill_merge_applied;
-            sleep_status.total_skill_deprecate_applied += summary.skill_deprecate_applied;
-            sleep_status.total_skill_update_rollbacks += summary.skill_update_rollbacks;
-            sleep_status.total_governance_duplicate_pairs += summary.governance_duplicate_pairs;
-            sleep_status.total_governance_low_quality_skills += summary.governance_low_quality_skills;
-            sleep_status.total_governance_cold_skills += summary.governance_cold_skills;
+            sleep_status.total_prompt_consumed_trace_events += prompt.consumed_trace_events;
+            sleep_status.total_failure_patterns += prompt.failure_patterns.len();
+            sleep_status.total_bootstrap_demos += prompt.bootstrap_demos;
+            sleep_status.total_stress_cases += prompt.stress_cases;
+            sleep_status.total_instruction_hypotheses += prompt.instruction_hypotheses;
+            sleep_status.total_runtime_demos += prompt.runtime_demos;
+            sleep_status.total_turn_demos += prompt.turn_demos;
+            sleep_status.total_prompt_system_additions += prompt.applied_system_additions;
+            sleep_status.total_compiled_prompt_updates +=
+                usize::from(prompt.compiled_prompt_updated);
+            sleep_status.total_workflow_evidence_run_records += workflow.evidence_run_records;
+            sleep_status.total_workflow_patch_candidates += workflow.patch_candidates;
+            sleep_status.total_workflow_merge_candidates += workflow.merge_candidates;
+            sleep_status.total_workflow_patch_applied += workflow.patch_applied;
+            sleep_status.total_workflow_merge_applied += workflow.merge_applied;
+            sleep_status.total_workflow_update_rollbacks += workflow.update_rollbacks;
+            sleep_status.total_workflow_optimization_rounds += workflow.optimization_rounds;
             let summary_text = summarize_sleep_summary(&summary);
             sleep_status.last_result = Some(summary_text.clone());
             set_runtime_status(

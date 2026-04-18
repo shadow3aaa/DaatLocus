@@ -58,7 +58,6 @@ use crate::{
             ProgramExecutionTelemetry, execute_program_with_ir_report,
             execute_program_with_ir_report_with_retry_hook_and_validator, resolve_program_tuning,
         },
-        runtime_review::{RuntimeReviewSpan, RuntimeTurnRecord},
         trace::TraceOrigin,
     },
 };
@@ -444,6 +443,15 @@ pub struct TurnTraceArtifact {
 
 pub struct TurnRolloutRunner;
 
+struct TurnTraceSourceTurn {
+    id: String,
+    current_doing: String,
+    description: String,
+    observation: String,
+    actions: Vec<EpisodeActionRecord>,
+    history_messages: Vec<HistoryMessage>,
+}
+
 struct IsolatedEvalContext {
     context: Context,
     home_override: DaatLocusHomeOverride,
@@ -495,25 +503,25 @@ pub async fn should_run_cold_start_turn_compile() -> Result<()> {
 }
 
 impl TurnRolloutRunner {
-    pub fn trace_from_span(span: &RuntimeReviewSpan) -> TurnTraceArtifact {
-        let steps = span
-            .turns
+    fn trace_from_turns(span_id: &str, turns: &[TurnTraceSourceTurn]) -> TurnTraceArtifact {
+        let steps = turns
             .iter()
-            .map(turn_trace_step_from_runtime_turn)
+            .map(turn_trace_step_from_source_turn)
             .collect::<Vec<_>>();
-        let final_assistant_message = span
-            .last_turn()
+        let final_turn = turns
+            .last()
+            .expect("turn trace source should contain at least one turn");
+        let final_assistant_message = final_turn
             .history_messages
             .iter()
             .rev()
             .find(|message| message.is_assistant())
             .and_then(|message| message.text_content().map(str::to_string))
             .filter(|message| !message.trim().is_empty());
-        let final_reply_message =
-            last_finish_and_send_reply_message(&span.last_turn().history_messages);
+        let final_reply_message = last_finish_and_send_reply_message(&final_turn.history_messages);
         TurnTraceArtifact {
-            span_id: span.id.clone(),
-            turn_count: span.turns.len(),
+            span_id: span_id.to_string(),
+            turn_count: turns.len(),
             steps,
             final_assistant_message,
             final_reply_message,
@@ -524,28 +532,6 @@ impl TurnRolloutRunner {
 pub struct TurnCompileEngine;
 
 impl TurnCompileEngine {
-    pub async fn evaluate_from_review_spans(
-        context: &mut Context,
-        turn_demos: &[EvaluationArtifactTurnDemo],
-        runtime_review_spans: &[RuntimeReviewSpan],
-        current_system_prompt: String,
-        previous_system_prompt: String,
-    ) -> Result<Vec<EvaluationArtifactTurnDemoEvaluation>> {
-        info!(
-            "[turn-compile:{}] evaluating {} turn demos from runtime review spans",
-            compile_mode_label(TurnCompileMode::SleepReplay),
-            turn_demos.len()
-        );
-        evaluate_turn_demos_from_review_spans(
-            context,
-            turn_demos,
-            runtime_review_spans,
-            current_system_prompt,
-            previous_system_prompt,
-        )
-        .await
-    }
-
     async fn evaluate_cold_start(
         config: Config,
         compiled_prompts: CompiledPromptStore,
@@ -1290,71 +1276,6 @@ fn render_rule_list(items: &[String]) -> String {
         .join("\n")
 }
 
-pub fn turn_prompt_suggestions_from_evaluations(
-    evaluations: &[EvaluationArtifactTurnDemoEvaluation],
-) -> Vec<String> {
-    evaluations
-        .iter()
-        .filter(|item| !item.passed)
-        .map(|item| format!("turn suggestion {}", item.demo_title))
-        .collect()
-}
-
-pub fn turn_evaluation_stats(
-    evaluations: &[EvaluationArtifactTurnDemoEvaluation],
-) -> (usize, usize) {
-    let passed = evaluations.iter().filter(|item| item.passed).count();
-    let regressions = evaluations
-        .iter()
-        .filter(|item| item.regression_detected)
-        .count();
-    (passed, regressions)
-}
-
-pub fn is_acceptable_turn_round(passed: usize, total: usize, has_regression: bool) -> bool {
-    !has_regression && passed == total
-}
-
-pub async fn generate_turn_prompt_candidates(
-    context: &mut Context,
-    evaluations: &[EvaluationArtifactTurnDemoEvaluation],
-    sleep_hypotheses: String,
-) -> Result<Vec<EvaluationArtifactRuntimePromptCandidate>> {
-    let failed = evaluations
-        .iter()
-        .filter(|item| !item.passed)
-        .cloned()
-        .collect::<Vec<_>>();
-    if failed.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let renderer = OpenAIToolRenderer;
-    let program = RuntimeTurnPromptPatchBuilderProgram;
-    let tuning = resolve_program_tuning(context, &program).await;
-    let current_system_prompt = runtime_system_prompt_text(&context.compiled_prompts);
-    let output = execute_program_with_ir_report(
-        context.judge_llm.as_ref(),
-        context,
-        &renderer,
-        &program,
-        program.dataset_ir(
-            current_system_prompt,
-            render_failed_turn_demos(&failed),
-            render_turn_judge_feedback(&failed),
-            sleep_hypotheses,
-        ),
-        &tuning,
-        TraceOrigin::Sleep,
-    )
-    .await?;
-
-    let Some(candidate) = turn_prompt_candidate_from_output(&output.output, &failed) else {
-        return Ok(Vec::new());
-    };
-    Ok(vec![candidate])
-}
-
 impl TurnCompileSpec {
     pub fn from_demo(demo: &EvaluationArtifactTurnDemo) -> Self {
         Self {
@@ -1366,68 +1287,6 @@ impl TurnCompileSpec {
             judge_focus: demo.judge_focus.clone(),
         }
     }
-}
-
-pub async fn evaluate_turn_demos_from_review_spans(
-    context: &mut Context,
-    turn_demos: &[EvaluationArtifactTurnDemo],
-    runtime_review_spans: &[RuntimeReviewSpan],
-    current_system_prompt: String,
-    previous_system_prompt: String,
-) -> Result<Vec<EvaluationArtifactTurnDemoEvaluation>> {
-    if turn_demos.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let renderer = OpenAIToolRenderer;
-    let program = RuntimeTurnTraceJudgeProgram;
-    let tuning = resolve_program_tuning(context, &program).await;
-    let mut evaluations = Vec::with_capacity(turn_demos.len());
-
-    for demo in turn_demos.iter().cloned() {
-        let Some(span) = runtime_review_spans.get(evaluations.len()) else {
-            warn!(
-                "turn demo '{}' skipped: no runtime review span available at matching index",
-                demo.title
-            );
-            continue;
-        };
-
-        let judge_focus = if demo.judge_focus.is_empty() {
-            String::from("none")
-        } else {
-            demo.judge_focus.join("\n")
-        };
-        let trace = TurnRolloutRunner::trace_from_span(span);
-        let turn_trace = render_turn_trace_for_judge(&trace);
-        let output = execute_program_with_ir_report(
-            context.judge_llm.as_ref(),
-            context,
-            &renderer,
-            &program,
-            program.dataset_ir(
-                current_system_prompt.clone(),
-                previous_system_prompt.clone(),
-                demo.title.clone(),
-                demo.scenario_summary.clone(),
-                demo.expected_behavior.clone(),
-                judge_focus,
-                turn_trace.clone(),
-            ),
-            &tuning,
-            TraceOrigin::Sleep,
-        )
-        .await?;
-
-        evaluations.push(turn_demo_evaluation_from_output(
-            &demo,
-            &trace,
-            &turn_trace,
-            &output.output,
-        ));
-    }
-
-    Ok(evaluations)
 }
 
 pub fn render_turn_trace_for_judge(trace: &TurnTraceArtifact) -> String {
@@ -1490,7 +1349,7 @@ pub fn render_turn_trace_for_judge(trace: &TurnTraceArtifact) -> String {
     lines.join("\n")
 }
 
-fn turn_trace_step_from_runtime_turn(turn: &RuntimeTurnRecord) -> TurnTraceStep {
+fn turn_trace_step_from_source_turn(turn: &TurnTraceSourceTurn) -> TurnTraceStep {
     TurnTraceStep {
         turn_id: turn.id.clone(),
         current_doing: turn.current_doing.clone(),
@@ -1817,20 +1676,6 @@ pub fn runtime_system_prompt_text(compiled_prompts: &CompiledPromptStore) -> Str
     ))
 }
 
-pub fn choose_best_non_regressing_prompt_shared(
-    best_prompt: &CompiledRuntimeSystemPrompt,
-    best_passed: usize,
-    current_prompt: &CompiledRuntimeSystemPrompt,
-    current_passed: usize,
-    has_regression: bool,
-) -> (CompiledRuntimeSystemPrompt, usize) {
-    if !has_regression && current_passed >= best_passed {
-        (current_prompt.clone(), current_passed)
-    } else {
-        (best_prompt.clone(), best_passed)
-    }
-}
-
 pub fn build_compiled_runtime_system_prompt_report(
     score: usize,
     total_cases: usize,
@@ -1933,7 +1778,7 @@ fn compile_mode_label(mode: TurnCompileMode) -> &'static str {
     }
 }
 
-fn last_assistant_message(turn: &RuntimeTurnRecord) -> Option<String> {
+fn last_assistant_message(turn: &TurnTraceSourceTurn) -> Option<String> {
     turn.history_messages
         .iter()
         .rev()
@@ -2034,36 +1879,29 @@ fn field_value(fields: &[ExampleField], names: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::reasoning::{runtime::HistoryMessage, runtime_review::RuntimeReviewSpan};
+    use crate::reasoning::runtime::HistoryMessage;
 
     use super::*;
 
     #[test]
     fn render_turn_trace_for_judge_includes_actions_and_assistant() {
-        let span = RuntimeReviewSpan {
-            id: "span-1".to_string(),
-            turns: vec![RuntimeTurnRecord {
-                id: "turn-1".to_string(),
-                recorded_at_ms: 1,
-                current_doing: "analyze main".to_string(),
-                description: "read main.rs".to_string(),
-                observation: "needs more inspection".to_string(),
-                actions: vec![crate::reasoning::episode::EpisodeActionRecord {
-                    kind: "assistant_message".to_string(),
-                    summary: "planning".to_string(),
-                }],
-                before_snapshot_text: String::new(),
-                after_snapshot_text: String::new(),
-                history_messages: vec![HistoryMessage {
-                    message: crate::reasoning::runtime::AgentMessage::assistant("I will continue."),
-                    tool_ui_event: None,
-                    tool_call_ui_events: Vec::new(),
-                }],
-                metadata: std::collections::BTreeMap::new(),
+        let turns = vec![TurnTraceSourceTurn {
+            id: "turn-1".to_string(),
+            current_doing: "analyze main".to_string(),
+            description: "read main.rs".to_string(),
+            observation: "needs more inspection".to_string(),
+            actions: vec![crate::reasoning::episode::EpisodeActionRecord {
+                kind: "assistant_message".to_string(),
+                summary: "planning".to_string(),
             }],
-        };
+            history_messages: vec![HistoryMessage {
+                message: crate::reasoning::runtime::AgentMessage::assistant("I will continue."),
+                tool_ui_event: None,
+                tool_call_ui_events: Vec::new(),
+            }],
+        }];
 
-        let trace = TurnRolloutRunner::trace_from_span(&span);
+        let trace = TurnRolloutRunner::trace_from_turns("span-1", &turns);
         let rendered = render_turn_trace_for_judge(&trace);
 
         assert!(rendered.contains("turn[1].actions=assistant_message(planning)"));

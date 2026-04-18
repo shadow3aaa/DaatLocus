@@ -7,6 +7,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 
+use crate::telegram_transport::state::TelegramTransportStateHandle;
 use crate::{
     config::TelegramConfig,
     dashboard::{DashboardControlCommand, DashboardState, execute_remote_command},
@@ -14,8 +15,6 @@ use crate::{
     pending_work::{PendingWork, PendingWorkQueue},
     telegram_acl::{AccessDecision, TelegramAclHandle},
 };
-use crate::telegram_transport::state::TelegramTransportStateHandle;
-
 
 pub struct TelegramTransport {
     client: Client,
@@ -135,10 +134,14 @@ impl TelegramTransport {
                             Some(reason.clone()),
                         )
                     {
-                        tracing::error!("mark telegram event awaiting delivery failed: {mark_err:?}");
+                        tracing::error!(
+                            "mark telegram event awaiting delivery failed: {mark_err:?}"
+                        );
                     }
                     if let Err(requeue_err) = self.handle.requeue_outbound_front(message) {
-                        tracing::error!("requeue telegram outbound message failed: {requeue_err:?}");
+                        tracing::error!(
+                            "requeue telegram outbound message failed: {requeue_err:?}"
+                        );
                     }
                     return Err(miette!("telegram outbound delivery failed: {reason}"));
                 }

@@ -9,9 +9,9 @@ use super::{
     prompts::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
         MEMORIES_UNIT_HOW, MEMORIES_UNIT_WHAT, MEMORIES_UNIT_WHEN, PLAN_UNIT_HOW, PLAN_UNIT_WHAT,
-        PLAN_UNIT_WHEN, SKILL_UNIT_HOW, SKILL_UNIT_WHAT, SKILL_UNIT_WHEN, WORKSPACE_UNIT_HOW,
-        WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY,
-        build_app_usage_prompt, build_runtime_app_usages, build_runtime_background_hint_items,
+        PLAN_UNIT_WHEN, WORKFLOW_UNIT_HOW, WORKFLOW_UNIT_WHAT, WORKFLOW_UNIT_WHEN,
+        WORKSPACE_UNIT_HOW, WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY, build_app_usage_prompt,
+        build_runtime_app_usages, build_runtime_background_hint_items,
         build_runtime_focused_app_how_to_use_prompt, build_workspace_unit_what,
     },
     turn_compile::load_prompt_persona_spec_sync,
@@ -32,14 +32,14 @@ pub struct AppsSystemPart;
 pub struct WorkspaceSystemPart;
 pub struct MemoriesSystemPart;
 pub struct PlanSystemPart;
-pub struct SkillSystemPart;
+pub struct WorkflowSystemPart;
 pub struct PersonaSystemPart;
 pub struct CompiledAdditionsSystemPart;
 
 pub struct MemoriesSnapshotPart;
 pub struct SensorySnapshotPart;
 pub struct PlanSnapshotPart;
-pub struct SkillsSnapshotPart;
+pub struct WorkflowSnapshotPart;
 pub struct EventsSnapshotPart;
 pub struct AppSnapshotPart;
 
@@ -123,18 +123,18 @@ impl SystemPromptPart for PlanSystemPart {
     }
 }
 
-impl SystemPromptPart for SkillSystemPart {
+impl SystemPromptPart for WorkflowSystemPart {
     fn key(&self) -> &'static str {
-        "skills"
+        "workflow"
     }
 
     fn build(&self, _ctx: &Context) -> Option<PromptUnitDoc> {
         Some(PromptUnitDoc::new(
             self.key(),
-            vec![PromptBlock::Paragraph(SKILL_UNIT_WHAT.to_string())],
+            vec![PromptBlock::Paragraph(WORKFLOW_UNIT_WHAT.to_string())],
             Vec::new(),
-            vec![PromptBlock::Paragraph(SKILL_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(SKILL_UNIT_HOW.to_string())],
+            vec![PromptBlock::Paragraph(WORKFLOW_UNIT_WHEN.to_string())],
+            vec![PromptBlock::Paragraph(WORKFLOW_UNIT_HOW.to_string())],
         ))
     }
 }
@@ -269,30 +269,22 @@ impl SnapshotPart for PlanSnapshotPart {
     }
 }
 
-impl SnapshotPart for SkillsSnapshotPart {
+impl SnapshotPart for WorkflowSnapshotPart {
     fn key(&self) -> &'static str {
-        "skills"
+        "workflow"
     }
 
     fn build(&self, ctx: &Context, _snapshot: &Snapshot) -> Option<PromptNode> {
         let mut blocks = Vec::new();
 
-        if let Some(active_skill) = ctx.active_skill() {
-            blocks.push(PromptBlock::KeyValueList(vec![
-                ("active_skill_id".to_string(), active_skill.id.clone()),
-                ("active_skill_name".to_string(), active_skill.name.clone()),
-                (
-                    "active_skill_version".to_string(),
-                    active_skill.version.to_string(),
-                ),
-                (
-                    "active_skill_status".to_string(),
-                    format!("{:?}", active_skill.status).to_ascii_lowercase(),
-                ),
-            ]));
-            if !active_skill.workflow_steps.is_empty() {
+        if let Some(bound_workflow) = ctx.bound_workflow() {
+            blocks.push(PromptBlock::KeyValueList(vec![(
+                "bound_workflow_id".to_string(),
+                bound_workflow.id.clone(),
+            )]));
+            if !bound_workflow.workflow_steps.is_empty() {
                 blocks.push(PromptBlock::BulletList(
-                    active_skill
+                    bound_workflow
                         .workflow_steps
                         .iter()
                         .take(6)
@@ -300,31 +292,44 @@ impl SnapshotPart for SkillsSnapshotPart {
                         .collect(),
                 ));
             }
+            if !bound_workflow.done_criteria.is_empty() {
+                blocks.push(PromptBlock::BulletList(
+                    bound_workflow
+                        .done_criteria
+                        .iter()
+                        .take(4)
+                        .map(|item| format!("done: {item}"))
+                        .collect(),
+                ));
+            }
+            if !bound_workflow.recovery.is_empty() {
+                blocks.push(PromptBlock::BulletList(
+                    bound_workflow
+                        .recovery
+                        .iter()
+                        .take(4)
+                        .map(|item| format!("recovery: {item}"))
+                        .collect(),
+                ));
+            }
         } else {
             blocks.push(PromptBlock::Paragraph(
-                "active_skill_id=<none>; 如果这是多步骤任务，应先调用 select_skill/create_skill 并 activate_skill。"
+                "bound_workflow_id=<none>; 如果这是多步骤任务并且适合复用稳定流程，应先从候选 workflow 中选择合适项；若没有合适项，再调用 create_workflow 并 activate_workflow。"
                     .to_string(),
             ));
         }
 
-        let summaries = ctx.skills.summaries(8);
+        let summaries = ctx.workflows.summaries(8);
         if !summaries.is_empty() {
             blocks.push(PromptBlock::BulletList(
                 summaries
                     .into_iter()
                     .map(|summary| {
-                        let success_rate = summary
-                            .success_rate
-                            .map(|rate| format!("{:.1}%", rate * 100.0))
-                            .unwrap_or_else(|| "n/a".to_string());
-                        format!(
-                            "{} v{} [{} | success={}] - {}",
-                            summary.id,
-                            summary.version,
-                            format!("{:?}", summary.status).to_ascii_lowercase(),
-                            success_rate,
-                            summary.name
-                        )
+                        if summary.when_to_use_summary.is_empty() {
+                            summary.id
+                        } else {
+                            format!("{} | when={}", summary.id, summary.when_to_use_summary)
+                        }
                     })
                     .collect(),
             ));

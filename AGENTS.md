@@ -2,7 +2,7 @@
 
 本文档定义 Daat Locus 当前代码实现对应的 agent-facing 边界。
 
-目标不是写一份抽象口号，而是给未来修改 `app`、`events`、`runtime_tools`、`snapshot`、`telegram_transport`、`memory`、`sleep` 等模块时提供一套与代码一致的设计约束。
+目标不是写一份抽象口号，而是给未来修改 `app`、`events`、`runtime_tools`、`snapshot`、`telegram_transport`、`workflow`、`memory`、`sleep` 等模块时提供一套与代码一致的设计约束。
 
 ## Project Reality
 
@@ -35,6 +35,7 @@
 
 - sensory：时间和机器状态
 - plan：当前分步计划
+- workflows：当前绑定 workflow 与候选 workflow 摘要
 - events：待处理事件
 - apps：当前前景 app 与 app 结构状态
 - memories：自动召回的长期记忆
@@ -72,7 +73,7 @@
 
 当前代码里这套分层主要体现在 `App::render_state`、`usage()`、`how_to_use()`。
 
-`skills()` 是可选的补充层，用于在已经聚焦某个 app 之后，提供更细的执行规范；它不应替代 `usage` 或 `how_to_use`。
+不要再把可自优化的任务执行流程塞进 app 的补充说明层。跨任务可复用的方法资产应单独建模为 `Workflow`，而不是 app 的局部附属文本。
 
 ### Event
 
@@ -123,6 +124,40 @@
 - 事件列表镜像
 - 隐式游标
 
+### Workflow
+
+`Workflow` 是“针对某类任务的可复用执行规范”，不是模型内在能力，也不是某个 app 的局部附属说明。
+
+它回答的问题是：
+
+- 这类任务什么时候适合复用一套稳定流程
+- 这套流程通常按什么顺序推进
+- 做到什么程度算完成
+- 失败或阻塞时应该如何稳定恢复
+
+`Workflow` 必须拆成三层：
+
+- `WorkflowSpec`：workflow 本体，是 agent-facing 规范资产
+- `WorkflowBinding`：当前任务是否绑定某个 workflow，只属于 runtime 状态
+- `WorkflowRunRecord`：白天执行后自动沉淀的运行证据，供 sleep 使用；当前实现要求在 work 完成边界直接写入，而不是由 sleep 事后回放生成
+
+规则：
+
+- `WorkflowSpec` 不承载运行期选中态，不承载“active”这类瞬时状态
+- `WorkflowBinding` 只表示当前任务正在采用哪个 workflow，不写回 workflow 本体
+- `WorkflowRunRecord` 由代码自动记录，不要求模型手工写 daytime outcome log
+- workflow 的主要演化动作是 `patch` 和 `merge`
+- v1 不引入 `deprecate`
+- v1 不要求语义搜索；直接在快照展示候选 workflow 即可
+- workflow evolution 必须只依赖 workflow-bound execution evidence，不依赖 error demo、failure pattern 或 prompt evaluation artifacts
+
+不要把 workflow 用成：
+
+- plan 的长期化镜像
+- 运行时隐式状态槽
+- 自动生成的默认模板集合
+- 需要模型自己记账的绩效表
+
 ### Memory
 
 `Memory` 由两部分组成：
@@ -137,14 +172,41 @@
 Daat Locus 有显式的自我改进闭环：
 
 - runtime trace
-- runtime review
 - sleep
 - turn compile
 - compiled prompt additions
 
-这意味着运行时设计不是一次性的。任何 agent-facing 接口设计如果会系统性诱导错误行为，最终都会污染 trace/review，并影响后续 compile。
+这意味着运行时设计不是一次性的。任何 agent-facing 接口设计如果会系统性诱导错误行为，最终都会污染 trace 与 workflow run evidence，并影响后续 compile。
 
 所以接口设计要偏稳定、显式、可评审，不要依赖模糊约定。
+
+sleep 内部必须明确分成两条独立 pipeline：
+
+- `Prompt Improvement Pipeline`
+- `Workflow Improvement Pipeline`
+
+二者可以在同一次 sleep 中并行运行，但不能互相作为输入依赖。
+
+`Prompt Improvement Pipeline` 负责：
+
+- 只基于 runtime trace 修正 system prompt 与行为约束
+- 直接产出 prompt patch、compile artifacts
+- failure pattern、bootstrap demo、stress case 等如果存在，也只允许作为 trace 内部分析产物，不得成为独立中间证据层
+
+`Workflow Improvement Pipeline` 负责：
+
+- 只基于 `WorkflowRunRecord` 修正 workflow spec
+- 产出 workflow patch、workflow merge
+
+明确禁止：
+
+- 用 runtime review、error demo 或 failure pattern 直接驱动 workflow patch
+- 用 workflow merge/patch 结果反向充当 prompt compile 的证据
+
+要区分清楚两类对象：
+
+- prompt compile 修的是“模型该怎么想、怎么决策”
+- workflow evolution 修的是“这类任务通常该按什么流程做”
 
 ## Current App Semantics
 
@@ -208,8 +270,6 @@ Daat Locus 有显式的自我改进闭环：
   prompt/
     usage.md
     how_to_use.md
-  skills/
-    <skill-name>.md
 ```
 
 规则：
@@ -217,7 +277,7 @@ Daat Locus 有显式的自我改进闭环：
 - `runtime/app.lua` 是唯一的 Lua 主入口
 - `prompt/usage.md` 是 app 的 pre-focus 说明
 - `prompt/how_to_use.md` 是 app 的 post-focus 说明
-- `skills/*.md` 是附着在该 app 上的结构化 skill 文档
+- 不在第三方 app 包内承载可自优化 workflow 资产
 
 ### `app.toml`
 
@@ -227,7 +287,7 @@ Daat Locus 有显式的自我改进闭环：
 
 - 不承载 `id`
 - 不承载权限
-- 不承载 usage/how_to_use/skills 元数据
+- 不承载 usage/how_to_use/workflow 元数据
 - 默认情况下，主入口约定为 `runtime/app.lua`
 
 最小示例：
@@ -268,33 +328,19 @@ entry = "runtime/app.lua"
 
 这意味着第三方 app 的行为本体是一个对象模型，不是脚本集合。
 
-### Skills
+### Workflow Assets
 
-第三方 app 的 skill 文件位于 `skills/*.md`。
-
-规则：
-
-- 每个 skill 一个 markdown 文件
-- skill 使用 frontmatter schema
-- skill 是附着在 app 上的结构化操作规范
-- skill 不是独立能力单元
-- skill 不定义宿主生命周期、权限或运行时边界
-
-`prompt/*.md` 和 `skills/*.md` 都是 agent-facing 文本资产；`runtime/app.lua` 是宿主执行入口。
-
-## Global Skills
-
-除了 app-scoped skills，runtime 还支持不挂在任何 app 上的 global skills。
+可自优化 workflow 不属于 app package，而属于 runtime 级资产。
 
 规则：
 
-- global skills 始终可见，不需要 `focus_app`
-- 内置 global skills 位于仓库根目录的 `skills/*.md`
-- workspace 拓展 global skills 位于 `~/daat-locus-workspace/skills/*.md`
-- global skills 与 app skills 使用同一套 frontmatter schema
-- workspace `skills/` 走单独的 `notify + digest + safe-point reload`，不与 `apps/` 共用一套目录
-
-这层的作用是承载跨 app 的稳定操作规范，例如未来“编写 app”“编写 skill”这类能力。
+- workflow 默认不挂在任何 app 上
+- 内置 workflow 位于仓库根目录 `workflows/*.md`
+- workspace 拓展 workflow 位于 `~/daat-locus-workspace/workflows/*.md`
+- 每个 workflow 一个 markdown 文件，文件名就是 workflow id
+- workflow 使用 frontmatter + markdown 正文 schema
+- workflow 是跨任务可复用的执行规范，不是 app 的局部说明
+- `prompt/*.md` 负责 app 说明；`workflows/*.md` 负责可自优化执行流程；两者不要混写
 
 ### Reload Strategy
 
@@ -303,9 +349,11 @@ entry = "runtime/app.lua"
 推荐策略：
 
 - 启动时全量扫描一次 `~/daat-locus-workspace/apps`
-- 运行时使用 `notify` 监听该目录变化
+- workflow 目录 `~/daat-locus-workspace/workflows` 单独扫描与监听
+- 运行时使用 `notify` 监听受支持目录变化
 - 根据文件事件定位到受影响的 `<app-name>`
 - 只把该 app 标记为 dirty 并按 app 增量重载
+- workflow 文件变化时，只把受影响 workflow 标记为 dirty 并增量重载
 - watcher 异常或目录状态不可信时，再回退到一次全量 rescan
 
 不要把全量解析作为常规路径。
@@ -317,10 +365,13 @@ v1 不设计专门的第三方 App cache 目录。
 当前结论：
 
 - 只定义 source 目录：`~/daat-locus-workspace/apps`
+- workflow source 目录单独定义为 `~/daat-locus-workspace/workflows`
 - 不定义 `cache/apps`
+- 不定义 `cache/workflows`
 - 如果未来确实需要宿主持久化某个 app 的运行状态，再使用受保护的 runtime state 体系，例如 `~/.daat-locus/state/apps/<app-name>/`
+- 如果未来需要宿主持久化 workflow telemetry，再使用受保护的 runtime state 体系，例如 `~/.daat-locus/state/workflows/`
 
-第三方 app 是 agent 可编辑资产，但不是 agent 直接拥有的运行时状态。
+第三方 app 与 workflow spec 都是 agent 可编辑资产，但不是 agent 直接拥有的运行时状态。
 
 ## Current Event Semantics
 
@@ -414,16 +465,18 @@ app-scoped tool 可以要求先 `focus_app`。
 
 不要新增“append_plan_step”或“select_plan_step”这类会引入隐藏游标和增量同步复杂度的工具，除非有强证据说明当前 contract 不够用。
 
-### Skill Tools
+### Workflow Tools
 
-skill 的职责是补充具体操作规范，不是承载动态世界状态。
+workflow 的职责是提供跨任务可复用的执行规范，不是承载动态世界状态。
 
 当前规则：
 
-- global skill 列表会始终出现在快照里
-- focused app 的 skill 列表只会随当前前景 app 一起暴露
-- `read_skill` 会先尝试读取当前前景 app 的同名 skill；若当前 app 没有该 skill，再回退到 global skill
-- 因此，是否 `focus_app` 应先由任务需要、app usage 或 app notice 驱动；只有在需要 app-scoped skill 时才需要先 focus
+- workflow 列表会以摘要形式直接出现在快照里
+- 当前绑定的 workflow 会以更完整的形式暴露给模型
+- v1 只需要 `create_workflow` 和 `activate_workflow`（或等价的 bind tool）
+- 不要引入 `select_workflow` 语义搜索；候选 workflow 应直接由快照展示
+- 不要引入显式 `log_workflow_outcome`；白天证据应由代码自动写入 `WorkflowRunRecord`
+- 是否绑定 workflow 由任务复杂度和可复用性驱动，而不是由 `focus_app` 决定
 
 ## What Code Should Do
 
@@ -432,12 +485,14 @@ skill 的职责是补充具体操作规范，不是承载动态世界状态。
 - 轮询和接收 Telegram 更新
 - 去重事件
 - 持久化状态
+- 加载与持久化 workflow specs
+- 在 work 完成边界直接写入 `WorkflowRunRecord`
 - claim / release / requeue pending work
 - 维护 outbox
 - 加载快照
 - 控制 tool scope
-- 记录 trace / review
-- 执行 sleep 与 compile
+- 记录 trace
+- 分别执行 prompt compile 和 workflow evolution
 
 不要把这些工作转嫁给模型。
 
@@ -458,6 +513,7 @@ skill 的职责是补充具体操作规范，不是承载动态世界状态。
 - 理解事件语义
 - 判断是否需要回复
 - 选择是否 focus 某个 app
+- 判断是否需要创建或绑定 workflow
 - 规划步骤
 - 选择工具
 - 在需要时调用 `deep_recall`
@@ -473,6 +529,8 @@ skill 的职责是补充具体操作规范，不是承载动态世界状态。
 
 - 当前前景 app
 - app 结构化状态
+- 当前绑定 workflow
+- workflow 摘要
 - 事件摘要
 - plan
 - 记忆摘录
@@ -494,6 +552,11 @@ skill 的职责是补充具体操作规范，不是承载动态世界状态。
 - 在 app state 中保存 `selected_chat`、`selected_thread`、`opened_message`
 - 让 send / resolve 依赖隐藏 viewport state
 - 对事件只绑定容器 id，不绑定事件 id
+- 把 workflow 设计成某个 app 的局部附属说明或模型内在能力
+- 强迫模型先做 workflow 语义搜索才能继续执行
+- 自动生成通用默认 workflow 模板交给模型盲用
+- 把当前绑定 workflow 写回 workflow spec 本体
+- 让模型手工提交 workflow 结果日志
 - 把长期记忆当即时状态缓存
 - 把 plan 当 backlog 仓库
 - 让模型通过普通文本隐式提交最终发送动作
@@ -507,7 +570,7 @@ skill 的职责是补充具体操作规范，不是承载动态世界状态。
 3. 代码是否已经掌握了模型需要的事实？
 4. 动作是否绑定了具体对象和 freshness guard？
 5. 这个接口会不会诱导模型做机械枚举？
-6. 它是否与 trace/review/sleep 的评估闭环兼容？
+6. 它是否与 trace / workflow-run-record / sleep 的评估闭环兼容？
 
 如果答案偏“探索和聚焦”，优先建模为 `App`。
 
@@ -520,6 +583,7 @@ skill 的职责是补充具体操作规范，不是承载动态世界状态。
 - `App` 解决“要把注意力放到哪里，聚焦后怎么操作”
 - `Event` 解决“发生了什么，要不要响应，如何终结”
 - `PendingWork` 解决“下一轮该驱动什么”
+- `Workflow` 解决“这类任务用什么可复用流程推进，以及如何在 sleep 中持续修正”
 - `Plan` 解决“当前任务如何持续推进”
 - `Memory` 解决“线程延续与长期经验”
 - `Sleep` 解决“如何从 runtime 错误中持续改进”

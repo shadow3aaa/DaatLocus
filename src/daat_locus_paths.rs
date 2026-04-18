@@ -236,10 +236,6 @@ fn migrate_legacy_layout_sync(paths: &DaatLocusPaths) {
         paths.root.join("reasoning_traces.jsonl"),
         paths.journal_file("reasoning_traces.jsonl"),
     );
-    migrate_legacy_path_sync(
-        paths.root.join("runtime_reviews.jsonl"),
-        paths.journal_file("runtime_reviews.jsonl"),
-    );
 
     let legacy_daat_locus_toml = paths.root.join("daat-locus.toml");
     if legacy_daat_locus_toml.exists() {

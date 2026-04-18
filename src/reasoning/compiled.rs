@@ -369,24 +369,6 @@ pub async fn save_compiled_runtime_system_prompt_for_model(
     save_compiled_runtime_system_prompt_by_key(&scoped_key, compiled).await
 }
 
-pub async fn load_previous_compiled_runtime_system_prompt_for_model(
-    model_name: &str,
-) -> Result<Option<CompiledRuntimeSystemPrompt>> {
-    let scoped_key =
-        model_scoped_runtime_compile_key(RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY, model_name);
-    load_compiled_runtime_system_prompt_by_key(&scoped_key).await
-}
-
-#[allow(dead_code)]
-pub async fn save_previous_compiled_runtime_system_prompt_for_model(
-    model_name: &str,
-    compiled: &CompiledRuntimeSystemPrompt,
-) -> Result<()> {
-    let scoped_key =
-        model_scoped_runtime_compile_key(RUNTIME_SYSTEM_PROMPT_PREVIOUS_COMPILE_KEY, model_name);
-    save_compiled_runtime_system_prompt_by_key(&scoped_key, compiled).await
-}
-
 async fn load_compiled_runtime_system_prompt_by_key(
     compile_key: &str,
 ) -> Result<Option<CompiledRuntimeSystemPrompt>> {
