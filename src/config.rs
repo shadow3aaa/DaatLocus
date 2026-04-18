@@ -67,7 +67,7 @@ pub struct MainModelConfig {
 impl Default for MainModelConfig {
     fn default() -> Self {
         Self {
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: "https://api.openai.com".to_string(),
             model_name: "gpt-4.1".to_string(),
             api_key: "your-api-key".to_string(),
             temperature: 1.0,
