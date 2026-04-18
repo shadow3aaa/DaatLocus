@@ -2,18 +2,9 @@
 
 use std::time::Duration;
 
-use crate::{
-    app::AppId,
-    context::Context,
-    reasoning::{
-        runtime_review::unread_runtime_review_count,
-        trace::unread_runtime_trace_count,
-    },
-};
+use crate::{app::AppId, context::Context, reasoning::trace::unread_runtime_trace_count};
 
-use super::{
-    DashboardState, render_activity_from_messages,
-};
+use super::{DashboardState, render_activity_from_messages};
 
 /// Sleep-related constants used in dashboard rendering.
 pub const AUTO_SLEEP_IDLE_THRESHOLD: Duration = Duration::from_secs(300);
@@ -27,27 +18,23 @@ pub struct SleepDashboardStatus {
     pub current_trigger: Option<&'static str>,
     pub last_result: Option<String>,
     pub unread_trace_backlog: usize,
-    pub unread_runtime_review_backlog: usize,
     pub total_runs: usize,
-    pub total_consumed_trace_events: usize,
-    pub total_consumed_runtime_reviews: usize,
+    pub total_prompt_consumed_trace_events: usize,
+    pub total_failure_patterns: usize,
+    pub total_bootstrap_demos: usize,
+    pub total_stress_cases: usize,
+    pub total_instruction_hypotheses: usize,
     pub total_runtime_demos: usize,
     pub total_turn_demos: usize,
-    pub total_runtime_demo_evaluations: usize,
-    pub total_turn_demo_evaluations: usize,
-    pub total_runtime_demo_passed: usize,
-    pub total_runtime_demo_regressions: usize,
-    pub total_skill_patch_candidates: usize,
-    pub total_skill_merge_candidates: usize,
-    pub total_skill_split_candidates: usize,
-    pub total_skill_deprecate_candidates: usize,
-    pub total_skill_patch_applied: usize,
-    pub total_skill_merge_applied: usize,
-    pub total_skill_deprecate_applied: usize,
-    pub total_skill_update_rollbacks: usize,
-    pub total_governance_duplicate_pairs: usize,
-    pub total_governance_low_quality_skills: usize,
-    pub total_governance_cold_skills: usize,
+    pub total_prompt_system_additions: usize,
+    pub total_compiled_prompt_updates: usize,
+    pub total_workflow_evidence_run_records: usize,
+    pub total_workflow_patch_candidates: usize,
+    pub total_workflow_merge_candidates: usize,
+    pub total_workflow_patch_applied: usize,
+    pub total_workflow_merge_applied: usize,
+    pub total_workflow_update_rollbacks: usize,
+    pub total_workflow_optimization_rounds: usize,
 }
 
 pub fn sync_dashboard_state(
@@ -227,9 +214,6 @@ pub async fn refresh_sleep_backlogs(sleep_status: &mut SleepDashboardStatus) {
     if let Ok(backlog) = unread_runtime_trace_count().await {
         sleep_status.unread_trace_backlog = backlog;
     }
-    if let Ok(backlog) = unread_runtime_review_count().await {
-        sleep_status.unread_runtime_review_backlog = backlog;
-    }
 }
 
 pub fn render_sleep_status_output_for_dashboard(
@@ -251,15 +235,24 @@ pub fn render_sleep_status_output_for_dashboard(
     }
     sections.push(format!("Overview\n{}", overview_lines.join("\n")));
 
-    let totals_lines = vec![
+    let prompt_lines = vec![
         format!("• Total runs: {}", sleep_status.total_runs),
         format!(
             "• Total consumed trace events: {}",
-            sleep_status.total_consumed_trace_events
+            sleep_status.total_prompt_consumed_trace_events
         ),
         format!(
-            "• Total consumed runtime reviews: {}",
-            sleep_status.total_consumed_runtime_reviews
+            "• Total failure patterns: {}",
+            sleep_status.total_failure_patterns
+        ),
+        format!(
+            "• Total bootstrap demos: {}",
+            sleep_status.total_bootstrap_demos
+        ),
+        format!("• Total stress cases: {}", sleep_status.total_stress_cases),
+        format!(
+            "• Total instruction hypotheses: {}",
+            sleep_status.total_instruction_hypotheses
         ),
         format!(
             "• Total runtime demos: {}",
@@ -267,67 +260,50 @@ pub fn render_sleep_status_output_for_dashboard(
         ),
         format!("• Total turn demos: {}", sleep_status.total_turn_demos),
         format!(
-            "• Total runtime demo evaluations: {}",
-            sleep_status.total_runtime_demo_evaluations
+            "• Total applied system additions: {}",
+            sleep_status.total_prompt_system_additions
         ),
         format!(
-            "• Total turn demo evaluations: {}",
-            sleep_status.total_turn_demo_evaluations
-        ),
-        format!(
-            "• Total runtime demo passes: {}",
-            sleep_status.total_runtime_demo_passed
-        ),
-        format!(
-            "• Total runtime demo regressions: {}",
-            sleep_status.total_runtime_demo_regressions
-        ),
-        format!(
-            "• Total skill patch candidates: {}",
-            sleep_status.total_skill_patch_candidates
-        ),
-        format!(
-            "• Total skill merge candidates: {}",
-            sleep_status.total_skill_merge_candidates
-        ),
-        format!(
-            "• Total skill split candidates: {}",
-            sleep_status.total_skill_split_candidates
-        ),
-        format!(
-            "• Total skill deprecate candidates: {}",
-            sleep_status.total_skill_deprecate_candidates
-        ),
-        format!(
-            "• Total skill patch applied: {}",
-            sleep_status.total_skill_patch_applied
-        ),
-        format!(
-            "• Total skill merge applied: {}",
-            sleep_status.total_skill_merge_applied
-        ),
-        format!(
-            "• Total skill deprecate applied: {}",
-            sleep_status.total_skill_deprecate_applied
-        ),
-        format!(
-            "• Total skill update rollbacks: {}",
-            sleep_status.total_skill_update_rollbacks
-        ),
-        format!(
-            "• Governance duplicate pairs: {}",
-            sleep_status.total_governance_duplicate_pairs
-        ),
-        format!(
-            "• Governance low quality skills: {}",
-            sleep_status.total_governance_low_quality_skills
-        ),
-        format!(
-            "• Governance cold skills: {}",
-            sleep_status.total_governance_cold_skills
+            "• Total compiled prompt updates: {}",
+            sleep_status.total_compiled_prompt_updates
         ),
     ];
-    sections.push(format!("Totals\n{}", totals_lines.join("\n")));
+    sections.push(format!("Prompt Improvement\n{}", prompt_lines.join("\n")));
+
+    let workflow_lines = vec![
+        format!(
+            "• Total workflow evidence run records: {}",
+            sleep_status.total_workflow_evidence_run_records
+        ),
+        format!(
+            "• Total workflow patch candidates: {}",
+            sleep_status.total_workflow_patch_candidates
+        ),
+        format!(
+            "• Total workflow merge candidates: {}",
+            sleep_status.total_workflow_merge_candidates
+        ),
+        format!(
+            "• Total workflow patch applied: {}",
+            sleep_status.total_workflow_patch_applied
+        ),
+        format!(
+            "• Total workflow merge applied: {}",
+            sleep_status.total_workflow_merge_applied
+        ),
+        format!(
+            "• Total workflow update rollbacks: {}",
+            sleep_status.total_workflow_update_rollbacks
+        ),
+        format!(
+            "• Total workflow optimization rounds: {}",
+            sleep_status.total_workflow_optimization_rounds
+        ),
+    ];
+    sections.push(format!(
+        "Workflow Improvement\n{}",
+        workflow_lines.join("\n")
+    ));
 
     let mut trigger_lines = vec![
         format!(
@@ -337,10 +313,6 @@ pub fn render_sleep_status_output_for_dashboard(
         format!(
             "• Current trace backlog: {}",
             sleep_status.unread_trace_backlog
-        ),
-        format!(
-            "• Current runtime review backlog: {}",
-            sleep_status.unread_runtime_review_backlog
         ),
         format!(
             "• Auto sleep after idle: {}",
@@ -405,8 +377,8 @@ pub fn render_status_command_output_for_dashboard(
         .unwrap_or_else(|| "none".to_string());
     let active_plans = context.plan.active_steps().count();
     let active_events = context.pending_work.pending_count();
-    let active_skill = context
-        .active_skill_id
+    let bound_workflow = context
+        .bound_workflow_id
         .clone()
         .unwrap_or_else(|| "none".to_string());
     let runtime_turn = if context.active_runtime_turn {
@@ -418,7 +390,7 @@ pub fn render_status_command_output_for_dashboard(
         "idle".to_string()
     };
     sections.push(format!(
-        "Overview\nRuntime turn: {runtime_turn}\nFocused app: {focused}\nActive skill: {active_skill}\nPlans: {active_plans}\nEvents: {active_events}"
+        "Overview\nRuntime turn: {runtime_turn}\nFocused app: {focused}\nBound workflow: {bound_workflow}\nPlans: {active_plans}\nEvents: {active_events}"
     ));
 
     let usage_lines = render_status_usage_lines(context);

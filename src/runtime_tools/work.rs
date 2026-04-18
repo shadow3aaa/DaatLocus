@@ -5,15 +5,15 @@ use crate::{
     apply_patch::{PatchOperationKind, parse_apply_patch, summarize_patch_ops},
     context::Context,
     core::{
-        ActivateSkillArgs, CreateSkillArgs, DeepRecallArgs, EventResolveArgs, FocusAppArgs,
-        LogSkillOutcomeArgs, PutAwayAppArgs, SelectSkillArgs, UpdatePlanArgs,
+        ActivateWorkflowArgs, CreateWorkflowArgs, DeepRecallArgs, EventResolveArgs, FocusAppArgs,
+        PutAwayAppArgs, UpdatePlanArgs,
     },
     events::{EventDisposition, EventPayload, EventStatus},
     hindsight::HindsightReflectOptions,
     plan::{Plan, PlanStatus, PlanStep},
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
-    skill::{NewSkillRecord, SkillOutcomeLog},
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
+    workflow::{NewWorkflowSpec, WorkflowRunOutcome},
 };
 
 use super::{
@@ -80,37 +80,21 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             render_update_plan_call_ui,
             execute_update_plan_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<SelectSkillArgs>(
-            "select_skill",
-            "按任务语义检索可复用 skill，并返回排序后的匹配结果。",
+        Box::new(StaticRuntimeTool::new::<CreateWorkflowArgs>(
+            "create_workflow",
+            "当没有可复用 workflow 时创建一个新 workflow 初稿。",
             None,
-            summarize_select_skill_tool,
-            render_select_skill_call_ui,
-            execute_select_skill_tool,
+            summarize_create_workflow_tool,
+            render_create_workflow_call_ui,
+            execute_create_workflow_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<CreateSkillArgs>(
-            "create_skill",
-            "当没有可复用 skill 时创建一个新 skill 草稿。",
+        Box::new(StaticRuntimeTool::new::<ActivateWorkflowArgs>(
+            "activate_workflow",
+            "将一个 workflow 绑定到当前任务，供后续多步骤执行复用。",
             None,
-            summarize_create_skill_tool,
-            render_create_skill_call_ui,
-            execute_create_skill_tool,
-        )),
-        Box::new(StaticRuntimeTool::new::<ActivateSkillArgs>(
-            "activate_skill",
-            "将一个 skill 绑定到当前任务，供后续多步骤执行复用。",
-            None,
-            summarize_activate_skill_tool,
-            render_activate_skill_call_ui,
-            execute_activate_skill_tool,
-        )),
-        Box::new(StaticRuntimeTool::new::<LogSkillOutcomeArgs>(
-            "log_skill_outcome",
-            "在任务后记录执行结果，更新 skill 指标与版本。",
-            None,
-            summarize_log_skill_outcome_tool,
-            render_log_skill_outcome_call_ui,
-            execute_log_skill_outcome_tool,
+            summarize_activate_workflow_tool,
+            render_activate_workflow_call_ui,
+            execute_activate_workflow_tool,
         )),
         Box::new(StaticRuntimeTool::new::<DeepRecallArgs>(
             "deep_recall",
@@ -298,6 +282,8 @@ fn execute_event_resolve_tool<'a>(
                 )
             }
         };
+        context.queue_active_workflow_run_for_flush(WorkflowRunOutcome::Completed);
+        context.bound_workflow_id = None;
         Ok(ToolExecutionResult::new(
             summary.clone(),
             json!({
@@ -338,15 +324,17 @@ fn execute_update_plan_tool<'a>(
     Box::pin(async move {
         let args: UpdatePlanArgs = parse_tool_args(call)?;
         let plan = build_plan_from_args(args)?;
-        if requires_skill_binding(&plan) && context.active_skill_id.is_none() {
+        if requires_workflow_binding(&plan) && context.bound_workflow_id.is_none() {
             return Err(miette::miette!(
-                "multi-step plan requires active skill; call select_skill/create_skill and activate_skill before update_plan"
+                "multi-step plan requires a bound workflow; call create_workflow or activate_workflow before update_plan"
             ));
         }
         let changed = context.plan.replace(plan.steps().to_vec());
-        let effective_steps = context.plan.steps();
+        let effective_steps = context.plan.steps().to_vec();
         let summary = if effective_steps.is_empty() {
             if changed {
+                context.queue_active_workflow_run_for_flush(WorkflowRunOutcome::Completed);
+                context.bound_workflow_id = None;
                 "cleared plan after completion".to_string()
             } else {
                 "plan already clear".to_string()
@@ -366,265 +354,95 @@ fn execute_update_plan_tool<'a>(
     })
 }
 
-fn summarize_select_skill_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: SelectSkillArgs = parse_tool_args(call)?;
+fn summarize_create_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: CreateWorkflowArgs = parse_tool_args(call)?;
     Ok(EpisodeActionRecord {
-        kind: "select_skill".to_string(),
-        summary: summarize_inline_text(&args.query),
+        kind: "create_workflow".to_string(),
+        summary: format!("workflow_id={}", args.id),
     })
 }
 
-fn render_select_skill_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: SelectSkillArgs = parse_tool_args(call)?;
-    let mut lines = vec![format!("query={}", summarize_inline_text(&args.query))];
-    if let Some(limit) = args.limit {
-        lines.push(format!("limit={limit}"));
-    }
-    Ok(ToolCallUiEvent::work("select_skill", lines))
+fn render_create_workflow_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: CreateWorkflowArgs = parse_tool_args(call)?;
+    let lines = vec![
+        format!("id={}", args.id),
+        format!("when_to_use={}", args.when_to_use.len()),
+        format!("workflow_steps={}", args.workflow_steps.len()),
+    ];
+    Ok(ToolCallUiEvent::work("create_workflow", lines))
 }
 
-fn execute_select_skill_tool<'a>(
+fn execute_create_workflow_tool<'a>(
     context: &'a mut Context,
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        let args: SelectSkillArgs = parse_tool_args(call)?;
-        let query = require_field(args.query, "query")?;
-        let limit = args.limit.unwrap_or(5).clamp(1, 12);
-        let mut matches = context.skills.query(&query, limit);
-        let mut auto_created = None;
-        if matches.is_empty() {
-            let created = context.skills.create_skill(NewSkillRecord {
-                name: query.clone(),
-                trigger_conditions: vec![query.clone()],
-                preconditions: vec!["明确任务范围与输入约束".to_string()],
-                workflow_steps: vec![
-                    "分析任务目标与边界".to_string(),
-                    "执行核心步骤并记录证据".to_string(),
-                    "验证结果并沉淀经验".to_string(),
-                ],
-                done_criteria: vec!["结果可验证并可复用".to_string()],
-                failure_recovery: vec!["失败时回退到上一个稳定步骤".to_string()],
-            })?;
-            context.skills.persist_if_dirty().await?;
-            auto_created = Some(created.clone());
-            matches = context.skills.query(&query, limit);
-        }
-
-        let summary = if matches.is_empty() {
-            format!(
-                "no skill matched query and auto-create failed: {}",
-                summarize_inline_text(&query)
-            )
-        } else if let Some(created) = auto_created.as_ref() {
-            format!(
-                "no match found; auto-created skill {} ({})",
-                created.id,
-                summarize_inline_text(&created.name)
-            )
-        } else {
-            format!("found {} skill matches", matches.len())
-        };
-        let ui_lines = if matches.is_empty() {
-            vec![summary.clone()]
-        } else {
-            matches
-                .iter()
-                .take(6)
-                .map(|matched| {
-                    format!(
-                        "score={:.2} {}",
-                        matched.score,
-                        format_skill_summary_line(
-                            &matched.summary.id,
-                            &matched.summary.name,
-                            matched.summary.version,
-                            matched.summary.success_rate,
-                        )
-                    )
-                })
-                .collect()
-        };
-
-        Ok(ToolExecutionResult::new(
-            summary.clone(),
-            json!({
-                "query": query,
-                "limit": limit,
-                "matches": matches,
-                "auto_created": auto_created,
-                "active_skill_id": context.active_skill_id,
-            }),
-            ToolUiEvent::work(summary, ui_lines),
-        ))
-    })
-}
-
-fn summarize_create_skill_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: CreateSkillArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "create_skill".to_string(),
-        summary: summarize_inline_text(&args.name),
-    })
-}
-
-fn render_create_skill_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: CreateSkillArgs = parse_tool_args(call)?;
-    let mut lines = vec![format!("name={}", summarize_inline_text(&args.name))];
-    lines.push(format!("workflow_steps={}", args.workflow_steps.len()));
-    Ok(ToolCallUiEvent::work("create_skill", lines))
-}
-
-fn execute_create_skill_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: CreateSkillArgs = parse_tool_args(call)?;
-        let created = context.skills.create_skill(NewSkillRecord {
-            name: args.name,
-            trigger_conditions: args.trigger_conditions,
-            preconditions: args.preconditions,
-            workflow_steps: args.workflow_steps,
-            done_criteria: args.done_criteria,
-            failure_recovery: args.failure_recovery,
-        })?;
-        context.skills.persist_if_dirty().await?;
-
-        let summary = format!("created skill {} ({})", created.id, created.name);
-        let ui_lines = vec![
-            format!("id={}", created.id),
-            format!("name={}", created.name),
-            format!("version={}", created.version),
-        ];
-
+        let args: CreateWorkflowArgs = parse_tool_args(call)?;
+        let created = context
+            .workflows
+            .create_workflow(NewWorkflowSpec {
+                id: args.id,
+                when_to_use: args.when_to_use,
+                preconditions: args.preconditions,
+                workflow_steps: args.workflow_steps,
+                done_criteria: args.done_criteria,
+                recovery: args.recovery,
+            })
+            .await?;
+        let summary = format!("created workflow {}", created.id);
+        let ui_lines = vec![format!("id={}", created.id)];
         Ok(ToolExecutionResult::new(
             summary.clone(),
             json!({
                 "created": created,
-                "active_skill_id": context.active_skill_id,
+                "bound_workflow_id": context.bound_workflow_id,
             }),
             ToolUiEvent::work(summary, ui_lines),
         ))
     })
 }
 
-fn summarize_activate_skill_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: ActivateSkillArgs = parse_tool_args(call)?;
+fn summarize_activate_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: ActivateWorkflowArgs = parse_tool_args(call)?;
     Ok(EpisodeActionRecord {
-        kind: "activate_skill".to_string(),
-        summary: format!("skill_id={}", args.skill_id),
+        kind: "activate_workflow".to_string(),
+        summary: format!("workflow_id={}", args.workflow_id),
     })
 }
 
-fn render_activate_skill_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: ActivateSkillArgs = parse_tool_args(call)?;
+fn render_activate_workflow_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: ActivateWorkflowArgs = parse_tool_args(call)?;
     Ok(ToolCallUiEvent::work(
-        "activate_skill",
-        vec![format!("skill_id={}", args.skill_id)],
+        "activate_workflow",
+        vec![format!("workflow_id={}", args.workflow_id)],
     ))
 }
 
-fn execute_activate_skill_tool<'a>(
+fn execute_activate_workflow_tool<'a>(
     context: &'a mut Context,
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
     Box::pin(async move {
-        let args: ActivateSkillArgs = parse_tool_args(call)?;
-        let skill_id = require_field(args.skill_id, "skill_id")?;
-        let activated = context.skills.activate_skill(&skill_id)?;
-        context.active_skill_id = Some(activated.id.clone());
-        context.skills.persist_if_dirty().await?;
-
-        let summary = format!(
-            "activated skill {} ({})",
-            activated.id,
-            summarize_inline_text(&activated.name)
-        );
+        let args: ActivateWorkflowArgs = parse_tool_args(call)?;
+        let workflow_id = require_field(args.workflow_id, "workflow_id")?;
+        let activated = context
+            .workflows
+            .get(&workflow_id)
+            .cloned()
+            .ok_or_else(|| miette::miette!("unknown workflow_id `{workflow_id}`"))?;
+        if context.bound_workflow_id.as_deref() != Some(activated.id.as_str()) {
+            context.queue_active_workflow_run_for_flush(WorkflowRunOutcome::Superseded);
+        }
+        context.bound_workflow_id = Some(activated.id.clone());
+        context.begin_workflow_run_session(activated.id.clone());
+        let summary = format!("activated workflow {}", activated.id);
         Ok(ToolExecutionResult::new(
             summary.clone(),
             json!({
-                "active_skill_id": context.active_skill_id,
+                "bound_workflow_id": context.bound_workflow_id,
                 "activated": activated,
             }),
-            ToolUiEvent::work(summary, vec![format!("active_skill_id={}", skill_id)]),
-        ))
-    })
-}
-
-fn summarize_log_skill_outcome_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: LogSkillOutcomeArgs = parse_tool_args(call)?;
-    let label = args
-        .skill_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("<active_skill>");
-    Ok(EpisodeActionRecord {
-        kind: "log_skill_outcome".to_string(),
-        summary: format!("skill_id={label} success={}", args.success),
-    })
-}
-
-fn render_log_skill_outcome_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: LogSkillOutcomeArgs = parse_tool_args(call)?;
-    let mut lines = vec![format!("success={}", args.success)];
-    if let Some(skill_id) = args.skill_id.as_deref()
-        && !skill_id.trim().is_empty()
-    {
-        lines.push(format!("skill_id={skill_id}"));
-    } else {
-        lines.push("skill_id=<active_skill>".to_string());
-    }
-    if let Some(steps_executed) = args.steps_executed {
-        lines.push(format!("steps_executed={steps_executed}"));
-    }
-    Ok(ToolCallUiEvent::work("log_skill_outcome", lines))
-}
-
-fn execute_log_skill_outcome_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: LogSkillOutcomeArgs = parse_tool_args(call)?;
-        let skill_id = args
-            .skill_id
-            .as_deref()
-            .and_then(|value| trim_required_field(value.to_string()))
-            .or_else(|| context.active_skill_id.clone())
-            .ok_or_else(|| {
-                miette::miette!("log_skill_outcome requires skill_id when no active skill is bound")
-            })?;
-
-        let updated = context.skills.log_outcome(
-            &skill_id,
-            SkillOutcomeLog {
-                success: args.success,
-                steps_executed: args.steps_executed,
-                regression: args.regression.unwrap_or(false),
-                summary: trim_optional_field(args.summary),
-                failure_type: trim_optional_field(args.failure_type),
-            },
-        )?;
-        context.skills.persist_if_dirty().await?;
-
-        let success_rate = updated
-            .quality_metrics
-            .success_rate()
-            .map(|rate| format!("{:.2}%", rate * 100.0))
-            .unwrap_or_else(|| "n/a".to_string());
-        let summary = format!(
-            "logged skill outcome for {} (runs={}, success_rate={})",
-            updated.id, updated.quality_metrics.total_runs, success_rate
-        );
-        Ok(ToolExecutionResult::new(
-            summary.clone(),
-            json!({
-                "skill_id": skill_id,
-                "updated": updated,
-                "active_skill_id": context.active_skill_id,
-            }),
-            ToolUiEvent::work(summary, vec![format!("skill_id={skill_id}")]),
+            ToolUiEvent::work(summary, vec![format!("bound_workflow_id={}", workflow_id)]),
         ))
     })
 }
@@ -882,28 +700,13 @@ fn render_plan_ui_lines(plan: &Plan) -> Vec<String> {
         .collect()
 }
 
-fn requires_skill_binding(plan: &Plan) -> bool {
+fn requires_workflow_binding(plan: &Plan) -> bool {
     let active_steps = plan
         .steps()
         .iter()
         .filter(|step| !matches!(step.status, PlanStatus::Completed))
         .count();
     active_steps > 1
-}
-
-fn format_skill_summary_line(
-    id: &str,
-    name: &str,
-    version: u64,
-    success_rate: Option<f64>,
-) -> String {
-    let success_rate = success_rate
-        .map(|rate| format!("{:.1}%", rate * 100.0))
-        .unwrap_or_else(|| "n/a".to_string());
-    format!(
-        "{id} v{version} ({success_rate}) - {}",
-        summarize_inline_text(name)
-    )
 }
 
 #[cfg(test)]

@@ -21,8 +21,8 @@ use crate::{
 
 use super::{HindsightRetainItem, HindsightRetainJob};
 
-use miette::Result;
 use crate::reasoning::render::openai_tools::OpenAIToolRenderer;
+use miette::Result;
 
 /// Maximum token budget for recent messages in hindsight context.
 pub const HINDSIGHT_RECENT_MESSAGES_MAX_TOKENS: usize = 160;

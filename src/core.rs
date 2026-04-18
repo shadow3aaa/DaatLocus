@@ -114,16 +114,10 @@ pub struct UpdatePlanArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct SelectSkillArgs {
-    pub query: String,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct CreateSkillArgs {
-    pub name: String,
+pub struct CreateWorkflowArgs {
+    pub id: String,
     #[serde(default)]
-    pub trigger_conditions: Vec<String>,
+    pub when_to_use: Vec<String>,
     #[serde(default)]
     pub preconditions: Vec<String>,
     #[serde(default)]
@@ -131,22 +125,12 @@ pub struct CreateSkillArgs {
     #[serde(default)]
     pub done_criteria: Vec<String>,
     #[serde(default)]
-    pub failure_recovery: Vec<String>,
+    pub recovery: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ActivateSkillArgs {
-    pub skill_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct LogSkillOutcomeArgs {
-    pub skill_id: Option<String>,
-    pub success: bool,
-    pub steps_executed: Option<u32>,
-    pub regression: Option<bool>,
-    pub summary: Option<String>,
-    pub failure_type: Option<String>,
+pub struct ActivateWorkflowArgs {
+    pub workflow_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

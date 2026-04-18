@@ -1,4 +1,5 @@
 pub mod paths;
+use crate::workspace_app::paths::workspace_apps_dir;
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet},
@@ -6,7 +7,6 @@ use std::{
     path::{Component, Path, PathBuf},
     time::Duration,
 };
-use crate::workspace_app::paths::workspace_apps_dir;
 
 use async_trait::async_trait;
 use miette::{Context as _, Result, miette};
@@ -2026,5 +2026,4 @@ return app
         assert!(message.contains("payload for workspace app tool `bad_payload`.count"));
         assert!(message.contains("must be an integer"));
     }
-
 }

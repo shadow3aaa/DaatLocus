@@ -526,18 +526,14 @@ pub async fn execute_agent_tool_call(
     context: &mut Context,
     call: &AgentToolCall,
 ) -> Result<ToolExecutionResult> {
-    if requires_skill_binding(context) && context.active_skill_id.is_none() {
+    if requires_workflow_binding(context) && context.bound_workflow_id.is_none() {
         let exempt = matches!(
             call.name.as_str(),
-            "select_skill"
-                | "create_skill"
-                | "activate_skill"
-                | "update_plan"
-                | "deep_recall"
+            "create_workflow" | "activate_workflow" | "update_plan" | "deep_recall"
         );
         if !exempt {
             return Err(miette!(
-                "multi-step execution requires active skill; call select_skill/create_skill and activate_skill first"
+                "multi-step execution requires a bound workflow; call create_workflow or activate_workflow first"
             ));
         }
     }
@@ -552,7 +548,7 @@ pub async fn execute_agent_tool_call(
         .ensure_model_content_with_budget(context.config.main_model.tool_output_max_tokens.max(1)))
 }
 
-fn requires_skill_binding(context: &Context) -> bool {
+fn requires_workflow_binding(context: &Context) -> bool {
     context
         .plan
         .steps()

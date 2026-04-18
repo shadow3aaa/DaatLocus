@@ -1,7 +1,7 @@
 //! 本模块包含 context，它是 Daat Locus 主循环中承载状态的结构体。
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -26,9 +26,9 @@ use crate::{
         prompt_doc::PromptDocument,
     },
     sandbox::RuntimeSandboxPolicy,
-    skill::{SkillRecord, SkillRegistry},
     snapshot::Snapshot,
     telegram_transport::state::TelegramTransportStateHandle,
+    workflow::{WorkflowRunOutcome, WorkflowSpec, WorkflowStore},
     workspace_app::WorkspaceAppRegistry,
 };
 
@@ -64,8 +64,12 @@ pub struct Context {
     pub plan: Plan,
     pub events: EventStore,
     pub pending_work: PendingWorkQueue,
-    pub skills: SkillRegistry,
-    pub active_skill_id: Option<String>,
+    pub workflows: WorkflowStore,
+    pub bound_workflow_id: Option<String>,
+    pub active_workflow_run: Option<ActiveWorkflowRunSession>,
+    pub pending_workflow_run_flushes: Vec<PendingWorkflowRunFlush>,
+    pub current_work_origin: Option<String>,
+    pub workflow_step_started_bound_id: Option<String>,
     pub apps: AppManager,
     pub workspace_apps: WorkspaceAppRegistry,
     pub telegram: TelegramTransportStateHandle,
@@ -81,7 +85,26 @@ pub struct Context {
     pub live_assistant_progress_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
-    pub record_runtime_reviews: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveWorkflowRunSession {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub started_at_ms: i64,
+    pub origin: String,
+    pub turn_count: usize,
+    pub tool_action_count: usize,
+    pub manual_fix_detected: bool,
+    pub rollback_detected: bool,
+    pub failure_types: BTreeSet<String>,
+    pub final_summary: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingWorkflowRunFlush {
+    pub session: ActiveWorkflowRunSession,
+    pub outcome: WorkflowRunOutcome,
 }
 
 #[derive(Debug, Clone)]
@@ -104,10 +127,43 @@ impl Context {
             .resolve_path(path, base.or(Some(&self.execution_cwd)))
     }
 
-    pub fn active_skill(&self) -> Option<&SkillRecord> {
-        self.active_skill_id
+    pub fn bound_workflow(&self) -> Option<&WorkflowSpec> {
+        self.bound_workflow_id
             .as_deref()
-            .and_then(|skill_id| self.skills.get(skill_id))
+            .and_then(|workflow_id| self.workflows.get(workflow_id))
+    }
+
+    pub fn begin_workflow_run_session(&mut self, workflow_id: impl Into<String>) {
+        let workflow_id = workflow_id.into();
+        if self
+            .active_workflow_run
+            .as_ref()
+            .is_some_and(|session| session.workflow_id == workflow_id)
+        {
+            return;
+        }
+        self.active_workflow_run = Some(ActiveWorkflowRunSession {
+            run_id: format!("workflow-run:{}", uuid::Uuid::new_v4()),
+            workflow_id,
+            started_at_ms: chrono::Utc::now().timestamp_millis(),
+            origin: self
+                .current_work_origin
+                .clone()
+                .unwrap_or_else(|| "runtime_work".to_string()),
+            turn_count: 0,
+            tool_action_count: 0,
+            manual_fix_detected: false,
+            rollback_detected: false,
+            failure_types: BTreeSet::new(),
+            final_summary: String::new(),
+        });
+    }
+
+    pub fn queue_active_workflow_run_for_flush(&mut self, outcome: WorkflowRunOutcome) {
+        if let Some(session) = self.active_workflow_run.take() {
+            self.pending_workflow_run_flushes
+                .push(PendingWorkflowRunFlush { session, outcome });
+        }
     }
 
     pub fn install_live_assistant_progress(
@@ -169,7 +225,7 @@ impl Context {
             self.memory.mark_queued_retained();
         }
         self.hindsight_retain.shutdown().await;
-        self.skills.shutdown().await;
+        self.workflows.shutdown().await;
         self.memory.shutdown().await;
         self.plan.shutdown().await;
         self.events.shutdown().await;

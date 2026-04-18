@@ -2,20 +2,19 @@ use std::collections::HashMap;
 
 use crate::{
     context::Context,
-    hindsight::{HindsightRecallOptions, HindsightRetainItem, builtin_hindsight_mental_models},
+    hindsight::{HindsightRecallOptions, builtin_hindsight_mental_models},
     reasoning::{
         compiled::{
-            RUNTIME_SYSTEM_PROMPT_COMPILE_KEY,
-            load_previous_compiled_runtime_system_prompt_for_model,
-            save_compiled_runtime_system_prompt_for_model,
-            save_previous_compiled_runtime_system_prompt_for_model,
+            RUNTIME_SYSTEM_PROMPT_COMPILE_KEY, save_compiled_runtime_system_prompt_for_model,
         },
-        episode::EpisodeActionRecord,
         examples::ExampleField,
-        runtime::{HistoryMessage, PromptRequest},
+        runtime::PromptRequest,
+        turn_compile::current_runtime_system_prompt_artifact_from_store,
     },
-    skill::{SkillRecord, SkillRegistry},
-    tool_ui::{ToolCallUiEvent, ToolUiEvent},
+    workflow::{
+        WorkflowPatch, WorkflowRunOutcome, WorkflowRunRecord, WorkflowSpec, WorkflowStore,
+        load_workflow_run_batch,
+    },
 };
 use miette::Result;
 use serde_json::json;
@@ -25,161 +24,65 @@ use super::{
     evaluation_artifacts::{
         EvaluationArtifactBootstrapDemo, EvaluationArtifactFailurePattern,
         EvaluationArtifactInstructionHypothesis, EvaluationArtifactRuntimeDemo,
-        EvaluationArtifactRuntimeDemoEvaluation, EvaluationArtifactRuntimePromptCandidate,
-        EvaluationArtifactRuntimePromptEvolutionReport,
-        EvaluationArtifactRuntimePromptEvolutionRound, EvaluationArtifactRuntimePromptSuggestion,
-        EvaluationArtifactSkillDeprecate, EvaluationArtifactSkillMerge,
-        EvaluationArtifactSkillPatch, EvaluationArtifactSkillSplit,
-        EvaluationArtifactSkillSplitDraft, EvaluationArtifactStressCase,
-        EvaluationArtifactSuggestedFixKind,
-        EvaluationArtifactTurnDemo, EvaluationArtifactTurnDemoEvaluation, EvaluationArtifactsStore,
+        EvaluationArtifactStressCase, EvaluationArtifactSuggestedFixKind,
+        EvaluationArtifactTurnDemo, EvaluationArtifactWorkflowMerge,
+        EvaluationArtifactWorkflowPatch, EvaluationArtifactsStore, PromptImprovementArtifacts,
+        WorkflowImprovementArtifacts,
     },
     programs::evaluation_artifact_builder::{
         EvaluationArtifactBuilderOutput, EvaluationArtifactBuilderProgram,
     },
-    programs::runtime_system_prompt_judge::{
-        RuntimeSystemPromptJudgeOutput, RuntimeSystemPromptJudgeProgram,
-    },
-    programs::runtime_system_prompt_patch_builder::{
-        RuntimeSystemPromptPatchBuilderOutput, RuntimeSystemPromptPatchBuilderProgram,
-    },
-    programs::sleep_review_synthesizer::{
-        SleepReviewSynthesizerOutput, SleepReviewSynthesizerProgram,
-    },
-    prompt_assembler::runtime_system_prompt_doc_from_additions,
-    prompt_renderer::LlmPromptRenderer,
     render::openai_tools::OpenAIToolRenderer,
     runtime::{execute_program_with_ir_report, resolve_program_tuning},
-    runtime_review::{
-        RuntimeReviewSpan, RuntimeTurnRecord, build_runtime_review_spans,
-        compact_runtime_review_file, load_runtime_review_batch,
-    },
     trace::{
         ProgramTraceRecord, RuntimeTraceBatch, TraceOrigin, compact_runtime_trace_file,
         load_runtime_trace_batch,
     },
-    turn_compile::{
-        TurnCompileEngine, apply_runtime_prompt_candidate_shared,
-        build_compiled_runtime_system_prompt_report, build_runtime_prompt_evolution_report,
-        choose_best_non_regressing_prompt_shared,
-        current_runtime_system_prompt_artifact_from_store, generate_turn_prompt_candidates,
-        is_acceptable_turn_round, runtime_system_prompt_text as render_runtime_system_prompt_text,
-        turn_evaluation_stats, turn_evaluation_summary_lines,
-        turn_prompt_suggestions_from_evaluations,
-    },
 };
 
-#[derive(Clone)]
-pub struct SleepSummary {
+#[derive(Clone, Default)]
+pub struct PromptImprovementSummary {
     pub consumed_trace_events: usize,
-    pub consumed_runtime_reviews: usize,
     pub failure_patterns: Vec<EvaluationArtifactFailurePattern>,
     pub bootstrap_demos: usize,
     pub stress_cases: usize,
     pub instruction_hypotheses: usize,
     pub runtime_demos: usize,
     pub turn_demos: usize,
-    pub runtime_demo_evaluations: usize,
-    pub turn_demo_evaluations: usize,
-    pub runtime_demo_passed: usize,
-    pub runtime_demo_regressions: usize,
-    pub skill_patch_candidates: usize,
-    pub skill_merge_candidates: usize,
-    pub skill_split_candidates: usize,
-    pub skill_deprecate_candidates: usize,
-    pub skill_patch_applied: usize,
-    pub skill_merge_applied: usize,
-    pub skill_deprecate_applied: usize,
-    pub skill_update_rollbacks: usize,
-    pub skill_optimization_rounds: usize,
-    pub governance_duplicate_pairs: usize,
-    pub governance_low_quality_skills: usize,
-    pub governance_cold_skills: usize,
-    pub retained_reflections: usize,
+    pub applied_system_additions: usize,
+    pub compiled_prompt_updated: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct WorkflowImprovementSummary {
+    pub evidence_run_records: usize,
+    pub patch_candidates: usize,
+    pub merge_candidates: usize,
+    pub patch_applied: usize,
+    pub merge_applied: usize,
+    pub update_rollbacks: usize,
+    pub optimization_rounds: usize,
+}
+
+#[derive(Clone, Default)]
+pub struct SleepSummary {
+    pub prompt_improvement: PromptImprovementSummary,
+    pub workflow_improvement: WorkflowImprovementSummary,
     pub refreshed_mental_models: usize,
 }
 
-#[derive(Clone, serde::Serialize)]
-struct SleepActionOutput {
-    observation: String,
-    description: String,
-    current_doing: String,
-    action_kind: String,
-    action_summary: String,
-}
-
 pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
-    let trace_batch = load_runtime_trace_records().await?;
-    let consumed_trace_events = trace_batch.records.len();
-    let records = trace_batch.records;
-    let runtime_review_batch = load_runtime_review_batch().await?;
-    let consumed_runtime_reviews = runtime_review_batch.turns.len();
-    let runtime_review_spans = build_runtime_review_spans(&runtime_review_batch.turns);
-    let mut failure_patterns = derive_failure_patterns(&records);
-    let review_inputs = collect_review_inputs(&runtime_review_spans);
-    let review_synthesis = synthesize_review_inputs(context, &review_inputs).await?;
-    failure_patterns.extend(review_synthesis.failure_patterns.clone());
     let store = EvaluationArtifactsStore::open().await?;
-    store.replace_failure_patterns(&failure_patterns).await?;
-    let mut derived = derive_evaluation_artifacts(context, &failure_patterns).await?;
-    derived
-        .bootstrap_demos
-        .extend(derive_success_bootstrap_demos(&records));
-    derived
-        .bootstrap_demos
-        .extend(review_synthesis.bootstrap_demos.clone());
-    derived
-        .stress_cases
-        .extend(review_synthesis.stress_cases.clone());
-    derived
-        .instruction_hypotheses
-        .extend(review_synthesis.instruction_hypotheses.clone());
-    derived
-        .runtime_demos
-        .extend(review_synthesis.runtime_demos.clone());
-    store
-        .replace_bootstrap_demos(&derived.bootstrap_demos)
-        .await?;
-    store.replace_stress_cases(&derived.stress_cases).await?;
-    store
-        .replace_instruction_hypotheses(&derived.instruction_hypotheses)
-        .await?;
-    store.replace_runtime_demos(&derived.runtime_demos).await?;
-    store.replace_turn_demos(&derived.turn_demos).await?;
-    let skill_optimization =
-        optimize_skills_from_reviews(&mut context.skills, &runtime_review_spans).await?;
-    store
-        .replace_runtime_demo_evaluations(&[])
-        .await?;
-    store
-        .replace_turn_demo_evaluations(&[])
-        .await?;
-    store
-        .replace_runtime_prompt_suggestions(&[])
-        .await?;
-    store
-        .replace_runtime_prompt_candidates(&[])
-        .await?;
-    store
-        .replace_runtime_prompt_evolution_reports(&[])
-        .await?;
-    store
-        .replace_skill_patches(&skill_optimization.patches)
-        .await?;
-    store
-        .replace_skill_merges(&skill_optimization.merges)
-        .await?;
-    store
-        .replace_skill_splits(&skill_optimization.splits)
-        .await?;
-    store
-        .replace_skill_deprecations(&skill_optimization.deprecations)
-        .await?;
-    let retained_reflections =
-        retain_sleep_reflections(context, &review_synthesis.reflections).await?;
-    if retained_reflections > 0 {
-        context.hindsight_retain.flush().await?;
-    }
+    let sleep_inputs = load_sleep_inputs().await?;
+    let prompt_improvement = run_prompt_improvement_pipeline(
+        context,
+        &store,
+        &sleep_inputs.trace_batch.records,
+        sleep_inputs.trace_batch.records.len(),
+    )
+    .await?;
+    let workflow_improvement =
+        run_workflow_improvement_pipeline(&mut context.workflows, &store).await?;
     let mental_models = builtin_hindsight_mental_models();
     let refreshed_mental_models = match context
         .hindsight
@@ -192,34 +95,10 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
             0
         }
     };
-    compact_runtime_trace_file(trace_batch.next_offset).await?;
-    compact_runtime_review_file(runtime_review_batch.next_offset).await?;
+    compact_runtime_trace_file(sleep_inputs.trace_batch.next_offset).await?;
     Ok(SleepSummary {
-        consumed_trace_events,
-        consumed_runtime_reviews,
-        failure_patterns,
-        bootstrap_demos: derived.bootstrap_demos.len(),
-        stress_cases: derived.stress_cases.len(),
-        instruction_hypotheses: derived.instruction_hypotheses.len(),
-        runtime_demos: derived.runtime_demos.len(),
-        turn_demos: derived.turn_demos.len(),
-        runtime_demo_evaluations: 0,
-        turn_demo_evaluations: 0,
-        runtime_demo_passed: 0,
-        runtime_demo_regressions: 0,
-        skill_patch_candidates: skill_optimization.patches.len(),
-        skill_merge_candidates: skill_optimization.merges.len(),
-        skill_split_candidates: skill_optimization.splits.len(),
-        skill_deprecate_candidates: skill_optimization.deprecations.len(),
-        skill_patch_applied: skill_optimization.patch_applied,
-        skill_merge_applied: skill_optimization.merge_applied,
-        skill_deprecate_applied: skill_optimization.deprecate_applied,
-        skill_update_rollbacks: skill_optimization.rollbacks,
-        skill_optimization_rounds: skill_optimization.rounds,
-        governance_duplicate_pairs: skill_optimization.governance_duplicate_pairs,
-        governance_low_quality_skills: skill_optimization.governance_low_quality_skills,
-        governance_cold_skills: skill_optimization.governance_cold_skills,
-        retained_reflections,
+        prompt_improvement,
+        workflow_improvement,
         refreshed_mental_models,
     })
 }
@@ -232,38 +111,23 @@ struct DerivedEvaluationArtifacts {
     turn_demos: Vec<EvaluationArtifactTurnDemo>,
 }
 
-struct RuntimePromptEvolutionResult {
-    evaluations: Vec<EvaluationArtifactRuntimeDemoEvaluation>,
-    turn_evaluations: Vec<EvaluationArtifactTurnDemoEvaluation>,
-    suggestions: Vec<EvaluationArtifactRuntimePromptSuggestion>,
-    candidates: Vec<EvaluationArtifactRuntimePromptCandidate>,
-    report: EvaluationArtifactRuntimePromptEvolutionReport,
-    passed: usize,
-    regressions: usize,
-    rolled_back: bool,
-    accepted: bool,
-    rounds: usize,
+struct SleepInputs {
+    trace_batch: RuntimeTraceBatch,
 }
 
 #[derive(Default)]
-struct SleepSkillOptimizationResult {
-    patches: Vec<EvaluationArtifactSkillPatch>,
-    merges: Vec<EvaluationArtifactSkillMerge>,
-    splits: Vec<EvaluationArtifactSkillSplit>,
-    deprecations: Vec<EvaluationArtifactSkillDeprecate>,
+struct SleepWorkflowOptimizationResult {
+    patches: Vec<EvaluationArtifactWorkflowPatch>,
+    merges: Vec<EvaluationArtifactWorkflowMerge>,
     patch_applied: usize,
     merge_applied: usize,
-    deprecate_applied: usize,
     rollbacks: usize,
     rounds: usize,
-    governance_duplicate_pairs: usize,
-    governance_low_quality_skills: usize,
-    governance_cold_skills: usize,
 }
 
 #[derive(Default)]
-struct SkillExecutionAggregate {
-    skill_id: String,
+struct WorkflowExecutionAggregate {
+    workflow_id: String,
     run_count: usize,
     blocked_count: usize,
     no_progress_count: usize,
@@ -271,198 +135,172 @@ struct SkillExecutionAggregate {
     manual_fix_signals: usize,
     rollback_signals: usize,
     failure_type_counts: HashMap<String, usize>,
-    source_review_ids: Vec<String>,
+    source_run_ids: Vec<String>,
 }
 
 async fn load_runtime_trace_records() -> Result<RuntimeTraceBatch> {
     load_runtime_trace_batch().await
 }
 
-#[derive(Default)]
-struct ReviewSleepSynthesis {
-    failure_patterns: Vec<EvaluationArtifactFailurePattern>,
-    bootstrap_demos: Vec<EvaluationArtifactBootstrapDemo>,
-    stress_cases: Vec<EvaluationArtifactStressCase>,
-    instruction_hypotheses: Vec<EvaluationArtifactInstructionHypothesis>,
-    runtime_demos: Vec<EvaluationArtifactRuntimeDemo>,
-    reflections: Vec<SleepReflectionRecord>,
+async fn load_sleep_inputs() -> Result<SleepInputs> {
+    let trace_batch = load_runtime_trace_records().await?;
+    Ok(SleepInputs { trace_batch })
 }
 
-#[derive(Clone)]
-struct SleepReflectionRecord {
-    document_id: String,
-    content: String,
-    tags: Vec<String>,
-}
-
-#[derive(Clone)]
-struct ReviewInput {
-    review_id: String,
-    review_label: String,
-    source_kind: String,
-    outcome_status: String,
-    task_goal: String,
-    done_criteria: String,
-    recent_steps: String,
-    final_observation: String,
-    memory_query: String,
-    demo_inputs: Vec<ExampleField>,
-    expected_output: SleepActionOutput,
-    source_trace_ids: Vec<String>,
-    repeat_hint: usize,
-    can_create_failure_pattern: bool,
-    reflection_tags: Vec<String>,
-    reflection_subject: String,
-    last_action_kind: String,
-    last_action_summary: String,
-}
-
-fn collect_review_inputs(runtime_review_spans: &[RuntimeReviewSpan]) -> Vec<ReviewInput> {
-    let mut inputs = Vec::new();
-    inputs.extend(
-        runtime_review_spans
-            .iter()
-            .filter_map(review_input_from_runtime_span),
-    );
-    inputs
-}
-
-async fn synthesize_review_inputs(
+async fn run_prompt_improvement_pipeline(
     context: &mut Context,
-    inputs: &[ReviewInput],
-) -> Result<ReviewSleepSynthesis> {
-    let renderer = OpenAIToolRenderer;
-    let program = SleepReviewSynthesizerProgram;
-    let tuning = resolve_program_tuning(context, &program).await;
-    let mut synthesized = ReviewSleepSynthesis::default();
+    store: &EvaluationArtifactsStore,
+    records: &[ProgramTraceRecord],
+    consumed_trace_events: usize,
+) -> Result<PromptImprovementSummary> {
+    let failure_patterns = derive_failure_patterns(records);
 
-    for review in inputs.iter().cloned() {
-        let related_memories = recall_related_memories(context, &review.memory_query, 3).await;
-        let outcome_ir = program.dataset_ir(
-            review.review_label.clone(),
-            review.source_kind.clone(),
-            review.review_id.clone(),
-            review.outcome_status.clone(),
-            review.task_goal.clone(),
-            review.done_criteria.clone(),
-            review.recent_steps.clone(),
-            review.final_observation.clone(),
-            render_related_memories(&related_memories).unwrap_or_else(|| "无".to_string()),
-        );
-        let synthesized_outcome = match execute_program_with_ir_report(
-            context.judge_llm.as_ref(),
-            context,
-            &renderer,
-            &program,
-            outcome_ir,
-            &tuning,
-            TraceOrigin::Sleep,
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                warn!(
-                    "sleep review synthesis skipped for {} (label={}): {err:?}",
-                    review.review_id, review.review_label
-                );
-                continue;
-            }
-        };
+    let mut derived = derive_evaluation_artifacts(context, &failure_patterns).await?;
+    derived
+        .bootstrap_demos
+        .extend(derive_success_bootstrap_demos(records));
+    let prompt_update = apply_trace_driven_runtime_prompt_patch(context, &failure_patterns).await?;
 
-        merge_review_synthesis(
-            &mut synthesized,
-            &review,
-            &related_memories,
-            &synthesized_outcome.output,
-        );
-    }
+    store
+        .replace_prompt_improvement_artifacts(PromptImprovementArtifacts {
+            failure_patterns: &failure_patterns,
+            bootstrap_demos: &derived.bootstrap_demos,
+            stress_cases: &derived.stress_cases,
+            instruction_hypotheses: &derived.instruction_hypotheses,
+            runtime_demos: &derived.runtime_demos,
+            turn_demos: &derived.turn_demos,
+        })
+        .await?;
 
-    Ok(synthesized)
-}
-
-fn review_input_from_runtime_span(span: &RuntimeReviewSpan) -> Option<ReviewInput> {
-    let first_turn = span.turns.first()?;
-    let last_turn = span.last_turn();
-    let last_action = last_runtime_turn_action(last_turn);
-    let review_label = review_label_from_action_kind(&last_action.kind, "runtime");
-    let task_goal = if last_turn.current_doing.trim().is_empty() {
-        last_action.summary.clone()
-    } else {
-        last_turn.current_doing.clone()
-    };
-    let outcome_status = infer_runtime_review_status(span);
-    let done_criteria = "推进当前 runtime 世界状态并保持行为边界稳定。".to_string();
-    let recent_steps = render_recent_runtime_span_steps(span);
-    let final_observation = format!(
-        "{}\n\n{}",
-        last_turn.observation.trim(),
-        last_turn.after_snapshot_text.trim()
-    );
-    let memory_query = format!(
-        "{}\n{}\n{}",
-        task_goal.trim(),
-        last_turn.observation.trim(),
-        recent_steps.trim()
-    );
-    Some(ReviewInput {
-        review_id: format!("runtime_review:{}", span.id),
-        review_label: review_label.clone(),
-        source_kind: "runtime_review".to_string(),
-        outcome_status: outcome_status.clone(),
-        task_goal,
-        done_criteria,
-        recent_steps,
-        final_observation,
-        memory_query,
-        demo_inputs: runtime_span_example_inputs(first_turn, span),
-        expected_output: runtime_turn_to_output(last_turn),
-        source_trace_ids: span
-            .turns
-            .iter()
-            .map(|turn| format!("runtime_turn:{}", turn.id))
-            .collect(),
-        repeat_hint: span.turns.len().max(2),
-        can_create_failure_pattern: matches!(outcome_status.as_str(), "Blocked" | "NoProgress"),
-        reflection_tags: vec![
-            "sleep-reflection".to_string(),
-            format!("label:{}", review_label),
-            "source:runtime_review".to_string(),
-            format!("status:{}", outcome_status.to_ascii_lowercase()),
-        ],
-        reflection_subject: format!("runtime review {}", span.id),
-        last_action_kind: last_action.kind.clone(),
-        last_action_summary: last_action.summary.clone(),
+    Ok(PromptImprovementSummary {
+        consumed_trace_events,
+        failure_patterns,
+        bootstrap_demos: derived.bootstrap_demos.len(),
+        stress_cases: derived.stress_cases.len(),
+        instruction_hypotheses: derived.instruction_hypotheses.len(),
+        runtime_demos: derived.runtime_demos.len(),
+        turn_demos: derived.turn_demos.len(),
+        applied_system_additions: prompt_update.applied_system_additions,
+        compiled_prompt_updated: prompt_update.compiled_prompt_updated,
     })
 }
 
-fn review_label_from_action_kind(action_kind: &str, fallback: &str) -> String {
-    let action_kind = action_kind.trim();
-    if action_kind.is_empty() {
-        fallback.to_string()
-    } else {
-        action_kind.to_string()
-    }
+async fn run_workflow_improvement_pipeline(
+    workflows: &mut WorkflowStore,
+    store: &EvaluationArtifactsStore,
+) -> Result<WorkflowImprovementSummary> {
+    let run_batch = load_workflow_run_batch().await?;
+    let workflow_optimization =
+        optimize_workflows_from_run_records(workflows, &run_batch.records).await?;
+    store
+        .replace_workflow_improvement_artifacts(WorkflowImprovementArtifacts {
+            workflow_patches: &workflow_optimization.patches,
+            workflow_merges: &workflow_optimization.merges,
+        })
+        .await?;
+
+    Ok(WorkflowImprovementSummary {
+        evidence_run_records: run_batch.records.len(),
+        patch_candidates: workflow_optimization.patches.len(),
+        merge_candidates: workflow_optimization.merges.len(),
+        patch_applied: workflow_optimization.patch_applied,
+        merge_applied: workflow_optimization.merge_applied,
+        update_rollbacks: workflow_optimization.rollbacks,
+        optimization_rounds: workflow_optimization.rounds,
+    })
 }
 
-fn infer_runtime_review_status(span: &RuntimeReviewSpan) -> String {
-    if span.turns.iter().all(|turn| {
-        let action = last_runtime_turn_action(turn);
-        matches!(
-            action.kind.as_str(),
-            "assistant_message" | "empty_tool_calls"
-        )
-    }) {
-        return "NoProgress".to_string();
+struct PromptPatchUpdate {
+    applied_system_additions: usize,
+    compiled_prompt_updated: bool,
+}
+
+async fn apply_trace_driven_runtime_prompt_patch(
+    context: &mut Context,
+    failure_patterns: &[EvaluationArtifactFailurePattern],
+) -> Result<PromptPatchUpdate> {
+    let new_additions = build_trace_driven_runtime_prompt_additions(failure_patterns);
+    if new_additions.is_empty() {
+        return Ok(PromptPatchUpdate {
+            applied_system_additions: 0,
+            compiled_prompt_updated: false,
+        });
     }
-    if span.turns.iter().any(|turn| {
-        turn.observation.contains("failed")
-            || turn.description.contains("没有可执行动作")
-            || turn.description.contains("empty tool call")
-    }) {
-        return "Blocked".to_string();
+
+    let mut compiled = current_runtime_system_prompt_artifact_from_store(&context.compiled_prompts);
+    let previous_len = compiled.system_additions.len();
+    for addition in new_additions {
+        if !compiled
+            .system_additions
+            .iter()
+            .any(|line| line == &addition)
+        {
+            compiled.system_additions.push(addition);
+        }
     }
-    "Observed".to_string()
+    let applied_system_additions = compiled.system_additions.len().saturating_sub(previous_len);
+    if applied_system_additions == 0 {
+        return Ok(PromptPatchUpdate {
+            applied_system_additions: 0,
+            compiled_prompt_updated: false,
+        });
+    }
+
+    compiled.best_candidate = format!("sleep_trace_patch_{}", chrono::Utc::now().timestamp());
+    save_compiled_runtime_system_prompt_for_model(&context.config.main_model.model_name, &compiled)
+        .await?;
+    context.compiled_prompts = context
+        .compiled_prompts
+        .clone()
+        .with_runtime_system_prompt(Some(compiled));
+
+    Ok(PromptPatchUpdate {
+        applied_system_additions,
+        compiled_prompt_updated: true,
+    })
+}
+
+fn build_trace_driven_runtime_prompt_additions(
+    failure_patterns: &[EvaluationArtifactFailurePattern],
+) -> Vec<String> {
+    let mut additions = Vec::new();
+    if failure_patterns.is_empty() {
+        return additions;
+    }
+
+    if failure_patterns.iter().any(|pattern| {
+        pattern.pattern_id.contains("missing-field")
+            || pattern.pattern_id.contains("unknown-variant")
+            || pattern.pattern_id.contains("invalid-type")
+            || pattern.pattern_id.contains("malformed-json")
+    }) {
+        additions.push(
+            "在任何结构化输出场景中，先对照目标 schema 自检必填字段、枚举值和字段类型，再提交最终结果。"
+                .to_string(),
+        );
+    }
+
+    if failure_patterns
+        .iter()
+        .any(|pattern| pattern.pattern_id.contains("provider-error"))
+    {
+        additions.push(
+            "当 provider 或上游接口报错时，不要盲目重试同一动作；先缩小问题边界并明确记录失败原因。"
+                .to_string(),
+        );
+    }
+
+    if failure_patterns
+        .iter()
+        .any(|pattern| pattern.severity >= 2 && pattern.frequency >= 2)
+    {
+        additions.push(
+            "如果同类失败重复出现，优先收缩输出、降低自由发挥空间，并显式遵守已有 contract。"
+                .to_string(),
+        );
+    }
+
+    additions
 }
 
 fn derive_failure_patterns(
@@ -524,299 +362,6 @@ fn derive_failure_patterns(
     });
 
     patterns
-}
-
-fn render_recent_runtime_span_steps(span: &RuntimeReviewSpan) -> String {
-    span.turns
-        .iter()
-        .enumerate()
-        .map(|(index, turn)| {
-            let phase = turn
-                .metadata
-                .get("work_phase")
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
-            let history_summary = render_runtime_turn_history_summary(&turn.history_messages);
-            format!(
-                "{}. phase={} actions={} current_doing={} observation={} history={}",
-                index + 1,
-                phase,
-                render_runtime_turn_actions(turn),
-                compact_review_text(&turn.current_doing),
-                compact_review_text(&turn.observation),
-                compact_review_text(&history_summary)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn render_runtime_turn_history_summary(messages: &[HistoryMessage]) -> String {
-    let mut lines = Vec::new();
-    for message in messages {
-        if let Some(summary) = render_prompt_message_summary_for_review(message) {
-            lines.push(summary);
-        }
-    }
-    lines.join(" | ")
-}
-
-fn render_prompt_message_summary_for_review(message: &HistoryMessage) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(content) = message.text_content()
-        && !content.trim().is_empty()
-    {
-        parts.push(compact_review_text(content));
-    }
-    for event in &message.tool_call_ui_events {
-        parts.push(render_tool_call_ui_event_summary(event));
-    }
-    if let Some(event) = &message.tool_ui_event {
-        parts.push(render_tool_ui_event_summary(event));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" / "))
-    }
-}
-
-fn render_tool_call_ui_event_summary(event: &ToolCallUiEvent) -> String {
-    match event {
-        ToolCallUiEvent::Exec(data)
-        | ToolCallUiEvent::Work(data)
-        | ToolCallUiEvent::App(data)
-        | ToolCallUiEvent::Error(data) => compact_review_text(&data.title),
-        ToolCallUiEvent::Terminal(data) => compact_review_text(&data.title),
-        ToolCallUiEvent::Patch(data) => compact_review_text(&data.summary_line),
-        ToolCallUiEvent::Telegram(data) => compact_review_text(&data.title),
-    }
-}
-
-fn render_tool_ui_event_summary(event: &ToolUiEvent) -> String {
-    match event {
-        ToolUiEvent::Exec(data)
-        | ToolUiEvent::Work(data)
-        | ToolUiEvent::App(data)
-        | ToolUiEvent::Error(data) => compact_review_text(&data.title),
-        ToolUiEvent::Terminal(data) => compact_review_text(&data.title),
-        ToolUiEvent::Patch(data) => compact_review_text(&data.summary_line),
-        ToolUiEvent::Telegram(data) => compact_review_text(&data.title),
-    }
-}
-
-fn compact_review_text(text: &str) -> String {
-    const MAX_CHARS: usize = 180;
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.chars().count() <= MAX_CHARS {
-        return normalized;
-    }
-    let truncated = normalized.chars().take(MAX_CHARS).collect::<String>();
-    format!("{truncated}…")
-}
-
-fn merge_review_synthesis(
-    synthesized: &mut ReviewSleepSynthesis,
-    review: &ReviewInput,
-    related_memories: &[String],
-    output: &SleepReviewSynthesizerOutput,
-) {
-    let has_case_artifact = output.create_bootstrap_demo || output.create_stress_case;
-
-    if output.create_failure_pattern
-        && !output.failure_pattern_summary.trim().is_empty()
-        && review.can_create_failure_pattern
-    {
-        synthesized
-            .failure_patterns
-            .push(EvaluationArtifactFailurePattern {
-                suite: review.review_label.clone(),
-                pattern_id: format!(
-                    "review:{}:{}:{}",
-                    slugify(&review.review_label),
-                    slugify(output.failure_pattern_summary.trim()),
-                    slugify(&review.review_id)
-                ),
-                description: output.failure_pattern_summary.trim().to_string(),
-                supporting_trace_ids: review.source_trace_ids.clone(),
-                frequency: review.repeat_hint.max(1),
-                severity: if review.source_kind == "runtime_review" {
-                    3
-                } else {
-                    4
-                },
-                suggested_fix_kind: match output
-                    .suggested_fix_kind
-                    .trim()
-                    .to_ascii_lowercase()
-                    .as_str()
-                {
-                    "demo" => EvaluationArtifactSuggestedFixKind::Demo,
-                    "stress" | "stress_case" | "stresscase" => {
-                        EvaluationArtifactSuggestedFixKind::StressCase
-                    }
-                    _ => EvaluationArtifactSuggestedFixKind::Instruction,
-                },
-            });
-    }
-
-    if output.create_bootstrap_demo
-        && !output.bootstrap_demo_title.trim().is_empty()
-        && !output.bootstrap_demo_summary.trim().is_empty()
-    {
-        synthesized
-            .bootstrap_demos
-            .push(EvaluationArtifactBootstrapDemo {
-                suite: review.review_label.clone(),
-                title: output.bootstrap_demo_title.trim().to_string(),
-                input_summary: output.synthesized_summary.trim().to_string(),
-                inputs: review.demo_inputs.clone(),
-                expected_output: serde_json::to_value(&review.expected_output)
-                    .unwrap_or_else(|_| json!({})),
-                reference_case_names: Vec::new(),
-                source_trace_ids: review.source_trace_ids.clone(),
-                confidence: output.reflection_confidence.clamp(0.0, 1.0) as f32,
-            });
-    }
-
-    if output.create_stress_case && !output.stress_case_name.trim().is_empty() {
-        synthesized.stress_cases.push(EvaluationArtifactStressCase {
-            suite: review.review_label.clone(),
-            name: output.stress_case_name.trim().to_string(),
-            input_ir: json!({
-                "review_label": review.review_label,
-                "source_kind": review.source_kind,
-                "task_goal": review.task_goal,
-                "summary": output.synthesized_summary,
-                "last_action": format!("{} ({})", review.last_action_kind, review.last_action_summary),
-                "related_memories": related_memories,
-            }),
-            expected_constraints: output.stress_constraints.clone(),
-            reference_case_names: Vec::new(),
-            source_pattern_id: review.review_id.clone(),
-            repeat: review.repeat_hint.max(2),
-            weight: 2,
-        });
-    }
-
-    if output.create_instruction_hypothesis
-        && !output.instruction_text.trim().is_empty()
-        && !has_case_artifact
-    {
-        synthesized
-            .instruction_hypotheses
-            .push(EvaluationArtifactInstructionHypothesis {
-                suite: review.review_label.clone(),
-                text: output.instruction_text.trim().to_string(),
-                justification: output.reason.trim().to_string(),
-                source_pattern_ids: review.source_trace_ids.clone(),
-            });
-    }
-
-    if let Some(runtime_demo) = review_runtime_demo(review, output) {
-        synthesized.runtime_demos.push(runtime_demo);
-    }
-
-    if output.retain_reflection
-        && (!output.synthesized_summary.trim().is_empty()
-            || !output.strategy_lesson.trim().is_empty())
-    {
-        let mut tags = review.reflection_tags.clone();
-        tags.push(format!(
-            "kind:{}",
-            format!("{:?}", output.reflection_kind).to_ascii_lowercase()
-        ));
-        tags.push(format!(
-            "stability:{}",
-            format!("{:?}", output.reflection_stability).to_ascii_lowercase()
-        ));
-        synthesized.reflections.push(SleepReflectionRecord {
-            document_id: format!("sleep-reflection:{}", slugify(&review.review_id)),
-            content: build_sleep_reflection_content(review, output),
-            tags,
-        });
-    }
-}
-
-fn build_sleep_reflection_content(
-    review: &ReviewInput,
-    output: &SleepReviewSynthesizerOutput,
-) -> String {
-    let retrieval_text = output.reflection_retrieval_text.trim();
-    let evidence = output.reflection_evidence_summary.trim();
-    let summary = output.synthesized_summary.trim();
-    let strategy = output.strategy_lesson.trim();
-    let reason = output.reason.trim();
-    let confidence = output.reflection_confidence.clamp(0.0, 1.0);
-    if !retrieval_text.is_empty() {
-        return format!(
-            "Source: {}\nLabel: {}\nStatus: {}\nKind: {:?}\nStability: {:?}\nConfidence: {:.2}\nLesson: {}\nEvidence: {}\nSummary: {}\nReason: {}",
-            review.reflection_subject,
-            review.review_label,
-            review.outcome_status,
-            output.reflection_kind,
-            output.reflection_stability,
-            confidence,
-            retrieval_text,
-            evidence,
-            summary,
-            reason,
-        );
-    }
-    format!(
-        "Source: {}\nLabel: {}\nStatus: {}\nKind: {:?}\nStability: {:?}\nConfidence: {:.2}\nSummary: {}\nStrategy lesson: {}\nEvidence: {}\nReason: {}",
-        review.reflection_subject,
-        review.review_label,
-        review.outcome_status,
-        output.reflection_kind,
-        output.reflection_stability,
-        confidence,
-        summary,
-        strategy,
-        evidence,
-        reason,
-    )
-}
-
-fn runtime_span_example_inputs(
-    first_turn: &RuntimeTurnRecord,
-    span: &RuntimeReviewSpan,
-) -> Vec<ExampleField> {
-    vec![
-        ExampleField {
-            name: "当前状态".to_string(),
-            value: first_turn.before_snapshot_text.clone(),
-        },
-        ExampleField {
-            name: "最近交互".to_string(),
-            value: render_recent_runtime_span_steps(span),
-        },
-    ]
-}
-
-fn runtime_turn_to_output(turn: &RuntimeTurnRecord) -> SleepActionOutput {
-    let action = last_runtime_turn_action(turn);
-    SleepActionOutput {
-        observation: turn.observation.clone(),
-        description: turn.description.clone(),
-        current_doing: turn.current_doing.clone(),
-        action_kind: action.kind.clone(),
-        action_summary: action.summary.clone(),
-    }
-}
-
-fn last_runtime_turn_action(turn: &RuntimeTurnRecord) -> &EpisodeActionRecord {
-    turn.actions
-        .last()
-        .expect("runtime review turn should contain at least one action")
-}
-
-fn render_runtime_turn_actions(turn: &RuntimeTurnRecord) -> String {
-    turn.actions
-        .iter()
-        .map(|action| format!("{}({})", action.kind, compact_review_text(&action.summary)))
-        .collect::<Vec<_>>()
-        .join(" -> ")
 }
 
 struct PatternAccumulator {
@@ -1005,38 +550,38 @@ async fn derive_evaluation_artifacts(
     })
 }
 
-async fn optimize_skills_from_reviews(
-    skills: &mut SkillRegistry,
-    runtime_review_spans: &[RuntimeReviewSpan],
-) -> Result<SleepSkillOptimizationResult> {
-    let mut result = SleepSkillOptimizationResult {
+async fn optimize_workflows_from_run_records(
+    workflows: &mut WorkflowStore,
+    run_records: &[WorkflowRunRecord],
+) -> Result<SleepWorkflowOptimizationResult> {
+    let mut result = SleepWorkflowOptimizationResult {
         rounds: 1,
         ..Default::default()
     };
 
-    let aggregates = collect_skill_execution_aggregates(runtime_review_spans);
-    let all_skills = skills.list();
-    let governance = skills.governance_report();
-    result.governance_duplicate_pairs = governance.duplicate_pairs.len();
-    result.governance_low_quality_skills = governance.low_quality_skill_ids.len();
-    result.governance_cold_skills = governance.cold_skill_ids.len();
+    let aggregates = collect_workflow_execution_aggregates(run_records);
+    let all_workflows = workflows.list();
 
-    result.patches = build_skill_patch_candidates(&aggregates, &all_skills);
-    result.merges = build_skill_merge_candidates(&governance);
-    result.splits = build_skill_split_candidates(&all_skills);
-    result.deprecations = build_skill_deprecate_candidates(&all_skills, &governance);
+    result.patches = build_workflow_patch_candidates(&aggregates, &all_workflows);
+    result.merges = build_workflow_merge_candidates(&all_workflows);
 
     for patch in &mut result.patches {
-        if !evaluate_skill_patch_candidate(skills, patch) {
+        if !evaluate_workflow_patch_candidate(workflows, patch) {
             patch.rolled_back = true;
             result.rollbacks += 1;
             continue;
         }
-        match skills.apply_sleep_patch(
-            &patch.skill_id,
-            patch.workflow_step_additions.clone(),
-            patch.failure_recovery_additions.clone(),
-        ) {
+        match workflows
+            .apply_patch(WorkflowPatch {
+                workflow_id: patch.workflow_id.clone(),
+                when_to_use_additions: patch.when_to_use_additions.clone(),
+                precondition_additions: patch.precondition_additions.clone(),
+                workflow_step_additions: patch.workflow_step_additions.clone(),
+                done_criteria_additions: patch.done_criteria_additions.clone(),
+                recovery_additions: patch.recovery_additions.clone(),
+            })
+            .await
+        {
             Ok(_) => {
                 patch.applied = true;
                 result.patch_applied += 1;
@@ -1050,17 +595,20 @@ async fn optimize_skills_from_reviews(
     }
 
     for merge in &mut result.merges {
-        if !evaluate_skill_merge_candidate(skills, merge) {
+        if !evaluate_workflow_merge_candidate(workflows, merge) {
             continue;
         }
         if merge.confidence < 0.75 {
             continue;
         }
-        match skills.merge_skills(
-            &merge.target_skill_id,
-            &merge.source_skill_ids,
-            Some(merge.rationale.clone()),
-        ) {
+        match workflows
+            .merge_workflows(
+                &merge.target_workflow_id,
+                &merge.source_workflow_ids,
+                Some(merge.rationale.clone()),
+            )
+            .await
+        {
             Ok(_) => {
                 merge.applied = true;
                 result.merge_applied += 1;
@@ -1072,81 +620,45 @@ async fn optimize_skills_from_reviews(
         }
     }
 
-    for deprecate in &mut result.deprecations {
-        if !evaluate_skill_deprecate_candidate(skills, deprecate) {
-            continue;
-        }
-        if deprecate.confidence < 0.7 {
-            continue;
-        }
-        match skills.deprecate_skill(&deprecate.skill_id, Some(deprecate.rationale.clone())) {
-            Ok(_) => {
-                deprecate.applied = true;
-                result.deprecate_applied += 1;
-            }
-            Err(err) => {
-                deprecate.rationale = format!("{}; rollback={}", deprecate.rationale, err);
-                result.rollbacks += 1;
-            }
-        }
-    }
-
-    skills.persist_if_dirty().await?;
     Ok(result)
 }
 
-fn collect_skill_execution_aggregates(
-    runtime_review_spans: &[RuntimeReviewSpan],
-) -> HashMap<String, SkillExecutionAggregate> {
-    let mut aggregates = HashMap::<String, SkillExecutionAggregate>::new();
+fn collect_workflow_execution_aggregates(
+    run_records: &[WorkflowRunRecord],
+) -> HashMap<String, WorkflowExecutionAggregate> {
+    let mut aggregates = HashMap::<String, WorkflowExecutionAggregate>::new();
 
-    for span in runtime_review_spans {
-        let Some(skill_id) = span
-            .turns
-            .iter()
-            .rev()
-            .find_map(|turn| turn.metadata.get("active_skill_id").cloned())
-        else {
-            continue;
-        };
-
-        let status = infer_runtime_review_status(span);
+    for record in run_records {
         let entry = aggregates
-            .entry(skill_id.clone())
-            .or_insert_with(|| SkillExecutionAggregate {
-                skill_id: skill_id.clone(),
+            .entry(record.workflow_id.clone())
+            .or_insert_with(|| WorkflowExecutionAggregate {
+                workflow_id: record.workflow_id.clone(),
                 ..Default::default()
             });
         entry.run_count += 1;
-        entry.source_review_ids.push(format!("runtime_review:{}", span.id));
+        entry.source_run_ids.push(record.run_id.clone());
 
-        if status == "Blocked" {
+        if record.outcome == WorkflowRunOutcome::Blocked {
             entry.blocked_count += 1;
         }
-        if status == "NoProgress" {
+        if record.outcome == WorkflowRunOutcome::NoProgress {
             entry.no_progress_count += 1;
         }
 
-        for turn in &span.turns {
-            if let Some(value) = turn.metadata.get("action_count")
-                && let Ok(parsed) = value.parse::<usize>()
-            {
-                entry.action_total += parsed;
-            }
-            if parse_bool_field(turn.metadata.get("manual_fix_detected")) {
-                entry.manual_fix_signals += 1;
-            }
-            if parse_bool_field(turn.metadata.get("rollback_detected")) {
-                entry.rollback_signals += 1;
-            }
-            if let Some(failure_type) = turn.metadata.get("failure_type") {
-                let failure_type = failure_type.trim();
-                if !failure_type.is_empty() {
-                    *entry
-                        .failure_type_counts
-                        .entry(failure_type.to_string())
-                        .or_insert(0) += 1;
-                }
+        entry.action_total += record.tool_action_count;
+        if record.manual_fix_detected {
+            entry.manual_fix_signals += 1;
+        }
+        if record.rollback_detected {
+            entry.rollback_signals += 1;
+        }
+        for failure_type in &record.failure_types {
+            let failure_type = failure_type.trim();
+            if !failure_type.is_empty() {
+                *entry
+                    .failure_type_counts
+                    .entry(failure_type.to_string())
+                    .or_insert(0) += 1;
             }
         }
     }
@@ -1154,23 +666,24 @@ fn collect_skill_execution_aggregates(
     aggregates
 }
 
-fn build_skill_patch_candidates(
-    aggregates: &HashMap<String, SkillExecutionAggregate>,
-    skills: &[SkillRecord],
-) -> Vec<EvaluationArtifactSkillPatch> {
-    let skill_map = skills
+fn build_workflow_patch_candidates(
+    aggregates: &HashMap<String, WorkflowExecutionAggregate>,
+    workflows: &[WorkflowSpec],
+) -> Vec<EvaluationArtifactWorkflowPatch> {
+    let workflow_map = workflows
         .iter()
-        .map(|skill| (skill.id.clone(), skill))
+        .map(|workflow| (workflow.id.clone(), workflow))
         .collect::<HashMap<_, _>>();
 
     let mut patches = Vec::new();
     for aggregate in aggregates.values() {
-        let Some(skill) = skill_map.get(&aggregate.skill_id) else {
+        let Some(workflow) = workflow_map.get(&aggregate.workflow_id) else {
             continue;
         };
         if aggregate.run_count == 0 {
             continue;
         }
+
         let failure_rate = (aggregate.blocked_count + aggregate.no_progress_count) as f64
             / aggregate.run_count as f64;
         let needs_patch = failure_rate >= 0.3
@@ -1180,36 +693,40 @@ fn build_skill_patch_candidates(
             continue;
         }
 
+        let mut precondition_additions = Vec::new();
         let mut workflow_step_additions = Vec::new();
-        let mut failure_recovery_additions = Vec::new();
+        let mut done_criteria_additions = Vec::new();
+        let mut recovery_additions = Vec::new();
 
         if aggregate.blocked_count > 0 {
-            workflow_step_additions.push(
-                "sleep patch: 在执行前进行阻塞风险预检，并记录可恢复路径".to_string(),
-            );
-            failure_recovery_additions.push(
-                "sleep patch: 出现阻塞后回退到上一个稳定步骤，再重新验证关键输出".to_string(),
-            );
+            precondition_additions.push("执行前确认关键依赖、输入和权限条件都已满足".to_string());
+            recovery_additions
+                .push("出现阻塞时，先回退到上一个稳定步骤，再重新验证关键前提".to_string());
+        }
+        if aggregate.no_progress_count > 0 {
+            workflow_step_additions
+                .push("如果连续多个回合没有实质推进，明确记录阻塞点并收缩目标".to_string());
+            done_criteria_additions
+                .push("如果无法继续推进，也必须产出明确的阻塞说明或下一步条件".to_string());
         }
         if aggregate.manual_fix_signals > 0 {
-            workflow_step_additions.push(
-                "sleep patch: 若需手工修复，先固化修复前提，再执行补丁并复验".to_string(),
-            );
+            workflow_step_additions
+                .push("进行手工修复前，先固定修复前提并规划复验步骤".to_string());
         }
         if let Some((failure_type, _)) = aggregate
             .failure_type_counts
             .iter()
             .max_by_key(|(_, count)| *count)
         {
-            failure_recovery_additions.push(format!(
-                "sleep patch: failure_type=`{}` 时优先执行标准恢复流程",
+            recovery_additions.push(format!(
+                "当 failure_type=`{}` 时，优先执行对应的标准恢复路径",
                 failure_type
             ));
         }
 
-        patches.push(EvaluationArtifactSkillPatch {
-            skill_id: skill.id.clone(),
-            title: format!("sleep patch {}", skill.name),
+        patches.push(EvaluationArtifactWorkflowPatch {
+            workflow_id: workflow.id.clone(),
+            title: format!("workflow patch {}", workflow.id),
             rationale: format!(
                 "run_count={} blocked={} no_progress={} manual_fix={} rollback={} failure_rate={:.2}",
                 aggregate.run_count,
@@ -1219,9 +736,12 @@ fn build_skill_patch_candidates(
                 aggregate.rollback_signals,
                 failure_rate,
             ),
+            when_to_use_additions: Vec::new(),
+            precondition_additions,
             workflow_step_additions,
-            failure_recovery_additions,
-            source_review_ids: aggregate.source_review_ids.clone(),
+            done_criteria_additions,
+            recovery_additions,
+            source_run_ids: aggregate.source_run_ids.clone(),
             confidence: (0.45 + failure_rate).min(0.95),
             applied: false,
             rolled_back: false,
@@ -1231,629 +751,85 @@ fn build_skill_patch_candidates(
     patches
 }
 
-fn build_skill_merge_candidates(
-    governance: &crate::skill::SkillGovernanceReport,
-) -> Vec<EvaluationArtifactSkillMerge> {
-    governance
-        .duplicate_pairs
-        .iter()
-        .map(|(left, right)| EvaluationArtifactSkillMerge {
-            target_skill_id: left.clone(),
-            source_skill_ids: vec![right.clone()],
-            rationale: "governance: duplicated skill names detected".to_string(),
-            confidence: 0.8,
-            applied: false,
-        })
-        .collect()
-}
-
-fn build_skill_split_candidates(skills: &[SkillRecord]) -> Vec<EvaluationArtifactSkillSplit> {
-    let mut candidates = Vec::new();
-
-    for skill in skills {
-        if skill.workflow_steps.len() < 6 {
-            continue;
+fn build_workflow_merge_candidates(
+    workflows: &[WorkflowSpec],
+) -> Vec<EvaluationArtifactWorkflowMerge> {
+    let mut merges = Vec::new();
+    for left in 0..workflows.len() {
+        for right in (left + 1)..workflows.len() {
+            let left_workflow = &workflows[left];
+            let right_workflow = &workflows[right];
+            let similarity = workflow_similarity(left_workflow, right_workflow);
+            if similarity < 0.72 {
+                continue;
+            }
+            merges.push(EvaluationArtifactWorkflowMerge {
+                target_workflow_id: left_workflow.id.clone(),
+                source_workflow_ids: vec![right_workflow.id.clone()],
+                rationale: format!(
+                    "workflow similarity {:.2}: when_to_use/workflow_steps overlap strongly",
+                    similarity
+                ),
+                confidence: similarity.min(0.95),
+                applied: false,
+            });
         }
-        let midpoint = skill.workflow_steps.len() / 2;
-        if midpoint == 0 || midpoint >= skill.workflow_steps.len() {
-            continue;
-        }
-        let first = skill.workflow_steps[..midpoint].to_vec();
-        let second = skill.workflow_steps[midpoint..].to_vec();
-        if first.is_empty() || second.is_empty() {
-            continue;
-        }
-
-        candidates.push(EvaluationArtifactSkillSplit {
-            source_skill_id: skill.id.clone(),
-            rationale: "workflow too long; suggest split into smaller reusable units".to_string(),
-            drafts: vec![
-                EvaluationArtifactSkillSplitDraft {
-                    name: format!("{} - part 1", skill.name),
-                    workflow_steps: first,
-                    done_criteria: skill.done_criteria.clone(),
-                },
-                EvaluationArtifactSkillSplitDraft {
-                    name: format!("{} - part 2", skill.name),
-                    workflow_steps: second,
-                    done_criteria: skill.done_criteria.clone(),
-                },
-            ],
-            confidence: 0.62,
-            applied: false,
-        });
     }
-
-    candidates
+    merges
 }
 
-fn build_skill_deprecate_candidates(
-    skills: &[SkillRecord],
-    governance: &crate::skill::SkillGovernanceReport,
-) -> Vec<EvaluationArtifactSkillDeprecate> {
-    skills
-        .iter()
-        .filter(|skill| governance.cold_skill_ids.contains(&skill.id))
-        .filter(|skill| !matches!(skill.status, crate::skill::SkillStatus::Deprecated))
-        .map(|skill| EvaluationArtifactSkillDeprecate {
-            skill_id: skill.id.clone(),
-            rationale: "cold skill without executions; deprecate to reduce maintenance load"
-                .to_string(),
-            replacement_skill_id: None,
-            confidence: 0.72,
-            applied: false,
-        })
-        .collect()
+fn evaluate_workflow_patch_candidate(
+    workflows: &WorkflowStore,
+    patch: &EvaluationArtifactWorkflowPatch,
+) -> bool {
+    workflows.get(&patch.workflow_id).is_some()
+        && (!patch.when_to_use_additions.is_empty()
+            || !patch.precondition_additions.is_empty()
+            || !patch.workflow_step_additions.is_empty()
+            || !patch.done_criteria_additions.is_empty()
+            || !patch.recovery_additions.is_empty())
 }
 
-fn evaluate_skill_patch_candidate(skills: &SkillRegistry, patch: &EvaluationArtifactSkillPatch) -> bool {
-    skills.get(&patch.skill_id).is_some()
-        && (!patch.workflow_step_additions.is_empty()
-            || !patch.failure_recovery_additions.is_empty())
-}
-
-fn evaluate_skill_merge_candidate(skills: &SkillRegistry, merge: &EvaluationArtifactSkillMerge) -> bool {
-    if skills.get(&merge.target_skill_id).is_none() {
+fn evaluate_workflow_merge_candidate(
+    workflows: &WorkflowStore,
+    merge: &EvaluationArtifactWorkflowMerge,
+) -> bool {
+    if workflows.get(&merge.target_workflow_id).is_none() {
         return false;
     }
-    !merge.source_skill_ids.is_empty()
+    !merge.source_workflow_ids.is_empty()
         && merge
-            .source_skill_ids
+            .source_workflow_ids
             .iter()
-            .all(|source_id| skills.get(source_id).is_some())
+            .all(|source_id| workflows.get(source_id).is_some())
 }
 
-fn evaluate_skill_deprecate_candidate(
-    skills: &SkillRegistry,
-    deprecate: &EvaluationArtifactSkillDeprecate,
-) -> bool {
-    skills.get(&deprecate.skill_id).is_some()
-}
-
-fn parse_bool_field(value: Option<&String>) -> bool {
-    value
-        .map(|item| item.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-async fn evaluate_runtime_demos(
-    context: &mut Context,
-    runtime_demos: &[EvaluationArtifactRuntimeDemo],
-) -> Result<Vec<EvaluationArtifactRuntimeDemoEvaluation>> {
-    if runtime_demos.is_empty() {
-        return Ok(Vec::new());
+fn workflow_similarity(left: &WorkflowSpec, right: &WorkflowSpec) -> f64 {
+    let left_tokens = workflow_similarity_tokens(left);
+    let right_tokens = workflow_similarity_tokens(right);
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return 0.0;
     }
-
-    let renderer = OpenAIToolRenderer;
-    let program = RuntimeSystemPromptJudgeProgram;
-    let tuning = resolve_program_tuning(context, &program).await;
-    let current_system_prompt = current_runtime_system_prompt_text(context);
-    let previous_system_prompt = previous_runtime_system_prompt_text(context).await?;
-    let mut evaluations = Vec::with_capacity(runtime_demos.len());
-
-    for demo in runtime_demos.iter().cloned() {
-        let judge_focus = if demo.judge_focus.is_empty() {
-            String::from("none")
-        } else {
-            demo.judge_focus.join("\n")
-        };
-        let output = execute_program_with_ir_report(
-            context.judge_llm.as_ref(),
-            context,
-            &renderer,
-            &program,
-            program.dataset_ir(
-                current_system_prompt.clone(),
-                previous_system_prompt.clone(),
-                demo.title.clone(),
-                demo.scenario_summary.clone(),
-                demo.expected_behavior.clone(),
-                judge_focus,
-            ),
-            &tuning,
-            TraceOrigin::Sleep,
-        )
-        .await?;
-
-        evaluations.push(runtime_demo_evaluation_from_output(&demo, &output.output));
-    }
-
-    Ok(evaluations)
-}
-
-const MAX_RUNTIME_PROMPT_EVOLUTION_ROUNDS: usize = 3;
-
-async fn evolve_runtime_system_prompt(
-    context: &mut Context,
-    runtime_demos: &[EvaluationArtifactRuntimeDemo],
-    turn_demos: &[EvaluationArtifactTurnDemo],
-    runtime_review_spans: &[RuntimeReviewSpan],
-    instruction_hypotheses: &[EvaluationArtifactInstructionHypothesis],
-) -> Result<RuntimePromptEvolutionResult> {
-    if runtime_demos.is_empty() && turn_demos.is_empty() {
-        return Ok(RuntimePromptEvolutionResult {
-            evaluations: Vec::new(),
-            turn_evaluations: Vec::new(),
-            suggestions: Vec::new(),
-            candidates: Vec::new(),
-            report: EvaluationArtifactRuntimePromptEvolutionReport {
-                compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-                rounds: 0,
-                accepted: true,
-                rolled_back: false,
-                passed: 0,
-                total_demos: 0,
-                regressions: 0,
-                selected_candidate: "current".to_string(),
-                selected_demo_titles: Vec::new(),
-                final_system_additions: context
-                    .compiled_prompts
-                    .runtime_system_additions()
-                    .to_vec(),
-                round_history: Vec::new(),
-            },
-            passed: 0,
-            regressions: 0,
-            rolled_back: false,
-            accepted: false,
-            rounds: 0,
-        });
-    }
-
-    let mut current_prompt = current_runtime_system_prompt_artifact(context);
-    let mut best_prompt = current_prompt.clone();
-    let mut best_passed = 0usize;
-    let mut rounds = 0usize;
-    let mut rolled_back = false;
-    let mut accepted = false;
-    let mut all_candidates = Vec::new();
-    let mut latest_evaluations = Vec::new();
-    let mut latest_turn_evaluations: Option<Vec<EvaluationArtifactTurnDemoEvaluation>> = None;
-    let mut latest_suggestions = Vec::new();
-    let mut latest_regressions = 0usize;
-    let mut round_history = Vec::new();
-
-    save_compiled_runtime_system_prompt_for_model(
-        &context.config.main_model.model_name,
-        &current_prompt,
-    )
-    .await?;
-    context.compiled_prompts = context
-        .compiled_prompts
-        .clone()
-        .with_runtime_system_prompt(Some(current_prompt.clone()));
-
-    for _ in 0..MAX_RUNTIME_PROMPT_EVOLUTION_ROUNDS {
-        rounds += 1;
-        latest_evaluations = evaluate_runtime_demos(context, runtime_demos).await?;
-        latest_turn_evaluations = Some(
-            TurnCompileEngine::evaluate_from_review_spans(
-                context,
-                turn_demos,
-                runtime_review_spans,
-                current_runtime_system_prompt_text(context),
-                previous_runtime_system_prompt_text(context).await?,
-            )
-            .await?,
-        );
-        let latest_turn_evaluations_ref = latest_turn_evaluations
-            .as_ref()
-            .expect("latest_turn_evaluations just populated");
-        let runtime_suggestions = runtime_prompt_suggestions_from_evaluations(&latest_evaluations);
-        let turn_suggestions =
-            turn_prompt_suggestions_from_evaluations(latest_turn_evaluations_ref)
-                .into_iter()
-                .map(|title| EvaluationArtifactRuntimePromptSuggestion {
-                    compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-                    title,
-                    rationale: "turn demo failed".to_string(),
-                    suggested_additions: Vec::new(),
-                    source_demo_titles: latest_turn_evaluations_ref
-                        .iter()
-                        .filter(|item| !item.passed)
-                        .map(|item| item.demo_title.clone())
-                        .collect(),
-                    source_pattern_ids: Vec::new(),
-                })
-                .collect::<Vec<_>>();
-        latest_suggestions = runtime_suggestions
-            .into_iter()
-            .chain(turn_suggestions.into_iter())
-            .collect();
-        let runtime_regressions = latest_evaluations
-            .iter()
-            .filter(|item| item.regression_detected)
-            .count();
-        let (turn_passed, turn_regressions) = turn_evaluation_stats(latest_turn_evaluations_ref);
-        let runtime_passed = latest_evaluations.iter().filter(|item| item.passed).count();
-        let passed = runtime_passed + turn_passed;
-        latest_regressions = runtime_regressions + turn_regressions;
-        let has_regression = latest_regressions > 0;
-
-        let runtime_round_accepted = is_acceptable_runtime_round(
-            runtime_passed,
-            latest_evaluations.len(),
-            runtime_regressions > 0,
-        );
-        let turn_round_accepted = is_acceptable_turn_round(
-            turn_passed,
-            latest_turn_evaluations_ref.len(),
-            turn_regressions > 0,
-        );
-        let round_accepted = runtime_round_accepted && turn_round_accepted;
-        let (next_best_prompt, next_best_passed) = choose_best_non_regressing_prompt_shared(
-            &best_prompt,
-            best_passed,
-            &current_prompt,
-            passed,
-            has_regression,
-        );
-        best_prompt = next_best_prompt;
-        best_passed = next_best_passed;
-
-        round_history.push(EvaluationArtifactRuntimePromptEvolutionRound {
-            round: rounds,
-            candidate: current_prompt.best_candidate.clone(),
-            passed,
-            total_demos: latest_evaluations.len() + latest_turn_evaluations_ref.len(),
-            regressions: latest_regressions,
-            rolled_back,
-            accepted: round_accepted,
-            suggestion_titles: latest_suggestions
-                .iter()
-                .map(|item| item.title.clone())
-                .collect(),
-            candidate_titles: Vec::new(),
-        });
-
-        if round_accepted {
-            accepted = true;
-            best_prompt = current_prompt.clone();
-            break;
-        }
-
-        if has_regression
-            && rollback_runtime_system_prompt_if_regressed(
-                context,
-                &latest_evaluations,
-                latest_turn_evaluations_ref,
-            )
-            .await?
-        {
-            rolled_back = true;
-            current_prompt = current_runtime_system_prompt_artifact(context);
-        }
-
-        let mut next_candidates = generate_runtime_prompt_candidates(
-            context,
-            &latest_evaluations,
-            instruction_hypotheses,
-        )
-        .await?;
-        next_candidates.extend(
-            generate_turn_prompt_candidates(
-                context,
-                latest_turn_evaluations_ref,
-                render_runtime_hypotheses(instruction_hypotheses),
-            )
-            .await?,
-        );
-        if next_candidates.is_empty() {
-            break;
-        }
-        let candidate_titles = next_candidates
-            .iter()
-            .map(|item| item.title.clone())
-            .collect::<Vec<_>>();
-        all_candidates.extend(next_candidates.clone());
-        if let Some(last_round) = round_history.last_mut() {
-            last_round.candidate_titles = candidate_titles;
-        }
-
-        let next_prompt =
-            apply_runtime_prompt_candidate_shared(&current_prompt, &next_candidates[0]);
-        save_previous_compiled_runtime_system_prompt_for_model(
-            &context.config.main_model.model_name,
-            &current_prompt,
-        )
-        .await?;
-        save_compiled_runtime_system_prompt_for_model(
-            &context.config.main_model.model_name,
-            &next_prompt,
-        )
-        .await?;
-        context.compiled_prompts = context
-            .compiled_prompts
-            .clone()
-            .with_runtime_system_prompt(Some(next_prompt.clone()));
-        current_prompt = next_prompt;
-    }
-
-    save_compiled_runtime_system_prompt_for_model(
-        &context.config.main_model.model_name,
-        &best_prompt,
-    )
-    .await?;
-    context.compiled_prompts = context
-        .compiled_prompts
-        .clone()
-        .with_runtime_system_prompt(Some(best_prompt.clone()));
-
-    let mut best_prompt_with_report = best_prompt.clone();
-    let runtime_summary_lines = latest_evaluations
-        .iter()
-        .map(|item| {
-            format!(
-                "- {}: passed={} regression={} reason={}",
-                item.demo_title,
-                item.passed,
-                item.regression_detected,
-                item.reason.trim()
-            )
-        })
-        .chain(turn_evaluation_summary_lines(
-            latest_turn_evaluations.as_deref().unwrap_or(&[]),
-        ))
-        .collect::<Vec<_>>();
-    best_prompt_with_report.report = Some(build_compiled_runtime_system_prompt_report(
-        best_passed,
-        runtime_demos.len() + turn_demos.len(),
-        &runtime_summary_lines,
-    ));
-    save_compiled_runtime_system_prompt_for_model(
-        &context.config.main_model.model_name,
-        &best_prompt_with_report,
-    )
-    .await?;
-    context.compiled_prompts = context
-        .compiled_prompts
-        .clone()
-        .with_runtime_system_prompt(Some(best_prompt_with_report.clone()));
-
-    Ok(RuntimePromptEvolutionResult {
-        evaluations: latest_evaluations,
-        turn_evaluations: latest_turn_evaluations.unwrap_or_else(Vec::new),
-        suggestions: latest_suggestions,
-        candidates: all_candidates,
-        report: build_runtime_prompt_evolution_report(
-            runtime_demos.len() + turn_demos.len(),
-            &best_prompt_with_report,
-            &round_history,
-            accepted,
-            rolled_back,
-            latest_regressions,
-            best_passed,
-        ),
-        passed: best_passed,
-        regressions: latest_regressions,
-        rolled_back,
-        accepted,
-        rounds,
-    })
-}
-
-async fn generate_runtime_prompt_candidates(
-    context: &mut Context,
-    evaluations: &[EvaluationArtifactRuntimeDemoEvaluation],
-    instruction_hypotheses: &[EvaluationArtifactInstructionHypothesis],
-) -> Result<Vec<EvaluationArtifactRuntimePromptCandidate>> {
-    let failed = evaluations
-        .iter()
-        .filter(|item| !item.passed)
-        .cloned()
-        .collect::<Vec<_>>();
-    if failed.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let renderer = OpenAIToolRenderer;
-    let program = RuntimeSystemPromptPatchBuilderProgram;
-    let tuning = resolve_program_tuning(context, &program).await;
-    let current_system_prompt = current_runtime_system_prompt_text(context);
-    let output = execute_program_with_ir_report(
-        context.judge_llm.as_ref(),
-        context,
-        &renderer,
-        &program,
-        program.dataset_ir(
-            current_system_prompt,
-            render_failed_runtime_demos(&failed),
-            render_runtime_judge_feedback(&failed),
-            render_runtime_hypotheses(instruction_hypotheses),
-        ),
-        &tuning,
-        TraceOrigin::Sleep,
-    )
-    .await?;
-
-    let Some(candidate) =
-        runtime_prompt_candidate_from_output(&output.output, &failed, instruction_hypotheses)
-    else {
-        return Ok(Vec::new());
-    };
-    Ok(vec![candidate])
-}
-
-fn current_runtime_system_prompt_artifact(
-    context: &Context,
-) -> crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
-    current_runtime_system_prompt_artifact_from_store(&context.compiled_prompts)
-}
-
-fn is_acceptable_runtime_round(passed: usize, total: usize, has_regression: bool) -> bool {
-    !has_regression && passed == total
-}
-
-async fn previous_runtime_system_prompt_text(context: &Context) -> Result<String> {
-    let Some(previous) = load_previous_compiled_runtime_system_prompt_for_model(
-        &context.config.main_model.model_name,
-    )
-    .await?
-    else {
-        return Ok(String::from("none"));
-    };
-    Ok(LlmPromptRenderer::render_document(
-        &runtime_system_prompt_doc_from_additions(&previous.system_additions),
-    ))
-}
-
-fn current_runtime_system_prompt_text(context: &Context) -> String {
-    render_runtime_system_prompt_text(&context.compiled_prompts)
-}
-
-fn runtime_demo_evaluation_from_output(
-    demo: &EvaluationArtifactRuntimeDemo,
-    output: &RuntimeSystemPromptJudgeOutput,
-) -> EvaluationArtifactRuntimeDemoEvaluation {
-    EvaluationArtifactRuntimeDemoEvaluation {
-        compile_key: demo.compile_key.clone(),
-        demo_title: demo.title.clone(),
-        passed: output.passed,
-        regression_detected: output.regression_detected,
-        confidence: output.confidence,
-        needed_changes: output.needed_changes.clone(),
-        reason: output.reason.clone(),
+    let intersection = left_tokens.intersection(&right_tokens).count() as f64;
+    let union = left_tokens.union(&right_tokens).count() as f64;
+    if union <= 0.0 {
+        0.0
+    } else {
+        intersection / union
     }
 }
 
-fn runtime_prompt_suggestions_from_evaluations(
-    evaluations: &[EvaluationArtifactRuntimeDemoEvaluation],
-) -> Vec<EvaluationArtifactRuntimePromptSuggestion> {
-    evaluations
-        .iter()
-        .filter(|item| !item.passed)
-        .filter(|item| !item.needed_changes.is_empty())
-        .map(|item| EvaluationArtifactRuntimePromptSuggestion {
-            compile_key: item.compile_key.clone(),
-            title: format!("runtime prompt suggestion {}", item.demo_title),
-            rationale: item.reason.clone(),
-            suggested_additions: item.needed_changes.clone(),
-            source_demo_titles: vec![item.demo_title.clone()],
-            source_pattern_ids: Vec::new(),
-        })
-        .collect()
-}
-
-fn render_failed_runtime_demos(evaluations: &[EvaluationArtifactRuntimeDemoEvaluation]) -> String {
-    evaluations
-        .iter()
-        .map(|item| format!("- {}: {}", item.demo_title, item.reason.trim()))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn render_runtime_judge_feedback(
-    evaluations: &[EvaluationArtifactRuntimeDemoEvaluation],
-) -> String {
-    evaluations
-        .iter()
-        .map(|item| {
-            let changes = if item.needed_changes.is_empty() {
-                "none".to_string()
-            } else {
-                item.needed_changes.join(" | ")
-            };
-            format!(
-                "- {}: regression={} changes={}",
-                item.demo_title, item.regression_detected, changes
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn render_runtime_hypotheses(
-    instruction_hypotheses: &[EvaluationArtifactInstructionHypothesis],
-) -> String {
-    if instruction_hypotheses.is_empty() {
-        return String::from("none");
-    }
-    instruction_hypotheses
-        .iter()
-        .map(|item| format!("- {}: {}", item.suite, item.text.trim()))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn runtime_prompt_candidate_from_output(
-    output: &RuntimeSystemPromptPatchBuilderOutput,
-    evaluations: &[EvaluationArtifactRuntimeDemoEvaluation],
-    instruction_hypotheses: &[EvaluationArtifactInstructionHypothesis],
-) -> Option<EvaluationArtifactRuntimePromptCandidate> {
-    if output.prompt_patches.is_empty() {
-        return None;
-    }
-    Some(EvaluationArtifactRuntimePromptCandidate {
-        compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-        title: if output.title.trim().is_empty() {
-            String::from("runtime prompt candidate")
-        } else {
-            output.title.trim().to_string()
-        },
-        rationale: output.rationale.trim().to_string(),
-        prompt_patches: output
-            .prompt_patches
-            .iter()
-            .filter(|item| !item.trim().is_empty())
-            .cloned()
-            .collect(),
-        source_demo_titles: evaluations
-            .iter()
-            .map(|item| item.demo_title.clone())
-            .collect(),
-        source_hypotheses: instruction_hypotheses
-            .iter()
-            .map(|item| item.text.clone())
-            .collect(),
-    })
-}
-
-async fn rollback_runtime_system_prompt_if_regressed(
-    context: &mut Context,
-    evaluations: &[EvaluationArtifactRuntimeDemoEvaluation],
-    turn_evaluations: &[EvaluationArtifactTurnDemoEvaluation],
-) -> Result<bool> {
-    if !evaluations.iter().any(|item| item.regression_detected)
-        && !turn_evaluations.iter().any(|item| item.regression_detected)
-    {
-        return Ok(false);
-    }
-    let Some(previous) = load_previous_compiled_runtime_system_prompt_for_model(
-        &context.config.main_model.model_name,
-    )
-    .await?
-    else {
-        return Ok(false);
-    };
-    save_compiled_runtime_system_prompt_for_model(&context.config.main_model.model_name, &previous)
-        .await?;
-    context.compiled_prompts = context
-        .compiled_prompts
-        .clone()
-        .with_runtime_system_prompt(Some(
-            previous.with_compile_key(RUNTIME_SYSTEM_PROMPT_COMPILE_KEY),
-        ));
-    Ok(true)
+fn workflow_similarity_tokens(workflow: &WorkflowSpec) -> std::collections::HashSet<String> {
+    [
+        workflow.when_to_use.join(" "),
+        workflow.workflow_steps.join(" "),
+        workflow.done_criteria.join(" "),
+    ]
+    .join(" ")
+    .split(|ch: char| !ch.is_alphanumeric())
+    .map(|token| token.trim().to_ascii_lowercase())
+    .filter(|token| !token.is_empty())
+    .collect()
 }
 
 fn render_related_memories(related_memories: &[String]) -> Option<String> {
@@ -2002,44 +978,6 @@ fn to_stress_case(
     })
 }
 
-fn review_runtime_demo(
-    review: &ReviewInput,
-    output: &SleepReviewSynthesizerOutput,
-) -> Option<EvaluationArtifactRuntimeDemo> {
-    let expected_behavior = if !output.strategy_lesson.trim().is_empty() {
-        output.strategy_lesson.trim()
-    } else if !output.reflection_lesson.trim().is_empty() {
-        output.reflection_lesson.trim()
-    } else {
-        return None;
-    };
-    Some(EvaluationArtifactRuntimeDemo {
-        compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-        title: format!("runtime demo {}", review.review_id),
-        scenario_summary: format!(
-            "source: {}\nlabel: {}\nstatus: {}\ntask: {}\nsummary: {}",
-            review.source_kind,
-            review.review_label,
-            review.outcome_status,
-            review.task_goal.trim(),
-            output.synthesized_summary.trim()
-        ),
-        inputs: review.demo_inputs.clone(),
-        expected_behavior: expected_behavior.to_string(),
-        judge_focus: [
-            output.failure_pattern_summary.trim(),
-            output.reason.trim(),
-            output.reflection_evidence_summary.trim(),
-        ]
-        .into_iter()
-        .filter(|item| !item.is_empty())
-        .map(str::to_string)
-        .collect(),
-        source_trace_ids: review.source_trace_ids.clone(),
-        confidence: output.reflection_confidence.clamp(0.0, 1.0) as f32,
-    })
-}
-
 fn derive_success_bootstrap_demos(
     records: &[ProgramTraceRecord],
 ) -> Vec<EvaluationArtifactBootstrapDemo> {
@@ -2150,34 +1088,6 @@ fn flush_section(
     current_body.clear();
 }
 
-async fn retain_sleep_reflections(
-    context: &Context,
-    reflections: &[SleepReflectionRecord],
-) -> Result<usize> {
-    if reflections.is_empty() {
-        return Ok(0);
-    }
-
-    let items = reflections
-        .iter()
-        .map(|reflection| HindsightRetainItem {
-            content: reflection.content.clone(),
-            timestamp: None,
-            context: Some("sleep reflection".to_string()),
-            metadata: None,
-            document_id: Some(reflection.document_id.clone()),
-            tags: Some(reflection.tags.clone()),
-        })
-        .collect::<Vec<_>>();
-    context
-        .hindsight_retain
-        .enqueue(crate::hindsight::HindsightRetainJob {
-            items,
-            document_id: None,
-        })?;
-    Ok(reflections.len())
-}
-
 async fn recall_related_memories(context: &Context, query: &str, top_k: usize) -> Vec<String> {
     let observations = context
         .hindsight
@@ -2235,161 +1145,66 @@ async fn recall_related_memories(context: &Context, query: &str, top_k: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-
     use tempfile::TempDir;
 
-    use crate::{
-        reasoning::{episode::EpisodeActionRecord, runtime_review::RuntimeTurnRecord},
-        skill::NewSkillRecord,
-        DaatLocusHomeOverride,
-    };
-
-    fn test_prompt(
-        best_candidate: &str,
-        additions: &[&str],
-    ) -> crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
-        crate::reasoning::compiled::CompiledRuntimeSystemPrompt {
-            compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-            best_candidate: best_candidate.to_string(),
-            system_additions: additions.iter().map(|item| item.to_string()).collect(),
-            selected_demo_titles: Vec::new(),
-            report: None,
-        }
-    }
-
-    #[test]
-    fn apply_runtime_prompt_candidate_appends_only_new_patches() {
-        let current = test_prompt("current", &["rule a", "rule b"]);
-        let candidate = EvaluationArtifactRuntimePromptCandidate {
-            compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-            title: "candidate".to_string(),
-            rationale: "test".to_string(),
-            prompt_patches: vec!["rule b".to_string(), "rule c".to_string()],
-            source_demo_titles: vec!["demo".to_string()],
-            source_hypotheses: Vec::new(),
-        };
-
-        let next = apply_runtime_prompt_candidate_shared(&current, &candidate);
-        assert_eq!(next.best_candidate, "candidate");
-        assert_eq!(next.system_additions, vec!["rule a", "rule b", "rule c"]);
-    }
-
-    #[test]
-    fn runtime_prompt_suggestions_come_only_from_failed_evaluations_with_changes() {
-        let suggestions = runtime_prompt_suggestions_from_evaluations(&[
-            EvaluationArtifactRuntimeDemoEvaluation {
-                compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-                demo_title: "passed-demo".to_string(),
-                passed: true,
-                regression_detected: false,
-                confidence: 0.9,
-                needed_changes: vec!["unused".to_string()],
-                reason: "ok".to_string(),
-            },
-            EvaluationArtifactRuntimeDemoEvaluation {
-                compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
-                demo_title: "failed-demo".to_string(),
-                passed: false,
-                regression_detected: false,
-                confidence: 0.6,
-                needed_changes: vec!["add rule".to_string()],
-                reason: "missing boundary".to_string(),
-            },
-        ]);
-
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(
-            suggestions[0].title,
-            "runtime prompt suggestion failed-demo"
-        );
-        assert_eq!(suggestions[0].suggested_additions, vec!["add rule"]);
-    }
-
-    #[test]
-    fn acceptable_runtime_round_requires_full_pass_without_regression() {
-        assert!(is_acceptable_runtime_round(2, 2, false));
-        assert!(!is_acceptable_runtime_round(2, 2, true));
-        assert!(!is_acceptable_runtime_round(1, 2, false));
-    }
-
-    #[test]
-    fn choose_best_non_regressing_prompt_prefers_more_passed_without_regression() {
-        let best = test_prompt("best", &["rule a"]);
-        let current = test_prompt("current", &["rule a", "rule b"]);
-
-        let (selected, passed) =
-            choose_best_non_regressing_prompt_shared(&best, 1, &current, 2, false);
-        assert_eq!(selected.best_candidate, "current");
-        assert_eq!(passed, 2);
-
-        let (selected, passed) =
-            choose_best_non_regressing_prompt_shared(&best, 2, &current, 3, true);
-        assert_eq!(selected.best_candidate, "best");
-        assert_eq!(passed, 2);
-    }
+    use crate::workflow::{NewWorkflowSpec, WorkflowRunOutcome, WorkflowRunRecord};
 
     #[tokio::test]
-    async fn sleep_skill_optimizer_updates_skill_version_from_runtime_review_signal() {
-        let temp_home = TempDir::new().expect("create temporary daat locus home");
-        let _home_override = DaatLocusHomeOverride::set(temp_home.path().to_path_buf());
+    async fn sleep_workflow_optimizer_updates_workflow_content_from_run_records() {
+        let temp_dir = TempDir::new().expect("create temporary workflow dir");
+        let primary = temp_dir.path().join("workflows");
 
-        let mut skills = SkillRegistry::new().await;
-        let created = skills
-            .create_skill(NewSkillRecord {
-                name: "Repair flaky test pipeline".to_string(),
-                trigger_conditions: vec!["test flaky".to_string()],
+        let mut workflows = WorkflowStore::open_scoped(primary.clone(), vec![primary]).await;
+        let created = workflows
+            .create_workflow(NewWorkflowSpec {
+                id: "repair-flaky-test-pipeline".to_string(),
+                when_to_use: vec!["test flaky".to_string()],
                 preconditions: vec!["failing test logs available".to_string()],
                 workflow_steps: vec![
                     "collect flaky failure evidence".to_string(),
                     "pinpoint unstable assertion".to_string(),
                 ],
                 done_criteria: vec!["test runs stable".to_string()],
-                failure_recovery: vec!["rollback last risky change".to_string()],
+                recovery: vec!["rollback last risky change".to_string()],
             })
-            .expect("create skill");
-        skills
-            .activate_skill(&created.id)
-            .expect("activate skill");
-
-        let mut metadata = BTreeMap::new();
-        metadata.insert("active_skill_id".to_string(), created.id.clone());
-        metadata.insert("action_count".to_string(), "3".to_string());
-        metadata.insert("manual_fix_detected".to_string(), "true".to_string());
-        metadata.insert("rollback_detected".to_string(), "true".to_string());
-        metadata.insert("failure_type".to_string(), "tool_failure".to_string());
-
-        let span = RuntimeReviewSpan {
-            id: "review-1".to_string(),
-            turns: vec![RuntimeTurnRecord {
-                id: "turn-1".to_string(),
-                recorded_at_ms: chrono::Utc::now().timestamp_millis(),
-                current_doing: "repair flaky pipeline".to_string(),
-                description: "tool failed while applying patch".to_string(),
-                observation: "failed to patch target file".to_string(),
-                actions: vec![EpisodeActionRecord {
-                    kind: "apply_patch".to_string(),
-                    summary: "patched flaky assertion".to_string(),
-                }],
-                before_snapshot_text: "before".to_string(),
-                after_snapshot_text: "after".to_string(),
-                history_messages: Vec::new(),
-                metadata,
-            }],
-        };
-
-        let result = optimize_skills_from_reviews(&mut skills, &[span])
             .await
-            .expect("optimize skills from runtime review");
+            .expect("create workflow");
+
+        let run_records = vec![WorkflowRunRecord {
+            run_id: "workflow-run:test".to_string(),
+            workflow_id: created.id.clone(),
+            started_at_ms: chrono::Utc::now().timestamp_millis(),
+            ended_at_ms: chrono::Utc::now().timestamp_millis(),
+            origin: "event:test".to_string(),
+            outcome: WorkflowRunOutcome::Blocked,
+            turn_count: 1,
+            tool_action_count: 3,
+            manual_fix_detected: true,
+            rollback_detected: true,
+            failure_types: vec!["tool_failure".to_string()],
+            final_summary: "tool failed while applying patch".to_string(),
+        }];
+        let result = optimize_workflows_from_run_records(&mut workflows, &run_records)
+            .await
+            .expect("optimize workflows from workflow run records");
 
         assert_eq!(result.patches.len(), 1);
         assert_eq!(result.patch_applied, 1);
         assert_eq!(result.rollbacks, 0);
 
-        let updated = skills.get(&created.id).expect("updated skill should exist");
-        assert!(updated.version > created.version);
-        assert!(updated.workflow_steps.iter().any(|step| {
-            step.contains("sleep patch") || step.contains("阻塞风险预检")
-        }));
+        let updated = workflows
+            .get(&created.id)
+            .expect("updated workflow should exist");
+        assert_ne!(updated.workflow_steps, created.workflow_steps);
+        assert!(
+            updated
+                .workflow_steps
+                .iter()
+                .any(|step| step.contains("手工修复") || step.contains("阻塞"))
+                || updated
+                    .recovery
+                    .iter()
+                    .any(|step| step.contains("阻塞") || step.contains("标准恢复路径"))
+        );
     }
 }
