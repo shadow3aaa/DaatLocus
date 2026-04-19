@@ -855,6 +855,32 @@ impl TurnCompileEngine {
     }
 }
 
+pub async fn evaluate_runtime_prompt_candidate_rollout(
+    config: Config,
+    compiled_prompts: CompiledPromptStore,
+    candidate: &EvaluationArtifactRuntimePromptCandidate,
+    turn_demos: &[EvaluationArtifactTurnDemo],
+) -> Result<Vec<EvaluationArtifactTurnDemoEvaluation>> {
+    if turn_demos.is_empty() {
+        return Ok(Vec::new());
+    }
+    let previous_system_prompt = runtime_system_prompt_text(&compiled_prompts);
+    let current_prompt = current_runtime_system_prompt_artifact_from_store(&compiled_prompts);
+    let candidate_prompt = apply_runtime_prompt_candidate_shared(&current_prompt, candidate);
+    let candidate_compiled_prompts =
+        compiled_prompts_with_runtime_prompt(&compiled_prompts, candidate_prompt);
+    let current_system_prompt = runtime_system_prompt_text(&candidate_compiled_prompts);
+    TurnCompileEngine::evaluate_cold_start(
+        config,
+        candidate_compiled_prompts,
+        turn_demos,
+        current_system_prompt,
+        previous_system_prompt,
+        None,
+    )
+    .await
+}
+
 async fn prompt_persona_path() -> PathBuf {
     daat_locus_paths()
         .await

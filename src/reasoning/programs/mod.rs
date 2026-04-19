@@ -1,10 +1,9 @@
 pub mod evaluation_artifact_builder;
-pub mod prompt_candidate_replay_judge;
 pub mod prompt_evolution_planner;
 pub mod runtime_retain_preprocessor;
 pub mod runtime_turn_demo_generator;
 pub mod runtime_turn_prompt_patch_builder;
 pub mod runtime_turn_trace_judge;
-pub mod workflow_candidate_replay_judge;
+pub mod workflow_candidate_rollout_evaluator;
 pub mod workflow_evolution_planner;
 pub mod workflow_merge_planner;

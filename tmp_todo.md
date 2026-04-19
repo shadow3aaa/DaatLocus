@@ -14,7 +14,7 @@
 - frontier 已有 lineage：
   - `parent_keys`
   - `generation`
-- frontier 在选择前会经过 sampled rollout replay judge 复评，而不是单轮直接执行
+- frontier 在选择前会经过逐 case rollout evaluator 复评，而不是批量摘要 judge
 - artifacts / dashboard / summary 都已跟上新模型
 
 ## 当前完成态
@@ -29,7 +29,7 @@
 - `prompt_candidates`
 - `prompt_candidate_evaluations`
 - `prompt_frontier`
-- `sampled rollout replay judge`
+- `case-level rollout evaluator`
 - `frontier selection`
 - `compiled runtime prompt update`
 
@@ -52,7 +52,7 @@
 - `workflow patch / merge candidates`
 - `workflow candidate evaluations`
 - `workflow_frontier`
-- `sampled rollout replay judge`
+- `case-level rollout evaluator`
 - `frontier selection`
 - `workspace workflow patch / merge apply`
 
@@ -82,20 +82,24 @@
   - `branched_entries`
   - `max_generation`
 
-### Replay
+### Rollout Evaluation
 
-当前 replay 不是“单批次最近样本”，而是 sampled rollout style：
+当前 replay 已升级为 executable rollout：
 
-- prompt replay：最近 trace 按 batch 切片，多批次 judge 后聚合
-- workflow replay：最近 run evidence 按 batch 切片，多批次 judge 后聚合
+- prompt replay：candidate prompt additions 会进入隔离 `CompiledPromptStore`，再执行真实 turn demos 并聚合为 frontier evaluation
+- workflow replay：candidate workflow 会进入隔离 `WorkflowStore`，真实应用 patch/merge，并显式模拟
+  - workflow binding
+  - session accumulate
+  - work flush boundary
+  - outcome collection
 
 这一步已经完成了从：
 
-- `single minibatch judge`
+- `batched evidence judge`
 
 到：
 
-- `sampled rollout replay + aggregation`
+- `executable rollout + frontier aggregation`
 
 的迁移。
 
@@ -107,11 +111,88 @@
 - builtin workflows 不可被优化管线修改：已完成
 - `cargo test` 全通过：已完成
 
-## 后续仅剩研究性增强
+## 下一阶段：Executable Rollout
 
-这些不是当前迁移阻塞项，也不再属于本 TODO 的“未完成”部分：
+主迁移已经完成，下一阶段的主目标是把当前 `case-level rollout evaluator` 提升为真正的 `executable rollout`。
 
-- 把 replay 从 sampled rollout judge 提升到真实 executable rollout
-- 引入更强的多目标 frontier ranking，而不只是当前非支配筛选 + replay score
-- 给 lineage 增加 ancestry graph 可视化，而不只是统计摘要
-- 决定是否引入跨 sleep 的更显式代际保留/淘汰策略
+实施顺序固定为：
+
+1. 先做 Prompt executable rollout
+2. 再做 Workflow executable rollout
+3. 最后再考虑更强的 frontier ranking
+
+原因：
+
+- prompt 线已经有现成的可执行基础设施：`TurnRolloutRunner` / `run_cold_start_turn_demo`
+- workflow 线虽然证据边界更干净，但缺少现成的“给定 candidate spec 后重放任务”的执行器
+
+### 1. Prompt executable rollout
+
+状态：已完成。
+
+优先复用的现有代码：
+
+- `src/reasoning/turn_compile.rs`
+  - `TurnRolloutRunner`
+  - `run_cold_start_turn_demo`
+  - `RuntimeTurnTraceJudgeProgram`
+  - `IsolatedEvalContext`
+
+当前实现：
+
+- prompt frontier 复评已不再走 case-level LLM evaluator
+- 现在会把 candidate prompt additions 临时应用到隔离 `CompiledPromptStore`
+- 复用 `TurnCompileEngine::evaluate_cold_start` 执行 turn demos
+- 再由现有 turn trace judge 聚合成 frontier evaluation
+
+当前数据来源：
+
+- sleep 中由 `runtime_demos -> turn_demos` 自动投影
+
+完成标准：已满足
+
+### 2. Workflow executable rollout
+
+状态：v1 已完成，并已补上显式 bind/session/flush 边界模拟。
+
+当前实现：
+
+- workflow frontier 复评不再直接拿原始 candidate 文本 judging
+- 现在会在隔离 `DAAT_LOCUS_HOME` 下构建真实 `WorkflowStore`
+- 把 target/source workflows 写入临时 store
+- 真实应用 patch/merge candidate
+- 再把“rollout 后的 target workflow spec + rollout result summary + 显式模拟出的 WorkflowRunRecord rollout case”
+  喂给 workflow rollout evaluator 聚合
+- workflow rollout case 不再是简单复制原 record，而是通过最小 runner-state 明确模拟：
+  - bind workflow
+  - accumulate session evidence
+  - queue flush
+  - collect flushed run record
+
+也就是说，workflow candidate 已经真实进入隔离执行上下文，而不是只作为静态文本被评估。
+
+初版不要求完全重建真实外部世界，但要求：
+
+- candidate workflow spec 真正进入执行上下文
+- runner 明确模拟：
+  - workflow binding
+  - work execution boundary
+  - outcome collection
+
+注意：
+
+- builtin workflows 仍不可修改
+- rollout 一律在隔离上下文中执行，不污染主 runtime state
+
+完成标准：
+
+- workflow frontier 复评主链从当前 `WorkflowCandidateRolloutEvaluatorProgram`
+  切到“真实 workflow rollout + outcome judge 聚合”
+
+### 3. Frontier ranking 之后再增强
+
+只有在 executable rollout 稳定后，再继续：
+
+- 更强的多目标 frontier ranking
+- ancestry graph 可视化
+- 更显式的代际保留 / 淘汰策略

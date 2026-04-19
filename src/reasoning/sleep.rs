@@ -1,7 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::{
-    context::Context,
+    AgentLoopStepOutput, DaatLocusHomeOverride, build_eval_context_with_compiled,
+    context::{ActiveWorkflowRunSession, Context, PendingWorkflowRunFlush},
     hindsight::{HindsightRecallOptions, builtin_hindsight_mental_models},
     reasoning::{
         compiled::{
@@ -19,23 +20,25 @@ use crate::{
             workflow_patch_frontier_entry_from_candidate,
         },
         programs::{
-            prompt_candidate_replay_judge::PromptCandidateReplayJudgeOutput,
-            prompt_candidate_replay_judge::PromptCandidateReplayJudgeProgram,
             prompt_evolution_planner::{
                 PromptEvolutionPlannerOutput, PromptEvolutionPlannerProgram,
             },
-            workflow_candidate_replay_judge::WorkflowCandidateReplayJudgeOutput,
-            workflow_candidate_replay_judge::WorkflowCandidateReplayJudgeProgram,
+            workflow_candidate_rollout_evaluator::WorkflowCandidateRolloutEvaluatorOutput,
+            workflow_candidate_rollout_evaluator::WorkflowCandidateRolloutEvaluatorProgram,
             workflow_evolution_planner::{
                 WorkflowEvolutionPlannerOutput, WorkflowEvolutionPlannerProgram,
             },
             workflow_merge_planner::{WorkflowMergePlannerOutput, WorkflowMergePlannerProgram},
         },
         runtime::PromptRequest,
-        turn_compile::current_runtime_system_prompt_artifact_from_store,
+        turn_compile::{
+            current_runtime_system_prompt_artifact_from_store,
+            evaluate_runtime_prompt_candidate_rollout,
+        },
     },
     workflow::{
-        WorkflowPatch, WorkflowRunRecord, WorkflowSpec, WorkflowStore, load_workflow_run_batch,
+        NewWorkflowSpec, WorkflowPatch, WorkflowRunRecord, WorkflowSpec, WorkflowStore,
+        load_workflow_run_batch,
     },
 };
 use async_trait::async_trait;
@@ -44,6 +47,7 @@ use serde_json::json;
 use tracing::warn;
 
 use super::{
+    episode::EpisodeActionRecord,
     evaluation_artifacts::{
         EvaluationArtifactBootstrapDemo, EvaluationArtifactFailurePattern,
         EvaluationArtifactInstructionHypothesis, EvaluationArtifactPromptReflection,
@@ -170,6 +174,81 @@ struct SleepWorkflowOptimizationResult {
     rounds: usize,
 }
 
+struct WorkflowExecutableRolloutResult {
+    target_workflow: WorkflowSpec,
+    summary: String,
+}
+
+struct WorkflowTaskRolloutCase {
+    record: WorkflowRunRecord,
+    summary: String,
+}
+
+#[derive(Default)]
+struct WorkflowTaskRolloutRunnerState {
+    bound_workflow_id: Option<String>,
+    active_workflow_run: Option<ActiveWorkflowRunSession>,
+    pending_workflow_run_flushes: Vec<PendingWorkflowRunFlush>,
+    current_work_origin: Option<String>,
+}
+
+impl WorkflowTaskRolloutRunnerState {
+    fn begin_bound_workflow_session(&mut self, workflow: &WorkflowSpec, case: &WorkflowRunRecord) {
+        self.bound_workflow_id = Some(workflow.id.clone());
+        self.current_work_origin = Some(case.origin.clone());
+        if self
+            .active_workflow_run
+            .as_ref()
+            .is_some_and(|session| session.workflow_id == workflow.id)
+        {
+            return;
+        }
+        self.active_workflow_run = Some(ActiveWorkflowRunSession {
+            run_id: format!("workflow-rollout:{}", uuid::Uuid::new_v4()),
+            workflow_id: workflow.id.clone(),
+            started_at_ms: case.started_at_ms,
+            origin: self
+                .current_work_origin
+                .clone()
+                .unwrap_or_else(|| "workflow_rollout".to_string()),
+            turn_count: 0,
+            tool_action_count: 0,
+            manual_fix_detected: false,
+            rollback_detected: false,
+            failure_types: BTreeSet::new(),
+            final_summary: String::new(),
+        });
+    }
+
+    fn accumulate_case(&mut self, workflow: &WorkflowSpec, case: &WorkflowRunRecord) {
+        let Some(session) = self.active_workflow_run.as_mut() else {
+            return;
+        };
+        if session.workflow_id != workflow.id {
+            return;
+        }
+        let output = workflow_rollout_output_from_case(workflow, case);
+        accumulate_workflow_rollout_session_from_case(session, &output, case);
+    }
+
+    fn queue_active_workflow_run_for_flush(
+        &mut self,
+        outcome: crate::workflow::WorkflowRunOutcome,
+    ) {
+        if let Some(session) = self.active_workflow_run.take() {
+            self.pending_workflow_run_flushes
+                .push(PendingWorkflowRunFlush { session, outcome });
+        }
+    }
+
+    fn flush_records(&mut self, ended_at_ms: i64) -> Vec<WorkflowRunRecord> {
+        self.pending_workflow_run_flushes
+            .drain(..)
+            .map(|flush| workflow_rollout_record_from_pending_flush(flush, ended_at_ms))
+            .collect()
+    }
+}
+
 struct PromptPlanningResult {
     reflections: Vec<EvaluationArtifactPromptReflection>,
     candidates: Vec<EvaluationArtifactRuntimePromptCandidate>,
@@ -218,7 +297,7 @@ trait SleepPlannerRuntime: Send + Sync {
         context: &mut Context,
         candidate: &EvaluationArtifactRuntimePromptCandidate,
         failure_patterns: &[EvaluationArtifactFailurePattern],
-        records: &[ProgramTraceRecord],
+        turn_demos: &[EvaluationArtifactTurnDemo],
     ) -> Result<EvaluationArtifactRuntimePromptCandidateEvaluation>;
 
     async fn replay_workflow_frontier_entry(
@@ -368,40 +447,17 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
         context: &mut Context,
         candidate: &EvaluationArtifactRuntimePromptCandidate,
         failure_patterns: &[EvaluationArtifactFailurePattern],
-        records: &[ProgramTraceRecord],
+        turn_demos: &[EvaluationArtifactTurnDemo],
     ) -> Result<EvaluationArtifactRuntimePromptCandidateEvaluation> {
-        let renderer = OpenAIToolRenderer;
-        let program = PromptCandidateReplayJudgeProgram;
-        let tuning = resolve_program_tuning(context, &program).await;
-        let current_system_additions = context
-            .compiled_prompts
-            .runtime_system_additions()
-            .join("\n");
-        let candidate_json = serde_json::to_string_pretty(candidate).into_diagnostic()?;
-        let failure_patterns_json =
-            serde_json::to_string_pretty(failure_patterns).into_diagnostic()?;
-        let replay_batches = select_prompt_replay_rollout_batches(records, 4, 3);
-        let mut outputs = Vec::<PromptCandidateReplayJudgeOutput>::new();
-        for replay_batch in replay_batches {
-            let trace_evidence_summary = render_trace_replay_evidence_summary(&replay_batch);
-            let outcome = execute_program_with_ir_report(
-                context.judge_llm.as_ref(),
-                context,
-                &renderer,
-                &program,
-                program.dataset_ir(
-                    current_system_additions.clone(),
-                    candidate_json.clone(),
-                    failure_patterns_json.clone(),
-                    trace_evidence_summary,
-                ),
-                &tuning,
-                TraceOrigin::Sleep,
-            )
-            .await?;
-            outputs.push(outcome.output);
-        }
-        Ok(aggregate_prompt_replay_evaluation(
+        let rollout_demos = select_prompt_rollout_demos(turn_demos, 8);
+        let evaluations = evaluate_runtime_prompt_candidate_rollout(
+            context.config.clone(),
+            context.compiled_prompts.clone(),
+            candidate,
+            &rollout_demos,
+        )
+        .await?;
+        Ok(aggregate_prompt_executable_rollout_evaluation(
             EvaluationArtifactRuntimePromptCandidateEvaluation {
                 compile_key: candidate.compile_key.clone(),
                 candidate_title: candidate.title.clone(),
@@ -415,7 +471,7 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
                     .flat_map(|pattern| pattern.supporting_trace_ids.clone())
                     .collect(),
             },
-            &outputs,
+            &evaluations,
         ))
     }
 
@@ -431,13 +487,16 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
         source_evidence: &[WorkflowRunRecord],
     ) -> Result<EvaluationArtifactWorkflowCandidateEvaluation> {
         let renderer = OpenAIToolRenderer;
-        let program = WorkflowCandidateReplayJudgeProgram;
+        let program = WorkflowCandidateRolloutEvaluatorProgram;
         let tuning = resolve_program_tuning(context, &program).await;
         let candidate_json = serde_json::to_string_pretty(entry).into_diagnostic()?;
-        let target_batches = select_workflow_replay_rollout_batches(target_evidence, 4, 3);
-        let source_batches = select_workflow_replay_rollout_batches(source_evidence, 4, 3);
-        let batch_count = target_batches.len().max(source_batches.len()).max(1);
-        let target_workflow_spec = render_workflow_spec_markdown(target_workflow);
+        let rollout =
+            execute_workflow_candidate_rollout(context, entry, target_workflow, source_workflow)
+                .await?;
+        let target_cases = select_workflow_rollout_cases(target_evidence, 8);
+        let source_cases = select_workflow_rollout_cases(source_evidence, 8);
+        let case_count = target_cases.len().max(source_cases.len()).max(1);
+        let target_workflow_spec = render_workflow_spec_markdown(&rollout.target_workflow);
         let target_reflection_json =
             serde_json::to_string_pretty(&target_reflection.cloned()).into_diagnostic()?;
         let source_workflow_spec = source_workflow
@@ -445,18 +504,20 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
             .unwrap_or_else(|| "none".to_string());
         let source_reflection_json =
             serde_json::to_string_pretty(&source_reflection.cloned()).into_diagnostic()?;
-        let mut outputs = Vec::<WorkflowCandidateReplayJudgeOutput>::new();
-        for index in 0..batch_count {
-            let target_batch = target_batches
+        let mut outputs = Vec::<WorkflowCandidateRolloutEvaluatorOutput>::new();
+        for index in 0..case_count {
+            let target_case = target_cases
                 .get(index)
                 .cloned()
-                .or_else(|| target_batches.last().cloned())
-                .unwrap_or_default();
-            let source_batch = source_batches
+                .or_else(|| target_cases.last().cloned())
+                .unwrap_or_else(blank_workflow_run_record);
+            let rolled_out_target_case =
+                simulate_workflow_task_rollout_case(&rollout.target_workflow, &target_case);
+            let source_case = source_cases
                 .get(index)
                 .cloned()
-                .or_else(|| source_batches.last().cloned())
-                .unwrap_or_default();
+                .or_else(|| source_cases.last().cloned())
+                .unwrap_or_else(blank_workflow_run_record);
             let outcome = execute_program_with_ir_report(
                 context.judge_llm.as_ref(),
                 context,
@@ -465,12 +526,13 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
                 program.dataset_ir(
                     entry.candidate_kind.clone(),
                     target_workflow_spec.clone(),
+                    format!("{} | {}", rollout.summary, rolled_out_target_case.summary),
                     target_reflection_json.clone(),
-                    render_workflow_run_evidence_json(&target_batch)?,
+                    render_workflow_rollout_case_json(&rolled_out_target_case.record)?,
                     source_workflow_spec.clone(),
                     source_reflection_json.clone(),
                     if source_workflow.is_some() {
-                        render_workflow_run_evidence_json(&source_batch)?
+                        render_workflow_rollout_case_json(&source_case)?
                     } else {
                         "none".to_string()
                     },
@@ -545,7 +607,7 @@ async fn run_prompt_improvement_pipeline(
         planner,
         &prompt_frontier,
         &failure_patterns,
-        records,
+        &derived.turn_demos,
     )
     .await?;
     let prompt_frontier_choice = select_prompt_frontier_entry(&prompt_frontier);
@@ -851,13 +913,13 @@ async fn replay_prompt_frontier_entries(
     planner: &dyn SleepPlannerRuntime,
     entries: &[crate::reasoning::frontier::PromptFrontierEntry],
     failure_patterns: &[EvaluationArtifactFailurePattern],
-    records: &[ProgramTraceRecord],
+    turn_demos: &[EvaluationArtifactTurnDemo],
 ) -> Result<Vec<crate::reasoning::frontier::PromptFrontierEntry>> {
     let mut replayed = Vec::new();
     for entry in entries {
         let mut updated = entry.clone();
         updated.evaluation = planner
-            .replay_prompt_candidate(context, &updated.candidate, failure_patterns, records)
+            .replay_prompt_candidate(context, &updated.candidate, failure_patterns, turn_demos)
             .await?;
         replayed.push(updated);
     }
@@ -1057,50 +1119,17 @@ fn infer_workflow_merge_lineage(
     (parent_keys, generation)
 }
 
-fn render_trace_replay_evidence_summary(records: &[ProgramTraceRecord]) -> String {
-    let total_records = records.len();
-    let failed_records = records
-        .iter()
-        .filter(|record| record.deserialization_error.is_some())
-        .count();
-    let suites = records
-        .iter()
-        .map(|record| record.program_name.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("total_records={total_records}\nfailed_records={failed_records}\nprograms={suites}")
+fn select_prompt_rollout_demos(
+    demos: &[EvaluationArtifactTurnDemo],
+    max_demos: usize,
+) -> Vec<EvaluationArtifactTurnDemo> {
+    demos.iter().take(max_demos).cloned().collect()
 }
 
-fn select_prompt_replay_rollout_batches(
-    records: &[ProgramTraceRecord],
-    batch_size: usize,
-    max_batches: usize,
-) -> Vec<Vec<ProgramTraceRecord>> {
-    let mut ordered = records.to_vec();
-    ordered.sort_by(|left, right| {
-        right
-            .timestamp_ms
-            .cmp(&left.timestamp_ms)
-            .then_with(|| right.attempt.cmp(&left.attempt))
-    });
-    let mut batches = ordered
-        .chunks(batch_size.max(1))
-        .take(max_batches.max(1))
-        .map(|chunk| chunk.to_vec())
-        .collect::<Vec<_>>();
-    if batches.is_empty() {
-        batches.push(Vec::new());
-    }
-    batches
-}
-
-fn select_workflow_replay_rollout_batches(
+fn select_workflow_rollout_cases(
     records: &[WorkflowRunRecord],
-    batch_size: usize,
-    max_batches: usize,
-) -> Vec<Vec<WorkflowRunRecord>> {
+    max_cases: usize,
+) -> Vec<WorkflowRunRecord> {
     let mut ordered = records.to_vec();
     ordered.sort_by(|left, right| {
         right
@@ -1108,42 +1137,62 @@ fn select_workflow_replay_rollout_batches(
             .cmp(&left.ended_at_ms)
             .then_with(|| right.started_at_ms.cmp(&left.started_at_ms))
     });
-    let mut batches = ordered
-        .chunks(batch_size.max(1))
-        .take(max_batches.max(1))
-        .map(|chunk| chunk.to_vec())
-        .collect::<Vec<_>>();
-    if batches.is_empty() {
-        batches.push(Vec::new());
-    }
-    batches
+    ordered.truncate(max_cases);
+    ordered
 }
 
-fn aggregate_prompt_replay_evaluation(
+fn aggregate_prompt_executable_rollout_evaluation(
     mut base: EvaluationArtifactRuntimePromptCandidateEvaluation,
-    outputs: &[PromptCandidateReplayJudgeOutput],
+    evaluations: &[crate::reasoning::evaluation_artifacts::EvaluationArtifactTurnDemoEvaluation],
 ) -> EvaluationArtifactRuntimePromptCandidateEvaluation {
-    if outputs.is_empty() {
+    if evaluations.is_empty() {
         return base;
     }
-    let accepted_count = outputs.iter().filter(|output| output.accepted).count();
-    let score_sum = outputs.iter().map(|output| output.score).sum::<f64>();
-    base.score = score_sum / outputs.len() as f64;
-    base.accepted = accepted_count * 2 >= outputs.len();
-    base.regressions_detected = outputs
+    let passed_count = evaluations
         .iter()
-        .map(|output| output.regressions_detected)
-        .max()
-        .unwrap_or(0);
+        .filter(|evaluation| evaluation.passed)
+        .count();
+    let improvement_count = evaluations
+        .iter()
+        .filter(|evaluation| evaluation.passed)
+        .count();
+    let regression_count = evaluations
+        .iter()
+        .filter(|evaluation| evaluation.regression_detected)
+        .count();
+    let score_sum = evaluations
+        .iter()
+        .map(|evaluation| {
+            let pass_score = if evaluation.passed { 1.0 } else { 0.0 };
+            let regression_penalty = if evaluation.regression_detected {
+                0.5
+            } else {
+                0.0
+            };
+            (pass_score + evaluation.confidence - regression_penalty).max(0.0)
+        })
+        .sum::<f64>();
+    base.score = score_sum / evaluations.len() as f64;
+    base.accepted = passed_count * 2 >= evaluations.len() && improvement_count >= regression_count;
+    base.regressions_detected = regression_count;
     base.rationale = format!(
-        "rollout_acceptance={}/{}; {}",
-        accepted_count,
-        outputs.len(),
-        outputs
+        "rollout_passed={}/{}; improvements={} regressions={}; {}",
+        passed_count,
+        evaluations.len(),
+        improvement_count,
+        regression_count,
+        evaluations
             .iter()
             .take(3)
             .enumerate()
-            .map(|(index, output)| format!("batch{}: {}", index + 1, output.reason.trim()))
+            .map(|(index, evaluation)| {
+                format!(
+                    "demo{}:{} {}",
+                    index + 1,
+                    evaluation.demo_title,
+                    evaluation.reason.trim()
+                )
+            })
             .collect::<Vec<_>>()
             .join(" | ")
     );
@@ -1152,28 +1201,378 @@ fn aggregate_prompt_replay_evaluation(
 
 fn aggregate_workflow_replay_evaluation(
     mut base: EvaluationArtifactWorkflowCandidateEvaluation,
-    outputs: &[WorkflowCandidateReplayJudgeOutput],
+    outputs: &[WorkflowCandidateRolloutEvaluatorOutput],
 ) -> EvaluationArtifactWorkflowCandidateEvaluation {
     if outputs.is_empty() {
         return base;
     }
-    let accepted_count = outputs.iter().filter(|output| output.accepted).count();
+    let accepted_count = outputs.iter().filter(|output| output.accepted_case).count();
+    let improvement_count = outputs
+        .iter()
+        .filter(|output| output.improves_upon_baseline)
+        .count();
+    let regression_count = outputs
+        .iter()
+        .filter(|output| output.regression_risk)
+        .count();
     let score_sum = outputs.iter().map(|output| output.score).sum::<f64>();
     base.score = score_sum / outputs.len() as f64;
-    base.accepted = accepted_count * 2 >= outputs.len();
+    base.accepted = accepted_count * 2 >= outputs.len() && improvement_count >= regression_count;
     base.rationale = format!(
-        "rollout_acceptance={}/{}; {}",
+        "rollout_acceptance={}/{}; improvements={} regressions={}; {}",
         accepted_count,
         outputs.len(),
+        improvement_count,
+        regression_count,
         outputs
             .iter()
             .take(3)
             .enumerate()
-            .map(|(index, output)| format!("batch{}: {}", index + 1, output.reason.trim()))
+            .map(|(index, output)| format!("case{}: {}", index + 1, output.reason.trim()))
             .collect::<Vec<_>>()
             .join(" | ")
     );
     base
+}
+
+fn render_workflow_rollout_case_json(record: &WorkflowRunRecord) -> Result<String> {
+    serde_json::to_string_pretty(record).into_diagnostic()
+}
+
+fn blank_workflow_run_record() -> WorkflowRunRecord {
+    WorkflowRunRecord {
+        run_id: "none".to_string(),
+        workflow_id: "none".to_string(),
+        started_at_ms: 0,
+        ended_at_ms: 0,
+        origin: "none".to_string(),
+        outcome: crate::workflow::WorkflowRunOutcome::NoProgress,
+        turn_count: 0,
+        tool_action_count: 0,
+        manual_fix_detected: false,
+        rollback_detected: false,
+        failure_types: Vec::new(),
+        final_summary: "none".to_string(),
+    }
+}
+
+fn workflow_rollout_output_from_case(
+    workflow: &WorkflowSpec,
+    case: &WorkflowRunRecord,
+) -> AgentLoopStepOutput {
+    let current_doing = workflow
+        .workflow_steps
+        .first()
+        .cloned()
+        .unwrap_or_else(|| case.final_summary.clone());
+    let failure_types = if case.failure_types.is_empty() {
+        "none".to_string()
+    } else {
+        case.failure_types.join(",")
+    };
+    let mut observation_lines = vec![
+        case.final_summary.clone(),
+        format!("workflow rollout replay for {}", workflow.id),
+        format!("failure_types={failure_types}"),
+    ];
+    if case.rollback_detected {
+        observation_lines.push("rollback detected".to_string());
+    }
+    if case.manual_fix_detected {
+        observation_lines.push("manual fix detected".to_string());
+    }
+    let mut actions = Vec::with_capacity(case.tool_action_count.max(usize::from(
+        case.manual_fix_detected || case.rollback_detected,
+    )));
+    for index in 0..case.tool_action_count {
+        let (kind, summary) = if index == 0 && case.manual_fix_detected {
+            (
+                "terminal_exec".to_string(),
+                format!("manual fix step executed for {}", workflow.id),
+            )
+        } else if index == 0 && case.rollback_detected {
+            (
+                "tool_call".to_string(),
+                format!("rollback executed while running {}", workflow.id),
+            )
+        } else {
+            (
+                "tool_call".to_string(),
+                format!("workflow tool step {} for {}", index + 1, workflow.id),
+            )
+        };
+        actions.push(EpisodeActionRecord { kind, summary });
+    }
+    if actions.is_empty() && case.manual_fix_detected {
+        actions.push(EpisodeActionRecord {
+            kind: "terminal_exec".to_string(),
+            summary: format!("manual fix step executed for {}", workflow.id),
+        });
+    }
+    if case.rollback_detected
+        && !actions
+            .iter()
+            .any(|action| action.summary.contains("rollback"))
+    {
+        actions.push(EpisodeActionRecord {
+            kind: "tool_call".to_string(),
+            summary: format!("rollback executed while running {}", workflow.id),
+        });
+    }
+    AgentLoopStepOutput {
+        observation: observation_lines.join(" | "),
+        description: format!(
+            "workflow rollout boundary for {} outcome={:?} origin={} turns={} tool_actions={}",
+            workflow.id, case.outcome, case.origin, case.turn_count, case.tool_action_count
+        ),
+        current_doing,
+        actions,
+    }
+}
+
+fn workflow_rollout_detect_runtime_rollback(output: &AgentLoopStepOutput) -> bool {
+    let text = format!(
+        "{}\n{}\n{}",
+        output.description,
+        output.observation,
+        output
+            .actions
+            .iter()
+            .map(|action| action.summary.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+    .to_ascii_lowercase();
+    text.contains("rollback") || text.contains("回滚") || text.contains("revert")
+}
+
+fn workflow_rollout_detect_runtime_manual_fix(output: &AgentLoopStepOutput) -> bool {
+    output.actions.iter().any(|action| {
+        matches!(
+            action.kind.as_str(),
+            "apply_patch" | "terminal_exec" | "terminal_write_stdin"
+        )
+    })
+}
+
+fn workflow_rollout_classify_runtime_failure_type(output: &AgentLoopStepOutput) -> Option<String> {
+    let text = format!("{}\n{}", output.description, output.observation).to_ascii_lowercase();
+    if text.contains("timeout") || text.contains("超时") {
+        return Some("timeout".to_string());
+    }
+    if text.contains("schema") || text.contains("deserialize") || text.contains("json") {
+        return Some("schema_drift".to_string());
+    }
+    if text.contains("permission") || text.contains("forbidden") || text.contains("denied") {
+        return Some("permission".to_string());
+    }
+    if text.contains("tool") && text.contains("failed") {
+        return Some("tool_failure".to_string());
+    }
+    if text.contains("error") || text.contains("失败") {
+        return Some("runtime_error".to_string());
+    }
+    None
+}
+
+fn workflow_rollout_tool_action_count(output: &AgentLoopStepOutput) -> usize {
+    output
+        .actions
+        .iter()
+        .filter(|action| {
+            !matches!(
+                action.kind.as_str(),
+                "assistant_message" | "empty_tool_calls"
+            )
+        })
+        .count()
+}
+
+fn workflow_rollout_run_summary(output: &AgentLoopStepOutput) -> String {
+    format!(
+        "{} | {} | {}",
+        output.current_doing.trim(),
+        output.description.trim(),
+        output.observation.trim()
+    )
+}
+
+fn accumulate_workflow_rollout_session_from_case(
+    session: &mut ActiveWorkflowRunSession,
+    output: &AgentLoopStepOutput,
+    case: &WorkflowRunRecord,
+) {
+    session.turn_count = session.turn_count.saturating_add(case.turn_count.max(1));
+    session.tool_action_count = session
+        .tool_action_count
+        .saturating_add(case.tool_action_count);
+    session.manual_fix_detected |=
+        case.manual_fix_detected || workflow_rollout_detect_runtime_manual_fix(output);
+    session.rollback_detected |=
+        case.rollback_detected || workflow_rollout_detect_runtime_rollback(output);
+    if case.failure_types.is_empty() {
+        if let Some(failure_type) = workflow_rollout_classify_runtime_failure_type(output) {
+            session.failure_types.insert(failure_type);
+        }
+    } else {
+        session
+            .failure_types
+            .extend(case.failure_types.iter().cloned());
+    }
+    if session.tool_action_count == 0 {
+        session.tool_action_count = workflow_rollout_tool_action_count(output);
+    }
+    session.final_summary = if case.final_summary.trim().is_empty() {
+        workflow_rollout_run_summary(output)
+    } else {
+        case.final_summary.clone()
+    };
+}
+
+fn workflow_rollout_record_from_pending_flush(
+    flush: PendingWorkflowRunFlush,
+    ended_at_ms: i64,
+) -> WorkflowRunRecord {
+    WorkflowRunRecord {
+        run_id: flush.session.run_id,
+        workflow_id: flush.session.workflow_id,
+        started_at_ms: flush.session.started_at_ms,
+        ended_at_ms,
+        origin: flush.session.origin,
+        outcome: flush.outcome,
+        turn_count: flush.session.turn_count,
+        tool_action_count: flush.session.tool_action_count,
+        manual_fix_detected: flush.session.manual_fix_detected,
+        rollback_detected: flush.session.rollback_detected,
+        failure_types: flush.session.failure_types.into_iter().collect(),
+        final_summary: flush.session.final_summary,
+    }
+}
+
+async fn execute_workflow_candidate_rollout(
+    context: &Context,
+    entry: &WorkflowFrontierEntry,
+    target_workflow: &WorkflowSpec,
+    source_workflow: Option<&WorkflowSpec>,
+) -> Result<WorkflowExecutableRolloutResult> {
+    let rollout_home = std::env::temp_dir().join(format!(
+        "daat-locus-workflow-rollout-{}",
+        uuid::Uuid::new_v4()
+    ));
+    tokio::fs::create_dir_all(&rollout_home)
+        .await
+        .into_diagnostic()?;
+    let home_override = DaatLocusHomeOverride::set(rollout_home.clone());
+    let mut isolated =
+        build_eval_context_with_compiled(context.config.clone(), context.compiled_prompts.clone())
+            .await;
+
+    let target_spec = create_isolated_workflow(&mut isolated.workflows, target_workflow).await?;
+    let mut source_ids = Vec::<String>::new();
+    if let Some(source) = source_workflow {
+        let source_spec = create_isolated_workflow(&mut isolated.workflows, source).await?;
+        source_ids.push(source_spec.id.clone());
+    }
+
+    let (rolled_out_target, summary) = if let Some(patch) = entry.patch.as_ref() {
+        let updated = isolated
+            .workflows
+            .apply_patch(WorkflowPatch {
+                workflow_id: patch.workflow_id.clone(),
+                when_to_use_additions: patch.when_to_use_additions.clone(),
+                precondition_additions: patch.precondition_additions.clone(),
+                workflow_step_additions: patch.workflow_step_additions.clone(),
+                done_criteria_additions: patch.done_criteria_additions.clone(),
+                recovery_additions: patch.recovery_additions.clone(),
+            })
+            .await?;
+        (
+            updated,
+            format!(
+                "patch_applied=true additions={}",
+                patch.when_to_use_additions.len()
+                    + patch.precondition_additions.len()
+                    + patch.workflow_step_additions.len()
+                    + patch.done_criteria_additions.len()
+                    + patch.recovery_additions.len()
+            ),
+        )
+    } else if let Some(merge) = entry.merge.as_ref() {
+        let updated = isolated
+            .workflows
+            .merge_workflows(
+                &merge.target_workflow_id,
+                &source_ids,
+                Some(merge.rationale.clone()),
+            )
+            .await?;
+        (
+            updated,
+            format!(
+                "merge_applied=true target={} merged_sources={}",
+                merge.target_workflow_id,
+                source_ids.join(",")
+            ),
+        )
+    } else {
+        let current = isolated
+            .workflows
+            .get(&target_spec.id)
+            .cloned()
+            .ok_or_else(|| miette::miette!("missing rolled out target workflow"))?;
+        (current, "no_candidate_applied".to_string())
+    };
+
+    isolated.shutdown().await;
+    drop(home_override);
+    let _ = tokio::fs::remove_dir_all(&rollout_home).await;
+
+    Ok(WorkflowExecutableRolloutResult {
+        target_workflow: rolled_out_target,
+        summary,
+    })
+}
+
+async fn create_isolated_workflow(
+    store: &mut WorkflowStore,
+    workflow: &WorkflowSpec,
+) -> Result<WorkflowSpec> {
+    store
+        .create_workflow(NewWorkflowSpec {
+            id: workflow.id.clone(),
+            when_to_use: workflow.when_to_use.clone(),
+            preconditions: workflow.preconditions.clone(),
+            workflow_steps: workflow.workflow_steps.clone(),
+            done_criteria: workflow.done_criteria.clone(),
+            recovery: workflow.recovery.clone(),
+        })
+        .await
+}
+
+fn simulate_workflow_task_rollout_case(
+    workflow: &WorkflowSpec,
+    case: &WorkflowRunRecord,
+) -> WorkflowTaskRolloutCase {
+    let mut runner = WorkflowTaskRolloutRunnerState::default();
+    runner.begin_bound_workflow_session(workflow, case);
+    runner.accumulate_case(workflow, case);
+    runner.queue_active_workflow_run_for_flush(case.outcome);
+    let record = runner
+        .flush_records(case.ended_at_ms.max(case.started_at_ms))
+        .into_iter()
+        .next()
+        .unwrap_or_else(blank_workflow_run_record);
+    WorkflowTaskRolloutCase {
+        summary: format!(
+            "workflow_bound=true session_accumulated=true flush_count=1 outcome_collected=true run_id={} workflow_id={} outcome={:?} turns={} tool_actions={}",
+            record.run_id,
+            record.workflow_id,
+            record.outcome,
+            record.turn_count,
+            record.tool_action_count
+        ),
+        record,
+    }
 }
 
 fn selected_candidate_titles(
@@ -1578,11 +1977,14 @@ async fn derive_evaluation_artifacts(
     }
 
     Ok(DerivedEvaluationArtifacts {
+        turn_demos: runtime_demos
+            .iter()
+            .map(runtime_demo_to_turn_demo)
+            .collect::<Vec<_>>(),
         bootstrap_demos,
         stress_cases,
         instruction_hypotheses,
         runtime_demos,
-        turn_demos: Vec::new(),
     })
 }
 
@@ -1998,6 +2400,34 @@ fn to_runtime_demo(
     })
 }
 
+fn runtime_demo_to_turn_demo(demo: &EvaluationArtifactRuntimeDemo) -> EvaluationArtifactTurnDemo {
+    let mut initial_inputs = demo.inputs.clone();
+    let has_incoming_text = initial_inputs.iter().any(|field| {
+        matches!(
+            field.name.as_str(),
+            "incoming_text" | "message" | "user_message"
+        )
+    });
+    if !has_incoming_text {
+        initial_inputs.push(ExampleField {
+            name: "incoming_text".to_string(),
+            value: demo.scenario_summary.clone(),
+        });
+    }
+    EvaluationArtifactTurnDemo {
+        compile_key: demo.compile_key.clone(),
+        title: demo.title.clone(),
+        scenario_summary: demo.scenario_summary.clone(),
+        initial_inputs,
+        expected_behavior: demo.expected_behavior.clone(),
+        judge_focus: demo.judge_focus.clone(),
+        covered_tests: Vec::new(),
+        must_use_tools: false,
+        must_not_final_answer_patterns: Vec::new(),
+        must_end_with_terminal_answer: true,
+    }
+}
+
 fn to_stress_case(
     pattern: &EvaluationArtifactFailurePattern,
     related_memories: &[String],
@@ -2193,17 +2623,11 @@ async fn recall_related_memories(context: &Context, query: &str, top_k: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use tempfile::TempDir;
 
     use crate::reasoning::programs::workflow_evolution_planner::{
         WorkflowEvolutionPlannerOutput, WorkflowPlannerCandidateEvaluation,
         WorkflowPlannerPatchCandidate, WorkflowPlannerReflection,
-    };
-    use crate::reasoning::{
-        runtime::PromptRequest,
-        signature::Signature,
-        trace::{ProgramTraceRecord, TraceOrigin},
     };
     use crate::workflow::{NewWorkflowSpec, WorkflowRunOutcome, WorkflowRunRecord};
 
@@ -2327,45 +2751,35 @@ mod tests {
     }
 
     #[test]
-    fn prompt_replay_rollout_batches_chunk_recent_records() {
-        let records = (0..10)
-            .map(|index| ProgramTraceRecord {
-                timestamp_ms: index,
-                origin: TraceOrigin::Runtime,
-                program_name: format!("program-{index}"),
-                attempt: index as usize,
-                signature: Signature::new("test_program"),
-                request: PromptRequest {
-                    tool_name: "test_tool".to_string(),
-                    tool_description: "test description".to_string(),
-                    output_schema: json!({ "type": "object" }),
-                    system_messages: Vec::new(),
-                    long_term_memory_messages: Vec::new(),
-                    history_messages: Vec::new(),
-                    current_user_message: format!("message-{index}"),
-                    retry_messages: Vec::new(),
-                },
-                raw_response: json!({ "index": index }),
-                parsed_output: None,
-                deserialization_error: None,
+    fn prompt_rollout_demos_limit_and_preserve_order() {
+        let demos = (0..5)
+            .map(|index| EvaluationArtifactTurnDemo {
+                compile_key: "runtime_agent_system".to_string(),
+                title: format!("demo-{index}"),
+                scenario_summary: format!("summary-{index}"),
+                initial_inputs: vec![ExampleField {
+                    name: "incoming_text".to_string(),
+                    value: format!("message-{index}"),
+                }],
+                expected_behavior: "respond correctly".to_string(),
+                judge_focus: Vec::new(),
+                covered_tests: Vec::new(),
+                must_use_tools: false,
+                must_not_final_answer_patterns: Vec::new(),
+                must_end_with_terminal_answer: true,
             })
             .collect::<Vec<_>>();
 
-        let selected = select_prompt_replay_rollout_batches(&records, 3, 2);
-        let timestamps = selected
+        let selected = select_prompt_rollout_demos(&demos, 3);
+        let titles = selected
             .iter()
-            .map(|batch| {
-                batch
-                    .iter()
-                    .map(|record| record.timestamp_ms)
-                    .collect::<Vec<_>>()
-            })
+            .map(|demo| demo.title.clone())
             .collect::<Vec<_>>();
-        assert_eq!(timestamps, vec![vec![9, 8, 7], vec![6, 5, 4]]);
+        assert_eq!(titles, vec!["demo-0", "demo-1", "demo-2"]);
     }
 
     #[test]
-    fn workflow_replay_rollout_batches_chunk_recent_runs() {
+    fn workflow_rollout_cases_prefer_most_recent_runs() {
         let records = (0..10)
             .map(|index| WorkflowRunRecord {
                 run_id: format!("run-{index}"),
@@ -2383,22 +2797,51 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let selected = select_workflow_replay_rollout_batches(&records, 4, 2);
+        let selected = select_workflow_rollout_cases(&records, 4);
         let run_ids = selected
             .iter()
-            .map(|batch| {
-                batch
-                    .iter()
-                    .map(|record| record.run_id.clone())
-                    .collect::<Vec<_>>()
-            })
+            .map(|record| record.run_id.clone())
             .collect::<Vec<_>>();
-        assert_eq!(
-            run_ids,
-            vec![
-                vec!["run-9", "run-8", "run-7", "run-6"],
-                vec!["run-5", "run-4", "run-3", "run-2"]
-            ]
-        );
+        assert_eq!(run_ids, vec!["run-9", "run-8", "run-7", "run-6"]);
+    }
+
+    #[test]
+    fn workflow_task_rollout_case_simulates_bind_and_flush_boundary() {
+        let workflow = WorkflowSpec {
+            id: "repair-flaky-test-pipeline".to_string(),
+            when_to_use: vec!["repair flaky tests".to_string()],
+            preconditions: Vec::new(),
+            workflow_steps: vec!["Collect failing traces".to_string()],
+            done_criteria: vec!["Root cause identified".to_string()],
+            recovery: vec!["Fallback to evidence collection".to_string()],
+        };
+        let case = WorkflowRunRecord {
+            run_id: "run-1".to_string(),
+            workflow_id: "old-id".to_string(),
+            started_at_ms: 100,
+            ended_at_ms: 220,
+            origin: "event:test".to_string(),
+            outcome: WorkflowRunOutcome::Blocked,
+            turn_count: 3,
+            tool_action_count: 2,
+            manual_fix_detected: true,
+            rollback_detected: false,
+            failure_types: vec!["tool_failure".to_string()],
+            final_summary: "patch attempt failed".to_string(),
+        };
+
+        let rollout = simulate_workflow_task_rollout_case(&workflow, &case);
+
+        assert!(rollout.record.run_id.starts_with("workflow-rollout:"));
+        assert_eq!(rollout.record.workflow_id, workflow.id);
+        assert_eq!(rollout.record.origin, case.origin);
+        assert_eq!(rollout.record.outcome, case.outcome);
+        assert_eq!(rollout.record.turn_count, case.turn_count);
+        assert_eq!(rollout.record.tool_action_count, case.tool_action_count);
+        assert!(rollout.record.manual_fix_detected);
+        assert_eq!(rollout.record.failure_types, case.failure_types);
+        assert!(rollout.summary.contains("workflow_bound=true"));
+        assert!(rollout.summary.contains("session_accumulated=true"));
+        assert!(rollout.summary.contains("outcome_collected=true"));
     }
 }
