@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, HashSet},
-    env,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -22,6 +21,17 @@ const MAX_SUMMARY_ITEMS: usize = 12;
 const WORKFLOWS_DIR_NAME: &str = "workflows";
 const WORKFLOW_RUN_RECORDS_FILE_NAME: &str = "run_records.jsonl";
 static WORKFLOW_RUN_RECORDS_IO_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+mod builtin_workflow_bindings {
+    include!(concat!(env!("OUT_DIR"), "/builtin_workflows.rs"));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowOrigin {
+    Builtin,
+    Workspace,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowSpec {
@@ -59,6 +69,7 @@ impl WorkflowSpec {
     pub fn compact_summary(&self) -> WorkflowSummary {
         WorkflowSummary {
             id: self.id.clone(),
+            origin: WorkflowOrigin::Workspace,
             when_to_use_summary: self.when_to_use.first().cloned().unwrap_or_default(),
         }
     }
@@ -67,6 +78,7 @@ impl WorkflowSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowSummary {
     pub id: String,
+    pub origin: WorkflowOrigin,
     pub when_to_use_summary: String,
 }
 
@@ -146,27 +158,27 @@ pub struct WorkflowPatch {
 
 struct StoredWorkflow {
     spec: WorkflowSpec,
-    path: PathBuf,
+    path: Option<PathBuf>,
+    origin: WorkflowOrigin,
 }
 
 pub struct WorkflowStore {
-    primary_dir: PathBuf,
-    source_dirs: Vec<PathBuf>,
+    workflow_dir: PathBuf,
     workflows: BTreeMap<String, StoredWorkflow>,
 }
 
 impl WorkflowStore {
     pub async fn new() -> Self {
-        let primary_dir = resolve_runtime_workspace_dir().unwrap().join(WORKFLOWS_DIR_NAME);
-        let source_dirs = Vec::default(); // Place holder for future.
-        Self::open_scoped(primary_dir, source_dirs).await
+        let workflow_dir = resolve_runtime_workspace_dir()
+            .unwrap()
+            .join(WORKFLOWS_DIR_NAME);
+        Self::open_scoped(workflow_dir).await
     }
 
-    pub(crate) async fn open_scoped(primary_dir: PathBuf, source_dirs: Vec<PathBuf>) -> Self {
+    pub(crate) async fn open_scoped(workflow_dir: PathBuf) -> Self {
         let mut store = Self {
-            primary_dir,
-            source_dirs,
-            workflows: BTreeMap::new(),
+            workflow_dir,
+            workflows: load_builtin_workflows(),
         };
         store.load_from_disk().await;
         store
@@ -176,9 +188,14 @@ impl WorkflowStore {
         self.workflows.get(workflow_id).map(|stored| &stored.spec)
     }
 
-    pub fn list(&self) -> Vec<WorkflowSpec> {
+    pub fn workflow_origin(&self, workflow_id: &str) -> Option<WorkflowOrigin> {
+        self.workflows.get(workflow_id).map(|stored| stored.origin)
+    }
+
+    pub fn workspace_list(&self) -> Vec<WorkflowSpec> {
         self.workflows
             .values()
+            .filter(|stored| stored.origin == WorkflowOrigin::Workspace)
             .map(|stored| stored.spec.clone())
             .collect()
     }
@@ -187,7 +204,11 @@ impl WorkflowStore {
         let mut items = self
             .workflows
             .values()
-            .map(|stored| stored.spec.compact_summary())
+            .map(|stored| {
+                let mut summary = stored.spec.compact_summary();
+                summary.origin = stored.origin;
+                summary
+            })
             .collect::<Vec<_>>();
         items.sort_by(|left, right| left.id.cmp(&right.id));
         items.truncate(limit.min(MAX_SUMMARY_ITEMS));
@@ -218,13 +239,14 @@ impl WorkflowStore {
         if self.workflows.contains_key(&spec.id) {
             return Err(miette!("workflow_id `{}` already exists", spec.id));
         }
-        let path = self.primary_dir.join(format!("{}.md", spec.id));
+        let path = self.workflow_dir.join(format!("{}.md", spec.id));
         write_workflow_file(&path, &spec).await?;
         self.workflows.insert(
             spec.id.clone(),
             StoredWorkflow {
                 spec: spec.clone(),
-                path,
+                path: Some(path),
+                origin: WorkflowOrigin::Workspace,
             },
         );
         Ok(spec)
@@ -235,6 +257,18 @@ impl WorkflowStore {
             .workflows
             .get_mut(&patch.workflow_id)
             .ok_or_else(|| miette!("unknown workflow_id `{}`", patch.workflow_id))?;
+        if stored.origin != WorkflowOrigin::Workspace {
+            return Err(miette!(
+                "builtin workflow `{}` is read-only and cannot be patched",
+                patch.workflow_id
+            ));
+        }
+        let path = stored.path.clone().ok_or_else(|| {
+            miette!(
+                "workspace workflow `{}` is missing backing path",
+                patch.workflow_id
+            )
+        })?;
 
         let before = stored.spec.clone();
         extend_unique(
@@ -260,7 +294,7 @@ impl WorkflowStore {
 
         stored.spec = stored.spec.clone().normalize()?;
         if !workflow_content_equal(&before, &stored.spec) {
-            write_workflow_file(&stored.path, &stored.spec).await?;
+            write_workflow_file(&path, &stored.spec).await?;
         }
 
         Ok(stored.spec.clone())
@@ -274,6 +308,11 @@ impl WorkflowStore {
     ) -> Result<WorkflowSpec> {
         if !self.workflows.contains_key(target_workflow_id) {
             return Err(miette!("unknown target workflow_id `{target_workflow_id}`"));
+        }
+        if self.workflow_origin(target_workflow_id) != Some(WorkflowOrigin::Workspace) {
+            return Err(miette!(
+                "builtin workflow `{target_workflow_id}` is read-only and cannot be merged"
+            ));
         }
 
         let source_ids = source_workflow_ids
@@ -292,6 +331,7 @@ impl WorkflowStore {
             .map(|source_id| {
                 self.workflows
                     .get(source_id)
+                    .filter(|stored| stored.origin == WorkflowOrigin::Workspace)
                     .map(|stored| stored.spec.clone())
                     .ok_or_else(|| miette!("unknown source workflow_id `{source_id}`"))
             })
@@ -301,6 +341,9 @@ impl WorkflowStore {
             .workflows
             .get_mut(target_workflow_id)
             .ok_or_else(|| miette!("unknown target workflow_id `{target_workflow_id}`"))?;
+        let target_path = target.path.clone().ok_or_else(|| {
+            miette!("workspace workflow `{target_workflow_id}` is missing backing path")
+        })?;
 
         for source in &sources {
             extend_unique(
@@ -326,11 +369,13 @@ impl WorkflowStore {
         }
 
         target.spec = target.spec.clone().normalize()?;
-        write_workflow_file(&target.path, &target.spec).await?;
+        write_workflow_file(&target_path, &target.spec).await?;
 
         for source_id in &source_ids {
             if let Some(stored) = self.workflows.remove(source_id) {
-                let _ = tokio::fs::remove_file(stored.path).await;
+                if let Some(path) = stored.path {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
             }
         }
 
@@ -343,39 +388,76 @@ impl WorkflowStore {
     pub async fn shutdown(self) {}
 
     async fn load_from_disk(&mut self) {
-        for dir in &self.source_dirs {
-            let _ = tokio::fs::create_dir_all(dir).await;
-            let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        let _ = tokio::fs::create_dir_all(&self.workflow_dir).await;
+        let Ok(mut entries) = tokio::fs::read_dir(&self.workflow_dir).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                continue;
+            }
+            let Ok(content) = tokio::fs::read_to_string(&path).await else {
                 continue;
             };
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
-                    continue;
+            match parse_workflow_file(&content) {
+                Ok(spec) => {
+                    if self.workflows.contains_key(&spec.id) {
+                        tracing::warn!(
+                            "workspace workflow id `{}` conflicts with existing builtin/workspace definition at {}; skipping",
+                            spec.id,
+                            path.display()
+                        );
+                        continue;
+                    }
+                    self.workflows.insert(
+                        spec.id.clone(),
+                        StoredWorkflow {
+                            spec,
+                            path: Some(path),
+                            origin: WorkflowOrigin::Workspace,
+                        },
+                    );
                 }
-                let Ok(content) = tokio::fs::read_to_string(&path).await else {
-                    continue;
-                };
-                match parse_workflow_file(&content) {
-                    Ok(spec) => {
-                        if self.workflows.contains_key(&spec.id) {
-                            tracing::warn!(
-                                "duplicate workflow id `{}` detected at {}; keeping first definition",
-                                spec.id,
-                                path.display()
-                            );
-                            continue;
-                        }
-                        self.workflows
-                            .insert(spec.id.clone(), StoredWorkflow { spec, path });
-                    }
-                    Err(err) => {
-                        tracing::warn!("failed to parse workflow file {}: {err:?}", path.display());
-                    }
+                Err(err) => {
+                    tracing::warn!("failed to parse workflow file {}: {err:?}", path.display());
                 }
             }
         }
     }
+}
+
+fn load_builtin_workflows() -> BTreeMap<String, StoredWorkflow> {
+    let mut workflows = BTreeMap::new();
+    for (source_name, content) in builtin_workflow_bindings::BUILTIN_WORKFLOW_SOURCES {
+        match parse_workflow_file(content) {
+            Ok(spec) => {
+                if workflows.contains_key(&spec.id) {
+                    tracing::warn!(
+                        "duplicate builtin workflow id `{}` detected in source {}; keeping first definition",
+                        spec.id,
+                        source_name
+                    );
+                    continue;
+                }
+                workflows.insert(
+                    spec.id.clone(),
+                    StoredWorkflow {
+                        spec,
+                        path: None,
+                        origin: WorkflowOrigin::Builtin,
+                    },
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "failed to parse builtin workflow source {}: {err:?}",
+                    source_name
+                );
+            }
+        }
+    }
+    workflows
 }
 
 pub async fn load_workflow_run_batch() -> Result<WorkflowRunBatch> {
@@ -694,7 +776,7 @@ mod tests {
     async fn create_workflow_writes_markdown_and_can_reload() {
         let temp_dir = TempDir::new().expect("create workflow temp dir");
         let primary = temp_dir.path().join("workflows");
-        let mut store = WorkflowStore::open_scoped(primary.clone(), vec![primary.clone()]).await;
+        let mut store = WorkflowStore::open_scoped(primary.clone()).await;
         let created = store
             .create_workflow(NewWorkflowSpec {
                 id: "repair-flaky-test-pipeline".to_string(),
@@ -710,7 +792,7 @@ mod tests {
         assert_eq!(created.id, "repair-flaky-test-pipeline");
         assert!(primary.join("repair-flaky-test-pipeline.md").exists());
 
-        let reloaded = WorkflowStore::open_scoped(primary.clone(), vec![primary]).await;
+        let reloaded = WorkflowStore::open_scoped(primary.clone()).await;
         let loaded = reloaded
             .get("repair-flaky-test-pipeline")
             .expect("reloaded workflow");
@@ -718,10 +800,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builtin_workflow_ids_cannot_be_overwritten() {
+        let temp_dir = TempDir::new().expect("create workflow temp dir");
+        let primary = temp_dir.path().join("workflows");
+        let mut store = WorkflowStore::open_scoped(primary).await;
+
+        let err = store
+            .create_workflow(NewWorkflowSpec {
+                id: "author-workspace-app".to_string(),
+                when_to_use: vec!["test".to_string()],
+                preconditions: vec![],
+                workflow_steps: vec!["step".to_string()],
+                done_criteria: vec!["done".to_string()],
+                recovery: vec![],
+            })
+            .await
+            .expect_err("builtin workflow id should be reserved");
+
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn builtin_workflows_are_read_only() {
+        let temp_dir = TempDir::new().expect("create workflow temp dir");
+        let primary = temp_dir.path().join("workflows");
+        let mut store = WorkflowStore::open_scoped(primary).await;
+
+        let err = store
+            .apply_patch(WorkflowPatch {
+                workflow_id: "author-workspace-app".to_string(),
+                when_to_use_additions: vec!["extra".to_string()],
+                precondition_additions: Vec::new(),
+                workflow_step_additions: Vec::new(),
+                done_criteria_additions: Vec::new(),
+                recovery_additions: Vec::new(),
+            })
+            .await
+            .expect_err("builtin workflow patch should be rejected");
+
+        assert!(err.to_string().contains("read-only"));
+    }
+
+    #[tokio::test]
     async fn merge_workflows_deletes_sources_and_updates_target() {
         let temp_dir = TempDir::new().expect("create workflow temp dir");
         let primary = temp_dir.path().join("workflows");
-        let mut store = WorkflowStore::open_scoped(primary.clone(), vec![primary.clone()]).await;
+        let mut store = WorkflowStore::open_scoped(primary.clone()).await;
         let target = store
             .create_workflow(NewWorkflowSpec {
                 id: "investigate-runtime-failure".to_string(),
