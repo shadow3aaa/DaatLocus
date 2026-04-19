@@ -8,7 +8,7 @@ const WORKFLOW_CANDIDATE_ROLLOUT_EVALUATOR_SYSTEM_PROMPT: &str = r#"你现在负
 - rollout 后的 target workflow spec
 - rollout result summary
 - target reflection
-- 一个具体 target rollout case
+- 一个具体 target rollout case，其中包含 flushed run record、executed steps 和 boundary events
 - 如果是 merge，还会看到 source workflow spec、source reflection 和一个 source rollout case
 - candidate 本身
 
@@ -59,7 +59,7 @@ impl Program for WorkflowCandidateRolloutEvaluatorProgram {
             .input("target reflection", "target workflow reflection。")
             .input(
                 "target rollout case",
-                "一个具体 target workflow rollout case。",
+                "一个具体 target workflow rollout case，包含 run record、executed steps 和 boundary events。",
             )
             .input(
                 "source workflow spec",
@@ -71,7 +71,7 @@ impl Program for WorkflowCandidateRolloutEvaluatorProgram {
             )
             .input(
                 "source rollout case",
-                "merge 时的 source rollout case；否则写 none。",
+                "merge 时的 source rollout case；否则写 none。source rollout case 同样包含 run record、executed steps 和 boundary events。",
             )
             .input("candidate", "要评估的 patch 或 merge candidate。")
             .output("score", "该 case 上的综合分数。")

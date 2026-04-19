@@ -165,9 +165,14 @@
   喂给 workflow rollout evaluator 聚合
 - workflow rollout case 不再是简单复制原 record，而是通过最小 runner-state 明确模拟：
   - bind workflow
-  - accumulate session evidence
+  - 按 `workflow_steps` 逐步生成 rollout outputs
+  - 逐步 accumulate session evidence
   - queue flush
   - collect flushed run record
+- rollout case 现在还会附带 step-level execution evidence：
+  - executed steps
+  - boundary events
+  - 哪一步在 blocked / no_progress / abandoned 边界停下
 
 也就是说，workflow candidate 已经真实进入隔离执行上下文，而不是只作为静态文本被评估。
 
