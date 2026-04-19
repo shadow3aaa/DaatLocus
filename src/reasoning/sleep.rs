@@ -179,9 +179,45 @@ struct WorkflowExecutableRolloutResult {
     summary: String,
 }
 
+#[derive(serde::Serialize)]
 struct WorkflowTaskRolloutCase {
     record: WorkflowRunRecord,
+    executed_steps: Vec<WorkflowTaskRolloutStep>,
+    boundary_events: Vec<String>,
     summary: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct WorkflowTaskRolloutStep {
+    step_index: usize,
+    step: String,
+    status: String,
+    evidence: String,
+}
+
+struct WorkflowTaskRolloutOutput {
+    output: AgentLoopStepOutput,
+    turn_increment: usize,
+    tool_action_increment: usize,
+    manual_fix_detected: bool,
+    rollback_detected: bool,
+    failure_types: Vec<String>,
+    final_summary: Option<String>,
+}
+
+#[derive(Clone)]
+struct WorkflowTaskCase {
+    task_summary: String,
+    origin: String,
+    baseline_outcome: crate::workflow::WorkflowRunOutcome,
+    baseline_turns: usize,
+    baseline_tool_actions: usize,
+    manual_fix_detected: bool,
+    rollback_detected: bool,
+    failure_types: Vec<String>,
+    started_at_ms: i64,
+    ended_at_ms: i64,
+    baseline_run_id: String,
 }
 
 #[derive(Default)]
@@ -193,9 +229,9 @@ struct WorkflowTaskRolloutRunnerState {
 }
 
 impl WorkflowTaskRolloutRunnerState {
-    fn begin_bound_workflow_session(&mut self, workflow: &WorkflowSpec, case: &WorkflowRunRecord) {
+    fn begin_bound_workflow_session(&mut self, workflow: &WorkflowSpec, task: &WorkflowTaskCase) {
         self.bound_workflow_id = Some(workflow.id.clone());
-        self.current_work_origin = Some(case.origin.clone());
+        self.current_work_origin = Some(task.origin.clone());
         if self
             .active_workflow_run
             .as_ref()
@@ -206,7 +242,7 @@ impl WorkflowTaskRolloutRunnerState {
         self.active_workflow_run = Some(ActiveWorkflowRunSession {
             run_id: format!("workflow-rollout:{}", uuid::Uuid::new_v4()),
             workflow_id: workflow.id.clone(),
-            started_at_ms: case.started_at_ms,
+            started_at_ms: task.started_at_ms,
             origin: self
                 .current_work_origin
                 .clone()
@@ -220,15 +256,18 @@ impl WorkflowTaskRolloutRunnerState {
         });
     }
 
-    fn accumulate_case(&mut self, workflow: &WorkflowSpec, case: &WorkflowRunRecord) {
+    fn accumulate_task(&mut self, workflow: &WorkflowSpec, task: &WorkflowTaskCase) {
         let Some(session) = self.active_workflow_run.as_mut() else {
             return;
         };
         if session.workflow_id != workflow.id {
             return;
         }
-        let output = workflow_rollout_output_from_case(workflow, case);
-        accumulate_workflow_rollout_session_from_case(session, &output, case);
+        let executed_steps = simulated_executed_workflow_steps(workflow, task);
+        let outputs = workflow_rollout_outputs_from_task(workflow, task, &executed_steps);
+        for rollout_output in &outputs {
+            accumulate_workflow_rollout_session_from_output(session, rollout_output);
+        }
     }
 
     fn queue_active_workflow_run_for_flush(
@@ -493,9 +532,21 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
         let rollout =
             execute_workflow_candidate_rollout(context, entry, target_workflow, source_workflow)
                 .await?;
-        let target_cases = select_workflow_rollout_cases(target_evidence, 8);
-        let source_cases = select_workflow_rollout_cases(source_evidence, 8);
-        let case_count = target_cases.len().max(source_cases.len()).max(1);
+        let target_task_cases = select_workflow_task_cases(
+            &target_evidence
+                .iter()
+                .map(workflow_task_case_from_record)
+                .collect::<Vec<_>>(),
+            8,
+        );
+        let source_task_cases = select_workflow_task_cases(
+            &source_evidence
+                .iter()
+                .map(workflow_task_case_from_record)
+                .collect::<Vec<_>>(),
+            8,
+        );
+        let case_count = target_task_cases.len().max(source_task_cases.len()).max(1);
         let target_workflow_spec = render_workflow_spec_markdown(&rollout.target_workflow);
         let target_reflection_json =
             serde_json::to_string_pretty(&target_reflection.cloned()).into_diagnostic()?;
@@ -506,18 +557,20 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
             serde_json::to_string_pretty(&source_reflection.cloned()).into_diagnostic()?;
         let mut outputs = Vec::<WorkflowCandidateRolloutEvaluatorOutput>::new();
         for index in 0..case_count {
-            let target_case = target_cases
+            let target_task = target_task_cases
                 .get(index)
                 .cloned()
-                .or_else(|| target_cases.last().cloned())
-                .unwrap_or_else(blank_workflow_run_record);
+                .or_else(|| target_task_cases.last().cloned())
+                .unwrap_or_else(blank_workflow_task_case);
             let rolled_out_target_case =
-                simulate_workflow_task_rollout_case(&rollout.target_workflow, &target_case);
-            let source_case = source_cases
+                run_workflow_task_rollout(&rollout.target_workflow, &target_task);
+            let source_task = source_task_cases
                 .get(index)
                 .cloned()
-                .or_else(|| source_cases.last().cloned())
-                .unwrap_or_else(blank_workflow_run_record);
+                .or_else(|| source_task_cases.last().cloned())
+                .unwrap_or_else(blank_workflow_task_case);
+            let rolled_out_source_case = source_workflow
+                .map(|workflow| run_workflow_task_rollout(workflow, &source_task));
             let outcome = execute_program_with_ir_report(
                 context.judge_llm.as_ref(),
                 context,
@@ -528,11 +581,11 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
                     target_workflow_spec.clone(),
                     format!("{} | {}", rollout.summary, rolled_out_target_case.summary),
                     target_reflection_json.clone(),
-                    render_workflow_rollout_case_json(&rolled_out_target_case.record)?,
+                    render_workflow_rollout_case_json(&rolled_out_target_case)?,
                     source_workflow_spec.clone(),
                     source_reflection_json.clone(),
-                    if source_workflow.is_some() {
-                        render_workflow_rollout_case_json(&source_case)?
+                    if let Some(source_case) = rolled_out_source_case.as_ref() {
+                        render_workflow_rollout_case_json(source_case)?
                     } else {
                         "none".to_string()
                     },
@@ -1126,20 +1179,6 @@ fn select_prompt_rollout_demos(
     demos.iter().take(max_demos).cloned().collect()
 }
 
-fn select_workflow_rollout_cases(
-    records: &[WorkflowRunRecord],
-    max_cases: usize,
-) -> Vec<WorkflowRunRecord> {
-    let mut ordered = records.to_vec();
-    ordered.sort_by(|left, right| {
-        right
-            .ended_at_ms
-            .cmp(&left.ended_at_ms)
-            .then_with(|| right.started_at_ms.cmp(&left.started_at_ms))
-    });
-    ordered.truncate(max_cases);
-    ordered
-}
 
 fn aggregate_prompt_executable_rollout_evaluation(
     mut base: EvaluationArtifactRuntimePromptCandidateEvaluation,
@@ -1235,8 +1274,8 @@ fn aggregate_workflow_replay_evaluation(
     base
 }
 
-fn render_workflow_rollout_case_json(record: &WorkflowRunRecord) -> Result<String> {
-    serde_json::to_string_pretty(record).into_diagnostic()
+fn render_workflow_rollout_case_json(case: &WorkflowTaskRolloutCase) -> Result<String> {
+    serde_json::to_string_pretty(case).into_diagnostic()
 }
 
 fn blank_workflow_run_record() -> WorkflowRunRecord {
@@ -1256,78 +1295,48 @@ fn blank_workflow_run_record() -> WorkflowRunRecord {
     }
 }
 
-fn workflow_rollout_output_from_case(
-    workflow: &WorkflowSpec,
-    case: &WorkflowRunRecord,
-) -> AgentLoopStepOutput {
-    let current_doing = workflow
-        .workflow_steps
-        .first()
-        .cloned()
-        .unwrap_or_else(|| case.final_summary.clone());
-    let failure_types = if case.failure_types.is_empty() {
-        "none".to_string()
-    } else {
-        case.failure_types.join(",")
-    };
-    let mut observation_lines = vec![
-        case.final_summary.clone(),
-        format!("workflow rollout replay for {}", workflow.id),
-        format!("failure_types={failure_types}"),
-    ];
-    if case.rollback_detected {
-        observation_lines.push("rollback detected".to_string());
+fn blank_workflow_task_case() -> WorkflowTaskCase {
+    WorkflowTaskCase {
+        task_summary: String::new(),
+        origin: "workflow_rollout".to_string(),
+        baseline_outcome: crate::workflow::WorkflowRunOutcome::NoProgress,
+        baseline_turns: 0,
+        baseline_tool_actions: 0,
+        manual_fix_detected: false,
+        rollback_detected: false,
+        failure_types: Vec::new(),
+        started_at_ms: 0,
+        ended_at_ms: 0,
+        baseline_run_id: "none".to_string(),
     }
-    if case.manual_fix_detected {
-        observation_lines.push("manual fix detected".to_string());
+}
+
+fn workflow_task_case_from_record(record: &WorkflowRunRecord) -> WorkflowTaskCase {
+    WorkflowTaskCase {
+        task_summary: record.final_summary.clone(),
+        origin: record.origin.clone(),
+        baseline_outcome: record.outcome,
+        baseline_turns: record.turn_count,
+        baseline_tool_actions: record.tool_action_count,
+        manual_fix_detected: record.manual_fix_detected,
+        rollback_detected: record.rollback_detected,
+        failure_types: record.failure_types.clone(),
+        started_at_ms: record.started_at_ms,
+        ended_at_ms: record.ended_at_ms,
+        baseline_run_id: record.run_id.clone(),
     }
-    let mut actions = Vec::with_capacity(case.tool_action_count.max(usize::from(
-        case.manual_fix_detected || case.rollback_detected,
-    )));
-    for index in 0..case.tool_action_count {
-        let (kind, summary) = if index == 0 && case.manual_fix_detected {
-            (
-                "terminal_exec".to_string(),
-                format!("manual fix step executed for {}", workflow.id),
-            )
-        } else if index == 0 && case.rollback_detected {
-            (
-                "tool_call".to_string(),
-                format!("rollback executed while running {}", workflow.id),
-            )
-        } else {
-            (
-                "tool_call".to_string(),
-                format!("workflow tool step {} for {}", index + 1, workflow.id),
-            )
-        };
-        actions.push(EpisodeActionRecord { kind, summary });
-    }
-    if actions.is_empty() && case.manual_fix_detected {
-        actions.push(EpisodeActionRecord {
-            kind: "terminal_exec".to_string(),
-            summary: format!("manual fix step executed for {}", workflow.id),
-        });
-    }
-    if case.rollback_detected
-        && !actions
-            .iter()
-            .any(|action| action.summary.contains("rollback"))
-    {
-        actions.push(EpisodeActionRecord {
-            kind: "tool_call".to_string(),
-            summary: format!("rollback executed while running {}", workflow.id),
-        });
-    }
-    AgentLoopStepOutput {
-        observation: observation_lines.join(" | "),
-        description: format!(
-            "workflow rollout boundary for {} outcome={:?} origin={} turns={} tool_actions={}",
-            workflow.id, case.outcome, case.origin, case.turn_count, case.tool_action_count
-        ),
-        current_doing,
-        actions,
-    }
+}
+
+fn select_workflow_task_cases(cases: &[WorkflowTaskCase], max_cases: usize) -> Vec<WorkflowTaskCase> {
+    let mut ordered = cases.to_vec();
+    ordered.sort_by(|left, right| {
+        right
+            .ended_at_ms
+            .cmp(&left.ended_at_ms)
+            .then_with(|| right.started_at_ms.cmp(&left.started_at_ms))
+    });
+    ordered.truncate(max_cases);
+    ordered
 }
 
 fn workflow_rollout_detect_runtime_rollback(output: &AgentLoopStepOutput) -> bool {
@@ -1397,36 +1406,177 @@ fn workflow_rollout_run_summary(output: &AgentLoopStepOutput) -> String {
     )
 }
 
-fn accumulate_workflow_rollout_session_from_case(
+fn distribute_rollout_count(total: usize, buckets: usize, index: usize) -> usize {
+    if buckets == 0 {
+        return 0;
+    }
+    let base = total / buckets;
+    let remainder = total % buckets;
+    base + usize::from(index < remainder)
+}
+
+fn workflow_rollout_outputs_from_task(
+    workflow: &WorkflowSpec,
+    task: &WorkflowTaskCase,
+    executed_steps: &[WorkflowTaskRolloutStep],
+) -> Vec<WorkflowTaskRolloutOutput> {
+    if executed_steps.is_empty() {
+        return vec![WorkflowTaskRolloutOutput {
+            output: AgentLoopStepOutput {
+                observation: format!(
+                    "workflow rollout replay for {} | {}",
+                    workflow.id, task.task_summary
+                ),
+                description: format!(
+                    "workflow rollout boundary for {} outcome={:?} origin={}",
+                    workflow.id, task.baseline_outcome, task.origin
+                ),
+                current_doing: task.task_summary.clone(),
+                actions: Vec::new(),
+            },
+            turn_increment: task.baseline_turns.max(1),
+            tool_action_increment: task.baseline_tool_actions,
+            manual_fix_detected: task.manual_fix_detected,
+            rollback_detected: task.rollback_detected,
+            failure_types: task.failure_types.clone(),
+            final_summary: Some(task.task_summary.clone()),
+        }];
+    }
+
+    executed_steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let turn_increment =
+                distribute_rollout_count(task.baseline_turns.max(1), executed_steps.len(), index);
+            let tool_action_increment =
+                distribute_rollout_count(task.baseline_tool_actions, executed_steps.len(), index);
+            let is_boundary = index + 1 == executed_steps.len();
+            let mut actions = Vec::with_capacity(tool_action_increment.max(usize::from(
+                is_boundary && (task.manual_fix_detected || task.rollback_detected),
+            )));
+            for action_index in 0..tool_action_increment {
+                let (kind, summary) =
+                    if is_boundary && action_index == 0 && task.manual_fix_detected {
+                        (
+                            "terminal_exec".to_string(),
+                            format!("manual fix step executed for {}", workflow.id),
+                        )
+                    } else if is_boundary && action_index == 0 && task.rollback_detected {
+                        (
+                            "tool_call".to_string(),
+                            format!("rollback executed while running {}", workflow.id),
+                        )
+                    } else {
+                        (
+                            "tool_call".to_string(),
+                            format!(
+                                "workflow tool step {}.{} for {}",
+                                step.step_index,
+                                action_index + 1,
+                                workflow.id
+                            ),
+                        )
+                    };
+                actions.push(EpisodeActionRecord { kind, summary });
+            }
+            if actions.is_empty() && is_boundary && task.manual_fix_detected {
+                actions.push(EpisodeActionRecord {
+                    kind: "terminal_exec".to_string(),
+                    summary: format!("manual fix step executed for {}", workflow.id),
+                });
+            }
+            if is_boundary
+                && task.rollback_detected
+                && !actions
+                    .iter()
+                    .any(|action| action.summary.contains("rollback"))
+            {
+                actions.push(EpisodeActionRecord {
+                    kind: "tool_call".to_string(),
+                    summary: format!("rollback executed while running {}", workflow.id),
+                });
+            }
+            let mut observation_lines = vec![
+                format!("workflow rollout replay for {}", workflow.id),
+                step.evidence.clone(),
+            ];
+            if is_boundary && !task.failure_types.is_empty() {
+                observation_lines
+                    .push(format!("failure_types={}", task.failure_types.join(",")));
+            }
+            if is_boundary && task.rollback_detected {
+                observation_lines.push("rollback detected".to_string());
+            }
+            if is_boundary && task.manual_fix_detected {
+                observation_lines.push("manual fix detected".to_string());
+            }
+            WorkflowTaskRolloutOutput {
+                output: AgentLoopStepOutput {
+                    observation: observation_lines.join(" | "),
+                    description: format!(
+                        "workflow rollout step {}/{} for {} status={} origin={} outcome={:?}",
+                        step.step_index,
+                        executed_steps.len(),
+                        workflow.id,
+                        step.status,
+                        task.origin,
+                        task.baseline_outcome
+                    ),
+                    current_doing: step.step.clone(),
+                    actions,
+                },
+                turn_increment,
+                tool_action_increment,
+                manual_fix_detected: is_boundary && task.manual_fix_detected,
+                rollback_detected: is_boundary && task.rollback_detected,
+                failure_types: if is_boundary {
+                    task.failure_types.clone()
+                } else {
+                    Vec::new()
+                },
+                final_summary: is_boundary.then(|| task.task_summary.clone()),
+            }
+        })
+        .collect()
+}
+
+fn accumulate_workflow_rollout_session_from_output(
     session: &mut ActiveWorkflowRunSession,
-    output: &AgentLoopStepOutput,
-    case: &WorkflowRunRecord,
+    rollout_output: &WorkflowTaskRolloutOutput,
 ) {
-    session.turn_count = session.turn_count.saturating_add(case.turn_count.max(1));
+    let output = &rollout_output.output;
+    session.turn_count = session
+        .turn_count
+        .saturating_add(rollout_output.turn_increment);
     session.tool_action_count = session
         .tool_action_count
-        .saturating_add(case.tool_action_count);
+        .saturating_add(rollout_output.tool_action_increment);
     session.manual_fix_detected |=
-        case.manual_fix_detected || workflow_rollout_detect_runtime_manual_fix(output);
+        rollout_output.manual_fix_detected || workflow_rollout_detect_runtime_manual_fix(output);
     session.rollback_detected |=
-        case.rollback_detected || workflow_rollout_detect_runtime_rollback(output);
-    if case.failure_types.is_empty() {
+        rollout_output.rollback_detected || workflow_rollout_detect_runtime_rollback(output);
+    if rollout_output.failure_types.is_empty() {
         if let Some(failure_type) = workflow_rollout_classify_runtime_failure_type(output) {
             session.failure_types.insert(failure_type);
         }
     } else {
         session
             .failure_types
-            .extend(case.failure_types.iter().cloned());
+            .extend(rollout_output.failure_types.iter().cloned());
     }
     if session.tool_action_count == 0 {
         session.tool_action_count = workflow_rollout_tool_action_count(output);
     }
-    session.final_summary = if case.final_summary.trim().is_empty() {
-        workflow_rollout_run_summary(output)
-    } else {
-        case.final_summary.clone()
-    };
+    if let Some(final_summary) = rollout_output.final_summary.as_deref() {
+        session.final_summary = if final_summary.trim().is_empty() {
+            workflow_rollout_run_summary(output)
+        } else {
+            final_summary.to_string()
+        };
+    } else if session.final_summary.is_empty() {
+        session.final_summary = workflow_rollout_run_summary(output);
+    }
 }
 
 fn workflow_rollout_record_from_pending_flush(
@@ -1447,6 +1597,71 @@ fn workflow_rollout_record_from_pending_flush(
         failure_types: flush.session.failure_types.into_iter().collect(),
         final_summary: flush.session.final_summary,
     }
+}
+
+fn workflow_rollout_step_status(
+    outcome: crate::workflow::WorkflowRunOutcome,
+    step_index: usize,
+    executed_steps: usize,
+) -> &'static str {
+    if step_index + 1 < executed_steps {
+        return "completed";
+    }
+    match outcome {
+        crate::workflow::WorkflowRunOutcome::Completed => "completed",
+        crate::workflow::WorkflowRunOutcome::Blocked => "blocked_boundary",
+        crate::workflow::WorkflowRunOutcome::Abandoned => "abandoned_boundary",
+        crate::workflow::WorkflowRunOutcome::Superseded => "superseded_boundary",
+        crate::workflow::WorkflowRunOutcome::NoProgress => "no_progress_boundary",
+    }
+}
+
+fn simulated_executed_workflow_steps(
+    workflow: &WorkflowSpec,
+    task: &WorkflowTaskCase,
+) -> Vec<WorkflowTaskRolloutStep> {
+    if workflow.workflow_steps.is_empty() {
+        return Vec::new();
+    }
+    let executed_count = workflow
+        .workflow_steps
+        .len()
+        .min(task.baseline_turns.max(task.baseline_tool_actions).max(1));
+    workflow
+        .workflow_steps
+        .iter()
+        .take(executed_count)
+        .enumerate()
+        .map(|(index, step)| WorkflowTaskRolloutStep {
+            step_index: index + 1,
+            step: step.clone(),
+            status: workflow_rollout_step_status(task.baseline_outcome, index, executed_count)
+                .to_string(),
+            evidence: format!(
+                "origin={} turns={} tool_actions={} summary={}",
+                task.origin, task.baseline_turns, task.baseline_tool_actions, task.task_summary
+            ),
+        })
+        .collect()
+}
+
+fn workflow_rollout_boundary_events(task: &WorkflowTaskCase) -> Vec<String> {
+    let mut events = vec![
+        "workflow_bound".to_string(),
+        "session_accumulated".to_string(),
+        "work_boundary_flushed".to_string(),
+        format!("outcome:{:?}", task.baseline_outcome),
+    ];
+    if task.manual_fix_detected {
+        events.push("manual_fix_detected".to_string());
+    }
+    if task.rollback_detected {
+        events.push("rollback_detected".to_string());
+    }
+    if !task.failure_types.is_empty() {
+        events.push(format!("failure_types:{}", task.failure_types.join(",")));
+    }
+    events
 }
 
 async fn execute_workflow_candidate_rollout(
@@ -1549,27 +1764,36 @@ async fn create_isolated_workflow(
         .await
 }
 
-fn simulate_workflow_task_rollout_case(
+fn run_workflow_task_rollout(
     workflow: &WorkflowSpec,
-    case: &WorkflowRunRecord,
+    task: &WorkflowTaskCase,
 ) -> WorkflowTaskRolloutCase {
     let mut runner = WorkflowTaskRolloutRunnerState::default();
-    runner.begin_bound_workflow_session(workflow, case);
-    runner.accumulate_case(workflow, case);
-    runner.queue_active_workflow_run_for_flush(case.outcome);
+    runner.begin_bound_workflow_session(workflow, task);
+    runner.accumulate_task(workflow, task);
+    runner.queue_active_workflow_run_for_flush(task.baseline_outcome);
     let record = runner
-        .flush_records(case.ended_at_ms.max(case.started_at_ms))
+        .flush_records(task.ended_at_ms.max(task.started_at_ms))
         .into_iter()
         .next()
         .unwrap_or_else(blank_workflow_run_record);
+    let executed_steps = simulated_executed_workflow_steps(workflow, task);
+    let boundary_events = workflow_rollout_boundary_events(task);
     WorkflowTaskRolloutCase {
+        executed_steps,
+        boundary_events: boundary_events.clone(),
         summary: format!(
-            "workflow_bound=true session_accumulated=true flush_count=1 outcome_collected=true run_id={} workflow_id={} outcome={:?} turns={} tool_actions={}",
+            "workflow_bound=true session_accumulated=true flush_count=1 outcome_collected=true run_id={} workflow_id={} outcome={:?} turns={} tool_actions={} step_count={} boundary_events={}",
             record.run_id,
             record.workflow_id,
             record.outcome,
             record.turn_count,
-            record.tool_action_count
+            record.tool_action_count,
+            workflow
+                .workflow_steps
+                .len()
+                .min(task.baseline_turns.max(task.baseline_tool_actions).max(1)),
+            boundary_events.join("|")
         ),
         record,
     }
@@ -2779,7 +3003,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_rollout_cases_prefer_most_recent_runs() {
+    fn workflow_task_cases_prefer_most_recent_runs() {
         let records = (0..10)
             .map(|index| WorkflowRunRecord {
                 run_id: format!("run-{index}"),
@@ -2796,11 +3020,15 @@ mod tests {
                 final_summary: format!("summary-{index}"),
             })
             .collect::<Vec<_>>();
+        let cases = records
+            .iter()
+            .map(workflow_task_case_from_record)
+            .collect::<Vec<_>>();
 
-        let selected = select_workflow_rollout_cases(&records, 4);
+        let selected = select_workflow_task_cases(&cases, 4);
         let run_ids = selected
             .iter()
-            .map(|record| record.run_id.clone())
+            .map(|task| task.baseline_run_id.clone())
             .collect::<Vec<_>>();
         assert_eq!(run_ids, vec!["run-9", "run-8", "run-7", "run-6"]);
     }
@@ -2811,7 +3039,10 @@ mod tests {
             id: "repair-flaky-test-pipeline".to_string(),
             when_to_use: vec!["repair flaky tests".to_string()],
             preconditions: Vec::new(),
-            workflow_steps: vec!["Collect failing traces".to_string()],
+            workflow_steps: vec![
+                "Collect failing traces".to_string(),
+                "Apply minimal patch".to_string(),
+            ],
             done_criteria: vec!["Root cause identified".to_string()],
             recovery: vec!["Fallback to evidence collection".to_string()],
         };
@@ -2830,16 +3061,32 @@ mod tests {
             final_summary: "patch attempt failed".to_string(),
         };
 
-        let rollout = simulate_workflow_task_rollout_case(&workflow, &case);
+        let task = workflow_task_case_from_record(&case);
+        let rollout = run_workflow_task_rollout(&workflow, &task);
 
         assert!(rollout.record.run_id.starts_with("workflow-rollout:"));
         assert_eq!(rollout.record.workflow_id, workflow.id);
-        assert_eq!(rollout.record.origin, case.origin);
-        assert_eq!(rollout.record.outcome, case.outcome);
-        assert_eq!(rollout.record.turn_count, case.turn_count);
-        assert_eq!(rollout.record.tool_action_count, case.tool_action_count);
+        assert_eq!(rollout.record.origin, task.origin);
+        assert_eq!(rollout.record.outcome, task.baseline_outcome);
+        assert_eq!(rollout.record.turn_count, task.baseline_turns);
+        assert_eq!(rollout.record.tool_action_count, task.baseline_tool_actions);
         assert!(rollout.record.manual_fix_detected);
-        assert_eq!(rollout.record.failure_types, case.failure_types);
+        assert_eq!(rollout.record.failure_types, task.failure_types);
+        assert_eq!(rollout.executed_steps.len(), 2);
+        assert_eq!(rollout.executed_steps[0].status, "completed");
+        assert_eq!(rollout.executed_steps[1].status, "blocked_boundary");
+        assert!(
+            rollout
+                .boundary_events
+                .iter()
+                .any(|event| event == "manual_fix_detected")
+        );
+        assert!(
+            rollout
+                .boundary_events
+                .iter()
+                .any(|event| event == "outcome:Blocked")
+        );
         assert!(rollout.summary.contains("workflow_bound=true"));
         assert!(rollout.summary.contains("session_accumulated=true"));
         assert!(rollout.summary.contains("outcome_collected=true"));
