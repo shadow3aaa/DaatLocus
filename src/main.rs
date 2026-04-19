@@ -931,9 +931,16 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
     let prompt = &summary.prompt_improvement;
     let workflow = &summary.workflow_improvement;
     println!(
-        "sleep: prompt[traces={} failure_patterns={} bootstrap_demos={} stress_cases={} instruction_hypotheses={} runtime_demos={} turn_demos={} additions={} updated={}] workflow[evidence_run_records={} patch/merge={}/{} applied={}/{} rollbacks={} rounds={}] refreshed {} mental models",
+        "sleep: prompt[traces={} failure_patterns={} reflections={} candidates={} evaluations={} frontier={} lineage={}/{}/{} bootstrap_demos={} stress_cases={} instruction_hypotheses={} runtime_demos={} turn_demos={} additions={} updated={}] workflow[evidence_run_records={} reflections={} patch/merge={}/{} evaluations={} frontier={} lineage={}/{}/{} applied={}/{} rollbacks={} rounds={}] refreshed {} mental models",
         prompt.consumed_trace_events,
         prompt.failure_patterns.len(),
+        prompt.prompt_reflections,
+        prompt.prompt_candidates,
+        prompt.prompt_candidate_evaluations,
+        prompt.prompt_frontier_entries,
+        prompt.prompt_frontier_root_entries,
+        prompt.prompt_frontier_branched_entries,
+        prompt.prompt_frontier_max_generation,
         prompt.bootstrap_demos,
         prompt.stress_cases,
         prompt.instruction_hypotheses,
@@ -942,8 +949,14 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
         prompt.applied_system_additions,
         prompt.compiled_prompt_updated,
         workflow.evidence_run_records,
+        workflow.workflow_reflections,
         workflow.patch_candidates,
         workflow.merge_candidates,
+        workflow.candidate_evaluations,
+        workflow.frontier_entries,
+        workflow.frontier_root_entries,
+        workflow.frontier_branched_entries,
+        workflow.frontier_max_generation,
         workflow.patch_applied,
         workflow.merge_applied,
         workflow.update_rollbacks,
@@ -972,13 +985,26 @@ fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> S
     let prompt = &summary.prompt_improvement;
     let workflow = &summary.workflow_improvement;
     format!(
-        "sleep 完成：prompt traces={}，failure_patterns={}，prompt additions={}，workflow evidence/patch/merge={}/{}/{}，应用 patch/merge={}/{}，回滚 {}",
+        "sleep 完成：prompt traces={}，failure_patterns/reflections/candidates/evaluations/frontier={}/{}/{}/{}/{}，prompt lineage={}/{}/{}，prompt additions={}，workflow evidence/reflections/patch/merge/evaluations/frontier={}/{}/{}/{}/{}/{}，workflow lineage={}/{}/{}，应用 patch/merge={}/{}，回滚 {}",
         prompt.consumed_trace_events,
         prompt.failure_patterns.len(),
+        prompt.prompt_reflections,
+        prompt.prompt_candidates,
+        prompt.prompt_candidate_evaluations,
+        prompt.prompt_frontier_entries,
+        prompt.prompt_frontier_root_entries,
+        prompt.prompt_frontier_branched_entries,
+        prompt.prompt_frontier_max_generation,
         prompt.applied_system_additions,
         workflow.evidence_run_records,
+        workflow.workflow_reflections,
         workflow.patch_candidates,
         workflow.merge_candidates,
+        workflow.candidate_evaluations,
+        workflow.frontier_entries,
+        workflow.frontier_root_entries,
+        workflow.frontier_branched_entries,
+        workflow.frontier_max_generation,
         workflow.patch_applied,
         workflow.merge_applied,
         workflow.update_rollbacks,
@@ -3272,6 +3298,15 @@ async fn handle_sleep_task_result(
             sleep_status.total_runs += 1;
             sleep_status.total_prompt_consumed_trace_events += prompt.consumed_trace_events;
             sleep_status.total_failure_patterns += prompt.failure_patterns.len();
+            sleep_status.total_prompt_reflections += prompt.prompt_reflections;
+            sleep_status.total_prompt_candidates += prompt.prompt_candidates;
+            sleep_status.total_prompt_candidate_evaluations += prompt.prompt_candidate_evaluations;
+            sleep_status.total_prompt_frontier_entries += prompt.prompt_frontier_entries;
+            sleep_status.latest_prompt_frontier_root_entries = prompt.prompt_frontier_root_entries;
+            sleep_status.latest_prompt_frontier_branched_entries =
+                prompt.prompt_frontier_branched_entries;
+            sleep_status.latest_prompt_frontier_max_generation =
+                prompt.prompt_frontier_max_generation;
             sleep_status.total_bootstrap_demos += prompt.bootstrap_demos;
             sleep_status.total_stress_cases += prompt.stress_cases;
             sleep_status.total_instruction_hypotheses += prompt.instruction_hypotheses;
@@ -3281,8 +3316,15 @@ async fn handle_sleep_task_result(
             sleep_status.total_compiled_prompt_updates +=
                 usize::from(prompt.compiled_prompt_updated);
             sleep_status.total_workflow_evidence_run_records += workflow.evidence_run_records;
+            sleep_status.total_workflow_reflections += workflow.workflow_reflections;
             sleep_status.total_workflow_patch_candidates += workflow.patch_candidates;
             sleep_status.total_workflow_merge_candidates += workflow.merge_candidates;
+            sleep_status.total_workflow_candidate_evaluations += workflow.candidate_evaluations;
+            sleep_status.total_workflow_frontier_entries += workflow.frontier_entries;
+            sleep_status.latest_workflow_frontier_root_entries = workflow.frontier_root_entries;
+            sleep_status.latest_workflow_frontier_branched_entries =
+                workflow.frontier_branched_entries;
+            sleep_status.latest_workflow_frontier_max_generation = workflow.frontier_max_generation;
             sleep_status.total_workflow_patch_applied += workflow.patch_applied;
             sleep_status.total_workflow_merge_applied += workflow.merge_applied;
             sleep_status.total_workflow_update_rollbacks += workflow.update_rollbacks;

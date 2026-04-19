@@ -21,6 +21,13 @@ pub struct SleepDashboardStatus {
     pub total_runs: usize,
     pub total_prompt_consumed_trace_events: usize,
     pub total_failure_patterns: usize,
+    pub total_prompt_reflections: usize,
+    pub total_prompt_candidates: usize,
+    pub total_prompt_candidate_evaluations: usize,
+    pub total_prompt_frontier_entries: usize,
+    pub latest_prompt_frontier_root_entries: usize,
+    pub latest_prompt_frontier_branched_entries: usize,
+    pub latest_prompt_frontier_max_generation: usize,
     pub total_bootstrap_demos: usize,
     pub total_stress_cases: usize,
     pub total_instruction_hypotheses: usize,
@@ -29,8 +36,14 @@ pub struct SleepDashboardStatus {
     pub total_prompt_system_additions: usize,
     pub total_compiled_prompt_updates: usize,
     pub total_workflow_evidence_run_records: usize,
+    pub total_workflow_reflections: usize,
     pub total_workflow_patch_candidates: usize,
     pub total_workflow_merge_candidates: usize,
+    pub total_workflow_candidate_evaluations: usize,
+    pub total_workflow_frontier_entries: usize,
+    pub latest_workflow_frontier_root_entries: usize,
+    pub latest_workflow_frontier_branched_entries: usize,
+    pub latest_workflow_frontier_max_generation: usize,
     pub total_workflow_patch_applied: usize,
     pub total_workflow_merge_applied: usize,
     pub total_workflow_update_rollbacks: usize,
@@ -246,6 +259,28 @@ pub fn render_sleep_status_output_for_dashboard(
             sleep_status.total_failure_patterns
         ),
         format!(
+            "• Total prompt reflections: {}",
+            sleep_status.total_prompt_reflections
+        ),
+        format!(
+            "• Total prompt candidates: {}",
+            sleep_status.total_prompt_candidates
+        ),
+        format!(
+            "• Total prompt candidate evaluations: {}",
+            sleep_status.total_prompt_candidate_evaluations
+        ),
+        format!(
+            "• Total prompt frontier entries: {}",
+            sleep_status.total_prompt_frontier_entries
+        ),
+        format!(
+            "• Latest prompt frontier roots/branched/max_generation: {}/{}/{}",
+            sleep_status.latest_prompt_frontier_root_entries,
+            sleep_status.latest_prompt_frontier_branched_entries,
+            sleep_status.latest_prompt_frontier_max_generation
+        ),
+        format!(
             "• Total bootstrap demos: {}",
             sleep_status.total_bootstrap_demos
         ),
@@ -276,12 +311,30 @@ pub fn render_sleep_status_output_for_dashboard(
             sleep_status.total_workflow_evidence_run_records
         ),
         format!(
+            "• Total workflow reflections: {}",
+            sleep_status.total_workflow_reflections
+        ),
+        format!(
             "• Total workflow patch candidates: {}",
             sleep_status.total_workflow_patch_candidates
         ),
         format!(
             "• Total workflow merge candidates: {}",
             sleep_status.total_workflow_merge_candidates
+        ),
+        format!(
+            "• Total workflow candidate evaluations: {}",
+            sleep_status.total_workflow_candidate_evaluations
+        ),
+        format!(
+            "• Total workflow frontier entries: {}",
+            sleep_status.total_workflow_frontier_entries
+        ),
+        format!(
+            "• Latest workflow frontier roots/branched/max_generation: {}/{}/{}",
+            sleep_status.latest_workflow_frontier_root_entries,
+            sleep_status.latest_workflow_frontier_branched_entries,
+            sleep_status.latest_workflow_frontier_max_generation
         ),
         format!(
             "• Total workflow patch applied: {}",
