@@ -560,7 +560,7 @@ async fn optimize_workflows_from_run_records(
     };
 
     let aggregates = collect_workflow_execution_aggregates(run_records);
-    let all_workflows = workflows.list();
+    let all_workflows = workflows.workspace_list();
 
     result.patches = build_workflow_patch_candidates(&aggregates, &all_workflows);
     result.merges = build_workflow_merge_candidates(&all_workflows);
@@ -782,7 +782,8 @@ fn evaluate_workflow_patch_candidate(
     workflows: &WorkflowStore,
     patch: &EvaluationArtifactWorkflowPatch,
 ) -> bool {
-    workflows.get(&patch.workflow_id).is_some()
+    workflows.workflow_origin(&patch.workflow_id)
+        == Some(crate::workflow::WorkflowOrigin::Workspace)
         && (!patch.when_to_use_additions.is_empty()
             || !patch.precondition_additions.is_empty()
             || !patch.workflow_step_additions.is_empty()
@@ -794,14 +795,15 @@ fn evaluate_workflow_merge_candidate(
     workflows: &WorkflowStore,
     merge: &EvaluationArtifactWorkflowMerge,
 ) -> bool {
-    if workflows.get(&merge.target_workflow_id).is_none() {
+    if workflows.workflow_origin(&merge.target_workflow_id)
+        != Some(crate::workflow::WorkflowOrigin::Workspace)
+    {
         return false;
     }
     !merge.source_workflow_ids.is_empty()
-        && merge
-            .source_workflow_ids
-            .iter()
-            .all(|source_id| workflows.get(source_id).is_some())
+        && merge.source_workflow_ids.iter().all(|source_id| {
+            workflows.workflow_origin(source_id) == Some(crate::workflow::WorkflowOrigin::Workspace)
+        })
 }
 
 fn workflow_similarity(left: &WorkflowSpec, right: &WorkflowSpec) -> f64 {
@@ -1154,7 +1156,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("create temporary workflow dir");
         let primary = temp_dir.path().join("workflows");
 
-        let mut workflows = WorkflowStore::open_scoped(primary.clone(), vec![primary]).await;
+        let mut workflows = WorkflowStore::open_scoped(primary.clone()).await;
         let created = workflows
             .create_workflow(NewWorkflowSpec {
                 id: "repair-flaky-test-pipeline".to_string(),

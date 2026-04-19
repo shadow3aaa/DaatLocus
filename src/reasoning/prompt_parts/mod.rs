@@ -278,10 +278,14 @@ impl SnapshotPart for WorkflowSnapshotPart {
         let mut blocks = Vec::new();
 
         if let Some(bound_workflow) = ctx.bound_workflow() {
-            blocks.push(PromptBlock::KeyValueList(vec![(
-                "bound_workflow_id".to_string(),
-                bound_workflow.id.clone(),
-            )]));
+            let mut pairs = vec![("bound_workflow_id".to_string(), bound_workflow.id.clone())];
+            if let Some(origin) = ctx.workflows.workflow_origin(&bound_workflow.id) {
+                pairs.push((
+                    "bound_workflow_origin".to_string(),
+                    format!("{origin:?}").to_ascii_lowercase(),
+                ));
+            }
+            blocks.push(PromptBlock::KeyValueList(pairs));
             if !bound_workflow.workflow_steps.is_empty() {
                 blocks.push(PromptBlock::BulletList(
                     bound_workflow
@@ -325,10 +329,17 @@ impl SnapshotPart for WorkflowSnapshotPart {
                 summaries
                     .into_iter()
                     .map(|summary| {
+                        let prefix = match summary.origin {
+                            crate::workflow::WorkflowOrigin::Builtin => "[builtin] ",
+                            crate::workflow::WorkflowOrigin::Workspace => "[workspace] ",
+                        };
                         if summary.when_to_use_summary.is_empty() {
-                            summary.id
+                            format!("{prefix}{}", summary.id)
                         } else {
-                            format!("{} | when={}", summary.id, summary.when_to_use_summary)
+                            format!(
+                                "{prefix}{} | when={}",
+                                summary.id, summary.when_to_use_summary
+                            )
                         }
                     })
                     .collect(),
