@@ -117,15 +117,29 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let planner = LlmSleepPlannerRuntime;
     let store = EvaluationArtifactsStore::open().await?;
     let sleep_inputs = load_sleep_inputs().await?;
-    let prompt_improvement = run_prompt_improvement_pipeline(
+    let prompt_improvement = match run_prompt_improvement_pipeline(
         context,
         &planner,
         &store,
         &sleep_inputs.trace_batch.records,
         sleep_inputs.trace_batch.records.len(),
     )
-    .await?;
-    let workflow_improvement = run_workflow_improvement_pipeline(context, &planner, &store).await?;
+    .await
+    {
+        Ok(summary) => summary,
+        Err(err) => {
+            warn!("prompt improvement pipeline failed, continuing with defaults: {err:?}");
+            PromptImprovementSummary::default()
+        }
+    };
+    let workflow_improvement =
+        match run_workflow_improvement_pipeline(context, &planner, &store).await {
+            Ok(summary) => summary,
+            Err(err) => {
+                warn!("workflow improvement pipeline failed, continuing with defaults: {err:?}");
+                WorkflowImprovementSummary::default()
+            }
+        };
     let mental_models = builtin_hindsight_mental_models();
     let refreshed_mental_models = match context
         .hindsight
@@ -288,6 +302,7 @@ impl WorkflowTaskRolloutRunnerState {
     }
 }
 
+#[derive(Default)]
 struct PromptPlanningResult {
     reflections: Vec<EvaluationArtifactPromptReflection>,
     candidates: Vec<EvaluationArtifactRuntimePromptCandidate>,
@@ -625,15 +640,36 @@ async fn run_prompt_improvement_pipeline(
     consumed_trace_events: usize,
 ) -> Result<PromptImprovementSummary> {
     let failure_patterns = derive_failure_patterns(records);
+    // LLM 调用失败（如推理模型返回 reasoning text 而非 tool_calls）时，降级为空规划，
+    // 不中断整个 pipeline：derive_artifacts、frontier replay 仍能正常执行。
     let PromptPlanningResult {
         reflections: prompt_reflections,
         candidates: prompt_candidates,
         evaluations: prompt_candidate_evaluations,
-    } = planner
+    } = match planner
         .plan_prompt_improvement(context, &failure_patterns)
-        .await?;
+        .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            warn!("prompt improvement planning failed, using empty plan: {err:?}");
+            PromptPlanningResult::default()
+        }
+    };
 
-    let mut derived = derive_evaluation_artifacts(context, &failure_patterns).await?;
+    let mut derived = match derive_evaluation_artifacts(context, &failure_patterns).await {
+        Ok(artifacts) => artifacts,
+        Err(err) => {
+            warn!("derive_evaluation_artifacts failed, using empty artifacts: {err:?}");
+            DerivedEvaluationArtifacts {
+                bootstrap_demos: Vec::new(),
+                stress_cases: Vec::new(),
+                instruction_hypotheses: Vec::new(),
+                runtime_demos: Vec::new(),
+                turn_demos: Vec::new(),
+            }
+        }
+    };
     derived
         .bootstrap_demos
         .extend(derive_success_bootstrap_demos(records));
@@ -655,14 +691,21 @@ async fn run_prompt_improvement_pipeline(
         })
         .collect::<Vec<_>>();
     prompt_frontier = retain_prompt_frontier(&prompt_frontier, &prompt_frontier_incoming, 16);
-    prompt_frontier = replay_prompt_frontier_entries(
+    prompt_frontier = match replay_prompt_frontier_entries(
         context,
         planner,
         &prompt_frontier,
         &failure_patterns,
         &derived.turn_demos,
     )
-    .await?;
+    .await
+    {
+        Ok(frontier) => frontier,
+        Err(err) => {
+            warn!("replay_prompt_frontier_entries failed, skipping replay: {err:?}");
+            prompt_frontier
+        }
+    };
     let prompt_frontier_choice = select_prompt_frontier_entry(&prompt_frontier);
     let prompt_update = apply_selected_prompt_frontier_candidate(
         context,

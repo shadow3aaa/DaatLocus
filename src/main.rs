@@ -440,6 +440,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         dashboard_tx: None,
         active_runtime_turn: false,
         active_runtime_phase: None,
+        runtime_turn_started_at: None,
         active_app_notices: std::collections::HashSet::new(),
         runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         suppressed_app_notices: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -899,6 +900,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         dashboard_tx: None,
         active_runtime_turn: false,
         active_runtime_phase: None,
+        runtime_turn_started_at: None,
         active_app_notices: std::collections::HashSet::new(),
         runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         suppressed_app_notices: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -2987,23 +2989,45 @@ async fn daat_locus_loop(
     enqueue_app_notice_work(context);
     sync_driver_frontier_from_sources(context);
     if context.active_runtime_turn {
-        let phase = context
-            .active_runtime_phase
-            .map(|phase| phase.label())
-            .unwrap_or("running");
-        set_runtime_status(
-            Some(tx),
-            RuntimeStatusLevel::Info,
-            format!("处理中：runtime turn 正在运行 / {phase}"),
+        // 检测 select! 取消导致的 stale flag：若 turn 已运行超过 request_timeout + 120s
+        // 但 active_runtime_turn 仍为 true，说明 daat_locus_loop 被 tokio::select! 取消时
+        // 未能执行 active_runtime_turn = false，需主动重置。
+        let stale_threshold = Duration::from_secs(
+            context.config.main_model.request_timeout_secs().saturating_add(120),
         );
-        sync_dashboard_state(
-            context,
-            tx,
-            sleep_status,
-            Some(cycle_started_at.elapsed().as_millis()),
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        return;
+        let is_stale = context
+            .runtime_turn_started_at
+            .map(|started| started.elapsed() > stale_threshold)
+            .unwrap_or(false);
+        if is_stale {
+            tracing::warn!(
+                elapsed_secs = context.runtime_turn_started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                threshold_secs = stale_threshold.as_secs(),
+                "stale active_runtime_turn detected (likely cancelled by tokio::select!); resetting"
+            );
+            context.active_runtime_turn = false;
+            context.set_runtime_phase(None);
+            context.runtime_turn_started_at = None;
+            // fall through to normal processing
+        } else {
+            let phase = context
+                .active_runtime_phase
+                .map(|phase| phase.label())
+                .unwrap_or("running");
+            set_runtime_status(
+                Some(tx),
+                RuntimeStatusLevel::Info,
+                format!("处理中：runtime turn 正在运行 / {phase}"),
+            );
+            sync_dashboard_state(
+                context,
+                tx,
+                sleep_status,
+                Some(cycle_started_at.elapsed().as_millis()),
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            return;
+        }
     }
     if context.memory.should_block_new_turns_on_retain_backlog() {
         let retain_backlog = context.memory.retain_backlog_count();
@@ -3065,6 +3089,7 @@ async fn daat_locus_loop(
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
         .await;
     context.active_runtime_turn = true;
+    context.runtime_turn_started_at = Some(std::time::Instant::now());
     context.set_runtime_phase(Some(RuntimeTurnPhase::PreflightMemory));
     sync_dashboard_state(
         context,
@@ -3074,6 +3099,7 @@ async fn daat_locus_loop(
     );
     let _ = execute_agent_loop_step(context, Some(tx)).await;
     context.active_runtime_turn = false;
+    context.runtime_turn_started_at = None;
     context.set_runtime_phase(None);
     refresh_sleep_backlogs(sleep_status).await;
     sync_dashboard_state(

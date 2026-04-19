@@ -79,6 +79,7 @@ pub struct Context {
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
     pub active_runtime_turn: bool,
     pub active_runtime_phase: Option<RuntimeTurnPhase>,
+    pub runtime_turn_started_at: Option<Instant>,
     pub active_app_notices: HashSet<AppId>,
     pub runtime_overflow_failures: Arc<Mutex<HashMap<String, usize>>>,
     pub suppressed_app_notices: Arc<Mutex<HashMap<AppId, SuppressedAppNotice>>>,
