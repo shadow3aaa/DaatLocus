@@ -55,11 +55,6 @@ pub enum InspectTarget {
 #[derive(Debug, Subcommand)]
 pub enum HindsightTarget {
     Config,
-    Directives,
-    #[command(name = "mental-models")]
-    MentalModels,
     #[command(name = "clear-observations")]
     ClearObservations,
-    #[command(name = "refresh-mental-models")]
-    RefreshMentalModels,
 }

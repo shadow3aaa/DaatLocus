@@ -34,11 +34,11 @@ pub const WORKSPACE_UNIT_WHY: &str =
 
 pub const WORKSPACE_UNIT_HOW: &str = "使用相对路径时，不要把 workspace 目录名再写进路径里。快照已经告诉你 workspace 的绝对路径；相对路径默认就是相对于该目录。";
 
-pub const MEMORIES_UNIT_WHAT: &str = "自动召回记忆（对应 `<recall_memories>` 标记）会优先提供长期 consolidated knowledge，例如 mental models 与 observations，并在需要时补充 raw memories 与 citations；`deep_recall` 是显式触发的更深层回忆。";
+pub const MEMORIES_UNIT_WHAT: &str = "自动召回记忆（对应 `<recall_memories>` 标记）会优先提供长期 consolidated knowledge，例如 observations，并在需要时补充 raw memories 与 citations；`deep_recall` 是显式触发的更深层回忆。";
 
 pub const MEMORIES_UNIT_WHEN: &str = "当自动召回里的 consolidated knowledge 仍不足以支撑判断，或者你需要更强的证据链、来源说明、历史偏好归纳时，应优先尝试 `deep_recall`；只有在深度回忆仍不足时，才再尝试其他方式。";
 
-pub const MEMORIES_UNIT_HOW: &str = "阅读 `<recall_memories>` 时，应先区分 mental models / observations / raw memories / citations 的角色：优先用 consolidated knowledge 做高层判断，再用 raw evidence 校验细节。使用 `deep_recall` 时，query 应写成自然语言问题，并尽量说明对象、事实、时间范围、任务背景与线索；query 越具体，越容易召回真正相关的记忆。";
+pub const MEMORIES_UNIT_HOW: &str = "阅读 `<recall_memories>` 时，应先区分 observations / raw memories / citations 的角色：优先用 consolidated knowledge 做高层判断，再用 raw evidence 校验细节。使用 `deep_recall` 时，query 应写成自然语言问题，并尽量说明对象、事实、时间范围、任务背景与线索；query 越具体，越容易召回真正相关的记忆。";
 
 pub const PLAN_UNIT_WHAT: &str =
     "plan 是任务的最新分步计划。它用于记录完成当前任务所需的步骤顺序，以及每一步的当前进展。";

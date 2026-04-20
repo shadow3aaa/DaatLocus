@@ -501,19 +501,7 @@ fn execute_deep_recall_tool<'a>(
                 .map(ToString::to_string),
         );
         if let Some(based_on) = &response.based_on {
-            body_lines.push(format!(
-                "sources: memories={} mental_models={} directives={}",
-                based_on.memories.len(),
-                based_on.mental_models.len(),
-                based_on.directives.len()
-            ));
-            body_lines.extend(based_on.mental_models.iter().take(3).map(|model| {
-                format!(
-                    "mental_model: {} ({})",
-                    model.id,
-                    summarize_inline_text(&model.text)
-                )
-            }));
+            body_lines.push(format!("sources: memories={}", based_on.memories.len()));
             body_lines.extend(based_on.memories.iter().take(3).map(|memory| {
                 format!(
                     "memory: {} [{}] {}",
@@ -525,13 +513,6 @@ fn execute_deep_recall_tool<'a>(
                     summarize_inline_text(&memory.text)
                 )
             }));
-            body_lines.extend(
-                based_on
-                    .directives
-                    .iter()
-                    .take(3)
-                    .map(|directive| format!("directive: {} ({})", directive.id, directive.name)),
-            );
         }
         if let Some(trace) = &response.trace {
             body_lines.push(format!(

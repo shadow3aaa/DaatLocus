@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::{
     AgentLoopStepOutput, DaatLocusHomeOverride, build_eval_context_with_compiled,
     context::{ActiveWorkflowRunSession, Context, PendingWorkflowRunFlush},
-    hindsight::{HindsightRecallOptions, builtin_hindsight_mental_models},
+    hindsight::HindsightRecallOptions,
     reasoning::{
         compiled::{
             RUNTIME_SYSTEM_PROMPT_COMPILE_KEY, save_compiled_runtime_system_prompt_for_model,
@@ -110,7 +110,6 @@ pub struct WorkflowImprovementSummary {
 pub struct SleepSummary {
     pub prompt_improvement: PromptImprovementSummary,
     pub workflow_improvement: WorkflowImprovementSummary,
-    pub refreshed_mental_models: usize,
 }
 
 pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
@@ -140,23 +139,10 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
                 WorkflowImprovementSummary::default()
             }
         };
-    let mental_models = builtin_hindsight_mental_models();
-    let refreshed_mental_models = match context
-        .hindsight
-        .sync_mental_models(&mental_models, true)
-        .await
-    {
-        Ok(operation_ids) => operation_ids.len(),
-        Err(err) => {
-            warn!("failed to refresh hindsight mental models during sleep: {err:?}");
-            0
-        }
-    };
     compact_runtime_trace_file(sleep_inputs.trace_batch.next_offset).await?;
     Ok(SleepSummary {
         prompt_improvement,
         workflow_improvement,
-        refreshed_mental_models,
     })
 }
 
@@ -584,8 +570,8 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
                 .cloned()
                 .or_else(|| source_task_cases.last().cloned())
                 .unwrap_or_else(blank_workflow_task_case);
-            let rolled_out_source_case = source_workflow
-                .map(|workflow| run_workflow_task_rollout(workflow, &source_task));
+            let rolled_out_source_case =
+                source_workflow.map(|workflow| run_workflow_task_rollout(workflow, &source_task));
             let outcome = execute_program_with_ir_report(
                 context.judge_llm.as_ref(),
                 context,
@@ -1222,7 +1208,6 @@ fn select_prompt_rollout_demos(
     demos.iter().take(max_demos).cloned().collect()
 }
 
-
 fn aggregate_prompt_executable_rollout_evaluation(
     mut base: EvaluationArtifactRuntimePromptCandidateEvaluation,
     evaluations: &[crate::reasoning::evaluation_artifacts::EvaluationArtifactTurnDemoEvaluation],
@@ -1370,7 +1355,10 @@ fn workflow_task_case_from_record(record: &WorkflowRunRecord) -> WorkflowTaskCas
     }
 }
 
-fn select_workflow_task_cases(cases: &[WorkflowTaskCase], max_cases: usize) -> Vec<WorkflowTaskCase> {
+fn select_workflow_task_cases(
+    cases: &[WorkflowTaskCase],
+    max_cases: usize,
+) -> Vec<WorkflowTaskCase> {
     let mut ordered = cases.to_vec();
     ordered.sort_by(|left, right| {
         right
@@ -1545,8 +1533,7 @@ fn workflow_rollout_outputs_from_task(
                 step.evidence.clone(),
             ];
             if is_boundary && !task.failure_types.is_empty() {
-                observation_lines
-                    .push(format!("failure_types={}", task.failure_types.join(",")));
+                observation_lines.push(format!("failure_types={}", task.failure_types.join(",")));
             }
             if is_boundary && task.rollback_detected {
                 observation_lines.push("rollback detected".to_string());
@@ -1904,8 +1891,11 @@ async fn apply_selected_prompt_candidate(
         slugify(&candidate.title),
         chrono::Utc::now().timestamp()
     );
-    save_compiled_runtime_system_prompt_for_model(&context.config.main_model_config().model_id, &compiled)
-        .await?;
+    save_compiled_runtime_system_prompt_for_model(
+        &context.config.main_model_config().model_id,
+        &compiled,
+    )
+    .await?;
     context.compiled_prompts = context
         .compiled_prompts
         .clone()

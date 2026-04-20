@@ -23,7 +23,7 @@ pub async fn run_memory_reset() -> Result<()> {
     );
     println!("[memory-reset] cleared: runtime_conversation, hindsight_queue");
     println!("[memory-reset] cleared: reasoning_traces.jsonl");
-    println!("[memory-reset] cleared: hindsight bank, observations, directives, mental models");
+    println!("[memory-reset] cleared: hindsight bank, observations");
     println!("[memory-reset] cleared: current plan");
     println!("[memory-reset] preserved: config/, state/, artifacts/, logs/");
 
@@ -119,7 +119,7 @@ pub async fn run_reset_all() -> Result<()> {
         println!("[reset] cleared state: {}", state_cleared.join(", "));
     }
     println!(
-        "[reset] cleared memory: runtime_conversation, hindsight_queue, reasoning_traces.jsonl, hindsight bank, observations, directives, mental models"
+        "[reset] cleared memory: runtime_conversation, hindsight_queue, reasoning_traces.jsonl, hindsight bank, observations"
     );
     if artifact_cleared.is_empty() {
         println!("[reset] cleared complite artifacts: none");

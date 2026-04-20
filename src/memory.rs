@@ -1,8 +1,13 @@
 //! 此模块定义运行时会话状态与 hindsight retain 队列。
-use std::{collections::VecDeque, fmt::Display, future::Future};
+use std::{
+    collections::{HashSet, VecDeque},
+    fmt::Display,
+    future::Future,
+};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
@@ -12,7 +17,7 @@ use crate::{
         truncate_text_to_token_budget_with_notice,
     },
     daat_locus_paths::daat_locus_paths,
-    hindsight::{HindsightRetainItem, HindsightRetainJob},
+    hindsight::{HINDSIGHT_RUNTIME_DOCUMENT_ID, HindsightRetainItem, HindsightRetainJob},
     reasoning::runtime::{AgentMessage, AgentToolSpec, HistoryMessage},
     tool_ui::{
         PatchUiData, TelegramUiData, TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent,
@@ -150,15 +155,6 @@ impl Memory {
             .or_else(|| self.hindsight_queue.current_focus())
     }
 
-    pub fn trail(&self) -> Vec<String> {
-        self.hindsight_queue
-            .trail
-            .clone()
-            .into_iter()
-            .flat_map(|item| item.render_messages())
-            .collect()
-    }
-
     pub fn runtime_conversation_messages(&self) -> Vec<HistoryMessage> {
         self.runtime_conversation().messages()
     }
@@ -237,11 +233,6 @@ impl Memory {
 
     pub fn mark_queued_retained(&mut self) {
         self.hindsight_queue.mark_queued_retained();
-    }
-
-    pub fn mark_retained_by_document_ids(&mut self, document_ids: &[String]) {
-        self.hindsight_queue
-            .mark_retained_by_document_ids(document_ids);
     }
 
     pub async fn clear_runtime_conversation(&mut self) -> MemoryRetainPlan {
@@ -723,13 +714,6 @@ impl HindsightQueueItem {
             .join("\n")
     }
 
-    fn render_messages(&self) -> Vec<String> {
-        self.messages
-            .iter()
-            .map(format_message_for_memory)
-            .collect()
-    }
-
     fn bootstrap_messages(&self) -> Vec<HistoryMessage> {
         self.messages.clone()
     }
@@ -758,8 +742,9 @@ impl HindsightQueueItem {
             timestamp: None,
             context: Some("runtime hindsight step".to_string()),
             metadata: Some(metadata),
-            document_id: Some(format!("hindsight-step:{}", self.id)),
+            document_id: Some(HINDSIGHT_RUNTIME_DOCUMENT_ID.to_string()),
             tags: Some(tags),
+            update_mode: Some("append".to_string()),
         }
     }
 
@@ -877,7 +862,7 @@ impl HindsightQueue {
             item.queued = true;
             jobs.push(HindsightRetainJob {
                 items: vec![item.to_hindsight_item()],
-                document_id: Some(format!("hindsight-step:{}", item.id)),
+                document_id: Some(HINDSIGHT_RUNTIME_DOCUMENT_ID.to_string()),
             });
         }
         jobs
@@ -890,30 +875,6 @@ impl HindsightQueue {
     fn mark_queued_retained(&mut self) {
         for item in &mut self.trail {
             if item.queued && !item.retained {
-                item.queued = false;
-                item.retained = true;
-            }
-        }
-        while self
-            .trail
-            .front()
-            .map(|item| item.retained)
-            .unwrap_or(false)
-        {
-            self.trail.pop_front();
-        }
-    }
-
-    fn mark_retained_by_document_ids(&mut self, document_ids: &[String]) {
-        if document_ids.is_empty() {
-            return;
-        }
-        for item in &mut self.trail {
-            let document_id = format!("hindsight-step:{}", item.id);
-            if document_ids
-                .iter()
-                .any(|candidate| candidate == &document_id)
-            {
                 item.queued = false;
                 item.retained = true;
             }
@@ -1355,154 +1316,211 @@ mod tests {
             )
         }));
     }
+
+    #[test]
+    fn hindsight_retain_transcript_keeps_structured_tool_blocks() {
+        let transcript = build_hindsight_retain_transcript(&[
+            HistoryMessage::user("user input"),
+            HistoryMessage {
+                message: AgentMessage::assistant_tool_call_protocol(
+                    Some("checking state".to_string()),
+                    vec![crate::reasoning::runtime::AgentToolCall {
+                        id: "call_1".to_string(),
+                        name: "terminal_exec".to_string(),
+                        arguments: serde_json::json!({ "cmd": "pwd" }),
+                    }],
+                ),
+                tool_ui_event: None,
+                tool_call_ui_events: Vec::new(),
+            },
+            HistoryMessage::tool(
+                "call_1",
+                "terminal_exec",
+                "tool_call_id=call_1\nname=terminal_exec\nsummary=ok\npayload=\n{\"cwd\":\"/tmp\"}",
+                ToolUiEvent::Work(ToolUiData {
+                    title: "terminal_exec".to_string(),
+                    body_lines: vec!["pwd".to_string()],
+                }),
+            ),
+        ]);
+
+        assert_eq!(transcript.len(), 3);
+        assert_eq!(transcript[0]["role"], "user");
+        assert_eq!(transcript[1]["role"], "assistant");
+        assert_eq!(transcript[1]["content"][1]["type"], "tool_use");
+        assert_eq!(transcript[1]["content"][1]["name"], "terminal_exec");
+        assert_eq!(transcript[2]["role"], "user");
+        assert_eq!(transcript[2]["content"][0]["type"], "tool_result");
+        assert_eq!(transcript[2]["content"][0]["tool_use_id"], "call_1");
+        assert_eq!(
+            transcript[2]["content"][0]["content"],
+            "summary=ok\npayload=\n{\"cwd\":\"/tmp\"}"
+        );
+    }
+
+    #[test]
+    fn hindsight_retain_transcript_skips_deep_recall_blocks() {
+        let transcript = build_hindsight_retain_transcript(&[
+            HistoryMessage::user("what changed?"),
+            HistoryMessage {
+                message: AgentMessage::assistant_tool_call_protocol(
+                    Some("checking memory".to_string()),
+                    vec![crate::reasoning::runtime::AgentToolCall {
+                        id: "call_h1".to_string(),
+                        name: "deep_recall".to_string(),
+                        arguments: serde_json::json!({ "query": "recent changes" }),
+                    }],
+                ),
+                tool_ui_event: None,
+                tool_call_ui_events: Vec::new(),
+            },
+            HistoryMessage::tool(
+                "call_h1",
+                "deep_recall",
+                "summary=found prior notes",
+                ToolUiEvent::Work(ToolUiData {
+                    title: "deep_recall".to_string(),
+                    body_lines: vec!["recent changes".to_string()],
+                }),
+            ),
+        ]);
+
+        assert_eq!(transcript.len(), 2);
+        assert_eq!(transcript[0]["role"], "user");
+        assert_eq!(transcript[1]["role"], "assistant");
+        assert_eq!(transcript[1]["content"].as_array().map(Vec::len), Some(1));
+        assert_eq!(transcript[1]["content"][0]["type"], "text");
+        assert!(transcript.iter().all(|message| {
+            message["content"].as_array().is_none_or(|blocks| {
+                blocks.iter().all(|block| {
+                    block.get("type").and_then(serde_json::Value::as_str) != Some("tool_result")
+                })
+            })
+        }));
+    }
 }
 
 impl HindsightQueueItem {
     fn render_for_retain(&self) -> String {
-        let mut lines = vec![
-            "runtime step narrative".to_string(),
-            format!("focus: {}", compact_inline_text(&self.current_doing)),
-            "goal: preserve durable facts, decisions, boundaries, preferences, and reusable lessons from this step.".to_string(),
-        ];
-        for message in &self.messages {
-            lines.extend(render_prompt_message_for_retain(message));
-        }
-        lines.join("\n")
+        let transcript = build_hindsight_retain_transcript(&self.messages);
+        serde_json::to_string(&transcript).unwrap_or_else(|_| "[]".to_string())
     }
 }
 
-fn render_prompt_message_for_retain(message: &HistoryMessage) -> Vec<String> {
-    let mut lines = Vec::new();
-    match &message.message {
-        AgentMessage::Assistant { .. } | AgentMessage::AssistantToolCallProtocol { .. } => {
-            if !history_message_content(message).trim().is_empty() {
-                lines.push(format!(
-                    "assistant reasoning: {}",
-                    compact_inline_text(history_message_content(message))
-                ));
+fn build_hindsight_retain_transcript(messages: &[HistoryMessage]) -> Vec<serde_json::Value> {
+    let mut transcript = Vec::new();
+    let mut skipped_tool_call_ids = HashSet::new();
+
+    for message in messages {
+        match &message.message {
+            AgentMessage::User { .. } => {
+                let text = history_message_content(message).trim();
+                if !text.is_empty() {
+                    transcript.push(json!({
+                        "role": "user",
+                        "content": [{ "type": "text", "text": text }],
+                    }));
+                }
             }
-            for event in &message.tool_call_ui_events {
-                lines.extend(render_tool_call_event_for_retain(event));
+            AgentMessage::Assistant { .. } => {
+                let text = history_message_content(message).trim();
+                if !text.is_empty() {
+                    transcript.push(json!({
+                        "role": "assistant",
+                        "content": [{ "type": "text", "text": text }],
+                    }));
+                }
             }
-        }
-        AgentMessage::Tool { .. } => {
-            if let Some(event) = &message.tool_ui_event {
-                lines.extend(render_tool_result_event_for_retain(event));
-            } else if !history_message_content(message).trim().is_empty() {
-                lines.push(format!(
-                    "tool outcome: {}",
-                    compact_inline_text(history_message_content(message))
-                ));
+            AgentMessage::AssistantToolCallProtocol { content, calls } => {
+                let mut blocks = Vec::new();
+                if let Some(text) = content.as_deref().map(str::trim)
+                    && !text.is_empty()
+                {
+                    blocks.push(json!({
+                        "type": "text",
+                        "text": text,
+                    }));
+                }
+                blocks.extend(calls.iter().filter_map(|call| {
+                    if is_hindsight_operational_tool(&call.name) {
+                        skipped_tool_call_ids.insert(call.id.clone());
+                        return None;
+                    }
+                    Some(json!({
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": call.name,
+                        "input": call.arguments,
+                    }))
+                }));
+                if !blocks.is_empty() {
+                    transcript.push(json!({
+                        "role": "assistant",
+                        "content": blocks,
+                    }));
+                }
             }
-        }
-        AgentMessage::User { .. } => {
-            if !history_message_content(message).trim().is_empty() {
-                lines.push(format!(
-                    "user/runtime context: {}",
-                    compact_inline_text(history_message_content(message))
-                ));
+            AgentMessage::Tool {
+                tool_call_id,
+                name: _,
+                ..
+            } => {
+                if skipped_tool_call_ids.contains(tool_call_id) {
+                    continue;
+                }
+                let result = strip_tool_history_envelope(history_message_content(message));
+                if result.trim().is_empty() {
+                    continue;
+                }
+                let block = json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": result,
+                });
+                if let Some(last) = transcript.last_mut()
+                    && last.get("role").and_then(serde_json::Value::as_str) == Some("user")
+                    && last
+                        .get("content")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|items| {
+                            items.iter().all(|item| {
+                                item.get("type").and_then(serde_json::Value::as_str)
+                                    == Some("tool_result")
+                            })
+                        })
+                {
+                    if let Some(items) = last
+                        .get_mut("content")
+                        .and_then(serde_json::Value::as_array_mut)
+                    {
+                        items.push(block);
+                        continue;
+                    }
+                }
+                transcript.push(json!({
+                    "role": "user",
+                    "content": [block],
+                }));
             }
+            AgentMessage::System { .. } => {}
         }
-        AgentMessage::System { .. } => {}
     }
-    lines
+
+    transcript
 }
 
-fn render_tool_call_event_for_retain(event: &ToolCallUiEvent) -> Vec<String> {
-    match event {
-        ToolCallUiEvent::Error(data) if data.title == "apply_patch" => Vec::new(),
-        ToolCallUiEvent::Exec(data)
-        | ToolCallUiEvent::Work(data)
-        | ToolCallUiEvent::App(data)
-        | ToolCallUiEvent::Error(data) => render_tool_data_for_retain("tool call", data),
-        ToolCallUiEvent::Terminal(data) => render_terminal_data_for_retain("tool call", data),
-        ToolCallUiEvent::Patch(data) => render_patch_data_for_retain("tool call", data),
-        ToolCallUiEvent::Telegram(data) => render_telegram_data_for_retain("tool call", data),
-    }
+fn is_hindsight_operational_tool(name: &str) -> bool {
+    matches!(name.trim(), "deep_recall")
 }
 
-fn render_tool_result_event_for_retain(event: &ToolUiEvent) -> Vec<String> {
-    match event {
-        ToolUiEvent::Error(data) if data.title == "apply_patch failed" => Vec::new(),
-        ToolUiEvent::Exec(data)
-        | ToolUiEvent::Work(data)
-        | ToolUiEvent::App(data)
-        | ToolUiEvent::Error(data) => render_tool_data_for_retain("tool result", data),
-        ToolUiEvent::Terminal(data) => render_terminal_data_for_retain("tool result", data),
-        ToolUiEvent::Patch(data) => render_patch_data_for_retain("tool result", data),
-        ToolUiEvent::Telegram(data) => render_telegram_data_for_retain("tool result", data),
+fn strip_tool_history_envelope(content: &str) -> String {
+    let mut lines = content.lines();
+    let first = lines.next().unwrap_or_default();
+    let second = lines.next().unwrap_or_default();
+    if first.starts_with("tool_call_id=") && second.starts_with("name=") {
+        return lines.collect::<Vec<_>>().join("\n").trim().to_string();
     }
-}
-
-fn render_tool_data_for_retain(prefix: &str, data: &ToolUiData) -> Vec<String> {
-    let mut lines = vec![format!(
-        "{prefix} action: {}",
-        compact_inline_text(&data.title)
-    )];
-    if !data.body_lines.is_empty() {
-        lines.push(format!(
-            "{prefix} result: {}",
-            compact_inline_text(&data.body_lines.join(" || "))
-        ));
-    }
-    lines
-}
-
-fn render_terminal_data_for_retain(prefix: &str, data: &TerminalUiData) -> Vec<String> {
-    let mut lines = vec![format!(
-        "{prefix} terminal action: {}",
-        compact_inline_text(&data.title)
-    )];
-    if !data.body_lines.is_empty() {
-        lines.push(format!(
-            "{prefix} terminal output: {}",
-            compact_inline_text(&data.body_lines.join(" || "))
-        ));
-    }
-    lines
-}
-
-fn render_patch_data_for_retain(prefix: &str, data: &PatchUiData) -> Vec<String> {
-    let mut lines = vec![format!(
-        "{prefix} patch action: {}",
-        compact_inline_text(&data.title)
-    )];
-    lines.push(format!(
-        "{prefix} patch summary: {}",
-        compact_inline_text(&data.summary_line)
-    ));
-    for file in data.files.iter().take(6) {
-        let marker = match file.operation.as_str() {
-            "add" => "+",
-            "delete" => "-",
-            _ => "~",
-        };
-        lines.push(format!(
-            "{prefix} changed file: {marker} {} (+{} -{})",
-            file.path, file.added_lines, file.removed_lines
-        ));
-    }
-    lines
-}
-
-fn render_telegram_data_for_retain(prefix: &str, data: &TelegramUiData) -> Vec<String> {
-    let mut lines = vec![format!(
-        "{prefix} telegram action: {}",
-        compact_inline_text(&data.title)
-    )];
-    if !data.detail_lines.is_empty() {
-        lines.push(format!(
-            "{prefix} telegram details: {}",
-            compact_inline_text(&data.detail_lines.join(" || "))
-        ));
-    }
-    if !data.message_lines.is_empty() {
-        lines.push(format!(
-            "{prefix} telegram messages: {}",
-            compact_inline_text(&data.message_lines.join(" || "))
-        ));
-    }
-    lines
+    content.trim().to_string()
 }
 
 fn message_has_workspace_signal(message: &HistoryMessage) -> bool {
@@ -1573,16 +1591,6 @@ fn tool_event_is_workspace_signal(event: &ToolUiEvent) -> bool {
             | ToolUiEvent::Patch(_)
             | ToolUiEvent::App(_)
     )
-}
-
-fn compact_inline_text(text: &str) -> String {
-    const MAX_CHARS: usize = 280;
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.chars().count() <= MAX_CHARS {
-        return normalized;
-    }
-    let truncated = normalized.chars().take(MAX_CHARS).collect::<String>();
-    format!("{truncated}…")
 }
 
 fn format_tool_call_ui_event_for_memory(event: &crate::tool_ui::ToolCallUiEvent) -> String {
