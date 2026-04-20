@@ -1,6 +1,6 @@
 use crate::{
     context::Context,
-    reasoning::runtime::{PromptMemoryCitation, PromptMemoryFact, PromptMentalModel},
+    reasoning::runtime::{PromptMemoryCitation, PromptMemoryFact},
     snapshot::Snapshot,
 };
 
@@ -200,12 +200,6 @@ impl SnapshotPart for MemoriesSnapshotPart {
         }
         let mut children = Vec::new();
 
-        if !ctx.prompt_memory.mental_models.is_empty() {
-            children.push(PromptNode::State(PromptStateDoc::new(
-                "mental_models",
-                render_prompt_memory_mental_models(&ctx.prompt_memory.mental_models),
-            )));
-        }
         if !ctx.prompt_memory.observations.is_empty() {
             children.push(PromptNode::State(PromptStateDoc::new(
                 "observations",
@@ -472,20 +466,6 @@ fn render_prompt_memory_facts(facts: &[PromptMemoryFact]) -> Vec<PromptBlock> {
                 kind,
                 fact.text.trim(),
                 context
-            ))
-        })
-        .collect()
-}
-
-fn render_prompt_memory_mental_models(models: &[PromptMentalModel]) -> Vec<PromptBlock> {
-    models
-        .iter()
-        .map(|model| {
-            PromptBlock::Paragraph(format!(
-                "id: {}\nname: {}\ncontent:\n{}",
-                model.id,
-                model.name,
-                model.content.trim()
             ))
         })
         .collect()

@@ -119,7 +119,6 @@ pub struct AgentTurnStreamResult {
 pub struct PromptMemoryContext {
     pub observations: Vec<PromptMemoryFact>,
     pub raw_memories: Vec<PromptMemoryFact>,
-    pub mental_models: Vec<PromptMentalModel>,
     pub citations: Vec<PromptMemoryCitation>,
 }
 
@@ -135,14 +134,6 @@ pub struct PromptMemoryFact {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct PromptMentalModel {
-    pub id: String,
-    pub name: String,
-    pub content: String,
-    pub tags: Vec<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
 pub struct PromptMemoryCitation {
     pub kind: String,
     pub id: String,
@@ -151,10 +142,7 @@ pub struct PromptMemoryCitation {
 
 impl PromptMemoryContext {
     pub fn is_empty(&self) -> bool {
-        self.observations.is_empty()
-            && self.raw_memories.is_empty()
-            && self.mental_models.is_empty()
-            && self.citations.is_empty()
+        self.observations.is_empty() && self.raw_memories.is_empty() && self.citations.is_empty()
     }
 }
 

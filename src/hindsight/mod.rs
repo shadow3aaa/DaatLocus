@@ -1,7 +1,6 @@
 //! Hindsight long-term memory system.
 
 pub mod managed;
-pub mod preprocess;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -18,6 +17,7 @@ pub struct HindsightClient {
     http: reqwest::Client,
     config: HindsightConfig,
     retain_api: HindsightRetainApi,
+    supports_update_mode_append: bool,
 }
 
 #[derive(Clone)]
@@ -57,6 +57,8 @@ pub struct HindsightRetainItem {
     pub document_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "update_mode")]
+    pub update_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -89,38 +91,22 @@ pub(crate) struct HindsightEntityLabelValueConfig {
     pub description: String,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct HindsightDirectiveConfig {
-    pub name: String,
-    pub content: String,
-    pub priority: i64,
-    pub is_active: bool,
-    pub tags: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct HindsightMentalModelTemplateConfig {
-    pub id: String,
-    pub name: String,
-    pub source_query: String,
-    pub max_tokens: usize,
-    pub tags: Vec<String>,
-    pub refresh_after_consolidation: bool,
-}
-
 const DEFAULT_HINDSIGHT_RECALL_BUDGET: &str = "mid";
 const DEFAULT_HINDSIGHT_REFLECT_BUDGET: &str = "low";
+pub const HINDSIGHT_RUNTIME_DOCUMENT_ID: &str = "daat-locus:runtime";
+const HINDSIGHT_UPDATE_MODE_APPEND: &str = "append";
+const MIN_HINDSIGHT_VERSION_FOR_APPEND: (u64, u64, u64) = (0, 5, 0);
 
 fn default_hindsight_reflect_mission() -> String {
-    "Reason like a persistent Daat Locus runtime maintainer. Prefer grounded, reviewable judgments about project continuity, runtime boundaries, tool usage, user preferences, and operational risk. Distinguish stable knowledge from transient state, and surface uncertainty when evidence is incomplete.".to_string()
+    "This bank is the long-term memory home for the Daat Locus agent. Use it to help the same agent recover context, continue ongoing work, and answer with grounded uncertainty-aware judgments based on stored memories.".to_string()
 }
 
 fn default_hindsight_retain_mission() -> String {
-    "Retain durable engineering knowledge for Daat Locus. Prefer architectural boundaries, event/app semantics, user preferences, failure patterns, tool usage constraints, and decisions with future reuse value. Ignore greetings, transient bookkeeping, redundant retries, and low-signal logs unless they materially explain a durable lesson.".to_string()
+    "Retain durable memories that will help the Daat Locus agent continue work over time in the same memory home. Prefer stable project facts, user instructions and preferences, important decisions, and recurring patterns. Skip low-value transient chatter and routine bookkeeping.".to_string()
 }
 
 fn default_hindsight_observations_mission() -> String {
-    "Observations should capture stable facts about the project, runtime behavior, user preferences, and recurring engineering patterns. Consolidate repeated evidence into reusable knowledge. Avoid overfitting to one-off events or transient machine state.".to_string()
+    "Observations in this bank should capture stable facts that the Daat Locus agent may need again later in the same long-term memory home. Prefer reusable facts and repeated patterns over one-off transient state.".to_string()
 }
 
 fn default_hindsight_entity_labels() -> Vec<HindsightEntityLabelGroupConfig> {
@@ -202,85 +188,6 @@ fn default_hindsight_entity_labels() -> Vec<HindsightEntityLabelGroupConfig> {
     ]
 }
 
-pub(crate) fn builtin_hindsight_directives() -> Vec<HindsightDirectiveConfig> {
-    vec![
-        HindsightDirectiveConfig {
-            name: "Ground Claims In Evidence".to_string(),
-            content: "Prefer conclusions that can be tied back to retrieved memories, observations, or mental models. If evidence is weak or mixed, say so explicitly instead of overstating certainty.".to_string(),
-            priority: 100,
-            is_active: true,
-            tags: vec!["runtime".to_string(), "reasoning".to_string()],
-        },
-        HindsightDirectiveConfig {
-            name: "Respect Stable Runtime Boundaries".to_string(),
-            content: "Preserve stable contracts around App, Event, PendingWork, Plan, Memory, and finish_and_send. Do not collapse distinct runtime concepts or rewrite boundaries based on one-off situations.".to_string(),
-            priority: 90,
-            is_active: true,
-            tags: vec!["runtime".to_string(), "architecture".to_string()],
-        },
-        HindsightDirectiveConfig {
-            name: "Avoid Transient Overfitting".to_string(),
-            content: "Do not elevate transient machine state, temporary confusion, or one-off logs into durable preferences or project facts unless the evidence repeats across turns.".to_string(),
-            priority: 80,
-            is_active: true,
-            tags: vec!["memory".to_string(), "retention".to_string()],
-        },
-    ]
-}
-
-pub(crate) fn builtin_hindsight_mental_models() -> Vec<HindsightMentalModelTemplateConfig> {
-    vec![
-        HindsightMentalModelTemplateConfig {
-            id: "project-state".to_string(),
-            name: "Project State".to_string(),
-            source_query: "What is the current project state of Daat Locus, including active workstreams, unresolved technical threads, and recently stabilized decisions?".to_string(),
-            max_tokens: 1600,
-            tags: vec![
-                "mental-model".to_string(),
-                "scope:project".to_string(),
-                "scope:runtime".to_string(),
-            ],
-            refresh_after_consolidation: true,
-        },
-        HindsightMentalModelTemplateConfig {
-            id: "runtime-boundaries".to_string(),
-            name: "Runtime Boundaries".to_string(),
-            source_query: "What stable runtime boundaries and agent-facing contracts define how Daat Locus should treat App, Event, PendingWork, Plan, Memory, and finish_and_send?".to_string(),
-            max_tokens: 1400,
-            tags: vec![
-                "mental-model".to_string(),
-                "scope:runtime".to_string(),
-                "kind:runtime_boundary".to_string(),
-            ],
-            refresh_after_consolidation: true,
-        },
-        HindsightMentalModelTemplateConfig {
-            id: "user-preferences".to_string(),
-            name: "User Preferences".to_string(),
-            source_query: "What stable user preferences, communication expectations, and collaboration patterns should Daat Locus preserve in this workspace?".to_string(),
-            max_tokens: 1200,
-            tags: vec![
-                "mental-model".to_string(),
-                "scope:user".to_string(),
-                "kind:user_preference".to_string(),
-            ],
-            refresh_after_consolidation: true,
-        },
-        HindsightMentalModelTemplateConfig {
-            id: "runtime-strategy".to_string(),
-            name: "Runtime Strategy".to_string(),
-            source_query: "What stable runtime strategies, learned heuristics, and prompt-level lessons should guide Daat Locus when continuing work in this repository?".to_string(),
-            max_tokens: 1400,
-            tags: vec![
-                "mental-model".to_string(),
-                "scope:runtime".to_string(),
-                "kind:strategy_lesson".to_string(),
-            ],
-            refresh_after_consolidation: true,
-        },
-    ]
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct HindsightReflectOptions {
     pub budget: Option<String>,
@@ -298,96 +205,6 @@ pub struct HindsightBankConfigEnvelope {
     pub bank_id: String,
     pub config: Value,
     pub overrides: Value,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HindsightDirectiveListResponse {
-    #[serde(default)]
-    pub items: Vec<HindsightDirective>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HindsightDirective {
-    pub id: String,
-    pub bank_id: String,
-    pub name: String,
-    pub content: String,
-    #[serde(default)]
-    pub priority: i64,
-    #[serde(default = "default_true")]
-    pub is_active: bool,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-    #[serde(default)]
-    pub updated_at: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HindsightMentalModelListResponse {
-    #[serde(default)]
-    pub items: Vec<HindsightMentalModel>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HindsightMentalModel {
-    pub id: String,
-    pub bank_id: String,
-    pub name: String,
-    #[serde(default)]
-    pub source_query: Option<String>,
-    #[serde(default)]
-    pub content: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub max_tokens: Option<usize>,
-    #[serde(default)]
-    pub trigger: Option<HindsightMentalModelTrigger>,
-    #[serde(default)]
-    pub last_refreshed_at: Option<String>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-    #[serde(default)]
-    pub reflect_response: Option<HindsightReflectResponse>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct HindsightMentalModelTrigger {
-    #[serde(default)]
-    pub refresh_after_consolidation: bool,
-    #[serde(default)]
-    pub fact_types: Vec<String>,
-    #[serde(default)]
-    pub exclude_mental_models: bool,
-    #[serde(default)]
-    pub exclude_mental_model_ids: Vec<String>,
-    #[serde(default)]
-    pub tags_match: Option<String>,
-    #[serde(default)]
-    pub tag_groups: Vec<HindsightTagGroup>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct HindsightTagGroup {
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub r#match: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HindsightMentalModelCreateResponse {
-    #[serde(default)]
-    pub mental_model_id: Option<String>,
-    pub operation_id: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HindsightAsyncOperationResponse {
-    pub operation_id: String,
-    pub status: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -557,10 +374,13 @@ impl HindsightClient {
             http,
             config: config.clone(),
             retain_api: HindsightRetainApi::MemoriesEndpoint,
+            supports_update_mode_append: false,
         };
-        let retain_api = bootstrap.detect_retain_api().await?;
+        let (retain_api, supports_update_mode_append) =
+            bootstrap.detect_retain_capabilities().await?;
         Ok(Self {
             retain_api,
+            supports_update_mode_append,
             ..bootstrap
         })
     }
@@ -632,15 +452,6 @@ impl HindsightClient {
                 Err(err) => return Err(err),
             }
         }
-        match self.sync_directives(&builtin_hindsight_directives()).await {
-            Ok(_) => {}
-            Err(err) if err.to_string().contains("404") => {
-                tracing::warn!(
-                    "hindsight directives endpoint unavailable; skipping directive sync: {err}"
-                );
-            }
-            Err(err) => return Err(err),
-        }
         Ok(())
     }
 
@@ -677,9 +488,22 @@ impl HindsightClient {
     ) -> Result<HindsightRetainResponse> {
         let items = items
             .into_iter()
-            .map(|mut item| {
+            .enumerate()
+            .map(|(index, mut item)| {
                 if item.document_id.is_none() {
                     item.document_id = document_id.map(|value| value.to_string());
+                }
+                if self.supports_update_mode_append {
+                    if item.document_id.as_deref() == Some(HINDSIGHT_RUNTIME_DOCUMENT_ID)
+                        && item.update_mode.is_none()
+                    {
+                        item.update_mode = Some(HINDSIGHT_UPDATE_MODE_APPEND.to_string());
+                    }
+                } else {
+                    if item.document_id.as_deref() == Some(HINDSIGHT_RUNTIME_DOCUMENT_ID) {
+                        item.document_id = Some(fallback_hindsight_document_id(&item, index));
+                    }
+                    item.update_mode = None;
                 }
                 item
             })
@@ -764,210 +588,11 @@ impl HindsightClient {
             .await
     }
 
-    pub async fn list_directives(&self, active_only: bool) -> Result<Vec<HindsightDirective>> {
-        let mut url = reqwest::Url::parse(&format!("{}/directives", self.bank_url()))
-            .map_err(|err| miette!("build hindsight directives url failed: {err}"))?;
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("active_only", &active_only.to_string());
-            query.append_pair("limit", "1000");
-            query.append_pair("offset", "0");
-        }
-        let response = self.authorized(self.http.get(url)).send().await;
-        Ok(self
-            .expect_json_success::<HindsightDirectiveListResponse>(
-                response,
-                "list hindsight directives",
-            )
-            .await?
-            .items)
-    }
-
-    pub async fn create_directive(
-        &self,
-        directive: &HindsightDirectiveConfig,
-    ) -> Result<HindsightDirective> {
-        let url = format!("{}/directives", self.bank_url());
-        let response = self
-            .authorized(self.http.post(url))
-            .json(&json!({
-                "name": directive.name,
-                "content": directive.content,
-                "priority": directive.priority,
-                "is_active": directive.is_active,
-                "tags": directive.tags,
-            }))
-            .send()
-            .await;
-        self.expect_json_success(response, "create hindsight directive")
-            .await
-    }
-
-    pub async fn update_directive(
-        &self,
-        directive_id: &str,
-        directive: &HindsightDirectiveConfig,
-    ) -> Result<HindsightDirective> {
-        let url = format!("{}/directives/{}", self.bank_url(), directive_id);
-        let response = self
-            .authorized(self.http.patch(url))
-            .json(&json!({
-                "name": directive.name,
-                "content": directive.content,
-                "priority": directive.priority,
-                "is_active": directive.is_active,
-                "tags": directive.tags,
-            }))
-            .send()
-            .await;
-        self.expect_json_success(response, "update hindsight directive")
-            .await
-    }
-
-    pub async fn sync_directives(
-        &self,
-        directives: &[HindsightDirectiveConfig],
-    ) -> Result<Vec<HindsightDirective>> {
-        let existing = self.list_directives(false).await?;
-        let mut by_name = HashMap::new();
-        for directive in existing {
-            by_name.insert(directive.name.clone(), directive);
-        }
-        let mut synced = Vec::new();
-        for directive in directives
-            .iter()
-            .filter(|item| !item.name.trim().is_empty())
-        {
-            let result = if let Some(existing) = by_name.get(&directive.name) {
-                self.update_directive(&existing.id, directive).await?
-            } else {
-                self.create_directive(directive).await?
-            };
-            synced.push(result);
-        }
-        Ok(synced)
-    }
-
     pub async fn delete_all_observations(&self) -> Result<HindsightDeleteObservationsResponse> {
         let url = format!("{}/observations", self.bank_url());
         let response = self.authorized(self.http.delete(url)).send().await;
         self.expect_json_success(response, "delete hindsight observations")
             .await
-    }
-
-    pub async fn list_mental_models(
-        &self,
-        tags: &[String],
-        detail: &str,
-    ) -> Result<Vec<HindsightMentalModel>> {
-        let mut url = reqwest::Url::parse(&format!("{}/mental-models", self.bank_url()))
-            .map_err(|err| miette!("build hindsight mental-model url failed: {err}"))?;
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("detail", detail);
-            query.append_pair("limit", "100");
-            query.append_pair("offset", "0");
-            if !tags.is_empty() {
-                query.append_pair("tags_match", "all");
-                for tag in tags {
-                    query.append_pair("tags", tag);
-                }
-            }
-        }
-        let request = self.authorized(self.http.get(url));
-        let response = request.send().await;
-        Ok(self
-            .expect_json_success::<HindsightMentalModelListResponse>(
-                response,
-                "list hindsight mental models",
-            )
-            .await?
-            .items)
-    }
-
-    pub async fn create_mental_model(
-        &self,
-        template: &HindsightMentalModelTemplateConfig,
-    ) -> Result<HindsightMentalModelCreateResponse> {
-        let url = format!("{}/mental-models", self.bank_url());
-        let response = self
-            .authorized(self.http.post(url))
-            .json(&json!({
-                "id": normalize_optional_id(&template.id),
-                "name": template.name,
-                "source_query": template.source_query,
-                "max_tokens": template.max_tokens,
-                "tags": template.tags,
-                "trigger": {
-                    "refresh_after_consolidation": template.refresh_after_consolidation,
-                },
-            }))
-            .send()
-            .await;
-        self.expect_json_success(response, "create hindsight mental model")
-            .await
-    }
-
-    pub async fn update_mental_model(
-        &self,
-        model_id: &str,
-        template: &HindsightMentalModelTemplateConfig,
-    ) -> Result<HindsightMentalModel> {
-        let url = format!("{}/mental-models/{}", self.bank_url(), model_id);
-        let response = self
-            .authorized(self.http.patch(url))
-            .json(&json!({
-                "name": template.name,
-                "source_query": template.source_query,
-                "max_tokens": template.max_tokens,
-                "tags": template.tags,
-                "trigger": {
-                    "refresh_after_consolidation": template.refresh_after_consolidation,
-                },
-            }))
-            .send()
-            .await;
-        self.expect_json_success(response, "update hindsight mental model")
-            .await
-    }
-
-    pub async fn refresh_mental_model(
-        &self,
-        model_id: &str,
-    ) -> Result<HindsightAsyncOperationResponse> {
-        let url = format!("{}/mental-models/{}/refresh", self.bank_url(), model_id);
-        let response = self.authorized(self.http.post(url)).send().await;
-        self.expect_json_success(response, "refresh hindsight mental model")
-            .await
-    }
-
-    pub async fn sync_mental_models(
-        &self,
-        templates: &[HindsightMentalModelTemplateConfig],
-        refresh_existing: bool,
-    ) -> Result<Vec<String>> {
-        let existing = self.list_mental_models(&[], "metadata").await?;
-        let mut by_id = HashMap::new();
-        for model in existing {
-            by_id.insert(model.id.clone(), model);
-        }
-
-        let mut operation_ids = Vec::new();
-        for template in templates
-            .iter()
-            .filter(|item| !item.id.trim().is_empty() && !item.name.trim().is_empty())
-        {
-            if by_id.contains_key(&template.id) {
-                self.update_mental_model(&template.id, template).await?;
-                if refresh_existing {
-                    operation_ids.push(self.refresh_mental_model(&template.id).await?.operation_id);
-                }
-            } else {
-                let response = self.create_mental_model(template).await?;
-                operation_ids.push(response.operation_id);
-            }
-        }
-        Ok(operation_ids)
     }
 
     fn bank_url(&self) -> String {
@@ -979,7 +604,7 @@ impl HindsightClient {
         )
     }
 
-    async fn detect_retain_api(&self) -> Result<HindsightRetainApi> {
+    async fn detect_retain_capabilities(&self) -> Result<(HindsightRetainApi, bool)> {
         let url = format!(
             "{}/openapi.json",
             self.config.base_url.trim_end_matches('/')
@@ -1011,11 +636,18 @@ impl HindsightClient {
             "/v1/default/banks/{bank_id}/operations/{operation_id}",
             "get",
         );
+        let supports_update_mode_append = supports_update_mode_append(&value);
         if has_memories_post {
-            return Ok(HindsightRetainApi::MemoriesEndpoint);
+            return Ok((
+                HindsightRetainApi::MemoriesEndpoint,
+                supports_update_mode_append,
+            ));
         }
         if has_legacy_files_post && has_operations_status {
-            return Ok(HindsightRetainApi::LegacyFilesEndpoint);
+            return Ok((
+                HindsightRetainApi::LegacyFilesEndpoint,
+                supports_update_mode_append,
+            ));
         }
         Err(miette!(
             "unsupported hindsight API (version {version}): expected either POST /v1/default/banks/{{bank_id}}/memories or legacy POST /v1/default/banks/{{bank_id}}/files/retain + GET /operations/{{operation_id}}"
@@ -1213,12 +845,51 @@ fn path_has_post(openapi: &Value, path: &str) -> bool {
     path_has_method(openapi, path, "post")
 }
 
+fn supports_update_mode_append(openapi: &Value) -> bool {
+    let version = openapi
+        .get("info")
+        .and_then(|info| info.get("version"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    parse_version_triplet(version)
+        .is_some_and(|version| version >= MIN_HINDSIGHT_VERSION_FOR_APPEND)
+}
+
+fn parse_version_triplet(version: &str) -> Option<(u64, u64, u64)> {
+    let sanitized = version.trim().trim_start_matches(['v', 'V']);
+    let sanitized = sanitized
+        .split_once('-')
+        .map(|(base, _)| base)
+        .unwrap_or(sanitized);
+    let sanitized = sanitized
+        .split_once('+')
+        .map(|(base, _)| base)
+        .unwrap_or(sanitized);
+    let mut parts = sanitized.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
 fn path_has_method(openapi: &Value, path: &str, method: &str) -> bool {
     openapi
         .get("paths")
         .and_then(|paths| paths.get(path))
         .and_then(|methods| methods.get(method))
         .is_some()
+}
+
+fn fallback_hindsight_document_id(item: &HindsightRetainItem, index: usize) -> String {
+    item.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("entry_id"))
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|entry_id| !entry_id.is_empty())
+        .map(|entry_id| format!("hindsight-step:{entry_id}"))
+        .or_else(|| item.document_id.clone())
+        .unwrap_or_else(|| format!("legacy-memory-{}", index + 1))
 }
 
 async fn retain_job(
@@ -1412,19 +1083,6 @@ fn configured_bank_updates() -> Result<serde_json::Map<String, Value>> {
     Ok(updates)
 }
 
-fn normalize_optional_id(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn default_true() -> bool {
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1508,5 +1166,34 @@ mod tests {
         assert_eq!(updates.get("disposition_literalism"), Some(&json!(4)));
         assert_eq!(updates.get("disposition_empathy"), Some(&json!(3)));
         assert_eq!(updates.get("entities_allow_free_form"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn parse_version_triplet_accepts_prefixed_versions() {
+        assert_eq!(parse_version_triplet("0.5.0"), Some((0, 5, 0)));
+        assert_eq!(parse_version_triplet("v0.5.1"), Some((0, 5, 1)));
+        assert_eq!(parse_version_triplet("0.5.2-beta.1"), Some((0, 5, 2)));
+        assert_eq!(parse_version_triplet("0.5.3+build.7"), Some((0, 5, 3)));
+    }
+
+    #[test]
+    fn fallback_hindsight_document_id_uses_entry_id() {
+        let item = HindsightRetainItem {
+            content: "memory".to_string(),
+            timestamp: None,
+            context: None,
+            metadata: Some(HashMap::from([(
+                "entry_id".to_string(),
+                "1234".to_string(),
+            )])),
+            document_id: Some(HINDSIGHT_RUNTIME_DOCUMENT_ID.to_string()),
+            tags: None,
+            update_mode: Some(HINDSIGHT_UPDATE_MODE_APPEND.to_string()),
+        };
+
+        assert_eq!(
+            fallback_hindsight_document_id(&item, 0),
+            "hindsight-step:1234"
+        );
     }
 }

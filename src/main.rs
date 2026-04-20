@@ -45,7 +45,10 @@ use crate::{
     commands::reset::{run_complite_reset, run_memory_reset, run_reset_all, run_state_reset},
     config::load_config,
     context::{ActiveWorkflowRunSession, Context, PendingWorkflowRunFlush, RuntimeTurnPhase},
-    context_budget::{approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded},
+    context_budget::{
+        approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded,
+        truncate_text_to_token_budget,
+    },
     daat_locus_paths::daat_locus_paths,
     dashboard::render::{
         AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD,
@@ -61,13 +64,7 @@ use crate::{
         apply_activity_event, assistant_activity_cell, run_tui_dashboard,
     },
     events::{EventPayload, EventStatus, EventStore, EventView},
-    hindsight::preprocess::{
-        preprocess_hindsight_retain_jobs, select_recent_trail_lines_for_hindsight,
-    },
-    hindsight::{
-        HindsightClient, HindsightRecallOptions, builtin_hindsight_mental_models,
-        managed::HindsightManagedServer,
-    },
+    hindsight::{HindsightClient, HindsightRecallOptions, managed::HindsightManagedServer},
     logging::{
         RuntimeStatusLevel, clear_runtime_status, init_logging, set_runtime_status,
         write_current_turn_messages_dump, write_current_turn_response_dump,
@@ -86,7 +83,7 @@ use crate::{
         evaluation_artifacts::EvaluationArtifactSuggestedFixKind,
         runtime::{
             AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage,
-            PromptMemoryCitation, PromptMemoryContext, PromptMentalModel,
+            PromptMemoryCitation, PromptMemoryContext,
         },
         sleep::run_sleep,
         turn_compile::{TurnCompileEngine, should_run_cold_start_turn_compile},
@@ -232,13 +229,8 @@ enum InspectTarget {
 #[derive(Debug, Subcommand)]
 enum HindsightTarget {
     Config,
-    Directives,
-    #[command(name = "mental-models")]
-    MentalModels,
     #[command(name = "clear-observations")]
     ClearObservations,
-    #[command(name = "refresh-mental-models")]
-    RefreshMentalModels,
 }
 
 fn main() {
@@ -295,7 +287,6 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
         _ => {}
     }
-
 
     // 首次运行：config.toml 不存在时触发交互式 setup
     let config = if !config::config_file_exists().await {
@@ -429,7 +420,12 @@ async fn async_main(cli: Cli) -> Result<()> {
     let telegram_handle = telegram.handle();
     bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
     let client = build_llm(&config.main_model, &config)?;
-    let judge_model_key = config.judge.model.as_deref().unwrap_or(&config.main_model).to_string();
+    let judge_model_key = config
+        .judge
+        .model
+        .as_deref()
+        .unwrap_or(&config.main_model)
+        .to_string();
     let judge_client = build_llm(&judge_model_key, &config)?;
     let hindsight = connect_bootstrapped_hindsight(&config).await?;
     let hindsight_retain = hindsight.spawn_retain_worker();
@@ -602,8 +598,7 @@ async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Resul
     if hindsight_config.managed {
         // In managed mode, force base_url to match managed_port so they're
         // always in sync even if the user configured them independently.
-        hindsight_config.base_url =
-            format!("http://127.0.0.1:{}", hindsight_config.managed_port);
+        hindsight_config.base_url = format!("http://127.0.0.1:{}", hindsight_config.managed_port);
 
         let server = HindsightManagedServer::new(hindsight_config.clone());
         // If the daemon is already running from a previous session, skip startup.
@@ -645,14 +640,6 @@ async fn run_hindsight_command(
                 }))?
             );
         }
-        HindsightTarget::Directives => {
-            let directives = hindsight.list_directives(false).await?;
-            println!("{}", to_pretty_json(&directives)?);
-        }
-        HindsightTarget::MentalModels => {
-            let models = hindsight.list_mental_models(&[], "content").await?;
-            println!("{}", to_pretty_json(&models)?);
-        }
         HindsightTarget::ClearObservations => {
             let response = hindsight.delete_all_observations().await?;
             println!(
@@ -661,17 +648,6 @@ async fn run_hindsight_command(
                     "success": response.success,
                     "message": response.message,
                     "deleted_count": response.deleted_count.unwrap_or(0),
-                }))?
-            );
-        }
-        HindsightTarget::RefreshMentalModels => {
-            let mental_models = builtin_hindsight_mental_models();
-            let operation_ids = hindsight.sync_mental_models(&mental_models, true).await?;
-            println!(
-                "{}",
-                to_pretty_json(&json!({
-                    "refreshed_models": mental_models.len(),
-                    "operation_ids": operation_ids,
                 }))?
             );
         }
@@ -934,7 +910,12 @@ pub(crate) async fn build_eval_context_with_compiled(
         .unwrap();
     let client = build_llm(&config.main_model, &config)
         .unwrap_or_else(|err| panic!("failed to construct main LLM client: {err:?}"));
-    let judge_model_key = config.judge.model.as_deref().unwrap_or(&config.main_model).to_string();
+    let judge_model_key = config
+        .judge
+        .model
+        .as_deref()
+        .unwrap_or(&config.main_model)
+        .to_string();
     let judge_client = build_llm(&judge_model_key, &config)
         .unwrap_or_else(|err| panic!("failed to construct judge LLM client: {err:?}"));
     let hindsight = connect_bootstrapped_hindsight(&config)
@@ -990,7 +971,8 @@ fn bootstrap_telegram_transport_state_from_acl(
 async fn load_compiled_prompts_only(
     config: &crate::config::Config,
 ) -> miette::Result<CompiledPromptStore> {
-    let compiled = load_all_compiled_programs_for_model(&config.main_model_config().model_id).await?;
+    let compiled =
+        load_all_compiled_programs_for_model(&config.main_model_config().model_id).await?;
     let runtime_system_prompt =
         load_compiled_runtime_system_prompt_for_model(&config.main_model_config().model_id).await?;
     Ok(CompiledPromptStore::from_entries(compiled)
@@ -1001,7 +983,7 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
     let prompt = &summary.prompt_improvement;
     let workflow = &summary.workflow_improvement;
     println!(
-        "sleep: prompt[traces={} failure_patterns={} reflections={} candidates={} evaluations={} frontier={} lineage={}/{}/{} bootstrap_demos={} stress_cases={} instruction_hypotheses={} runtime_demos={} turn_demos={} additions={} updated={}] workflow[evidence_run_records={} reflections={} patch/merge={}/{} evaluations={} frontier={} lineage={}/{}/{} applied={}/{} rollbacks={} rounds={}] refreshed {} mental models",
+        "sleep: prompt[traces={} failure_patterns={} reflections={} candidates={} evaluations={} frontier={} lineage={}/{}/{} bootstrap_demos={} stress_cases={} instruction_hypotheses={} runtime_demos={} turn_demos={} additions={} updated={}] workflow[evidence_run_records={} reflections={} patch/merge={}/{} evaluations={} frontier={} lineage={}/{}/{} applied={}/{} rollbacks={} rounds={}]",
         prompt.consumed_trace_events,
         prompt.failure_patterns.len(),
         prompt.prompt_reflections,
@@ -1030,8 +1012,7 @@ fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
         workflow.patch_applied,
         workflow.merge_applied,
         workflow.update_rollbacks,
-        workflow.optimization_rounds,
-        summary.refreshed_mental_models
+        workflow.optimization_rounds
     );
     for pattern in &prompt.failure_patterns {
         let kind = match pattern.suggested_fix_kind {
@@ -1198,13 +1179,7 @@ const RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS: u64 = 60;
 
 async fn record_runtime_history_messages(context: &mut Context, draft: RuntimeTurnDraft) {
     let retain_plan = context.memory.commit_runtime_turn(draft).await;
-    let preprocessing = preprocess_hindsight_retain_jobs(context, retain_plan.jobs).await;
-    if !preprocessing.skipped_document_ids.is_empty() {
-        context
-            .memory
-            .mark_retained_by_document_ids(&preprocessing.skipped_document_ids);
-    }
-    for job in preprocessing.jobs {
+    for job in retain_plan.jobs {
         if let Err(err) = context.hindsight_retain.enqueue(job) {
             tracing::error!("failed to enqueue hindsight retain job: {err:?}");
             return;
@@ -1525,6 +1500,32 @@ pub(crate) async fn execute_agent_loop_step(
     context: &mut Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
 ) -> AgentLoopStepExecution {
+    let claimed_inputs = claim_pending_runtime_inputs(context, RUNTIME_EVENT_CLAIM_BATCH_SIZE);
+    context.current_work_origin = runtime_work_origin(&claimed_inputs);
+    context.workflow_step_started_bound_id = context.bound_workflow_id.clone();
+    let claimed_input_fingerprint = claimed_runtime_input_fingerprint(&claimed_inputs);
+    let claimed_event_ids = claimed_inputs
+        .iter()
+        .filter_map(|input| match input {
+            ClaimedRuntimeInput::Event(event) => Some(event.event_id.to_string()),
+            ClaimedRuntimeInput::AppNotice { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let claimed_app_notice_entries = claimed_inputs
+        .iter()
+        .filter_map(|input| match input {
+            ClaimedRuntimeInput::Event(_) => None,
+            ClaimedRuntimeInput::AppNotice { app, reason } => Some((app.clone(), reason.clone())),
+        })
+        .collect::<Vec<_>>();
+    let claimed_app_notices = claimed_inputs
+        .iter()
+        .filter_map(|input| match input {
+            ClaimedRuntimeInput::Event(_) => None,
+            ClaimedRuntimeInput::AppNotice { app, .. } => Some(app.clone()),
+        })
+        .collect::<Vec<_>>();
+
     let preflight_timeout = Duration::from_secs(RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS);
     enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightMemory);
     let preflight_started_at = std::time::Instant::now();
@@ -1534,7 +1535,7 @@ pub(crate) async fn execute_agent_loop_step(
     );
     let prompt_memory = match tokio::time::timeout(
         preflight_timeout,
-        build_hindsight_memory_context(context),
+        build_hindsight_memory_context(context, &claimed_inputs),
     )
     .await
     {
@@ -1570,9 +1571,9 @@ pub(crate) async fn execute_agent_loop_step(
                 context,
                 tx,
                 None,
-                None,
-                &[],
-                &[],
+                claimed_input_fingerprint.as_deref(),
+                &claimed_event_ids,
+                &claimed_app_notices,
                 format!("runtime preflight failed: {err}"),
                 "构建 hindsight 记忆上下文失败。".to_string(),
             )
@@ -1580,31 +1581,6 @@ pub(crate) async fn execute_agent_loop_step(
         }
     };
     context.prompt_memory = prompt_memory;
-    let claimed_inputs = claim_pending_runtime_inputs(context, RUNTIME_EVENT_CLAIM_BATCH_SIZE);
-    context.current_work_origin = runtime_work_origin(&claimed_inputs);
-    context.workflow_step_started_bound_id = context.bound_workflow_id.clone();
-    let claimed_input_fingerprint = claimed_runtime_input_fingerprint(&claimed_inputs);
-    let claimed_event_ids = claimed_inputs
-        .iter()
-        .filter_map(|input| match input {
-            ClaimedRuntimeInput::Event(event) => Some(event.event_id.to_string()),
-            ClaimedRuntimeInput::AppNotice { .. } => None,
-        })
-        .collect::<Vec<_>>();
-    let claimed_app_notice_entries = claimed_inputs
-        .iter()
-        .filter_map(|input| match input {
-            ClaimedRuntimeInput::Event(_) => None,
-            ClaimedRuntimeInput::AppNotice { app, reason } => Some((app.clone(), reason.clone())),
-        })
-        .collect::<Vec<_>>();
-    let claimed_app_notices = claimed_inputs
-        .iter()
-        .filter_map(|input| match input {
-            ClaimedRuntimeInput::Event(_) => None,
-            ClaimedRuntimeInput::AppNotice { app, .. } => Some(app.clone()),
-        })
-        .collect::<Vec<_>>();
     let claimed_input_messages = claimed_inputs
         .iter()
         .map(|input| prompt_message_for_claimed_input(context, input))
@@ -1981,7 +1957,11 @@ pub(crate) async fn execute_agent_loop_step(
                     result.history_content_with_budget(
                         &call.id,
                         &call.name,
-                        context.config.main_model_config().tool_output_max_tokens.max(1),
+                        context
+                            .config
+                            .main_model_config()
+                            .tool_output_max_tokens
+                            .max(1),
                     ),
                     result.ui_event.clone(),
                 ));
@@ -2759,7 +2739,8 @@ async fn run_agent_turn_with_retry(
                 render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
         });
     }
-    let request_timeout = Duration::from_secs(context.config.main_model_config().request_timeout_secs());
+    let request_timeout =
+        Duration::from_secs(context.config.main_model_config().request_timeout_secs());
     let model_name = context
         .llm
         .model_name()
@@ -2827,13 +2808,19 @@ async fn run_agent_turn_with_retry(
     }
 }
 
-async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryContext {
+async fn build_hindsight_memory_context(
+    context: &mut Context,
+    claimed_inputs: &[ClaimedRuntimeInput],
+) -> PromptMemoryContext {
     let hindsight = context.hindsight.clone();
+    let current_input = current_turn_input_for_hindsight(claimed_inputs);
 
     let query = build_hindsight_recall_query(
-        context.memory.current_thread_focus().as_deref(),
-        summarize_terminal_for_hindsight(context),
-        select_recent_trail_lines_for_hindsight(context),
+        current_input.as_deref(),
+        select_recent_runtime_conversation_for_hindsight(
+            &context.memory.runtime_conversation_messages(),
+            current_input.as_deref(),
+        ),
     );
 
     let observations = hindsight
@@ -2892,45 +2879,17 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
         }
     };
 
-    let mental_models = match hindsight
-        .list_mental_models(&["mental-model".to_string()], "content")
-        .await
-    {
-        Ok(models) => models
-            .into_iter()
-            .filter_map(|model| {
-                let content = model.content?.trim().to_string();
-                if content.is_empty() {
-                    return None;
-                }
-                Some(PromptMentalModel {
-                    id: model.id,
-                    name: model.name,
-                    content,
-                    tags: model.tags,
-                })
-            })
-            .take(4)
-            .collect::<Vec<_>>(),
-        Err(err) => {
-            tracing::warn!("hindsight mental model fetch failed: {err:?}");
-            Vec::new()
-        }
-    };
-
-    let citations = build_prompt_memory_citations(&observations, &raw_memories, &mental_models);
+    let citations = build_prompt_memory_citations(&observations, &raw_memories);
     tracing::debug!(
-        "hindsight memory context observations={} raw_memories={} mental_models={} citations={}",
+        "hindsight memory context observations={} raw_memories={} citations={}",
         observations.len(),
         raw_memories.len(),
-        mental_models.len(),
         citations.len()
     );
 
     PromptMemoryContext {
         observations,
         raw_memories,
-        mental_models,
         citations,
     }
 }
@@ -2938,7 +2897,6 @@ async fn build_hindsight_memory_context(context: &mut Context) -> PromptMemoryCo
 fn build_prompt_memory_citations(
     observations: &[crate::reasoning::runtime::PromptMemoryFact],
     raw_memories: &[crate::reasoning::runtime::PromptMemoryFact],
-    mental_models: &[PromptMentalModel],
 ) -> Vec<PromptMemoryCitation> {
     let mut citations = Vec::new();
     citations.extend(observations.iter().map(|memory| PromptMemoryCitation {
@@ -2956,61 +2914,166 @@ fn build_prompt_memory_citations(
             summary: summarize_hindsight_query_value(&memory.text, 96),
         }
     }));
-    citations.extend(mental_models.iter().map(|model| PromptMemoryCitation {
-        kind: "mental_model".to_string(),
-        id: model.id.clone(),
-        summary: model.name.clone(),
-    }));
     citations
 }
 
 fn build_hindsight_recall_query(
-    thread_focus: Option<&str>,
-    terminal_summary: Option<String>,
+    current_input: Option<&str>,
     recent_messages: Vec<String>,
 ) -> String {
     let mut lines = vec!["问题：召回最相关的历史经验，帮助继续推进当前任务。".to_string()];
-    if let Some(thread_focus) = thread_focus.filter(|value| !value.trim().is_empty()) {
-        lines.push(format!(
-            "主线: {}",
-            summarize_hindsight_query_value(thread_focus, 120)
-        ));
-    }
-
-    let mut sections = Vec::new();
     if !recent_messages.is_empty() {
-        sections.push((
-            "近期".to_string(),
+        lines.push("前文:".to_string());
+        lines.extend(
             recent_messages
                 .into_iter()
-                .map(|line| format!("- {}", summarize_hindsight_query_value(&line, 120)))
-                .collect::<Vec<_>>(),
-        ));
+                .map(|line| format!("- {}", summarize_hindsight_query_value(&line, 120))),
+        );
     }
-    if let Some(terminal_summary) = terminal_summary.filter(|value| !value.trim().is_empty()) {
-        sections.push((
-            "终端".to_string(),
-            terminal_summary
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .take(3)
-                .map(|line| format!("- {}", summarize_hindsight_query_value(line, 120)))
-                .collect::<Vec<_>>(),
-        ));
+    if let Some(current_input) = current_input.filter(|value| !value.trim().is_empty()) {
+        lines.push("当前输入:".to_string());
+        lines.push(summarize_hindsight_query_value(current_input, 240));
     }
 
     let mut query = lines.join("\n");
-    for (title, section_lines) in sections {
-        if section_lines.is_empty() {
-            continue;
-        }
-        let candidate = format!("{query}\n{title}:\n{}", section_lines.join("\n"));
-        if approx_token_count(&candidate) > HINDSIGHT_RECALL_QUERY_MAX_TOKENS {
-            continue;
-        }
-        query = candidate;
+    if approx_token_count(&query) > HINDSIGHT_RECALL_QUERY_MAX_TOKENS {
+        query = truncate_hindsight_query_preserving_latest_input(
+            &query,
+            current_input.unwrap_or_default(),
+            HINDSIGHT_RECALL_QUERY_MAX_TOKENS,
+        );
     }
     query
+}
+
+fn current_turn_input_for_hindsight(claimed_inputs: &[ClaimedRuntimeInput]) -> Option<String> {
+    claimed_inputs.first().and_then(|input| match input {
+        ClaimedRuntimeInput::Event(event) => match &event.payload {
+            EventPayload::TelegramIncoming(payload) => {
+                let text = payload.incoming_text.trim();
+                (!text.is_empty()).then(|| text.to_string())
+            }
+        },
+        ClaimedRuntimeInput::AppNotice { app, reason } => {
+            let reason = reason.trim();
+            (!reason.is_empty()).then(|| format!("app notice from {app}: {reason}"))
+        }
+    })
+}
+
+fn select_recent_runtime_conversation_for_hindsight(
+    messages: &[HistoryMessage],
+    latest_input: Option<&str>,
+) -> Vec<String> {
+    let contextual_messages = slice_recent_runtime_conversation_turns(messages, 1);
+    contextual_messages
+        .into_iter()
+        .filter_map(|message| format_runtime_message_for_hindsight(message, latest_input))
+        .collect()
+}
+
+fn slice_recent_runtime_conversation_turns(
+    messages: &[HistoryMessage],
+    turns: usize,
+) -> &[HistoryMessage] {
+    if messages.is_empty() || turns == 0 {
+        return &[];
+    }
+
+    let mut user_turns_seen = 0usize;
+    let mut start_index = None;
+    for (index, message) in messages.iter().enumerate().rev() {
+        if message.is_user() {
+            user_turns_seen += 1;
+            if user_turns_seen >= turns {
+                start_index = Some(index);
+                break;
+            }
+        }
+    }
+
+    match start_index {
+        Some(index) => &messages[index..],
+        None => messages,
+    }
+}
+
+fn format_runtime_message_for_hindsight(
+    message: &HistoryMessage,
+    latest_input: Option<&str>,
+) -> Option<String> {
+    let content = message.text_content()?.trim();
+    if content.is_empty()
+        || is_runtime_summary_message_for_hindsight(content)
+        || content.starts_with("assistant tool-call protocol:")
+    {
+        return None;
+    }
+
+    let role = match &message.message {
+        AgentMessage::User { .. } => "user",
+        AgentMessage::Assistant { .. } => "assistant",
+        AgentMessage::AssistantToolCallProtocol { .. } => "assistant",
+        AgentMessage::System { .. } | AgentMessage::Tool { .. } => return None,
+    };
+
+    if role == "user" && latest_input.is_some_and(|latest| latest.trim() == content) {
+        return None;
+    }
+
+    Some(format!("{role}: {content}"))
+}
+
+fn is_runtime_summary_message_for_hindsight(content: &str) -> bool {
+    content.starts_with("Earlier runtime history summary:")
+        || content.starts_with("Earlier tool/context progress summary:")
+}
+
+fn truncate_hindsight_query_preserving_latest_input(
+    query: &str,
+    latest_input: &str,
+    max_tokens: usize,
+) -> String {
+    let latest_input = latest_input.trim();
+    if latest_input.is_empty() {
+        return truncate_text_to_token_budget(query, max_tokens);
+    }
+
+    let latest_only =
+        format!("问题：召回最相关的历史经验，帮助继续推进当前任务。\n当前输入:\n{latest_input}");
+    if approx_token_count(&latest_only) > max_tokens {
+        return truncate_text_to_token_budget(&latest_only, max_tokens);
+    }
+
+    let marker = "\n当前输入:\n";
+    let Some(marker_index) = query.find(marker) else {
+        return truncate_text_to_token_budget(query, max_tokens);
+    };
+    let suffix = &query[marker_index..];
+    if approx_token_count(suffix) >= max_tokens {
+        return truncate_text_to_token_budget(&latest_only, max_tokens);
+    }
+
+    let prefix = &query[..marker_index];
+    let prefix_lines = prefix.lines().collect::<Vec<_>>();
+    let mut kept_prefix_lines = Vec::new();
+    for line in prefix_lines.into_iter().rev() {
+        kept_prefix_lines.insert(0, line);
+        let candidate = format!("{}\n{}", kept_prefix_lines.join("\n"), suffix.trim_start());
+        if approx_token_count(&candidate) > max_tokens {
+            kept_prefix_lines.remove(0);
+            break;
+        }
+    }
+    let mut result = if kept_prefix_lines.is_empty() {
+        latest_only
+    } else {
+        format!("{}\n{}", kept_prefix_lines.join("\n"), suffix.trim_start())
+    };
+    if approx_token_count(&result) > max_tokens {
+        result = truncate_text_to_token_budget(&result, max_tokens);
+    }
+    result
 }
 
 fn summarize_hindsight_query_value(value: &str, max_chars: usize) -> String {
@@ -3021,18 +3084,6 @@ fn summarize_hindsight_query_value(value: &str, max_chars: usize) -> String {
     }
     let head = compact.chars().take(max_chars).collect::<String>();
     format!("{head}...")
-}
-
-fn summarize_terminal_for_hindsight(context: &Context) -> Option<String> {
-    if context.apps.focused() != Some(crate::app::AppId::terminal()) {
-        return None;
-    }
-    let (_, render) = context
-        .apps
-        .state_renders()
-        .into_iter()
-        .find(|(app_id, _)| app_id == &crate::app::AppId::terminal())?;
-    Some(render.lines.join("\n"))
 }
 
 async fn daat_locus_loop(
@@ -3061,7 +3112,11 @@ async fn daat_locus_loop(
         // 但 active_runtime_turn 仍为 true，说明 daat_locus_loop 被 tokio::select! 取消时
         // 未能执行 active_runtime_turn = false，需主动重置。
         let stale_threshold = Duration::from_secs(
-            context.config.main_model_config().request_timeout_secs().saturating_add(120),
+            context
+                .config
+                .main_model_config()
+                .request_timeout_secs()
+                .saturating_add(120),
         );
         let is_stale = context
             .runtime_turn_started_at
@@ -3069,7 +3124,10 @@ async fn daat_locus_loop(
             .unwrap_or(false);
         if is_stale {
             tracing::warn!(
-                elapsed_secs = context.runtime_turn_started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                elapsed_secs = context
+                    .runtime_turn_started_at
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0),
                 threshold_secs = stale_threshold.as_secs(),
                 "stale active_runtime_turn detected (likely cancelled by tokio::select!); resetting"
             );

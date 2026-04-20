@@ -78,24 +78,6 @@ fn build_long_term_memory_messages(context: &Context) -> Vec<HistoryMessage> {
     }
 
     let mut children = Vec::new();
-    if !context.prompt_memory.mental_models.is_empty() {
-        children.push(PromptNode::State(PromptStateDoc::new(
-            "mental_models",
-            context
-                .prompt_memory
-                .mental_models
-                .iter()
-                .map(|model| {
-                    PromptBlock::Paragraph(format!(
-                        "id: {}\nname: {}\ncontent:\n{}",
-                        model.id,
-                        model.name,
-                        model.content.trim()
-                    ))
-                })
-                .collect(),
-        )));
-    }
     if !context.prompt_memory.observations.is_empty() {
         children.push(PromptNode::State(PromptStateDoc::new(
             "observations",
