@@ -829,8 +829,11 @@ impl TurnCompileEngine {
             turn_demos.len(),
             &turn_evaluation_summary_lines(&best_evaluations),
         ));
-        save_compiled_runtime_system_prompt_for_model(&config.main_model_config().model_id, &selected)
-            .await?;
+        save_compiled_runtime_system_prompt_for_model(
+            &config.main_model_config().model_id,
+            &selected,
+        )
+        .await?;
         let _ = artifacts
             .replace_runtime_prompt_evolution_reports(&[build_runtime_prompt_evolution_report(
                 turn_demos.len(),

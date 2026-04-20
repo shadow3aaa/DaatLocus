@@ -172,7 +172,11 @@ impl OpenAIClient {
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
             max_completion_tokens,
-            request_rate_limiter: shared_request_rate_limiter(base_url, &model_config.model_id, model_config.rpm()),
+            request_rate_limiter: shared_request_rate_limiter(
+                base_url,
+                &model_config.model_id,
+                model_config.rpm(),
+            ),
             adapter_state: Mutex::new(ChatCompletionsAdapterState::default()),
             token_usage: Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
@@ -1534,7 +1538,8 @@ impl CopilotClient {
             .timeout(Duration::from_secs(15))
             .build()
             .expect("failed to build copilot auth http client");
-        let inner = OpenAIClient::from_parts("placeholder", COPILOT_INTERNAL_BASE_URL, model_config);
+        let inner =
+            OpenAIClient::from_parts("placeholder", COPILOT_INTERNAL_BASE_URL, model_config);
         Self {
             github_token: github_token.to_string(),
             auth_client,
@@ -1567,7 +1572,10 @@ impl CopilotClient {
         let mut hdrs = reqwest::header::HeaderMap::new();
         hdrs.insert("Editor-Version", COPILOT_EDITOR_VERSION.parse().unwrap());
         hdrs.insert("User-Agent", COPILOT_USER_AGENT.parse().unwrap());
-        hdrs.insert("X-Github-Api-Version", COPILOT_GITHUB_API_VERSION.parse().unwrap());
+        hdrs.insert(
+            "X-Github-Api-Version",
+            COPILOT_GITHUB_API_VERSION.parse().unwrap(),
+        );
 
         let mut inner = self.inner.lock().await;
         inner.api_key = token.clone();
@@ -1575,13 +1583,18 @@ impl CopilotClient {
         inner.completions_path = "/chat/completions";
         inner.extra_headers = hdrs;
 
-        *self.cached.lock().await = Some(CopilotSessionToken { token, base_url, expires_at_secs });
+        *self.cached.lock().await = Some(CopilotSessionToken {
+            token,
+            base_url,
+            expires_at_secs,
+        });
         Ok(())
     }
 
     async fn exchange_session_token(&self) -> Result<(String, String, u64)> {
         tracing::debug!("copilot: exchanging github token for session token");
-        let resp = self.auth_client
+        let resp = self
+            .auth_client
             .get("https://api.github.com/copilot_internal/v2/token")
             .header("Authorization", format!("Bearer {}", self.github_token))
             .header("Accept", "application/json")
@@ -1599,10 +1612,10 @@ impl CopilotClient {
             return Err(miette!("HTTP {status}"));
         }
 
-        let json: serde_json::Value = resp.json().await
-            .map_err(|e| miette!("parse error: {e}"))?;
+        let json: serde_json::Value = resp.json().await.map_err(|e| miette!("parse error: {e}"))?;
 
-        let token = json["token"].as_str()
+        let token = json["token"]
+            .as_str()
             .ok_or_else(|| miette!("missing 'token' field"))?
             .to_string();
         let expires_at_secs = json["expires_at"].as_u64().unwrap_or(0);
@@ -1614,32 +1627,49 @@ impl CopilotClient {
 
 /// session token 是分号分隔的 key=value 串，从 proxy-ep 字段派生 API base URL。
 fn derive_copilot_base_url(session_token: &str) -> String {
-    session_token.split(';').find_map(|part| {
-        let trimmed = part.trim();
-        let val = trimmed.to_lowercase();
-        val.strip_prefix("proxy-ep=").and_then(|_| {
-            let host = &trimmed[9..];
-            if host.is_empty() { return None; }
-            let host = if host.to_lowercase().starts_with("proxy.") {
-                format!("api.{}", &host[6..])
-            } else {
-                host.to_string()
-            };
-            Some(format!("https://{host}"))
+    session_token
+        .split(';')
+        .find_map(|part| {
+            let trimmed = part.trim();
+            let val = trimmed.to_lowercase();
+            val.strip_prefix("proxy-ep=").and_then(|_| {
+                let host = &trimmed[9..];
+                if host.is_empty() {
+                    return None;
+                }
+                let host = if host.to_lowercase().starts_with("proxy.") {
+                    format!("api.{}", &host[6..])
+                } else {
+                    host.to_string()
+                };
+                Some(format!("https://{host}"))
+            })
         })
-    }).unwrap_or_else(|| COPILOT_INTERNAL_BASE_URL.to_string())
+        .unwrap_or_else(|| COPILOT_INTERNAL_BASE_URL.to_string())
 }
 
 #[async_trait]
 impl LLM for CopilotClient {
-    async fn run_json(&self, context: &Context, request: PromptRequest) -> Result<serde_json::Value> {
+    async fn run_json(
+        &self,
+        context: &Context,
+        request: PromptRequest,
+    ) -> Result<serde_json::Value> {
         self.ensure_auth().await?;
         self.inner.lock().await.run_json(context, request).await
     }
 
-    async fn run_agent_turn(&self, context: &Context, request: AgentTurnRequest) -> Result<AgentTurnStreamResult> {
+    async fn run_agent_turn(
+        &self,
+        context: &Context,
+        request: AgentTurnRequest,
+    ) -> Result<AgentTurnStreamResult> {
         self.ensure_auth().await?;
-        self.inner.lock().await.run_agent_turn(context, request).await
+        self.inner
+            .lock()
+            .await
+            .run_agent_turn(context, request)
+            .await
     }
 
     fn token_usage_info(&self) -> Option<TokenUsageInfo> {
@@ -1657,25 +1687,33 @@ impl LLM for CopilotClient {
 
 /// 根据 model 名称和全局 Config 构造对应的 LLM 实例。
 pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn LLM + Send + Sync>> {
-    let model_config = config.models.get(model_name).ok_or_else(|| {
-        miette!("model '{}' not found in [models]", model_name)
-    })?;
-    let provider_config = config.providers.get(&model_config.provider).ok_or_else(|| {
-        miette!(
-            "provider '{}' (referenced by model '{}') not found in [providers]",
-            model_config.provider,
-            model_name
-        )
-    })?;
+    let model_config = config
+        .models
+        .get(model_name)
+        .ok_or_else(|| miette!("model '{}' not found in [models]", model_name))?;
+    let provider_config = config
+        .providers
+        .get(&model_config.provider)
+        .ok_or_else(|| {
+            miette!(
+                "provider '{}' (referenced by model '{}') not found in [providers]",
+                model_config.provider,
+                model_name
+            )
+        })?;
 
     match provider_config {
         ProviderConfig::Openai { api_key, base_url } => {
             let base = base_url.as_deref().unwrap_or("https://api.openai.com");
-            Ok(Box::new(OpenAIClient::from_parts(api_key, base, model_config)))
+            Ok(Box::new(OpenAIClient::from_parts(
+                api_key,
+                base,
+                model_config,
+            )))
         }
-        ProviderConfig::OpenaiCompatible { base_url, api_key } => {
-            Ok(Box::new(OpenAIClient::from_parts(api_key, base_url, model_config)))
-        }
+        ProviderConfig::OpenaiCompatible { base_url, api_key } => Ok(Box::new(
+            OpenAIClient::from_parts(api_key, base_url, model_config),
+        )),
         ProviderConfig::GithubCopilot { github_token } => {
             let resolved = resolve_env_var_ref(github_token);
             Ok(Box::new(CopilotClient::new(&resolved, model_config)))

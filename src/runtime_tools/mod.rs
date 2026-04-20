@@ -544,8 +544,13 @@ pub async fn execute_agent_tool_call(
         return Err(miette!("tool `{}` is not currently available", call.name));
     }
     let result = tool.execute(context, call).await?;
-    Ok(result
-        .ensure_model_content_with_budget(context.config.main_model_config().tool_output_max_tokens.max(1)))
+    Ok(result.ensure_model_content_with_budget(
+        context
+            .config
+            .main_model_config()
+            .tool_output_max_tokens
+            .max(1),
+    ))
 }
 
 fn requires_workflow_binding(context: &Context) -> bool {
