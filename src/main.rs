@@ -349,6 +349,9 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
     }
 
+    let hindsight = connect_bootstrapped_hindsight(&config).await?;
+    let hindsight_retain = hindsight.spawn_retain_worker();
+
     emit_startup_progress("[prompt-compile] loading compiled prompts before dashboard startup...");
     let mut compiled_prompts = match load_compiled_prompts_only(&config).await {
         Ok(store) => store,
@@ -427,8 +430,6 @@ async fn async_main(cli: Cli) -> Result<()> {
         .unwrap_or(&config.main_model)
         .to_string();
     let judge_client = build_llm(&judge_model_key, &config)?;
-    let hindsight = connect_bootstrapped_hindsight(&config).await?;
-    let hindsight_retain = hindsight.spawn_retain_worker();
     let execution_cwd = resolve_runtime_workspace_dir()?;
     tokio::fs::create_dir_all(&execution_cwd)
         .await
@@ -593,24 +594,151 @@ async fn async_main(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Result<HindsightClient> {
-    let mut hindsight_config = config.hindsight.clone();
-    if hindsight_config.managed {
-        // In managed mode, force base_url to match managed_port so they're
-        // always in sync even if the user configured them independently.
-        hindsight_config.base_url = format!("http://127.0.0.1:{}", hindsight_config.managed_port);
+/// Tail `~/.hindsight/profiles/<profile>.log` and forward new lines to stdout/tracing.
+/// Designed to run concurrently with `HindsightManagedServer::start()` so the user
+/// can see download/init progress in real time. Cancellation via task abort is expected.
+async fn tail_hindsight_log(profile: &str) {
+    use tokio::io::{AsyncBufReadExt, AsyncSeekExt};
 
-        let server = HindsightManagedServer::new(hindsight_config.clone());
-        // If the daemon is already running from a previous session, skip startup.
-        if server.check_health().await {
-            tracing::info!("[hindsight:managed] daemon already running, reusing");
-        } else {
-            server.start().await?;
+    let log_path = match std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+    {
+        Some(home) => home
+            .join(".hindsight")
+            .join("profiles")
+            .join(format!("{profile}.log")),
+        None => return,
+    };
+
+    // Wait up to 8 s for the log file to appear (daemon creates it on first run).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while !log_path.exists() {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    let mut file = match tokio::fs::File::open(&log_path).await {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    // Start from the end so we only show new output from this run.
+    let _ = file.seek(std::io::SeekFrom::End(0)).await;
+
+    let mut reader = tokio::io::BufReader::new(file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
+            Ok(_) => {
+                let t = line.trim();
+                if !t.is_empty() {
+                    emit_startup_progress(format!("[hindsight] {t}"));
+                }
+            }
+            Err(_) => break,
         }
     }
+}
+
+async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Result<HindsightClient> {
+    let hindsight_config = config.hindsight.clone();
+    emit_startup_progress(format!(
+        "[hindsight] initializing daemon (profile={}, port={}, bank={}/{})",
+        hindsight_config.profile,
+        hindsight_config.port,
+        hindsight_config.namespace,
+        hindsight_config.bank_id,
+    ));
+    let server =
+        HindsightManagedServer::new(hindsight_config.clone(), hindsight_llm_env_vars(config));
+    if server.check_health().await {
+        emit_startup_progress("[hindsight] daemon already running, reusing");
+    } else {
+        emit_startup_progress(
+            "[hindsight] starting daemon (first run may take a few minutes to download embedding models)...",
+        );
+        let profile = hindsight_config.profile.clone();
+        let log_tail = tokio::spawn(async move { tail_hindsight_log(&profile).await });
+        let result = server.start().await;
+        log_tail.abort();
+        result?;
+        emit_startup_progress("[hindsight] daemon ready");
+    }
+    emit_startup_progress(format!(
+        "[hindsight] connecting to bank '{}/{}'",
+        hindsight_config.namespace, hindsight_config.bank_id,
+    ));
     let hindsight = HindsightClient::connect(&hindsight_config).await?;
     hindsight.bootstrap_bank().await?;
+    emit_startup_progress("[hindsight] bank ready");
     Ok(hindsight)
+}
+
+fn hindsight_llm_env_vars(config: &crate::config::Config) -> Vec<(String, String)> {
+    use crate::config::ProviderConfig;
+    let model = config.main_model_config();
+    match config.main_provider_config() {
+        ProviderConfig::GithubCopilot { github_token } => {
+            vec![
+                ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
+                (
+                    "HINDSIGHT_API_LLM_API_KEY".into(),
+                    resolve_hindsight_env_value(github_token),
+                ),
+                ("HINDSIGHT_API_LLM_MODEL".into(), model.model_id.clone()),
+                (
+                    "HINDSIGHT_API_LLM_BASE_URL".into(),
+                    "https://api.githubcopilot.com".into(),
+                ),
+            ]
+        }
+        ProviderConfig::Openai { api_key, base_url } => {
+            let mut vars = vec![
+                ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
+                (
+                    "HINDSIGHT_API_LLM_API_KEY".into(),
+                    resolve_hindsight_env_value(api_key),
+                ),
+                ("HINDSIGHT_API_LLM_MODEL".into(), model.model_id.clone()),
+            ];
+            if let Some(url) = base_url.as_deref().filter(|u| !u.trim().is_empty()) {
+                vars.push((
+                    "HINDSIGHT_API_LLM_BASE_URL".into(),
+                    resolve_hindsight_env_value(url),
+                ));
+            }
+            vars
+        }
+        ProviderConfig::OpenaiCompatible { base_url, api_key } => {
+            vec![
+                ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
+                (
+                    "HINDSIGHT_API_LLM_API_KEY".into(),
+                    resolve_hindsight_env_value(api_key),
+                ),
+                ("HINDSIGHT_API_LLM_MODEL".into(), model.model_id.clone()),
+                (
+                    "HINDSIGHT_API_LLM_BASE_URL".into(),
+                    resolve_hindsight_env_value(base_url),
+                ),
+            ]
+        }
+    }
+}
+
+fn resolve_hindsight_env_value(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Some(inner) = trimmed.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        std::env::var(inner).unwrap_or_else(|_| trimmed.to_string())
+    } else if let Some(inner) = trimmed.strip_prefix('$') {
+        std::env::var(inner).unwrap_or_else(|_| trimmed.to_string())
+    } else {
+        trimmed.to_string()
+    }
 }
 
 async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
@@ -2548,6 +2676,24 @@ fn append_committed_activity_cells(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Config, ModelConfig, ProviderConfig};
+
+    fn config_with_main_provider(provider: ProviderConfig, model_id: &str) -> Config {
+        let mut config = Config::default();
+        config
+            .providers
+            .insert("test-provider".to_string(), provider);
+        config.models.insert(
+            "test-model".to_string(),
+            ModelConfig {
+                provider: "test-provider".to_string(),
+                model_id: model_id.to_string(),
+                ..ModelConfig::default()
+            },
+        );
+        config.main_model = "test-model".to_string();
+        config
+    }
 
     #[test]
     fn claimed_terminal_status_depends_only_on_statuses() {
@@ -2717,6 +2863,37 @@ mod tests {
             RuntimeFollowUpReason::RawStreamRequestedFollowUp.message(),
             "本次采样仍标记为 needs_follow_up；请继续推进当前 turn。"
         );
+    }
+
+    #[test]
+    fn hindsight_llm_env_vars_keep_copilot_llm_enabled() {
+        let config = config_with_main_provider(
+            ProviderConfig::GithubCopilot {
+                github_token: "ghu_test_token".to_string(),
+            },
+            "gpt-4o",
+        );
+
+        let vars: std::collections::HashMap<_, _> =
+            hindsight_llm_env_vars(&config).into_iter().collect();
+
+        assert_eq!(
+            vars.get("HINDSIGHT_API_LLM_PROVIDER").map(String::as_str),
+            Some("openai")
+        );
+        assert_eq!(
+            vars.get("HINDSIGHT_API_LLM_API_KEY").map(String::as_str),
+            Some("ghu_test_token")
+        );
+        assert_eq!(
+            vars.get("HINDSIGHT_API_LLM_MODEL").map(String::as_str),
+            Some("gpt-4o")
+        );
+        assert_eq!(
+            vars.get("HINDSIGHT_API_LLM_BASE_URL").map(String::as_str),
+            Some("https://api.githubcopilot.com")
+        );
+        assert!(!vars.contains_key("HINDSIGHT_API_SKIP_LLM_VERIFICATION"));
     }
 }
 
