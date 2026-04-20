@@ -23,7 +23,11 @@ use super::{
 };
 
 fn model_tool_output_token_budget(context: &Context) -> usize {
-    context.config.main_model_config().tool_output_max_tokens.max(1)
+    context
+        .config
+        .main_model_config()
+        .tool_output_max_tokens
+        .max(1)
 }
 
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {

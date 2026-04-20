@@ -44,10 +44,7 @@ impl HindsightManagedServer {
         self.configure_profile().await?;
         self.start_daemon().await?;
         self.wait_for_ready().await?;
-        tracing::info!(
-            "[hindsight:managed] daemon ready at {}",
-            self.base_url()
-        );
+        tracing::info!("[hindsight:managed] daemon ready at {}", self.base_url());
         Ok(())
     }
 
@@ -165,12 +162,18 @@ impl HindsightManagedServer {
             ("HINDSIGHT_API_LLM_MODEL".into(), llm.model.clone()),
         ];
         if !llm.base_url.trim().is_empty() {
-            vars.push(("HINDSIGHT_API_LLM_BASE_URL".into(), llm.base_url.trim().to_string()));
+            vars.push((
+                "HINDSIGHT_API_LLM_BASE_URL".into(),
+                llm.base_url.trim().to_string(),
+            ));
         }
         // macOS: local embedding/reranker models require CPU-only mode to avoid
         // Metal/Accelerate compatibility crashes (same workaround as hindsight-all).
         if cfg!(target_os = "macos") {
-            vars.push(("HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU".into(), "1".into()));
+            vars.push((
+                "HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU".into(),
+                "1".into(),
+            ));
             vars.push(("HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU".into(), "1".into()));
         }
         vars
@@ -178,11 +181,8 @@ impl HindsightManagedServer {
 
     async fn run_command_with_timeout(&self, mut cmd: Command, label: &str) -> Result<()> {
         cmd.kill_on_drop(false); // daemon start exits 0 once background process is running
-        let result = tokio::time::timeout(
-            Duration::from_secs(COMMAND_TIMEOUT_SECS),
-            cmd.output(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), cmd.output()).await;
 
         match result {
             Err(_) => Err(miette!(
@@ -238,9 +238,7 @@ impl HindsightManagedServer {
             attempt += 1;
             match client.get(&url).send().await {
                 Ok(r) if r.status().is_success() => {
-                    tracing::debug!(
-                        "[hindsight:managed] health check passed (attempt {attempt})"
-                    );
+                    tracing::debug!("[hindsight:managed] health check passed (attempt {attempt})");
                     return Ok(());
                 }
                 _ => {}

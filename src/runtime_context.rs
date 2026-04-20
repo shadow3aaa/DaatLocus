@@ -94,8 +94,14 @@ pub fn build_runtime_snapshot_text(
 
 pub fn runtime_request_budget_limits(context: &Context) -> RequestBudgetLimits {
     RequestBudgetLimits {
-        context_window_tokens: context.config.main_model_config().effective_context_window_tokens(),
-        auto_compact_threshold_tokens: context.config.main_model_config().auto_compact_token_limit(),
+        context_window_tokens: context
+            .config
+            .main_model_config()
+            .effective_context_window_tokens(),
+        auto_compact_threshold_tokens: context
+            .config
+            .main_model_config()
+            .auto_compact_token_limit(),
         reserved_output_tokens: context.config.main_model_config().max_completion_tokens(),
     }
 }

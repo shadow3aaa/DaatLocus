@@ -107,7 +107,11 @@ impl Default for ModelConfig {
 impl ModelConfig {
     pub fn thinking_budget(&self) -> Option<String> {
         let budget = self.thinking_budget.as_deref()?.trim();
-        if budget.is_empty() { None } else { Some(budget.to_string()) }
+        if budget.is_empty() {
+            None
+        } else {
+            Some(budget.to_string())
+        }
     }
 
     pub fn rpm(&self) -> Option<usize> {
@@ -134,18 +138,14 @@ impl ModelConfig {
 
     pub fn effective_context_window_tokens(&self) -> usize {
         let cw = self.context_window_tokens();
-        let effective = (cw as u128)
-            .saturating_mul(self.effective_context_window_percent() as u128)
-            / 100;
-        usize::try_from(effective)
-            .unwrap_or(cw)
-            .clamp(1, cw)
+        let effective =
+            (cw as u128).saturating_mul(self.effective_context_window_percent() as u128) / 100;
+        usize::try_from(effective).unwrap_or(cw).clamp(1, cw)
     }
 
     pub fn auto_compact_token_limit(&self) -> usize {
         let cw = self.context_window_tokens();
-        let default_limit =
-            usize::try_from((cw as u128).saturating_mul(9) / 10).unwrap_or(cw);
+        let default_limit = usize::try_from((cw as u128).saturating_mul(9) / 10).unwrap_or(cw);
         let configured = self.auto_compact_token_limit.unwrap_or(default_limit);
         configured
             .min(default_limit.max(1))
@@ -154,7 +154,8 @@ impl ModelConfig {
     }
 
     pub fn max_completion_tokens(&self) -> usize {
-        self.max_completion_tokens.clamp(1, self.context_window_tokens())
+        self.max_completion_tokens
+            .clamp(1, self.context_window_tokens())
     }
 }
 
@@ -260,9 +261,10 @@ impl Config {
 
     /// 校验 main_model 和 judge model 引用的 provider/model 都存在。
     pub fn validate(&self) -> Result<(), String> {
-        let main = self.models.get(&self.main_model).ok_or_else(|| {
-            format!("main_model '{}' not found in [models]", self.main_model)
-        })?;
+        let main = self
+            .models
+            .get(&self.main_model)
+            .ok_or_else(|| format!("main_model '{}' not found in [models]", self.main_model))?;
         self.providers.get(&main.provider).ok_or_else(|| {
             format!(
                 "main_model '{}' references unknown provider '{}'",
@@ -397,14 +399,17 @@ pub enum ConfigError {
 
 /// config.toml 是否已存在
 pub async fn config_file_exists() -> bool {
-    daat_locus_paths().await.config_file(CONFIG_FILE_NAME).exists()
+    daat_locus_paths()
+        .await
+        .config_file(CONFIG_FILE_NAME)
+        .exists()
 }
 
 /// 将 Config 序列化并写入 config.toml
 pub async fn write_config(config: &Config) -> Result<(), ConfigError> {
     let config_path = daat_locus_paths().await.config_file(CONFIG_FILE_NAME);
-    let toml_str = toml::to_string_pretty(config)
-        .map_err(|e| ConfigError::Syntax(e.to_string()))?;
+    let toml_str =
+        toml::to_string_pretty(config).map_err(|e| ConfigError::Syntax(e.to_string()))?;
     tokio::fs::write(&config_path, toml_str)
         .await
         .map_err(ConfigError::IO)?;

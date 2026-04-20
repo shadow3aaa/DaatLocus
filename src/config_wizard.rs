@@ -34,7 +34,10 @@ async fn run_github_device_flow() -> Result<String> {
         .post(GITHUB_DEVICE_CODE_URL)
         .header("Accept", "application/json")
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(format!("client_id={}&scope=read%3Auser", urlenc(&client_id)))
+        .body(format!(
+            "client_id={}&scope=read%3Auser",
+            urlenc(&client_id)
+        ))
         .send()
         .await
         .map_err(|e| miette!("请求 device code 失败: {e}"))?;
@@ -143,11 +146,20 @@ fn urlenc(s: &str) -> String {
 
 fn open_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(url).spawn()?.wait()?;
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()?
+        .wait()?;
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open").arg(url).spawn()?.wait()?;
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()?
+        .wait()?;
     #[cfg(target_os = "windows")]
-    std::process::Command::new("cmd").args(["/c", "start", url]).spawn()?.wait()?;
+    std::process::Command::new("cmd")
+        .args(["/c", "start", url])
+        .spawn()?
+        .wait()?;
     Ok(())
 }
 
@@ -181,8 +193,11 @@ enum ProviderKind {
 }
 
 impl ProviderKind {
-    const LABELS: &'static [&'static str] =
-        &["OpenAI", "GitHub Copilot", "OpenAI-compatible（Ollama / LMStudio / 本地）"];
+    const LABELS: &'static [&'static str] = &[
+        "OpenAI",
+        "GitHub Copilot",
+        "OpenAI-compatible（Ollama / LMStudio / 本地）",
+    ];
 
     fn from_index(i: usize) -> Self {
         match i {
@@ -282,7 +297,9 @@ async fn prompt_provider(existing_names: &[String]) -> Result<(String, ProviderC
             let github_token = match auth_method {
                 0 => run_github_device_flow().await?,
                 1 => {
-                    info("在 https://github.com/settings/tokens 创建 Classic Token，scope 选 read:user。");
+                    info(
+                        "在 https://github.com/settings/tokens 创建 Classic Token，scope 选 read:user。",
+                    );
                     Password::with_theme(&theme())
                         .with_prompt("GitHub Token（ghp_...）")
                         .interact()
@@ -363,9 +380,16 @@ fn resolve_token(raw: &str) -> String {
 
 /// 模型探测：先试 session token（内部 API，全量模型），失败降级到公共 API，再失败用静态列表。
 async fn fetch_copilot_models(github_token: &str) -> Vec<DiscoveredModel> {
-    let fallback = || COPILOT_DEFAULT_MODELS.iter()
-        .map(|s| DiscoveredModel { id: s.to_string(), context_window: None, max_output_tokens: None })
-        .collect::<Vec<_>>();
+    let fallback = || {
+        COPILOT_DEFAULT_MODELS
+            .iter()
+            .map(|s| DiscoveredModel {
+                id: s.to_string(),
+                context_window: None,
+                max_output_tokens: None,
+            })
+            .collect::<Vec<_>>()
+    };
 
     let token = resolve_token(github_token);
     if token.is_empty() {
@@ -373,24 +397,38 @@ async fn fetch_copilot_models(github_token: &str) -> Vec<DiscoveredModel> {
         return fallback();
     }
 
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(10)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
         Ok(c) => c,
-        Err(e) => { tracing::warn!("copilot model discovery: http client error: {e}"); return fallback(); }
+        Err(e) => {
+            tracing::warn!("copilot model discovery: http client error: {e}");
+            return fallback();
+        }
     };
 
     match try_fetch_via_session_token(&client, &token).await {
         Some(models) => {
-            tracing::info!("copilot model discovery: {} models via internal API", models.len());
+            tracing::info!(
+                "copilot model discovery: {} models via internal API",
+                models.len()
+            );
             models
         }
         None => {
-            tracing::warn!("copilot model discovery: session token exchange failed, using static list");
+            tracing::warn!(
+                "copilot model discovery: session token exchange failed, using static list"
+            );
             fallback()
         }
     }
 }
 
-async fn try_fetch_via_session_token(client: &reqwest::Client, github_token: &str) -> Option<Vec<DiscoveredModel>> {
+async fn try_fetch_via_session_token(
+    client: &reqwest::Client,
+    github_token: &str,
+) -> Option<Vec<DiscoveredModel>> {
     let resp = client
         .get("https://api.github.com/copilot_internal/v2/token")
         .header("Authorization", format!("Bearer {github_token}"))
@@ -398,7 +436,9 @@ async fn try_fetch_via_session_token(client: &reqwest::Client, github_token: &st
         .header("User-Agent", "GitHubCopilotChat/0.26.7")
         .header("Editor-Version", "vscode/1.96.2")
         .header("X-Github-Api-Version", "2025-04-01")
-        .send().await.ok()?;
+        .send()
+        .await
+        .ok()?;
 
     if !resp.status().is_success() {
         tracing::debug!(http_status = %resp.status(), "copilot model discovery: session token exchange failed");
@@ -408,20 +448,36 @@ async fn try_fetch_via_session_token(client: &reqwest::Client, github_token: &st
     let json: serde_json::Value = resp.json().await.ok()?;
     let session_token = json["token"].as_str()?.to_string();
 
-    let base_url = session_token.split(';').find_map(|part| {
-        let trimmed = part.trim();
-        let host = trimmed.strip_prefix("proxy-ep=").or_else(|| {
-            if trimmed.to_lowercase().starts_with("proxy-ep=") { Some(&trimmed[9..]) } else { None }
-        })?;
-        if host.is_empty() { return None; }
-        let host = if host.to_lowercase().starts_with("proxy.") {
-            format!("api.{}", &host[6..])
-        } else { host.to_string() };
-        Some(format!("https://{host}"))
-    }).unwrap_or_else(|| "https://api.individual.githubcopilot.com".to_string());
+    let base_url = session_token
+        .split(';')
+        .find_map(|part| {
+            let trimmed = part.trim();
+            let host = trimmed.strip_prefix("proxy-ep=").or_else(|| {
+                if trimmed.to_lowercase().starts_with("proxy-ep=") {
+                    Some(&trimmed[9..])
+                } else {
+                    None
+                }
+            })?;
+            if host.is_empty() {
+                return None;
+            }
+            let host = if host.to_lowercase().starts_with("proxy.") {
+                format!("api.{}", &host[6..])
+            } else {
+                host.to_string()
+            };
+            Some(format!("https://{host}"))
+        })
+        .unwrap_or_else(|| "https://api.individual.githubcopilot.com".to_string());
 
-    let models = fetch_copilot_internal_models(client, &format!("{base_url}/models"), &session_token).await;
-    if models.is_empty() { None } else { Some(models) }
+    let models =
+        fetch_copilot_internal_models(client, &format!("{base_url}/models"), &session_token).await;
+    if models.is_empty() {
+        None
+    } else {
+        Some(models)
+    }
 }
 
 /// API 返回的模型信息（context window 和 max tokens 来自响应，非推测）
@@ -435,9 +491,7 @@ struct DiscoveredModel {
 /// 从 provider 的 /v1/models 接口拉取模型列表；失败时返回空 Vec。
 async fn fetch_model_ids(provider: &ProviderConfig) -> Vec<DiscoveredModel> {
     match provider {
-        ProviderConfig::GithubCopilot { github_token } => {
-            fetch_copilot_models(github_token).await
-        }
+        ProviderConfig::GithubCopilot { github_token } => fetch_copilot_models(github_token).await,
         ProviderConfig::Openai { api_key, base_url } => {
             let base = base_url.as_deref().unwrap_or("https://api.openai.com");
             fetch_openai_models(base, api_key).await
@@ -455,13 +509,27 @@ async fn fetch_openai_models(base_url: &str, api_key: &str) -> Vec<DiscoveredMod
 
 async fn fetch_openai_models_path(url: &str, api_key: &str) -> Vec<DiscoveredModel> {
     let url = url.to_string();
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(10)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
         Ok(c) => c,
-        Err(e) => { tracing::warn!("fetch_openai_models: failed to build http client: {e}"); return vec![]; }
+        Err(e) => {
+            tracing::warn!("fetch_openai_models: failed to build http client: {e}");
+            return vec![];
+        }
     };
-    let resp = match client.get(&url).header("Authorization", format!("Bearer {api_key}")).send().await {
+    let resp = match client
+        .get(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+    {
         Ok(r) => r,
-        Err(e) => { tracing::warn!(url = %url, "fetch_openai_models: request failed: {e}"); return vec![]; }
+        Err(e) => {
+            tracing::warn!(url = %url, "fetch_openai_models: request failed: {e}");
+            return vec![];
+        }
     };
     let status = resp.status();
     if !status.is_success() {
@@ -472,17 +540,25 @@ async fn fetch_openai_models_path(url: &str, api_key: &str) -> Vec<DiscoveredMod
     parse_models_response(resp.json().await.ok())
 }
 
-async fn fetch_copilot_internal_models(client: &reqwest::Client, url: &str, session_token: &str) -> Vec<DiscoveredModel> {
+async fn fetch_copilot_internal_models(
+    client: &reqwest::Client,
+    url: &str,
+    session_token: &str,
+) -> Vec<DiscoveredModel> {
     let resp = match client
         .get(url)
         .header("Authorization", format!("Bearer {session_token}"))
         .header("User-Agent", "GitHubCopilotChat/0.26.7")
         .header("Editor-Version", "vscode/1.96.2")
         .header("X-Github-Api-Version", "2025-04-01")
-        .send().await
+        .send()
+        .await
     {
         Ok(r) => r,
-        Err(e) => { tracing::warn!(url, "copilot internal models request failed: {e}"); return vec![]; }
+        Err(e) => {
+            tracing::warn!(url, "copilot internal models request failed: {e}");
+            return vec![];
+        }
     };
     if !resp.status().is_success() {
         let s = resp.status();
@@ -505,9 +581,15 @@ fn parse_models_response(json: Option<serde_json::Value>) -> Vec<DiscoveredModel
         .filter_map(|m| {
             let id = m["id"].as_str()?.to_string();
             let limits = &m["capabilities"]["limits"];
-            let context_window = limits["max_context_window_tokens"].as_u64().map(|v| v as usize);
+            let context_window = limits["max_context_window_tokens"]
+                .as_u64()
+                .map(|v| v as usize);
             let max_output_tokens = limits["max_output_tokens"].as_u64().map(|v| v as usize);
-            Some(DiscoveredModel { id, context_window, max_output_tokens })
+            Some(DiscoveredModel {
+                id,
+                context_window,
+                max_output_tokens,
+            })
         })
         .collect();
     models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -527,8 +609,13 @@ async fn prompt_model(
     print!("  正在获取 {provider_name} 的模型列表...");
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let mut discovered = fetch_model_ids(provider).await;
-    println!("\r  {}                                    ",
-        if discovered.is_empty() { "无法获取模型列表，请手动输入" } else { "模型列表已就绪" }
+    println!(
+        "\r  {}                                    ",
+        if discovered.is_empty() {
+            "无法获取模型列表，请手动输入"
+        } else {
+            "模型列表已就绪"
+        }
     );
 
     let (model_id, api_ctx, api_out) = if discovered.is_empty() {
@@ -539,7 +626,11 @@ async fn prompt_model(
         (id, None, None)
     } else {
         const MANUAL: &str = "手动输入...";
-        let labels: Vec<String> = discovered.iter().map(|m| m.id.clone()).chain(std::iter::once(MANUAL.to_string())).collect();
+        let labels: Vec<String> = discovered
+            .iter()
+            .map(|m| m.id.clone())
+            .chain(std::iter::once(MANUAL.to_string()))
+            .collect();
 
         let idx = Select::with_theme(&theme())
             .with_prompt("选择模型")
@@ -565,7 +656,11 @@ async fn prompt_model(
     let default_ctx = api_ctx.unwrap_or(inferred_ctx);
     let default_out = api_out.unwrap_or(inferred_out);
 
-    let default_name = model_id.split(['/', ':']).last().unwrap_or(&model_id).to_string();
+    let default_name = model_id
+        .split(['/', ':'])
+        .last()
+        .unwrap_or(&model_id)
+        .to_string();
     let name: String = Input::with_theme(&theme())
         .with_prompt("Model 名称（config.toml 中的 key）")
         .default(default_name)
@@ -584,13 +679,16 @@ async fn prompt_model(
         .interact_text()
         .map_err(|e| miette!("交互中断: {e}"))?;
 
-    Ok((name, ModelConfig {
-        provider: provider_name.to_string(),
-        model_id,
-        context_window_tokens: context_window,
-        max_completion_tokens: max_completion,
-        ..ModelConfig::default()
-    }))
+    Ok((
+        name,
+        ModelConfig {
+            provider: provider_name.to_string(),
+            model_id,
+            context_window_tokens: context_window,
+            max_completion_tokens: max_completion,
+            ..ModelConfig::default()
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -630,8 +728,7 @@ pub async fn run_first_time_setup() -> Result<Config> {
 
     // === 配置第一个 Model ===
     header("步骤 2/2：添加模型");
-    let (model_name, model_config) =
-        prompt_model(&provider_name, &provider_config).await?;
+    let (model_name, model_config) = prompt_model(&provider_name, &provider_config).await?;
 
     let mut models = HashMap::new();
     models.insert(model_name.clone(), model_config);
@@ -656,7 +753,8 @@ pub async fn run_first_time_setup() -> Result<Config> {
 
 /// `config add-provider` 子命令
 pub async fn run_add_provider() -> Result<()> {
-    let mut config = crate::config::load_config().await
+    let mut config = crate::config::load_config()
+        .await
         .map_err(|e| miette!("加载配置失败: {e}"))?;
 
     header("添加 Provider");
@@ -683,7 +781,8 @@ pub async fn run_add_provider() -> Result<()> {
 
 /// `config add-model` 子命令
 pub async fn run_add_model() -> Result<()> {
-    let mut config = crate::config::load_config().await
+    let mut config = crate::config::load_config()
+        .await
         .map_err(|e| miette!("加载配置失败: {e}"))?;
 
     header("添加 Model");
@@ -736,7 +835,8 @@ pub async fn run_add_model() -> Result<()> {
 
 /// `config set-main-model` 子命令
 pub async fn run_set_main_model() -> Result<()> {
-    let mut config = crate::config::load_config().await
+    let mut config = crate::config::load_config()
+        .await
         .map_err(|e| miette!("加载配置失败: {e}"))?;
 
     let model_names: Vec<String> = config.models.keys().cloned().collect();
@@ -764,7 +864,8 @@ pub async fn run_set_main_model() -> Result<()> {
 
 /// `config show` 子命令：打印当前配置摘要（隐藏 secrets）
 pub async fn show_config() -> Result<()> {
-    let config = crate::config::load_config().await
+    let config = crate::config::load_config()
+        .await
         .map_err(|e| miette!("加载配置失败: {e}"))?;
 
     header("Providers");
@@ -789,10 +890,17 @@ pub async fn show_config() -> Result<()> {
 
     header("Models");
     for (name, model) in &config.models {
-        let main_mark = if name == &config.main_model { " ← main" } else { "" };
+        let main_mark = if name == &config.main_model {
+            " ← main"
+        } else {
+            ""
+        };
         println!(
             "  [{name}]{main_mark}  provider={}  model_id={}  ctx={}  max_out={}",
-            model.provider, model.model_id, model.context_window_tokens, model.max_completion_tokens
+            model.provider,
+            model.model_id,
+            model.context_window_tokens,
+            model.max_completion_tokens
         );
     }
 
