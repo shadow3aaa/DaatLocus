@@ -300,10 +300,11 @@ pub struct HindsightConfig {
     pub namespace: String,
     pub bank_id: String,
     pub request_timeout_secs: u64,
-    /// When true, daat-locus manages the hindsight daemon lifecycle via
-    /// `uvx hindsight-embed`. The daemon is started on boot and stopped on
-    /// exit. `base_url` / `api_key` are still used for HTTP calls but
-    /// `base_url` defaults to the managed port.
+    /// When true (default), daat-locus manages the hindsight daemon lifecycle
+    /// automatically via `uv`/`uvx hindsight-embed` — no Docker or manual
+    /// setup required. Set to false only when connecting to an externally-
+    /// managed instance (e.g. a remote server), in which case `base_url`
+    /// and `api_key` are used directly.
     pub managed: bool,
     pub managed_llm: HindsightManagedLlmConfig,
     /// Pinned version passed to `uvx hindsight-embed@<version>`.
@@ -323,7 +324,7 @@ impl Default for HindsightConfig {
             namespace: "default".to_string(),
             bank_id: "daat-locus".to_string(),
             request_timeout_secs: 180,
-            managed: false,
+            managed: true,
             managed_llm: HindsightManagedLlmConfig::default(),
             managed_embed_version: String::new(),
             managed_profile: "daat-locus".to_string(),
