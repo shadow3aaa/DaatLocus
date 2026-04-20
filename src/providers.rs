@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error as _,
     sync::{Arc, LazyLock, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -15,7 +15,7 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::{
-    config::{Config, MainModelConfig},
+    config::{Config, ModelConfig, ProviderConfig},
     context::Context,
     context_budget::{
         ContextBudgetExceededError, RequestBudgetBreakdown, RequestBudgetLimits,
@@ -32,8 +32,12 @@ use crate::{
 
 pub struct OpenAIClient {
     client: reqwest::Client,
-    api_key: String,
-    base_url: String,
+    pub(crate) api_key: String,
+    pub(crate) base_url: String,
+    /// chat completions 路径，默认 "/v1/chat/completions"
+    completions_path: &'static str,
+    /// 每次请求附带的额外 headers（用于 Copilot IDE 鉴权等）
+    extra_headers: reqwest::header::HeaderMap,
     model: String,
     temperature: f64,
     thinking_budget: Option<String>,
@@ -141,41 +145,34 @@ impl StreamingToolCallBuilder {
 }
 
 impl OpenAIClient {
-    pub fn new(config: &Config) -> Self {
-        Self::from_model_config(&config.main_model)
-    }
-
-    pub fn from_model_config(model_config: &MainModelConfig) -> Self {
+    /// 从独立的凭据 + ModelConfig 构造。
+    pub fn from_parts(api_key: &str, base_url: &str, model_config: &ModelConfig) -> Self {
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
         let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
         let client = reqwest::Client::builder()
             .timeout(request_timeout)
             .build()
             .expect("failed to build llm http client");
-        let api_key = model_config.api_key.clone();
-        let base_url = model_config.base_url.clone();
-        let model = model_config.model_name.clone();
-        let temperature = model_config.temperature;
-        let thinking_budget = model_config.thinking_budget();
-        let rpm = model_config.rpm();
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
         let max_completion_tokens = model_config.max_completion_tokens();
         Self {
             client,
-            api_key,
-            base_url,
-            model,
-            temperature,
-            thinking_budget,
-            rpm,
+            api_key: api_key.to_string(),
+            base_url: base_url.to_string(),
+            completions_path: "/v1/chat/completions",
+            extra_headers: reqwest::header::HeaderMap::new(),
+            model: model_config.model_id.clone(),
+            temperature: model_config.temperature,
+            thinking_budget: model_config.thinking_budget(),
+            rpm: model_config.rpm(),
             stream_idle_timeout,
             context_window_tokens,
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
             max_completion_tokens,
-            request_rate_limiter: shared_request_rate_limiter(model_config),
+            request_rate_limiter: shared_request_rate_limiter(base_url, &model_config.model_id, model_config.rpm()),
             adapter_state: Mutex::new(ChatCompletionsAdapterState::default()),
             token_usage: Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
@@ -187,8 +184,9 @@ impl OpenAIClient {
 
     fn url(&self) -> String {
         format!(
-            "{}/v1/chat/completions",
-            self.base_url.trim_end_matches('/')
+            "{}{}",
+            self.base_url.trim_end_matches('/'),
+            self.completions_path
         )
     }
 
@@ -288,6 +286,7 @@ impl OpenAIClient {
                 .client
                 .post(url)
                 .bearer_auth(&self.api_key)
+                .headers(self.extra_headers.clone())
                 .json(payload)
                 .send()
                 .await
@@ -1008,14 +1007,28 @@ fn apply_optional_thinking_budget(
     }
 }
 
+/// 展开 `${VAR_NAME}` 形式的环境变量引用；若无法展开则返回原值。
+fn resolve_env_var_ref(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Some(inner) = trimmed.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        std::env::var(inner).unwrap_or_else(|_| trimmed.to_string())
+    } else if let Some(inner) = trimmed.strip_prefix('$') {
+        std::env::var(inner).unwrap_or_else(|_| trimmed.to_string())
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn shared_request_rate_limiter(
-    model_config: &MainModelConfig,
+    base_url: &str,
+    model_id: &str,
+    rpm: Option<usize>,
 ) -> Option<Arc<tokio::sync::Mutex<VecDeque<Instant>>>> {
-    let rpm = model_config.rpm()?;
+    let rpm = rpm?;
     let key = format!(
         "{}\u{1f}{}\u{1f}{}",
-        model_config.base_url.trim_end_matches('/'),
-        model_config.model_name,
+        base_url.trim_end_matches('/'),
+        model_id,
         rpm
     );
     let mut registry = REQUEST_RATE_LIMITERS.lock();
@@ -1493,10 +1506,186 @@ fn default_rate_limit_backoff(attempt: usize) -> Duration {
     Duration::from_secs(seconds)
 }
 
+// ---------------------------------------------------------------------------
+// CopilotClient：首选 session token（内部 API，全模型），失败降级到公共 API
+// ---------------------------------------------------------------------------
+
+const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.26.7";
+const COPILOT_EDITOR_VERSION: &str = "vscode/1.96.2";
+const COPILOT_GITHUB_API_VERSION: &str = "2025-04-01";
+const COPILOT_INTERNAL_BASE_URL: &str = "https://api.individual.githubcopilot.com";
+
+struct CopilotSessionToken {
+    token: String,
+    base_url: String,
+    expires_at_secs: u64,
+}
+
+pub struct CopilotClient {
+    github_token: String,
+    auth_client: reqwest::Client,
+    cached: tokio::sync::Mutex<Option<CopilotSessionToken>>,
+    inner: tokio::sync::Mutex<OpenAIClient>,
+}
+
+impl CopilotClient {
+    pub fn new(github_token: &str, model_config: &ModelConfig) -> Self {
+        let auth_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("failed to build copilot auth http client");
+        let inner = OpenAIClient::from_parts("placeholder", COPILOT_INTERNAL_BASE_URL, model_config);
+        Self {
+            github_token: github_token.to_string(),
+            auth_client,
+            cached: tokio::sync::Mutex::new(None),
+            inner: tokio::sync::Mutex::new(inner),
+        }
+    }
+
+    async fn ensure_auth(&self) -> Result<()> {
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let needs_exchange = {
+            let cached = self.cached.lock().await;
+            match cached.as_ref() {
+                None => true,
+                Some(t) => now_secs + 60 >= t.expires_at_secs,
+            }
+        };
+
+        if !needs_exchange {
+            return Ok(());
+        }
+
+        let (token, base_url, expires_at_secs) = self.exchange_session_token().await?;
+        tracing::info!(base_url = %base_url, "copilot: session token acquired");
+
+        let mut hdrs = reqwest::header::HeaderMap::new();
+        hdrs.insert("Editor-Version", COPILOT_EDITOR_VERSION.parse().unwrap());
+        hdrs.insert("User-Agent", COPILOT_USER_AGENT.parse().unwrap());
+        hdrs.insert("X-Github-Api-Version", COPILOT_GITHUB_API_VERSION.parse().unwrap());
+
+        let mut inner = self.inner.lock().await;
+        inner.api_key = token.clone();
+        inner.base_url = base_url.clone();
+        inner.completions_path = "/chat/completions";
+        inner.extra_headers = hdrs;
+
+        *self.cached.lock().await = Some(CopilotSessionToken { token, base_url, expires_at_secs });
+        Ok(())
+    }
+
+    async fn exchange_session_token(&self) -> Result<(String, String, u64)> {
+        tracing::debug!("copilot: exchanging github token for session token");
+        let resp = self.auth_client
+            .get("https://api.github.com/copilot_internal/v2/token")
+            .header("Authorization", format!("Bearer {}", self.github_token))
+            .header("Accept", "application/json")
+            .header("User-Agent", COPILOT_USER_AGENT)
+            .header("Editor-Version", COPILOT_EDITOR_VERSION)
+            .header("X-Github-Api-Version", COPILOT_GITHUB_API_VERSION)
+            .send()
+            .await
+            .map_err(|e| miette!("Copilot token exchange request failed: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::debug!(http_status = %status, body = %body, "copilot session token exchange non-2xx");
+            return Err(miette!("HTTP {status}"));
+        }
+
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| miette!("parse error: {e}"))?;
+
+        let token = json["token"].as_str()
+            .ok_or_else(|| miette!("missing 'token' field"))?
+            .to_string();
+        let expires_at_secs = json["expires_at"].as_u64().unwrap_or(0);
+        let base_url = derive_copilot_base_url(&token);
+
+        Ok((token, base_url, expires_at_secs))
+    }
+}
+
+/// session token 是分号分隔的 key=value 串，从 proxy-ep 字段派生 API base URL。
+fn derive_copilot_base_url(session_token: &str) -> String {
+    session_token.split(';').find_map(|part| {
+        let trimmed = part.trim();
+        let val = trimmed.to_lowercase();
+        val.strip_prefix("proxy-ep=").and_then(|_| {
+            let host = &trimmed[9..];
+            if host.is_empty() { return None; }
+            let host = if host.to_lowercase().starts_with("proxy.") {
+                format!("api.{}", &host[6..])
+            } else {
+                host.to_string()
+            };
+            Some(format!("https://{host}"))
+        })
+    }).unwrap_or_else(|| COPILOT_INTERNAL_BASE_URL.to_string())
+}
+
+#[async_trait]
+impl LLM for CopilotClient {
+    async fn run_json(&self, context: &Context, request: PromptRequest) -> Result<serde_json::Value> {
+        self.ensure_auth().await?;
+        self.inner.lock().await.run_json(context, request).await
+    }
+
+    async fn run_agent_turn(&self, context: &Context, request: AgentTurnRequest) -> Result<AgentTurnStreamResult> {
+        self.ensure_auth().await?;
+        self.inner.lock().await.run_agent_turn(context, request).await
+    }
+
+    fn token_usage_info(&self) -> Option<TokenUsageInfo> {
+        self.inner.try_lock().ok()?.token_usage_info()
+    }
+
+    fn model_name(&self) -> Option<String> {
+        self.inner.try_lock().ok()?.model_name()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 工厂函数：根据 config 构造 LLM
+// ---------------------------------------------------------------------------
+
+/// 根据 model 名称和全局 Config 构造对应的 LLM 实例。
+pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn LLM + Send + Sync>> {
+    let model_config = config.models.get(model_name).ok_or_else(|| {
+        miette!("model '{}' not found in [models]", model_name)
+    })?;
+    let provider_config = config.providers.get(&model_config.provider).ok_or_else(|| {
+        miette!(
+            "provider '{}' (referenced by model '{}') not found in [providers]",
+            model_config.provider,
+            model_name
+        )
+    })?;
+
+    match provider_config {
+        ProviderConfig::Openai { api_key, base_url } => {
+            let base = base_url.as_deref().unwrap_or("https://api.openai.com");
+            Ok(Box::new(OpenAIClient::from_parts(api_key, base, model_config)))
+        }
+        ProviderConfig::OpenaiCompatible { base_url, api_key } => {
+            Ok(Box::new(OpenAIClient::from_parts(api_key, base_url, model_config)))
+        }
+        ProviderConfig::GithubCopilot { github_token } => {
+            let resolved = resolve_env_var_ref(github_token);
+            Ok(Box::new(CopilotClient::new(&resolved, model_config)))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::MainModelConfig;
     use crate::reasoning::runtime::{AgentToolCall, HistoryMessage};
     use serde_json::json;
 
@@ -1597,9 +1786,9 @@ mod tests {
 
     #[test]
     fn thinking_budget_is_injected_as_reasoning_effort_by_default() {
-        let mut config = MainModelConfig::default();
-        config.thinking_budget = Some("medium".to_string());
-        let client = OpenAIClient::from_model_config(&config);
+        let mut model_config = ModelConfig::default();
+        model_config.thinking_budget = Some("medium".to_string());
+        let client = OpenAIClient::from_parts("test-key", "https://api.openai.com", &model_config);
 
         let payload = build_agent_turn_payload_common(
             &client,

@@ -40,7 +40,7 @@ fn terminal_session_meta(session: &crate::terminal_app::TerminalSessionState) ->
 }
 
 fn model_tool_output_token_budget(context: &Context) -> usize {
-    context.config.main_model.tool_output_max_tokens.max(1)
+    context.config.main_model_config().tool_output_max_tokens.max(1)
 }
 
 fn resolve_terminal_path(context: &Context, raw: &str, base: Option<&Path>) -> std::path::PathBuf {

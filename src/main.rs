@@ -3,6 +3,7 @@ mod apply_patch;
 mod browser_app;
 mod commands;
 mod config;
+mod config_wizard;
 mod context;
 mod context_budget;
 mod core;
@@ -72,7 +73,7 @@ use crate::{
     memory::{Memory, RuntimeTurnDraft},
     pending_work::{PendingWork, PendingWorkQueue},
     plan::Plan,
-    providers::OpenAIClient,
+    providers::build_llm,
     reasoning::{
         compiled::{
             CompiledPromptStore, load_all_compiled_programs_for_model,
@@ -172,6 +173,11 @@ enum DaatLocusCommand {
         #[command(subcommand)]
         target: SetupTarget,
     },
+    /// 交互式配置管理（无子命令时进入菜单）
+    Config {
+        #[command(subcommand)]
+        target: Option<ConfigTarget>,
+    },
     Sleep,
     Hindsight {
         #[command(subcommand)]
@@ -181,6 +187,21 @@ enum DaatLocusCommand {
         #[command(subcommand)]
         target: InspectTarget,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigTarget {
+    /// 显示当前配置摘要（secrets 已遮蔽）
+    Show,
+    /// 交互式添加一个 provider
+    #[command(name = "add-provider")]
+    AddProvider,
+    /// 交互式添加一个 model
+    #[command(name = "add-model")]
+    AddModel,
+    /// 更改 main_model
+    #[command(name = "set-main-model")]
+    SetMainModel,
 }
 
 #[derive(Debug, Subcommand)]
@@ -232,6 +253,8 @@ fn main() {
 }
 
 async fn async_main(cli: Cli) -> Result<()> {
+    let _log_guard = init_logging().await;
+
     match cli.command.as_ref() {
         Some(DaatLocusCommand::Reset {
             target: ResetTarget::Complite,
@@ -263,16 +286,31 @@ async fn async_main(cli: Cli) -> Result<()> {
             run_browser_runtime_setup().await?;
             return Ok(());
         }
+        // Config 子命令：可能在无 config 时运行（add-provider/add-model 除外）
+        Some(DaatLocusCommand::Config { target }) => {
+            return run_config_command(target.as_ref()).await;
+        }
         _ => {}
     }
 
-    init_logging().await;
 
-    let config = match load_config().await {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::error!("failed to load config: {e}");
-            std::process::exit(1);
+    // 首次运行：config.toml 不存在时触发交互式 setup
+    let config = if !config::config_file_exists().await {
+        match config_wizard::run_first_time_setup().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("初始化失败: {e:?}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        match load_config().await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::error!("failed to load config: {e}");
+                eprintln!("配置加载失败: {e:?}");
+                std::process::exit(1);
+            }
         }
     };
 
@@ -387,9 +425,9 @@ async fn async_main(cli: Cli) -> Result<()> {
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
     bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
-    let judge_model = config.judge.resolved_model(&config.main_model);
-    let client = OpenAIClient::new(&config);
-    let judge_client = OpenAIClient::from_model_config(&judge_model);
+    let client = build_llm(&config.main_model, &config)?;
+    let judge_model_key = config.judge.model.as_deref().unwrap_or(&config.main_model).to_string();
+    let judge_client = build_llm(&judge_model_key, &config)?;
     let hindsight = connect_bootstrapped_hindsight(&config).await?;
     let hindsight_retain = hindsight.spawn_retain_worker();
     let execution_cwd = resolve_runtime_workspace_dir()?;
@@ -415,8 +453,8 @@ async fn async_main(cli: Cli) -> Result<()> {
         .unwrap();
     let sandbox_policy = sandbox_policy_for_runtime().await;
     let mut context = Context {
-        llm: Box::new(client),
-        judge_llm: Box::new(judge_client),
+        llm: client,
+        judge_llm: judge_client,
         config,
         hindsight,
         hindsight_retain,
@@ -560,6 +598,16 @@ async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Resul
     let hindsight = HindsightClient::connect(&config.hindsight).await?;
     hindsight.bootstrap_bank().await?;
     Ok(hindsight)
+}
+
+async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
+    match target {
+        None => config_wizard::run_config_menu().await,
+        Some(ConfigTarget::Show) => config_wizard::show_config().await,
+        Some(ConfigTarget::AddProvider) => config_wizard::run_add_provider().await,
+        Some(ConfigTarget::AddModel) => config_wizard::run_add_model().await,
+        Some(ConfigTarget::SetMainModel) => config_wizard::run_set_main_model().await,
+    }
 }
 
 async fn run_hindsight_command(
@@ -866,17 +914,19 @@ pub(crate) async fn build_eval_context_with_compiled(
     let apps = AppManager::new(Some(AppId::terminal()), runtime_apps.apps)
         .await
         .unwrap();
-    let judge_model = config.judge.resolved_model(&config.main_model);
-    let client = OpenAIClient::new(&config);
-    let judge_client = OpenAIClient::from_model_config(&judge_model);
+    let client = build_llm(&config.main_model, &config)
+        .unwrap_or_else(|err| panic!("failed to construct main LLM client: {err:?}"));
+    let judge_model_key = config.judge.model.as_deref().unwrap_or(&config.main_model).to_string();
+    let judge_client = build_llm(&judge_model_key, &config)
+        .unwrap_or_else(|err| panic!("failed to construct judge LLM client: {err:?}"));
     let hindsight = connect_bootstrapped_hindsight(&config)
         .await
         .unwrap_or_else(|err| panic!("failed to construct hindsight client: {err:?}"));
     let hindsight_retain = hindsight.spawn_retain_worker();
 
     Context {
-        llm: Box::new(client),
-        judge_llm: Box::new(judge_client),
+        llm: client,
+        judge_llm: judge_client,
         config,
         hindsight,
         hindsight_retain,
@@ -922,9 +972,9 @@ fn bootstrap_telegram_transport_state_from_acl(
 async fn load_compiled_prompts_only(
     config: &crate::config::Config,
 ) -> miette::Result<CompiledPromptStore> {
-    let compiled = load_all_compiled_programs_for_model(&config.main_model.model_name).await?;
+    let compiled = load_all_compiled_programs_for_model(&config.main_model_config().model_id).await?;
     let runtime_system_prompt =
-        load_compiled_runtime_system_prompt_for_model(&config.main_model.model_name).await?;
+        load_compiled_runtime_system_prompt_for_model(&config.main_model_config().model_id).await?;
     Ok(CompiledPromptStore::from_entries(compiled)
         .with_runtime_system_prompt(runtime_system_prompt))
 }
@@ -1913,7 +1963,7 @@ pub(crate) async fn execute_agent_loop_step(
                     result.history_content_with_budget(
                         &call.id,
                         &call.name,
-                        context.config.main_model.tool_output_max_tokens.max(1),
+                        context.config.main_model_config().tool_output_max_tokens.max(1),
                     ),
                     result.ui_event.clone(),
                 ));
@@ -2691,11 +2741,11 @@ async fn run_agent_turn_with_retry(
                 render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
         });
     }
-    let request_timeout = Duration::from_secs(context.config.main_model.request_timeout_secs());
+    let request_timeout = Duration::from_secs(context.config.main_model_config().request_timeout_secs());
     let model_name = context
         .llm
         .model_name()
-        .unwrap_or_else(|| context.config.main_model.model_name.clone());
+        .unwrap_or_else(|| context.config.main_model_config().model_id.clone());
     let mut attempt = 1usize;
     loop {
         set_runtime_status(tx, RuntimeStatusLevel::Debug, "Working");
@@ -2993,7 +3043,7 @@ async fn daat_locus_loop(
         // 但 active_runtime_turn 仍为 true，说明 daat_locus_loop 被 tokio::select! 取消时
         // 未能执行 active_runtime_turn = false，需主动重置。
         let stale_threshold = Duration::from_secs(
-            context.config.main_model.request_timeout_secs().saturating_add(120),
+            context.config.main_model_config().request_timeout_secs().saturating_add(120),
         );
         let is_stale = context
             .runtime_turn_started_at

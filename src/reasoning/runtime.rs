@@ -449,7 +449,7 @@ pub async fn resolve_program_tuning<P: Program>(
 
     let tuning = program.default_tuning();
     if let Err(err) = seed_compiled_program_from_tuning_for_model(
-        &context.config.main_model.model_name,
+        &context.config.main_model_config().model_id,
         program,
         &tuning,
     )

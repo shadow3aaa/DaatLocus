@@ -545,7 +545,7 @@ pub async fn execute_agent_tool_call(
     }
     let result = tool.execute(context, call).await?;
     Ok(result
-        .ensure_model_content_with_budget(context.config.main_model.tool_output_max_tokens.max(1)))
+        .ensure_model_content_with_budget(context.config.main_model_config().tool_output_max_tokens.max(1)))
 }
 
 fn requires_workflow_binding(context: &Context) -> bool {
