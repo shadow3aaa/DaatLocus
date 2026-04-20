@@ -64,7 +64,10 @@ use crate::{
     hindsight::preprocess::{
         preprocess_hindsight_retain_jobs, select_recent_trail_lines_for_hindsight,
     },
-    hindsight::{HindsightClient, HindsightRecallOptions, builtin_hindsight_mental_models},
+    hindsight::{
+        HindsightClient, HindsightRecallOptions, builtin_hindsight_mental_models,
+        managed::HindsightManagedServer,
+    },
     logging::{
         RuntimeStatusLevel, clear_runtime_status, init_logging, set_runtime_status,
         write_current_turn_messages_dump, write_current_turn_response_dump,
@@ -595,7 +598,22 @@ async fn async_main(cli: Cli) -> Result<()> {
 }
 
 async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Result<HindsightClient> {
-    let hindsight = HindsightClient::connect(&config.hindsight).await?;
+    let mut hindsight_config = config.hindsight.clone();
+    if hindsight_config.managed {
+        // In managed mode, force base_url to match managed_port so they're
+        // always in sync even if the user configured them independently.
+        hindsight_config.base_url =
+            format!("http://127.0.0.1:{}", hindsight_config.managed_port);
+
+        let server = HindsightManagedServer::new(hindsight_config.clone());
+        // If the daemon is already running from a previous session, skip startup.
+        if server.check_health().await {
+            tracing::info!("[hindsight:managed] daemon already running, reusing");
+        } else {
+            server.start().await?;
+        }
+    }
+    let hindsight = HindsightClient::connect(&hindsight_config).await?;
     hindsight.bootstrap_bank().await?;
     Ok(hindsight)
 }
