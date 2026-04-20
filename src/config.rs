@@ -295,65 +295,27 @@ impl Config {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HindsightConfig {
-    pub base_url: String,
-    pub api_key: String,
     pub namespace: String,
     pub bank_id: String,
     pub request_timeout_secs: u64,
-    /// When true (default), daat-locus manages the hindsight daemon lifecycle
-    /// automatically via `uv`/`uvx hindsight-embed` — no Docker or manual
-    /// setup required. Set to false only when connecting to an externally-
-    /// managed instance (e.g. a remote server), in which case `base_url`
-    /// and `api_key` are used directly.
-    pub managed: bool,
-    pub managed_llm: HindsightManagedLlmConfig,
     /// Pinned version passed to `uvx hindsight-embed@<version>`.
     /// Empty string means "latest".
-    pub managed_embed_version: String,
+    pub embed_version: String,
     /// Profile name used by hindsight-embed. Defaults to "daat-locus".
-    pub managed_profile: String,
-    /// Port the managed daemon listens on. Must match `base_url` when managed=true.
-    pub managed_port: u16,
+    pub profile: String,
+    /// Port the managed daemon listens on.
+    pub port: u16,
 }
 
 impl Default for HindsightConfig {
     fn default() -> Self {
         Self {
-            base_url: "http://localhost:8888".to_string(),
-            api_key: String::new(),
             namespace: "default".to_string(),
             bank_id: "daat-locus".to_string(),
             request_timeout_secs: 180,
-            managed: true,
-            managed_llm: HindsightManagedLlmConfig::default(),
-            managed_embed_version: String::new(),
-            managed_profile: "daat-locus".to_string(),
-            managed_port: 8888,
-        }
-    }
-}
-
-/// LLM configuration forwarded to the managed hindsight daemon.
-/// Separate from the main model — hindsight needs a stable long-lived key,
-/// so Copilot session tokens cannot be used here.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HindsightManagedLlmConfig {
-    /// LLM provider: "openai" (default, also covers OpenAI-compatible) or "anthropic".
-    pub provider: String,
-    pub api_key: String,
-    pub model: String,
-    /// Optional custom base URL (e.g. for a local Ollama instance).
-    pub base_url: String,
-}
-
-impl Default for HindsightManagedLlmConfig {
-    fn default() -> Self {
-        Self {
-            provider: "openai".to_string(),
-            api_key: String::new(),
-            model: "gpt-4o-mini".to_string(),
-            base_url: String::new(),
+            embed_version: String::new(),
+            profile: "daat-locus".to_string(),
+            port: 8888,
         }
     }
 }

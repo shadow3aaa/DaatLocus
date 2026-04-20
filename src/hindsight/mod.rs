@@ -359,9 +359,6 @@ struct HindsightOperationStatusResponse {
 
 impl HindsightClient {
     pub async fn connect(config: &HindsightConfig) -> Result<Self> {
-        if config.base_url.trim().is_empty() {
-            return Err(miette!("hindsight base_url must not be empty"));
-        }
         if config.bank_id.trim().is_empty() {
             return Err(miette!("hindsight bank_id must not be empty"));
         }
@@ -595,20 +592,21 @@ impl HindsightClient {
             .await
     }
 
+    fn base_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.config.port)
+    }
+
     fn bank_url(&self) -> String {
         format!(
             "{}/v1/{}/banks/{}",
-            self.config.base_url.trim_end_matches('/'),
+            self.base_url(),
             self.config.namespace,
             self.config.bank_id
         )
     }
 
     async fn detect_retain_capabilities(&self) -> Result<(HindsightRetainApi, bool)> {
-        let url = format!(
-            "{}/openapi.json",
-            self.config.base_url.trim_end_matches('/')
-        );
+        let url = format!("{}/openapi.json", self.base_url());
         let response = self
             .authorized(self.http.get(url))
             .send()
@@ -764,11 +762,7 @@ impl HindsightClient {
     }
 
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if self.config.api_key.trim().is_empty() {
-            request
-        } else {
-            request.bearer_auth(&self.config.api_key)
-        }
+        request
     }
 
     async fn expect_success(

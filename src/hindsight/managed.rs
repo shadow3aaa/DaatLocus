@@ -1,8 +1,8 @@
 //! Managed hindsight daemon lifecycle.
 //!
-//! When `HindsightConfig::managed = true`, daat-locus manages the hindsight
-//! daemon via `uvx hindsight-embed` (or a locally-downloaded `uv` binary when
-//! neither `uvx` nor `uv` is on PATH).  No pre-installed tooling is required.
+//! daat-locus always manages the hindsight daemon via `uvx hindsight-embed`
+//! (or a locally-downloaded `uv` binary when neither `uvx` nor `uv` is on
+//! PATH).  No pre-installed tooling is required.
 //!
 //! Runner resolution order:
 //!   1. `uvx` on PATH  (alias for `uv tool run`)
@@ -30,6 +30,9 @@ use crate::daat_locus_paths::daat_locus_paths;
 const HEALTH_POLL_INTERVAL_MS: u64 = 1_000;
 const HEALTH_READY_TIMEOUT_MS: u64 = 60_000;
 const COMMAND_TIMEOUT_SECS: u64 = 60;
+/// `daemon start` blocks until the daemon is fully ready, which on first run
+/// requires downloading HuggingFace embedding models (~100 MB). Allow 10 min.
+const DAEMON_START_TIMEOUT_SECS: u64 = 600;
 /// 5-minute window for the first-run uv download on slow connections.
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 
@@ -70,19 +73,23 @@ impl UvInvoker {
 
 pub struct HindsightManagedServer {
     config: HindsightConfig,
+    llm_env_vars: Vec<(String, String)>,
 }
 
 impl HindsightManagedServer {
-    pub fn new(config: HindsightConfig) -> Self {
-        Self { config }
+    pub fn new(config: HindsightConfig, llm_env_vars: Vec<(String, String)>) -> Self {
+        Self {
+            config,
+            llm_env_vars,
+        }
     }
 
     /// Start the daemon: resolve runner → configure profile → start → wait.
     pub async fn start(&self) -> Result<()> {
         tracing::info!(
             "[hindsight:managed] starting daemon (profile={}, port={})",
-            self.config.managed_profile,
-            self.config.managed_port,
+            self.config.profile,
+            self.config.port,
         );
         let invoker = self.ensure_uv_invoker().await?;
         self.configure_profile(&invoker).await?;
@@ -96,7 +103,7 @@ impl HindsightManagedServer {
     pub async fn stop(&self) {
         tracing::info!(
             "[hindsight:managed] stopping daemon (profile={})",
-            self.config.managed_profile
+            self.config.profile
         );
         let invoker = match self.ensure_uv_invoker().await {
             Ok(inv) => inv,
@@ -134,11 +141,11 @@ impl HindsightManagedServer {
     // ── helpers ───────────────────────────────────────────────────────────────
 
     fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.config.managed_port)
+        format!("http://127.0.0.1:{}", self.config.port)
     }
 
     fn package_spec(&self) -> String {
-        let ver = self.config.managed_embed_version.trim();
+        let ver = self.config.embed_version.trim();
         if ver.is_empty() {
             "hindsight-embed".to_string()
         } else {
@@ -151,23 +158,23 @@ impl HindsightManagedServer {
         vec![
             "daemon".to_string(),
             "--profile".to_string(),
-            self.config.managed_profile.clone(),
+            self.config.profile.clone(),
         ]
     }
 
     async fn configure_profile(&self, invoker: &UvInvoker) -> Result<()> {
         tracing::info!(
             "[hindsight:managed] configuring profile '{}'",
-            self.config.managed_profile
+            self.config.profile
         );
         let mut cmd = invoker.embed_command(&self.package_spec());
         cmd.args([
             "profile",
             "create",
-            &self.config.managed_profile,
+            &self.config.profile,
             "--merge",
             "--port",
-            &self.config.managed_port.to_string(),
+            &self.config.port.to_string(),
         ]);
         for (k, v) in self.profile_env_vars() {
             cmd.args(["--env", &format!("{k}={v}")]);
@@ -179,43 +186,50 @@ impl HindsightManagedServer {
         tracing::info!("[hindsight:managed] starting daemon process");
         let mut cmd = invoker.embed_command(&self.package_spec());
         cmd.args(self.daemon_profile_args()).arg("start");
-        self.run_command(cmd, "daemon.start").await
+        // Use a long timeout: first run downloads HuggingFace models (~100 MB).
+        self.run_command_with_timeout(cmd, "daemon.start", DAEMON_START_TIMEOUT_SECS)
+            .await
     }
 
     fn profile_env_vars(&self) -> Vec<(String, String)> {
-        let llm = &self.config.managed_llm;
-        let mut vars = vec![
-            ("HINDSIGHT_API_LLM_PROVIDER".into(), llm.provider.clone()),
-            ("HINDSIGHT_API_LLM_API_KEY".into(), llm.api_key.clone()),
-            ("HINDSIGHT_API_LLM_MODEL".into(), llm.model.clone()),
-        ];
-        if !llm.base_url.trim().is_empty() {
-            vars.push((
-                "HINDSIGHT_API_LLM_BASE_URL".into(),
-                llm.base_url.trim().to_string(),
-            ));
-        }
+        let mut vars = self.llm_env_vars.clone();
+        // Use a daat-locus-specific pg0 instance so the database does not
+        // collide with other apps that also use hindsight-embed.
+        // Data lands at ~/.pg0/instances/daat-locus/data/
+        vars.push((
+            "HINDSIGHT_API_DATABASE_URL".into(),
+            "pg0://daat-locus".into(),
+        ));
         // macOS: local embedding/reranker models crash without CPU-only mode
         // (Metal/Accelerate incompatibility with hindsight's bundled ONNX runtime).
         if cfg!(target_os = "macos") {
-            vars.push(("HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU".into(), "1".into()));
+            vars.push((
+                "HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU".into(),
+                "1".into(),
+            ));
             vars.push(("HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU".into(), "1".into()));
         }
         vars
     }
 
-    async fn run_command(&self, mut cmd: Command, label: &str) -> Result<()> {
+    async fn run_command(&self, cmd: Command, label: &str) -> Result<()> {
+        self.run_command_with_timeout(cmd, label, COMMAND_TIMEOUT_SECS)
+            .await
+    }
+
+    async fn run_command_with_timeout(
+        &self,
+        mut cmd: Command,
+        label: &str,
+        timeout_secs: u64,
+    ) -> Result<()> {
         // kill_on_drop(false): `daemon start` spawns a background OS process and
         // exits 0 — we must not kill the Command handle after it returns.
         cmd.kill_on_drop(false);
-        let result = tokio::time::timeout(
-            Duration::from_secs(COMMAND_TIMEOUT_SECS),
-            cmd.output(),
-        )
-        .await;
+        let result = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output()).await;
         match result {
             Err(_) => Err(miette!(
-                "[hindsight:managed] {label} timed out after {COMMAND_TIMEOUT_SECS}s"
+                "[hindsight:managed] {label} timed out after {timeout_secs}s"
             )),
             Ok(Err(err)) => Err(miette!("[hindsight:managed] {label} spawn failed: {err}")),
             Ok(Ok(out)) => {
@@ -251,17 +265,14 @@ impl HindsightManagedServer {
             .timeout(Duration::from_millis(HEALTH_POLL_INTERVAL_MS))
             .build()
             .map_err(|e| miette!("build health client: {e}"))?;
-        let deadline =
-            std::time::Instant::now() + Duration::from_millis(HEALTH_READY_TIMEOUT_MS);
+        let deadline = std::time::Instant::now() + Duration::from_millis(HEALTH_READY_TIMEOUT_MS);
         tracing::info!("[hindsight:managed] waiting for daemon at {url}");
         let mut attempt = 0u32;
         while std::time::Instant::now() < deadline {
             attempt += 1;
             if let Ok(r) = client.get(&url).send().await {
                 if r.status().is_success() {
-                    tracing::debug!(
-                        "[hindsight:managed] health check passed (attempt {attempt})"
-                    );
+                    tracing::debug!("[hindsight:managed] health check passed (attempt {attempt})");
                     return Ok(());
                 }
             }
