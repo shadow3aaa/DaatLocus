@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use serde_json::to_string_pretty;
 use tokio::sync::watch::Sender;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -15,8 +13,6 @@ use crate::{
     },
 };
 
-static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
-
 #[derive(Clone, Copy)]
 pub enum RuntimeStatusLevel {
     Debug,
@@ -25,19 +21,26 @@ pub enum RuntimeStatusLevel {
     Error,
 }
 
-pub async fn init_logging() {
+/// 初始化文件日志，返回必须持有到程序结束的 guard（drop 时 flush）。
+pub async fn init_logging() -> WorkerGuard {
     let log_dir = daat_locus_paths().await.logs_dir();
     if let Err(err) = tokio::fs::create_dir_all(&log_dir).await {
         eprintln!(
             "failed to create log directory {}: {err}",
             log_dir.display()
         );
-        return;
+        // 回退到 stderr，返回一个 /dev/null appender 的 guard
+        let (non_blocking, guard) = tracing_appender::non_blocking(std::io::sink());
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new("warn"))
+            .with_ansi(false)
+            .with_writer(non_blocking)
+            .try_init();
+        return guard;
     }
 
     let file_appender = tracing_appender::rolling::never(log_dir, "daat-locus.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-    let _ = LOG_GUARD.set(guard);
 
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("daat_locus=info,warn"));
@@ -49,6 +52,8 @@ pub async fn init_logging() {
         .with_thread_ids(true)
         .with_writer(non_blocking)
         .try_init();
+
+    guard
 }
 
 pub fn set_runtime_status(

@@ -78,7 +78,7 @@ pub fn render_dashboard_footer_context(
     let model = context
         .llm
         .model_name()
-        .unwrap_or_else(|| context.config.main_model.model_name.clone());
+        .unwrap_or_else(|| context.config.main_model_config().model_id.clone());
     let focused_app = context
         .apps
         .focused()
@@ -86,7 +86,7 @@ pub fn render_dashboard_footer_context(
         .unwrap_or_else(|| "none".to_string());
     let effective_window = context
         .config
-        .main_model
+        .main_model_config()
         .effective_context_window_tokens()
         .max(1);
     let Some(info) = context.llm.token_usage_info() else {

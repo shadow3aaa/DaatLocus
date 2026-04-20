@@ -1904,7 +1904,7 @@ async fn apply_selected_prompt_candidate(
         slugify(&candidate.title),
         chrono::Utc::now().timestamp()
     );
-    save_compiled_runtime_system_prompt_for_model(&context.config.main_model.model_name, &compiled)
+    save_compiled_runtime_system_prompt_for_model(&context.config.main_model_config().model_id, &compiled)
         .await?;
     context.compiled_prompts = context
         .compiled_prompts
