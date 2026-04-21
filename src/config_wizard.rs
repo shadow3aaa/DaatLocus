@@ -206,7 +206,6 @@ impl ProviderKind {
             _ => Self::OpenAICompatible,
         }
     }
-
 }
 
 /// 交互式填写一个 provider 的凭据，返回 (provider_name, ProviderConfig)
@@ -891,6 +890,24 @@ pub async fn show_config() -> Result<()> {
         config.judge.max_pairwise_cases
     );
 
+    header("Hindsight");
+    let hindsight_model = config
+        .hindsight
+        .model
+        .as_deref()
+        .unwrap_or(&config.main_model);
+    println!(
+        "  model={}{}  port={}  profile={}",
+        hindsight_model,
+        if config.hindsight.model.is_none() {
+            " (同 main_model)"
+        } else {
+            ""
+        },
+        config.hindsight.port,
+        config.hindsight.profile,
+    );
+
     println!();
     Ok(())
 }
@@ -921,6 +938,7 @@ pub async fn run_config_menu() -> Result<()> {
             "添加 Provider",
             "添加 Model",
             "更改 main_model",
+            "更改 hindsight 模型",
             "退出",
         ];
 
@@ -936,9 +954,55 @@ pub async fn run_config_menu() -> Result<()> {
             1 => run_add_provider().await?,
             2 => run_add_model().await?,
             3 => run_set_main_model().await?,
+            4 => run_set_hindsight_model().await?,
             _ => break,
         }
     }
+    Ok(())
+}
+
+/// `config set-hindsight-model` 子命令
+pub async fn run_set_hindsight_model() -> Result<()> {
+    let mut config = crate::config::load_config()
+        .await
+        .map_err(|e| miette!("加载配置失败: {e}"))?;
+
+    let model_names: Vec<String> = config.models.keys().cloned().collect();
+    if model_names.is_empty() {
+        return Err(miette!("没有已配置的 model，请先运行 config add-model"));
+    }
+
+    const USE_MAIN: &str = "与 main_model 相同（默认）";
+    let mut items: Vec<String> = model_names.clone();
+    items.push(USE_MAIN.to_string());
+
+    let current_idx = config
+        .hindsight
+        .model
+        .as_ref()
+        .and_then(|m| model_names.iter().position(|n| n == m))
+        .unwrap_or(items.len() - 1); // 默认选最后一项（USE_MAIN）
+
+    let idx = Select::with_theme(&theme())
+        .with_prompt("选择 hindsight 使用的模型")
+        .items(&items)
+        .default(current_idx)
+        .interact()
+        .map_err(|e| miette!("交互中断: {e}"))?;
+
+    config.hindsight.model = if items[idx] == USE_MAIN {
+        None
+    } else {
+        Some(model_names[idx].clone())
+    };
+
+    write_config(&config).await?;
+    let display = config
+        .hindsight
+        .model
+        .as_deref()
+        .unwrap_or(&config.main_model);
+    info(&format!("hindsight 模型已设为 '{display}'。"));
     Ok(())
 }
 

@@ -99,6 +99,21 @@ impl HindsightManagedServer {
         Ok(())
     }
 
+    /// Stop the daemon gracefully.
+    pub async fn stop(&self) -> Result<()> {
+        if !self.check_health().await {
+            return Ok(());
+        }
+        tracing::info!(
+            "[hindsight:managed] stopping daemon (profile={})",
+            self.config.profile,
+        );
+        let invoker = self.ensure_uv_invoker().await?;
+        let mut cmd = invoker.embed_command(&self.package_spec());
+        cmd.args(self.daemon_profile_args()).arg("stop");
+        self.run_command(cmd, "daemon.stop").await
+    }
+
     /// One-shot health probe (used to detect already-running daemon).
     pub async fn check_health(&self) -> bool {
         reqwest::Client::new()

@@ -67,8 +67,8 @@ use crate::{
     },
     dashboard::{
         DashboardActivityEvent, DashboardControlCommand, DashboardState,
-        activity_cell_from_tool_ui_event, activity_cells_from_tool_call_ui_event,
-        apply_activity_event, assistant_activity_cell, run_tui_dashboard,
+        activity_cell_from_tool_ui_event, apply_activity_event, assistant_activity_cell,
+        run_tui_dashboard,
     },
     events::{EventPayload, EventStatus, EventStore, EventView},
     hindsight::{HindsightClient, HindsightRecallOptions, managed::HindsightManagedServer},
@@ -215,6 +215,9 @@ enum ConfigTarget {
     /// 更改 main_model
     #[command(name = "set-main-model")]
     SetMainModel,
+    /// 更改 hindsight 使用的模型
+    #[command(name = "set-hindsight-model")]
+    SetHindsightModel,
 }
 
 #[derive(Debug, Subcommand)]
@@ -473,11 +476,10 @@ async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Resul
         hindsight_config.namespace,
         hindsight_config.bank_id,
     ));
-    let server =
-        HindsightManagedServer::new(
-            hindsight_config.clone(),
-            hindsight_llm_env_vars(config).await?,
-        );
+    let server = HindsightManagedServer::new(
+        hindsight_config.clone(),
+        hindsight_llm_env_vars(config).await?,
+    );
     if server.check_health().await {
         emit_startup_progress("[hindsight] daemon already running, reusing");
     } else {
@@ -495,10 +497,9 @@ async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Resul
         "[hindsight] connecting to bank '{}/{}'",
         hindsight_config.namespace, hindsight_config.bank_id,
     ));
-    let hindsight =
-        HindsightClient::connect(&hindsight_config)
-            .await?
-            .with_restart_support(hindsight_llm_env_vars(config).await?);
+    let hindsight = HindsightClient::connect(&hindsight_config)
+        .await?
+        .with_restart_support(hindsight_llm_env_vars(config).await?);
     hindsight.bootstrap_bank().await?;
     emit_startup_progress("[hindsight] bank ready");
     Ok(hindsight)
@@ -506,11 +507,12 @@ async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Resul
 
 async fn hindsight_llm_env_vars(config: &crate::config::Config) -> Result<Vec<(String, String)>> {
     use crate::config::ProviderConfig;
-    let model = config.main_model_config();
-    match config.main_provider_config() {
+    let model = config.hindsight_model_config();
+    match config.hindsight_provider_config() {
         ProviderConfig::GithubCopilot { github_token } => {
             let github_token = resolve_hindsight_env_value(github_token);
-            let (session_token, base_url, _) = exchange_copilot_session_token(&github_token).await?;
+            let (session_token, base_url, _) =
+                exchange_copilot_session_token(&github_token).await?;
             Ok(hindsight_copilot_llm_env_vars(
                 &session_token,
                 &base_url,
@@ -556,7 +558,10 @@ fn hindsight_copilot_llm_env_vars(
 ) -> Vec<(String, String)> {
     vec![
         ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
-        ("HINDSIGHT_API_LLM_API_KEY".into(), session_token.to_string()),
+        (
+            "HINDSIGHT_API_LLM_API_KEY".into(),
+            session_token.to_string(),
+        ),
         ("HINDSIGHT_API_LLM_MODEL".into(), model_id.to_string()),
         ("HINDSIGHT_API_LLM_BASE_URL".into(), base_url.to_string()),
     ]
@@ -580,6 +585,7 @@ async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
         Some(ConfigTarget::AddProvider) => config_wizard::run_add_provider().await,
         Some(ConfigTarget::AddModel) => config_wizard::run_add_model().await,
         Some(ConfigTarget::SetMainModel) => config_wizard::run_set_main_model().await,
+        Some(ConfigTarget::SetHindsightModel) => config_wizard::run_set_hindsight_model().await,
     }
 }
 
@@ -665,6 +671,8 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     // 提前加载 telegram_acl（廉价 I/O），创建所有 channel，然后立即启动 HTTP 服务器并
     // 写入 metadata 文件——这样 wait_for_daemon_ready 在耗时的 prompt compile 之前就能返回。
     let telegram_acl = TelegramAclHandle::load().await;
+    let events = EventStore::new().await;
+    let pending_work = PendingWorkQueue::new().await;
     let (tx, _rx) = tokio::sync::watch::channel(DashboardState::default());
     let (dashboard_control_tx, mut dashboard_control_rx) =
         tokio::sync::mpsc::unbounded_channel::<DashboardControlCommand>();
@@ -679,6 +687,8 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     let daemon_server = start_server(
         tx.subscribe(),
         telegram_acl.clone(),
+        events.clone(),
+        pending_work.clone(),
         dashboard_control_tx.clone(),
         daemon_control_tx.clone(),
         server_shutdown_rx,
@@ -737,8 +747,6 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
 
     let memory = Memory::new().await;
     let plan = Plan::new().await;
-    let events = EventStore::new().await;
-    let pending_work = PendingWorkQueue::new().await;
     let workflows = WorkflowStore::new().await;
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
@@ -922,7 +930,13 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
         handle.abort();
     }
     daemon_server.shutdown().await;
+    let hindsight_config = context.config.hindsight.clone();
+    let hindsight_llm_vars = hindsight_llm_env_vars(&context.config).await.unwrap_or_default();
     context.shutdown().await;
+    let managed = HindsightManagedServer::new(hindsight_config, hindsight_llm_vars);
+    if let Err(err) = managed.stop().await {
+        tracing::warn!("[hindsight] stop failed: {err}");
+    }
     clear_metadata().await;
     Ok(())
 }
@@ -1641,7 +1655,9 @@ fn maybe_start_telegram_live_draft_session(
         return None;
     }
     let event = claimed_event_views.first()?;
-    let EventPayload::TelegramIncoming(payload) = &event.payload;
+    let EventPayload::TelegramIncoming(payload) = &event.payload else {
+        return None;
+    };
     if payload.chat_kind != "private" {
         return None;
     }
@@ -2130,22 +2146,6 @@ pub(crate) async fn execute_agent_loop_step(
             {
                 committed_cells.push(cell);
             }
-            committed_cells.extend(
-                tool_call_ui_events
-                    .iter()
-                    .cloned()
-                    .filter(|event| match event {
-                        event if is_apply_patch_tool_call_event(event) => false,
-                        ToolCallUiEvent::Exec(_) => false,
-                        ToolCallUiEvent::Terminal(terminal_event) => !matches!(
-                            terminal_event.action,
-                            crate::tool_ui::TerminalUiAction::Execute
-                                | crate::tool_ui::TerminalUiAction::Continue
-                        ),
-                        _ => true,
-                    })
-                    .flat_map(activity_cells_from_tool_call_ui_event),
-            );
             append_committed_activity_cells(tx, committed_cells);
             for (call, call_ui_event) in calls.iter().zip(tool_call_ui_events.iter()) {
                 let action_record =
@@ -2725,6 +2725,13 @@ fn prompt_message_for_claimed_input(
                 payload.chat_id,
                 payload.incoming_text.trim(),
             )),
+            EventPayload::TerminalIncoming(payload) => HistoryMessage::user(format!(
+                "<world_event source=\"terminal\" event_id=\"{}\" status=\"{}\">\norigin: {}\nincoming_text: {}\n</world_event>",
+                event.event_id,
+                event.status,
+                payload.origin,
+                payload.incoming_text.trim(),
+            )),
         },
         ClaimedRuntimeInput::AppNotice { app, reason } => HistoryMessage::user(format!(
             "<app_notice app=\"{}\">\nreason: {}\n</app_notice>",
@@ -2797,14 +2804,6 @@ fn runtime_turn_follow_up_decision_from_state(
 
     RuntimeFollowUpDecision::AllowFinish
 }
-fn is_apply_patch_tool_call_event(event: &ToolCallUiEvent) -> bool {
-    match event {
-        ToolCallUiEvent::Patch(_) => true,
-        ToolCallUiEvent::Error(data) => data.title == "apply_patch",
-        _ => false,
-    }
-}
-
 fn append_committed_activity_cells(
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
     cells: Vec<crate::dashboard::ActivityCell>,
@@ -3016,14 +3015,13 @@ mod tests {
 
     #[test]
     fn hindsight_copilot_llm_env_vars_keep_copilot_llm_enabled() {
-        let vars: std::collections::HashMap<_, _> =
-            hindsight_copilot_llm_env_vars(
-                "copilot_session_token",
-                "https://api.individual.githubcopilot.com",
-                "gpt-4o",
-            )
-            .into_iter()
-            .collect();
+        let vars: std::collections::HashMap<_, _> = hindsight_copilot_llm_env_vars(
+            "copilot_session_token",
+            "https://api.individual.githubcopilot.com",
+            "gpt-4o",
+        )
+        .into_iter()
+        .collect();
 
         assert_eq!(
             vars.get("HINDSIGHT_API_LLM_PROVIDER").map(String::as_str),
@@ -3275,6 +3273,10 @@ fn current_turn_input_for_hindsight(claimed_inputs: &[ClaimedRuntimeInput]) -> O
     claimed_inputs.first().and_then(|input| match input {
         ClaimedRuntimeInput::Event(event) => match &event.payload {
             EventPayload::TelegramIncoming(payload) => {
+                let text = payload.incoming_text.trim();
+                (!text.is_empty()).then(|| text.to_string())
+            }
+            EventPayload::TerminalIncoming(payload) => {
                 let text = payload.incoming_text.trim();
                 (!text.is_empty()).then(|| text.to_string())
             }

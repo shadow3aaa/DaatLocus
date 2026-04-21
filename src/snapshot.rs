@@ -232,6 +232,26 @@ impl Display for EventSnapshot {
                             .unwrap_or_else(|| "<none>".to_string())
                     )?;
                 }
+                EventPayload::TerminalIncoming(payload) => {
+                    writeln!(
+                        f,
+                        "- {}. [{} / {}] {}: {}",
+                        event.event_id,
+                        event.source,
+                        event.status,
+                        payload.origin,
+                        summarize_inline_text(&payload.incoming_text)
+                    )?;
+                    writeln!(
+                        f,
+                        "  last_error={}",
+                        event
+                            .last_error
+                            .as_deref()
+                            .map(summarize_inline_text)
+                            .unwrap_or_else(|| "<none>".to_string())
+                    )?;
+                }
             }
         }
 
@@ -308,6 +328,19 @@ impl EventSnapshot {
                         payload.sender,
                         payload.chat_title,
                         payload.chat_id,
+                        summarize_inline_text(&payload.incoming_text)
+                    ));
+                    if let Some(error) = event.last_error.as_deref() {
+                        lines.push(format!("  last_error={}", summarize_inline_text(error)));
+                    }
+                }
+                EventPayload::TerminalIncoming(payload) => {
+                    lines.push(format!(
+                        "- {}. [{} / {}] {}: {}",
+                        event.event_id,
+                        event.source,
+                        event.status,
+                        payload.origin,
                         summarize_inline_text(&payload.incoming_text)
                     ));
                     if let Some(error) = event.last_error.as_deref() {

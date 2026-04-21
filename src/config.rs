@@ -226,6 +226,22 @@ impl Config {
             .unwrap_or_else(|| panic!("judge model '{}' not found in models", key))
     }
 
+    /// 返回 hindsight 使用的模型配置（未指定时退回主模型）。
+    pub fn hindsight_model_config(&self) -> &ModelConfig {
+        let key = self.hindsight.model.as_deref().unwrap_or(&self.main_model);
+        self.models
+            .get(key)
+            .unwrap_or_else(|| panic!("hindsight model '{}' not found in models", key))
+    }
+
+    /// 返回 hindsight 使用的 provider 配置。
+    pub fn hindsight_provider_config(&self) -> &ProviderConfig {
+        let provider_key = &self.hindsight_model_config().provider;
+        self.providers
+            .get(provider_key)
+            .unwrap_or_else(|| panic!("provider '{}' not found in providers", provider_key))
+    }
+
     /// 校验 main_model 和 judge model 引用的 provider/model 都存在。
     pub fn validate(&self) -> Result<(), String> {
         let main = self
@@ -251,6 +267,21 @@ impl Config {
             })?;
         }
 
+        if let Some(hindsight_model_key) = &self.hindsight.model {
+            let h = self.models.get(hindsight_model_key).ok_or_else(|| {
+                format!(
+                    "hindsight.model '{}' not found in [models]",
+                    hindsight_model_key
+                )
+            })?;
+            self.providers.get(&h.provider).ok_or_else(|| {
+                format!(
+                    "hindsight.model '{}' references unknown provider '{}'",
+                    hindsight_model_key, h.provider
+                )
+            })?;
+        }
+
         Ok(())
     }
 }
@@ -272,6 +303,9 @@ pub struct HindsightConfig {
     pub profile: String,
     /// Port the managed daemon listens on.
     pub port: u16,
+    /// Model used for hindsight LLM operations (reflect/retain).
+    /// None = use main_model.
+    pub model: Option<String>,
 }
 
 impl Default for HindsightConfig {
@@ -283,6 +317,7 @@ impl Default for HindsightConfig {
             embed_version: String::new(),
             profile: "daat-locus".to_string(),
             port: 8888,
+            model: None,
         }
     }
 }

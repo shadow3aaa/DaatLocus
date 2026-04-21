@@ -36,7 +36,7 @@ pub struct Event {
     pub last_error: Option<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventSource {
     Telegram,
     Terminal,
@@ -63,6 +63,7 @@ pub enum EventDisposition {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum EventPayload {
     TelegramIncoming(TelegramIncomingEvent),
+    TerminalIncoming(TerminalIncomingEvent),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -78,8 +79,19 @@ pub struct TelegramIncomingEvent {
     pub telegram_message_date: Option<i64>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TerminalIncomingEvent {
+    #[serde(default = "default_terminal_origin")]
+    pub origin: String,
+    pub incoming_text: String,
+}
+
 fn default_telegram_chat_kind() -> String {
     "unknown".to_string()
+}
+
+fn default_terminal_origin() -> String {
+    "dashboard".to_string()
 }
 
 #[derive(Clone)]
@@ -116,7 +128,11 @@ impl EventStore {
 
         if let Some(existing_id) = find_existing_telegram_event(&inner.state, &event) {
             if let Some(existing) = inner.state.events.get_mut(&existing_id) {
-                let EventPayload::TelegramIncoming(existing_payload) = &mut existing.payload;
+                let EventPayload::TelegramIncoming(existing_payload) = &mut existing.payload else {
+                    return Err(miette!(
+                        "existing telegram event payload had unexpected type"
+                    ));
+                };
                 existing_payload.chat_kind = event.chat_kind;
                 existing_payload.chat_title = event.chat_title;
                 existing_payload.sender = event.sender;
@@ -143,6 +159,26 @@ impl EventStore {
                 arrived_at_ms: now,
                 last_updated_at_ms: now,
                 payload: EventPayload::TelegramIncoming(event),
+                last_error: None,
+            },
+        );
+        persist_locked(&inner)?;
+        Ok(event_id)
+    }
+
+    pub fn register_terminal_incoming(&self, event: TerminalIncomingEvent) -> Result<Uuid> {
+        let mut inner = self.inner.lock();
+        let now = Utc::now().timestamp_millis();
+        let event_id = Uuid::new_v4();
+        inner.state.order.push(event_id);
+        inner.state.events.insert(
+            event_id,
+            Event {
+                source: EventSource::Terminal,
+                status: EventStatus::Pending,
+                arrived_at_ms: now,
+                last_updated_at_ms: now,
+                payload: EventPayload::TerminalIncoming(event),
                 last_error: None,
             },
         );
@@ -354,7 +390,9 @@ fn find_existing_telegram_event(
 ) -> Option<Uuid> {
     state.order.iter().rev().find_map(|event_id| {
         let event = state.events.get(event_id)?;
-        let EventPayload::TelegramIncoming(existing) = &event.payload;
+        let EventPayload::TelegramIncoming(existing) = &event.payload else {
+            return None;
+        };
         if existing.telegram_update_id == incoming.telegram_update_id {
             return Some(*event_id);
         }
@@ -373,4 +411,51 @@ fn persist_locked(inner: &EventStoreInner) -> Result<()> {
         .map_err(|err| miette!("serialize events failed: {err}"))?;
     std::fs::write(&inner.path, bytes).map_err(|err| miette!("write events file failed: {err}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+    fn test_store() -> EventStore {
+        let unique = TEST_EVENT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "daat-locus-events-test-{}-{}.bin",
+            std::process::id(),
+            unique
+        ));
+        let _ = std::fs::remove_file(&path);
+        EventStore {
+            inner: Arc::new(Mutex::new(EventStoreInner {
+                path,
+                state: PersistedEventStore::default(),
+            })),
+        }
+    }
+
+    #[test]
+    fn register_terminal_incoming_creates_terminal_event() {
+        let store = test_store();
+        let event_id = store
+            .register_terminal_incoming(TerminalIncomingEvent {
+                origin: "dashboard".to_string(),
+                incoming_text: "hello from terminal".to_string(),
+            })
+            .expect("register terminal event");
+        let event = store
+            .view(&event_id.to_string())
+            .expect("view terminal event");
+        assert_eq!(event.source, EventSource::Terminal);
+        assert_eq!(event.status, EventStatus::Pending);
+        match event.payload {
+            EventPayload::TerminalIncoming(payload) => {
+                assert_eq!(payload.origin, "dashboard");
+                assert_eq!(payload.incoming_text, "hello from terminal");
+            }
+            EventPayload::TelegramIncoming(_) => panic!("expected terminal payload"),
+        }
+    }
 }

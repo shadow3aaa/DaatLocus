@@ -7,6 +7,12 @@ pub enum ToolUiEvent {
     Terminal(TerminalUiData),
     Patch(PatchUiData),
     Telegram(TelegramUiData),
+    Reply(ReplyUiData),
+    Finish(ToolUiData),
+    Plan(ToolUiData),
+    CreateWorkflow(ToolUiData),
+    ActivateWorkflow(ToolUiData),
+    DeepRecall(ToolUiData),
     Work(ToolUiData),
     App(ToolUiData),
     Error(ToolUiData),
@@ -19,6 +25,11 @@ pub enum ToolCallUiEvent {
     Terminal(TerminalUiData),
     Patch(PatchUiData),
     Telegram(TelegramUiData),
+    Finish(ToolUiData),
+    Plan(ToolUiData),
+    CreateWorkflow(ToolUiData),
+    ActivateWorkflow(ToolUiData),
+    DeepRecall(ToolUiData),
     Work(ToolUiData),
     App(ToolUiData),
     Error(ToolUiData),
@@ -74,6 +85,21 @@ pub struct TelegramUiData {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplyUiData {
+    pub disposition: ReplyDisposition,
+    #[serde(default)]
+    pub message_lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyDisposition {
+    Resolved,
+    Dismissed,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TelegramUiAction {
     ListChats,
     #[serde(alias = "ReadChat")]
@@ -108,10 +134,38 @@ impl ToolUiEvent {
         })
     }
 
-    pub fn work(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::Work(ToolUiData {
+    pub fn plan(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::Plan(ToolUiData {
             title: title.into(),
             body_lines,
+        })
+    }
+
+    pub fn create_workflow(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::CreateWorkflow(ToolUiData {
+            title: title.into(),
+            body_lines,
+        })
+    }
+
+    pub fn activate_workflow(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::ActivateWorkflow(ToolUiData {
+            title: title.into(),
+            body_lines,
+        })
+    }
+
+    pub fn deep_recall(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::DeepRecall(ToolUiData {
+            title: title.into(),
+            body_lines,
+        })
+    }
+
+    pub fn reply(disposition: ReplyDisposition, message_lines: Vec<String>) -> Self {
+        Self::Reply(ReplyUiData {
+            disposition,
+            message_lines,
         })
     }
 
@@ -155,8 +209,36 @@ impl ToolCallUiEvent {
         })
     }
 
-    pub fn work(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::Work(ToolUiData {
+    pub fn finish(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::Finish(ToolUiData {
+            title: title.into(),
+            body_lines,
+        })
+    }
+
+    pub fn plan(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::Plan(ToolUiData {
+            title: title.into(),
+            body_lines,
+        })
+    }
+
+    pub fn create_workflow(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::CreateWorkflow(ToolUiData {
+            title: title.into(),
+            body_lines,
+        })
+    }
+
+    pub fn activate_workflow(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::ActivateWorkflow(ToolUiData {
+            title: title.into(),
+            body_lines,
+        })
+    }
+
+    pub fn deep_recall(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::DeepRecall(ToolUiData {
             title: title.into(),
             body_lines,
         })

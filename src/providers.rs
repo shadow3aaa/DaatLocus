@@ -1581,9 +1581,7 @@ impl CopilotClient {
         inner.completions_path = "/chat/completions";
         inner.extra_headers = hdrs;
 
-        *self.cached.lock().await = Some(CopilotSessionToken {
-            expires_at_secs,
-        });
+        *self.cached.lock().await = Some(CopilotSessionToken { expires_at_secs });
         Ok(())
     }
 
@@ -1592,9 +1590,7 @@ impl CopilotClient {
     }
 }
 
-pub async fn exchange_copilot_session_token(
-    github_token: &str,
-) -> Result<(String, String, u64)> {
+pub async fn exchange_copilot_session_token(github_token: &str) -> Result<(String, String, u64)> {
     let auth_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()

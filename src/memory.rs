@@ -1080,18 +1080,34 @@ fn summarize_tool_call_ui_events(events: &[ToolCallUiEvent]) -> String {
 fn summarize_tool_ui_event(event: &ToolUiEvent) -> String {
     match event {
         ToolUiEvent::Exec(data)
+        | ToolUiEvent::Finish(data)
+        | ToolUiEvent::Plan(data)
+        | ToolUiEvent::CreateWorkflow(data)
+        | ToolUiEvent::ActivateWorkflow(data)
+        | ToolUiEvent::DeepRecall(data)
         | ToolUiEvent::Work(data)
         | ToolUiEvent::App(data)
         | ToolUiEvent::Error(data) => summarize_runtime_inline_text(&data.title),
         ToolUiEvent::Terminal(data) => summarize_runtime_inline_text(&data.title),
         ToolUiEvent::Patch(data) => summarize_runtime_inline_text(&data.summary_line),
         ToolUiEvent::Telegram(data) => summarize_runtime_inline_text(&data.title),
+        ToolUiEvent::Reply(data) => data
+            .message_lines
+            .iter()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| summarize_runtime_inline_text(line))
+            .unwrap_or_else(|| "reply submitted".to_string()),
     }
 }
 
 fn tool_call_ui_event_title(event: &ToolCallUiEvent) -> &str {
     match event {
         ToolCallUiEvent::Exec(ToolUiData { title, .. })
+        | ToolCallUiEvent::Finish(ToolUiData { title, .. })
+        | ToolCallUiEvent::Plan(ToolUiData { title, .. })
+        | ToolCallUiEvent::CreateWorkflow(ToolUiData { title, .. })
+        | ToolCallUiEvent::ActivateWorkflow(ToolUiData { title, .. })
+        | ToolCallUiEvent::DeepRecall(ToolUiData { title, .. })
         | ToolCallUiEvent::Work(ToolUiData { title, .. })
         | ToolCallUiEvent::App(ToolUiData { title, .. })
         | ToolCallUiEvent::Error(ToolUiData { title, .. }) => title,
@@ -1596,6 +1612,11 @@ fn tool_event_is_workspace_signal(event: &ToolUiEvent) -> bool {
 fn format_tool_call_ui_event_for_memory(event: &crate::tool_ui::ToolCallUiEvent) -> String {
     match event {
         crate::tool_ui::ToolCallUiEvent::Exec(data)
+        | crate::tool_ui::ToolCallUiEvent::Finish(data)
+        | crate::tool_ui::ToolCallUiEvent::Plan(data)
+        | crate::tool_ui::ToolCallUiEvent::CreateWorkflow(data)
+        | crate::tool_ui::ToolCallUiEvent::ActivateWorkflow(data)
+        | crate::tool_ui::ToolCallUiEvent::DeepRecall(data)
         | crate::tool_ui::ToolCallUiEvent::Work(data)
         | crate::tool_ui::ToolCallUiEvent::App(data)
         | crate::tool_ui::ToolCallUiEvent::Error(data) => {

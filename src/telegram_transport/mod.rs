@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, watch};
 use crate::telegram_transport::state::TelegramTransportStateHandle;
 use crate::{
     config::TelegramConfig,
-    dashboard::{DashboardControlCommand, DashboardState, execute_remote_command},
+    dashboard::{DashboardControlCommand, DashboardState, execute_control_command},
     events::{EventStatus, EventStore, TelegramIncomingEvent},
     pending_work::{PendingWork, PendingWorkQueue},
     telegram_acl::{AccessDecision, TelegramAclHandle},
@@ -226,7 +226,7 @@ impl TelegramTransport {
     async fn handle_command_message(&self, chat_id: i64, command: &str) -> Result<()> {
         let response = {
             let state = self.command_state_rx.borrow();
-            execute_remote_command(&command, &self.acl, &state, &self.command_control_tx)
+            execute_control_command(command, &self.acl, &state, &self.command_control_tx)
         };
         self.handle
             .register_known_chat(chat_id.to_string(), chat_id.to_string());

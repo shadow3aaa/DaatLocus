@@ -1,6 +1,13 @@
 //! Dashboard: activity feed + command console.
 
+pub mod cells;
 pub mod render;
+
+pub use cells::{
+    ActivityCell, DashboardActivityEvent, LiveActivityCell, activity_cell_from_tool_ui_event,
+    apply_activity_event, assistant_activity_cell, render_activity_feed,
+    render_activity_from_messages,
+};
 
 use std::time::Duration;
 
@@ -16,12 +23,9 @@ use ratatui::{
 use crate::{
     app::AppId,
     daat_locus_paths::daat_locus_paths_sync,
-    reasoning::runtime::{AgentMessage, HistoryMessage},
+    events::{EventStore, TerminalIncomingEvent},
+    pending_work::{PendingWork, PendingWorkQueue},
     telegram_acl::{PendingAccessRequest, TelegramAclHandle},
-    tool_ui::{
-        PatchFileUiData, PatchUiData, TelegramUiAction, TelegramUiData, TerminalUiAction,
-        TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent,
-    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -49,485 +53,9 @@ pub enum DashboardControlCommand {
     ClearConversation,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LiveActivityCell {
-    pub key: String,
-    pub cell: ActivityCell,
-}
-
-pub fn render_activity_from_messages(messages: Vec<HistoryMessage>) -> Vec<ActivityCell> {
-    let cells = messages
-        .into_iter()
-        .filter(|message| !message.is_system())
-        .rev()
-        .take(12)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .flat_map(activity_cells_from_prompt_message)
-        .collect::<Vec<_>>();
-    coalesce_activity_cells(cells)
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TextActivityCell {
-    pub title: String,
-    pub body_lines: Vec<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ExecActivityCell {
-    pub title: String,
-    pub call_lines: Vec<String>,
-    pub meta: Option<String>,
-    pub output_lines: Vec<String>,
-    pub active: bool,
-    pub started_at_ms: Option<i64>,
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PatchActivityCell {
-    pub title: String,
-    pub summary_line: String,
-    pub files: Vec<PatchFileUiData>,
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TelegramActivityCell {
-    pub title: String,
-    pub detail_lines: Vec<String>,
-    pub message_lines: Vec<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ActivityCell {
-    Assistant(TextActivityCell),
-    User(TextActivityCell),
-    ToolCall(TextActivityCell),
-    ToolResult(TextActivityCell),
-    Exec(ExecActivityCell),
-    Patch(PatchActivityCell),
-    Telegram(TelegramActivityCell),
-    TerminalWait(TextActivityCell),
-    Error(TextActivityCell),
-}
-
-#[derive(Clone)]
-pub enum DashboardActivityEvent {
-    AppendCommittedCells {
-        cells: Vec<ActivityCell>,
-    },
-    ExecBegin {
-        key: String,
-        title: String,
-        call_lines: Vec<String>,
-    },
-    ExecUpdate {
-        key: String,
-        meta: Option<String>,
-        output_lines: Vec<String>,
-    },
-    ExecEnd {
-        key: String,
-    },
-}
-
 #[async_trait]
 pub trait DashboardCommandRunner: Send + Sync {
     async fn run_command(&self, command: &str, state: &DashboardState) -> String;
-}
-
-fn current_time_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
-}
-
-fn text_cell(title: impl Into<String>, body_lines: Vec<String>) -> TextActivityCell {
-    TextActivityCell {
-        title: title.into(),
-        body_lines,
-    }
-}
-
-fn tool_ui_text_cell(data: ToolUiData) -> TextActivityCell {
-    text_cell(data.title, data.body_lines)
-}
-
-fn exec_cell_from_ui(data: ToolUiData) -> ExecActivityCell {
-    let mut body_lines = data.body_lines;
-    let meta = if body_lines.is_empty() {
-        None
-    } else {
-        Some(body_lines.remove(0))
-    };
-    ExecActivityCell {
-        title: data.title,
-        call_lines: Vec::new(),
-        meta,
-        output_lines: body_lines,
-        active: false,
-        started_at_ms: None,
-    }
-}
-
-fn exec_call_cell_from_ui(data: ToolUiData) -> ExecActivityCell {
-    ExecActivityCell {
-        title: data.title,
-        call_lines: data.body_lines,
-        meta: None,
-        output_lines: Vec::new(),
-        active: true,
-        started_at_ms: Some(current_time_ms()),
-    }
-}
-
-fn patch_cell_from_ui(data: PatchUiData) -> PatchActivityCell {
-    PatchActivityCell {
-        title: data.title,
-        summary_line: data.summary_line,
-        files: data.files,
-    }
-}
-
-fn telegram_cell_from_ui(data: TelegramUiData) -> TelegramActivityCell {
-    let mut detail_lines = data.detail_lines;
-    if detail_lines.is_empty() {
-        detail_lines.push(match data.action {
-            TelegramUiAction::ListChats => "list chats".to_string(),
-            TelegramUiAction::ReadHistory => "read history".to_string(),
-            TelegramUiAction::SelectChat => "select chat".to_string(),
-            TelegramUiAction::SendMessage => "send message".to_string(),
-            TelegramUiAction::ResolveChat => "resolve chat".to_string(),
-        });
-    }
-    TelegramActivityCell {
-        title: data.title,
-        detail_lines,
-        message_lines: data.message_lines,
-    }
-}
-
-fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<ActivityCell> {
-    match &message.message {
-        AgentMessage::Assistant { content } => {
-            let mut cells = Vec::new();
-            if !content.trim().is_empty() {
-                cells.push(ActivityCell::Assistant(text_cell(
-                    first_line_or_fallback(content, "assistant"),
-                    remaining_lines_with_limit(content, 8),
-                )));
-            }
-            if !message.tool_call_ui_events.is_empty() {
-                cells.extend(
-                    message
-                        .tool_call_ui_events
-                        .into_iter()
-                        .flat_map(activity_cells_from_tool_call_ui_event),
-                );
-                return cells;
-            }
-            if content.starts_with("工具调用失败") || content.starts_with("tool loop 调用失败")
-            {
-                return vec![ActivityCell::Error(text_cell(
-                    first_line_or_fallback(content, "tool invocation error"),
-                    remaining_lines_with_limit(content, 24),
-                ))];
-            }
-            cells
-        }
-        AgentMessage::AssistantToolCallProtocol { .. } => message
-            .tool_call_ui_events
-            .into_iter()
-            .flat_map(activity_cells_from_tool_call_ui_event)
-            .collect(),
-        AgentMessage::Tool { .. } => vec![activity_cell_from_tool_ui_event(
-            message
-                .tool_ui_event
-                .expect("tool history messages must carry ToolUiEvent"),
-        )],
-        AgentMessage::User { content } => vec![ActivityCell::User(text_cell(
-            first_line_or_fallback(content, "user"),
-            remaining_lines_with_limit(content, 8),
-        ))],
-        AgentMessage::System { .. } => Vec::new(),
-    }
-}
-
-pub fn activity_cells_from_tool_call_ui_event(ui_event: ToolCallUiEvent) -> Vec<ActivityCell> {
-    match ui_event {
-        ToolCallUiEvent::Exec(event) => {
-            vec![ActivityCell::Exec(exec_call_cell_from_ui(ToolUiData {
-                title: event.title,
-                body_lines: event.body_lines,
-            }))]
-        }
-        ToolCallUiEvent::Terminal(event) => {
-            if matches!(event.action, TerminalUiAction::Poll) {
-                Vec::new()
-            } else {
-                vec![ActivityCell::Exec(exec_call_cell_from_terminal_ui(event))]
-            }
-        }
-        ToolCallUiEvent::Patch(event) => vec![ActivityCell::Patch(patch_cell_from_ui(event))],
-        ToolCallUiEvent::Telegram(event) => {
-            vec![ActivityCell::Telegram(telegram_cell_from_ui(event))]
-        }
-        ToolCallUiEvent::Work(event) | ToolCallUiEvent::App(event) => {
-            vec![ActivityCell::ToolCall(tool_ui_text_cell(ToolUiData {
-                title: event.title,
-                body_lines: event.body_lines,
-            }))]
-        }
-        ToolCallUiEvent::Error(event) => vec![ActivityCell::Error(tool_ui_text_cell(ToolUiData {
-            title: event.title,
-            body_lines: event.body_lines,
-        }))],
-    }
-}
-
-pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivityEvent) {
-    match event {
-        DashboardActivityEvent::AppendCommittedCells { mut cells } => {
-            state.activity_cells.append(&mut cells);
-            state.activity_cells = coalesce_activity_cells(state.activity_cells.clone());
-        }
-        DashboardActivityEvent::ExecBegin {
-            key,
-            title,
-            call_lines,
-        } => upsert_live_activity_cell(
-            &mut state.live_activity_cells,
-            LiveActivityCell {
-                key,
-                cell: ActivityCell::Exec(ExecActivityCell {
-                    title,
-                    call_lines,
-                    meta: None,
-                    output_lines: Vec::new(),
-                    active: true,
-                    started_at_ms: Some(current_time_ms()),
-                }),
-            },
-        ),
-        DashboardActivityEvent::ExecUpdate {
-            key,
-            meta,
-            output_lines,
-        } => upsert_live_activity_cell(
-            &mut state.live_activity_cells,
-            LiveActivityCell {
-                key,
-                cell: ActivityCell::Exec(ExecActivityCell {
-                    title: String::new(),
-                    call_lines: Vec::new(),
-                    meta,
-                    output_lines,
-                    active: true,
-                    started_at_ms: None,
-                }),
-            },
-        ),
-        DashboardActivityEvent::ExecEnd { key } => {
-            state.live_activity_cells.retain(|cell| cell.key != key);
-        }
-    }
-}
-
-pub fn assistant_activity_cell(content: &str) -> Option<ActivityCell> {
-    if content.trim().is_empty() {
-        return None;
-    }
-    if content.starts_with("工具调用失败") || content.starts_with("tool loop 调用失败") {
-        return Some(ActivityCell::Error(text_cell(
-            first_line_or_fallback(content, "tool invocation error"),
-            remaining_lines_with_limit(content, 24),
-        )));
-    }
-    Some(ActivityCell::Assistant(text_cell(
-        first_line_or_fallback(content, "assistant"),
-        remaining_lines_with_limit(content, 8),
-    )))
-}
-
-fn upsert_live_activity_cell(cells: &mut Vec<LiveActivityCell>, incoming: LiveActivityCell) {
-    if let Some(existing) = cells.iter_mut().find(|cell| cell.key == incoming.key) {
-        match (&mut existing.cell, incoming.cell) {
-            (ActivityCell::Exec(existing_exec), ActivityCell::Exec(incoming_exec)) => {
-                if !incoming_exec.title.is_empty() {
-                    existing_exec.title = incoming_exec.title;
-                }
-                if !incoming_exec.call_lines.is_empty() {
-                    existing_exec.call_lines = incoming_exec.call_lines;
-                }
-                if incoming_exec.meta.is_some() {
-                    existing_exec.meta = incoming_exec.meta;
-                }
-                if !incoming_exec.output_lines.is_empty() {
-                    existing_exec.output_lines = incoming_exec.output_lines;
-                }
-                existing_exec.active = incoming_exec.active;
-                if existing_exec.started_at_ms.is_none() {
-                    existing_exec.started_at_ms = incoming_exec.started_at_ms;
-                }
-            }
-            (slot, cell) => *slot = cell,
-        }
-    } else {
-        cells.push(incoming);
-    }
-}
-
-pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> ActivityCell {
-    match ui_event {
-        ToolUiEvent::Exec(event) => ActivityCell::Exec(exec_cell_from_ui(ToolUiData {
-            title: event.title,
-            body_lines: event.body_lines,
-        })),
-        ToolUiEvent::Terminal(event) => {
-            if matches!(event.action, TerminalUiAction::Poll) {
-                ActivityCell::TerminalWait(text_cell(event.title, event.body_lines))
-            } else {
-                ActivityCell::Exec(exec_cell_from_terminal_ui(event))
-            }
-        }
-        ToolUiEvent::Patch(event) => ActivityCell::Patch(patch_cell_from_ui(event)),
-        ToolUiEvent::Telegram(event) => ActivityCell::Telegram(telegram_cell_from_ui(event)),
-        ToolUiEvent::Work(event) | ToolUiEvent::App(event) => {
-            ActivityCell::ToolResult(tool_ui_text_cell(ToolUiData {
-                title: event.title,
-                body_lines: event.body_lines,
-            }))
-        }
-        ToolUiEvent::Error(event) => ActivityCell::Error(tool_ui_text_cell(ToolUiData {
-            title: event.title,
-            body_lines: event.body_lines,
-        })),
-    }
-}
-
-fn exec_call_cell_from_terminal_ui(data: TerminalUiData) -> ExecActivityCell {
-    ExecActivityCell {
-        title: data.title,
-        call_lines: data.body_lines,
-        meta: None,
-        output_lines: Vec::new(),
-        active: !matches!(data.action, TerminalUiAction::Terminate),
-        started_at_ms: if matches!(data.action, TerminalUiAction::Terminate) {
-            None
-        } else {
-            Some(current_time_ms())
-        },
-    }
-}
-
-fn exec_cell_from_terminal_ui(data: TerminalUiData) -> ExecActivityCell {
-    let mut body_lines = data.body_lines;
-    let meta = if body_lines.is_empty() {
-        None
-    } else {
-        Some(body_lines.remove(0))
-    };
-    ExecActivityCell {
-        title: data.title,
-        call_lines: Vec::new(),
-        meta,
-        output_lines: body_lines,
-        active: false,
-        started_at_ms: None,
-    }
-}
-
-fn first_line_or_fallback<'a>(content: &'a str, fallback: &'a str) -> &'a str {
-    content
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or(fallback)
-}
-
-fn remaining_lines_with_limit(content: &str, limit: usize) -> Vec<String> {
-    let mut lines = content.lines();
-    let _ = lines.next();
-    lines
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .take(limit)
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn coalesce_activity_cells(cells: Vec<ActivityCell>) -> Vec<ActivityCell> {
-    let mut merged: Vec<ActivityCell> = Vec::new();
-    for cell in cells {
-        if let Some(last) = merged.last_mut() {
-            let same_exact = *last == cell;
-            let same_exec_pair = matches!(
-                (&mut *last, &cell),
-                (ActivityCell::Exec(last_exec), ActivityCell::Exec(new_exec))
-                    if last_exec.title == new_exec.title
-            );
-            let same_error_family = matches!(
-                (&*last, &cell),
-                (ActivityCell::Error(last_error), ActivityCell::Error(new_error))
-                    if strip_repeated_suffix(&last_error.title) == new_error.title
-            );
-            if same_exact || same_error_family || same_exec_pair {
-                if same_exec_pair {
-                    if let (ActivityCell::Exec(last_exec), ActivityCell::Exec(new_exec)) =
-                        (&mut *last, cell)
-                    {
-                        if !new_exec.call_lines.is_empty() {
-                            last_exec.call_lines.extend(new_exec.call_lines);
-                        }
-                        if new_exec.meta.is_some() {
-                            last_exec.meta = new_exec.meta;
-                        }
-                        last_exec.output_lines = new_exec.output_lines;
-                        last_exec.active = new_exec.active;
-                        if new_exec.started_at_ms.is_some() {
-                            last_exec.started_at_ms = new_exec.started_at_ms;
-                        } else if !last_exec.active {
-                            last_exec.started_at_ms = None;
-                        }
-                    }
-                    continue;
-                }
-                if let ActivityCell::Error(last_error) = last {
-                    if let Some((base, count)) = parse_repeated_suffix(&last_error.title) {
-                        last_error.title = format!("{base} (x{})", count + 1);
-                    } else {
-                        last_error.title = format!("{} (x2)", last_error.title);
-                    }
-                    if same_error_family && let ActivityCell::Error(new_error) = cell {
-                        last_error.body_lines = new_error.body_lines;
-                    }
-                }
-                continue;
-            }
-        }
-        merged.push(cell);
-    }
-    merged
-}
-
-fn parse_repeated_suffix(title: &str) -> Option<(String, usize)> {
-    let marker = " (x";
-    let start = title.rfind(marker)?;
-    if !title.ends_with(')') {
-        return None;
-    }
-    let count = title[start + marker.len()..title.len() - 1]
-        .parse::<usize>()
-        .ok()?;
-    Some((title[..start].to_string(), count))
-}
-
-fn strip_repeated_suffix(title: &str) -> String {
-    parse_repeated_suffix(title)
-        .map(|(base, _)| base)
-        .unwrap_or_else(|| title.to_string())
 }
 
 struct CommandOverlay {
@@ -1311,17 +839,21 @@ pub async fn run_tui_dashboard(
                         command_popup_scroll = 0;
                         continue;
                     }
-                    let command = command_input.trim().to_string();
-                    if !command.is_empty() {
-                        if matches!(command.as_str(), "quit" | "q" | "exit") {
+                    let input = command_input.trim().to_string();
+                    if !input.is_empty() {
+                        if matches!(dashboard_command_body(&input), Some("quit" | "q" | "exit")) {
                             break;
                         }
-                        let response = command_runner.run_command(&command, &state).await;
-                        command_overlay = Some(CommandOverlay {
-                            title: command.to_uppercase(),
-                            text: response,
-                            scroll: 0,
-                        });
+                        let response = command_runner.run_command(&input, &state).await;
+                        if is_dashboard_command_input(&input) {
+                            command_overlay = Some(CommandOverlay {
+                                title: input.to_uppercase(),
+                                text: response,
+                                scroll: 0,
+                            });
+                        } else {
+                            command_overlay = None;
+                        }
                     }
                     command_input.clear();
                     command_popup_selection = 0;
@@ -1421,7 +953,7 @@ fn execute_dashboard_command(
     }
 }
 
-pub(crate) fn execute_remote_command(
+pub(crate) fn execute_control_command(
     command: &str,
     telegram_acl: &TelegramAclHandle,
     state: &DashboardState,
@@ -1448,6 +980,41 @@ pub(crate) fn execute_remote_command(
     }
 }
 
+pub(crate) fn execute_remote_command(
+    input: &str,
+    telegram_acl: &TelegramAclHandle,
+    events: &EventStore,
+    pending_work: &PendingWorkQueue,
+    state: &DashboardState,
+    control_tx: &tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
+) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return "empty input".to_string();
+    }
+    let Some(command) = dashboard_command_body(trimmed) else {
+        return enqueue_terminal_message(events, pending_work, trimmed);
+    };
+    execute_control_command(command, telegram_acl, state, control_tx)
+}
+
+fn enqueue_terminal_message(
+    events: &EventStore,
+    pending_work: &PendingWorkQueue,
+    input: &str,
+) -> String {
+    match events.register_terminal_incoming(TerminalIncomingEvent {
+        origin: "dashboard".to_string(),
+        incoming_text: input.to_string(),
+    }) {
+        Ok(event_id) => match pending_work.enqueue(PendingWork::Event { event_id }) {
+            Ok(_) => format!("queued terminal message as event {event_id}"),
+            Err(err) => format!("failed to queue terminal message {event_id}: {err}"),
+        },
+        Err(err) => format!("failed to register terminal message: {err}"),
+    }
+}
+
 fn panel(title: impl Into<Line<'static>>) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -1460,425 +1027,6 @@ fn panel(title: impl Into<Line<'static>>) -> Block<'static> {
                 .add_modifier(Modifier::BOLD),
         )
         .padding(Padding::new(1, 1, 0, 0))
-}
-
-fn render_activity_feed(
-    f: &mut Frame,
-    area: Rect,
-    cells: &[ActivityCell],
-    live_cells: &[LiveActivityCell],
-) {
-    let lines = if cells.is_empty() && live_cells.is_empty() {
-        vec![Line::from(vec![Span::styled(
-            "No activity yet",
-            Style::default().fg(Color::DarkGray),
-        )])]
-    } else {
-        let mut visible_cells = cells.to_vec();
-        visible_cells.extend(live_cells.iter().map(|cell| cell.cell.clone()));
-        let mut lines = Vec::new();
-        for (idx, cell) in visible_cells.iter().enumerate() {
-            lines.extend(render_activity_cell_lines(cell));
-            if idx + 1 < visible_cells.len() {
-                lines.push(Line::from(""));
-            }
-        }
-        lines
-    };
-    let text = if lines.is_empty() {
-        Text::from(Line::from(vec![Span::styled(
-            "No activity yet",
-            Style::default().fg(Color::DarkGray),
-        )]))
-    } else {
-        Text::from(lines)
-    };
-    let inner = Rect {
-        x: area.x.saturating_add(1),
-        y: area.y,
-        width: area.width.saturating_sub(2),
-        height: area.height,
-    };
-    let max_scroll = text
-        .lines
-        .len()
-        .saturating_sub(inner.height.saturating_sub(1) as usize) as u16;
-    let widget = Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .scroll((max_scroll, 0));
-    f.render_widget(widget, inner);
-}
-
-fn render_activity_cell_lines(cell: &ActivityCell) -> Vec<Line<'static>> {
-    match cell {
-        ActivityCell::Exec(cell) => render_exec_activity_cell(cell),
-        ActivityCell::Patch(cell) => render_patch_activity_cell(cell),
-        ActivityCell::ToolCall(cell) => render_tool_call_activity_cell(cell),
-        ActivityCell::ToolResult(cell) => render_tool_result_activity_cell(cell),
-        ActivityCell::Assistant(cell) => render_assistant_activity_cell(cell),
-        ActivityCell::User(cell) => render_user_activity_cell(cell),
-        ActivityCell::Telegram(cell) => render_telegram_activity_cell(cell),
-        ActivityCell::TerminalWait(cell) => render_terminal_wait_activity_cell(cell),
-        ActivityCell::Error(cell) => render_error_activity_cell(cell),
-    }
-}
-
-fn render_assistant_activity_cell(cell: &TextActivityCell) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "›",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            cell.title.clone(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    for line in cell.body_lines.iter().take(8) {
-        lines.push(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(line.to_string(), Style::default().fg(Color::Gray)),
-        ]));
-    }
-    lines
-}
-
-fn render_tool_call_activity_cell(cell: &TextActivityCell) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "→",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            cell.title.clone(),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    for line in cell.body_lines.iter().take(6) {
-        lines.push(Line::from(vec![
-            Span::raw("   "),
-            Span::styled("· ", Style::default().fg(Color::DarkGray)),
-            Span::styled(line.to_string(), Style::default().fg(Color::Gray)),
-        ]));
-    }
-    lines
-}
-
-fn render_exec_activity_cell(cell: &ExecActivityCell) -> Vec<Line<'static>> {
-    let elapsed = cell.started_at_ms.and_then(|started_at_ms| {
-        let now_ms = current_time_ms();
-        if now_ms >= started_at_ms {
-            Some(Duration::from_millis((now_ms - started_at_ms) as u64))
-        } else {
-            None
-        }
-    });
-    let exit_code = cell.meta.as_deref().and_then(parse_exit_code_from_meta);
-    let (indicator, indicator_style) = if cell.active {
-        (
-            exec_spinner(elapsed),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else if exit_code == Some(0) {
-        (
-            "•".to_string(),
-            Style::default()
-                .fg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else if exit_code.is_some() {
-        (
-            "•".to_string(),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )
-    } else {
-        (
-            "•".to_string(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-    };
-    let verb = if cell.active { "Running" } else { "Ran" };
-    let mut lines = vec![Line::from(vec![
-        Span::styled(indicator, indicator_style),
-        Span::raw("  "),
-        Span::styled(
-            verb,
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(cell.title.clone(), Style::default().fg(Color::White)),
-    ])];
-    if cell.active && cell.output_lines.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("  └ ", Style::default().fg(Color::DarkGray)),
-            Span::styled("running...", Style::default().fg(Color::DarkGray)),
-        ]));
-    }
-    let rendered_output = if cell.output_lines.is_empty() && !cell.active {
-        vec!["(no output)".to_string()]
-    } else {
-        truncate_lines_middle(&cell.output_lines, 4, 4)
-    };
-    for (index, line) in rendered_output.into_iter().enumerate() {
-        let style = if line.starts_with("… +") {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                if index == 0 { "  └ " } else { "    " },
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(line, style),
-        ]));
-    }
-    lines
-}
-
-fn exec_spinner(elapsed: Option<Duration>) -> String {
-    const FRAMES: &[&str] = &["•", "◦", "▪", "◦"];
-    let index = elapsed
-        .map(|duration| ((duration.as_millis() / 200) as usize) % FRAMES.len())
-        .unwrap_or(0);
-    FRAMES[index].to_string()
-}
-
-fn parse_exit_code_from_meta(meta: &str) -> Option<i32> {
-    let exit = meta
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("exit="))?;
-    if exit == "-" {
-        None
-    } else {
-        exit.parse::<i32>().ok()
-    }
-}
-
-fn render_patch_activity_cell(cell: &PatchActivityCell) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "Δ",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            cell.title.clone(),
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    lines.push(Line::from(vec![
-        Span::raw("   "),
-        Span::styled(
-            cell.summary_line.clone(),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
-    for (index, file) in limit_patch_files(&cell.files, 8).into_iter().enumerate() {
-        if index > 0 {
-            lines.push(Line::from(""));
-        }
-        let (marker, label, style) = match file.operation.as_str() {
-            "add" => ("+", "added", Style::default().fg(Color::LightGreen)),
-            "delete" => ("-", "deleted", Style::default().fg(Color::LightRed)),
-            "update" => ("~", "updated", Style::default().fg(Color::Yellow)),
-            _ => ("·", "summary", Style::default().fg(Color::DarkGray)),
-        };
-        lines.push(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(format!("{marker} "), style.add_modifier(Modifier::BOLD)),
-            Span::styled(file.path.clone(), style.add_modifier(Modifier::BOLD)),
-        ]));
-        if file.operation == "summary" {
-            continue;
-        }
-        lines.push(Line::from(vec![
-            Span::raw("     "),
-            Span::styled(
-                format!("{label}  +{} -{}", file.added_lines, file.removed_lines),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-    }
-    lines
-}
-
-fn render_telegram_activity_cell(cell: &TelegramActivityCell) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "◦",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            cell.title.clone(),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    for line in cell.detail_lines.iter().take(6) {
-        lines.push(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(line.to_string(), Style::default().fg(Color::Gray)),
-        ]));
-    }
-    for (index, line) in cell.message_lines.iter().take(6).enumerate() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                if index == 0 { "  └ " } else { "    " },
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(line.to_string(), Style::default().fg(Color::White)),
-        ]));
-    }
-    lines
-}
-
-fn render_terminal_wait_activity_cell(cell: &TextActivityCell) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "•",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            cell.title.clone(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    for line in cell.body_lines.iter().take(6) {
-        lines.push(Line::from(vec![
-            Span::styled("  └ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(line.to_string(), Style::default().fg(Color::Gray)),
-        ]));
-    }
-    lines
-}
-
-fn truncate_lines_middle(lines: &[String], head: usize, tail: usize) -> Vec<String> {
-    if lines.len() <= head + tail + 1 {
-        return lines.to_vec();
-    }
-    let mut out = Vec::with_capacity(head + tail + 1);
-    out.extend(lines.iter().take(head).cloned());
-    out.push(format!(
-        "… +{} lines",
-        lines.len().saturating_sub(head + tail)
-    ));
-    out.extend(lines.iter().skip(lines.len().saturating_sub(tail)).cloned());
-    out
-}
-
-fn limit_patch_files(files: &[PatchFileUiData], keep: usize) -> Vec<PatchFileUiData> {
-    if files.len() <= keep {
-        return files.to_vec();
-    }
-    let mut out = files[..keep].to_vec();
-    out.push(PatchFileUiData {
-        path: format!("… +{} files", files.len() - keep),
-        operation: "summary".to_string(),
-        added_lines: 0,
-        removed_lines: 0,
-    });
-    out
-}
-
-fn render_tool_result_activity_cell(cell: &TextActivityCell) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "←",
-            Style::default()
-                .fg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            cell.title.clone(),
-            Style::default()
-                .fg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    for line in cell.body_lines.iter().take(8) {
-        lines.push(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(line.to_string(), Style::default().fg(Color::Gray)),
-        ]));
-    }
-    lines
-}
-
-fn render_user_activity_cell(cell: &TextActivityCell) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "•",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            cell.title.clone(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    for line in cell.body_lines.iter().take(6) {
-        lines.push(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(line.to_string(), Style::default().fg(Color::Gray)),
-        ]));
-    }
-    lines
-}
-
-fn render_error_activity_cell(cell: &TextActivityCell) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "!",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            cell.title.clone(),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    for line in cell.body_lines.iter().take(12) {
-        lines.push(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(line.to_string(), Style::default().fg(Color::LightRed)),
-        ]));
-    }
-    lines
 }
 
 fn render_command_overlay(f: &mut Frame, area: Rect, overlay: &CommandOverlay) {
@@ -2094,7 +1242,7 @@ fn render_command_bar(
         Span::raw(" "),
         Span::styled(
             if input.is_empty() {
-                "type a command".to_string()
+                "type a message, or /command".to_string()
             } else {
                 input.to_string()
             },
@@ -2215,15 +1363,31 @@ fn selected_command_completion(
     Some(matches[index].completion.clone())
 }
 
+fn dashboard_command_body(input: &str) -> Option<&str> {
+    let stripped = input.trim_start().strip_prefix('/')?.trim();
+    (!stripped.is_empty()).then_some(stripped)
+}
+
+fn command_completion_body(input: &str) -> Option<&str> {
+    input.trim_start().strip_prefix('/')
+}
+
+fn is_dashboard_command_input(input: &str) -> bool {
+    dashboard_command_body(input).is_some()
+}
+
 fn matching_commands(input: &str, context: &DashboardCommandContext<'_>) -> Vec<CommandSuggestion> {
-    let trimmed = input.trim();
-    let trailing_space = input.ends_with(' ');
+    let Some(command_input) = command_completion_body(input) else {
+        return Vec::new();
+    };
+    let trimmed = command_input.trim();
+    let trailing_space = command_input.ends_with(' ');
     if trimmed.is_empty() {
         return dashboard_commands()
             .iter()
             .map(|command| CommandSuggestion {
                 display: command.usage().to_string(),
-                completion: command.primary_verb().to_string(),
+                completion: format!("/{}", command.primary_verb()),
                 description: command.description().to_string(),
             })
             .collect::<Vec<_>>();
@@ -2256,7 +1420,7 @@ fn matching_commands(input: &str, context: &DashboardCommandContext<'_>) -> Vec<
                     .filter(|subcommand| subcommand.name().starts_with(prefix))
                     .map(|subcommand| CommandSuggestion {
                         display: subcommand.usage().to_string(),
-                        completion: format!("{} {}", command.primary_verb(), subcommand.name()),
+                        completion: format!("/{} {}", command.primary_verb(), subcommand.name()),
                         description: subcommand.description().to_string(),
                     })
                     .collect::<Vec<_>>();
@@ -2285,7 +1449,7 @@ fn matching_commands(input: &str, context: &DashboardCommandContext<'_>) -> Vec<
         .filter(|command| command.primary_verb().starts_with(parts[0]))
         .map(|command| CommandSuggestion {
             display: command.usage().to_string(),
-            completion: command.primary_verb().to_string(),
+            completion: format!("/{}", command.primary_verb()),
             description: command.description().to_string(),
         })
         .collect::<Vec<_>>()
@@ -2315,8 +1479,18 @@ fn adjusted_popup_scroll(current_scroll: usize, selected_index: usize, total: us
 }
 
 fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
+    if !is_dashboard_command_input(input) {
+        if input.trim().is_empty() {
+            return "Enter send. Prefix / for commands. Esc clear.".to_string();
+        }
+        return "Enter send. Prefix / for commands.".to_string();
+    }
     let matches = matching_commands(input, context);
-    if input.trim().is_empty() {
+    if command_completion_body(input)
+        .map(str::trim)
+        .unwrap_or_default()
+        .is_empty()
+    {
         return "Up/Down select. Tab accept. Enter run. Esc clear.".to_string();
     }
     if matches.len() == 1 {
@@ -2332,4 +1506,37 @@ fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
             .join(" | ");
     }
     "unknown command".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_command_context<'a>() -> DashboardCommandContext<'a> {
+        DashboardCommandContext {
+            requests: &[],
+            state: Box::leak(Box::new(DashboardState::default())),
+            executor: None,
+        }
+    }
+
+    #[test]
+    fn dashboard_command_body_requires_slash_prefix() {
+        assert_eq!(dashboard_command_body("status"), None);
+        assert_eq!(dashboard_command_body("/status"), Some("status"));
+        assert_eq!(dashboard_command_body("  /status  "), Some("status"));
+    }
+
+    #[test]
+    fn matching_commands_only_triggers_for_slash_inputs() {
+        let context = test_command_context();
+        assert!(matching_commands("status", &context).is_empty());
+        let matches = matching_commands("/sta", &context);
+        assert!(!matches.is_empty());
+        assert!(
+            matches
+                .iter()
+                .all(|suggestion| suggestion.completion.starts_with('/'))
+        );
+    }
 }

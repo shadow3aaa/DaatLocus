@@ -847,7 +847,8 @@ impl HindsightClient {
             match operation().await {
                 Ok(value) => return Ok(value),
                 Err(err)
-                    if !restart_attempted && should_attempt_hindsight_restart(err.to_string().as_str()) =>
+                    if !restart_attempted
+                        && should_attempt_hindsight_restart(err.to_string().as_str()) =>
                 {
                     restart_attempted = true;
                     if self.restart_daemon_if_needed(action, &err).await? {
@@ -865,10 +866,8 @@ impl HindsightClient {
             return Ok(false);
         };
         let _guard = restart_support.restart_lock.lock().await;
-        let server = HindsightManagedServer::new(
-            self.config.clone(),
-            restart_support.llm_env_vars.clone(),
-        );
+        let server =
+            HindsightManagedServer::new(self.config.clone(), restart_support.llm_env_vars.clone());
         if server.check_health().await {
             return Ok(false);
         }

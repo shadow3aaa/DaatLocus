@@ -32,6 +32,8 @@ use crate::{
     dashboard::{
         DashboardCommandRunner, DashboardControlCommand, DashboardState, execute_remote_command,
     },
+    events::EventStore,
+    pending_work::PendingWorkQueue,
     telegram_acl::TelegramAclHandle,
 };
 
@@ -103,6 +105,8 @@ struct ServerState {
     metadata: Arc<DaemonMetadata>,
     dashboard_rx: watch::Receiver<DashboardState>,
     telegram_acl: TelegramAclHandle,
+    events: EventStore,
+    pending_work: PendingWorkQueue,
     dashboard_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
     connected_clients: Arc<std::sync::atomic::AtomicUsize>,
@@ -230,6 +234,8 @@ fn random_token() -> String {
 pub async fn start_server(
     dashboard_rx: watch::Receiver<DashboardState>,
     telegram_acl: TelegramAclHandle,
+    events: EventStore,
+    pending_work: PendingWorkQueue,
     dashboard_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
     shutdown_rx: oneshot::Receiver<()>,
@@ -259,6 +265,8 @@ pub async fn start_server(
         metadata: Arc::new(metadata.clone()),
         dashboard_rx,
         telegram_acl,
+        events,
+        pending_work,
         dashboard_control_tx,
         daemon_control_tx,
         connected_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -346,6 +354,8 @@ async fn command_handler(
     let output = execute_remote_command(
         &request.command,
         &state.telegram_acl,
+        &state.events,
+        &state.pending_work,
         &snapshot,
         &state.dashboard_control_tx,
     );

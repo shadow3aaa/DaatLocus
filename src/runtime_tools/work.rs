@@ -12,7 +12,7 @@ use crate::{
     hindsight::HindsightReflectOptions,
     plan::{Plan, PlanStatus, PlanStep},
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
-    tool_ui::{ToolCallUiEvent, ToolUiEvent},
+    tool_ui::{ReplyDisposition, ToolCallUiEvent, ToolUiEvent},
     workflow::{NewWorkflowSpec, WorkflowRunOutcome},
 };
 
@@ -221,7 +221,7 @@ fn render_event_resolve_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent>
     {
         lines.push(format!("reply={}", summarize_inline_text(reply_message)));
     }
-    Ok(ToolCallUiEvent::work("finish_and_send", lines))
+    Ok(ToolCallUiEvent::finish("finish_and_send", lines))
 }
 
 fn execute_event_resolve_tool<'a>(
@@ -252,6 +252,22 @@ fn execute_event_resolve_tool<'a>(
                 let reply_message = required_reply_message
                     .clone()
                     .expect("reply requirement should be validated above");
+                let delivery_summary = match &event.payload {
+                    EventPayload::TelegramIncoming(_) => {
+                        format!(
+                            "{} event {} via channel delivery",
+                            event_disposition_kind(args.disposition),
+                            event_id
+                        )
+                    }
+                    EventPayload::TerminalIncoming(_) => {
+                        format!(
+                            "{} terminal event {}",
+                            event_disposition_kind(args.disposition),
+                            event_id
+                        )
+                    }
+                };
                 execute_event_resolve_with_reply(
                     context,
                     &event_id,
@@ -260,11 +276,7 @@ fn execute_event_resolve_tool<'a>(
                     reply_message.clone(),
                     args.note.clone(),
                 )?;
-                format!(
-                    "{} event {} via channel delivery",
-                    event_disposition_kind(args.disposition),
-                    event_id
-                )
+                delivery_summary
             }
             EventDisposition::Dismissed => {
                 context.events.set_status(
@@ -281,15 +293,35 @@ fn execute_event_resolve_tool<'a>(
         };
         context.queue_active_workflow_run_for_flush(WorkflowRunOutcome::Completed);
         context.bound_workflow_id = None;
+        let reply_lines = reply_message
+            .as_deref()
+            .map(|message| {
+                message
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .take(8)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let result_payload = json!({
+            "event_id": event_id,
+            "disposition": event_disposition_kind(args.disposition),
+            "reply_message": reply_message.clone(),
+            "note": args.note.clone(),
+        });
         Ok(ToolExecutionResult::new(
             summary.clone(),
-            json!({
-                "event_id": event_id,
-                "disposition": event_disposition_kind(args.disposition),
-                "reply_message": reply_message,
-                "note": args.note,
-            }),
-            ToolUiEvent::work(summary, Vec::new()),
+            result_payload,
+            ToolUiEvent::reply(
+                match args.disposition {
+                    EventDisposition::Resolved => ReplyDisposition::Resolved,
+                    EventDisposition::Dismissed => ReplyDisposition::Dismissed,
+                    EventDisposition::Failed => ReplyDisposition::Failed,
+                },
+                reply_lines,
+            ),
         ))
     })
 }
@@ -304,7 +336,7 @@ fn summarize_update_plan_tool(call: &AgentToolCall) -> Result<EpisodeActionRecor
 
 fn render_update_plan_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: UpdatePlanArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::work(
+    Ok(ToolCallUiEvent::plan(
         "update_plan",
         args.plan
             .into_iter()
@@ -340,7 +372,7 @@ fn execute_update_plan_tool<'a>(
             json!({
                 "plan": effective_steps,
             }),
-            ToolUiEvent::work(summary, render_plan_ui_lines(&context.plan)),
+            ToolUiEvent::plan(summary, render_plan_ui_lines(&context.plan)),
         ))
     })
 }
@@ -360,7 +392,7 @@ fn render_create_workflow_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEven
         format!("when_to_use={}", args.when_to_use.len()),
         format!("workflow_steps={}", args.workflow_steps.len()),
     ];
-    Ok(ToolCallUiEvent::work("create_workflow", lines))
+    Ok(ToolCallUiEvent::create_workflow("create_workflow", lines))
 }
 
 fn execute_create_workflow_tool<'a>(
@@ -388,7 +420,7 @@ fn execute_create_workflow_tool<'a>(
                 "created": created,
                 "bound_workflow_id": context.bound_workflow_id,
             }),
-            ToolUiEvent::work(summary, ui_lines),
+            ToolUiEvent::create_workflow(summary, ui_lines),
         ))
     })
 }
@@ -403,7 +435,7 @@ fn summarize_activate_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActio
 
 fn render_activate_workflow_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: ActivateWorkflowArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::work(
+    Ok(ToolCallUiEvent::activate_workflow(
         "activate_workflow",
         vec![format!("workflow_id={}", args.workflow_id)],
     ))
@@ -433,7 +465,10 @@ fn execute_activate_workflow_tool<'a>(
                 "bound_workflow_id": context.bound_workflow_id,
                 "activated": activated,
             }),
-            ToolUiEvent::work(summary, vec![format!("bound_workflow_id={}", workflow_id)]),
+            ToolUiEvent::activate_workflow(
+                summary,
+                vec![format!("bound_workflow_id={}", workflow_id)],
+            ),
         ))
     })
 }
@@ -457,7 +492,7 @@ fn render_deep_recall_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     if let Some(max_tokens) = args.max_tokens {
         lines.push(format!("max_tokens={max_tokens}"));
     }
-    Ok(ToolCallUiEvent::work("deep_recall", lines))
+    Ok(ToolCallUiEvent::deep_recall("deep_recall", lines))
 }
 
 fn execute_deep_recall_tool<'a>(
@@ -529,7 +564,7 @@ fn execute_deep_recall_tool<'a>(
                 "usage": response.usage,
                 "trace": response.trace,
             }),
-            ToolUiEvent::work(title, body_lines),
+            ToolUiEvent::deep_recall(title, body_lines),
         ))
     })
 }
@@ -611,6 +646,14 @@ fn execute_event_resolve_with_reply(
             )?;
             Ok(())
         }
+        EventPayload::TerminalIncoming(_) => {
+            context.events.set_status(
+                event_id,
+                status_for_event_disposition(disposition),
+                note.filter(|_| matches!(disposition, EventDisposition::Failed)),
+            )?;
+            Ok(())
+        }
     }
 }
 
@@ -671,7 +714,6 @@ fn render_plan_ui_lines(plan: &Plan) -> Vec<String> {
         .map(|step| format!("[{}] {}", step.status, summarize_inline_text(&step.step)))
         .collect()
 }
-
 
 #[cfg(test)]
 mod tests {
