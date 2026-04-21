@@ -183,14 +183,6 @@ impl CompiledPromptStore {
         self.runtime_system_prompt.is_some()
     }
 
-    pub fn len(&self) -> usize {
-        self.entries.len() + usize::from(self.runtime_system_prompt.is_some())
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.runtime_system_prompt.is_none()
-    }
-
     pub fn get_tuning<P: Program>(&self, program: &P) -> Option<PromptTuningConfig<P::Output>> {
         self.entries
             .get(&program.tuning_key())

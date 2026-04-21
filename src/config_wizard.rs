@@ -207,29 +207,6 @@ impl ProviderKind {
         }
     }
 
-    fn default_model_id(&self) -> &'static str {
-        match self {
-            Self::OpenAI => "gpt-4.1",
-            Self::GithubCopilot => "gpt-4o",
-            Self::OpenAICompatible => "qwen2.5-coder:32b",
-        }
-    }
-
-    fn default_context_window(&self) -> usize {
-        match self {
-            Self::OpenAI => 1_047_576,
-            Self::GithubCopilot => 128_000,
-            Self::OpenAICompatible => 32_768,
-        }
-    }
-
-    fn default_max_completion(&self) -> usize {
-        match self {
-            Self::OpenAI => 32_768,
-            Self::GithubCopilot => 8_192,
-            Self::OpenAICompatible => 8_192,
-        }
-    }
 }
 
 /// 交互式填写一个 provider 的凭据，返回 (provider_name, ProviderConfig)
@@ -608,7 +585,7 @@ async fn prompt_model(
     // 获取模型列表
     print!("  正在获取 {provider_name} 的模型列表...");
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    let mut discovered = fetch_model_ids(provider).await;
+    let discovered = fetch_model_ids(provider).await;
     println!(
         "\r  {}                                    ",
         if discovered.is_empty() {

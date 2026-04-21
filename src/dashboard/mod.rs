@@ -2,8 +2,9 @@
 
 pub mod render;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use async_trait::async_trait;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     prelude::*,
@@ -16,13 +17,15 @@ use crate::{
     app::AppId,
     daat_locus_paths::daat_locus_paths_sync,
     reasoning::runtime::{AgentMessage, HistoryMessage},
-    telegram_acl::TelegramAclHandle,
+    telegram_acl::{PendingAccessRequest, TelegramAclHandle},
     tool_ui::{
         PatchFileUiData, PatchUiData, TelegramUiAction, TelegramUiData, TerminalUiAction,
         TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent,
     },
 };
+use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DashboardState {
     pub focused_app: Option<AppId>,
     pub status_output: String,
@@ -30,6 +33,8 @@ pub struct DashboardState {
     pub inspect_telegram_output: String,
     pub system_prompt_output: String,
     pub app_status_outputs: Vec<(String, String)>,
+    #[serde(default)]
+    pub pending_access_requests: Vec<PendingAccessRequest>,
     pub activity_cells: Vec<ActivityCell>,
     pub live_activity_cells: Vec<LiveActivityCell>,
     pub last_cycle_elapsed_ms: Option<u128>,
@@ -44,7 +49,7 @@ pub enum DashboardControlCommand {
     ClearConversation,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LiveActivityCell {
     pub key: String,
     pub cell: ActivityCell,
@@ -64,37 +69,37 @@ pub fn render_activity_from_messages(messages: Vec<HistoryMessage>) -> Vec<Activ
     coalesce_activity_cells(cells)
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TextActivityCell {
     pub title: String,
     pub body_lines: Vec<String>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecActivityCell {
     pub title: String,
     pub call_lines: Vec<String>,
     pub meta: Option<String>,
     pub output_lines: Vec<String>,
     pub active: bool,
-    pub started_at: Option<Instant>,
+    pub started_at_ms: Option<i64>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PatchActivityCell {
     pub title: String,
     pub summary_line: String,
     pub files: Vec<PatchFileUiData>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TelegramActivityCell {
     pub title: String,
     pub detail_lines: Vec<String>,
     pub message_lines: Vec<String>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ActivityCell {
     Assistant(TextActivityCell),
     User(TextActivityCell),
@@ -127,6 +132,18 @@ pub enum DashboardActivityEvent {
     },
 }
 
+#[async_trait]
+pub trait DashboardCommandRunner: Send + Sync {
+    async fn run_command(&self, command: &str, state: &DashboardState) -> String;
+}
+
+fn current_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
 fn text_cell(title: impl Into<String>, body_lines: Vec<String>) -> TextActivityCell {
     TextActivityCell {
         title: title.into(),
@@ -151,7 +168,7 @@ fn exec_cell_from_ui(data: ToolUiData) -> ExecActivityCell {
         meta,
         output_lines: body_lines,
         active: false,
-        started_at: None,
+        started_at_ms: None,
     }
 }
 
@@ -162,7 +179,7 @@ fn exec_call_cell_from_ui(data: ToolUiData) -> ExecActivityCell {
         meta: None,
         output_lines: Vec::new(),
         active: true,
-        started_at: Some(Instant::now()),
+        started_at_ms: Some(current_time_ms()),
     }
 }
 
@@ -290,7 +307,7 @@ pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivity
                     meta: None,
                     output_lines: Vec::new(),
                     active: true,
-                    started_at: Some(Instant::now()),
+                    started_at_ms: Some(current_time_ms()),
                 }),
             },
         ),
@@ -308,7 +325,7 @@ pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivity
                     meta,
                     output_lines,
                     active: true,
-                    started_at: None,
+                    started_at_ms: None,
                 }),
             },
         ),
@@ -351,8 +368,8 @@ fn upsert_live_activity_cell(cells: &mut Vec<LiveActivityCell>, incoming: LiveAc
                     existing_exec.output_lines = incoming_exec.output_lines;
                 }
                 existing_exec.active = incoming_exec.active;
-                if existing_exec.started_at.is_none() {
-                    existing_exec.started_at = incoming_exec.started_at;
+                if existing_exec.started_at_ms.is_none() {
+                    existing_exec.started_at_ms = incoming_exec.started_at_ms;
                 }
             }
             (slot, cell) => *slot = cell,
@@ -397,10 +414,10 @@ fn exec_call_cell_from_terminal_ui(data: TerminalUiData) -> ExecActivityCell {
         meta: None,
         output_lines: Vec::new(),
         active: !matches!(data.action, TerminalUiAction::Terminate),
-        started_at: if matches!(data.action, TerminalUiAction::Terminate) {
+        started_at_ms: if matches!(data.action, TerminalUiAction::Terminate) {
             None
         } else {
-            Some(Instant::now())
+            Some(current_time_ms())
         },
     }
 }
@@ -418,7 +435,7 @@ fn exec_cell_from_terminal_ui(data: TerminalUiData) -> ExecActivityCell {
         meta,
         output_lines: body_lines,
         active: false,
-        started_at: None,
+        started_at_ms: None,
     }
 }
 
@@ -469,10 +486,10 @@ fn coalesce_activity_cells(cells: Vec<ActivityCell>) -> Vec<ActivityCell> {
                         }
                         last_exec.output_lines = new_exec.output_lines;
                         last_exec.active = new_exec.active;
-                        if new_exec.started_at.is_some() {
-                            last_exec.started_at = new_exec.started_at;
+                        if new_exec.started_at_ms.is_some() {
+                            last_exec.started_at_ms = new_exec.started_at_ms;
                         } else if !last_exec.active {
-                            last_exec.started_at = None;
+                            last_exec.started_at_ms = None;
                         }
                     }
                     continue;
@@ -520,9 +537,14 @@ struct CommandOverlay {
 }
 
 struct DashboardCommandContext<'a> {
-    requests: &'a [crate::telegram_acl::PendingAccessRequest],
-    telegram_acl: &'a TelegramAclHandle,
+    requests: &'a [PendingAccessRequest],
     state: &'a DashboardState,
+    executor: Option<DashboardCommandExecutor<'a>>,
+}
+
+#[derive(Clone, Copy)]
+struct DashboardCommandExecutor<'a> {
+    telegram_acl: &'a TelegramAclHandle,
     control_tx: &'a tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
 }
 
@@ -705,7 +727,13 @@ impl DashboardCommand for ClearCommand {
         raw: &str,
         context: &DashboardCommandContext<'_>,
     ) -> DashboardCommandResult {
-        match context
+        let Some(executor) = context.executor else {
+            return DashboardCommandResult::ShowOverlay {
+                title: raw.trim().to_uppercase(),
+                text: "clear is unavailable in completion-only mode".to_string(),
+            };
+        };
+        match executor
             .control_tx
             .send(DashboardControlCommand::ClearConversation)
         {
@@ -916,7 +944,13 @@ impl DashboardSubcommand for SleepRunSubcommand {
         raw: &str,
         context: &DashboardCommandContext<'_>,
     ) -> DashboardCommandResult {
-        match context.control_tx.send(DashboardControlCommand::RunSleep) {
+        let Some(executor) = context.executor else {
+            return DashboardCommandResult::ShowOverlay {
+                title: raw.trim().to_uppercase(),
+                text: "sleep run is unavailable in completion-only mode".to_string(),
+            };
+        };
+        match executor.control_tx.send(DashboardControlCommand::RunSleep) {
             Ok(()) => DashboardCommandResult::ShowOverlay {
                 title: raw.trim().to_uppercase(),
                 text: "queued sleep run".to_string(),
@@ -1125,9 +1159,15 @@ fn execute_access_request_command(
     };
 
     let result = if approve {
-        context.telegram_acl.approve(chat_id)
+        let Some(executor) = context.executor else {
+            return format!("{action} is unavailable in completion-only mode");
+        };
+        executor.telegram_acl.approve(chat_id)
     } else {
-        context.telegram_acl.reject(chat_id)
+        let Some(executor) = context.executor else {
+            return format!("{action} is unavailable in completion-only mode");
+        };
+        executor.telegram_acl.reject(chat_id)
     };
     match result {
         Ok(()) => format!("{} {}", action, chat_id),
@@ -1137,8 +1177,7 @@ fn execute_access_request_command(
 
 pub async fn run_tui_dashboard(
     rx: &mut tokio::sync::watch::Receiver<DashboardState>,
-    telegram_acl: TelegramAclHandle,
-    control_tx: tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
+    command_runner: &dyn DashboardCommandRunner,
 ) -> Result<(), std::io::Error> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -1151,7 +1190,7 @@ pub async fn run_tui_dashboard(
     let mut command_overlay: Option<CommandOverlay> = None;
 
     loop {
-        let pending_requests = telegram_acl.pending_requests();
+        let pending_requests = rx.borrow().pending_access_requests.clone();
 
         if crossterm::event::poll(Duration::from_millis(16))?
             && let Event::Key(key) = crossterm::event::read()?
@@ -1194,9 +1233,8 @@ pub async fn run_tui_dashboard(
                     let state = rx.borrow();
                     let command_context = DashboardCommandContext {
                         requests: &pending_requests,
-                        telegram_acl: &telegram_acl,
                         state: &state,
-                        control_tx: &control_tx,
+                        executor: None,
                     };
                     if let Some(completion) = selected_command_completion(
                         &command_input,
@@ -1217,9 +1255,8 @@ pub async fn run_tui_dashboard(
                     let state = rx.borrow();
                     let command_context = DashboardCommandContext {
                         requests: &pending_requests,
-                        telegram_acl: &telegram_acl,
                         state: &state,
-                        control_tx: &control_tx,
+                        executor: None,
                     };
                     let matches = matching_commands(&command_input, &command_context);
                     if !matches.is_empty() {
@@ -1237,9 +1274,8 @@ pub async fn run_tui_dashboard(
                     let state = rx.borrow();
                     let command_context = DashboardCommandContext {
                         requests: &pending_requests,
-                        telegram_acl: &telegram_acl,
                         state: &state,
-                        control_tx: &control_tx,
+                        executor: None,
                     };
                     let matches = matching_commands(&command_input, &command_context);
                     if !matches.is_empty() {
@@ -1258,12 +1294,11 @@ pub async fn run_tui_dashboard(
                     command_popup_scroll = 0;
                 }
                 KeyCode::Enter => {
-                    let state = rx.borrow();
+                    let state = rx.borrow().clone();
                     let command_context = DashboardCommandContext {
                         requests: &pending_requests,
-                        telegram_acl: &telegram_acl,
                         state: &state,
-                        control_tx: &control_tx,
+                        executor: None,
                     };
                     if let Some(completion) = selected_command_completion(
                         &command_input,
@@ -1278,23 +1313,15 @@ pub async fn run_tui_dashboard(
                     }
                     let command = command_input.trim().to_string();
                     if !command.is_empty() {
-                        let state = rx.borrow();
-                        match execute_dashboard_command(
-                            &command,
-                            &pending_requests,
-                            &telegram_acl,
-                            &state,
-                            &control_tx,
-                        ) {
-                            DashboardCommandResult::ShowOverlay { title, text } => {
-                                command_overlay = Some(CommandOverlay {
-                                    title,
-                                    text,
-                                    scroll: 0,
-                                });
-                            }
-                            DashboardCommandResult::Quit => break,
+                        if matches!(command.as_str(), "quit" | "q" | "exit") {
+                            break;
                         }
+                        let response = command_runner.run_command(&command, &state).await;
+                        command_overlay = Some(CommandOverlay {
+                            title: command.to_uppercase(),
+                            text: response,
+                            scroll: 0,
+                        });
                     }
                     command_input.clear();
                     command_popup_selection = 0;
@@ -1308,9 +1335,8 @@ pub async fn run_tui_dashboard(
         let popup_rows = if command_overlay.is_none() {
             let command_context = DashboardCommandContext {
                 requests: &pending_requests,
-                telegram_acl: &telegram_acl,
                 state: &state,
-                control_tx: &control_tx,
+                executor: None,
             };
             command_popup_row_count(&command_input, &command_context)
         } else {
@@ -1337,9 +1363,8 @@ pub async fn run_tui_dashboard(
                 &command_input,
                 &DashboardCommandContext {
                     requests: &pending_requests,
-                    telegram_acl: &telegram_acl,
                     state: &state,
-                    control_tx: &control_tx,
+                    executor: None,
                 },
                 state.runtime_status.as_deref(),
                 &state.footer_context,
@@ -1375,9 +1400,11 @@ fn execute_dashboard_command(
 
     let context = DashboardCommandContext {
         requests,
-        telegram_acl,
         state,
-        control_tx,
+        executor: Some(DashboardCommandExecutor {
+            telegram_acl,
+            control_tx,
+        }),
     };
 
     if let Some(command_impl) = dashboard_commands()
@@ -1408,7 +1435,13 @@ pub(crate) fn execute_remote_command(
         control_tx,
     );
     match result {
-        DashboardCommandResult::ShowOverlay { text, .. } => text,
+        DashboardCommandResult::ShowOverlay { title, text } => {
+            if text.trim().is_empty() {
+                title
+            } else {
+                text
+            }
+        }
         DashboardCommandResult::Quit => {
             "quit command is only available in the local dashboard".to_string()
         }
@@ -1542,7 +1575,14 @@ fn render_tool_call_activity_cell(cell: &TextActivityCell) -> Vec<Line<'static>>
 }
 
 fn render_exec_activity_cell(cell: &ExecActivityCell) -> Vec<Line<'static>> {
-    let elapsed = cell.started_at.map(|started_at| started_at.elapsed());
+    let elapsed = cell.started_at_ms.and_then(|started_at_ms| {
+        let now_ms = current_time_ms();
+        if now_ms >= started_at_ms {
+            Some(Duration::from_millis((now_ms - started_at_ms) as u64))
+        } else {
+            None
+        }
+    });
     let exit_code = cell.meta.as_deref().and_then(parse_exit_code_from_meta);
     let (indicator, indicator_style) = if cell.active {
         (
@@ -2201,8 +2241,8 @@ fn matching_commands(input: &str, context: &DashboardCommandContext<'_>) -> Vec<
             // 一旦用户输了 subcommand 名字后加了空格/参数（进入参数阶段）就不再补全：
             //   "telegram approve "   → trailing_space=true,  parts.len()==2  ✗
             //   "telegram approve 1"  → trailing_space=false, parts.len()==3  ✗
-            let in_subcommand_word = (trailing_space && parts.len() == 1)
-                || (!trailing_space && parts.len() == 2);
+            let in_subcommand_word =
+                (trailing_space && parts.len() == 1) || (!trailing_space && parts.len() == 2);
             if in_subcommand_word {
                 let prefix = if trailing_space {
                     ""
