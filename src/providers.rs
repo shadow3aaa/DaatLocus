@@ -1588,37 +1588,53 @@ impl CopilotClient {
     }
 
     async fn exchange_session_token(&self) -> Result<(String, String, u64)> {
-        tracing::debug!("copilot: exchanging github token for session token");
-        let resp = self
-            .auth_client
-            .get("https://api.github.com/copilot_internal/v2/token")
-            .header("Authorization", format!("Bearer {}", self.github_token))
-            .header("Accept", "application/json")
-            .header("User-Agent", COPILOT_USER_AGENT)
-            .header("Editor-Version", COPILOT_EDITOR_VERSION)
-            .header("X-Github-Api-Version", COPILOT_GITHUB_API_VERSION)
-            .send()
-            .await
-            .map_err(|e| miette!("Copilot token exchange request failed: {e}"))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            tracing::debug!(http_status = %status, body = %body, "copilot session token exchange non-2xx");
-            return Err(miette!("HTTP {status}"));
-        }
-
-        let json: serde_json::Value = resp.json().await.map_err(|e| miette!("parse error: {e}"))?;
-
-        let token = json["token"]
-            .as_str()
-            .ok_or_else(|| miette!("missing 'token' field"))?
-            .to_string();
-        let expires_at_secs = json["expires_at"].as_u64().unwrap_or(0);
-        let base_url = derive_copilot_base_url(&token);
-
-        Ok((token, base_url, expires_at_secs))
+        exchange_copilot_session_token_with_client(&self.auth_client, &self.github_token).await
     }
+}
+
+pub async fn exchange_copilot_session_token(
+    github_token: &str,
+) -> Result<(String, String, u64)> {
+    let auth_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| miette!("failed to build copilot auth http client: {e}"))?;
+    exchange_copilot_session_token_with_client(&auth_client, github_token).await
+}
+
+async fn exchange_copilot_session_token_with_client(
+    auth_client: &reqwest::Client,
+    github_token: &str,
+) -> Result<(String, String, u64)> {
+    tracing::debug!("copilot: exchanging github token for session token");
+    let resp = auth_client
+        .get("https://api.github.com/copilot_internal/v2/token")
+        .header("Authorization", format!("Bearer {}", github_token))
+        .header("Accept", "application/json")
+        .header("User-Agent", COPILOT_USER_AGENT)
+        .header("Editor-Version", COPILOT_EDITOR_VERSION)
+        .header("X-Github-Api-Version", COPILOT_GITHUB_API_VERSION)
+        .send()
+        .await
+        .map_err(|e| miette!("Copilot token exchange request failed: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        tracing::debug!(http_status = %status, body = %body, "copilot session token exchange non-2xx");
+        return Err(miette!("HTTP {status}"));
+    }
+
+    let json: serde_json::Value = resp.json().await.map_err(|e| miette!("parse error: {e}"))?;
+
+    let token = json["token"]
+        .as_str()
+        .ok_or_else(|| miette!("missing 'token' field"))?
+        .to_string();
+    let expires_at_secs = json["expires_at"].as_u64().unwrap_or(0);
+    let base_url = derive_copilot_base_url(&token);
+
+    Ok((token, base_url, expires_at_secs))
 }
 
 /// session token 是分号分隔的 key=value 串，从 proxy-ep 字段派生 API base URL。

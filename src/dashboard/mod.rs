@@ -25,7 +25,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardState {
     pub focused_app: Option<AppId>,
     pub status_output: String,

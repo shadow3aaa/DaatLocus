@@ -574,12 +574,22 @@ pub async fn wait_for_daemon_shutdown(pid: u32) -> Result<()> {
 pub async fn spawn_detached_daemon_process() -> Result<()> {
     let current_exe = std::env::current_exe()
         .map_err(|err| miette!("resolve current executable failed: {err}"))?;
+
+    // 将 stderr 重定向到日志文件，方便排查 daemon 启动失败的原因。
+    // stdout 仍然丢弃（emit_startup_progress 的 println! 已由 tracing 记录到文件）。
+    let log_path = daat_locus_paths().await.logs_file("daemon-stderr.log");
+    let stderr_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|err| miette!("open daemon stderr log {}: {err}", log_path.display()))?;
+
     std::process::Command::new(current_exe)
         .arg("daemon")
         .arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr_file)
         .spawn()
         .map_err(|err| miette!("spawn daemon process failed: {err}"))?;
     Ok(())
@@ -587,6 +597,15 @@ pub async fn spawn_detached_daemon_process() -> Result<()> {
 
 pub async fn connect_existing_daemon() -> Result<DaemonClient> {
     let metadata = read_metadata().await?;
+    if !process_exists(metadata.pid) {
+        // pid 已不存在：daemon 非正常退出，留下了 stale metadata。
+        tracing::info!(
+            pid = metadata.pid,
+            "daemon metadata found but pid is gone; clearing stale metadata"
+        );
+        clear_metadata().await;
+        return Err(miette!("daemon pid={} is no longer running", metadata.pid));
+    }
     let client = DaemonClient::new(metadata);
     client.health().await?;
     Ok(client)
