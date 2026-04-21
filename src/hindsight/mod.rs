@@ -729,9 +729,11 @@ impl HindsightClient {
         items: Vec<HindsightRetainItem>,
     ) -> Result<HindsightRetainResponse> {
         let url = format!("{}/memories", self.bank_url());
+        // Use async=true so the server returns immediately and processes in the
+        // background.  This avoids blocking daat-locus on slow LLM calls.
         let body = json!({
             "items": items,
-            "async": false,
+            "async": true,
         });
         let response = self
             .authorized(self.http.post(url))
