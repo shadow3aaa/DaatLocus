@@ -99,6 +99,13 @@ impl HindsightManagedServer {
         Ok(())
     }
 
+    /// Update the profile configuration without restarting the daemon.
+    /// Call this before starting or restarting to ensure env vars are current.
+    pub async fn reconfigure_profile(&self) -> Result<()> {
+        let invoker = self.ensure_uv_invoker().await?;
+        self.configure_profile(&invoker).await
+    }
+
     /// Stop the daemon gracefully.
     pub async fn stop(&self) -> Result<()> {
         if !self.check_health().await {

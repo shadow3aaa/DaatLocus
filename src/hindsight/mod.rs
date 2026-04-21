@@ -885,7 +885,7 @@ impl HindsightClient {
         response: std::result::Result<reqwest::Response, reqwest::Error>,
         action: &str,
     ) -> Result<reqwest::Response> {
-        let response = response.map_err(|err| miette!("{action} failed: {err}"))?;
+        let response = response.map_err(|err| miette!("{action} failed: {}", fmt_reqwest_error(&err)))?;
         let status = response.status();
         if status.is_success() {
             return Ok(response);
@@ -1066,6 +1066,20 @@ async fn retain_job_with_retry(
     }
 
     unreachable!("retain retry loop must return or error");
+}
+
+/// Format a reqwest error including its full source chain.
+/// reqwest's Display only shows the top-level message; the actual cause
+/// (timeout, connection refused, TLS error, etc.) lives in source().
+fn fmt_reqwest_error(err: &reqwest::Error) -> String {
+    use std::error::Error;
+    let mut msg = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        msg.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    msg
 }
 
 fn truncate_for_error(text: &str) -> String {
