@@ -467,7 +467,18 @@ async fn tail_hindsight_log(profile: &str) {
     }
 }
 
-async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Result<HindsightClient> {
+/// Connect to the hindsight daemon, optionally ensuring a fresh start.
+///
+/// `ensure_fresh = true`: always reconfigure the profile and restart any
+/// already-running daemon so that config changes (e.g. a new model) take
+/// effect immediately.  Use this only at daemon startup.
+///
+/// `ensure_fresh = false`: connect to a running daemon as-is (used by
+/// background tasks that just need a client handle).
+async fn connect_bootstrapped_hindsight(
+    config: &crate::config::Config,
+    ensure_fresh: bool,
+) -> Result<HindsightClient> {
     let hindsight_config = config.hindsight.clone();
     emit_startup_progress(format!(
         "[hindsight] initializing daemon (profile={}, port={}, bank={}/{})",
@@ -480,7 +491,26 @@ async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Resul
         hindsight_config.clone(),
         hindsight_llm_env_vars(config).await?,
     );
-    if server.check_health().await {
+    if ensure_fresh {
+        // Always reconfigure the profile so that model/env changes take effect.
+        server.reconfigure_profile().await?;
+        if server.check_health().await {
+            // Daemon is running but may have stale config — restart to reload profile.
+            emit_startup_progress(
+                "[hindsight] daemon already running, restarting to apply config...",
+            );
+            server.stop().await?;
+        }
+        emit_startup_progress(
+            "[hindsight] starting daemon (first run may take a few minutes to download embedding models)...",
+        );
+        let profile = hindsight_config.profile.clone();
+        let log_tail = tokio::spawn(async move { tail_hindsight_log(&profile).await });
+        let result = server.start().await;
+        log_tail.abort();
+        result?;
+        emit_startup_progress("[hindsight] daemon ready");
+    } else if server.check_health().await {
         emit_startup_progress("[hindsight] daemon already running, reusing");
     } else {
         emit_startup_progress(
@@ -593,7 +623,7 @@ async fn run_hindsight_command(
     config: &crate::config::Config,
     target: &HindsightTarget,
 ) -> Result<()> {
-    let hindsight = connect_bootstrapped_hindsight(config).await?;
+    let hindsight = connect_bootstrapped_hindsight(config, false).await?;
     match target {
         HindsightTarget::Config => {
             let config = hindsight.get_bank_config().await?;
@@ -700,7 +730,7 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     ));
 
     // 耗时初始化（hindsight + prompt compile）在服务器启动后进行。
-    let hindsight = connect_bootstrapped_hindsight(&config).await?;
+    let hindsight = connect_bootstrapped_hindsight(&config, true).await?;
     let hindsight_retain = hindsight.spawn_retain_worker();
 
     emit_startup_progress("[prompt-compile] loading compiled prompts before daemon startup...");
@@ -1206,7 +1236,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         .to_string();
     let judge_client = build_llm(&judge_model_key, &config)
         .unwrap_or_else(|err| panic!("failed to construct judge LLM client: {err:?}"));
-    let hindsight = connect_bootstrapped_hindsight(&config)
+    let hindsight = connect_bootstrapped_hindsight(&config, false)
         .await
         .unwrap_or_else(|err| panic!("failed to construct hindsight client: {err:?}"));
     let hindsight_retain = hindsight.spawn_retain_worker();
