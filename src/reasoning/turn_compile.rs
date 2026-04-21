@@ -441,8 +441,10 @@ pub struct TurnTraceArtifact {
     pub final_reply_message: Option<String>,
 }
 
+#[cfg(test)]
 pub struct TurnRolloutRunner;
 
+#[cfg(test)]
 struct TurnTraceSourceTurn {
     id: String,
     current_doing: String,
@@ -502,6 +504,7 @@ pub async fn should_run_cold_start_turn_compile() -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 impl TurnRolloutRunner {
     fn trace_from_turns(span_id: &str, turns: &[TurnTraceSourceTurn]) -> TurnTraceArtifact {
         let steps = turns
@@ -1378,6 +1381,7 @@ pub fn render_turn_trace_for_judge(trace: &TurnTraceArtifact) -> String {
     lines.join("\n")
 }
 
+#[cfg(test)]
 fn turn_trace_step_from_source_turn(turn: &TurnTraceSourceTurn) -> TurnTraceStep {
     TurnTraceStep {
         turn_id: turn.id.clone(),
@@ -1807,6 +1811,7 @@ fn compile_mode_label(mode: TurnCompileMode) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn last_assistant_message(turn: &TurnTraceSourceTurn) -> Option<String> {
     turn.history_messages
         .iter()

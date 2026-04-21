@@ -217,6 +217,7 @@ struct WorkflowTaskCase {
     failure_types: Vec<String>,
     started_at_ms: i64,
     ended_at_ms: i64,
+    #[cfg(test)]
     baseline_run_id: String,
 }
 
@@ -1335,6 +1336,7 @@ fn blank_workflow_task_case() -> WorkflowTaskCase {
         failure_types: Vec::new(),
         started_at_ms: 0,
         ended_at_ms: 0,
+        #[cfg(test)]
         baseline_run_id: "none".to_string(),
     }
 }
@@ -1351,6 +1353,7 @@ fn workflow_task_case_from_record(record: &WorkflowRunRecord) -> WorkflowTaskCas
         failure_types: record.failure_types.clone(),
         started_at_ms: record.started_at_ms,
         ended_at_ms: record.ended_at_ms,
+        #[cfg(test)]
         baseline_run_id: record.run_id.clone(),
     }
 }
@@ -1829,6 +1832,7 @@ fn run_workflow_task_rollout(
     }
 }
 
+#[cfg(test)]
 fn selected_candidate_titles(
     evaluations: &[EvaluationArtifactWorkflowCandidateEvaluation],
     candidate_kind: &str,

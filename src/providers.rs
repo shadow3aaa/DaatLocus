@@ -1520,8 +1520,6 @@ const COPILOT_GITHUB_API_VERSION: &str = "2025-04-01";
 const COPILOT_INTERNAL_BASE_URL: &str = "https://api.individual.githubcopilot.com";
 
 struct CopilotSessionToken {
-    token: String,
-    base_url: String,
     expires_at_secs: u64,
 }
 
@@ -1584,8 +1582,6 @@ impl CopilotClient {
         inner.extra_headers = hdrs;
 
         *self.cached.lock().await = Some(CopilotSessionToken {
-            token,
-            base_url,
             expires_at_secs,
         });
         Ok(())

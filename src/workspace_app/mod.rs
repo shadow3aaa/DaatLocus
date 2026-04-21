@@ -78,16 +78,14 @@ pub enum WorkspaceAppWatcherHandle {
     Poll(PollWatcher),
 }
 
-impl WorkspaceAppWatcherHandle {
-    pub fn backend_name(&self) -> &'static str {
+impl Drop for WorkspaceAppWatcherHandle {
+    fn drop(&mut self) {
         match self {
             Self::Recommended(watcher) => {
                 let _ = watcher;
-                "recommended"
             }
             Self::Poll(watcher) => {
                 let _ = watcher;
-                "poll"
             }
         }
     }

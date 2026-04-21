@@ -99,34 +99,6 @@ impl HindsightManagedServer {
         Ok(())
     }
 
-    /// Stop the daemon gracefully. Never fails — logs and returns.
-    pub async fn stop(&self) {
-        tracing::info!(
-            "[hindsight:managed] stopping daemon (profile={})",
-            self.config.profile
-        );
-        let invoker = match self.ensure_uv_invoker().await {
-            Ok(inv) => inv,
-            Err(err) => {
-                tracing::warn!("[hindsight:managed] stop: could not find uv runner: {err}");
-                return;
-            }
-        };
-        let mut cmd = invoker.embed_command(&self.package_spec());
-        cmd.args(self.daemon_profile_args()).arg("stop");
-        match tokio::time::timeout(Duration::from_secs(10), cmd.output()).await {
-            Ok(Ok(out)) if !out.status.success() => {
-                tracing::warn!(
-                    "[hindsight:managed] daemon stop exited non-zero: {}",
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
-            }
-            Ok(Err(err)) => tracing::warn!("[hindsight:managed] daemon stop spawn error: {err}"),
-            Err(_) => tracing::warn!("[hindsight:managed] daemon stop timed out"),
-            _ => {}
-        }
-    }
-
     /// One-shot health probe (used to detect already-running daemon).
     pub async fn check_health(&self) -> bool {
         reqwest::Client::new()

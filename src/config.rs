@@ -36,31 +36,6 @@ pub enum ProviderConfig {
     },
 }
 
-impl ProviderConfig {
-    /// 返回该 provider 对应的 base_url（不含路径）。
-    pub fn base_url(&self) -> &str {
-        match self {
-            ProviderConfig::Openai { base_url, .. } => {
-                base_url.as_deref().unwrap_or("https://api.openai.com")
-            }
-            ProviderConfig::GithubCopilot { .. } => {
-                // Copilot 的 base_url 由 token 交换后动态获取；这里给出默认值供初始化使用。
-                "https://api.githubcopilot.com"
-            }
-            ProviderConfig::OpenaiCompatible { base_url, .. } => base_url.as_str(),
-        }
-    }
-
-    /// 返回静态 api_key（Copilot 返回 None，因为需要动态交换）。
-    pub fn static_api_key(&self) -> Option<&str> {
-        match self {
-            ProviderConfig::Openai { api_key, .. } => Some(api_key.as_str()),
-            ProviderConfig::GithubCopilot { .. } => None,
-            ProviderConfig::OpenaiCompatible { api_key, .. } => Some(api_key.as_str()),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Model 能力层
 // ---------------------------------------------------------------------------
@@ -249,14 +224,6 @@ impl Config {
         self.models
             .get(key)
             .unwrap_or_else(|| panic!("judge model '{}' not found in models", key))
-    }
-
-    /// 返回 judge 使用的 provider 配置。
-    pub fn judge_provider_config(&self) -> &ProviderConfig {
-        let provider_key = &self.judge_model_config().provider;
-        self.providers
-            .get(provider_key)
-            .unwrap_or_else(|| panic!("provider '{}' not found in providers", provider_key))
     }
 
     /// 校验 main_model 和 judge model 引用的 provider/model 都存在。

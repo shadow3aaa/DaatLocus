@@ -64,6 +64,7 @@ pub fn sync_dashboard_state(
         state.inspect_telegram_output = render_telegram_status_for_dashboard(context);
         state.system_prompt_output = render_system_prompt_output_for_dashboard(context);
         state.app_status_outputs = render_app_status_outputs_for_dashboard(context);
+        state.pending_access_requests = context.telegram_acl.pending_requests();
         state.activity_cells = render_activity_for_dashboard(context);
         state.last_cycle_elapsed_ms = last_cycle_elapsed_ms;
         state.footer_context =
