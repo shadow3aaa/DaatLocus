@@ -95,7 +95,6 @@ pub struct BrowserClosePageArgs {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct EventResolveArgs {
-    pub event_id: String,
     pub disposition: EventDisposition,
     pub reply_message: Option<String>,
     pub note: Option<String>,

@@ -205,11 +205,7 @@ fn summarize_event_resolve_tool(call: &AgentToolCall) -> Result<EpisodeActionRec
                 event_disposition_kind(args.disposition),
                 reply
             ),
-            None => format!(
-                "event_id={} disposition={}",
-                args.event_id,
-                event_disposition_kind(args.disposition)
-            ),
+            None => format!("disposition={}", event_disposition_kind(args.disposition)),
         },
     })
 }
@@ -225,10 +221,7 @@ fn render_event_resolve_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent>
     {
         lines.push(format!("reply={}", summarize_inline_text(reply_message)));
     }
-    Ok(ToolCallUiEvent::work(
-        format!("finish_and_send {}", args.event_id),
-        lines,
-    ))
+    Ok(ToolCallUiEvent::work("finish_and_send", lines))
 }
 
 fn execute_event_resolve_tool<'a>(
@@ -237,14 +230,18 @@ fn execute_event_resolve_tool<'a>(
 ) -> ToolFuture<'a> {
     Box::pin(async move {
         let args: EventResolveArgs = parse_tool_args(call)?;
+        let event_id = context
+            .claimed_event_ids
+            .first()
+            .ok_or_else(|| miette::miette!("no claimed event in current turn"))?
+            .clone();
         let reply_message = trim_optional_field(args.reply_message);
-        let event = context.events.view(&args.event_id)?;
+        let event = context.events.view(&event_id)?;
         let required_reply_message = if disposition_requires_reply(args.disposition) {
             Some(reply_message.clone().ok_or_else(|| {
                 miette::miette!(
-                    "{} event {} requires a non-empty reply_message",
+                    "{} requires a non-empty reply_message",
                     event_disposition_kind(args.disposition),
-                    args.event_id,
                 )
             })?)
         } else {
@@ -257,7 +254,7 @@ fn execute_event_resolve_tool<'a>(
                     .expect("reply requirement should be validated above");
                 execute_event_resolve_with_reply(
                     context,
-                    &args.event_id,
+                    &event_id,
                     &event,
                     args.disposition,
                     reply_message.clone(),
@@ -266,18 +263,18 @@ fn execute_event_resolve_tool<'a>(
                 format!(
                     "{} event {} via channel delivery",
                     event_disposition_kind(args.disposition),
-                    args.event_id
+                    event_id
                 )
             }
             EventDisposition::Dismissed => {
                 context.events.set_status(
-                    &args.event_id,
+                    &event_id,
                     status_for_event_disposition(args.disposition),
                     args.note.clone(),
                 )?;
                 format!(
                     "resolved event {} as {}",
-                    args.event_id,
+                    event_id,
                     event_disposition_kind(args.disposition)
                 )
             }
@@ -287,7 +284,7 @@ fn execute_event_resolve_tool<'a>(
         Ok(ToolExecutionResult::new(
             summary.clone(),
             json!({
-                "event_id": args.event_id,
+                "event_id": event_id,
                 "disposition": event_disposition_kind(args.disposition),
                 "reply_message": reply_message,
                 "note": args.note,

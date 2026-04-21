@@ -964,6 +964,28 @@ impl DashboardCommand for TelegramCommand {
         &TELEGRAM_SUBCOMMANDS
     }
 
+    fn complete_arguments(
+        &self,
+        parts: &[&str],
+        context: &DashboardCommandContext<'_>,
+    ) -> Vec<CommandSuggestion> {
+        let subcommand = parts.get(1).copied().unwrap_or_default();
+        if subcommand != "approve" && subcommand != "reject" {
+            return Vec::new();
+        }
+        let prefix = parts.get(2).copied().unwrap_or_default();
+        context
+            .requests
+            .iter()
+            .filter(|r| r.chat_id.to_string().starts_with(prefix))
+            .map(|r| CommandSuggestion {
+                display: format!("{} ({})", r.chat_id, r.sender),
+                completion: format!("telegram {} {}", subcommand, r.chat_id),
+                description: format!("{} — {}", r.title, r.sender),
+            })
+            .collect()
+    }
+
     fn execute(
         &self,
         parts: &[&str],
@@ -973,7 +995,7 @@ impl DashboardCommand for TelegramCommand {
         let Some(subcommand_name) = parts.get(1).copied() else {
             return DashboardCommandResult::ShowOverlay {
                 title: self.overlay_title(raw),
-                text: "available:\n  telegram status\n  telegram approve <index|chat_id>\n  telegram reject <index|chat_id>".to_string(),
+                text: "available:\n  telegram status\n  telegram approve [chat_id]\n  telegram reject [chat_id]".to_string(),
             };
         };
         if let Some(subcommand) = self
@@ -1019,7 +1041,7 @@ impl DashboardSubcommand for TelegramStatusSubcommand {
 
 impl DashboardSubcommand for TelegramApproveSubcommand {
     fn usage(&self) -> &'static str {
-        "approve <index|chat_id>"
+        "approve [chat_id]"
     }
 
     fn description(&self) -> &'static str {
@@ -1041,7 +1063,7 @@ impl DashboardSubcommand for TelegramApproveSubcommand {
 
 impl DashboardSubcommand for TelegramRejectSubcommand {
     fn usage(&self) -> &'static str {
-        "reject <index|chat_id>"
+        "reject [chat_id]"
     }
 
     fn description(&self) -> &'static str {
@@ -1070,28 +1092,36 @@ fn execute_access_request_command(
     parts: &[&str],
     context: &DashboardCommandContext<'_>,
 ) -> String {
-    let Some(target) = parts.get(2).copied() else {
-        return format!(
-            "{} requires <index|chat_id>",
-            if approve {
-                "telegram approve"
-            } else {
-                "telegram reject"
-            }
-        );
-    };
+    let action = if approve { "approve" } else { "reject" };
 
-    let chat_id = if let Ok(index) = target.parse::<usize>() {
-        context
-            .requests
-            .get(index.saturating_sub(1))
-            .map(|request| request.chat_id)
+    let chat_id = if let Some(target) = parts.get(2).copied() {
+        // 有参数：直接当 chat_id 解析
+        match target.parse::<i64>() {
+            Ok(id) => id,
+            Err(_) => return format!("invalid chat_id: {target}"),
+        }
     } else {
-        target.parse::<i64>().ok()
-    };
-
-    let Some(chat_id) = chat_id else {
-        return format!("no pending request at index {}", target);
+        // 无参数：交互式
+        match context.requests.len() {
+            0 => return format!("no pending requests"),
+            1 => {
+                // 只有一个请求，直接执行
+                context.requests[0].chat_id
+            }
+            _ => {
+                // 多个请求，列出 chat_id 让用户选择
+                let mut lines = vec![format!(
+                    "pending requests — run 'telegram {action} <chat_id>' to proceed:"
+                )];
+                lines.extend(context.requests.iter().map(|r| {
+                    format!(
+                        "  {} | {} | {} | {}",
+                        r.chat_id, r.title, r.sender, r.last_message_preview
+                    )
+                }));
+                return lines.join("\n");
+            }
+        }
     };
 
     let result = if approve {
@@ -1100,16 +1130,8 @@ fn execute_access_request_command(
         context.telegram_acl.reject(chat_id)
     };
     match result {
-        Ok(()) => format!(
-            "{} {}",
-            if approve { "approved" } else { "rejected" },
-            chat_id
-        ),
-        Err(err) => format!(
-            "{} failed for {}: {err}",
-            if approve { "approve" } else { "reject" },
-            chat_id
-        ),
+        Ok(()) => format!("{} {}", action, chat_id),
+        Err(err) => format!("{action} failed for {chat_id}: {err}"),
     }
 }
 
@@ -2173,25 +2195,42 @@ fn matching_commands(input: &str, context: &DashboardCommandContext<'_>) -> Vec<
         .find(|command| command.accepts(parts[0]))
     {
         if !command.subcommands().is_empty() && (parts.len() > 1 || trailing_space) {
-            let prefix = if trailing_space {
-                ""
+            // 只在光标仍在 subcommand 单词上时才提供补全：
+            //   "telegram "      → trailing_space=true,  parts.len()==1  ✓
+            //   "telegram app"   → trailing_space=false, parts.len()==2  ✓
+            // 一旦用户输了 subcommand 名字后加了空格/参数（进入参数阶段）就不再补全：
+            //   "telegram approve "   → trailing_space=true,  parts.len()==2  ✗
+            //   "telegram approve 1"  → trailing_space=false, parts.len()==3  ✗
+            let in_subcommand_word = (trailing_space && parts.len() == 1)
+                || (!trailing_space && parts.len() == 2);
+            if in_subcommand_word {
+                let prefix = if trailing_space {
+                    ""
+                } else {
+                    parts.get(1).copied().unwrap_or_default()
+                };
+                let direct = command
+                    .subcommands()
+                    .iter()
+                    .copied()
+                    .filter(|subcommand| subcommand.name().starts_with(prefix))
+                    .map(|subcommand| CommandSuggestion {
+                        display: subcommand.usage().to_string(),
+                        completion: format!("{} {}", command.primary_verb(), subcommand.name()),
+                        description: subcommand.description().to_string(),
+                    })
+                    .collect::<Vec<_>>();
+                if !direct.is_empty() {
+                    return direct;
+                }
             } else {
-                parts.get(1).copied().unwrap_or_default()
-            };
-            let direct = command
-                .subcommands()
-                .iter()
-                .copied()
-                .filter(|subcommand| subcommand.name().starts_with(prefix))
-                .map(|subcommand| CommandSuggestion {
-                    display: subcommand.usage().to_string(),
-                    completion: format!("{} {}", command.primary_verb(), subcommand.name()),
-                    description: subcommand.description().to_string(),
-                })
-                .collect::<Vec<_>>();
-            if !direct.is_empty() {
-                return direct;
+                // 进入参数阶段，让命令自己提供参数补全
+                let args = command.complete_arguments(&parts, context);
+                if !args.is_empty() {
+                    return args;
+                }
             }
+            return Vec::new();
         } else if parts.len() > 1 || trailing_space {
             let args = command.complete_arguments(&parts, context);
             if !args.is_empty() {

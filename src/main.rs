@@ -472,6 +472,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         apps,
         workspace_apps: runtime_apps.workspace_registry,
         telegram: telegram_handle,
+        telegram_acl: telegram_acl.clone(),
         compiled_prompts,
         execution_cwd,
         sandbox_policy,
@@ -483,6 +484,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         suppressed_app_notices: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         live_assistant_progress_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        claimed_event_ids: Vec::new(),
         idle_since: None,
         last_idle_sleep_at: None,
     };
@@ -1030,8 +1032,10 @@ pub(crate) async fn build_eval_context_with_compiled(
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
     let workflows = WorkflowStore::new().await;
+    let telegram_acl = TelegramAclHandle::load().await;
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
+    bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
     let runtime_apps = build_runtime_apps(&execution_cwd);
     let apps = AppManager::new(Some(AppId::terminal()), runtime_apps.apps)
         .await
@@ -1071,6 +1075,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         apps,
         workspace_apps: runtime_apps.workspace_registry,
         telegram: telegram_handle,
+        telegram_acl,
         compiled_prompts,
         execution_cwd,
         sandbox_policy,
@@ -1082,6 +1087,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         suppressed_app_notices: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         live_assistant_progress_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        claimed_event_ids: Vec::new(),
         idle_since: None,
         last_idle_sleep_at: None,
     }
@@ -1639,6 +1645,7 @@ pub(crate) async fn execute_agent_loop_step(
             ClaimedRuntimeInput::AppNotice { .. } => None,
         })
         .collect::<Vec<_>>();
+    context.claimed_event_ids = claimed_event_ids.clone();
     let claimed_app_notice_entries = claimed_inputs
         .iter()
         .filter_map(|input| match input {

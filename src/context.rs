@@ -27,6 +27,7 @@ use crate::{
     },
     sandbox::RuntimeSandboxPolicy,
     snapshot::Snapshot,
+    telegram_acl::TelegramAclHandle,
     telegram_transport::state::TelegramTransportStateHandle,
     workflow::{WorkflowRunOutcome, WorkflowSpec, WorkflowStore},
     workspace_app::WorkspaceAppRegistry,
@@ -73,6 +74,7 @@ pub struct Context {
     pub apps: AppManager,
     pub workspace_apps: WorkspaceAppRegistry,
     pub telegram: TelegramTransportStateHandle,
+    pub telegram_acl: TelegramAclHandle,
     pub compiled_prompts: CompiledPromptStore,
     pub execution_cwd: PathBuf,
     pub sandbox_policy: RuntimeSandboxPolicy,
@@ -84,6 +86,7 @@ pub struct Context {
     pub runtime_overflow_failures: Arc<Mutex<HashMap<String, usize>>>,
     pub suppressed_app_notices: Arc<Mutex<HashMap<AppId, SuppressedAppNotice>>>,
     pub live_assistant_progress_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
+    pub claimed_event_ids: Vec<String>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
 }

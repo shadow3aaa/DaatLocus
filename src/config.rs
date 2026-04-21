@@ -331,7 +331,7 @@ pub struct TelegramConfig {
 impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             bot_token: "your-telegram-bot-token".to_string(),
             poll_timeout_secs: 30,
         }
