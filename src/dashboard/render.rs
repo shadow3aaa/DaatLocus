@@ -505,6 +505,7 @@ fn render_status_plan_lines(context: &Context) -> Vec<String> {
 
 pub fn render_telegram_status_for_dashboard(context: &Context) -> String {
     let chats = context.telegram.chat_summaries_view();
+    let pending_requests = context.telegram_acl.pending_requests();
     let queued_outbound = chats
         .iter()
         .map(|chat| chat.pending_outbound_count)
@@ -514,29 +515,53 @@ pub fn render_telegram_status_for_dashboard(context: &Context) -> String {
         "Telegram".to_string(),
         "Role: transport / adapter".to_string(),
         format!("Known chats: {}", chats.len()),
+        format!("Pending approvals: {}", pending_requests.len()),
         format!("Queued outbound: {queued_outbound}"),
     ];
 
-    if chats.is_empty() {
+    if chats.is_empty() && pending_requests.is_empty() {
         lines.push(String::new());
-        lines.push("No chats.".to_string());
+        lines.push("No chats or pending approvals.".to_string());
         return lines.join("\n");
     }
 
-    lines.push(String::new());
-    lines.push("Chats".to_string());
-    lines.extend(chats.iter().take(8).map(|chat| {
-        let mut flags = Vec::new();
-        if chat.pending_outbound_count > 0 {
-            flags.push(format!("{} queued", chat.pending_outbound_count));
-        }
-        let suffix = if flags.is_empty() {
-            String::new()
-        } else {
-            format!("  [{}]", flags.join(", "))
-        };
-        format!("• {} ({}){}", chat.title, chat.chat_id, suffix)
-    }));
+    if !pending_requests.is_empty() {
+        lines.push(String::new());
+        lines.push("Pending approval requests".to_string());
+        lines.extend(
+            pending_requests
+                .iter()
+                .take(8)
+                .enumerate()
+                .map(|(index, request)| {
+                    format!(
+                        "{}. {} ({}) from {} :: {}",
+                        index + 1,
+                        request.title,
+                        request.chat_id,
+                        request.sender,
+                        request.last_message_preview
+                    )
+                }),
+        );
+    }
+
+    if !chats.is_empty() {
+        lines.push(String::new());
+        lines.push("Chats".to_string());
+        lines.extend(chats.iter().take(8).map(|chat| {
+            let mut flags = Vec::new();
+            if chat.pending_outbound_count > 0 {
+                flags.push(format!("{} queued", chat.pending_outbound_count));
+            }
+            let suffix = if flags.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", flags.join(", "))
+            };
+            format!("• {} ({}){}", chat.title, chat.chat_id, suffix)
+        }));
+    }
 
     lines.join("\n")
 }

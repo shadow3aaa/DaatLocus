@@ -11,7 +11,6 @@ pub const EVENT_UNIT_WHAT: &str = r#"外部输入主要通过事件进入当前 
 pub const EVENT_UNIT_HOW: &str = r#"只有当你显式调用工具时，世界才会真正改变；凡是需要向用户提交最终答复的事件收尾，无论 `resolved` 还是 `failed`，都应调用 `finish_and_send` 并提供 `reply_message`。
 如果还需要继续推进，就不要调用 `finish_and_send`；应继续调用工具。
 当你明显完成了某个中间步骤时，应直接输出文本来解释并记录当前进度；但这类中间记录不是最终提交，不能使用 `finish_and_send` 发送。
-凡是动作参数中的 `event_id`，都应优先填写快照中显示的 UUID；不要把中文描述、标题或摘要直接塞进这些字段。
 如果当前仍然存在可推进的目标、事件或应用信号，那么仅输出文本回复不会改变世界，不构成有效推进；应直接调用工具。
 对于 event-driven turn：
 - 只有在准备好最终回复后，才调用 `finish_and_send` 终结当前事件。
