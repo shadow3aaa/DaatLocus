@@ -321,17 +321,11 @@ fn execute_update_plan_tool<'a>(
     Box::pin(async move {
         let args: UpdatePlanArgs = parse_tool_args(call)?;
         let plan = build_plan_from_args(args)?;
-        if requires_workflow_binding(&plan) && context.bound_workflow_id.is_none() {
-            return Err(miette::miette!(
-                "multi-step plan requires a bound workflow; call create_workflow or activate_workflow before update_plan"
-            ));
-        }
         let changed = context.plan.replace(plan.steps().to_vec());
         let effective_steps = context.plan.steps().to_vec();
         let summary = if effective_steps.is_empty() {
             if changed {
                 context.queue_active_workflow_run_for_flush(WorkflowRunOutcome::Completed);
-                context.bound_workflow_id = None;
                 "cleared plan after completion".to_string()
             } else {
                 "plan already clear".to_string()
@@ -678,14 +672,6 @@ fn render_plan_ui_lines(plan: &Plan) -> Vec<String> {
         .collect()
 }
 
-fn requires_workflow_binding(plan: &Plan) -> bool {
-    let active_steps = plan
-        .steps()
-        .iter()
-        .filter(|step| !matches!(step.status, PlanStatus::Completed))
-        .count();
-    active_steps > 1
-}
 
 #[cfg(test)]
 mod tests {

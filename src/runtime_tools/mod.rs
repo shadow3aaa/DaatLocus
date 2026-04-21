@@ -499,9 +499,15 @@ fn find_runtime_tool<'a>(
 }
 
 pub fn build_runtime_tool_specs(context: &Context) -> Vec<AgentToolSpec> {
-    build_runtime_tools(context)
+    let tools = build_runtime_tools(context);
+    let workflow_selection_phase = context.bound_workflow_id.is_none();
+    tools
         .into_iter()
         .filter(|tool| tool.is_available(context))
+        .filter(|tool| {
+            !workflow_selection_phase
+                || matches!(tool.name(), "activate_workflow" | "create_workflow")
+        })
         .map(|tool| tool.spec())
         .collect()
 }
@@ -526,18 +532,6 @@ pub async fn execute_agent_tool_call(
     context: &mut Context,
     call: &AgentToolCall,
 ) -> Result<ToolExecutionResult> {
-    if requires_workflow_binding(context) && context.bound_workflow_id.is_none() {
-        let exempt = matches!(
-            call.name.as_str(),
-            "create_workflow" | "activate_workflow" | "update_plan" | "deep_recall"
-        );
-        if !exempt {
-            return Err(miette!(
-                "multi-step execution requires a bound workflow; call create_workflow or activate_workflow first"
-            ));
-        }
-    }
-
     let tools = build_runtime_tools(context);
     let tool = find_runtime_tool(&tools, &call.name)?;
     if !tool.is_available(context) {
@@ -551,14 +545,4 @@ pub async fn execute_agent_tool_call(
             .tool_output_max_tokens
             .max(1),
     ))
-}
-
-fn requires_workflow_binding(context: &Context) -> bool {
-    context
-        .plan
-        .steps()
-        .iter()
-        .filter(|step| !matches!(step.status, crate::plan::PlanStatus::Completed))
-        .count()
-        > 1
 }

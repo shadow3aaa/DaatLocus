@@ -48,7 +48,7 @@ pub const PLAN_UNIT_HOW: &str = "使用 `update_plan` 持续维护 plan。每次
 
 pub const WORKFLOW_UNIT_WHAT: &str = "workflow 是可迭代的任务执行规范。每个 workflow 都描述何时适用、前置条件、可复用步骤、完成标准与稳定恢复路径。";
 
-pub const WORKFLOW_UNIT_WHEN: &str = "当任务是非平凡、多步骤、且适合复用稳定流程时，应先查看快照里的候选 workflow；如果没有合适项，再调用 `create_workflow` 创建初稿，并用 `activate_workflow` 绑定到当前任务。";
+pub const WORKFLOW_UNIT_WHEN: &str = "每个 turn 开始时，必须先绑定 workflow，然后才能执行任何任务。从快照候选中选择最合适的项并调用 `activate_workflow`；若无合适项，调用 `create_workflow` 创建新 workflow。workflow 对所有任务类型均适用，包括单次回复。";
 
 pub const WORKFLOW_UNIT_HOW: &str = "workflow 绑定只是当前任务的 runtime 状态，不会自动改写 workflow 规范本体。白天无需手工记录 workflow outcome；runtime 会在 work 完成边界直接写入 `WorkflowRunRecord`，供 sleep 在夜间进行 patch 或 merge。";
 

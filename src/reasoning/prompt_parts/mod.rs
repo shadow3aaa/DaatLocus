@@ -312,7 +312,7 @@ impl SnapshotPart for WorkflowSnapshotPart {
             }
         } else {
             blocks.push(PromptBlock::Paragraph(
-                "bound_workflow_id=<none>; 如果这是多步骤任务并且适合复用稳定流程，应先从候选 workflow 中选择合适项；若没有合适项，再调用 create_workflow 并 activate_workflow。"
+                "【当前阶段：workflow 选择】bound_workflow_id=<none>。在执行任何任务之前，必须先调用 activate_workflow 从候选中选择最合适的 workflow，或调用 create_workflow 创建新 workflow。当前可用工具仅限这两个。"
                     .to_string(),
             ));
         }
