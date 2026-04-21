@@ -54,7 +54,8 @@ use crate::{
     daemon::{
         DaemonClient, DaemonControlCommand as RuntimeDaemonControlCommand, DaemonLock,
         clear_metadata, connect_existing_daemon, connect_or_start_daemon, read_metadata,
-        start_server, status_summary,
+        spawn_detached_daemon_process, start_server, status_summary, wait_for_daemon_ready,
+        wait_for_daemon_shutdown,
     },
     dashboard::render::{
         AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD,
@@ -249,6 +250,7 @@ enum HindsightTarget {
 enum DaemonTarget {
     Status,
     Stop,
+    Restart,
     Serve,
 }
 
@@ -314,6 +316,12 @@ async fn async_main(cli: Cli) -> Result<()> {
             target: DaemonTarget::Stop,
         }) => {
             run_daemon_stop_command().await?;
+            return Ok(());
+        }
+        Some(DaatLocusCommand::Daemon {
+            target: DaemonTarget::Restart,
+        }) => {
+            run_daemon_restart_command().await?;
             return Ok(());
         }
         Some(DaatLocusCommand::Attach) => {
@@ -484,7 +492,10 @@ async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Resul
         "[hindsight] connecting to bank '{}/{}'",
         hindsight_config.namespace, hindsight_config.bank_id,
     ));
-    let hindsight = HindsightClient::connect(&hindsight_config).await?;
+    let hindsight =
+        HindsightClient::connect(&hindsight_config)
+            .await?
+            .with_restart_support(hindsight_llm_env_vars(config));
     hindsight.bootstrap_bank().await?;
     emit_startup_progress("[hindsight] bank ready");
     Ok(hindsight)
@@ -607,6 +618,18 @@ async fn run_daemon_stop_command() -> Result<()> {
     let client = connect_existing_daemon().await?;
     client.shutdown().await?;
     println!("daemon shutdown requested");
+    Ok(())
+}
+
+async fn run_daemon_restart_command() -> Result<()> {
+    if let Ok(client) = connect_existing_daemon().await {
+        let pid = client.metadata().pid;
+        client.shutdown().await?;
+        wait_for_daemon_shutdown(pid).await?;
+    }
+    spawn_detached_daemon_process().await?;
+    let metadata = wait_for_daemon_ready().await?;
+    println!("daemon restarted: {}", status_summary(&metadata));
     Ok(())
 }
 

@@ -225,7 +225,12 @@ impl Context {
     }
 
     pub async fn shutdown(mut self) {
-        if self.hindsight_retain.flush().await.is_ok() {
+        if self
+            .hindsight_retain
+            .flush_with_timeout(Duration::from_secs(30))
+            .await
+            .is_ok()
+        {
             self.memory.mark_queued_retained();
         }
         self.hindsight_retain.shutdown().await;
