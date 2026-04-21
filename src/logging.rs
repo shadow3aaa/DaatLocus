@@ -39,19 +39,30 @@ pub async fn init_logging() -> WorkerGuard {
         return guard;
     }
 
-    let file_appender = tracing_appender::rolling::never(log_dir, "daat-locus.log");
+    let file_appender = tracing_appender::rolling::never(&log_dir, "daat-locus.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("daat_locus=info,warn"));
+        .unwrap_or_else(|_| EnvFilter::new("info"));
 
-    let _ = tracing_subscriber::fmt()
+    if let Err(err) = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_ansi(false)
         .with_target(true)
         .with_thread_ids(true)
         .with_writer(non_blocking)
-        .try_init();
+        .try_init()
+    {
+        // 全局 subscriber 已被设置（正常情况下不应发生），回退到 stderr。
+        eprintln!("init_logging: tracing subscriber already set, falling back to stderr: {err}");
+        let (nb_stderr, guard_stderr) = tracing_appender::non_blocking(std::io::stderr());
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new("daat_locus=info,warn"))
+            .with_ansi(false)
+            .with_writer(nb_stderr)
+            .try_init();
+        return guard_stderr;
+    }
 
     guard
 }

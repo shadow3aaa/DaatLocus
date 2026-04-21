@@ -80,7 +80,7 @@ use crate::{
     memory::{Memory, RuntimeTurnDraft},
     pending_work::{PendingWork, PendingWorkQueue},
     plan::Plan,
-    providers::build_llm,
+    providers::{build_llm, exchange_copilot_session_token},
     reasoning::{
         compiled::{
             CompiledPromptStore, load_all_compiled_programs_for_model,
@@ -474,7 +474,10 @@ async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Resul
         hindsight_config.bank_id,
     ));
     let server =
-        HindsightManagedServer::new(hindsight_config.clone(), hindsight_llm_env_vars(config));
+        HindsightManagedServer::new(
+            hindsight_config.clone(),
+            hindsight_llm_env_vars(config).await?,
+        );
     if server.check_health().await {
         emit_startup_progress("[hindsight] daemon already running, reusing");
     } else {
@@ -495,29 +498,24 @@ async fn connect_bootstrapped_hindsight(config: &crate::config::Config) -> Resul
     let hindsight =
         HindsightClient::connect(&hindsight_config)
             .await?
-            .with_restart_support(hindsight_llm_env_vars(config));
+            .with_restart_support(hindsight_llm_env_vars(config).await?);
     hindsight.bootstrap_bank().await?;
     emit_startup_progress("[hindsight] bank ready");
     Ok(hindsight)
 }
 
-fn hindsight_llm_env_vars(config: &crate::config::Config) -> Vec<(String, String)> {
+async fn hindsight_llm_env_vars(config: &crate::config::Config) -> Result<Vec<(String, String)>> {
     use crate::config::ProviderConfig;
     let model = config.main_model_config();
     match config.main_provider_config() {
         ProviderConfig::GithubCopilot { github_token } => {
-            vec![
-                ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
-                (
-                    "HINDSIGHT_API_LLM_API_KEY".into(),
-                    resolve_hindsight_env_value(github_token),
-                ),
-                ("HINDSIGHT_API_LLM_MODEL".into(), model.model_id.clone()),
-                (
-                    "HINDSIGHT_API_LLM_BASE_URL".into(),
-                    "https://api.githubcopilot.com".into(),
-                ),
-            ]
+            let github_token = resolve_hindsight_env_value(github_token);
+            let (session_token, base_url, _) = exchange_copilot_session_token(&github_token).await?;
+            Ok(hindsight_copilot_llm_env_vars(
+                &session_token,
+                &base_url,
+                &model.model_id,
+            ))
         }
         ProviderConfig::Openai { api_key, base_url } => {
             let mut vars = vec![
@@ -534,23 +532,34 @@ fn hindsight_llm_env_vars(config: &crate::config::Config) -> Vec<(String, String
                     resolve_hindsight_env_value(url),
                 ));
             }
-            vars
+            Ok(vars)
         }
-        ProviderConfig::OpenaiCompatible { base_url, api_key } => {
-            vec![
-                ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
-                (
-                    "HINDSIGHT_API_LLM_API_KEY".into(),
-                    resolve_hindsight_env_value(api_key),
-                ),
-                ("HINDSIGHT_API_LLM_MODEL".into(), model.model_id.clone()),
-                (
-                    "HINDSIGHT_API_LLM_BASE_URL".into(),
-                    resolve_hindsight_env_value(base_url),
-                ),
-            ]
-        }
+        ProviderConfig::OpenaiCompatible { base_url, api_key } => Ok(vec![
+            ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
+            (
+                "HINDSIGHT_API_LLM_API_KEY".into(),
+                resolve_hindsight_env_value(api_key),
+            ),
+            ("HINDSIGHT_API_LLM_MODEL".into(), model.model_id.clone()),
+            (
+                "HINDSIGHT_API_LLM_BASE_URL".into(),
+                resolve_hindsight_env_value(base_url),
+            ),
+        ]),
     }
+}
+
+fn hindsight_copilot_llm_env_vars(
+    session_token: &str,
+    base_url: &str,
+    model_id: &str,
+) -> Vec<(String, String)> {
+    vec![
+        ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
+        ("HINDSIGHT_API_LLM_API_KEY".into(), session_token.to_string()),
+        ("HINDSIGHT_API_LLM_MODEL".into(), model_id.to_string()),
+        ("HINDSIGHT_API_LLM_BASE_URL".into(), base_url.to_string()),
+    ]
 }
 
 fn resolve_hindsight_env_value(value: &str) -> String {
@@ -653,6 +662,34 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     let _lock = DaemonLock::acquire().await?;
     clear_metadata().await;
 
+    // 提前加载 telegram_acl（廉价 I/O），创建所有 channel，然后立即启动 HTTP 服务器并
+    // 写入 metadata 文件——这样 wait_for_daemon_ready 在耗时的 prompt compile 之前就能返回。
+    let telegram_acl = TelegramAclHandle::load().await;
+    let (tx, _rx) = tokio::sync::watch::channel(DashboardState::default());
+    let (dashboard_control_tx, mut dashboard_control_rx) =
+        tokio::sync::mpsc::unbounded_channel::<DashboardControlCommand>();
+    let (sleep_result_tx, mut sleep_result_rx) =
+        tokio::sync::mpsc::unbounded_channel::<SleepTaskResult>();
+    let (workspace_app_invalidation_tx, mut workspace_app_invalidation_rx) =
+        tokio::sync::mpsc::unbounded_channel::<WorkspaceAppInvalidation>();
+    let (daemon_control_tx, mut daemon_control_rx) =
+        tokio::sync::mpsc::unbounded_channel::<RuntimeDaemonControlCommand>();
+    let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::oneshot::channel();
+
+    let daemon_server = start_server(
+        tx.subscribe(),
+        telegram_acl.clone(),
+        dashboard_control_tx.clone(),
+        daemon_control_tx.clone(),
+        server_shutdown_rx,
+    )
+    .await?;
+    emit_startup_progress(format!(
+        "[daemon] listening on http://{}:{}",
+        daemon_server.metadata.host, daemon_server.metadata.port
+    ));
+
+    // 耗时初始化（hindsight + prompt compile）在服务器启动后进行。
     let hindsight = connect_bootstrapped_hindsight(&config).await?;
     let hindsight_retain = hindsight.spawn_retain_worker();
 
@@ -703,7 +740,6 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
     let workflows = WorkflowStore::new().await;
-    let telegram_acl = TelegramAclHandle::load().await;
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
     bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
@@ -759,7 +795,7 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
         compiled_prompts,
         execution_cwd,
         sandbox_policy,
-        dashboard_tx: None,
+        dashboard_tx: Some(tx.clone()),
         active_runtime_turn: false,
         active_runtime_phase: None,
         runtime_turn_started_at: None,
@@ -771,36 +807,29 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
         idle_since: None,
         last_idle_sleep_at: None,
     };
-    let app_renders = context.apps.state_renders();
-    let (tx, _rx) = tokio::sync::watch::channel(DashboardState {
-        focused_app: context.apps.focused(),
-        status_output: render_status_command_output_for_dashboard(&context, &app_renders),
-        sleep_status_output: render_sleep_status_output_for_dashboard(
-            &context,
-            &SleepDashboardStatus::default(),
-        ),
-        inspect_telegram_output: render_telegram_status_for_dashboard(&context),
-        system_prompt_output: render_system_prompt_output_for_dashboard(&context),
-        app_status_outputs: render_app_status_outputs_for_dashboard(&context),
-        pending_access_requests: context.telegram_acl.pending_requests(),
-        activity_cells: render_activity_for_dashboard(&context),
-        live_activity_cells: Vec::new(),
-        last_cycle_elapsed_ms: None,
-        runtime_status: None,
-        footer_context: render_dashboard_footer_context(&context, None),
-        footer_estimated_input_tokens: None,
-    });
-    context.dashboard_tx = Some(tx.clone());
 
-    let (dashboard_control_tx, mut dashboard_control_rx) =
-        tokio::sync::mpsc::unbounded_channel::<DashboardControlCommand>();
-    let (sleep_result_tx, mut sleep_result_rx) =
-        tokio::sync::mpsc::unbounded_channel::<SleepTaskResult>();
-    let (workspace_app_invalidation_tx, mut workspace_app_invalidation_rx) =
-        tokio::sync::mpsc::unbounded_channel::<WorkspaceAppInvalidation>();
-    let (daemon_control_tx, mut daemon_control_rx) =
-        tokio::sync::mpsc::unbounded_channel::<RuntimeDaemonControlCommand>();
-    let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::oneshot::channel();
+    // context 构建完成后，用真实状态替换占位 dashboard state。
+    let app_renders = context.apps.state_renders();
+    tx.send_modify(|state| {
+        *state = DashboardState {
+            focused_app: context.apps.focused(),
+            status_output: render_status_command_output_for_dashboard(&context, &app_renders),
+            sleep_status_output: render_sleep_status_output_for_dashboard(
+                &context,
+                &SleepDashboardStatus::default(),
+            ),
+            inspect_telegram_output: render_telegram_status_for_dashboard(&context),
+            system_prompt_output: render_system_prompt_output_for_dashboard(&context),
+            app_status_outputs: render_app_status_outputs_for_dashboard(&context),
+            pending_access_requests: context.telegram_acl.pending_requests(),
+            activity_cells: render_activity_for_dashboard(&context),
+            live_activity_cells: Vec::new(),
+            last_cycle_elapsed_ms: None,
+            runtime_status: None,
+            footer_context: render_dashboard_footer_context(&context, None),
+            footer_estimated_input_tokens: None,
+        };
+    });
 
     let workspace_app_watcher = match start_workspace_app_watcher(
         workspace_apps_dir(&context.execution_cwd),
@@ -812,19 +841,6 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
             None
         }
     };
-
-    let daemon_server = start_server(
-        tx.subscribe(),
-        telegram_acl.clone(),
-        dashboard_control_tx.clone(),
-        daemon_control_tx.clone(),
-        server_shutdown_rx,
-    )
-    .await?;
-    emit_startup_progress(format!(
-        "[daemon] listening on http://{}:{}",
-        daemon_server.metadata.host, daemon_server.metadata.port
-    ));
 
     let telegram_transport =
         if context.config.telegram.enabled && context.config.telegram.has_real_credentials() {
@@ -843,6 +859,16 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
         } else {
             None
         };
+
+    // SIGTERM → graceful shutdown（unix only）。
+    // 在 Windows 等平台上用 pending() 占位，让 select! 的分支结构保持统一。
+    #[cfg(unix)]
+    let mut sigterm = {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|err| miette!("failed to install SIGTERM handler: {err}"))?
+    };
+    #[cfg(not(unix))]
+    let sigterm_never = std::future::pending::<Option<()>>();
 
     let mut sleep_running = false;
     let mut sleep_status = SleepDashboardStatus::default();
@@ -877,6 +903,14 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
                 if let Err(err) = signal {
                     tracing::warn!("ctrl_c listener failed: {err}");
                 }
+                tracing::info!("daemon received SIGINT, shutting down");
+                break;
+            }
+            _ = {
+                #[cfg(unix)] { sigterm.recv() }
+                #[cfg(not(unix))] { sigterm_never }
+            } => {
+                tracing::info!("daemon received SIGTERM, shutting down");
                 break;
             }
         }
@@ -2981,16 +3015,15 @@ mod tests {
     }
 
     #[test]
-    fn hindsight_llm_env_vars_keep_copilot_llm_enabled() {
-        let config = config_with_main_provider(
-            ProviderConfig::GithubCopilot {
-                github_token: "ghu_test_token".to_string(),
-            },
-            "gpt-4o",
-        );
-
+    fn hindsight_copilot_llm_env_vars_keep_copilot_llm_enabled() {
         let vars: std::collections::HashMap<_, _> =
-            hindsight_llm_env_vars(&config).into_iter().collect();
+            hindsight_copilot_llm_env_vars(
+                "copilot_session_token",
+                "https://api.individual.githubcopilot.com",
+                "gpt-4o",
+            )
+            .into_iter()
+            .collect();
 
         assert_eq!(
             vars.get("HINDSIGHT_API_LLM_PROVIDER").map(String::as_str),
@@ -2998,7 +3031,7 @@ mod tests {
         );
         assert_eq!(
             vars.get("HINDSIGHT_API_LLM_API_KEY").map(String::as_str),
-            Some("ghu_test_token")
+            Some("copilot_session_token")
         );
         assert_eq!(
             vars.get("HINDSIGHT_API_LLM_MODEL").map(String::as_str),
@@ -3006,7 +3039,7 @@ mod tests {
         );
         assert_eq!(
             vars.get("HINDSIGHT_API_LLM_BASE_URL").map(String::as_str),
-            Some("https://api.githubcopilot.com")
+            Some("https://api.individual.githubcopilot.com")
         );
         assert!(!vars.contains_key("HINDSIGHT_API_SKIP_LLM_VERIFICATION"));
     }
