@@ -60,9 +60,6 @@ impl WorkflowSpec {
         if self.id.is_empty() {
             return Err(miette!("workflow.id cannot be empty"));
         }
-        if self.workflow_steps.is_empty() {
-            return Err(miette!("workflow.workflow_steps cannot be empty"));
-        }
         Ok(self)
     }
 
@@ -218,11 +215,6 @@ impl WorkflowStore {
     pub async fn create_workflow(&mut self, draft: NewWorkflowSpec) -> Result<WorkflowSpec> {
         if draft.id.trim().is_empty() {
             return Err(miette!("create_workflow requires non-empty id"));
-        }
-        if draft.workflow_steps.is_empty() {
-            return Err(miette!(
-                "create_workflow requires at least one workflow step"
-            ));
         }
         if draft.when_to_use.is_empty() {
             return Err(miette!(
