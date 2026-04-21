@@ -556,6 +556,21 @@ pub async fn wait_for_daemon_ready() -> Result<DaemonMetadata> {
     ))
 }
 
+pub async fn wait_for_daemon_shutdown(pid: u32) -> Result<()> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    while Instant::now() < deadline {
+        if !process_exists(pid) {
+            return Ok(());
+        }
+        tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
+    }
+    Err(miette!(
+        "daemon pid={} did not shut down within {}s",
+        pid,
+        START_TIMEOUT.as_secs()
+    ))
+}
+
 pub async fn spawn_detached_daemon_process() -> Result<()> {
     let current_exe = std::env::current_exe()
         .map_err(|err| miette!("resolve current executable failed: {err}"))?;

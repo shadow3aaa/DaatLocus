@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::config::HindsightConfig;
+use crate::hindsight::managed::HindsightManagedServer;
 
 #[derive(Clone)]
 pub struct HindsightClient {
@@ -18,6 +19,7 @@ pub struct HindsightClient {
     config: HindsightConfig,
     retain_api: HindsightRetainApi,
     supports_update_mode_append: bool,
+    restart_support: Option<Arc<HindsightRestartSupport>>,
 }
 
 #[derive(Clone)]
@@ -29,6 +31,12 @@ pub struct HindsightRetainHandle {
 enum HindsightRetainApi {
     MemoriesEndpoint,
     LegacyFilesEndpoint,
+}
+
+#[derive(Debug)]
+struct HindsightRestartSupport {
+    llm_env_vars: Vec<(String, String)>,
+    restart_lock: Mutex<()>,
 }
 
 #[derive(Debug)]
@@ -93,6 +101,7 @@ pub(crate) struct HindsightEntityLabelValueConfig {
 
 const DEFAULT_HINDSIGHT_RECALL_BUDGET: &str = "mid";
 const DEFAULT_HINDSIGHT_REFLECT_BUDGET: &str = "low";
+const DEFAULT_HINDSIGHT_FLUSH_TIMEOUT_SECS: u64 = 15;
 pub const HINDSIGHT_RUNTIME_DOCUMENT_ID: &str = "daat-locus:runtime";
 const HINDSIGHT_UPDATE_MODE_APPEND: &str = "append";
 const MIN_HINDSIGHT_VERSION_FOR_APPEND: (u64, u64, u64) = (0, 5, 0);
@@ -372,6 +381,7 @@ impl HindsightClient {
             config: config.clone(),
             retain_api: HindsightRetainApi::MemoriesEndpoint,
             supports_update_mode_append: false,
+            restart_support: None,
         };
         let (retain_api, supports_update_mode_append) =
             bootstrap.detect_retain_capabilities().await?;
@@ -380,6 +390,14 @@ impl HindsightClient {
             supports_update_mode_append,
             ..bootstrap
         })
+    }
+
+    pub fn with_restart_support(mut self, llm_env_vars: Vec<(String, String)>) -> Self {
+        self.restart_support = Some(Arc::new(HindsightRestartSupport {
+            llm_env_vars,
+            restart_lock: Mutex::new(()),
+        }));
+        self
     }
 
     pub fn spawn_retain_worker(&self) -> HindsightRetainHandle {
@@ -456,26 +474,39 @@ impl HindsightClient {
         let url = self.bank_url();
         let mut body = json!({});
         body["reflect_mission"] = serde_json::Value::String(default_hindsight_reflect_mission());
-        let response = self.authorized(self.http.put(url)).json(&body).send().await;
-        self.expect_success(response, "create/update hindsight bank")
-            .await?;
-        Ok(())
+        self.with_restart_retry("create/update hindsight bank", || {
+            let url = url.clone();
+            let body = body.clone();
+            async move {
+                let response = self.authorized(self.http.put(url)).json(&body).send().await;
+                self.expect_success(response, "create/update hindsight bank")
+                    .await?;
+                Ok(())
+            }
+        })
+        .await
     }
 
     pub async fn delete_bank(&self) -> Result<()> {
         let url = self.bank_url();
-        let response = self.authorized(self.http.delete(url)).send().await;
-        match self.expect_success(response, "delete hindsight bank").await {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                let message = err.to_string();
-                if message.contains("404") {
-                    Ok(())
-                } else {
-                    Err(err)
+        self.with_restart_retry("delete hindsight bank", || {
+            let url = url.clone();
+            async move {
+                let response = self.authorized(self.http.delete(url)).send().await;
+                match self.expect_success(response, "delete hindsight bank").await {
+                    Ok(_) => Ok(()),
+                    Err(err) => {
+                        let message = err.to_string();
+                        if message.contains("404") {
+                            Ok(())
+                        } else {
+                            Err(err)
+                        }
+                    }
                 }
             }
-        }
+        })
+        .await
     }
 
     pub async fn retain(
@@ -505,10 +536,18 @@ impl HindsightClient {
                 item
             })
             .collect::<Vec<_>>();
-        match self.retain_api {
-            HindsightRetainApi::MemoriesEndpoint => self.retain_via_memories(items).await,
-            HindsightRetainApi::LegacyFilesEndpoint => self.retain_via_legacy_files(items).await,
-        }
+        self.with_restart_retry("retain hindsight memories", || {
+            let items = items.clone();
+            async move {
+                match self.retain_api {
+                    HindsightRetainApi::MemoriesEndpoint => self.retain_via_memories(items).await,
+                    HindsightRetainApi::LegacyFilesEndpoint => {
+                        self.retain_via_legacy_files(items).await
+                    }
+                }
+            }
+        })
+        .await
     }
 
     pub async fn recall(
@@ -539,13 +578,20 @@ impl HindsightClient {
             "tags": if options.tags.is_empty() { serde_json::Value::Null } else { json!(options.tags) },
             "tags_match": options.tags_match.unwrap_or_else(|| "any".to_string()),
         });
-        let response = self
-            .authorized(self.http.post(url))
-            .json(&body)
-            .send()
-            .await;
-        self.expect_json_success(response, "recall hindsight memories")
-            .await
+        self.with_restart_retry("recall hindsight memories", || {
+            let url = url.clone();
+            let body = body.clone();
+            async move {
+                let response = self
+                    .authorized(self.http.post(url))
+                    .json(&body)
+                    .send()
+                    .await;
+                self.expect_json_success(response, "recall hindsight memories")
+                    .await
+            }
+        })
+        .await
     }
 
     pub async fn reflect(
@@ -555,20 +601,33 @@ impl HindsightClient {
     ) -> Result<HindsightReflectResponse> {
         let url = format!("{}/reflect", self.bank_url());
         let body = build_reflect_body(query, options);
-        let response = self
-            .authorized(self.http.post(url))
-            .json(&body)
-            .send()
-            .await;
-        self.expect_json_success(response, "reflect hindsight memories")
-            .await
+        self.with_restart_retry("reflect hindsight memories", || {
+            let url = url.clone();
+            let body = body.clone();
+            async move {
+                let response = self
+                    .authorized(self.http.post(url))
+                    .json(&body)
+                    .send()
+                    .await;
+                self.expect_json_success(response, "reflect hindsight memories")
+                    .await
+            }
+        })
+        .await
     }
 
     pub async fn get_bank_config(&self) -> Result<HindsightBankConfigEnvelope> {
         let url = format!("{}/config", self.bank_url());
-        let response = self.authorized(self.http.get(url)).send().await;
-        self.expect_json_success(response, "get hindsight bank config")
-            .await
+        self.with_restart_retry("get hindsight bank config", || {
+            let url = url.clone();
+            async move {
+                let response = self.authorized(self.http.get(url)).send().await;
+                self.expect_json_success(response, "get hindsight bank config")
+                    .await
+            }
+        })
+        .await
     }
 
     pub async fn update_bank_config(
@@ -576,20 +635,33 @@ impl HindsightClient {
         updates: serde_json::Map<String, Value>,
     ) -> Result<HindsightBankConfigEnvelope> {
         let url = format!("{}/config", self.bank_url());
-        let response = self
-            .authorized(self.http.patch(url))
-            .json(&json!({ "updates": updates }))
-            .send()
-            .await;
-        self.expect_json_success(response, "update hindsight bank config")
-            .await
+        self.with_restart_retry("update hindsight bank config", || {
+            let url = url.clone();
+            let updates = updates.clone();
+            async move {
+                let response = self
+                    .authorized(self.http.patch(url))
+                    .json(&json!({ "updates": updates }))
+                    .send()
+                    .await;
+                self.expect_json_success(response, "update hindsight bank config")
+                    .await
+            }
+        })
+        .await
     }
 
     pub async fn delete_all_observations(&self) -> Result<HindsightDeleteObservationsResponse> {
         let url = format!("{}/observations", self.bank_url());
-        let response = self.authorized(self.http.delete(url)).send().await;
-        self.expect_json_success(response, "delete hindsight observations")
-            .await
+        self.with_restart_retry("delete hindsight observations", || {
+            let url = url.clone();
+            async move {
+                let response = self.authorized(self.http.delete(url)).send().await;
+                self.expect_json_success(response, "delete hindsight observations")
+                    .await
+            }
+        })
+        .await
     }
 
     fn base_url(&self) -> String {
@@ -765,6 +837,50 @@ impl HindsightClient {
         request
     }
 
+    async fn with_restart_retry<T, F, Fut>(&self, action: &str, mut operation: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut restart_attempted = false;
+        loop {
+            match operation().await {
+                Ok(value) => return Ok(value),
+                Err(err)
+                    if !restart_attempted && should_attempt_hindsight_restart(err.to_string().as_str()) =>
+                {
+                    restart_attempted = true;
+                    if self.restart_daemon_if_needed(action, &err).await? {
+                        continue;
+                    }
+                    return Err(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    async fn restart_daemon_if_needed(&self, action: &str, err: &miette::Report) -> Result<bool> {
+        let Some(restart_support) = &self.restart_support else {
+            return Ok(false);
+        };
+        let _guard = restart_support.restart_lock.lock().await;
+        let server = HindsightManagedServer::new(
+            self.config.clone(),
+            restart_support.llm_env_vars.clone(),
+        );
+        if server.check_health().await {
+            return Ok(false);
+        }
+        tracing::warn!(
+            "[hindsight] {} failed; daemon appears down, attempting restart\n{}",
+            action,
+            format_report(err)
+        );
+        server.start().await?;
+        Ok(true)
+    }
+
     async fn expect_success(
         &self,
         response: std::result::Result<reqwest::Response, reqwest::Error>,
@@ -814,12 +930,23 @@ impl HindsightRetainHandle {
     }
 
     pub async fn flush(&self) -> Result<()> {
+        self.flush_with_timeout(Duration::from_secs(DEFAULT_HINDSIGHT_FLUSH_TIMEOUT_SECS))
+            .await
+    }
+
+    pub async fn flush_with_timeout(&self, timeout: Duration) -> Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RetainWorkerMessage::Flush { reply: reply_tx })
             .map_err(|_| miette!("hindsight retain worker channel closed"))?;
-        reply_rx
+        tokio::time::timeout(timeout, reply_rx)
             .await
+            .map_err(|_| {
+                miette!(
+                    "hindsight retain flush timed out after {:.1}s",
+                    timeout.as_secs_f64()
+                )
+            })?
             .map_err(|_| miette!("hindsight retain worker flush reply dropped"))?
     }
 
@@ -949,6 +1076,19 @@ fn truncate_for_error(text: &str) -> String {
     }
     let truncated = text.chars().take(MAX_LEN).collect::<String>();
     format!("{truncated}...")
+}
+
+fn should_attempt_hindsight_restart(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("http 502")
+        || text.contains("http 503")
+        || text.contains("http 504")
+        || text.contains("connection refused")
+        || text.contains("error trying to connect")
+        || text.contains("couldn't connect to server")
+        || text.contains("connection reset")
+        || text.contains("dns error")
+        || text.contains("tcp connect error")
 }
 
 fn hindsight_retain_backoff(attempt: usize) -> Duration {
@@ -1189,5 +1329,28 @@ mod tests {
             fallback_hindsight_document_id(&item, 0),
             "hindsight-step:1234"
         );
+    }
+
+    #[test]
+    fn restart_trigger_matches_transport_failures() {
+        assert!(should_attempt_hindsight_restart(
+            "recall hindsight memories failed with HTTP 502 Bad Gateway"
+        ));
+        assert!(should_attempt_hindsight_restart(
+            "retain hindsight memories failed: error trying to connect: tcp connect error: Connection refused"
+        ));
+        assert!(should_attempt_hindsight_restart(
+            "probe hindsight openapi failed: couldn't connect to server"
+        ));
+    }
+
+    #[test]
+    fn restart_trigger_ignores_non_transport_failures() {
+        assert!(!should_attempt_hindsight_restart(
+            "retain hindsight memories failed with HTTP 400: model_not_supported"
+        ));
+        assert!(!should_attempt_hindsight_restart(
+            "workflow planner failed: missing field `should_optimize`"
+        ));
     }
 }
