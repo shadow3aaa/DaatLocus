@@ -56,6 +56,7 @@ pub struct OpenAIClient {
 enum PromptToolChoiceMode {
     NamedFunction,
     RequiredString,
+    Omit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -416,12 +417,24 @@ impl OpenAIClient {
             }
 
             if should_retry_prompt_request_with_string_tool_choice(&body)
-                && adapter_state.prompt_tool_choice_mode != PromptToolChoiceMode::RequiredString
+                && adapter_state.prompt_tool_choice_mode == PromptToolChoiceMode::NamedFunction
             {
                 adapter_state.prompt_tool_choice_mode = PromptToolChoiceMode::RequiredString;
                 self.update_adapter_state(adapter_state);
                 warn!(
                     "llm provider rejected named function tool_choice; retrying prompt request with string tool_choice\n{}",
+                    request_context.join("\n")
+                );
+                continue;
+            }
+
+            if should_retry_prompt_request_without_tool_choice(&body)
+                && adapter_state.prompt_tool_choice_mode != PromptToolChoiceMode::Omit
+            {
+                adapter_state.prompt_tool_choice_mode = PromptToolChoiceMode::Omit;
+                self.update_adapter_state(adapter_state);
+                warn!(
+                    "llm provider does not support tool_choice; retrying prompt request without tool_choice\n{}",
                     request_context.join("\n")
                 );
                 continue;
@@ -817,15 +830,6 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
         output_schema: serde_json::Value,
     ) -> serde_json::Value {
         let messages = prompt_request_to_openai_messages(request.clone(), true);
-        let tool_choice = match self.state.prompt_tool_choice_mode {
-            PromptToolChoiceMode::NamedFunction => {
-                json!({
-                    "type": "function",
-                    "function": { "name": request.tool_name }
-                })
-            }
-            PromptToolChoiceMode::RequiredString => json!("required"),
-        };
         let mut payload = json!({
             "model": client.model,
             "messages": messages,
@@ -840,10 +844,21 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
                     }
                 }
             ],
-            "tool_choice": tool_choice,
             "temperature": client.temperature,
             "max_tokens": client.max_completion_tokens,
         });
+        match self.state.prompt_tool_choice_mode {
+            PromptToolChoiceMode::NamedFunction => {
+                payload["tool_choice"] = json!({
+                    "type": "function",
+                    "function": { "name": request.tool_name }
+                });
+            }
+            PromptToolChoiceMode::RequiredString => {
+                payload["tool_choice"] = json!("required");
+            }
+            PromptToolChoiceMode::Omit => {}
+        }
         apply_optional_thinking_budget(
             &mut payload,
             client.thinking_budget.as_deref(),
@@ -899,6 +914,14 @@ fn should_retry_prompt_request_with_string_tool_choice(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     body.contains("unknown parameter: 'tool_choice.function'")
         || body.contains("unknown parameter: \"tool_choice.function\"")
+}
+
+fn should_retry_prompt_request_without_tool_choice(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("does not support this tool_choice")
+        || body.contains("does not support tool_choice")
+        || body.contains("unknown parameter: 'tool_choice'")
+        || body.contains("unknown parameter: \"tool_choice\"")
 }
 
 fn should_retry_prompt_request_with_nested_thinking_budget(body: &str) -> bool {
