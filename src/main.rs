@@ -186,11 +186,6 @@ enum DaatLocusCommand {
         target: Option<ConfigTarget>,
     },
     Sleep,
-    /// 查看 hindsight bank 配置；加子命令可执行管理操作
-    Hindsight {
-        #[command(subcommand)]
-        target: Option<HindsightTarget>,
-    },
     /// 输出内部诊断信息（system-prompt / snapshot）
     Debug {
         #[command(subcommand)]
@@ -230,12 +225,6 @@ enum DebugTarget {
     #[command(name = "system-prompt")]
     SystemPrompt,
     Snapshot,
-}
-
-#[derive(Debug, Subcommand)]
-enum HindsightTarget {
-    #[command(name = "clear-observations")]
-    ClearObservations,
 }
 
 #[derive(Debug, Subcommand)]
@@ -346,10 +335,6 @@ async fn async_main(cli: Cli) -> Result<()> {
     };
 
     match cli.command.as_ref() {
-        Some(DaatLocusCommand::Hindsight { target }) => {
-            run_hindsight_command(&config, target.as_ref()).await?;
-            return Ok(());
-        }
         Some(DaatLocusCommand::Debug {
             target: DebugTarget::SystemPrompt,
         }) => {
@@ -600,38 +585,6 @@ async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
         Some(ConfigTarget::SetMainModel) => config_wizard::run_set_main_model().await,
         Some(ConfigTarget::SetHindsightModel) => config_wizard::run_set_hindsight_model().await,
     }
-}
-
-async fn run_hindsight_command(
-    config: &crate::config::Config,
-    target: Option<&HindsightTarget>,
-) -> Result<()> {
-    let hindsight = connect_bootstrapped_hindsight(config, false).await?;
-    match target {
-        None => {
-            let config = hindsight.get_bank_config().await?;
-            println!(
-                "{}",
-                to_pretty_json(&json!({
-                    "bank_id": config.bank_id,
-                    "config": config.config,
-                    "overrides": config.overrides,
-                }))?
-            );
-        }
-        Some(HindsightTarget::ClearObservations) => {
-            let response = hindsight.delete_all_observations().await?;
-            println!(
-                "{}",
-                to_pretty_json(&json!({
-                    "success": response.success,
-                    "message": response.message,
-                    "deleted_count": response.deleted_count.unwrap_or(0),
-                }))?
-            );
-        }
-    }
-    Ok(())
 }
 
 async fn run_daemon_status_command() -> Result<()> {
