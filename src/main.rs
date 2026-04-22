@@ -162,7 +162,7 @@ impl TelegramLiveDraftSession {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "daat-locus", about = "Daat Locus AI 助理运行时")]
+#[command(name = "daat-locus", about = "Daat Locus Agent")]
 struct Cli {
     #[command(subcommand)]
     command: Option<DaatLocusCommand>,
