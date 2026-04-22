@@ -180,23 +180,21 @@ enum DaatLocusCommand {
         #[command(subcommand)]
         target: ResetTarget,
     },
-    Setup {
-        #[command(subcommand)]
-        target: SetupTarget,
-    },
     /// 交互式配置管理（无子命令时进入菜单）
     Config {
         #[command(subcommand)]
         target: Option<ConfigTarget>,
     },
     Sleep,
+    /// 查看 hindsight bank 配置；加子命令可执行管理操作
     Hindsight {
         #[command(subcommand)]
-        target: HindsightTarget,
+        target: Option<HindsightTarget>,
     },
-    Inspect {
+    /// 输出内部诊断信息（system-prompt / snapshot）
+    Debug {
         #[command(subcommand)]
-        target: InspectTarget,
+        target: DebugTarget,
     },
 }
 
@@ -228,13 +226,7 @@ enum ResetTarget {
 }
 
 #[derive(Debug, Subcommand)]
-enum SetupTarget {
-    #[command(name = "browser-runtime")]
-    BrowserRuntime,
-}
-
-#[derive(Debug, Subcommand)]
-enum InspectTarget {
+enum DebugTarget {
     #[command(name = "system-prompt")]
     SystemPrompt,
     Snapshot,
@@ -242,7 +234,6 @@ enum InspectTarget {
 
 #[derive(Debug, Subcommand)]
 enum HindsightTarget {
-    Config,
     #[command(name = "clear-observations")]
     ClearObservations,
 }
@@ -295,12 +286,6 @@ async fn async_main(cli: Cli) -> Result<()> {
             target: ResetTarget::All,
         }) => {
             run_reset_all().await?;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Setup {
-            target: SetupTarget::BrowserRuntime,
-        }) => {
-            run_browser_runtime_setup().await?;
             return Ok(());
         }
         // Config 子命令：可能在无 config 时运行（add-provider/add-model 除外）
@@ -362,19 +347,19 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     match cli.command.as_ref() {
         Some(DaatLocusCommand::Hindsight { target }) => {
-            run_hindsight_command(&config, target).await?;
+            run_hindsight_command(&config, target.as_ref()).await?;
             return Ok(());
         }
-        Some(DaatLocusCommand::Inspect {
-            target: InspectTarget::SystemPrompt,
+        Some(DaatLocusCommand::Debug {
+            target: DebugTarget::SystemPrompt,
         }) => {
             let context = build_eval_context_for_inspect(config).await;
             println!("{}", render_system_prompt_output_for_dashboard(&context));
             context.shutdown().await;
             return Ok(());
         }
-        Some(DaatLocusCommand::Inspect {
-            target: InspectTarget::Snapshot,
+        Some(DaatLocusCommand::Debug {
+            target: DebugTarget::Snapshot,
         }) => {
             let mut context = build_eval_context_for_inspect(config).await;
             let snapshot = Snapshot::new(&mut context).await;
@@ -619,11 +604,11 @@ async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
 
 async fn run_hindsight_command(
     config: &crate::config::Config,
-    target: &HindsightTarget,
+    target: Option<&HindsightTarget>,
 ) -> Result<()> {
     let hindsight = connect_bootstrapped_hindsight(config, false).await?;
     match target {
-        HindsightTarget::Config => {
+        None => {
             let config = hindsight.get_bank_config().await?;
             println!(
                 "{}",
@@ -634,7 +619,7 @@ async fn run_hindsight_command(
                 }))?
             );
         }
-        HindsightTarget::ClearObservations => {
+        Some(HindsightTarget::ClearObservations) => {
             let response = hindsight.delete_all_observations().await?;
             println!(
                 "{}",
@@ -751,6 +736,9 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
         }
         std::process::exit(0);
     });
+
+    // browser runtime 不存在时自动安装（幂等，已安装则跳过）。
+    maybe_setup_browser_runtime().await;
 
     // 耗时初始化（hindsight + prompt compile）在服务器启动后进行。
     let hindsight = connect_bootstrapped_hindsight(&config, true).await?;
@@ -1050,6 +1038,18 @@ fn browser_runtime_platform() -> Result<&'static str> {
     Err(miette!("unsupported browser runtime platform"))
 }
 
+/// 若 browser runtime 已安装则跳过；否则下载并安装。由 daemon 启动时自动调用。
+async fn maybe_setup_browser_runtime() {
+    let paths = daat_locus_paths().await;
+    if paths.browser_executable_path().exists() {
+        return;
+    }
+    tracing::info!("[browser-runtime] executable not found, starting auto-install...");
+    if let Err(err) = run_browser_runtime_setup().await {
+        tracing::warn!("[browser-runtime] auto-install failed: {err:?}");
+    }
+}
+
 async fn run_browser_runtime_setup() -> Result<()> {
     const MANIFEST_URL: &str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
@@ -1058,8 +1058,8 @@ async fn run_browser_runtime_setup() -> Result<()> {
     let runtime_dir = paths.browser_runtime_dir();
     let executable_path = paths.browser_executable_path();
 
-    println!(
-        "[setup] downloading browser runtime for platform `{platform}` into {}",
+    tracing::info!(
+        "[browser-runtime] downloading for platform `{platform}` into {}",
         runtime_dir.display()
     );
 
@@ -1085,8 +1085,8 @@ async fn run_browser_runtime_setup() -> Result<()> {
             miette!("Chrome for Testing has no chrome download for platform `{platform}`")
         })?;
 
-    println!(
-        "[setup] downloading Chrome for Testing {} from {}",
+    tracing::info!(
+        "[browser-runtime] downloading Chrome for Testing {} from {}",
         stable.version, download.url
     );
 
@@ -1184,9 +1184,11 @@ async fn run_browser_runtime_setup() -> Result<()> {
         .await
         .map_err(|err| miette!("failed to write browser runtime version file: {err}"))?;
 
-    println!("[setup] browser runtime installed successfully");
-    println!("[setup] version: {}", stable.version);
-    println!("[setup] executable: {}", executable_path.display());
+    tracing::info!(
+        "[browser-runtime] installed successfully (version={} executable={})",
+        stable.version,
+        executable_path.display()
+    );
     Ok(())
 }
 
