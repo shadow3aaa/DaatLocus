@@ -135,9 +135,7 @@ struct RuntimeAppsBootstrap {
 }
 
 fn emit_startup_progress(message: impl AsRef<str>) {
-    let message = message.as_ref();
-    tracing::info!("{message}");
-    println!("{message}");
+    tracing::info!("{}", message.as_ref());
 }
 
 #[derive(Default)]
