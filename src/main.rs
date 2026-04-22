@@ -729,6 +729,31 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
         daemon_server.metadata.host, daemon_server.metadata.port
     ));
 
+    // 在耗时初始化开始前提前注册信号处理，防止冷启动编译期间无法响应 Ctrl+C / SIGTERM。
+    // 收到信号时直接 process::exit(0)；进入主循环后会 abort 此任务，信号处理权交还给主 select!。
+    // DaemonLock 锁文件不会被清理，但 acquire() 的 stale PID 检测会在下次启动时自动移除它。
+    #[cfg(unix)]
+    let mut early_sigterm = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate(),
+    )
+    .map_err(|err| miette!("failed to install early SIGTERM handler: {err}"))?;
+    let early_shutdown_handle = tokio::spawn(async move {
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if result.is_ok() {
+                    tracing::info!("daemon received SIGINT during startup, exiting");
+                }
+            }
+            _ = {
+                #[cfg(unix)] { early_sigterm.recv() }
+                #[cfg(not(unix))] { std::future::pending::<Option<()>>() }
+            } => {
+                tracing::info!("daemon received SIGTERM during startup, exiting");
+            }
+        }
+        std::process::exit(0);
+    });
+
     // 耗时初始化（hindsight + prompt compile）在服务器启动后进行。
     let hindsight = connect_bootstrapped_hindsight(&config, true).await?;
     let hindsight_retain = hindsight.spawn_retain_worker();
@@ -897,6 +922,9 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
         } else {
             None
         };
+
+    // 启动完成，early_shutdown_handle 已不再需要，abort 以让主循环的信号处理独占接管。
+    early_shutdown_handle.abort();
 
     // SIGTERM → graceful shutdown（unix only）。
     // 在 Windows 等平台上用 pending() 占位，让 select! 的分支结构保持统一。
