@@ -162,7 +162,7 @@ impl TelegramLiveDraftSession {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "daat-locus")]
+#[command(name = "daat-locus", about = "Daat Locus AI 助理运行时")]
 struct Cli {
     #[command(subcommand)]
     command: Option<DaatLocusCommand>,
@@ -170,12 +170,16 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum DaatLocusCommand {
+    /// 启动前台运行时（等同于 daemon serve + attach）
     Run,
+    /// 连接到已运行的 daemon，进入交互会话
     Attach,
+    /// 管理后台 daemon 进程
     Daemon {
         #[command(subcommand)]
         target: DaemonTarget,
     },
+    /// 清除本地状态或缓存数据
     Reset {
         #[command(subcommand)]
         target: ResetTarget,
@@ -185,8 +189,9 @@ enum DaatLocusCommand {
         #[command(subcommand)]
         target: Option<ConfigTarget>,
     },
+    /// 手动触发一次 hindsight 睡眠编排（通常由 daemon 自动调度）
     Sleep,
-    /// 输出内部诊断信息（system-prompt / snapshot）
+    /// 输出内部诊断信息
     Debug {
         #[command(subcommand)]
         target: DebugTarget,
@@ -203,7 +208,7 @@ enum ConfigTarget {
     /// 交互式添加一个 model
     #[command(name = "add-model")]
     AddModel,
-    /// 更改 main_model
+    /// 更改主模型
     #[command(name = "set-main-model")]
     SetMainModel,
     /// 更改 hindsight 使用的模型
@@ -213,25 +218,35 @@ enum ConfigTarget {
 
 #[derive(Debug, Subcommand)]
 enum ResetTarget {
+    /// 清除编译缓存（compiled prompts）
     #[command(name = "complite", alias = "compile")]
     Complite,
+    /// 清除运行时状态（daemon lock、socket 等）
     State,
+    /// 清除对话历史、hindsight 记录及推理 traces
     Memory,
+    /// 清除全部（state + memory + complite）
     All,
 }
 
 #[derive(Debug, Subcommand)]
 enum DebugTarget {
+    /// 打印当前 system prompt 全文
     #[command(name = "system-prompt")]
     SystemPrompt,
+    /// 打印当前 snapshot 内容
     Snapshot,
 }
 
 #[derive(Debug, Subcommand)]
 enum DaemonTarget {
+    /// 查看 daemon 运行状态
     Status,
+    /// 停止后台 daemon
     Stop,
+    /// 重启后台 daemon
     Restart,
+    /// 在前台启动 daemon（内部使用）
     Serve,
 }
 
