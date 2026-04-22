@@ -8,7 +8,7 @@ use miette::{Result, miette};
 use reqwest::{StatusCode, multipart};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::Mutex;
 
 use crate::config::HindsightConfig;
 use crate::hindsight::managed::HindsightManagedServer;
@@ -24,7 +24,8 @@ pub struct HindsightClient {
 
 #[derive(Clone)]
 pub struct HindsightRetainHandle {
-    tx: mpsc::UnboundedSender<RetainWorkerMessage>,
+    client: Arc<HindsightClient>,
+    bank_ready: Arc<Mutex<bool>>,
 }
 
 #[derive(Clone, Debug)]
@@ -37,13 +38,6 @@ enum HindsightRetainApi {
 struct HindsightRestartSupport {
     llm_env_vars: Vec<(String, String)>,
     restart_lock: Mutex<()>,
-}
-
-#[derive(Debug)]
-enum RetainWorkerMessage {
-    Retain(HindsightRetainJob),
-    Flush { reply: oneshot::Sender<Result<()>> },
-    Shutdown { reply: oneshot::Sender<()> },
 }
 
 #[derive(Clone, Debug)]
@@ -101,7 +95,6 @@ pub(crate) struct HindsightEntityLabelValueConfig {
 
 const DEFAULT_HINDSIGHT_RECALL_BUDGET: &str = "mid";
 const DEFAULT_HINDSIGHT_REFLECT_BUDGET: &str = "low";
-const DEFAULT_HINDSIGHT_FLUSH_TIMEOUT_SECS: u64 = 15;
 pub const HINDSIGHT_RUNTIME_DOCUMENT_ID: &str = "daat-locus:runtime";
 const HINDSIGHT_UPDATE_MODE_APPEND: &str = "append";
 const MIN_HINDSIGHT_VERSION_FOR_APPEND: (u64, u64, u64) = (0, 5, 0);
@@ -401,56 +394,10 @@ impl HindsightClient {
     }
 
     pub fn spawn_retain_worker(&self) -> HindsightRetainHandle {
-        let (tx, mut rx) = mpsc::unbounded_channel::<RetainWorkerMessage>();
-        let client = self.clone();
-        let bank_ready = Arc::new(Mutex::new(false));
-        let bank_ready_for_task = bank_ready.clone();
-        tokio::spawn(async move {
-            while let Some(message) = rx.recv().await {
-                match message {
-                    RetainWorkerMessage::Retain(job) => {
-                        let mut outage_cycle = 0usize;
-                        let job_summary = summarize_retain_job(job.clone(), &client.config);
-                        loop {
-                            match retain_job_with_retry(&client, &bank_ready_for_task, job.clone())
-                                .await
-                            {
-                                Ok(()) => {
-                                    if outage_cycle > 0 {
-                                        tracing::info!(
-                                            "[hindsight] retain recovered after extended outage (cycle {}): {}",
-                                            outage_cycle + 1,
-                                            job_summary
-                                        );
-                                    }
-                                    break;
-                                }
-                                Err(err) => {
-                                    outage_cycle += 1;
-                                    let delay = hindsight_retain_outage_backoff(outage_cycle);
-                                    tracing::error!(
-                                        "[hindsight] retain exhausted immediate retries; continuing background retry in {:.1}s (cycle {})\njob: {}\n{}",
-                                        delay.as_secs_f64(),
-                                        outage_cycle,
-                                        job_summary,
-                                        format_report(&err)
-                                    );
-                                    tokio::time::sleep(delay).await;
-                                }
-                            }
-                        }
-                    }
-                    RetainWorkerMessage::Flush { reply } => {
-                        let _ = reply.send(Ok(()));
-                    }
-                    RetainWorkerMessage::Shutdown { reply } => {
-                        let _ = reply.send(());
-                        break;
-                    }
-                }
-            }
-        });
-        HindsightRetainHandle { tx }
+        HindsightRetainHandle {
+            client: Arc::new(self.clone()),
+            bank_ready: Arc::new(Mutex::new(false)),
+        }
     }
 
     pub async fn bootstrap_bank(&self) -> Result<()> {
@@ -924,42 +871,49 @@ impl HindsightClient {
 
 impl HindsightRetainHandle {
     pub fn enqueue(&self, job: HindsightRetainJob) -> Result<()> {
-        self.tx
-            .send(RetainWorkerMessage::Retain(job))
-            .map_err(|_| miette!("hindsight retain worker channel closed"))?;
+        let client = self.client.clone();
+        let bank_ready = self.bank_ready.clone();
+        tokio::spawn(async move {
+            let job_summary = summarize_retain_job(job.clone(), &client.config);
+            let mut outage_cycle = 0usize;
+            loop {
+                match retain_job_with_retry(&client, &bank_ready, job.clone()).await {
+                    Ok(()) => {
+                        if outage_cycle > 0 {
+                            tracing::info!(
+                                "[hindsight] retain recovered after extended outage (cycle {}): {}",
+                                outage_cycle + 1,
+                                job_summary
+                            );
+                        }
+                        break;
+                    }
+                    Err(err) => {
+                        outage_cycle += 1;
+                        let delay = hindsight_retain_outage_backoff(outage_cycle);
+                        tracing::error!(
+                            "[hindsight] retain exhausted immediate retries; continuing background retry in {:.1}s (cycle {})\njob: {}\n{}",
+                            delay.as_secs_f64(),
+                            outage_cycle,
+                            job_summary,
+                            format_report(&err)
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        });
         Ok(())
     }
 
+    /// With async=true retain, hindsight processes in the background.
+    /// There is no local queue to drain, so this is always a no-op.
     pub async fn flush(&self) -> Result<()> {
-        self.flush_with_timeout(Duration::from_secs(DEFAULT_HINDSIGHT_FLUSH_TIMEOUT_SECS))
-            .await
-    }
-
-    pub async fn flush_with_timeout(&self, timeout: Duration) -> Result<()> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(RetainWorkerMessage::Flush { reply: reply_tx })
-            .map_err(|_| miette!("hindsight retain worker channel closed"))?;
-        tokio::time::timeout(timeout, reply_rx)
-            .await
-            .map_err(|_| {
-                miette!(
-                    "hindsight retain flush timed out after {:.1}s",
-                    timeout.as_secs_f64()
-                )
-            })?
-            .map_err(|_| miette!("hindsight retain worker flush reply dropped"))?
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(RetainWorkerMessage::Shutdown { reply: reply_tx })
-            .is_ok()
-        {
-            let _ = reply_rx.await;
-        }
+        // No worker task to stop.
     }
 }
 
