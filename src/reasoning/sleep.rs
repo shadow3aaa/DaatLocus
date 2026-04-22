@@ -116,19 +116,24 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let planner = LlmSleepPlannerRuntime;
     let store = EvaluationArtifactsStore::open().await?;
     let sleep_inputs = load_sleep_inputs().await?;
-    let prompt_improvement = match run_prompt_improvement_pipeline(
-        context,
-        &planner,
-        &store,
-        &sleep_inputs.trace_batch.records,
-        sleep_inputs.trace_batch.records.len(),
-    )
-    .await
-    {
-        Ok(summary) => summary,
-        Err(err) => {
-            warn!("prompt improvement pipeline failed, continuing with defaults: {err:?}");
-            PromptImprovementSummary::default()
+    let prompt_improvement = if sleep_inputs.trace_batch.records.is_empty() {
+        tracing::info!("[sleep] no trace records, skipping prompt improvement pipeline");
+        PromptImprovementSummary::default()
+    } else {
+        match run_prompt_improvement_pipeline(
+            context,
+            &planner,
+            &store,
+            &sleep_inputs.trace_batch.records,
+            sleep_inputs.trace_batch.records.len(),
+        )
+        .await
+        {
+            Ok(summary) => summary,
+            Err(err) => {
+                warn!("prompt improvement pipeline failed, continuing with defaults: {err:?}");
+                PromptImprovementSummary::default()
+            }
         }
     };
     let workflow_improvement =
@@ -2263,59 +2268,65 @@ async fn optimize_workflows_from_run_records(
     let all_workflows = context.workflows.workspace_list();
     let mut reflection_by_workflow = HashMap::<String, EvaluationArtifactWorkflowReflection>::new();
 
-    for workflow in &all_workflows {
-        let evidence = evidence_by_workflow
-            .get(&workflow.id)
-            .cloned()
-            .unwrap_or_default();
-        let Some(plan) = planner
-            .plan_workflow_improvement(context, workflow, &evidence)
-            .await?
-        else {
-            continue;
-        };
-        reflection_by_workflow.insert(workflow.id.clone(), plan.reflection.clone());
-        result.reflections.push(plan.reflection);
-        result.patches.extend(plan.patches);
-        result.candidate_evaluations.extend(plan.evaluations);
-    }
+    // 没有 run records 时跳过 planning、merge 和 frontier replay——不存在新证据，LLM 调用无意义。
+    // frontier 中已有的候选仍会在后续被选取和 apply。
+    if !run_records.is_empty() {
+        for workflow in &all_workflows {
+            let evidence = evidence_by_workflow
+                .get(&workflow.id)
+                .cloned()
+                .unwrap_or_default();
+            let Some(plan) = planner
+                .plan_workflow_improvement(context, workflow, &evidence)
+                .await?
+            else {
+                continue;
+            };
+            reflection_by_workflow.insert(workflow.id.clone(), plan.reflection.clone());
+            result.reflections.push(plan.reflection);
+            result.patches.extend(plan.patches);
+            result.candidate_evaluations.extend(plan.evaluations);
+        }
 
-    for left in 0..all_workflows.len() {
-        for right in (left + 1)..all_workflows.len() {
-            let target = &all_workflows[left];
-            let source = &all_workflows[right];
-            let Some(target_reflection) = reflection_by_workflow.get(&target.id) else {
-                continue;
-            };
-            let Some(source_reflection) = reflection_by_workflow.get(&source.id) else {
-                continue;
-            };
-            let target_evidence = evidence_by_workflow
-                .get(&target.id)
-                .cloned()
-                .unwrap_or_default();
-            let source_evidence = evidence_by_workflow
-                .get(&source.id)
-                .cloned()
-                .unwrap_or_default();
-            let merge_plan = planner
-                .plan_workflow_merge(
-                    context,
-                    target,
-                    target_reflection,
-                    &target_evidence,
-                    source,
-                    source_reflection,
-                    &source_evidence,
-                )
-                .await?;
-            if let Some(evaluation) = merge_plan.evaluation {
-                result.candidate_evaluations.push(evaluation);
-            }
-            if let Some(merge) = merge_plan.merge {
-                result.merges.push(merge);
+        for left in 0..all_workflows.len() {
+            for right in (left + 1)..all_workflows.len() {
+                let target = &all_workflows[left];
+                let source = &all_workflows[right];
+                let Some(target_reflection) = reflection_by_workflow.get(&target.id) else {
+                    continue;
+                };
+                let Some(source_reflection) = reflection_by_workflow.get(&source.id) else {
+                    continue;
+                };
+                let target_evidence = evidence_by_workflow
+                    .get(&target.id)
+                    .cloned()
+                    .unwrap_or_default();
+                let source_evidence = evidence_by_workflow
+                    .get(&source.id)
+                    .cloned()
+                    .unwrap_or_default();
+                let merge_plan = planner
+                    .plan_workflow_merge(
+                        context,
+                        target,
+                        target_reflection,
+                        &target_evidence,
+                        source,
+                        source_reflection,
+                        &source_evidence,
+                    )
+                    .await?;
+                if let Some(evaluation) = merge_plan.evaluation {
+                    result.candidate_evaluations.push(evaluation);
+                }
+                if let Some(merge) = merge_plan.merge {
+                    result.merges.push(merge);
+                }
             }
         }
+    } else {
+        tracing::info!("[sleep] no workflow run records, skipping workflow planning and frontier replay");
     }
 
     let mut workflow_frontier = load_workflow_frontier().await?;
@@ -2344,15 +2355,17 @@ async fn optimize_workflows_from_run_records(
         }
     }
     workflow_frontier = retain_workflow_frontier(&workflow_frontier, &frontier_incoming, 4);
-    workflow_frontier = replay_workflow_frontier_entries(
-        context,
-        planner,
-        &workflow_frontier,
-        &all_workflows,
-        &reflection_by_workflow,
-        &evidence_by_workflow,
-    )
-    .await?;
+    if !run_records.is_empty() {
+        workflow_frontier = replay_workflow_frontier_entries(
+            context,
+            planner,
+            &workflow_frontier,
+            &all_workflows,
+            &reflection_by_workflow,
+            &evidence_by_workflow,
+        )
+        .await?;
+    }
     let workflow_frontier_stats = workflow_frontier_lineage_stats(&workflow_frontier);
     result.frontier_entries = workflow_frontier.len();
     result.frontier_root_entries = workflow_frontier_stats.root_entries;
