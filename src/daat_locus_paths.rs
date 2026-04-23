@@ -86,10 +86,6 @@ impl DaatLocusPaths {
         self.runtime_dir().join("daemon.lock")
     }
 
-    pub fn daemon_metadata_file(&self) -> PathBuf {
-        self.runtime_dir().join("daemon.json")
-    }
-
     pub fn browser_executable_path(&self) -> PathBuf {
         #[cfg(target_os = "macos")]
         {

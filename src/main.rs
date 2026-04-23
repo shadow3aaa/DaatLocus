@@ -56,9 +56,8 @@ use crate::{
     daat_locus_paths::daat_locus_paths,
     daemon::{
         DaemonClient, DaemonControlCommand as RuntimeDaemonControlCommand, DaemonLock,
-        clear_metadata, connect_existing_daemon, connect_or_start_daemon, read_metadata,
-        spawn_detached_daemon_process, start_server, status_summary, wait_for_daemon_ready,
-        wait_for_daemon_shutdown,
+        connect_existing_daemon, connect_or_start_daemon, spawn_detached_daemon_process,
+        start_server, status_summary, wait_for_daemon_ready, wait_for_daemon_shutdown,
     },
     dashboard::render::{
         AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD,
@@ -605,29 +604,30 @@ async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
 }
 
 async fn run_daemon_status_command() -> Result<()> {
-    let metadata = read_metadata().await?;
-    let client = DaemonClient::new(metadata.clone());
-    client.health().await?;
-    println!("{}", status_summary(&metadata));
+    let client = connect_existing_daemon().await?;
+    let status = client.status().await?;
+    println!("{}", status_summary(&status));
     Ok(())
 }
 
 async fn run_daemon_stop_command() -> Result<()> {
     let client = connect_existing_daemon().await?;
+    let port = client.port();
     client.shutdown().await?;
-    println!("daemon shutdown requested");
+    wait_for_daemon_shutdown(port).await?;
+    println!("daemon stopped");
     Ok(())
 }
 
 async fn run_daemon_restart_command() -> Result<()> {
     if let Ok(client) = connect_existing_daemon().await {
-        let pid = client.metadata().pid;
+        let port = client.port();
         client.shutdown().await?;
-        wait_for_daemon_shutdown(pid).await?;
+        wait_for_daemon_shutdown(port).await?;
     }
     spawn_detached_daemon_process().await?;
-    let metadata = wait_for_daemon_ready().await?;
-    println!("daemon restarted: {}", status_summary(&metadata));
+    let status = wait_for_daemon_ready().await?;
+    println!("daemon restarted: {}", status_summary(&status));
     Ok(())
 }
 
@@ -635,7 +635,7 @@ async fn attach_to_daemon(client: DaemonClient) -> Result<()> {
     let initial = client.snapshot().await?;
     let (tx, mut rx) = tokio::sync::watch::channel(initial);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    let stream_client = DaemonClient::new(client.metadata().clone());
+    let stream_client = DaemonClient::new(client.port());
     let stream_task = tokio::spawn(async move {
         let _ = stream_client.stream_to(tx, stop_rx).await;
     });
@@ -648,11 +648,10 @@ async fn attach_to_daemon(client: DaemonClient) -> Result<()> {
 }
 
 async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
-    let _lock = DaemonLock::acquire().await?;
-    clear_metadata().await;
+    let mut lock = DaemonLock::acquire().await?;
 
     // 提前加载 telegram_acl（廉价 I/O），创建所有 channel，然后立即启动 HTTP 服务器并
-    // 写入 metadata 文件——这样 wait_for_daemon_ready 在耗时的 prompt compile 之前就能返回。
+    // 监听固定本机端口——这样 wait_for_daemon_ready 在耗时初始化之前就能返回。
     let telegram_acl = TelegramAclHandle::load().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
@@ -668,6 +667,7 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::oneshot::channel();
 
     let daemon_server = start_server(
+        config.daemon.port,
         tx.subscribe(),
         telegram_acl.clone(),
         events.clone(),
@@ -679,7 +679,7 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     .await?;
     emit_startup_progress(format!(
         "[daemon] listening on http://{}:{}",
-        daemon_server.metadata.host, daemon_server.metadata.port
+        "127.0.0.1", daemon_server.port
     ));
 
     // 在耗时初始化开始前提前注册信号处理，防止冷启动编译期间无法响应 Ctrl+C / SIGTERM。
@@ -860,6 +860,7 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
 
     let mut sleep_running = false;
     let mut sleep_status = SleepDashboardStatus::default();
+    let mut shutdown_completion_tx = None;
     loop {
         tokio::select! {
             _ = daat_locus_loop(
@@ -884,7 +885,8 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
                 sleep_running = false;
                 handle_sleep_task_result(&mut context, &tx, &mut sleep_status, result).await;
             }
-            Some(RuntimeDaemonControlCommand::ShutdownRequested) = daemon_control_rx.recv() => {
+            Some(RuntimeDaemonControlCommand::ShutdownRequested { completion_tx }) = daemon_control_rx.recv() => {
+                shutdown_completion_tx = Some(completion_tx);
                 break;
             }
             signal = tokio::signal::ctrl_c() => {
@@ -904,12 +906,10 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
         }
     }
 
-    let _ = server_shutdown_tx.send(());
     drop(workspace_app_watcher);
     if let Some(handle) = telegram_transport {
         handle.abort();
     }
-    daemon_server.shutdown().await;
     let hindsight_config = context.config.hindsight.clone();
     let hindsight_llm_vars = hindsight_llm_env_vars(&context.config)
         .await
@@ -919,7 +919,12 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     if let Err(err) = managed.stop().await {
         tracing::warn!("[hindsight] stop failed: {err}");
     }
-    clear_metadata().await;
+    lock.release();
+    if let Some(completion_tx) = shutdown_completion_tx.take() {
+        let _ = completion_tx.send(());
+    }
+    let _ = server_shutdown_tx.send(());
+    daemon_server.shutdown().await;
     Ok(())
 }
 

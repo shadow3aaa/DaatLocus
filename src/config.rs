@@ -172,6 +172,7 @@ pub struct Config {
     pub models: HashMap<String, ModelConfig>,
     /// 主模型名称，引用 models 中的 key
     pub main_model: String,
+    pub daemon: DaemonConfig,
     pub judge: JudgeConfig,
     pub hindsight: HindsightConfig,
     pub telegram: TelegramConfig,
@@ -195,6 +196,7 @@ impl Default for Config {
             providers,
             models,
             main_model: "default".to_string(),
+            daemon: DaemonConfig::default(),
             judge: JudgeConfig::default(),
             hindsight: HindsightConfig::default(),
             telegram: TelegramConfig::default(),
@@ -244,6 +246,10 @@ impl Config {
 
     /// 校验 main_model 和 judge model 引用的 provider/model 都存在。
     pub fn validate(&self) -> Result<(), String> {
+        if self.daemon.port == 0 {
+            return Err("daemon.port must be greater than 0".to_string());
+        }
+
         let main = self
             .models
             .get(&self.main_model)
@@ -289,6 +295,18 @@ impl Config {
 // ---------------------------------------------------------------------------
 // 其他子配置（不变）
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DaemonConfig {
+    pub port: u16,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self { port: 53825 }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
