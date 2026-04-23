@@ -22,9 +22,11 @@ use ratatui::{
 
 use crate::{
     app::AppId,
-    daat_locus_paths::daat_locus_paths_sync,
     events::{EventStore, TerminalIncomingEvent},
     pending_work::{PendingWork, PendingWorkQueue},
+    reasoning::turn_compile::{
+        load_prompt_persona_spec_sync, prompt_persona_path_sync, render_prompt_persona_markdown,
+    },
     telegram_acl::{PendingAccessRequest, TelegramAclHandle},
 };
 use serde::{Deserialize, Serialize};
@@ -292,10 +294,10 @@ impl DashboardCommand for PersonaCommand {
         raw: &str,
         _: &DashboardCommandContext<'_>,
     ) -> DashboardCommandResult {
-        let path = daat_locus_paths_sync().config_file("prompt_persona.toml");
+        let path = prompt_persona_path_sync();
         let text = match std::fs::read_to_string(&path) {
             Ok(content) => content,
-            Err(err) => format!("failed to read {}: {err}", path.display()),
+            Err(_) => render_prompt_persona_markdown(&load_prompt_persona_spec_sync()),
         };
         DashboardCommandResult::ShowOverlay {
             title: raw.trim().to_uppercase(),

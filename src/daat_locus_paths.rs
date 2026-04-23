@@ -186,10 +186,6 @@ fn migrate_legacy_layout_sync(paths: &DaatLocusPaths) {
         paths.config_file("config.toml"),
     );
     migrate_legacy_path_sync(
-        paths.root.join("prompt_persona.toml"),
-        paths.config_file("prompt_persona.toml"),
-    );
-    migrate_legacy_path_sync(
         paths.root.join("telegram_acl.json"),
         paths.config_file("telegram_acl.json"),
     );

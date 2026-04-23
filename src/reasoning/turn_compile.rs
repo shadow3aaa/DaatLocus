@@ -36,7 +36,7 @@ use crate::{
     },
 };
 
-const PROMPT_PERSONA_FILE_NAME: &str = "prompt_persona.toml";
+pub const PROMPT_PERSONA_FILE_NAME: &str = "persona.md";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +45,14 @@ pub struct PromptPersonaSpec {
     #[serde(default = "default_prompt_persona_language")]
     pub language: String,
     pub identity_summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct PromptPersonaFrontmatter {
+    pub name: String,
+    #[serde(default = "default_prompt_persona_language")]
+    pub language: String,
 }
 
 fn default_prompt_persona_language() -> String {
@@ -257,7 +265,7 @@ pub async fn evaluate_runtime_prompt_candidate_rollout(
     .await
 }
 
-fn prompt_persona_path_sync() -> PathBuf {
+pub fn prompt_persona_path_sync() -> PathBuf {
     daat_locus_paths_sync().config_file(PROMPT_PERSONA_FILE_NAME)
 }
 
@@ -278,7 +286,7 @@ pub fn load_prompt_persona_spec_sync() -> PromptPersonaSpec {
         }
     };
 
-    match toml::from_str::<PromptPersonaSpec>(&content) {
+    match parse_prompt_persona_markdown(&content) {
         Ok(parsed) => parsed,
         Err(error) => {
             warn!(
@@ -288,6 +296,59 @@ pub fn load_prompt_persona_spec_sync() -> PromptPersonaSpec {
             PromptPersonaSpec::default()
         }
     }
+}
+
+fn parse_prompt_persona_markdown(content: &str) -> Result<PromptPersonaSpec> {
+    let (frontmatter_text, body) = split_prompt_persona_frontmatter(content)?;
+    let frontmatter: PromptPersonaFrontmatter = serde_yaml::from_str(frontmatter_text)
+        .map_err(|error| miette!("parse persona frontmatter failed: {error}"))?;
+    let identity_summary = body.trim().to_string();
+    if frontmatter.name.trim().is_empty() {
+        return Err(miette!(
+            "persona frontmatter field 'name' must not be empty"
+        ));
+    }
+    if identity_summary.is_empty() {
+        return Err(miette!("persona markdown body must not be empty"));
+    }
+    Ok(PromptPersonaSpec {
+        name: frontmatter.name.trim().to_string(),
+        language: normalized_persona_language(&frontmatter.language),
+        identity_summary,
+    })
+}
+
+fn normalized_persona_language(language: &str) -> String {
+    let language = language.trim();
+    if language.is_empty() {
+        default_prompt_persona_language()
+    } else {
+        language.to_string()
+    }
+}
+
+fn split_prompt_persona_frontmatter(content: &str) -> Result<(&str, &str)> {
+    let rest = content
+        .strip_prefix("---\n")
+        .ok_or_else(|| miette!("persona file missing frontmatter start"))?;
+    let end = rest
+        .find("\n---\n")
+        .ok_or_else(|| miette!("persona file missing frontmatter end"))?;
+    Ok((&rest[..end], &rest[end + 5..]))
+}
+
+pub fn render_prompt_persona_markdown(spec: &PromptPersonaSpec) -> String {
+    let frontmatter = PromptPersonaFrontmatter {
+        name: spec.name.clone(),
+        language: spec.language.clone(),
+    };
+    let frontmatter_text = serde_yaml::to_string(&frontmatter)
+        .unwrap_or_else(|_| format!("name: {}\nlanguage: {}\n", spec.name, spec.language));
+    format!(
+        "---\n{}---\n\n{}\n",
+        frontmatter_text,
+        spec.identity_summary.trim()
+    )
 }
 
 impl TurnCompileSpec {
@@ -607,6 +668,41 @@ mod tests {
     use crate::reasoning::runtime::HistoryMessage;
 
     use super::*;
+
+    #[test]
+    fn parse_prompt_persona_markdown_uses_frontmatter_and_body() {
+        let parsed = parse_prompt_persona_markdown(
+            r#"---
+name: Test Persona
+language: en-US
+---
+
+Be concise.
+Preserve intent.
+"#,
+        )
+        .expect("persona markdown should parse");
+
+        assert_eq!(parsed.name, "Test Persona");
+        assert_eq!(parsed.language, "en-US");
+        assert_eq!(parsed.identity_summary, "Be concise.\nPreserve intent.");
+    }
+
+    #[test]
+    fn parse_prompt_persona_markdown_defaults_language() {
+        let parsed = parse_prompt_persona_markdown(
+            r#"---
+name: Test Persona
+---
+
+Use Chinese by default.
+"#,
+        )
+        .expect("persona markdown should parse");
+
+        assert_eq!(parsed.language, "zh-CN");
+        assert_eq!(parsed.identity_summary, "Use Chinese by default.");
+    }
 
     #[test]
     fn render_turn_trace_for_judge_includes_actions_and_assistant() {
