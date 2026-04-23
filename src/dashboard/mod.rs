@@ -38,6 +38,7 @@ pub struct DashboardState {
     pub sleep_status_output: String,
     pub inspect_telegram_output: String,
     pub system_prompt_output: String,
+    pub snapshot_output: String,
     pub app_status_outputs: Vec<(String, String)>,
     #[serde(default)]
     pub pending_access_requests: Vec<PendingAccessRequest>,
@@ -155,6 +156,7 @@ struct QuitCommand;
 struct ClearCommand;
 struct PersonaCommand;
 struct SystemPromptCommand;
+struct SnapshotCommand;
 struct AppStatusCommand;
 struct StatusCommand;
 struct SleepCommand;
@@ -169,6 +171,7 @@ static QUIT_COMMAND: QuitCommand = QuitCommand;
 static CLEAR_COMMAND: ClearCommand = ClearCommand;
 static PERSONA_COMMAND: PersonaCommand = PersonaCommand;
 static SYSTEM_PROMPT_COMMAND: SystemPromptCommand = SystemPromptCommand;
+static SNAPSHOT_COMMAND: SnapshotCommand = SnapshotCommand;
 static APP_STATUS_COMMAND: AppStatusCommand = AppStatusCommand;
 static STATUS_COMMAND: StatusCommand = StatusCommand;
 static SLEEP_COMMAND: SleepCommand = SleepCommand;
@@ -186,11 +189,12 @@ static TELEGRAM_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
     &TELEGRAM_REJECT_SUBCOMMAND,
 ];
 
-static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 8] = [
+static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 9] = [
     &QUIT_COMMAND,
     &CLEAR_COMMAND,
     &PERSONA_COMMAND,
     &SYSTEM_PROMPT_COMMAND,
+    &SNAPSHOT_COMMAND,
     &APP_STATUS_COMMAND,
     &STATUS_COMMAND,
     &SLEEP_COMMAND,
@@ -328,6 +332,28 @@ impl DashboardCommand for SystemPromptCommand {
         DashboardCommandResult::ShowOverlay {
             title: raw.trim().to_uppercase(),
             text: fallback_output(&context.state.system_prompt_output),
+        }
+    }
+}
+
+impl DashboardCommand for SnapshotCommand {
+    fn usage(&self) -> &'static str {
+        "snapshot"
+    }
+
+    fn description(&self) -> &'static str {
+        "show latest runtime snapshot"
+    }
+
+    fn execute(
+        &self,
+        _: &[&str],
+        raw: &str,
+        context: &DashboardCommandContext<'_>,
+    ) -> DashboardCommandResult {
+        DashboardCommandResult::ShowOverlay {
+            title: raw.trim().to_uppercase(),
+            text: fallback_output(&context.state.snapshot_output),
         }
     }
 }

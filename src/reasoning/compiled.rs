@@ -156,10 +156,6 @@ impl CompiledRuntimeSystemPrompt {
 }
 
 impl CompiledPromptStore {
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
     pub fn from_entries(entries: Vec<CompiledProgram>) -> Self {
         let entries = entries
             .into_iter()

@@ -73,7 +73,10 @@ use crate::{
         run_tui_dashboard,
     },
     events::{EventPayload, EventStatus, EventStore, EventView},
-    hindsight::{HindsightClient, HindsightRecallOptions, managed::HindsightManagedServer},
+    hindsight::{
+        HindsightClient, HindsightRecallOptions, env::hindsight_llm_env_vars,
+        managed::HindsightManagedServer,
+    },
     logging::{
         RuntimeStatusLevel, clear_runtime_status, init_logging, set_runtime_status,
         write_current_turn_messages_dump, write_current_turn_response_dump,
@@ -82,14 +85,13 @@ use crate::{
     memory::{Memory, RuntimeTurnDraft},
     pending_work::{PendingWork, PendingWorkQueue},
     plan::Plan,
-    providers::{build_llm, exchange_copilot_session_token},
+    providers::build_llm,
     reasoning::{
         compiled::{
             CompiledPromptStore, load_all_compiled_programs_for_model,
             load_compiled_runtime_system_prompt_for_model,
         },
         episode::EpisodeActionRecord,
-        evaluation_artifacts::EvaluationArtifactSuggestedFixKind,
         runtime::{
             AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage,
             PromptMemoryCitation, PromptMemoryContext,
@@ -190,13 +192,6 @@ enum DaatLocusCommand {
         #[command(subcommand)]
         target: Option<ConfigTarget>,
     },
-    /// 手动触发一次 hindsight 睡眠编排（通常由 daemon 自动调度）
-    Sleep,
-    /// 输出内部诊断信息
-    Debug {
-        #[command(subcommand)]
-        target: DebugTarget,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -228,15 +223,6 @@ enum ResetTarget {
     Memory,
     /// 清除全部（state + memory + complite）
     All,
-}
-
-#[derive(Debug, Subcommand)]
-enum DebugTarget {
-    /// 打印当前 system prompt 全文
-    #[command(name = "system-prompt")]
-    SystemPrompt,
-    /// 打印当前 snapshot 内容
-    Snapshot,
 }
 
 #[derive(Debug, Subcommand)]
@@ -351,23 +337,6 @@ async fn async_main(cli: Cli) -> Result<()> {
     };
 
     match cli.command.as_ref() {
-        Some(DaatLocusCommand::Debug {
-            target: DebugTarget::SystemPrompt,
-        }) => {
-            let context = build_eval_context_for_inspect(config).await;
-            println!("{}", render_system_prompt_output_for_dashboard(&context));
-            context.shutdown().await;
-            return Ok(());
-        }
-        Some(DaatLocusCommand::Debug {
-            target: DebugTarget::Snapshot,
-        }) => {
-            let mut context = build_eval_context_for_inspect(config).await;
-            let snapshot = Snapshot::new(&mut context).await;
-            println!("{}", build_runtime_snapshot_text(&context, &snapshot));
-            context.shutdown().await;
-            return Ok(());
-        }
         Some(DaatLocusCommand::Daemon {
             target: DaemonTarget::Serve,
         }) => {
@@ -375,22 +344,6 @@ async fn async_main(cli: Cli) -> Result<()> {
             return Ok(());
         }
         _ => {}
-    }
-
-    if matches!(cli.command, Some(DaatLocusCommand::Sleep)) {
-        let mut context = build_eval_context(config).await;
-        match run_sleep(&mut context).await {
-            Ok(summary) => {
-                print_sleep_summary(&summary);
-                context.shutdown().await;
-                return Ok(());
-            }
-            Err(err) => {
-                tracing::error!("sleep command failed: {err:?}");
-                context.shutdown().await;
-                std::process::exit(1);
-            }
-        }
     }
 
     if matches!(cli.command, None | Some(DaatLocusCommand::Run)) {
@@ -517,79 +470,6 @@ async fn connect_bootstrapped_hindsight(
     hindsight.bootstrap_bank().await?;
     emit_startup_progress("[hindsight] bank ready");
     Ok(hindsight)
-}
-
-async fn hindsight_llm_env_vars(config: &crate::config::Config) -> Result<Vec<(String, String)>> {
-    use crate::config::ProviderConfig;
-    let model = config.hindsight_model_config();
-    match config.hindsight_provider_config() {
-        ProviderConfig::GithubCopilot { github_token } => {
-            let github_token = resolve_hindsight_env_value(github_token);
-            let (session_token, base_url, _) =
-                exchange_copilot_session_token(&github_token).await?;
-            Ok(hindsight_copilot_llm_env_vars(
-                &session_token,
-                &base_url,
-                &model.model_id,
-            ))
-        }
-        ProviderConfig::Openai { api_key, base_url } => {
-            let mut vars = vec![
-                ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
-                (
-                    "HINDSIGHT_API_LLM_API_KEY".into(),
-                    resolve_hindsight_env_value(api_key),
-                ),
-                ("HINDSIGHT_API_LLM_MODEL".into(), model.model_id.clone()),
-            ];
-            if let Some(url) = base_url.as_deref().filter(|u| !u.trim().is_empty()) {
-                vars.push((
-                    "HINDSIGHT_API_LLM_BASE_URL".into(),
-                    resolve_hindsight_env_value(url),
-                ));
-            }
-            Ok(vars)
-        }
-        ProviderConfig::OpenaiCompatible { base_url, api_key } => Ok(vec![
-            ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
-            (
-                "HINDSIGHT_API_LLM_API_KEY".into(),
-                resolve_hindsight_env_value(api_key),
-            ),
-            ("HINDSIGHT_API_LLM_MODEL".into(), model.model_id.clone()),
-            (
-                "HINDSIGHT_API_LLM_BASE_URL".into(),
-                resolve_hindsight_env_value(base_url),
-            ),
-        ]),
-    }
-}
-
-fn hindsight_copilot_llm_env_vars(
-    session_token: &str,
-    base_url: &str,
-    model_id: &str,
-) -> Vec<(String, String)> {
-    vec![
-        ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
-        (
-            "HINDSIGHT_API_LLM_API_KEY".into(),
-            session_token.to_string(),
-        ),
-        ("HINDSIGHT_API_LLM_MODEL".into(), model_id.to_string()),
-        ("HINDSIGHT_API_LLM_BASE_URL".into(), base_url.to_string()),
-    ]
-}
-
-fn resolve_hindsight_env_value(value: &str) -> String {
-    let trimmed = value.trim();
-    if let Some(inner) = trimmed.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
-        std::env::var(inner).unwrap_or_else(|_| trimmed.to_string())
-    } else if let Some(inner) = trimmed.strip_prefix('$') {
-        std::env::var(inner).unwrap_or_else(|_| trimmed.to_string())
-    } else {
-        trimmed.to_string()
-    }
 }
 
 async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
@@ -794,6 +674,8 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     };
 
     // context 构建完成后，用真实状态替换占位 dashboard state。
+    let startup_snapshot = Snapshot::new(&mut context).await;
+    let startup_snapshot_output = build_runtime_snapshot_text(&context, &startup_snapshot);
     let app_renders = context.apps.state_renders();
     tx.send_modify(|state| {
         *state = DashboardState {
@@ -805,6 +687,7 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
             ),
             inspect_telegram_output: render_telegram_status_for_dashboard(&context),
             system_prompt_output: render_system_prompt_output_for_dashboard(&context),
+            snapshot_output: startup_snapshot_output,
             app_status_outputs: render_app_status_outputs_for_dashboard(&context),
             pending_access_requests: context.telegram_acl.pending_requests(),
             activity_cells: render_activity_for_dashboard(&context),
@@ -1136,17 +1019,6 @@ async fn run_browser_runtime_setup() -> Result<()> {
     Ok(())
 }
 
-async fn build_eval_context(config: crate::config::Config) -> Context {
-    build_eval_context_with_compiled(config, CompiledPromptStore::empty()).await
-}
-
-async fn build_eval_context_for_inspect(config: crate::config::Config) -> Context {
-    let compiled_prompts = load_compiled_prompts_only(&config)
-        .await
-        .unwrap_or_else(|_| CompiledPromptStore::empty());
-    build_eval_context_with_compiled(config, compiled_prompts).await
-}
-
 async fn sandbox_policy_for_runtime() -> RuntimeSandboxPolicy {
     let daat_locus_home = daat_locus_paths().await.root().to_path_buf();
     RuntimeSandboxPolicy::protect_daat_locus_runtime(&daat_locus_home)
@@ -1269,59 +1141,6 @@ async fn load_compiled_prompts_only(
         load_compiled_runtime_system_prompt_for_model(&config.main_model_config().model_id).await?;
     Ok(CompiledPromptStore::from_entries(compiled)
         .with_runtime_system_prompt(runtime_system_prompt))
-}
-
-fn print_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) {
-    let prompt = &summary.prompt_improvement;
-    let workflow = &summary.workflow_improvement;
-    println!(
-        "sleep: prompt[traces={} failure_patterns={} reflections={} candidates={} evaluations={} frontier={} lineage={}/{}/{} bootstrap_demos={} stress_cases={} instruction_hypotheses={} runtime_demos={} turn_demos={} additions={} updated={}] workflow[evidence_run_records={} reflections={} patch/merge={}/{} evaluations={} frontier={} lineage={}/{}/{} applied={}/{} rollbacks={} rounds={}]",
-        prompt.consumed_trace_events,
-        prompt.failure_patterns.len(),
-        prompt.prompt_reflections,
-        prompt.prompt_candidates,
-        prompt.prompt_candidate_evaluations,
-        prompt.prompt_frontier_entries,
-        prompt.prompt_frontier_root_entries,
-        prompt.prompt_frontier_branched_entries,
-        prompt.prompt_frontier_max_generation,
-        prompt.bootstrap_demos,
-        prompt.stress_cases,
-        prompt.instruction_hypotheses,
-        prompt.runtime_demos,
-        prompt.turn_demos,
-        prompt.applied_system_additions,
-        prompt.compiled_prompt_updated,
-        workflow.evidence_run_records,
-        workflow.workflow_reflections,
-        workflow.patch_candidates,
-        workflow.merge_candidates,
-        workflow.candidate_evaluations,
-        workflow.frontier_entries,
-        workflow.frontier_root_entries,
-        workflow.frontier_branched_entries,
-        workflow.frontier_max_generation,
-        workflow.patch_applied,
-        workflow.merge_applied,
-        workflow.update_rollbacks,
-        workflow.optimization_rounds
-    );
-    for pattern in &prompt.failure_patterns {
-        let kind = match pattern.suggested_fix_kind {
-            EvaluationArtifactSuggestedFixKind::Demo => "demo",
-            EvaluationArtifactSuggestedFixKind::Instruction => "instruction",
-            EvaluationArtifactSuggestedFixKind::StressCase => "stress_case",
-        };
-        println!(
-            "- suite={} pattern_id={} frequency={} severity={} fix={} traces={}",
-            pattern.suite,
-            pattern.pattern_id,
-            pattern.frequency,
-            pattern.severity,
-            kind,
-            pattern.supporting_trace_ids.len()
-        );
-    }
 }
 
 fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> String {
@@ -1942,6 +1761,11 @@ pub(crate) async fn execute_agent_loop_step(
         }
     };
     let snapshot_text = build_runtime_snapshot_text(context, &snapshot);
+    if let Some(tx) = tx {
+        tx.send_modify(|state| {
+            state.snapshot_output = snapshot_text.clone();
+        });
+    }
     let request_envelope = build_runtime_request_envelope(context, &snapshot_text);
     let initial_tools = build_runtime_tool_specs(context);
     let runtime_conversation_budget = request_envelope
@@ -3041,13 +2865,14 @@ mod tests {
 
     #[test]
     fn hindsight_copilot_llm_env_vars_keep_copilot_llm_enabled() {
-        let vars: std::collections::HashMap<_, _> = hindsight_copilot_llm_env_vars(
-            "copilot_session_token",
-            "https://api.individual.githubcopilot.com",
-            "gpt-4o",
-        )
-        .into_iter()
-        .collect();
+        let vars: std::collections::HashMap<_, _> =
+            crate::hindsight::env::hindsight_copilot_llm_env_vars(
+                "copilot_session_token",
+                "https://api.individual.githubcopilot.com",
+                "gpt-4o",
+            )
+            .into_iter()
+            .collect();
 
         assert_eq!(
             vars.get("HINDSIGHT_API_LLM_PROVIDER").map(String::as_str),

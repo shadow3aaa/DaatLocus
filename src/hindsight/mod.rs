@@ -1,5 +1,6 @@
 //! Hindsight long-term memory system.
 
+pub mod env;
 pub mod managed;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};

@@ -5,7 +5,8 @@ use miette::{Result, miette};
 use crate::{
     config::load_config,
     daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
-    hindsight::HindsightClient,
+    daemon::connect_existing_daemon,
+    hindsight::{HindsightClient, env::hindsight_llm_env_vars, managed::HindsightManagedServer},
     reasoning::compiled::COMPILED_DIR_NAME,
 };
 
@@ -13,8 +14,43 @@ async fn get_daat_locus_home() -> PathBuf {
     daat_locus_paths().await.root().to_path_buf()
 }
 
+async fn reject_if_daemon_running(reset_name: &str) -> Result<()> {
+    if connect_existing_daemon().await.is_ok() {
+        return Err(miette!(
+            "{reset_name} refused while DaatLocus daemon is running; run `daat-locus daemon stop` first"
+        ));
+    }
+    Ok(())
+}
+
+async fn clear_hindsight_bank(config: &crate::config::Config) -> Result<()> {
+    let llm_env_vars = hindsight_llm_env_vars(config)
+        .await
+        .map_err(|err| miette!("failed to build hindsight env for memory-reset: {err}"))?;
+    let server = HindsightManagedServer::new(config.hindsight.clone(), llm_env_vars.clone());
+    let was_running = server.check_health().await;
+    if !was_running {
+        server.start().await?;
+    }
+
+    let delete_result = async {
+        let hindsight = HindsightClient::connect(&config.hindsight)
+            .await?
+            .with_restart_support(llm_env_vars);
+        hindsight.delete_bank().await
+    }
+    .await;
+
+    if !was_running && let Err(err) = server.stop().await {
+        tracing::warn!("[memory-reset] failed to stop temporary hindsight daemon: {err}");
+    }
+
+    delete_result
+}
+
 pub async fn run_memory_reset() -> Result<()> {
     let home = get_daat_locus_home().await;
+    reject_if_daemon_running("memory reset").await?;
     clear_memory_state(&home).await?;
 
     println!(
@@ -34,8 +70,7 @@ async fn clear_memory_state(home: &PathBuf) -> Result<()> {
     let config = load_config()
         .await
         .map_err(|err| miette!("failed to load config for memory-reset: {err}"))?;
-    let hindsight = HindsightClient::connect(&config.hindsight).await?;
-    hindsight.delete_bank().await?;
+    clear_hindsight_bank(&config).await?;
     let paths = DaatLocusPaths::from_root(home.clone());
     clear_files(&[
         paths.memory_file("runtime_conversation"),
@@ -50,6 +85,7 @@ async fn clear_memory_state(home: &PathBuf) -> Result<()> {
 
 pub async fn run_state_reset() -> Result<()> {
     let home = get_daat_locus_home().await;
+    reject_if_daemon_running("state reset").await?;
     let cleared = clear_state_files(&home).await?;
 
     println!("[state-reset] reset runtime state under {}", home.display());
@@ -71,6 +107,7 @@ async fn clear_state_files(home: &PathBuf) -> Result<Vec<String>> {
 
 pub async fn run_complite_reset() -> Result<()> {
     let home = get_daat_locus_home().await;
+    reject_if_daemon_running("complite reset").await?;
     let cleared = clear_compiled_artifacts(&home).await?;
 
     println!(
@@ -106,6 +143,7 @@ async fn clear_compiled_artifacts(home: &PathBuf) -> Result<Vec<String>> {
 
 pub async fn run_reset_all() -> Result<()> {
     let home = get_daat_locus_home().await;
+    reject_if_daemon_running("reset all").await?;
     let memory_cleared = clear_memory_state(&home).await;
     let state_cleared = clear_state_files(&home).await?;
     let artifact_cleared = clear_compiled_artifacts(&home).await?;
