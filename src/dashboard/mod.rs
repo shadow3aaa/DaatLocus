@@ -152,6 +152,14 @@ trait DashboardSubcommand: Sync {
         self.usage().split_whitespace().next().unwrap_or_default()
     }
 
+    fn aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn accepts(&self, verb: &str) -> bool {
+        self.name() == verb || self.aliases().contains(&verb)
+    }
+
     fn execute(
         &self,
         parts: &[&str],
@@ -162,9 +170,10 @@ trait DashboardSubcommand: Sync {
 
 struct QuitCommand;
 struct ClearCommand;
-struct PersonaCommand;
-struct SystemPromptCommand;
-struct SnapshotCommand;
+struct DebugCommand;
+struct DebugPersonaSubcommand;
+struct DebugSystemPromptSubcommand;
+struct DebugSnapshotSubcommand;
 struct AppStatusCommand;
 struct StatusCommand;
 struct SleepCommand;
@@ -177,9 +186,10 @@ struct TelegramRejectSubcommand;
 
 static QUIT_COMMAND: QuitCommand = QuitCommand;
 static CLEAR_COMMAND: ClearCommand = ClearCommand;
-static PERSONA_COMMAND: PersonaCommand = PersonaCommand;
-static SYSTEM_PROMPT_COMMAND: SystemPromptCommand = SystemPromptCommand;
-static SNAPSHOT_COMMAND: SnapshotCommand = SnapshotCommand;
+static DEBUG_COMMAND: DebugCommand = DebugCommand;
+static DEBUG_PERSONA_SUBCOMMAND: DebugPersonaSubcommand = DebugPersonaSubcommand;
+static DEBUG_SYSTEM_PROMPT_SUBCOMMAND: DebugSystemPromptSubcommand = DebugSystemPromptSubcommand;
+static DEBUG_SNAPSHOT_SUBCOMMAND: DebugSnapshotSubcommand = DebugSnapshotSubcommand;
 static APP_STATUS_COMMAND: AppStatusCommand = AppStatusCommand;
 static STATUS_COMMAND: StatusCommand = StatusCommand;
 static SLEEP_COMMAND: SleepCommand = SleepCommand;
@@ -196,13 +206,16 @@ static TELEGRAM_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
     &TELEGRAM_APPROVE_SUBCOMMAND,
     &TELEGRAM_REJECT_SUBCOMMAND,
 ];
+static DEBUG_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
+    &DEBUG_PERSONA_SUBCOMMAND,
+    &DEBUG_SYSTEM_PROMPT_SUBCOMMAND,
+    &DEBUG_SNAPSHOT_SUBCOMMAND,
+];
 
-static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 9] = [
+static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 7] = [
     &QUIT_COMMAND,
     &CLEAR_COMMAND,
-    &PERSONA_COMMAND,
-    &SYSTEM_PROMPT_COMMAND,
-    &SNAPSHOT_COMMAND,
+    &DEBUG_COMMAND,
     &APP_STATUS_COMMAND,
     &STATUS_COMMAND,
     &SLEEP_COMMAND,
@@ -295,7 +308,49 @@ impl DashboardCommand for ClearCommand {
     }
 }
 
-impl DashboardCommand for PersonaCommand {
+impl DashboardCommand for DebugCommand {
+    fn usage(&self) -> &'static str {
+        "debug"
+    }
+
+    fn description(&self) -> &'static str {
+        "debug outputs and internal runtime views"
+    }
+
+    fn subcommands(&self) -> &'static [&'static dyn DashboardSubcommand] {
+        &DEBUG_SUBCOMMANDS
+    }
+
+    fn execute(
+        &self,
+        parts: &[&str],
+        raw: &str,
+        context: &DashboardCommandContext<'_>,
+    ) -> DashboardCommandResult {
+        let Some(subcommand_name) = parts.get(1).copied() else {
+            return DashboardCommandResult::ShowOverlay {
+                title: self.overlay_title(raw),
+                text: "available:\n  debug persona\n  debug system-prompt\n  debug snapshot"
+                    .to_string(),
+            };
+        };
+        if let Some(subcommand) = self
+            .subcommands()
+            .iter()
+            .copied()
+            .find(|subcommand| subcommand.accepts(subcommand_name))
+        {
+            subcommand.execute(parts, raw, context)
+        } else {
+            DashboardCommandResult::ShowOverlay {
+                title: self.overlay_title(raw),
+                text: format!("unknown debug subcommand: {subcommand_name}"),
+            }
+        }
+    }
+}
+
+impl DashboardSubcommand for DebugPersonaSubcommand {
     fn usage(&self) -> &'static str {
         "persona"
     }
@@ -322,7 +377,7 @@ impl DashboardCommand for PersonaCommand {
     }
 }
 
-impl DashboardCommand for SystemPromptCommand {
+impl DashboardSubcommand for DebugSystemPromptSubcommand {
     fn usage(&self) -> &'static str {
         "system-prompt"
     }
@@ -333,10 +388,6 @@ impl DashboardCommand for SystemPromptCommand {
 
     fn aliases(&self) -> &'static [&'static str] {
         &["system_prompt"]
-    }
-
-    fn remote_command(&self) -> Option<&'static str> {
-        Some("system_prompt")
     }
 
     fn execute(
@@ -352,7 +403,7 @@ impl DashboardCommand for SystemPromptCommand {
     }
 }
 
-impl DashboardCommand for SnapshotCommand {
+impl DashboardSubcommand for DebugSnapshotSubcommand {
     fn usage(&self) -> &'static str {
         "snapshot"
     }
@@ -493,7 +544,7 @@ impl DashboardCommand for SleepCommand {
             .subcommands()
             .iter()
             .copied()
-            .find(|subcommand| subcommand.name() == subcommand_name)
+            .find(|subcommand| subcommand.accepts(subcommand_name))
         {
             subcommand.execute(parts, raw, context)
         } else {
@@ -612,7 +663,7 @@ impl DashboardCommand for TelegramCommand {
             .subcommands()
             .iter()
             .copied()
-            .find(|subcommand| subcommand.name() == subcommand_name)
+            .find(|subcommand| subcommand.accepts(subcommand_name))
         {
             subcommand.execute(parts, raw, context)
         } else {
@@ -1615,9 +1666,10 @@ mod tests {
             .map(|command| command.command)
             .collect::<Vec<_>>();
 
-        assert!(commands.contains(&"snapshot"));
-        assert!(commands.contains(&"system_prompt"));
+        assert!(commands.contains(&"debug"));
         assert!(commands.contains(&"app_status"));
+        assert!(!commands.contains(&"snapshot"));
+        assert!(!commands.contains(&"system_prompt"));
         assert!(!commands.contains(&"quit"));
     }
 }
