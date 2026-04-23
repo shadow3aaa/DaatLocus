@@ -13,6 +13,8 @@ use uuid::Uuid;
 use crate::{daat_locus_paths::daat_locus_paths_sync, events::EventStatus};
 
 const TELEGRAM_TRANSPORT_STATE_FILE_NAME: &str = "telegram_transport_state";
+const TELEGRAM_MESSAGE_CHAR_LIMIT: usize = 4096;
+const TELEGRAM_CHUNK_BODY_CHAR_LIMIT: usize = 3900;
 
 pub struct TelegramTransportState {
     inner: Arc<TelegramInner>,
@@ -132,15 +134,31 @@ impl TelegramTransportStateHandle {
     ) -> Result<()> {
         let mut state = self.inner.state.lock();
         state.ensure_chat(chat_id.clone(), chat_id.clone());
-        let local_message_id = Uuid::new_v4().to_string();
-        state.outbox.push_back(PendingOutboundMessage {
-            local_message_id,
-            chat_id,
-            text,
-            related_event_id,
-            settle_status_on_delivery,
-            settle_note_on_delivery,
-        });
+        let chunks = split_telegram_message_text(&text);
+        let last_index = chunks.len().saturating_sub(1);
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let is_last = index == last_index;
+            state.outbox.push_back(PendingOutboundMessage {
+                local_message_id: Uuid::new_v4().to_string(),
+                chat_id: chat_id.clone(),
+                text: chunk,
+                related_event_id: if is_last {
+                    related_event_id.clone()
+                } else {
+                    None
+                },
+                settle_status_on_delivery: if is_last {
+                    settle_status_on_delivery.clone()
+                } else {
+                    None
+                },
+                settle_note_on_delivery: if is_last {
+                    settle_note_on_delivery.clone()
+                } else {
+                    None
+                },
+            });
+        }
         persist_telegram_state_result(&self.inner, &state)?;
         self.inner.outbound_notify.notify_one();
         Ok(())
@@ -174,6 +192,70 @@ impl TelegramTransportStateHandle {
                     .count(),
             })
             .collect()
+    }
+}
+
+pub(crate) fn split_telegram_message_text(text: &str) -> Vec<String> {
+    if text.chars().count() <= TELEGRAM_MESSAGE_CHAR_LIMIT {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_chars = 0usize;
+
+    for segment in text.split_inclusive('\n') {
+        let segment_chars = segment.chars().count();
+        if segment_chars > TELEGRAM_CHUNK_BODY_CHAR_LIMIT {
+            push_non_empty_chunk(&mut chunks, &mut current, &mut current_chars);
+            push_hard_wrapped_segment(&mut chunks, segment);
+            continue;
+        }
+
+        if current_chars + segment_chars > TELEGRAM_CHUNK_BODY_CHAR_LIMIT {
+            push_non_empty_chunk(&mut chunks, &mut current, &mut current_chars);
+        }
+        current.push_str(segment);
+        current_chars += segment_chars;
+    }
+    push_non_empty_chunk(&mut chunks, &mut current, &mut current_chars);
+
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    if chunks.len() == 1 {
+        return chunks;
+    }
+
+    let total = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| format!("[{}/{}]\n{}", index + 1, total, chunk))
+        .collect()
+}
+
+fn push_non_empty_chunk(chunks: &mut Vec<String>, current: &mut String, current_chars: &mut usize) {
+    if current.is_empty() {
+        return;
+    }
+    chunks.push(std::mem::take(current));
+    *current_chars = 0;
+}
+
+fn push_hard_wrapped_segment(chunks: &mut Vec<String>, segment: &str) {
+    let mut current = String::new();
+    let mut current_chars = 0usize;
+    for ch in segment.chars() {
+        if current_chars == TELEGRAM_CHUNK_BODY_CHAR_LIMIT {
+            chunks.push(std::mem::take(&mut current));
+            current_chars = 0;
+        }
+        current.push(ch);
+        current_chars += 1;
+    }
+    if !current.is_empty() {
+        chunks.push(current);
     }
 }
 
@@ -308,4 +390,89 @@ fn persist_telegram_state_bytes(path: &Path, state: &TelegramState) -> Result<()
     std::fs::write(path, bytes)
         .map_err(|err| miette!("write telegram transport state failed: {err}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use crate::events::EventStatus;
+    use parking_lot::Mutex;
+    use tokio::sync::Notify;
+
+    #[test]
+    fn short_telegram_message_is_not_chunked() {
+        let chunks = split_telegram_message_text("hello");
+        assert_eq!(chunks, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn long_telegram_message_is_chunked_under_api_limit() {
+        let text = "x".repeat(TELEGRAM_MESSAGE_CHAR_LIMIT + 1);
+        let chunks = split_telegram_message_text(&text);
+
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= TELEGRAM_MESSAGE_CHAR_LIMIT)
+        );
+        assert!(chunks[0].starts_with("[1/"));
+    }
+
+    #[test]
+    fn long_telegram_message_chunking_respects_unicode_boundaries() {
+        let text = "好".repeat(TELEGRAM_MESSAGE_CHAR_LIMIT + 1);
+        let chunks = split_telegram_message_text(&text);
+
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= TELEGRAM_MESSAGE_CHAR_LIMIT)
+        );
+    }
+
+    #[test]
+    fn enqueue_long_outbound_settles_only_after_last_chunk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transport = TelegramTransportState {
+            inner: Arc::new(TelegramInner {
+                state: Mutex::new(TelegramState::default()),
+                outbound_notify: Notify::new(),
+                persistence_path: dir.path().join("telegram_state"),
+            }),
+        };
+        let handle = transport.handle();
+
+        handle
+            .enqueue_outgoing_message(
+                "1".to_string(),
+                "x".repeat(TELEGRAM_MESSAGE_CHAR_LIMIT + 1),
+                Some("event-1".to_string()),
+                Some(EventStatus::Resolved),
+                Some("done".to_string()),
+            )
+            .expect("enqueue");
+
+        let state = transport.inner.state.lock();
+        assert!(state.outbox.len() > 1);
+        let last_index = state.outbox.len() - 1;
+        for (index, message) in state.outbox.iter().enumerate() {
+            assert!(message.text.chars().count() <= TELEGRAM_MESSAGE_CHAR_LIMIT);
+            if index == last_index {
+                assert_eq!(message.related_event_id.as_deref(), Some("event-1"));
+                assert_eq!(
+                    message.settle_status_on_delivery,
+                    Some(EventStatus::Resolved)
+                );
+                assert_eq!(message.settle_note_on_delivery.as_deref(), Some("done"));
+            } else {
+                assert!(message.related_event_id.is_none());
+                assert!(message.settle_status_on_delivery.is_none());
+                assert!(message.settle_note_on_delivery.is_none());
+            }
+        }
+    }
 }

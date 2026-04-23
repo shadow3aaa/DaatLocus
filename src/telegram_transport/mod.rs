@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 
-use crate::telegram_transport::state::TelegramTransportStateHandle;
+use crate::telegram_transport::state::{TelegramTransportStateHandle, split_telegram_message_text};
 use crate::{
     config::TelegramConfig,
     dashboard::{
@@ -232,7 +232,7 @@ impl TelegramTransport {
         };
         self.handle
             .register_known_chat(chat_id.to_string(), chat_id.to_string());
-        self.send_message(chat_id, &response).await
+        self.send_text(chat_id, &response).await
     }
 
     async fn get_updates(&self) -> Result<Vec<TelegramUpdate>> {
@@ -350,6 +350,13 @@ impl TelegramTransport {
                     .unwrap_or_else(|| "unknown api error".to_string())
             );
         }
+    }
+
+    async fn send_text(&self, chat_id: i64, text: &str) -> Result<()> {
+        for chunk in split_telegram_message_text(text) {
+            self.send_message(chat_id, &chunk).await?;
+        }
+        Ok(())
     }
 
     fn endpoint(&self, method: &str) -> String {
