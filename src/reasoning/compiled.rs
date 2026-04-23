@@ -179,10 +179,6 @@ impl CompiledPromptStore {
         self
     }
 
-    pub fn has_runtime_system_prompt(&self) -> bool {
-        self.runtime_system_prompt.is_some()
-    }
-
     pub fn get_tuning<P: Program>(&self, program: &P) -> Option<PromptTuningConfig<P::Output>> {
         self.entries
             .get(&program.tuning_key())

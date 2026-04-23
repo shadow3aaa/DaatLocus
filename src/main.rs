@@ -96,7 +96,6 @@ use crate::{
             PromptMemoryCitation, PromptMemoryContext,
         },
         sleep::run_sleep,
-        turn_compile::{TurnCompileEngine, should_run_cold_start_turn_compile},
     },
     runtime_context::{
         MID_TURN_COMPACTION_MAX_RECOVERIES, build_runtime_request_envelope,
@@ -715,46 +714,13 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     let hindsight_retain = hindsight.spawn_retain_worker();
 
     emit_startup_progress("[prompt-compile] loading compiled prompts before daemon startup...");
-    let mut compiled_prompts = match load_compiled_prompts_only(&config).await {
+    let compiled_prompts = match load_compiled_prompts_only(&config).await {
         Ok(store) => store,
         Err(err) => {
             tracing::error!("failed to load compiled prompts: {err:?}");
             return Err(err);
         }
     };
-    if !compiled_prompts.has_runtime_system_prompt() {
-        match should_run_cold_start_turn_compile().await {
-            Ok(()) => {
-                emit_startup_progress(
-                    "[prompt-compile] runtime system prompt missing; running cold-start turn compile...",
-                );
-                match TurnCompileEngine::compile_cold_start(
-                    config.clone(),
-                    compiled_prompts.clone(),
-                )
-                .await
-                {
-                    Ok(runtime_prompt) => {
-                        compiled_prompts =
-                            compiled_prompts.with_runtime_system_prompt(Some(runtime_prompt));
-                        emit_startup_progress(
-                            "[prompt-compile] cold-start turn compile completed; runtime prompt cached",
-                        );
-                    }
-                    Err(err) => {
-                        tracing::error!(
-                            "cold-start turn compile failed; continuing with baseline runtime prompt: {err:?}"
-                        );
-                    }
-                }
-            }
-            Err(err) => {
-                tracing::info!(
-                    "skipping cold-start turn compile because prompt persona calibration is incomplete: {err:?}"
-                );
-            }
-        }
-    }
 
     let memory = Memory::new().await;
     let plan = Plan::new().await;

@@ -378,11 +378,8 @@ impl RuntimeTool for AppRuntimeTool {
                 .max(1),
         };
         let result = context.apps.execute_tool(call, &app_context).await?;
-        let mut output = ToolExecutionResult::new(
-            result.summary.clone(),
-            result.payload,
-            result.ui_event,
-        );
+        let mut output =
+            ToolExecutionResult::new(result.summary.clone(), result.payload, result.ui_event);
         if let Some(model_content) = result.model_content {
             output = output.with_model_content(model_content);
         }

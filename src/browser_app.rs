@@ -12,8 +12,8 @@ use viewpoint_core::{AriaSnapshot, Browser, BrowserContext, DocumentLoadState, P
 
 use crate::{
     app::{
-        App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext,
-        AppToolExecutionResult, AppToolScope, AppToolSpec, AppUsage,
+        App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
+        AppToolScope, AppToolSpec, AppUsage,
     },
     context_budget::truncate_text_to_token_budget,
     core::{
@@ -766,10 +766,7 @@ fn browser_action_result(
     }
 }
 
-fn browser_wait_result(
-    result: &BrowserWaitResult,
-    max_tokens: usize,
-) -> AppToolExecutionResult {
+fn browser_wait_result(result: &BrowserWaitResult, max_tokens: usize) -> AppToolExecutionResult {
     let extra_lines = vec![format!("wait_state={}", result.wait_state)];
     let model_content = browser_action_model_content(
         "waited for browser page",
@@ -858,7 +855,8 @@ impl App for BrowserApp {
             },
             AppToolSpec {
                 name: "browser_snapshot".to_string(),
-                description: "读取指定页面的紧凑语义快照，优先保留高价值节点与可交互元素引用。".to_string(),
+                description: "读取指定页面的紧凑语义快照，优先保留高价值节点与可交互元素引用。"
+                    .to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserSnapshotArgs)).unwrap(),
             },
             AppToolSpec {
@@ -868,12 +866,16 @@ impl App for BrowserApp {
             },
             AppToolSpec {
                 name: "browser_click".to_string(),
-                description: "基于 `element_ref` 点击页面元素；如果页面变化导致引用失效，tool 会直接报错。".to_string(),
+                description:
+                    "基于 `element_ref` 点击页面元素；如果页面变化导致引用失效，tool 会直接报错。"
+                        .to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserClickArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "browser_fill".to_string(),
-                description: "基于 `element_ref` 填写输入框；如果页面变化导致引用失效，tool 会直接报错。".to_string(),
+                description:
+                    "基于 `element_ref` 填写输入框；如果页面变化导致引用失效，tool 会直接报错。"
+                        .to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserFillArgs)).unwrap(),
             },
             AppToolSpec {
@@ -1109,8 +1111,11 @@ impl App for BrowserApp {
                 let args: BrowserSnapshotArgs = parse_browser_tool_args(call)?;
                 let result = self.snapshot_page(&args.page_id).await?;
                 let summary = format!("captured browser snapshot for page {}", result.page.page_id);
-                let model_content =
-                    browser_snapshot_model_content(&summary, &result, context.tool_output_max_tokens);
+                let model_content = browser_snapshot_model_content(
+                    &summary,
+                    &result,
+                    context.tool_output_max_tokens,
+                );
                 Ok(AppToolExecutionResult {
                     summary,
                     payload: json!({

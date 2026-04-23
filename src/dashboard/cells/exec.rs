@@ -64,10 +64,7 @@ impl Cell for ExecResultActivityCell {
                 Style::default().fg(Color::Gray)
             };
             lines.push(Line::from(vec![
-                Span::styled(
-                    "  ",
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled("  ", Style::default().fg(Color::DarkGray)),
                 Span::styled(line, style),
             ]));
         }
@@ -116,10 +113,7 @@ impl Cell for LiveExecActivityCell {
                 Style::default().fg(Color::Gray)
             };
             lines.push(Line::from(vec![
-                Span::styled(
-                    "  ",
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled("  ", Style::default().fg(Color::DarkGray)),
                 Span::styled(line, style),
             ]));
         }

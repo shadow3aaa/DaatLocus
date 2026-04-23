@@ -34,7 +34,11 @@ fn syntax_set() -> &'static SyntaxSet {
 }
 
 fn theme() -> &'static Theme {
-    THEME.get_or_init(|| two_face::theme::extra().get(EmbeddedThemeName::TwoDark).clone())
+    THEME.get_or_init(|| {
+        two_face::theme::extra()
+            .get(EmbeddedThemeName::TwoDark)
+            .clone()
+    })
 }
 
 fn color_level() -> ColorLevel {
@@ -79,7 +83,10 @@ fn convert_color(color: syntect::highlighting::Color) -> Option<Color> {
     match color.a {
         0 => Some(Color::Indexed(color.r)),
         1 => None,
-        _ => Some(convert_rgb_for_level((color.r, color.g, color.b), color_level())),
+        _ => Some(convert_rgb_for_level(
+            (color.r, color.g, color.b),
+            color_level(),
+        )),
     }
 }
 
@@ -184,7 +191,10 @@ pub(super) fn highlight_patch_lines(
     let mut segment_start = 0usize;
     while segment_start < lines.len() {
         while segment_start < lines.len()
-            && matches!(lines[segment_start].kind, crate::tool_ui::PatchDiffLineKind::HunkBreak)
+            && matches!(
+                lines[segment_start].kind,
+                crate::tool_ui::PatchDiffLineKind::HunkBreak
+            )
         {
             segment_start += 1;
         }

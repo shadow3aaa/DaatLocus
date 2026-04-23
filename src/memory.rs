@@ -1092,9 +1092,7 @@ fn summarize_tool_ui_event(event: &ToolUiEvent) -> String {
                 .as_deref()
                 .map(|app| format!("focused app {app}"))
                 .unwrap_or_else(|| "focused app".to_string()),
-            crate::tool_ui::AppAttentionUiAction::PutAway => {
-                "put away focused app".to_string()
-            }
+            crate::tool_ui::AppAttentionUiAction::PutAway => "put away focused app".to_string(),
         },
         ToolUiEvent::Plan(PlanUiData { steps }) => format!("plan with {} step(s)", steps.len()),
         ToolUiEvent::CreateWorkflow(CreateWorkflowUiData { workflow_id }) => {

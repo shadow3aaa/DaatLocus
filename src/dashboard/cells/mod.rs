@@ -189,10 +189,7 @@ pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivity
         DashboardActivityEvent::ExecEnd { key } => {
             state.live_activity_cells.retain(|cell| cell.key != key);
         }
-        DashboardActivityEvent::BrowserBegin {
-            key,
-            event,
-        } => upsert_live_activity_cell(
+        DashboardActivityEvent::BrowserBegin { key, event } => upsert_live_activity_cell(
             &mut state.live_activity_cells,
             LiveActivityCell {
                 key,
@@ -356,7 +353,10 @@ fn upsert_live_activity_cell(cells: &mut Vec<LiveActivityCell>, incoming: LiveAc
                     existing_exec.started_at_ms = incoming_exec.started_at_ms;
                 }
             }
-            (ActivityCell::LiveBrowser(existing_browser), ActivityCell::LiveBrowser(incoming_browser)) => {
+            (
+                ActivityCell::LiveBrowser(existing_browser),
+                ActivityCell::LiveBrowser(incoming_browser),
+            ) => {
                 *existing_browser = incoming_browser;
             }
             (slot, cell) => *slot = cell,

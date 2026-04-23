@@ -51,7 +51,11 @@ impl Cell for PatchActivityCell {
             .to_string()
             .len()
             .max(1);
-        let file_noun = if self.files.len() == 1 { "File" } else { "Files" };
+        let file_noun = if self.files.len() == 1 {
+            "File"
+        } else {
+            "Files"
+        };
 
         let mut lines = vec![Line::from(vec![
             Span::styled(
@@ -86,12 +90,10 @@ impl Cell for PatchActivityCell {
         }
         if self.files.len() > visible_files.len() {
             lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("… {} more files", self.files.len() - visible_files.len()),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                format!("… {} more files", self.files.len() - visible_files.len()),
+                Style::default().fg(Color::DarkGray),
+            )]));
         }
         lines
     }
@@ -127,9 +129,10 @@ impl Cell for ReplyActivityCell {
             ),
         ])];
         for line in self.message_lines.iter().take(8) {
-            lines.push(Line::from(vec![
-                Span::styled(line.to_string(), Style::default().fg(Color::White)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::White),
+            )]));
         }
         lines
     }
@@ -250,18 +253,16 @@ fn render_patch_diff_line(
     new_lineno_width: usize,
 ) -> Line<'static> {
     if matches!(line.kind, PatchDiffLineKind::HunkBreak) {
-        return Line::from(vec![
-            Span::styled(
-                format!(
-                    "{:>old_width$} {:>new_width$} ⋮",
-                    "",
-                    "",
-                    old_width = old_lineno_width,
-                    new_width = new_lineno_width
-                ),
-                Style::default().fg(Color::DarkGray),
+        return Line::from(vec![Span::styled(
+            format!(
+                "{:>old_width$} {:>new_width$} ⋮",
+                "",
+                "",
+                old_width = old_lineno_width,
+                new_width = new_lineno_width
             ),
-        ]);
+            Style::default().fg(Color::DarkGray),
+        )]);
     }
 
     let (gutter, text_style, background) = match line.kind {
@@ -366,8 +367,16 @@ mod tests {
         let lines = cell.render_lines();
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
 
-        assert!(rendered.iter().any(|line| line.contains("∂  Edited 1 File")));
-        assert!(rendered.iter().any(|line| line.contains("src/app.rs (+1 -1)")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("∂  Edited 1 File"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("src/app.rs (+1 -1)"))
+        );
         assert!(
             rendered
                 .iter()

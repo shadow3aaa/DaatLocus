@@ -14,8 +14,8 @@ use serde_json::json;
 
 use crate::{
     app::{
-        App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext,
-        AppToolExecutionResult, AppToolScope, AppToolSpec, AppUsage,
+        App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
+        AppToolScope, AppToolSpec, AppUsage,
     },
     core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWriteStdinArgs},
     dashboard::{DashboardActivityEvent, apply_activity_event},
@@ -455,8 +455,7 @@ fn compact_terminal_model_content(
     if !output.trim().is_empty() {
         lines.push("output=".to_string());
         lines.push(crate::context_budget::truncate_text_to_token_budget(
-            output,
-            max_tokens,
+            output, max_tokens,
         ));
     }
     crate::context_budget::truncate_text_to_token_budget(&lines.join("\n"), max_tokens)
@@ -656,10 +655,15 @@ impl App for TerminalApp {
                     .sandbox_policy
                     .ensure_path_readable(&effective_workdir, "terminal workdir")
                     .map_err(|_| {
-                        terminal_protection_error(&format!("workdir={}", effective_workdir.display()))
+                        terminal_protection_error(&format!(
+                            "workdir={}",
+                            effective_workdir.display()
+                        ))
                     })?;
                 if command_mentions_protected_paths(context, &args.command) {
-                    return Err(terminal_protection_error("command references protected path"));
+                    return Err(terminal_protection_error(
+                        "command references protected path",
+                    ));
                 }
                 let effective_workdir = args
                     .workdir
@@ -740,7 +744,7 @@ impl App for TerminalApp {
                             TerminalUiAction::Continue
                         },
                         summarize_terminal_inline_text(
-                            result.session.command.as_deref().unwrap_or(&args.command)
+                            result.session.command.as_deref().unwrap_or(&args.command),
                         ),
                         {
                             let mut body = vec![terminal_session_meta(&result.session)];
@@ -795,14 +799,24 @@ impl App for TerminalApp {
                 let mode = terminal_progress_mode(&args.text);
                 let running = result.session.status == "running";
                 let command_label = summarize_terminal_inline_text(
-                    result.session.command.as_deref().unwrap_or(&args.session_id),
+                    result
+                        .session
+                        .command
+                        .as_deref()
+                        .unwrap_or(&args.session_id),
                 );
                 let summary = match (mode, running) {
                     ("poll", true) => {
-                        format!("continued {}", display_session_label(&result.session.session_id))
+                        format!(
+                            "continued {}",
+                            display_session_label(&result.session.session_id)
+                        )
                     }
                     ("poll", false) => {
-                        format!("completed {}", display_session_label(&result.session.session_id))
+                        format!(
+                            "completed {}",
+                            display_session_label(&result.session.session_id)
+                        )
                     }
                     ("continue", true) => format!(
                         "continued {} with stdin",
@@ -812,7 +826,10 @@ impl App for TerminalApp {
                         "completed {} after stdin",
                         display_session_label(&result.session.session_id)
                     ),
-                    _ => format!("continued {}", display_session_label(&result.session.session_id)),
+                    _ => format!(
+                        "continued {}",
+                        display_session_label(&result.session.session_id)
+                    ),
                 };
                 let mut extra_lines = vec![
                     format!("mode={mode}"),
@@ -878,7 +895,7 @@ impl App for TerminalApp {
                     ui_event: ToolUiEvent::terminal(
                         TerminalUiAction::Terminate,
                         summarize_terminal_inline_text(
-                            session.command.as_deref().unwrap_or(&args.session_id)
+                            session.command.as_deref().unwrap_or(&args.session_id),
                         ),
                         vec![terminal_session_meta(&session)],
                     ),

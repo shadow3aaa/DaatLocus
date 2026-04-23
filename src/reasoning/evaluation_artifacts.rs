@@ -15,11 +15,9 @@ const STRESS_CASES_DIR: &str = "stress_cases";
 const INSTRUCTION_HYPOTHESES_DIR: &str = "instruction_hypotheses";
 const RUNTIME_DEMOS_DIR: &str = "runtime_demos";
 const TURN_DEMOS_DIR: &str = "turn_demos";
-const TURN_DEMO_EVALUATIONS_DIR: &str = "turn_demo_evaluations";
 const PROMPT_REFLECTIONS_DIR: &str = "prompt_reflections";
 const RUNTIME_PROMPT_CANDIDATES_DIR: &str = "runtime_prompt_candidates";
 const RUNTIME_PROMPT_CANDIDATE_EVALUATIONS_DIR: &str = "runtime_prompt_candidate_evaluations";
-const RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR: &str = "runtime_prompt_evolution_reports";
 const WORKFLOW_REFLECTIONS_DIR: &str = "workflow_reflections";
 const WORKFLOW_PATCHES_DIR: &str = "workflow_patches";
 const WORKFLOW_MERGES_DIR: &str = "workflow_merges";
@@ -188,39 +186,6 @@ pub struct EvaluationArtifactRuntimePromptCandidateEvaluation {
     pub source_trace_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EvaluationArtifactRuntimePromptEvolutionRound {
-    pub round: usize,
-    pub candidate: String,
-    pub passed: usize,
-    pub total_demos: usize,
-    pub regressions: usize,
-    pub rolled_back: bool,
-    pub accepted: bool,
-    #[serde(default)]
-    pub suggestion_titles: Vec<String>,
-    #[serde(default)]
-    pub candidate_titles: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EvaluationArtifactRuntimePromptEvolutionReport {
-    pub compile_key: String,
-    pub rounds: usize,
-    pub accepted: bool,
-    pub rolled_back: bool,
-    pub passed: usize,
-    pub total_demos: usize,
-    pub regressions: usize,
-    pub selected_candidate: String,
-    #[serde(default)]
-    pub selected_demo_titles: Vec<String>,
-    #[serde(default)]
-    pub final_system_additions: Vec<String>,
-    #[serde(default)]
-    pub round_history: Vec<EvaluationArtifactRuntimePromptEvolutionRound>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct EvaluationArtifactWorkflowPatch {
     pub workflow_id: String,
@@ -326,11 +291,9 @@ impl EvaluationArtifactsStore {
         ensure_dir(&root.join(INSTRUCTION_HYPOTHESES_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_DEMOS_DIR)).await?;
         ensure_dir(&root.join(TURN_DEMOS_DIR)).await?;
-        ensure_dir(&root.join(TURN_DEMO_EVALUATIONS_DIR)).await?;
         ensure_dir(&root.join(PROMPT_REFLECTIONS_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_CANDIDATES_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_CANDIDATE_EVALUATIONS_DIR)).await?;
-        ensure_dir(&root.join(RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR)).await?;
         ensure_dir(&root.join(WORKFLOW_REFLECTIONS_DIR)).await?;
         ensure_dir(&root.join(WORKFLOW_PATCHES_DIR)).await?;
         ensure_dir(&root.join(WORKFLOW_MERGES_DIR)).await?;
@@ -422,21 +385,6 @@ impl EvaluationArtifactsStore {
         replace_artifacts(&self.root.join(TURN_DEMOS_DIR), artifacts).await
     }
 
-    pub async fn replace_turn_demo_evaluations(
-        &self,
-        artifacts: &[EvaluationArtifactTurnDemoEvaluation],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                let slug = slugify(&artifact.demo_title);
-                (format!("{}-{}", artifact.compile_key, slug), artifact)
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(TURN_DEMO_EVALUATIONS_DIR), artifacts).await
-    }
-
     pub async fn replace_runtime_prompt_candidates(
         &self,
         artifacts: &[EvaluationArtifactRuntimePromptCandidate],
@@ -481,27 +429,6 @@ impl EvaluationArtifactsStore {
             .collect::<Vec<_>>();
         replace_artifacts(
             &self.root.join(RUNTIME_PROMPT_CANDIDATE_EVALUATIONS_DIR),
-            artifacts,
-        )
-        .await
-    }
-
-    pub async fn replace_runtime_prompt_evolution_reports(
-        &self,
-        artifacts: &[EvaluationArtifactRuntimePromptEvolutionReport],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                (
-                    format!("{}-rounds-{}", artifact.compile_key, artifact.rounds),
-                    artifact,
-                )
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(
-            &self.root.join(RUNTIME_PROMPT_EVOLUTION_REPORTS_DIR),
             artifacts,
         )
         .await
@@ -692,51 +619,6 @@ fn artifact_file_stem(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn runtime_prompt_evolution_report_roundtrip_preserves_round_history() {
-        let report = EvaluationArtifactRuntimePromptEvolutionReport {
-            compile_key: "runtime_agent_system".to_string(),
-            rounds: 2,
-            accepted: false,
-            rolled_back: true,
-            passed: 1,
-            total_demos: 2,
-            regressions: 1,
-            selected_candidate: "candidate-b".to_string(),
-            selected_demo_titles: vec!["demo-a".to_string()],
-            final_system_additions: vec!["rule a".to_string(), "rule b".to_string()],
-            round_history: vec![
-                EvaluationArtifactRuntimePromptEvolutionRound {
-                    round: 1,
-                    candidate: "current".to_string(),
-                    passed: 1,
-                    total_demos: 2,
-                    regressions: 0,
-                    rolled_back: false,
-                    accepted: false,
-                    suggestion_titles: vec!["suggestion-1".to_string()],
-                    candidate_titles: vec!["candidate-a".to_string()],
-                },
-                EvaluationArtifactRuntimePromptEvolutionRound {
-                    round: 2,
-                    candidate: "candidate-a".to_string(),
-                    passed: 1,
-                    total_demos: 2,
-                    regressions: 1,
-                    rolled_back: true,
-                    accepted: false,
-                    suggestion_titles: vec!["suggestion-2".to_string()],
-                    candidate_titles: vec!["candidate-b".to_string()],
-                },
-            ],
-        };
-
-        let json = serde_json::to_string(&report).unwrap();
-        let decoded: EvaluationArtifactRuntimePromptEvolutionReport =
-            serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded, report);
-    }
 
     #[test]
     fn artifact_file_stem_is_bounded_and_non_empty() {
