@@ -40,6 +40,7 @@ use crate::{
 const LOCALHOST: &str = "127.0.0.1";
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(200);
+pub const DAEMONIZE_ENV: &str = "DAAT_LOCUS_DAEMONIZE";
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -507,14 +508,58 @@ pub async fn spawn_detached_daemon_process() -> Result<()> {
         .open(&log_path)
         .map_err(|err| miette!("open daemon stderr log {}: {err}", log_path.display()))?;
 
-    std::process::Command::new(current_exe)
+    let mut command = std::process::Command::new(current_exe);
+    command
         .arg("daemon")
         .arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr_file)
+        .env(DAEMONIZE_ENV, "1");
+    command
         .spawn()
         .map_err(|err| miette!("spawn daemon process failed: {err}"))?;
+    Ok(())
+}
+
+pub fn daemonize_current_process_if_requested() -> Result<()> {
+    if std::env::var_os(DAEMONIZE_ENV).is_none() {
+        return Ok(());
+    }
+    daemonize_current_process()
+}
+
+#[cfg(unix)]
+fn daemonize_current_process() -> Result<()> {
+    // Run before Tokio starts: daemonizing forks, so doing it after a
+    // multi-thread runtime exists would duplicate only the calling thread.
+    unsafe {
+        fork_parent_exit("first daemon fork")?;
+        if libc::setsid() == -1 {
+            return Err(miette!(
+                "daemonize setsid failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        fork_parent_exit("second daemon fork")?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+unsafe fn fork_parent_exit(label: &str) -> Result<()> {
+    match unsafe { libc::fork() } {
+        -1 => Err(miette!(
+            "{label} failed: {}",
+            std::io::Error::last_os_error()
+        )),
+        0 => Ok(()),
+        _ => unsafe { libc::_exit(0) },
+    }
+}
+
+#[cfg(not(unix))]
+fn daemonize_current_process() -> Result<()> {
     Ok(())
 }
 

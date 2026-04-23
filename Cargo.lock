@@ -784,6 +784,7 @@ dependencies = [
  "diffy",
  "flate2",
  "futures-util",
+ "libc",
  "miette",
  "mlua",
  "notify",

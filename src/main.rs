@@ -240,6 +240,11 @@ enum DaemonTarget {
 fn main() {
     let cli = Cli::parse();
 
+    if let Err(err) = crate::daemon::daemonize_current_process_if_requested() {
+        eprintln!("{err:?}");
+        std::process::exit(1);
+    }
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -572,8 +577,12 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     let early_shutdown_handle = tokio::spawn(async move {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
-                if result.is_ok() {
-                    tracing::info!("daemon received SIGINT during startup, exiting");
+                match result {
+                    Ok(()) => tracing::info!("daemon received SIGINT during startup, exiting"),
+                    Err(err) => {
+                        tracing::warn!("ctrl_c listener failed during startup: {err}");
+                        return;
+                    }
                 }
             }
             _ = {
@@ -744,6 +753,7 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     let mut sleep_running = false;
     let mut sleep_status = SleepDashboardStatus::default();
     let mut shutdown_completion_tx = None;
+    let mut ctrl_c_disabled = false;
     loop {
         tokio::select! {
             _ = daat_locus_loop(
@@ -772,12 +782,17 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
                 shutdown_completion_tx = Some(completion_tx);
                 break;
             }
-            signal = tokio::signal::ctrl_c() => {
-                if let Err(err) = signal {
-                    tracing::warn!("ctrl_c listener failed: {err}");
+            signal = tokio::signal::ctrl_c(), if !ctrl_c_disabled => {
+                match signal {
+                    Ok(()) => {
+                        tracing::info!("daemon received SIGINT, shutting down");
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::warn!("ctrl_c listener failed: {err}");
+                        ctrl_c_disabled = true;
+                    }
                 }
-                tracing::info!("daemon received SIGINT, shutting down");
-                break;
             }
             _ = {
                 #[cfg(unix)] { sigterm.recv() }
@@ -799,8 +814,14 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
         .unwrap_or_default();
     context.shutdown().await;
     let managed = HindsightManagedServer::new(hindsight_config, hindsight_llm_vars);
-    if let Err(err) = managed.stop().await {
-        tracing::warn!("[hindsight] stop failed: {err}");
+    match tokio::time::timeout(Duration::from_secs(10), managed.stop()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::warn!("[hindsight] stop failed: {err}");
+        }
+        Err(_) => {
+            tracing::warn!("[hindsight] stop timed out during daemon shutdown");
+        }
     }
     lock.release();
     if let Some(completion_tx) = shutdown_completion_tx.take() {
