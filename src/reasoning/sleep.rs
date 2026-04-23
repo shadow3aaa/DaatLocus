@@ -632,6 +632,29 @@ async fn run_prompt_improvement_pipeline(
     consumed_trace_events: usize,
 ) -> Result<PromptImprovementSummary> {
     let failure_patterns = derive_failure_patterns(records);
+    if failure_patterns.is_empty() {
+        tracing::info!(
+            "[sleep] no prompt failure patterns, skipping prompt planning and frontier replay"
+        );
+        store
+            .replace_prompt_improvement_artifacts(PromptImprovementArtifacts {
+                failure_patterns: &failure_patterns,
+                bootstrap_demos: &[],
+                stress_cases: &[],
+                instruction_hypotheses: &[],
+                runtime_demos: &[],
+                turn_demos: &[],
+                prompt_reflections: &[],
+                runtime_prompt_candidates: &[],
+                runtime_prompt_candidate_evaluations: &[],
+            })
+            .await?;
+        return Ok(PromptImprovementSummary {
+            consumed_trace_events,
+            failure_patterns,
+            ..Default::default()
+        });
+    }
     // LLM 调用失败（如推理模型返回 reasoning text 而非 tool_calls）时，降级为空规划，
     // 不中断整个 pipeline：derive_artifacts、frontier replay 仍能正常执行。
     let PromptPlanningResult {
