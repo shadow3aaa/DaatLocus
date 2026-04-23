@@ -516,6 +516,16 @@ pub async fn spawn_detached_daemon_process() -> Result<()> {
         .stdout(Stdio::null())
         .stderr(stderr_file)
         .env(DAEMONIZE_ENV, "1");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
     command
         .spawn()
         .map_err(|err| miette!("spawn daemon process failed: {err}"))?;
