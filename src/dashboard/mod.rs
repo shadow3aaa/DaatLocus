@@ -107,6 +107,14 @@ trait DashboardCommand: Sync {
         self.primary_verb() == verb || self.aliases().contains(&verb)
     }
 
+    fn remote_command(&self) -> Option<&'static str> {
+        Some(self.primary_verb())
+    }
+
+    fn remote_description(&self) -> &'static str {
+        self.description()
+    }
+
     fn overlay_title(&self, raw: &str) -> String {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -212,6 +220,10 @@ impl DashboardCommand for QuitCommand {
 
     fn aliases(&self) -> &'static [&'static str] {
         &["q", "exit"]
+    }
+
+    fn remote_command(&self) -> Option<&'static str> {
+        None
     }
 
     fn execute(
@@ -323,6 +335,10 @@ impl DashboardCommand for SystemPromptCommand {
         &["system_prompt"]
     }
 
+    fn remote_command(&self) -> Option<&'static str> {
+        Some("system_prompt")
+    }
+
     fn execute(
         &self,
         _: &[&str],
@@ -369,6 +385,10 @@ impl DashboardCommand for AppStatusCommand {
 
     fn aliases(&self) -> &'static [&'static str] {
         &["app_status"]
+    }
+
+    fn remote_command(&self) -> Option<&'static str> {
+        Some("app_status")
     }
 
     fn complete_arguments(
@@ -675,6 +695,26 @@ impl DashboardSubcommand for TelegramRejectSubcommand {
 
 fn dashboard_commands() -> &'static [&'static dyn DashboardCommand] {
     &DASHBOARD_COMMANDS
+}
+
+#[derive(Clone, Copy, Serialize)]
+pub(crate) struct RemoteDashboardCommand {
+    pub command: &'static str,
+    pub description: &'static str,
+}
+
+pub(crate) fn remote_dashboard_commands() -> Vec<RemoteDashboardCommand> {
+    dashboard_commands()
+        .iter()
+        .filter_map(|command| {
+            command
+                .remote_command()
+                .map(|remote_command| RemoteDashboardCommand {
+                    command: remote_command,
+                    description: command.remote_description(),
+                })
+        })
+        .collect()
 }
 
 fn execute_access_request_command(
@@ -1566,5 +1606,18 @@ mod tests {
                 .iter()
                 .all(|suggestion| suggestion.completion.starts_with('/'))
         );
+    }
+
+    #[test]
+    fn remote_dashboard_commands_are_derived_from_command_registry() {
+        let commands = remote_dashboard_commands()
+            .into_iter()
+            .map(|command| command.command)
+            .collect::<Vec<_>>();
+
+        assert!(commands.contains(&"snapshot"));
+        assert!(commands.contains(&"system_prompt"));
+        assert!(commands.contains(&"app_status"));
+        assert!(!commands.contains(&"quit"));
     }
 }
