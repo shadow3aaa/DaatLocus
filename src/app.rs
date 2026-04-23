@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, fmt::Display, time::Duration};
+use std::{collections::HashMap, fmt::Display, path::Path, path::PathBuf, time::Duration};
 
 use async_trait::async_trait;
 use miette::{Result, miette};
@@ -6,7 +6,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{browser_app::BrowserApp, sandbox::RuntimeSandboxPolicy, terminal_app::TerminalApp};
+use crate::{
+    dashboard::DashboardState,
+    reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
+    sandbox::RuntimeSandboxPolicy,
+    tool_ui::{ToolCallUiEvent, ToolUiData, ToolUiEvent},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
 #[serde(transparent)]
@@ -102,13 +107,64 @@ pub struct AppDynamicToolResult {
     pub turn_boundary_reason: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AppToolSpec {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppToolExecutionResult {
+    pub summary: String,
+    pub payload: Value,
+    pub model_content: Option<String>,
+    pub ui_event: ToolUiEvent,
+    pub turn_boundary_reason: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct AppToolExecutionContext {
+    pub execution_cwd: PathBuf,
+    pub sandbox_policy: RuntimeSandboxPolicy,
+    pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
+    pub tool_output_max_tokens: usize,
+}
+
+impl AppToolExecutionContext {
+    pub fn resolve_tool_path(&self, path: &Path, base: Option<&Path>) -> PathBuf {
+        self.sandbox_policy
+            .resolve_path(path, base.or(Some(&self.execution_cwd)))
+    }
+}
+
+fn summarize_app_inline_text(text: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let compact = text.replace('\n', "\\n");
+    let mut chars = compact.chars();
+    let summary = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{summary}...")
+    } else {
+        summary
+    }
+}
+
+fn compact_app_tool_ui_lines(arguments: &Value) -> Vec<String> {
+    match arguments {
+        Value::Object(map) if map.is_empty() => Vec::new(),
+        Value::Object(map) => map
+            .iter()
+            .map(|(key, value)| format!("{key}={}", summarize_app_inline_text(&value.to_string())))
+            .take(8)
+            .collect(),
+        other => vec![summarize_app_inline_text(&other.to_string())],
+    }
+}
+
 #[async_trait]
 pub trait App: Send + Sync {
     fn id(&self) -> AppId;
-
-    fn as_any(&self) -> &dyn Any;
-
-    fn as_any_mut(&mut self) -> &mut dyn Any;
 
     fn render_state(&self) -> AppStateRender;
 
@@ -122,6 +178,49 @@ pub trait App: Send + Sync {
 
     fn dynamic_tools(&self) -> Result<Vec<AppDynamicToolSpec>> {
         Ok(Vec::new())
+    }
+
+    fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
+        Ok(self
+            .dynamic_tools()?
+            .into_iter()
+            .map(|tool| AppToolSpec {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+            })
+            .collect())
+    }
+
+    fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+        Ok(EpisodeActionRecord {
+            kind: call.name.clone(),
+            summary: summarize_app_inline_text(&call.arguments.to_string()),
+        })
+    }
+
+    fn render_tool_call_ui(&self, call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+        Ok(ToolCallUiEvent::App(ToolUiData {
+            title: call.name.clone(),
+            body_lines: compact_app_tool_ui_lines(&call.arguments),
+        }))
+    }
+
+    async fn execute_tool(
+        &mut self,
+        call: &AgentToolCall,
+        _context: &AppToolExecutionContext,
+    ) -> Result<AppToolExecutionResult> {
+        let result = self
+            .execute_dynamic_tool(&call.name, call.arguments.clone())
+            .await?;
+        Ok(AppToolExecutionResult {
+            summary: result.summary,
+            payload: result.payload,
+            model_content: result.model_content,
+            ui_event: ToolUiEvent::app(call.name.clone(), result.ui_lines),
+            turn_boundary_reason: result.turn_boundary_reason,
+        })
     }
 
     async fn execute_dynamic_tool(
@@ -250,7 +349,7 @@ impl AppManager {
         Ok(())
     }
 
-    pub fn dynamic_tools(&self) -> Result<Vec<AppDynamicToolSpec>> {
+    pub fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
         let Some(focused) = self.focused.clone() else {
             return Ok(Vec::new());
         };
@@ -258,7 +357,38 @@ impl AppManager {
             .apps
             .get(&focused)
             .ok_or_else(|| miette!("focused app missing: {focused}"))?;
-        app.dynamic_tools()
+        app.tool_specs()
+    }
+
+    pub fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+        let Some(focused) = self.focused.clone() else {
+            return Err(miette!("no focused app"));
+        };
+        let app = self
+            .apps
+            .get(&focused)
+            .ok_or_else(|| miette!("focused app missing: {focused}"))?;
+        app.summarize_tool_call(call)
+    }
+
+    pub fn render_tool_call_ui(&self, call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+        let Some(focused) = self.focused.clone() else {
+            return Err(miette!("no focused app"));
+        };
+        let app = self
+            .apps
+            .get(&focused)
+            .ok_or_else(|| miette!("focused app missing: {focused}"))?;
+        app.render_tool_call_ui(call)
+    }
+
+    pub async fn execute_tool(
+        &mut self,
+        call: &AgentToolCall,
+        context: &AppToolExecutionContext,
+    ) -> Result<AppToolExecutionResult> {
+        let app = self.focused_app_mut()?;
+        app.execute_tool(call, context).await
     }
 
     pub async fn focus(&mut self, id: AppId) -> Result<()> {
@@ -348,214 +478,7 @@ impl AppManager {
             .ok_or_else(|| miette!("focused app missing: {focused}"))
     }
 
-    pub async fn terminal_exec_with_progress<F>(
-        &mut self,
-        command: String,
-        session_id: Option<String>,
-        workdir: Option<String>,
-        sandbox_policy: &RuntimeSandboxPolicy,
-        yield_time_ms: Option<u64>,
-        max_chars: Option<usize>,
-        on_progress: F,
-    ) -> Result<crate::terminal_app::TerminalToolResult>
-    where
-        F: FnMut(&crate::terminal_app::TerminalSessionState, &str) + Send,
-    {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let terminal = app
-            .as_any_mut()
-            .downcast_mut::<TerminalApp>()
-            .ok_or_else(|| miette!("focused app is not Terminal: {:?}", focused))?;
-        terminal
-            .exec_command_with_progress(
-                command,
-                session_id,
-                workdir,
-                sandbox_policy,
-                yield_time_ms,
-                max_chars,
-                on_progress,
-            )
-            .await
-    }
-
-    pub async fn terminal_write_stdin_with_progress<F>(
-        &mut self,
-        session_id: &str,
-        text: String,
-        yield_time_ms: Option<u64>,
-        max_chars: Option<usize>,
-        on_progress: F,
-    ) -> Result<crate::terminal_app::TerminalToolResult>
-    where
-        F: FnMut(&crate::terminal_app::TerminalSessionState, &str) + Send,
-    {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let terminal = app
-            .as_any_mut()
-            .downcast_mut::<TerminalApp>()
-            .ok_or_else(|| miette!("focused app is not Terminal: {:?}", focused))?;
-        terminal
-            .write_stdin_with_progress(session_id, text, yield_time_ms, max_chars, on_progress)
-            .await
-    }
-
-    pub async fn terminal_terminate(
-        &mut self,
-        session_id: &str,
-    ) -> Result<crate::terminal_app::TerminalSessionState> {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let terminal = app
-            .as_any_mut()
-            .downcast_mut::<TerminalApp>()
-            .ok_or_else(|| miette!("focused app is not Terminal: {:?}", focused))?;
-        terminal.terminate_session(session_id).await
-    }
-
-    pub async fn browser_open_page(
-        &mut self,
-        url: &str,
-    ) -> Result<crate::browser_app::BrowserOpenResult> {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let browser = app
-            .as_any_mut()
-            .downcast_mut::<BrowserApp>()
-            .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.open_page(url).await
-    }
-
-    pub async fn browser_snapshot(
-        &mut self,
-        page_id: &str,
-    ) -> Result<crate::browser_app::BrowserSnapshotResult> {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let browser = app
-            .as_any_mut()
-            .downcast_mut::<BrowserApp>()
-            .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.snapshot_page(page_id).await
-    }
-
-    pub async fn browser_wait(
-        &mut self,
-        page_id: &str,
-        state: Option<&str>,
-        timeout_ms: Option<u64>,
-    ) -> Result<crate::browser_app::BrowserWaitResult> {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let browser = app
-            .as_any_mut()
-            .downcast_mut::<BrowserApp>()
-            .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.wait_for_page(page_id, state, timeout_ms).await
-    }
-
-    pub async fn browser_click(
-        &mut self,
-        page_id: &str,
-        element_ref: &str,
-    ) -> Result<crate::browser_app::BrowserActionResult> {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let browser = app
-            .as_any_mut()
-            .downcast_mut::<BrowserApp>()
-            .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.click(page_id, element_ref).await
-    }
-
-    pub async fn browser_fill(
-        &mut self,
-        page_id: &str,
-        element_ref: &str,
-        value: &str,
-    ) -> Result<crate::browser_app::BrowserActionResult> {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let browser = app
-            .as_any_mut()
-            .downcast_mut::<BrowserApp>()
-            .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.fill(page_id, element_ref, value).await
-    }
-
-    pub async fn browser_back(
-        &mut self,
-        page_id: &str,
-    ) -> Result<crate::browser_app::BrowserActionResult> {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let browser = app
-            .as_any_mut()
-            .downcast_mut::<BrowserApp>()
-            .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.go_back(page_id).await
-    }
-
-    pub async fn browser_forward(
-        &mut self,
-        page_id: &str,
-    ) -> Result<crate::browser_app::BrowserActionResult> {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let browser = app
-            .as_any_mut()
-            .downcast_mut::<BrowserApp>()
-            .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.go_forward(page_id).await
-    }
-
-    pub async fn browser_reload(
-        &mut self,
-        page_id: &str,
-    ) -> Result<crate::browser_app::BrowserActionResult> {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let browser = app
-            .as_any_mut()
-            .downcast_mut::<BrowserApp>()
-            .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.reload(page_id).await
-    }
-
-    pub async fn browser_close_page(
-        &mut self,
-        page_id: &str,
-    ) -> Result<crate::browser_app::BrowserActionResult> {
-        let focused = self.focused.clone();
-        let app = self.focused_app_mut()?;
-        let browser = app
-            .as_any_mut()
-            .downcast_mut::<BrowserApp>()
-            .ok_or_else(|| miette!("focused app is not Browser: {:?}", focused))?;
-        browser.close_page(page_id).await
-    }
-
-    pub fn terminal_session_state(
-        &self,
-        session_id: &str,
-    ) -> Result<crate::terminal_app::TerminalSessionState> {
-        let focused = self
-            .focused
-            .clone()
-            .ok_or_else(|| miette!("no focused app"))?;
-        let app = self
-            .apps
-            .get(&focused)
-            .ok_or_else(|| miette!("focused app missing: {focused}"))?;
-        let terminal = app
-            .as_any()
-            .downcast_ref::<TerminalApp>()
-            .ok_or_else(|| miette!("focused app is not Terminal: {:?}", focused))?;
-        terminal.session_state(session_id)
-    }
-
+    #[cfg(test)]
     pub async fn execute_dynamic_tool(
         &mut self,
         name: &str,

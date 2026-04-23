@@ -1,7 +1,6 @@
 pub mod paths;
 use crate::workspace_app::paths::workspace_apps_dir;
 use std::{
-    any::Any,
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
@@ -1127,14 +1126,6 @@ impl WorkspaceApp {
 impl App for WorkspaceApp {
     fn id(&self) -> AppId {
         self.id.clone()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 
     fn render_state(&self) -> AppStateRender {

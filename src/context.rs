@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -124,11 +124,6 @@ impl Context {
 
     pub fn runtime_snapshot_doc(&self, snapshot: &Snapshot) -> PromptDocument {
         SnapshotAssembler::default_runtime().assemble(self, snapshot)
-    }
-
-    pub fn resolve_tool_path(&self, path: &Path, base: Option<&Path>) -> PathBuf {
-        self.sandbox_policy
-            .resolve_path(path, base.or(Some(&self.execution_cwd)))
     }
 
     pub fn bound_workflow(&self) -> Option<&WorkflowSpec> {

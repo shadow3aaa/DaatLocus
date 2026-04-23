@@ -9,6 +9,7 @@ axum = { version = "0.8.4", features = ["ws"] }
 chrono = "0.4.44"
 clap = { version = "4.5.38", features = ["derive"] }
 crossterm = "0.29.0"
+diffy = "0.4.2"
 dialoguer = { version = "0.11", features = ["history"] }
 futures-util = "0.3.31"
 miette = { version = "7.6.0", features = ["fancy"] }
@@ -24,6 +25,7 @@ serde_json = "1.0.149"
 serde_path_to_error = "0.1.20"
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"
+syntect = "5"
 sysinfo = "0.38.4"
 thiserror = "2.0.18"
 tokio = { version = "1.50.0", features = ["full"] }
@@ -32,6 +34,7 @@ toml = "1.0.6"
 tracing = "0.1.41"
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
 uuid = { version = "1.22.0", features = ["serde", "v4"] }
 viewpoint-core = "0.4"
 flate2 = "1"

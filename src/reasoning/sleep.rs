@@ -2326,7 +2326,9 @@ async fn optimize_workflows_from_run_records(
             }
         }
     } else {
-        tracing::info!("[sleep] no workflow run records, skipping workflow planning and frontier replay");
+        tracing::info!(
+            "[sleep] no workflow run records, skipping workflow planning and frontier replay"
+        );
     }
 
     let mut workflow_frontier = load_workflow_frontier().await?;

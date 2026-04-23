@@ -20,7 +20,8 @@ use crate::{
     hindsight::{HINDSIGHT_RUNTIME_DOCUMENT_ID, HindsightRetainItem, HindsightRetainJob},
     reasoning::runtime::{AgentMessage, AgentToolSpec, HistoryMessage},
     tool_ui::{
-        PatchUiData, TelegramUiData, TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent,
+        ActivateWorkflowUiData, CreateWorkflowUiData, DeepRecallUiData, PatchUiData, PlanUiData,
+        TelegramUiData, TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent,
     },
 };
 
@@ -1079,15 +1080,32 @@ fn summarize_tool_call_ui_events(events: &[ToolCallUiEvent]) -> String {
 
 fn summarize_tool_ui_event(event: &ToolUiEvent) -> String {
     match event {
-        ToolUiEvent::Exec(data)
-        | ToolUiEvent::Finish(data)
-        | ToolUiEvent::Plan(data)
-        | ToolUiEvent::CreateWorkflow(data)
-        | ToolUiEvent::ActivateWorkflow(data)
-        | ToolUiEvent::DeepRecall(data)
-        | ToolUiEvent::Work(data)
-        | ToolUiEvent::App(data)
-        | ToolUiEvent::Error(data) => summarize_runtime_inline_text(&data.title),
+        ToolUiEvent::Exec(data) | ToolUiEvent::App(data) | ToolUiEvent::Error(data) => {
+            summarize_runtime_inline_text(&data.title)
+        }
+        ToolUiEvent::Browser(crate::tool_ui::BrowserUiData { title, .. }) => {
+            summarize_runtime_inline_text(title)
+        }
+        ToolUiEvent::AppAttention(data) => match data.action {
+            crate::tool_ui::AppAttentionUiAction::Focus => data
+                .app
+                .as_deref()
+                .map(|app| format!("focused app {app}"))
+                .unwrap_or_else(|| "focused app".to_string()),
+            crate::tool_ui::AppAttentionUiAction::PutAway => {
+                "put away focused app".to_string()
+            }
+        },
+        ToolUiEvent::Plan(PlanUiData { steps }) => format!("plan with {} step(s)", steps.len()),
+        ToolUiEvent::CreateWorkflow(CreateWorkflowUiData { workflow_id }) => {
+            format!("created workflow {workflow_id}")
+        }
+        ToolUiEvent::ActivateWorkflow(ActivateWorkflowUiData { workflow_id }) => {
+            format!("activated workflow {workflow_id}")
+        }
+        ToolUiEvent::DeepRecall(DeepRecallUiData { memory_count }) => {
+            format!("recalled {memory_count} memories")
+        }
         ToolUiEvent::Terminal(data) => summarize_runtime_inline_text(&data.title),
         ToolUiEvent::Patch(data) => summarize_runtime_inline_text(&data.summary_line),
         ToolUiEvent::Telegram(data) => summarize_runtime_inline_text(&data.title),
@@ -1103,15 +1121,14 @@ fn summarize_tool_ui_event(event: &ToolUiEvent) -> String {
 fn tool_call_ui_event_title(event: &ToolCallUiEvent) -> &str {
     match event {
         ToolCallUiEvent::Exec(ToolUiData { title, .. })
-        | ToolCallUiEvent::Finish(ToolUiData { title, .. })
         | ToolCallUiEvent::Plan(ToolUiData { title, .. })
         | ToolCallUiEvent::CreateWorkflow(ToolUiData { title, .. })
         | ToolCallUiEvent::ActivateWorkflow(ToolUiData { title, .. })
         | ToolCallUiEvent::DeepRecall(ToolUiData { title, .. })
-        | ToolCallUiEvent::Work(ToolUiData { title, .. })
         | ToolCallUiEvent::App(ToolUiData { title, .. })
         | ToolCallUiEvent::Error(ToolUiData { title, .. }) => title,
         ToolCallUiEvent::Terminal(TerminalUiData { title, .. }) => title,
+        ToolCallUiEvent::Browser(crate::tool_ui::BrowserUiData { title, .. }) => title,
         ToolCallUiEvent::Patch(PatchUiData { summary_line, .. }) => summary_line,
         ToolCallUiEvent::Telegram(TelegramUiData { title, .. }) => title,
     }
@@ -1353,7 +1370,7 @@ mod tests {
                 "call_1",
                 "terminal_exec",
                 "tool_call_id=call_1\nname=terminal_exec\nsummary=ok\npayload=\n{\"cwd\":\"/tmp\"}",
-                ToolUiEvent::Work(ToolUiData {
+                ToolUiEvent::Exec(ToolUiData {
                     title: "terminal_exec".to_string(),
                     body_lines: vec!["pwd".to_string()],
                 }),
@@ -1394,10 +1411,7 @@ mod tests {
                 "call_h1",
                 "deep_recall",
                 "summary=found prior notes",
-                ToolUiEvent::Work(ToolUiData {
-                    title: "deep_recall".to_string(),
-                    body_lines: vec!["recent changes".to_string()],
-                }),
+                ToolUiEvent::DeepRecall(DeepRecallUiData { memory_count: 1 }),
             ),
         ]);
 
@@ -1594,6 +1608,7 @@ fn tool_call_event_is_workspace_signal(event: &ToolCallUiEvent) -> bool {
         event,
         ToolCallUiEvent::Exec(_)
             | ToolCallUiEvent::Terminal(_)
+            | ToolCallUiEvent::Browser(_)
             | ToolCallUiEvent::Patch(_)
             | ToolCallUiEvent::App(_)
     )
@@ -1604,6 +1619,7 @@ fn tool_event_is_workspace_signal(event: &ToolUiEvent) -> bool {
         event,
         ToolUiEvent::Exec(_)
             | ToolUiEvent::Terminal(_)
+            | ToolUiEvent::Browser(_)
             | ToolUiEvent::Patch(_)
             | ToolUiEvent::App(_)
     )
@@ -1612,14 +1628,17 @@ fn tool_event_is_workspace_signal(event: &ToolUiEvent) -> bool {
 fn format_tool_call_ui_event_for_memory(event: &crate::tool_ui::ToolCallUiEvent) -> String {
     match event {
         crate::tool_ui::ToolCallUiEvent::Exec(data)
-        | crate::tool_ui::ToolCallUiEvent::Finish(data)
         | crate::tool_ui::ToolCallUiEvent::Plan(data)
         | crate::tool_ui::ToolCallUiEvent::CreateWorkflow(data)
         | crate::tool_ui::ToolCallUiEvent::ActivateWorkflow(data)
         | crate::tool_ui::ToolCallUiEvent::DeepRecall(data)
-        | crate::tool_ui::ToolCallUiEvent::Work(data)
         | crate::tool_ui::ToolCallUiEvent::App(data)
         | crate::tool_ui::ToolCallUiEvent::Error(data) => {
+            let mut lines = vec![format!("tool_call: {}", data.title)];
+            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
+            lines.join("\n")
+        }
+        crate::tool_ui::ToolCallUiEvent::Browser(data) => {
             let mut lines = vec![format!("tool_call: {}", data.title)];
             lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
             lines.join("\n")
@@ -1637,14 +1656,14 @@ fn format_tool_call_ui_event_for_memory(event: &crate::tool_ui::ToolCallUiEvent)
         }
         crate::tool_ui::ToolCallUiEvent::Patch(data) => {
             let mut lines = vec![
-                format!("tool_call: {}", data.title),
+                "tool_call: apply_patch".to_string(),
                 format!("  {}", data.summary_line),
             ];
             lines.extend(data.files.iter().map(|file| {
-                let marker = match file.operation.as_str() {
-                    "add" => "+",
-                    "delete" => "-",
-                    _ => "~",
+                let marker = match file.operation {
+                    crate::tool_ui::PatchFileOperation::Add => "+",
+                    crate::tool_ui::PatchFileOperation::Delete => "-",
+                    crate::tool_ui::PatchFileOperation::Update => "~",
                 };
                 format!(
                     "  {marker} {} (+{} -{})",

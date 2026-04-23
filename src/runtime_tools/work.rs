@@ -12,7 +12,7 @@ use crate::{
     hindsight::HindsightReflectOptions,
     plan::{Plan, PlanStatus, PlanStep},
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
-    tool_ui::{ReplyDisposition, ToolCallUiEvent, ToolUiEvent},
+    tool_ui::{PlanStepUiData, PlanStepUiStatus, ReplyDisposition, ToolCallUiEvent, ToolUiEvent},
     workflow::{NewWorkflowSpec, WorkflowRunOutcome},
 };
 
@@ -154,7 +154,7 @@ fn execute_focus_app_tool<'a>(context: &'a mut Context, call: &'a AgentToolCall)
         Ok(ToolExecutionResult::new(
             format!("focused app {}", app),
             json!({ "app": app.to_string() }),
-            ToolUiEvent::app(format!("focused app {}", app), vec![app.to_string()]),
+            ToolUiEvent::focus_app(app.to_string()),
         )
         .with_turn_boundary(format!(
             "focused app changed to {}; re-render world state in a new turn",
@@ -183,7 +183,7 @@ fn execute_put_away_app_tool<'a>(
         Ok(ToolExecutionResult::new(
             "put away focused app",
             json!({}),
-            ToolUiEvent::app("put away focused app", Vec::new()),
+            ToolUiEvent::put_away_app(),
         )
         .with_turn_boundary("focused app was put away; re-render world state in a new turn"))
     })
@@ -221,7 +221,7 @@ fn render_event_resolve_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent>
     {
         lines.push(format!("reply={}", summarize_inline_text(reply_message)));
     }
-    Ok(ToolCallUiEvent::finish("finish_and_send", lines))
+    Ok(ToolCallUiEvent::app("finish_and_send", lines))
 }
 
 fn execute_event_resolve_tool<'a>(
@@ -372,7 +372,7 @@ fn execute_update_plan_tool<'a>(
             json!({
                 "plan": effective_steps,
             }),
-            ToolUiEvent::plan(summary, render_plan_ui_lines(&context.plan)),
+            ToolUiEvent::plan(plan_ui_steps(&context.plan)),
         ))
     })
 }
@@ -413,14 +413,13 @@ fn execute_create_workflow_tool<'a>(
             })
             .await?;
         let summary = format!("created workflow {}", created.id);
-        let ui_lines = vec![format!("id={}", created.id)];
         Ok(ToolExecutionResult::new(
             summary.clone(),
             json!({
                 "created": created,
                 "bound_workflow_id": context.bound_workflow_id,
             }),
-            ToolUiEvent::create_workflow(summary, ui_lines),
+            ToolUiEvent::create_workflow(created.id),
         ))
     })
 }
@@ -465,10 +464,7 @@ fn execute_activate_workflow_tool<'a>(
                 "bound_workflow_id": context.bound_workflow_id,
                 "activated": activated,
             }),
-            ToolUiEvent::activate_workflow(
-                summary,
-                vec![format!("bound_workflow_id={}", workflow_id)],
-            ),
+            ToolUiEvent::activate_workflow(workflow_id),
         ))
     })
 }
@@ -515,44 +511,12 @@ fn execute_deep_recall_tool<'a>(
                 },
             )
             .await?;
-        let title = format!("deep recall: {}", summarize_inline_text(&args.query));
-        let mut body_lines = Vec::new();
-        body_lines.extend(
-            response
-                .text
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .take(12)
-                .map(ToString::to_string),
-        );
-        if let Some(based_on) = &response.based_on {
-            body_lines.push(format!("sources: memories={}", based_on.memories.len()));
-            body_lines.extend(based_on.memories.iter().take(3).map(|memory| {
-                format!(
-                    "memory: {} [{}] {}",
-                    memory.id,
-                    memory
-                        .r#type
-                        .clone()
-                        .unwrap_or_else(|| "memory".to_string()),
-                    summarize_inline_text(&memory.text)
-                )
-            }));
-        }
-        if let Some(trace) = &response.trace {
-            body_lines.push(format!(
-                "trace: tool_calls={} llm_calls={}",
-                trace.tool_calls.len(),
-                trace.llm_calls.len()
-            ));
-        }
-        if let Some(usage) = &response.usage {
-            body_lines.push(format!(
-                "usage: input={} output={} total={}",
-                usage.input_tokens, usage.output_tokens, usage.total_tokens
-            ));
-        }
+        let memory_count = response
+            .based_on
+            .as_ref()
+            .map(|based_on| based_on.memories.len())
+            .unwrap_or(0);
+        let title = format!("Recalled {memory_count} Memories");
         Ok(ToolExecutionResult::new(
             title.clone(),
             json!({
@@ -564,7 +528,7 @@ fn execute_deep_recall_tool<'a>(
                 "usage": response.usage,
                 "trace": response.trace,
             }),
-            ToolUiEvent::deep_recall(title, body_lines),
+            ToolUiEvent::deep_recall(memory_count),
         ))
     })
 }
@@ -580,7 +544,6 @@ pub(super) fn render_apply_patch_call_ui(call: &AgentToolCall) -> Result<ToolCal
     let ops = parse_apply_patch(&extract_apply_patch_text(call)?)?;
     let summary = summarize_patch_ops(&ops);
     Ok(ToolCallUiEvent::patch(
-        "apply_patch",
         format!(
             "{} file(s) changed (+{} -{})",
             summary.changed_files, summary.added_lines, summary.removed_lines
@@ -592,12 +555,13 @@ pub(super) fn render_apply_patch_call_ui(call: &AgentToolCall) -> Result<ToolCal
             .map(|file| crate::tool_ui::PatchFileUiData {
                 path: file.path,
                 operation: match file.operation {
-                    PatchOperationKind::Add => "add".to_string(),
-                    PatchOperationKind::Delete => "delete".to_string(),
-                    PatchOperationKind::Update => "update".to_string(),
+                    PatchOperationKind::Add => crate::tool_ui::PatchFileOperation::Add,
+                    PatchOperationKind::Delete => crate::tool_ui::PatchFileOperation::Delete,
+                    PatchOperationKind::Update => crate::tool_ui::PatchFileOperation::Update,
                 },
                 added_lines: file.added_lines,
                 removed_lines: file.removed_lines,
+                diff_lines: Vec::new(),
             })
             .collect(),
     ))
@@ -707,11 +671,18 @@ fn validate_plan_steps(steps: &[PlanStep]) -> miette::Result<()> {
     Ok(())
 }
 
-fn render_plan_ui_lines(plan: &Plan) -> Vec<String> {
+fn plan_ui_steps(plan: &Plan) -> Vec<PlanStepUiData> {
     plan.steps()
         .iter()
         .take(8)
-        .map(|step| format!("[{}] {}", step.status, summarize_inline_text(&step.step)))
+        .map(|step| PlanStepUiData {
+            status: match step.status {
+                PlanStatus::Pending => PlanStepUiStatus::Pending,
+                PlanStatus::InProgress => PlanStepUiStatus::InProgress,
+                PlanStatus::Completed => PlanStepUiStatus::Completed,
+            },
+            text: summarize_inline_text(&step.step),
+        })
         .collect()
 }
 

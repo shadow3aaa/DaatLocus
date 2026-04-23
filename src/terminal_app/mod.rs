@@ -1,17 +1,27 @@
 pub mod process;
 use std::{
     collections::BTreeMap,
+    path::Path,
     time::{Duration, Instant},
 };
 
 use crate::terminal_app::process::TerminalProcess;
 use async_trait::async_trait;
 use miette::{Result, bail, miette};
+use schemars::schema_for;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::{
-    app::{App, AppHowToUse, AppId, AppStateRender, AppToolScope, AppUsage},
+    app::{
+        App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext,
+        AppToolExecutionResult, AppToolScope, AppToolSpec, AppUsage,
+    },
+    core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWriteStdinArgs},
+    dashboard::{DashboardActivityEvent, apply_activity_event},
+    reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     sandbox::RuntimeSandboxPolicy,
+    tool_ui::{TerminalUiAction, ToolCallUiEvent, ToolUiEvent, compact_body_lines},
 };
 
 const TERMINAL_USAGE_PURPOSE: &str = "Terminal 是本地命令执行与持续进程交互界面。";
@@ -363,18 +373,99 @@ impl TerminalApp {
     }
 }
 
+fn parse_terminal_tool_args<T: for<'de> Deserialize<'de>>(call: &AgentToolCall) -> Result<T> {
+    serde_json::from_value(call.arguments.clone()).map_err(|err| {
+        miette!(
+            "invalid arguments for terminal tool `{}`: {}; arguments={}",
+            call.name,
+            err,
+            call.arguments
+        )
+    })
+}
+
+fn display_session_label(session_id: &str) -> String {
+    session_id.to_string()
+}
+
+fn terminal_progress_mode(text: &str) -> &'static str {
+    if text.is_empty() { "poll" } else { "continue" }
+}
+
+fn terminal_session_meta(session: &TerminalSessionState) -> String {
+    format!(
+        "{}  {}  exit={}  cwd={}",
+        display_session_label(&session.session_id),
+        session.status,
+        session
+            .exit_code
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        session.cwd.as_deref().unwrap_or("-")
+    )
+}
+
+fn summarize_terminal_inline_text(text: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let compact = text.replace('\n', "\\n");
+    let mut chars = compact.chars();
+    let summary = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{summary}...")
+    } else {
+        summary
+    }
+}
+
+fn resolve_terminal_path(
+    context: &AppToolExecutionContext,
+    raw: &str,
+    base: Option<&Path>,
+) -> std::path::PathBuf {
+    context.resolve_tool_path(Path::new(raw), base)
+}
+
+fn command_mentions_protected_paths(context: &AppToolExecutionContext, text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains(".daat-locus") {
+        return true;
+    }
+    context.sandbox_policy.protected_paths().iter().any(|root| {
+        let rendered = root.display().to_string();
+        !rendered.is_empty() && text.contains(&rendered)
+    })
+}
+
+fn terminal_protection_error(label: &str) -> miette::Report {
+    miette!("terminal access to protected runtime path is not allowed ({label})")
+}
+
+fn compact_terminal_model_content(
+    summary: &str,
+    session: &TerminalSessionState,
+    output: &str,
+    extra_lines: &[String],
+    max_tokens: usize,
+) -> String {
+    let mut lines = vec![
+        format!("summary={summary}"),
+        format!("session={}", terminal_session_meta(session)),
+    ];
+    lines.extend(extra_lines.iter().cloned());
+    if !output.trim().is_empty() {
+        lines.push("output=".to_string());
+        lines.push(crate::context_budget::truncate_text_to_token_budget(
+            output,
+            max_tokens,
+        ));
+    }
+    crate::context_budget::truncate_text_to_token_budget(&lines.join("\n"), max_tokens)
+}
+
 #[async_trait]
 impl App for TerminalApp {
     fn id(&self) -> AppId {
         AppId::terminal()
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 
     fn render_state(&self) -> AppStateRender {
@@ -436,6 +527,366 @@ impl App for TerminalApp {
 
     fn focused_tool_scopes(&self) -> &'static [AppToolScope] {
         &[AppToolScope::Terminal]
+    }
+
+    fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
+        Ok(vec![
+            AppToolSpec {
+                name: "terminal_exec".to_string(),
+                description: "启动一条终端命令，并在当前输出窗口结束后返回输出。如果提供 `session_id`，则在该 session 中复用执行；如果不提供，则新建 session。若命令仍在运行，结果中会保留 session，后续继续使用 terminal_write_stdin。".to_string(),
+                input_schema: serde_json::to_value(schema_for!(TerminalExecArgs)).unwrap(),
+            },
+            AppToolSpec {
+                name: "terminal_write_stdin".to_string(),
+                description: "继续一个正在运行的 terminal session。发送文本可写入 stdin；发送空文本可仅等待下一段输出。".to_string(),
+                input_schema: serde_json::to_value(schema_for!(TerminalWriteStdinArgs)).unwrap(),
+            },
+            AppToolSpec {
+                name: "terminal_terminate".to_string(),
+                description: "终止指定 terminal session 的当前前台进程，并返回更新后的 session 状态。".to_string(),
+                input_schema: serde_json::to_value(schema_for!(TerminalTerminateArgs)).unwrap(),
+            },
+        ])
+    }
+
+    fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+        match call.name.as_str() {
+            "terminal_exec" => {
+                let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
+                Ok(EpisodeActionRecord {
+                    kind: "terminal_exec".to_string(),
+                    summary: format!(
+                        "command={} session={} workdir={} yield_time_ms={}",
+                        summarize_terminal_inline_text(&args.command),
+                        args.session_id.unwrap_or_else(|| "new".to_string()),
+                        args.workdir.unwrap_or_else(|| "none".to_string()),
+                        args.yield_time_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "default".to_string())
+                    ),
+                })
+            }
+            "terminal_write_stdin" => {
+                let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
+                Ok(EpisodeActionRecord {
+                    kind: "terminal_write_stdin".to_string(),
+                    summary: format!(
+                        "session={} mode={} yield_time_ms={}",
+                        args.session_id,
+                        terminal_progress_mode(&args.text),
+                        args.yield_time_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "default".to_string())
+                    ),
+                })
+            }
+            "terminal_terminate" => {
+                let args: TerminalTerminateArgs = parse_terminal_tool_args(call)?;
+                Ok(EpisodeActionRecord {
+                    kind: "terminal_terminate".to_string(),
+                    summary: format!("session={}", args.session_id),
+                })
+            }
+            _ => Err(miette!("unknown terminal tool `{}`", call.name)),
+        }
+    }
+
+    fn render_tool_call_ui(&self, call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+        match call.name.as_str() {
+            "terminal_exec" => {
+                let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
+                Ok(ToolCallUiEvent::terminal(
+                    TerminalUiAction::Execute,
+                    summarize_terminal_inline_text(&args.command),
+                    vec![format!(
+                        "session={} workdir={} yield_time_ms={}",
+                        args.session_id.unwrap_or_else(|| "new".to_string()),
+                        args.workdir.unwrap_or_else(|| "-".to_string()),
+                        args.yield_time_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "default".to_string())
+                    )],
+                ))
+            }
+            "terminal_write_stdin" => {
+                let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
+                Ok(ToolCallUiEvent::terminal(
+                    if args.text.is_empty() {
+                        TerminalUiAction::Poll
+                    } else {
+                        TerminalUiAction::Continue
+                    },
+                    summarize_terminal_inline_text(&args.session_id),
+                    vec![format!(
+                        "yield_time_ms={}",
+                        args.yield_time_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "default".to_string())
+                    )],
+                ))
+            }
+            "terminal_terminate" => {
+                let args: TerminalTerminateArgs = parse_terminal_tool_args(call)?;
+                Ok(ToolCallUiEvent::terminal(
+                    TerminalUiAction::Terminate,
+                    format!("terminate {}", args.session_id),
+                    Vec::new(),
+                ))
+            }
+            _ => Err(miette!("unknown terminal tool `{}`", call.name)),
+        }
+    }
+
+    async fn execute_tool(
+        &mut self,
+        call: &AgentToolCall,
+        context: &AppToolExecutionContext,
+    ) -> Result<AppToolExecutionResult> {
+        match call.name.as_str() {
+            "terminal_exec" => {
+                let args: TerminalExecArgs = parse_terminal_tool_args(call)?;
+                let effective_workdir = args
+                    .workdir
+                    .as_deref()
+                    .map(|workdir| {
+                        resolve_terminal_path(context, workdir, Some(&context.execution_cwd))
+                    })
+                    .unwrap_or_else(|| context.execution_cwd.clone());
+                context
+                    .sandbox_policy
+                    .ensure_path_readable(&effective_workdir, "terminal workdir")
+                    .map_err(|_| {
+                        terminal_protection_error(&format!("workdir={}", effective_workdir.display()))
+                    })?;
+                if command_mentions_protected_paths(context, &args.command) {
+                    return Err(terminal_protection_error("command references protected path"));
+                }
+                let effective_workdir = args
+                    .workdir
+                    .clone()
+                    .or_else(|| Some(context.execution_cwd.display().to_string()));
+                let dashboard_tx = context.dashboard_tx.clone();
+                let result = self
+                    .exec_command_with_progress(
+                        args.command.clone(),
+                        args.session_id.clone(),
+                        effective_workdir,
+                        &context.sandbox_policy,
+                        args.yield_time_ms,
+                        args.max_chars,
+                        move |session, delta| {
+                            if let Some(tx) = &dashboard_tx {
+                                tx.send_modify(|state| {
+                                    apply_activity_event(
+                                        state,
+                                        DashboardActivityEvent::ExecUpdate {
+                                            key: call.id.clone(),
+                                            meta: Some(terminal_session_meta(session)),
+                                            output_lines: compact_body_lines(delta, 10),
+                                        },
+                                    );
+                                });
+                            }
+                        },
+                    )
+                    .await?;
+                let running = result.session.status == "running";
+                let summary = if running {
+                    format!(
+                        "started `{}` in {}",
+                        summarize_terminal_inline_text(
+                            result.session.command.as_deref().unwrap_or(&args.command)
+                        ),
+                        display_session_label(&result.session.session_id)
+                    )
+                } else {
+                    format!(
+                        "ran `{}` in {}",
+                        summarize_terminal_inline_text(
+                            result.session.command.as_deref().unwrap_or(&args.command)
+                        ),
+                        display_session_label(&result.session.session_id)
+                    )
+                };
+                let model_content = compact_terminal_model_content(
+                    &summary,
+                    &result.session,
+                    &result.output,
+                    &[
+                        format!("running={running}"),
+                        format!(
+                            "yield_time_ms={}",
+                            args.yield_time_ms
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "default".to_string())
+                        ),
+                    ],
+                    context.tool_output_max_tokens,
+                );
+                Ok(AppToolExecutionResult {
+                    summary,
+                    payload: json!({
+                        "session": result.session,
+                        "output": result.output,
+                        "running": running,
+                        "yield_time_ms": args.yield_time_ms,
+                        "max_chars": args.max_chars,
+                    }),
+                    model_content: Some(model_content),
+                    ui_event: ToolUiEvent::terminal(
+                        if running {
+                            TerminalUiAction::Execute
+                        } else {
+                            TerminalUiAction::Continue
+                        },
+                        summarize_terminal_inline_text(
+                            result.session.command.as_deref().unwrap_or(&args.command)
+                        ),
+                        {
+                            let mut body = vec![terminal_session_meta(&result.session)];
+                            body.extend(compact_body_lines(&result.output, 10));
+                            body
+                        },
+                    ),
+                    turn_boundary_reason: None,
+                })
+            }
+            "terminal_write_stdin" => {
+                let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
+                let session = self.session_state(&args.session_id)?;
+                if let Some(cwd) = session.cwd.as_deref() {
+                    let resolved_cwd = resolve_terminal_path(context, cwd, None);
+                    context
+                        .sandbox_policy
+                        .ensure_path_readable(&resolved_cwd, "terminal session cwd")
+                        .map_err(|_| {
+                            terminal_protection_error(&format!(
+                                "session cwd={}",
+                                resolved_cwd.display()
+                            ))
+                        })?;
+                }
+                if command_mentions_protected_paths(context, &args.text) {
+                    return Err(terminal_protection_error("stdin references protected path"));
+                }
+                let dashboard_tx = context.dashboard_tx.clone();
+                let result = self
+                    .write_stdin_with_progress(
+                        &args.session_id,
+                        args.text.clone(),
+                        args.yield_time_ms,
+                        args.max_chars,
+                        move |session, delta| {
+                            if let Some(tx) = &dashboard_tx {
+                                tx.send_modify(|state| {
+                                    apply_activity_event(
+                                        state,
+                                        DashboardActivityEvent::ExecUpdate {
+                                            key: call.id.clone(),
+                                            meta: Some(terminal_session_meta(session)),
+                                            output_lines: compact_body_lines(delta, 10),
+                                        },
+                                    );
+                                });
+                            }
+                        },
+                    )
+                    .await?;
+                let mode = terminal_progress_mode(&args.text);
+                let running = result.session.status == "running";
+                let command_label = summarize_terminal_inline_text(
+                    result.session.command.as_deref().unwrap_or(&args.session_id),
+                );
+                let summary = match (mode, running) {
+                    ("poll", true) => {
+                        format!("continued {}", display_session_label(&result.session.session_id))
+                    }
+                    ("poll", false) => {
+                        format!("completed {}", display_session_label(&result.session.session_id))
+                    }
+                    ("continue", true) => format!(
+                        "continued {} with stdin",
+                        display_session_label(&result.session.session_id)
+                    ),
+                    ("continue", false) => format!(
+                        "completed {} after stdin",
+                        display_session_label(&result.session.session_id)
+                    ),
+                    _ => format!("continued {}", display_session_label(&result.session.session_id)),
+                };
+                let mut extra_lines = vec![
+                    format!("mode={mode}"),
+                    format!("running={running}"),
+                    format!(
+                        "yield_time_ms={}",
+                        args.yield_time_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "default".to_string())
+                    ),
+                ];
+                if !args.text.is_empty() {
+                    extra_lines.push(format!(
+                        "stdin={}",
+                        summarize_terminal_inline_text(&args.text)
+                    ));
+                }
+                let model_content = compact_terminal_model_content(
+                    &summary,
+                    &result.session,
+                    &result.output,
+                    &extra_lines,
+                    context.tool_output_max_tokens,
+                );
+                Ok(AppToolExecutionResult {
+                    summary,
+                    payload: json!({
+                        "session": result.session,
+                        "output": result.output,
+                        "running": running,
+                        "mode": mode,
+                        "yield_time_ms": args.yield_time_ms,
+                        "max_chars": args.max_chars,
+                    }),
+                    model_content: Some(model_content),
+                    ui_event: ToolUiEvent::terminal(
+                        if running {
+                            if args.text.is_empty() {
+                                TerminalUiAction::Poll
+                            } else {
+                                TerminalUiAction::Continue
+                            }
+                        } else {
+                            TerminalUiAction::Continue
+                        },
+                        command_label,
+                        {
+                            let mut body = vec![terminal_session_meta(&result.session)];
+                            body.extend(compact_body_lines(&result.output, 10));
+                            body
+                        },
+                    ),
+                    turn_boundary_reason: None,
+                })
+            }
+            "terminal_terminate" => {
+                let args: TerminalTerminateArgs = parse_terminal_tool_args(call)?;
+                let session = self.terminate_session(&args.session_id).await?;
+                Ok(AppToolExecutionResult {
+                    summary: format!("terminated {}", display_session_label(&session.session_id)),
+                    payload: json!({ "session": session }),
+                    model_content: None,
+                    ui_event: ToolUiEvent::terminal(
+                        TerminalUiAction::Terminate,
+                        summarize_terminal_inline_text(
+                            session.command.as_deref().unwrap_or(&args.session_id)
+                        ),
+                        vec![terminal_session_meta(&session)],
+                    ),
+                    turn_boundary_reason: None,
+                })
+            }
+            _ => Err(miette!("unknown terminal tool `{}`", call.name)),
+        }
     }
 
     fn notice_reason(&self) -> Option<String> {

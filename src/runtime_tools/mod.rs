@@ -6,7 +6,7 @@ use schemars::schema_for;
 use serde_json::Value;
 
 use crate::{
-    app::AppToolScope,
+    app::{AppToolExecutionContext, AppToolScope},
     context::Context,
     context_budget::truncate_text_to_token_budget_with_notice,
     reasoning::{
@@ -17,8 +17,6 @@ use crate::{
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
 };
 
-mod browser;
-mod terminal;
 mod work;
 
 pub(super) type ToolFuture<'a> =
@@ -267,63 +265,45 @@ impl RuntimeTool for ApplyPatchRuntimeTool {
     }
 
     fn description(&self) -> &str {
-        r#"使用 `apply_patch` 按严格 patch grammar 编辑文件。
+        r#"使用 `apply_patch` 以 unified diff 格式编辑文件。
 
 补丁必须满足：
-- 以 `*** Begin Patch` 开始
-- 以 `*** End Patch` 结束
-- 只能包含 `*** Add File:` / `*** Delete File:` / `*** Update File:` 三种文件操作头
-- `@@` 只能出现在 `*** Update File:` 之后，作为 hunk 头
-
-完整 grammar：
-Patch := Begin { FileOp } End
-Begin := "*** Begin Patch" NEWLINE
-End := "*** End Patch" NEWLINE
-FileOp := AddFile | DeleteFile | UpdateFile
-AddFile := "*** Add File: " path NEWLINE { "+" line NEWLINE }
-DeleteFile := "*** Delete File: " path NEWLINE
-UpdateFile := "*** Update File: " path NEWLINE { Hunk }
-Hunk := "@@" [ header ] NEWLINE { HunkLine }
-HunkLine := (" " | "-" | "+") text NEWLINE
+- 使用标准 unified diff 文件头：`--- <old_path>` / `+++ <new_path>`
+- 每个变更块都必须包含 `@@ ... @@` hunk 头
+- hunk 中每一行都必须以空格、`+` 或 `-` 开头
+- 新增文件使用 `--- /dev/null` 和 `+++ <path>`
+- 删除文件使用 `--- <path>` 和 `+++ /dev/null`
 
 示例：
-*** Begin Patch
-*** Add File: hello.txt
-+Hello world
-*** Update File: src/app.py
-@@
+--- a/src/app.py
++++ b/src/app.py
+@@ -1,1 +1,1 @@
 -print("Hi")
 +print("Hello, world!")
-*** Delete File: obsolete.txt
-*** End Patch
+
+--- /dev/null
++++ b/hello.txt
+@@ -0,0 +1 @@
++Hello world
 
 注意：
-- 新文件的每一行都必须以 `+` 开头
-- patch 必须使用相对路径，不能使用绝对路径
-- 不要输出 unified diff 的 `---` / `+++` 文件头
-- 不要省略 `*** Update File:` 后就直接写 `@@`"#
+- patch 必须使用 workspace 内相对路径
+- 当前不支持 rename patch，请改成删除和新增
+- 不要输出解释文字，只输出完整 unified diff"#
     }
 
     fn input_spec(&self) -> AgentToolInputSpec {
         AgentToolInputSpec::FreeformGrammar {
-            syntax: "lark".to_string(),
-            definition: r#"start: begin_patch hunk+ end_patch
-begin_patch: "*** Begin Patch" LF
-end_patch: "*** End Patch" LF?
-hunk: add_hunk | delete_hunk | update_hunk
-add_hunk: "*** Add File: " filename LF add_line+
-delete_hunk: "*** Delete File: " filename LF
-update_hunk: "*** Update File: " filename LF change?
-filename: /(.+)/
-add_line: "+" /(.*)/ LF
-change: (change_context | change_line)+ eof_line?
-change_context: ("@@" | "@@ " /(.+)/) LF
-change_line: ("+" | "-" | " ") /(.*)/ LF
-eof_line: "*** End of File" LF
-%import common.LF"#
+            syntax: "unified_diff".to_string(),
+            definition: r#"file_patch := file_header hunk+
+file_header := "--- " old_path LF "+++ " new_path LF
+hunk := "@@ " hunk_range " @@" [header] LF hunk_line+
+hunk_line := (" " | "+" | "-") text LF
+new_file := old_path == "/dev/null"
+deleted_file := new_path == "/dev/null""#
                 .to_string(),
             fallback_schema: freeform_string_fallback_schema(
-                "The entire contents of the apply_patch command",
+                "The entire contents of the unified diff",
             ),
         }
     }
@@ -352,14 +332,14 @@ eof_line: "*** End of File" LF
     }
 }
 
-struct DynamicAppRuntimeTool {
+struct AppRuntimeTool {
     name: String,
     description: String,
     input_spec: AgentToolInputSpec,
 }
 
 #[async_trait]
-impl RuntimeTool for DynamicAppRuntimeTool {
+impl RuntimeTool for AppRuntimeTool {
     fn name(&self) -> &str {
         &self.name
     }
@@ -372,18 +352,14 @@ impl RuntimeTool for DynamicAppRuntimeTool {
         self.input_spec.clone()
     }
 
-    fn summarize_action(&self, call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
-        Ok(EpisodeActionRecord {
-            kind: call.name.clone(),
-            summary: summarize_inline_text(&call.arguments.to_string()),
-        })
+    fn summarize_action(&self, _call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
+        context_free_error()?;
+        unreachable!()
     }
 
-    fn call_ui_event(&self, call: &AgentToolCall) -> miette::Result<ToolCallUiEvent> {
-        Ok(ToolCallUiEvent::app(
-            call.name.clone(),
-            compact_dynamic_tool_ui_lines(&call.arguments),
-        ))
+    fn call_ui_event(&self, _call: &AgentToolCall) -> miette::Result<ToolCallUiEvent> {
+        context_free_error()?;
+        unreachable!()
     }
 
     async fn execute(
@@ -391,14 +367,21 @@ impl RuntimeTool for DynamicAppRuntimeTool {
         context: &mut Context,
         call: &AgentToolCall,
     ) -> miette::Result<ToolExecutionResult> {
-        let result = context
-            .apps
-            .execute_dynamic_tool(&self.name, call.arguments.clone())
-            .await?;
+        let app_context = AppToolExecutionContext {
+            execution_cwd: context.execution_cwd.clone(),
+            sandbox_policy: context.sandbox_policy.clone(),
+            dashboard_tx: context.dashboard_tx.clone(),
+            tool_output_max_tokens: context
+                .config
+                .main_model_config()
+                .tool_output_max_tokens
+                .max(1),
+        };
+        let result = context.apps.execute_tool(call, &app_context).await?;
         let mut output = ToolExecutionResult::new(
             result.summary.clone(),
             result.payload,
-            ToolUiEvent::app(self.name.clone(), result.ui_lines),
+            result.ui_event,
         );
         if let Some(model_content) = result.model_content {
             output = output.with_model_content(model_content);
@@ -413,25 +396,23 @@ impl RuntimeTool for DynamicAppRuntimeTool {
 fn build_static_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
     let mut tools: Vec<Box<dyn RuntimeTool>> = vec![Box::new(ApplyPatchRuntimeTool)];
     tools.extend(work::register_tools());
-    tools.extend(browser::register_tools());
-    tools.extend(terminal::register_tools());
     tools
 }
 
-fn build_dynamic_app_runtime_tools(
+fn build_app_runtime_tools(
     context: &Context,
     reserved_names: &HashSet<String>,
 ) -> Vec<Box<dyn RuntimeTool>> {
     let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
     let mut seen_names = reserved_names.clone();
-    let dynamic_tools = match context.apps.dynamic_tools() {
-        Ok(dynamic_tools) => dynamic_tools,
+    let app_tools = match context.apps.tool_specs() {
+        Ok(app_tools) => app_tools,
         Err(err) => {
             tracing::warn!("failed to list focused app tools: {err:?}");
             return tools;
         }
     };
-    for tool in dynamic_tools {
+    for tool in app_tools {
         if !is_valid_dynamic_tool_name(&tool.name) {
             tracing::warn!(
                 "skipping focused app tool `{}` because its name must match [A-Za-z0-9_-]+",
@@ -446,7 +427,7 @@ fn build_dynamic_app_runtime_tools(
             );
             continue;
         }
-        tools.push(Box::new(DynamicAppRuntimeTool {
+        tools.push(Box::new(AppRuntimeTool {
             name: tool.name,
             description: tool.description,
             input_spec: AgentToolInputSpec::JsonSchema {
@@ -463,7 +444,7 @@ pub fn build_runtime_tools(context: &Context) -> Vec<Box<dyn RuntimeTool>> {
         .iter()
         .map(|tool| tool.name().to_string())
         .collect::<HashSet<_>>();
-    tools.extend(build_dynamic_app_runtime_tools(context, &reserved_names));
+    tools.extend(build_app_runtime_tools(context, &reserved_names));
     tools
 }
 
@@ -475,16 +456,10 @@ fn is_valid_dynamic_tool_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
 }
 
-fn compact_dynamic_tool_ui_lines(arguments: &Value) -> Vec<String> {
-    match arguments {
-        Value::Object(map) if map.is_empty() => Vec::new(),
-        Value::Object(map) => map
-            .iter()
-            .map(|(key, value)| format!("{key}={}", summarize_inline_text(&value.to_string())))
-            .take(8)
-            .collect(),
-        other => vec![summarize_inline_text(&other.to_string())],
-    }
+fn context_free_error<T>() -> miette::Result<T> {
+    Err(miette!(
+        "focused app runtime tools require app-owned summarize/call-ui dispatch"
+    ))
 }
 
 fn find_runtime_tool<'a>(
@@ -516,6 +491,9 @@ pub fn summarize_action_from_tool_call(
     context: &Context,
     call: &AgentToolCall,
 ) -> Result<EpisodeActionRecord> {
+    if let Ok(summary) = context.apps.summarize_tool_call(call) {
+        return Ok(summary);
+    }
     let tools = build_runtime_tools(context);
     find_runtime_tool(&tools, &call.name)?.summarize_action(call)
 }
@@ -524,6 +502,9 @@ pub fn render_tool_call_ui_event(
     context: &Context,
     call: &AgentToolCall,
 ) -> Result<ToolCallUiEvent> {
+    if let Ok(event) = context.apps.render_tool_call_ui(call) {
+        return Ok(event);
+    }
     let tools = build_runtime_tools(context);
     find_runtime_tool(&tools, &call.name)?.call_ui_event(call)
 }

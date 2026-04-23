@@ -41,7 +41,10 @@ use std::{
 
 use crate::{
     app::{AppId, AppManager},
-    apply_patch::{PatchOperationKind, apply_patch_in_root, summarize_apply_patch_error},
+    apply_patch::{
+        PatchOperationKind, PatchPreviewLineKind, apply_patch_in_root, build_patch_preview_in_root,
+        summarize_apply_patch_error,
+    },
     browser_app::BrowserApp,
     commands::reset::{run_complite_reset, run_memory_reset, run_reset_all, run_state_reset},
     config::load_config,
@@ -684,10 +687,9 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     // 收到信号时直接 process::exit(0)；进入主循环后会 abort 此任务，信号处理权交还给主 select!。
     // DaemonLock 锁文件不会被清理，但 acquire() 的 stale PID 检测会在下次启动时自动移除它。
     #[cfg(unix)]
-    let mut early_sigterm = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )
-    .map_err(|err| miette!("failed to install early SIGTERM handler: {err}"))?;
+    let mut early_sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|err| miette!("failed to install early SIGTERM handler: {err}"))?;
     let early_shutdown_handle = tokio::spawn(async move {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
@@ -943,7 +945,9 @@ async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     }
     daemon_server.shutdown().await;
     let hindsight_config = context.config.hindsight.clone();
-    let hindsight_llm_vars = hindsight_llm_env_vars(&context.config).await.unwrap_or_default();
+    let hindsight_llm_vars = hindsight_llm_env_vars(&context.config)
+        .await
+        .unwrap_or_default();
     context.shutdown().await;
     let managed = HindsightManagedServer::new(hindsight_config, hindsight_llm_vars);
     if let Err(err) = managed.stop().await {
@@ -1055,7 +1059,8 @@ async fn run_browser_runtime_setup() -> Result<()> {
 
     tracing::info!(
         "[browser-runtime] downloading Chrome for Testing {} from {}",
-        stable.version, download.url
+        stable.version,
+        download.url
     );
 
     let archive_bytes = reqwest::get(&download.url)
@@ -2215,6 +2220,22 @@ pub(crate) async fn execute_agent_loop_step(
                                 );
                             });
                         }
+                        ToolCallUiEvent::Browser(event)
+                            if !matches!(
+                                event.action,
+                                crate::tool_ui::BrowserUiAction::Snapshot
+                            ) =>
+                        {
+                            tx.send_modify(|state| {
+                                apply_activity_event(
+                                    state,
+                                    DashboardActivityEvent::BrowserBegin {
+                                        key: call.id.clone(),
+                                        event,
+                                    },
+                                );
+                            });
+                        }
                         _ => {}
                     }
                 }
@@ -2247,6 +2268,12 @@ pub(crate) async fn execute_agent_loop_step(
                                 key: call.id.clone(),
                             },
                         );
+                        apply_activity_event(
+                            state,
+                            DashboardActivityEvent::BrowserEnd {
+                                key: call.id.clone(),
+                            },
+                        );
                     });
                 }
                 runtime_step.push_agent_message(AgentMessage::tool(
@@ -2270,7 +2297,9 @@ pub(crate) async fn execute_agent_loop_step(
                 ));
                 append_committed_activity_cells(
                     tx,
-                    vec![activity_cell_from_tool_ui_event(result.ui_event.clone())],
+                    activity_cell_from_tool_ui_event(result.ui_event.clone())
+                        .into_iter()
+                        .collect(),
                 );
                 tool_results.push(format!("{} => {}", call.name, result.summary));
                 if let Some(reason) = result.turn_boundary_reason.clone() {
@@ -3863,6 +3892,7 @@ async fn execute_apply_patch_tool(
     context: &Context,
     patch_text: &str,
 ) -> miette::Result<ToolExecutionResult> {
+    let preview_files = build_patch_preview_in_root(&context.execution_cwd, patch_text).await?;
     let summary =
         apply_patch_in_root(&context.execution_cwd, &context.sandbox_policy, patch_text).await?;
     Ok(ToolExecutionResult::new(
@@ -3888,24 +3918,42 @@ async fn execute_apply_patch_tool(
             }).collect::<Vec<_>>(),
         }),
         ToolUiEvent::patch(
-            format!("patched {} file(s)", summary.changed_files),
             format!(
                 "{} file(s) changed (+{} -{})",
                 summary.changed_files, summary.added_lines, summary.removed_lines
             ),
-            summary
-                .files
-                .iter()
-                .cloned()
+            preview_files
+                .into_iter()
                 .map(|file| crate::tool_ui::PatchFileUiData {
                     path: file.path,
                     operation: match file.operation {
-                        PatchOperationKind::Add => "add".to_string(),
-                        PatchOperationKind::Delete => "delete".to_string(),
-                        PatchOperationKind::Update => "update".to_string(),
+                        PatchOperationKind::Add => crate::tool_ui::PatchFileOperation::Add,
+                        PatchOperationKind::Delete => crate::tool_ui::PatchFileOperation::Delete,
+                        PatchOperationKind::Update => crate::tool_ui::PatchFileOperation::Update,
                     },
                     added_lines: file.added_lines,
                     removed_lines: file.removed_lines,
+                    diff_lines: file
+                        .diff_lines
+                        .into_iter()
+                        .map(|line| crate::tool_ui::PatchDiffLineUiData {
+                            kind: match line.kind {
+                                PatchPreviewLineKind::Context => {
+                                    crate::tool_ui::PatchDiffLineKind::Context
+                                }
+                                PatchPreviewLineKind::Delete => {
+                                    crate::tool_ui::PatchDiffLineKind::Delete
+                                }
+                                PatchPreviewLineKind::Add => crate::tool_ui::PatchDiffLineKind::Add,
+                                PatchPreviewLineKind::HunkBreak => {
+                                    crate::tool_ui::PatchDiffLineKind::HunkBreak
+                                }
+                            },
+                            old_lineno: line.old_lineno,
+                            new_lineno: line.new_lineno,
+                            text: line.text,
+                        })
+                        .collect(),
                 })
                 .collect(),
         ),

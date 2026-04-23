@@ -5,15 +5,16 @@ use serde::{Deserialize, Serialize};
 pub enum ToolUiEvent {
     Exec(ToolUiData),
     Terminal(TerminalUiData),
+    Browser(BrowserUiData),
     Patch(PatchUiData),
     Telegram(TelegramUiData),
     Reply(ReplyUiData),
-    Finish(ToolUiData),
-    Plan(ToolUiData),
-    CreateWorkflow(ToolUiData),
-    ActivateWorkflow(ToolUiData),
-    DeepRecall(ToolUiData),
-    Work(ToolUiData),
+    AppAttention(AppAttentionUiData),
+    Plan(PlanUiData),
+    CreateWorkflow(CreateWorkflowUiData),
+    ActivateWorkflow(ActivateWorkflowUiData),
+    DeepRecall(DeepRecallUiData),
+    #[serde(alias = "Finish", alias = "Work")]
     App(ToolUiData),
     Error(ToolUiData),
 }
@@ -23,14 +24,14 @@ pub enum ToolUiEvent {
 pub enum ToolCallUiEvent {
     Exec(ToolUiData),
     Terminal(TerminalUiData),
+    Browser(BrowserUiData),
     Patch(PatchUiData),
     Telegram(TelegramUiData),
-    Finish(ToolUiData),
     Plan(ToolUiData),
     CreateWorkflow(ToolUiData),
     ActivateWorkflow(ToolUiData),
     DeepRecall(ToolUiData),
-    Work(ToolUiData),
+    #[serde(alias = "Finish", alias = "Work")]
     App(ToolUiData),
     Error(ToolUiData),
 }
@@ -51,6 +52,20 @@ pub struct TerminalUiData {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserUiData {
+    pub action: BrowserUiAction,
+    pub title: String,
+    #[serde(default)]
+    pub body_lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_count: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TerminalUiAction {
     Execute,
     Continue,
@@ -59,8 +74,21 @@ pub enum TerminalUiAction {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserUiAction {
+    OpenPage,
+    Snapshot,
+    Wait,
+    Click,
+    Fill,
+    Back,
+    Forward,
+    Reload,
+    ClosePage,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PatchUiData {
-    pub title: String,
     pub summary_line: String,
     #[serde(default)]
     pub files: Vec<PatchFileUiData>,
@@ -69,9 +97,36 @@ pub struct PatchUiData {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PatchFileUiData {
     pub path: String,
-    pub operation: String,
+    pub operation: PatchFileOperation,
     pub added_lines: usize,
     pub removed_lines: usize,
+    #[serde(default)]
+    pub diff_lines: Vec<PatchDiffLineUiData>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PatchFileOperation {
+    Add,
+    Delete,
+    Update,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PatchDiffLineUiData {
+    pub kind: PatchDiffLineKind,
+    pub old_lineno: Option<usize>,
+    pub new_lineno: Option<usize>,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PatchDiffLineKind {
+    Context,
+    Delete,
+    Add,
+    HunkBreak,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,11 +147,58 @@ pub struct ReplyUiData {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppAttentionUiData {
+    pub action: AppAttentionUiAction,
+    pub app: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanUiData {
+    pub steps: Vec<PlanStepUiData>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanStepUiData {
+    pub status: PlanStepUiStatus,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStepUiStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateWorkflowUiData {
+    pub workflow_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivateWorkflowUiData {
+    pub workflow_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeepRecallUiData {
+    pub memory_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyDisposition {
     Resolved,
     Dismissed,
     Failed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppAttentionUiAction {
+    Focus,
+    PutAway,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,13 +212,8 @@ pub enum TelegramUiAction {
 }
 
 impl ToolUiEvent {
-    pub fn patch(
-        title: impl Into<String>,
-        summary_line: impl Into<String>,
-        files: Vec<PatchFileUiData>,
-    ) -> Self {
+    pub fn patch(summary_line: impl Into<String>, files: Vec<PatchFileUiData>) -> Self {
         Self::Patch(PatchUiData {
-            title: title.into(),
             summary_line: summary_line.into(),
             files,
         })
@@ -134,38 +231,44 @@ impl ToolUiEvent {
         })
     }
 
-    pub fn plan(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::Plan(ToolUiData {
-            title: title.into(),
-            body_lines,
+    pub fn plan(steps: Vec<PlanStepUiData>) -> Self {
+        Self::Plan(PlanUiData { steps })
+    }
+
+    pub fn create_workflow(workflow_id: impl Into<String>) -> Self {
+        Self::CreateWorkflow(CreateWorkflowUiData {
+            workflow_id: workflow_id.into(),
         })
     }
 
-    pub fn create_workflow(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::CreateWorkflow(ToolUiData {
-            title: title.into(),
-            body_lines,
+    pub fn activate_workflow(workflow_id: impl Into<String>) -> Self {
+        Self::ActivateWorkflow(ActivateWorkflowUiData {
+            workflow_id: workflow_id.into(),
         })
     }
 
-    pub fn activate_workflow(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::ActivateWorkflow(ToolUiData {
-            title: title.into(),
-            body_lines,
-        })
-    }
-
-    pub fn deep_recall(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::DeepRecall(ToolUiData {
-            title: title.into(),
-            body_lines,
-        })
+    pub fn deep_recall(memory_count: usize) -> Self {
+        Self::DeepRecall(DeepRecallUiData { memory_count })
     }
 
     pub fn reply(disposition: ReplyDisposition, message_lines: Vec<String>) -> Self {
         Self::Reply(ReplyUiData {
             disposition,
             message_lines,
+        })
+    }
+
+    pub fn focus_app(app: impl Into<String>) -> Self {
+        Self::AppAttention(AppAttentionUiData {
+            action: AppAttentionUiAction::Focus,
+            app: Some(app.into()),
+        })
+    }
+
+    pub fn put_away_app() -> Self {
+        Self::AppAttention(AppAttentionUiData {
+            action: AppAttentionUiAction::PutAway,
+            app: None,
         })
     }
 
@@ -185,13 +288,8 @@ impl ToolUiEvent {
 }
 
 impl ToolCallUiEvent {
-    pub fn patch(
-        title: impl Into<String>,
-        summary_line: impl Into<String>,
-        files: Vec<PatchFileUiData>,
-    ) -> Self {
+    pub fn patch(summary_line: impl Into<String>, files: Vec<PatchFileUiData>) -> Self {
         Self::Patch(PatchUiData {
-            title: title.into(),
             summary_line: summary_line.into(),
             files,
         })
@@ -204,13 +302,6 @@ impl ToolCallUiEvent {
     ) -> Self {
         Self::Terminal(TerminalUiData {
             action,
-            title: title.into(),
-            body_lines,
-        })
-    }
-
-    pub fn finish(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::Finish(ToolUiData {
             title: title.into(),
             body_lines,
         })
