@@ -10,7 +10,9 @@ use tokio::sync::{mpsc, watch};
 use crate::telegram_transport::state::TelegramTransportStateHandle;
 use crate::{
     config::TelegramConfig,
-    dashboard::{DashboardControlCommand, DashboardState, execute_control_command},
+    dashboard::{
+        DashboardControlCommand, DashboardState, execute_control_command, remote_dashboard_commands,
+    },
     events::{EventStatus, EventStore, TelegramIncomingEvent},
     pending_work::{PendingWork, PendingWorkQueue},
     telegram_acl::{AccessDecision, TelegramAclHandle},
@@ -291,11 +293,12 @@ impl TelegramTransport {
     }
 
     async fn set_my_commands(&self) -> Result<()> {
+        let commands = remote_dashboard_commands();
         let response = self
             .client
             .post(self.endpoint("setMyCommands"))
             .json(&serde_json::json!({
-                "commands": TELEGRAM_BOT_COMMANDS,
+                "commands": commands,
             }))
             .send()
             .await
@@ -465,43 +468,6 @@ struct TelegramUser {
 struct TelegramBotProfile {
     username: Option<String>,
 }
-
-#[derive(serde::Serialize)]
-struct TelegramBotCommand {
-    command: &'static str,
-    description: &'static str,
-}
-
-const TELEGRAM_BOT_COMMANDS: &[TelegramBotCommand] = &[
-    TelegramBotCommand {
-        command: "status",
-        description: "查看当前状态",
-    },
-    TelegramBotCommand {
-        command: "clear",
-        description: "清空当前会话消息历史与当前 plan",
-    },
-    TelegramBotCommand {
-        command: "persona",
-        description: "查看当前人格配置",
-    },
-    TelegramBotCommand {
-        command: "system_prompt",
-        description: "查看当前系统提示词",
-    },
-    TelegramBotCommand {
-        command: "app_status",
-        description: "查看应用结构化状态与说明",
-    },
-    TelegramBotCommand {
-        command: "sleep",
-        description: "sleep run 或 sleep status",
-    },
-    TelegramBotCommand {
-        command: "telegram",
-        description: "telegram status/approve/reject",
-    },
-];
 
 fn extract_message_text(message: &TelegramIncomingMessage) -> String {
     message
