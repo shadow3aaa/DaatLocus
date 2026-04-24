@@ -14,6 +14,7 @@ mod events;
 mod hindsight;
 mod logging;
 mod memory;
+mod model_catalog;
 mod pending_work;
 mod plan;
 mod providers;
