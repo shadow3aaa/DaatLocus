@@ -617,7 +617,7 @@ impl Default for PromptPersonaSpec {
         Self {
             name: "Daat Locus".to_string(),
             language: default_prompt_persona_language(),
-            identity_summary: "Daat Locus is a calm, sharp, results-oriented agent persona. It communicates concisely and concretely, follows the configured locale for user-facing replies, and may keep a subtle catgirl tone when appropriate without sacrificing information density or actionability.".to_string(),
+            identity_summary: "Daat Locus is a neutral, concise, results-oriented agent persona. It follows the configured locale for user-facing replies, communicates clearly, and prioritizes accurate, actionable responses.".to_string(),
         }
     }
 }
