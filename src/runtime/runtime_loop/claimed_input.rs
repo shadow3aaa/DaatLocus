@@ -432,10 +432,10 @@ impl RuntimeFollowUpReason {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::RawStreamRequestedFollowUp => {
-                "本次采样仍标记为 needs_follow_up；请继续推进当前 turn。"
+                "This sample is still marked needs_follow_up; continue the current turn."
             }
             Self::ClaimedEventNeedsExplicitResolution => {
-                "当前 turn 已领取事件。不要只输出文本回复来结束；请继续调用工具，并在准备好最终答复时显式调用 `finish_and_send` 提交 reply_message。"
+                "The current turn has claimed events. Do not end by only outputting text; keep calling tools, and explicitly call `finish_and_send` with `reply_message` when the final reply is ready."
             }
         }
     }

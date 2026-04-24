@@ -1,4 +1,4 @@
-//! 本模块定义快照，即LLM应当看到的输入。
+//! Snapshot state rendered into model-facing runtime input.
 
 use std::collections::HashSet;
 use std::fmt::Display;
@@ -19,9 +19,7 @@ const SNAPSHOT_PLAN_MAX_ITEMS: usize = 8;
 const SNAPSHOT_EVENT_MAX_ITEMS: usize = 8;
 const SNAPSHOT_APP_LINES_PER_APP: usize = 8;
 
-/// 快照保存着当前agent的大脑状态
-///
-/// 这包括 plan、事件和感官输入。
+/// Snapshot of the current agent-visible world state.
 pub struct Snapshot {
     sensory: Sensory,
     plan: Plan,
@@ -61,7 +59,7 @@ impl Snapshot {
     pub fn plan_runtime_text(&self) -> String {
         let steps = self.plan.steps();
         if steps.is_empty() {
-            return "当前没有 plan。".to_string();
+            return "No current plan.".to_string();
         }
 
         let omitted = steps.len().saturating_sub(SNAPSHOT_PLAN_MAX_ITEMS);
@@ -74,7 +72,7 @@ impl Snapshot {
         }
         if omitted > 0 {
             lines.push(String::new());
-            lines.push(format!("... 还有 {omitted} 个 plan 未展示"));
+            lines.push(format!("... {omitted} more plan item(s) omitted"));
         }
         truncate_text_to_token_budget(&lines.join("\n"), SNAPSHOT_PLAN_MAX_TOKENS)
     }
@@ -95,13 +93,13 @@ impl Snapshot {
 
 impl Display for Snapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "感官：")?;
+        writeln!(f, "Sensory:")?;
         writeln!(f, "{}", self.sensory)?;
-        writeln!(f, "Plan：")?;
+        writeln!(f, "Plan:")?;
         writeln!(f, "{}", self.plan)?;
-        writeln!(f, "事件列表：")?;
+        writeln!(f, "Events:")?;
         writeln!(f, "{}", self.events)?;
-        writeln!(f, "应用：")?;
+        writeln!(f, "Apps:")?;
         write!(f, "{}", self.apps)
     }
 }
@@ -125,8 +123,8 @@ impl Sensory {
 
 impl Display for Sensory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "当前时间：{}", self.time)?;
-        write!(f, "机器状态：\n{}", self.machine_status)
+        writeln!(f, "Current time: {}", self.time)?;
+        write!(f, "Machine status:\n{}", self.machine_status)
     }
 }
 
@@ -171,8 +169,8 @@ impl EventSnapshot {
 impl Display for AppSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.focused_app.as_ref() {
-            Some(app) => writeln!(f, "当前前景应用：{app}")?,
-            None => writeln!(f, "当前前景应用：无")?,
+            Some(app) => writeln!(f, "Focused app: {app}")?,
+            None => writeln!(f, "Focused app: none")?,
         }
 
         let attention_hints = self
@@ -182,13 +180,13 @@ impl Display for AppSnapshot {
             .filter_map(|(id, state)| app_attention_hint(id.clone(), state));
         let attention_hints = attention_hints.collect::<Vec<_>>();
         if !attention_hints.is_empty() {
-            writeln!(f, "后台应用提醒：")?;
+            writeln!(f, "Background app notices:")?;
             for hint in attention_hints {
                 writeln!(f, "- {hint}")?;
             }
         }
 
-        writeln!(f, "应用结构状态：")?;
+        writeln!(f, "App structure state:")?;
         for (id, state) in &self.states {
             writeln!(f, "- {id} / {}：", state.title)?;
             for line in &state.lines {
@@ -202,7 +200,7 @@ impl Display for AppSnapshot {
 impl Display for EventSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.events.is_empty() {
-            return write!(f, "当前没有待处理事件。");
+            return write!(f, "No pending events.");
         }
 
         for (index, event) in self.events.iter().enumerate() {
@@ -263,7 +261,7 @@ impl AppSnapshot {
     fn focused_runtime_text(&self) -> String {
         match self.focused_app.as_ref() {
             Some(app) => app.to_string(),
-            None => "无".to_string(),
+            None => "none".to_string(),
         }
     }
 
@@ -284,7 +282,7 @@ impl AppSnapshot {
                     .collect::<Vec<_>>();
                 let omitted = state.lines.len().saturating_sub(max_lines_per_device);
                 if omitted > 0 {
-                    lines.push(format!("... 还有 {omitted} 行未展示"));
+                    lines.push(format!("... {omitted} more line(s) omitted"));
                 }
                 SnapshotAppStateEntry {
                     app_id: id.to_string(),
@@ -299,7 +297,7 @@ impl AppSnapshot {
 impl EventSnapshot {
     fn render_runtime(&self, max_items: usize, max_tokens: usize) -> String {
         if self.events.is_empty() {
-            return "当前没有待处理事件。".to_string();
+            return "No pending events.".to_string();
         }
 
         let omitted = self.events.len().saturating_sub(max_items);
@@ -310,7 +308,7 @@ impl EventSnapshot {
             .any(|event| matches!(event.status, EventStatus::Claimed))
         {
             lines.push(
-                "提交提示：当前存在已领取事件。你输出的文本回复不会自动发给用户；只有显式调用 `finish_and_send` 并提供 `reply_message`，才会真正提交最终答复。".to_string(),
+                "Delivery reminder: at least one event is currently claimed. Assistant text is not automatically sent to the user; only an explicit `finish_and_send` call with `reply_message` submits the final reply.".to_string(),
             );
             lines.push(String::new());
         }
@@ -351,7 +349,7 @@ impl EventSnapshot {
         }
         if omitted > 0 {
             lines.push(String::new());
-            lines.push(format!("... 还有 {omitted} 个事件未展示"));
+            lines.push(format!("... {omitted} more event(s) omitted"));
         }
         truncate_text_to_token_budget(&lines.join("\n"), max_tokens)
     }
@@ -368,7 +366,7 @@ fn app_attention_hint(app_id: AppId, state: &AppStateRender) -> Option<String> {
         if list_field(&state.lines, "unread_sessions").is_empty() {
             None
         } else {
-            Some(format!("Terminal 会话 {session_id} 有未读输出"))
+            Some(format!("Terminal session {session_id} has unread output"))
         }
     } else {
         None

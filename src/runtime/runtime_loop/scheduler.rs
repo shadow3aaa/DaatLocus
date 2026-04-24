@@ -23,9 +23,9 @@ pub(crate) async fn daat_locus_loop(
     enqueue_app_notice_work(context);
     sync_driver_frontier_from_sources(context);
     if context.active_runtime_turn {
-        // 检测 select! 取消导致的 stale flag：若 turn 已运行超过 request_timeout + 120s
-        // 但 active_runtime_turn 仍为 true，说明 daat_locus_loop 被 tokio::select! 取消时
-        // 未能执行 active_runtime_turn = false，需主动重置。
+        // Detect a stale flag caused by select! cancellation. If the turn has
+        // exceeded request_timeout + 120s but active_runtime_turn is still true,
+        // daat_locus_loop was likely cancelled before resetting it.
         let stale_threshold = Duration::from_secs(
             context
                 .config
@@ -58,7 +58,7 @@ pub(crate) async fn daat_locus_loop(
             set_runtime_status(
                 Some(tx),
                 RuntimeStatusLevel::Info,
-                format!("处理中：runtime turn 正在运行 / {phase}"),
+                format!("processing: runtime turn running / {phase}"),
             );
             sync_dashboard_state(
                 context,
@@ -75,10 +75,7 @@ pub(crate) async fn daat_locus_loop(
         set_runtime_status(
             Some(tx),
             RuntimeStatusLevel::Info,
-            format!(
-                "处理中：等待 hindsight retain 队列回落（{} turn）",
-                retain_backlog
-            ),
+            format!("processing: waiting for hindsight retain backlog ({retain_backlog} turn(s))"),
         );
         sync_dashboard_state(
             context,
@@ -119,7 +116,7 @@ pub(crate) async fn daat_locus_loop(
         return;
     }
     context.idle_since = None;
-    let mut status = format!("处理中：{} 个 pending work", pending_work_count);
+    let mut status = format!("processing: {pending_work_count} pending work item(s)");
     if let Some(forced_sleep_status) = forced_sleep_status.as_deref() {
         status.push_str(" | ");
         status.push_str(forced_sleep_status);

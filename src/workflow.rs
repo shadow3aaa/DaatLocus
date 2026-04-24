@@ -772,11 +772,11 @@ mod tests {
         let created = store
             .create_workflow(NewWorkflowSpec {
                 id: "repair-flaky-test-pipeline".to_string(),
-                when_to_use: vec!["测试偶发失败".to_string()],
-                preconditions: vec!["有失败日志".to_string()],
-                workflow_steps: vec!["收集证据".to_string(), "验证修复".to_string()],
-                done_criteria: vec!["结果稳定".to_string()],
-                recovery: vec!["回退到上一个稳定状态".to_string()],
+                when_to_use: vec!["flaky test failure".to_string()],
+                preconditions: vec!["failing logs available".to_string()],
+                workflow_steps: vec!["collect evidence".to_string(), "verify fix".to_string()],
+                done_criteria: vec!["result is stable".to_string()],
+                recovery: vec!["return to previous stable state".to_string()],
             })
             .await
             .expect("create workflow");
@@ -841,10 +841,10 @@ mod tests {
         let target = store
             .create_workflow(NewWorkflowSpec {
                 id: "investigate-runtime-failure".to_string(),
-                when_to_use: vec!["runtime 失败".to_string()],
+                when_to_use: vec!["runtime failure".to_string()],
                 preconditions: vec![],
-                workflow_steps: vec!["收集日志".to_string()],
-                done_criteria: vec!["原因明确".to_string()],
+                workflow_steps: vec!["collect logs".to_string()],
+                done_criteria: vec!["cause is clear".to_string()],
                 recovery: vec![],
             })
             .await
@@ -854,9 +854,9 @@ mod tests {
                 id: "investigate-runtime-errors".to_string(),
                 when_to_use: vec!["runtime error".to_string()],
                 preconditions: vec![],
-                workflow_steps: vec!["定位根因".to_string()],
-                done_criteria: vec!["修复方向清晰".to_string()],
-                recovery: vec!["回退".to_string()],
+                workflow_steps: vec!["locate root cause".to_string()],
+                done_criteria: vec!["fix direction is clear".to_string()],
+                recovery: vec!["rollback".to_string()],
             })
             .await
             .expect("create source");
@@ -870,7 +870,12 @@ mod tests {
             .await
             .expect("merge workflows");
 
-        assert!(merged.workflow_steps.iter().any(|item| item == "定位根因"));
+        assert!(
+            merged
+                .workflow_steps
+                .iter()
+                .any(|item| item == "locate root cause")
+        );
         assert!(store.get(&source.id).is_none());
         assert!(!primary.join(format!("{}.md", source.id)).exists());
     }

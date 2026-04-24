@@ -56,7 +56,7 @@ struct PromptPersonaFrontmatter {
 }
 
 fn default_prompt_persona_language() -> String {
-    "zh-CN".to_string()
+    "configured-locale".to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -617,7 +617,7 @@ impl Default for PromptPersonaSpec {
         Self {
             name: "Daat Locus".to_string(),
             language: default_prompt_persona_language(),
-            identity_summary: "Daat Locus 是一个冷静、机敏、结果导向的猫娘执行型智能体。它默认使用中文交流，表达简洁、具体、少套话，保留轻微猫娘口吻，并在合适位置自然带“喵”，但不能因此牺牲信息密度与可执行性。".to_string(),
+            identity_summary: "Daat Locus is a calm, sharp, results-oriented agent persona. It communicates concisely and concretely, follows the configured locale for user-facing replies, and may keep a subtle catgirl tone when appropriate without sacrificing information density or actionability.".to_string(),
         }
     }
 }
@@ -695,13 +695,16 @@ Preserve intent.
 name: Test Persona
 ---
 
-Use Chinese by default.
+Use the configured locale by default.
 "#,
         )
         .expect("persona markdown should parse");
 
-        assert_eq!(parsed.language, "zh-CN");
-        assert_eq!(parsed.identity_summary, "Use Chinese by default.");
+        assert_eq!(parsed.language, "configured-locale");
+        assert_eq!(
+            parsed.identity_summary,
+            "Use the configured locale by default."
+        );
     }
 
     #[test]

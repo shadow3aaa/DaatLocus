@@ -95,31 +95,31 @@ fn describe_failure(record: &ProgramTraceRecord, error: &str, label: &str) -> St
         l if l.starts_with("missing_field:") => {
             let field = l.trim_start_matches("missing_field:");
             format!(
-                "{} 在运行时输出缺少关键字段 `{}`，需要通过 demos、stress case 或 instruction 保持结构稳定。",
+                "{} omitted required field `{}` at runtime; keep the structure stable through demos, stress cases, or instructions.",
                 record.program_name, field
             )
         }
         l if l.starts_with("unknown_variant:") => {
             let variant = l.trim_start_matches("unknown_variant:");
             format!(
-                "{} 在运行时输出了未知枚举 `{}`，说明动作/分支边界仍有 schema 漂移。",
+                "{} emitted unknown enum variant `{}` at runtime, indicating schema drift around action or branch boundaries.",
                 record.program_name, variant
             )
         }
         "invalid_type" => format!(
-            "{} 在运行时输出字段类型错误，说明当前候选对结构约束仍不稳定。",
+            "{} emitted an invalid field type at runtime, indicating unstable structural constraints.",
             record.program_name
         ),
         "malformed_json" => format!(
-            "{} 在运行时输出了无法解析的 JSON，说明输出格式稳定性不足。",
+            "{} emitted malformed JSON at runtime, indicating unstable output formatting.",
             record.program_name
         ),
         "provider_error" => format!(
-            "{} 在运行时遇到 provider 级错误，需要区分接口兼容问题与程序语义问题。",
+            "{} encountered a provider-level error at runtime; distinguish API compatibility from program semantics.",
             record.program_name
         ),
         _ => format!(
-            "{} 在运行时出现结构化输出失败：{}",
+            "{} had a structured output failure at runtime: {}",
             record.program_name, error
         ),
     }
@@ -259,7 +259,9 @@ pub(super) async fn derive_evaluation_artifacts(
                 pattern.severity,
                 format!("{:?}", pattern.suggested_fix_kind),
                 pattern.supporting_trace_ids.join("\n"),
-                evidence_summary.clone().unwrap_or_else(|| "无".to_string()),
+                evidence_summary
+                    .clone()
+                    .unwrap_or_else(|| "none".to_string()),
                 available_canonical_cases.join("\n"),
             ),
             &tuning,
@@ -317,8 +319,9 @@ pub(super) async fn optimize_workflows_from_run_records(
     let all_workflows = context.workflows.workspace_list();
     let mut reflection_by_workflow = HashMap::<String, EvaluationArtifactWorkflowReflection>::new();
 
-    // 没有 run records 时跳过 planning、merge 和 frontier replay——不存在新证据，LLM 调用无意义。
-    // frontier 中已有的候选仍会在后续被选取和 apply。
+    // Skip planning, merge, and frontier replay without run records; there is no new
+    // evidence, so LLM calls are not meaningful. Existing frontier candidates can
+    // still be selected and applied later.
     if !run_records.is_empty() {
         for workflow in &all_workflows {
             let evidence = evidence_by_workflow
@@ -628,7 +631,7 @@ fn render_input_summary(
 ) -> String {
     match evidence_summary {
         Some(evidence) => format!(
-            "failure pattern: {}\n相关 L2 记忆：\n{}",
+            "failure pattern: {}\nrelated L2 memories:\n{}",
             pattern.description, evidence
         ),
         None => format!("failure pattern: {}", pattern.description),
@@ -880,7 +883,7 @@ fn flush_section(
         current_body.clear();
         return;
     }
-    if matches!(title.as_str(), "程序签名" | "示例") {
+    if matches!(title.as_str(), "Program Signature" | "Examples") {
         current_body.clear();
         return;
     }

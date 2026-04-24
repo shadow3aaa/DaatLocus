@@ -266,28 +266,28 @@ impl PromptRequest {
 
     fn with_schema_retry_note(&self, note: impl Into<String>) -> Self {
         self.push_retry_message(format!(
-            "上一次输出未通过类型校验，请只修正输出结构并重试。\n\
-错误：{}\n\
-严格要求：\n\
-1. 必须返回与 schema 完全匹配的单个 JSON 对象。\n\
-2. 不要返回 markdown，不要使用 ```json 代码块，不要附加解释文字。\n\
-3. 所有字段都必须提供；如果某字段当前不需要，请使用空字符串、false、0 或空数组，而不是 null，也不要省略。\n\
-4. 枚举值必须逐字匹配 schema，不能自行改写名称。\n\
-5. 如果 provider 支持 tool call，请把该 JSON 放在 tool arguments 中，而不是普通文本 content 里。",
+            "The previous output failed type validation. Fix only the output structure and retry.\n\
+Error: {}\n\
+Strict requirements:\n\
+1. Return exactly one JSON object matching the schema.\n\
+2. Do not return markdown, do not use ```json code fences, and do not add explanatory text.\n\
+3. Provide every field. If a field is not currently needed, use an empty string, false, 0, or an empty array instead of null, and do not omit it.\n\
+4. Enum values must exactly match the schema; do not rewrite their names.\n\
+5. If the provider supports tool calls, put this JSON in tool arguments rather than plain text content.",
             note.into()
         ))
     }
 
     pub(crate) fn with_semantic_retry_note(&self, note: impl Into<String>) -> Self {
         self.push_retry_message(format!(
-            "上一次输出通过了 JSON schema，但未通过程序语义校验，请根据具体错误修正内容后重试。\n\
-错误：{}\n\
-严格要求：\n\
-1. 保持返回结果仍然是与 schema 完全匹配的单个 JSON 对象。\n\
-2. 逐条修正错误里点名的缺失项、重复项、未知项或覆盖缺口，不要忽略。\n\
-3. 如果错误提到缺失的 test、group、规则或字段，必须把它们显式补回输出，而不是只隐含在其他字段里。\n\
-4. 不要删除已经满足要求的有效内容，除非它与错误直接冲突。\n\
-5. 不要返回 markdown，不要附加解释文字，只返回修正后的 JSON。",
+            "The previous output passed JSON schema validation but failed program semantic validation. Fix the content according to the specific error and retry.\n\
+Error: {}\n\
+Strict requirements:\n\
+1. Keep the result as exactly one JSON object matching the schema.\n\
+2. Correct every missing item, duplicate, unknown item, or coverage gap named in the error; do not ignore them.\n\
+3. If the error mentions a missing test, group, rule, or field, add it explicitly to the output instead of only implying it elsewhere.\n\
+4. Do not delete valid content that already satisfies requirements unless it directly conflicts with the error.\n\
+5. Do not return markdown or explanatory text; return only the corrected JSON.",
             note.into()
         ))
     }

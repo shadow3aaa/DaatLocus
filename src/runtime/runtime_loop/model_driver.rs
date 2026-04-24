@@ -47,7 +47,7 @@ pub(super) async fn run_agent_turn_with_retry(
                 let capped_shift = (attempt.saturating_sub(1)).min(6) as u32;
                 let backoff_ms = 300u64.saturating_mul(1u64 << capped_shift).min(30_000);
                 let summary = format!(
-                    "模型请求超时，重试 #{attempt}，等待 {:.1}s",
+                    "model request timed out; retry #{attempt} after {:.1}s",
                     backoff_ms as f64 / 1000.0
                 );
                 set_runtime_status(tx, RuntimeStatusLevel::Warn, summary);
@@ -76,7 +76,7 @@ pub(super) async fn run_agent_turn_with_retry(
                 let capped_shift = (attempt.saturating_sub(1)).min(6) as u32;
                 let backoff_ms = 300u64.saturating_mul(1u64 << capped_shift).min(30_000);
                 let summary = format!(
-                    "请求失败，重试 #{attempt}，等待 {:.1}s",
+                    "request failed; retry #{attempt} after {:.1}s",
                     backoff_ms as f64 / 1000.0
                 );
                 set_runtime_status(tx, RuntimeStatusLevel::Warn, summary);

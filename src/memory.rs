@@ -1,4 +1,4 @@
-//! 此模块定义运行时会话状态与 hindsight retain 队列。
+//! Runtime conversation state and the hindsight retain queue.
 use std::{
     collections::{HashSet, VecDeque},
     fmt::Display,
@@ -163,7 +163,7 @@ impl Memory {
     pub fn begin_runtime_turn(&self) -> RuntimeTurnDraft {
         RuntimeTurnDraft::new(
             self.current_thread_focus()
-                .unwrap_or_else(|| "等待下一轮工具决策".to_string()),
+                .unwrap_or_else(|| "waiting for next tool decision".to_string()),
         )
     }
 
@@ -1636,10 +1636,7 @@ fn message_has_failure_signal(message: &HistoryMessage) -> bool {
 
 fn message_has_preference_signal(message: &HistoryMessage) -> bool {
     let content = history_message_content(message).to_ascii_lowercase();
-    content.contains("prefer")
-        || content.contains("偏好")
-        || content.contains("喜欢")
-        || matches!(message.tool_ui_event, Some(ToolUiEvent::Telegram(_)))
+    content.contains("prefer") || matches!(message.tool_ui_event, Some(ToolUiEvent::Telegram(_)))
 }
 
 fn tool_call_event_is_workspace_signal(event: &ToolCallUiEvent) -> bool {

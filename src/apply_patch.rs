@@ -159,38 +159,38 @@ pub(crate) fn parse_apply_patch(patch_text: &str) -> Result<Vec<PatchOp>> {
 
 pub(crate) fn summarize_apply_patch_error(message: &str) -> String {
     if message.contains("expects unified diff input") {
-        return "patch 必须使用 unified diff 格式，并包含 `---`、`+++`、`@@`".to_string();
+        return "patch must use unified diff format and include `---`, `+++`, and `@@`".to_string();
     }
     if message.contains("must contain `--- <path>`") {
-        return "每个文件 patch 都必须以 `--- <path>` 开始".to_string();
+        return "each file patch must start with `--- <path>`".to_string();
     }
     if message.contains("missing `+++ <path>`") {
-        return "`---` 后必须紧跟 `+++ <path>`".to_string();
+        return "`---` must be followed by `+++ <path>`".to_string();
     }
     if message.contains("expected unified diff hunk header") {
-        return "文件头之后必须提供 `@@ ... @@` hunk header".to_string();
+        return "a file header must be followed by an `@@ ... @@` hunk header".to_string();
     }
     if message.contains("hunk contains no lines") {
-        return "unified diff hunk 不能为空".to_string();
+        return "unified diff hunk must not be empty".to_string();
     }
     if message.contains("hunk lines must start with space/+/-") {
-        return "hunk 中每一行都必须以空格、`+` 或 `-` 开头".to_string();
+        return "every hunk line must start with a space, `+`, or `-`".to_string();
     }
     if message.contains("rename patches are not supported") {
-        return "暂不支持 rename patch；请改成单独的删除和新增".to_string();
+        return "rename patches are not supported; use a separate delete and add".to_string();
     }
     if message.contains("new file diff for")
         || message.contains("deleted file diff for")
         || message.contains("contains no hunks")
     {
-        return "文件 patch 内容和 `---` / `+++` 头不匹配，请检查 add/delete/update diff"
+        return "file patch content does not match the `---` / `+++` headers; check the add/delete/update diff"
             .to_string();
     }
     if message.contains("patch hunk old text not found uniquely in target file") {
-        return "patch 上下文不足，旧文本无法在目标文件中唯一定位；请提供更多上下文".to_string();
+        return "patch context is insufficient; old text could not be uniquely located in the target file. Provide more context".to_string();
     }
     if message.contains("patch hunk old text matched") {
-        return "patch 上下文过少，旧文本匹配了多个位置；请提供更多上下文".to_string();
+        return "patch context is too small; old text matched multiple locations. Provide more context".to_string();
     }
     message.to_string()
 }

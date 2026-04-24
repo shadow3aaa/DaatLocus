@@ -12,7 +12,11 @@ pub(crate) async fn handle_dashboard_control_command(
     match command {
         DashboardControlCommand::RunSleep => {
             if *sleep_running {
-                set_runtime_status(Some(tx), RuntimeStatusLevel::Info, "sleep 已在后台运行");
+                set_runtime_status(
+                    Some(tx),
+                    RuntimeStatusLevel::Info,
+                    "sleep is already running in the background",
+                );
                 sync_dashboard_state(context, tx, sleep_status, None);
                 return;
             }
@@ -23,7 +27,7 @@ pub(crate) async fn handle_dashboard_control_command(
                 sleep_running,
                 sleep_status,
                 SleepTrigger::Manual,
-                "正在后台执行 sleep",
+                "running sleep in the background",
             )
             .await;
         }
@@ -48,7 +52,7 @@ pub(crate) async fn handle_dashboard_control_command(
             set_runtime_status(
                 Some(tx),
                 RuntimeStatusLevel::Info,
-                "已将当前会话转入 hindsight，并清空当前会话消息历史与当前 plan",
+                "current conversation moved to hindsight; runtime conversation history and current plan cleared",
             );
             sync_dashboard_state(context, tx, sleep_status, None);
         }

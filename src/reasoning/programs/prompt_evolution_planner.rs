@@ -3,17 +3,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::reasoning::{ir::PromptIR, program::Program, signature::Signature};
 
-const PROMPT_EVOLUTION_PLANNER_SYSTEM_PROMPT: &str = r#"你现在负责 runtime system prompt 的 sleep 优化规划。
-你的任务不是直接修改 prompt，而是基于 failure patterns 产出结构化的：
+const PROMPT_EVOLUTION_PLANNER_SYSTEM_PROMPT: &str = r#"You are responsible for sleep-time optimization planning for the runtime system prompt.
+Your task is not to directly edit the prompt. Instead, based on failure patterns, produce structured:
 1. reflections
 2. candidate prompt patches
 3. candidate evaluations
 
-要求：
-- 先诊断失败模式，再给候选 patch，再评估候选。
-- patch 必须是稳定、可迁移的运行时规则，不要写成 case 特化描述。
-- evaluation 必须显式指出哪个 candidate 应被 selected。
-- 如果没有可靠 patch，就输出空 candidates 和空 evaluations。"#;
+Requirements:
+- Diagnose failure modes first, then propose candidate patches, then evaluate candidates.
+- Each patch must be a stable, transferable runtime rule, not a case-specific description.
+- Each evaluation must explicitly state which candidate should be selected.
+- If no reliable patch exists, output empty candidates and empty evaluations."#;
 
 pub struct PromptEvolutionPlannerProgram;
 
@@ -68,28 +68,38 @@ impl Program for PromptEvolutionPlannerProgram {
     }
 
     fn description(&self) -> &'static str {
-        "基于 runtime trace 提炼的 failure patterns，为 runtime system prompt 生成 reflection、candidates 和 evaluations。"
+        "Generate reflections, candidates, and evaluations for the runtime system prompt from failure patterns extracted from runtime traces."
     }
 
     fn signature(&self) -> Signature {
-        Signature::new("为 runtime system prompt 生成基于反思的 sleep 优化规划。")
-            .input(
-                "current system additions",
-                "当前 runtime system prompt 的可演化 additions。",
-            )
-            .input(
-                "failure patterns",
-                "从 trace 中提炼出的 failure pattern 列表。",
-            )
-            .output("reflections", "针对 failure patterns 的结构化反思结果。")
-            .output("candidates", "基于 reflections 生成的 prompt patch 候选。")
-            .output(
-                "evaluations",
-                "对每个 candidate 的评估结果，必须标出 selected。",
-            )
-            .rule("reflections 应先于 candidates，evaluations 应覆盖每个 candidate。")
-            .rule("selected=true 的 candidate 最多一个。")
-            .rule("如果没有 candidate，就输出空 evaluations。")
+        Signature::new(
+            "Generate reflection-based sleep optimization planning for the runtime system prompt.",
+        )
+        .input(
+            "current system additions",
+            "Current evolvable additions in the runtime system prompt.",
+        )
+        .input(
+            "failure patterns",
+            "Failure patterns extracted from traces.",
+        )
+        .output(
+            "reflections",
+            "Structured reflections over the failure patterns.",
+        )
+        .output(
+            "candidates",
+            "Prompt patch candidates generated from reflections.",
+        )
+        .output(
+            "evaluations",
+            "Evaluation results for each candidate, explicitly marking selected.",
+        )
+        .rule(
+            "Reflections should precede candidates, and evaluations should cover every candidate.",
+        )
+        .rule("At most one candidate may have selected=true.")
+        .rule("If there are no candidates, output empty evaluations.")
     }
 }
 
@@ -100,10 +110,10 @@ impl PromptEvolutionPlannerProgram {
         failure_patterns_json: String,
     ) -> PromptIR {
         let mut ir = PromptIR::with_system(PROMPT_EVOLUTION_PLANNER_SYSTEM_PROMPT);
-        ir.push_instruction("优先提出最小但有效的增量规则。");
-        ir.push_instruction("不要重复 current system additions 中已经存在的同义规则。");
+        ir.push_instruction("Prefer the smallest effective incremental rules.");
+        ir.push_instruction("Do not duplicate semantically equivalent rules already present in current system additions.");
         ir.push_instruction(
-            "若多个 failure pattern 可被同一条规则覆盖，应合并为更稳定的 candidate。",
+            "If multiple failure patterns can be covered by one rule, merge them into a more stable candidate.",
         );
         ir.push_section("current system additions", current_system_additions);
         ir.push_section("failure patterns", failure_patterns_json);

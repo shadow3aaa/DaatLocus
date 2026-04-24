@@ -10,7 +10,7 @@ fn enter_runtime_phase(
     set_runtime_status(
         tx,
         RuntimeStatusLevel::Info,
-        format!("处理中：runtime turn / {}", phase.label()),
+        format!("processing: runtime turn / {}", phase.label()),
     );
 }
 
@@ -36,7 +36,7 @@ async fn abort_runtime_turn_before_model(
     let output = AgentLoopStepOutput {
         observation: observation.clone(),
         description,
-        current_doing: "等待下一轮工具决策".to_string(),
+        current_doing: "waiting for next tool decision".to_string(),
         actions: vec![EpisodeActionRecord {
             kind: "runtime_preflight_failed".to_string(),
             summary: observation,
@@ -115,7 +115,7 @@ pub(crate) async fn execute_agent_loop_step(
                 tx,
                 RuntimeStatusLevel::Error,
                 format!(
-                    "runtime turn preflight 超时：{}",
+                    "runtime turn preflight timeout: {}",
                     RuntimeTurnPhase::PreflightMemory.label()
                 ),
             );
@@ -133,7 +133,7 @@ pub(crate) async fn execute_agent_loop_step(
                 &claimed_event_ids,
                 &claimed_app_notices,
                 format!("runtime preflight failed: {err}"),
-                "构建 hindsight 记忆上下文失败。".to_string(),
+                "Failed to build hindsight memory context.".to_string(),
             )
             .await;
         }
@@ -181,7 +181,7 @@ pub(crate) async fn execute_agent_loop_step(
                 tx,
                 RuntimeStatusLevel::Error,
                 format!(
-                    "runtime turn preflight 超时：{}",
+                    "runtime turn preflight timeout: {}",
                     RuntimeTurnPhase::PreflightSnapshot.label()
                 ),
             );
@@ -199,7 +199,7 @@ pub(crate) async fn execute_agent_loop_step(
                 &claimed_event_ids,
                 &claimed_app_notices,
                 format!("runtime preflight failed: {err}"),
-                "构建 runtime 快照失败。".to_string(),
+                "Failed to build runtime snapshot.".to_string(),
             )
             .await;
         }
@@ -251,7 +251,7 @@ pub(crate) async fn execute_agent_loop_step(
                     tx,
                     RuntimeStatusLevel::Error,
                     format!(
-                        "runtime turn preflight 超时：{}",
+                        "runtime turn preflight timeout: {}",
                         RuntimeTurnPhase::PreflightCompaction.label()
                     ),
                 );
@@ -269,7 +269,7 @@ pub(crate) async fn execute_agent_loop_step(
                     &claimed_event_ids,
                     &claimed_app_notices,
                     format!("runtime preflight failed: {err}"),
-                    "执行 pre-turn context compaction 失败。".to_string(),
+                    "Failed to execute pre-turn context compaction.".to_string(),
                 )
                 .await;
             }
@@ -348,8 +348,8 @@ pub(crate) async fn execute_agent_loop_step(
                 }
                 break 'agent_loop AgentLoopStepOutput {
                     observation: observation.clone(),
-                    description: "模型请求失败。".to_string(),
-                    current_doing: "等待下一轮工具决策".to_string(),
+                    description: "Model request failed.".to_string(),
+                    current_doing: "waiting for next tool decision".to_string(),
                     actions: terminal_actions,
                 };
             }
@@ -556,9 +556,9 @@ pub(crate) async fn execute_agent_loop_step(
                             tool_results.join("\n")
                         },
                         description: format!(
-                            "某个 tool 改变了后续所需的上下文视图；当前 turn 在该边界后立即结束，并在新 turn 中重新渲染世界状态。原因：{reason}"
+                            "A tool changed the context view needed for subsequent work; the current turn ends immediately at this boundary and the world state will be re-rendered in a new turn. reason: {reason}"
                         ),
-                        current_doing: "等待下一轮工具决策".to_string(),
+                        current_doing: "waiting for next tool decision".to_string(),
                         actions: actions.clone(),
                     };
                 }
@@ -575,9 +575,9 @@ pub(crate) async fn execute_agent_loop_step(
                         } else {
                             tool_results.join("\n")
                         },
-                        description: "本轮领取的事件已完成或已交接，turn 在相关 tool 后立即终止。"
+                        description: "Claimed events for this turn reached a terminal or handoff state, so the turn ends immediately after the relevant tool."
                             .to_string(),
-                        current_doing: "等待下一轮工具决策".to_string(),
+                        current_doing: "waiting for next tool decision".to_string(),
                         actions: actions.clone(),
                     };
                 }
@@ -598,7 +598,7 @@ pub(crate) async fn execute_agent_loop_step(
             .lines()
             .next()
             .filter(|line| !line.trim().is_empty())
-            .unwrap_or("等待下一轮工具决策")
+            .unwrap_or("waiting for next tool decision")
             .to_string();
         let assistant_action = EpisodeActionRecord {
             kind: "assistant_message".to_string(),
@@ -617,7 +617,7 @@ pub(crate) async fn execute_agent_loop_step(
                 tool_results.join("\n")
             },
             description: if tool_results.is_empty() {
-                "模型返回了 assistant 文本，但没有调用 tool。".to_string()
+                "The model returned assistant text without calling a tool.".to_string()
             } else {
                 content
             },

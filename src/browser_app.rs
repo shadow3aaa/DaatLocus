@@ -26,25 +26,24 @@ use crate::{
     tool_ui::{BrowserUiAction, BrowserUiData, ToolCallUiEvent, ToolUiEvent},
 };
 
-const BROWSER_USAGE_PURPOSE: &str =
-    "Browser 是网页查看与交互界面，用于在需要主动浏览和探索网页时承载注意力。";
+const BROWSER_USAGE_PURPOSE: &str = "Browser is the web viewing and interaction surface for tasks that require active browsing and exploration.";
 const BROWSER_WHEN_TO_FOCUS: &[&str] = &[
-    "需要主动浏览网页，而不是仅根据已注入的事件事实做判断时。",
-    "需要阅读页面当前可见内容、进入候选链接或跨多个页面继续调查时。",
-    "需要在网页会话中继续操作，例如提交搜索、填写控件、前进后退或刷新时。",
+    "When active web browsing is needed instead of judging only from injected event facts.",
+    "When current visible page content must be read, candidate links must be opened, or investigation must continue across pages.",
+    "When a web session needs continued interaction such as submitting search, filling controls, going back or forward, or reloading.",
 ];
 const BROWSER_HOW_TO_USE_LINES: &[&str] = &[
-    "Browser 只通过 browser tools 操作；不要假设自己可以直接读取原始 HTML 或像人类一样机械导航。",
-    "先用 `browser_open_page` 打开新页面，或在已知 `page_id` 上继续工作。",
-    "如果页面可能仍在加载，先调用 `browser_wait`；如果要理解当前页面内容或拿到可交互元素引用，使用 `browser_snapshot` 读取紧凑语义快照。",
-    "一切页面交互都必须显式提供 `page_id + element_ref`；不要猜测页面结构。",
-    "输入框、搜索框、筛选器等可填写控件都属于基础 Browser 操作；先阅读页面快照拿到 `element_ref`，再用 `browser_fill`。",
-    "搜索结果页通常只是定位线索，不应默认把摘要当作最终事实；应优先进入候选目标页继续确认。",
-    "如果元素引用因页面变化而失效，Browser tool 会直接报错；此时应重新读取页面，而不是盲目重试旧引用。",
-    "不再需要的页面应调用 `browser_close_page` 关闭，避免标签页长期堆积并浪费内存。",
-    "不要因为第一页主要是导航或页头就立刻宣告失败；应先等待并完整阅读当前页面的语义快照，再决定是否无法完成。",
-    "如果已经查到标题、摘要或正文片段，应基于已确认内容回答并明确范围；只有在关键内容确实不可得时才收尾为失败。",
-    "Browser 只使用 Daat Locus 自带的独立浏览器 runtime，不会复用用户日常浏览器 profile；如果 runtime 未安装，浏览器工具会直接报错。",
+    "Operate Browser only through browser tools; do not assume raw HTML access or human-style mechanical navigation.",
+    "Use `browser_open_page` to open a new page, or continue on a known `page_id`.",
+    "If the page may still be loading, call `browser_wait`; to understand current page content or obtain interactable element refs, call `browser_snapshot` for a compact semantic snapshot.",
+    "Every page interaction must explicitly provide `page_id + element_ref`; do not guess page structure.",
+    "Fillable controls such as inputs, search boxes, and filters are basic Browser operations. Read the page snapshot to obtain `element_ref`, then use `browser_fill`.",
+    "Search result pages are usually leads, not final evidence; prefer opening candidate target pages to confirm.",
+    "If an element ref becomes stale after page changes, Browser tools fail directly; read the page again instead of blindly retrying the old ref.",
+    "Close pages that are no longer needed with `browser_close_page` to avoid tab buildup and memory waste.",
+    "Do not declare failure just because the first page is mostly navigation or a header; wait and read the semantic snapshot before deciding it cannot be completed.",
+    "If a title, summary, or body snippet has been confirmed, answer from the confirmed content and state the scope; fail only when key content is truly unavailable.",
+    "Browser uses Daat Locus's own isolated browser runtime and never reuses the user's everyday browser profile. Browser tools fail directly if the runtime is not installed.",
 ];
 const BROWSER_TOOL_SCOPES: &[AppToolScope] = &[AppToolScope::Browser];
 const BROWSER_SNAPSHOT_MAX_DEPTH: usize = 6;
@@ -850,52 +849,48 @@ impl App for BrowserApp {
         Ok(vec![
             AppToolSpec {
                 name: "browser_open_page".to_string(),
-                description: "新建一个浏览器页面并打开指定 URL。返回新的 `page_id`。".to_string(),
+                description: "Create a browser page, open the specified URL, and return the new `page_id`.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserOpenArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "browser_snapshot".to_string(),
-                description: "读取指定页面的紧凑语义快照，优先保留高价值节点与可交互元素引用。"
+                description: "Read a compact semantic snapshot of the specified page, preserving high-value nodes and interactable element refs first."
                     .to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserSnapshotArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "browser_wait".to_string(),
-                description: "等待指定页面进入稳定状态。`state` 可用 `dom` 或 `load`。".to_string(),
+                description: "Wait until the specified page reaches a stable state. `state` may be `dom` or `load`.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserWaitArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "browser_click".to_string(),
-                description:
-                    "基于 `element_ref` 点击页面元素；如果页面变化导致引用失效，tool 会直接报错。"
-                        .to_string(),
+                description: "Click a page element by `element_ref`; if page changes made the ref stale, the tool fails directly.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserClickArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "browser_fill".to_string(),
-                description:
-                    "基于 `element_ref` 填写输入框；如果页面变化导致引用失效，tool 会直接报错。"
-                        .to_string(),
+                description: "Fill an input by `element_ref`; if page changes made the ref stale, the tool fails directly.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserFillArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "browser_back".to_string(),
-                description: "让指定页面后退。".to_string(),
+                description: "Navigate the specified page backward.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserBackArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "browser_forward".to_string(),
-                description: "让指定页面前进。".to_string(),
+                description: "Navigate the specified page forward.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserForwardArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "browser_reload".to_string(),
-                description: "刷新指定页面。".to_string(),
+                description: "Reload the specified page.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserReloadArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "browser_close_page".to_string(),
-                description: "关闭指定浏览器页面。关闭不再需要的页面以节省内存。".to_string(),
+                description: "Close the specified browser page. Close pages that are no longer needed to save memory.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(BrowserClosePageArgs)).unwrap(),
             },
         ])

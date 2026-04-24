@@ -113,9 +113,12 @@ fn build_hindsight_recall_query(
     current_input: Option<&str>,
     recent_messages: Vec<String>,
 ) -> String {
-    let mut lines = vec!["问题：召回最相关的历史经验，帮助继续推进当前任务。".to_string()];
+    let mut lines = vec![
+        "Question: recall the most relevant prior experience to continue the current task."
+            .to_string(),
+    ];
     if !recent_messages.is_empty() {
-        lines.push("前文:".to_string());
+        lines.push("Prior context:".to_string());
         lines.extend(
             recent_messages
                 .into_iter()
@@ -123,7 +126,7 @@ fn build_hindsight_recall_query(
         );
     }
     if let Some(current_input) = current_input.filter(|value| !value.trim().is_empty()) {
-        lines.push("当前输入:".to_string());
+        lines.push("Current input:".to_string());
         lines.push(summarize_hindsight_query_value(current_input, 240));
     }
 
@@ -235,13 +238,14 @@ fn truncate_hindsight_query_preserving_latest_input(
         return truncate_text_to_token_budget(query, max_tokens);
     }
 
-    let latest_only =
-        format!("问题：召回最相关的历史经验，帮助继续推进当前任务。\n当前输入:\n{latest_input}");
+    let latest_only = format!(
+        "Question: recall the most relevant prior experience to continue the current task.\nCurrent input:\n{latest_input}"
+    );
     if approx_token_count(&latest_only) > max_tokens {
         return truncate_text_to_token_budget(&latest_only, max_tokens);
     }
 
-    let marker = "\n当前输入:\n";
+    let marker = "\nCurrent input:\n";
     let Some(marker_index) = query.find(marker) else {
         return truncate_text_to_token_budget(query, max_tokens);
     };
