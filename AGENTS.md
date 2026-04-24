@@ -20,6 +20,19 @@
 - `App` 和 `Event` 是并列概念，不要互相偷换。
 - 让模型做语义判断，不要让模型做代码已经能完成的机械枚举、定位、去重和 freshness 校验。
 
+## Commit History
+
+提交历史是项目的长期工程接口，不是临时聊天记录。修改历史或新增提交时遵守这些规则：
+
+- commit message 使用英文，标题用祈使语气或明确动作短语，例如 `Add ...`、`Fix ...`、`Refactor ...`、`Remove ...`、`Split ...`、`Document ...`。
+- 标题必须说明真实变更对象和目的；禁止 `update`、`fix`、`u`、`misc`、`wip`、`cleanup` 这类无信息标题。
+- 一个 commit 只表达一个逻辑关注点。把行为变更、重构、格式化、文档、测试、依赖更新拆开，除非它们无法独立编译或无法独立解释。
+- 大型重构提交必须在标题里写出被拆分的边界，例如 `Split runtime turn scheduling modules`，不要只写 `Refactor runtime`。
+- 修 bug 的提交标题要描述修复后的行为，而不是只描述症状，例如 `Retry Telegram delivery instead of failing events`。
+- 只做机械格式化时，使用独立提交，例如 `Format Rust sources after refactor`。
+- 不要把本地临时研究目录、生成缓存、运行日志或未确认实验混入提交。
+- 重写已推送历史前，先创建本地备份分支；推送重写后的 `main` 时使用 `--force-with-lease`。
+
 ## Runtime Model
 
 一次 runtime turn 通常包含这些层：
