@@ -423,7 +423,7 @@ fn summarize_compacted_agent_message(message: &AgentMessage) -> Option<String> {
             "assistant: {}",
             summarize_runtime_inline_text(content)
         )),
-        AgentMessage::AssistantToolCallProtocol { content, calls } => Some(
+        AgentMessage::AssistantToolCallProtocol { content, calls, .. } => Some(
             summarize_assistant_tool_call_protocol(content.as_deref(), calls),
         ),
         AgentMessage::Tool { name, content, .. } => Some(format!(
@@ -484,7 +484,7 @@ fn agent_message_to_history_message_for_compaction(
         AgentMessage::Assistant { content } => Some(history_message_for_compaction(
             AgentMessage::assistant(summarize_runtime_inline_text(content)),
         )),
-        AgentMessage::AssistantToolCallProtocol { content, calls } => {
+        AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
             Some(history_message_for_compaction(AgentMessage::assistant(
                 summarize_assistant_tool_call_protocol(content.as_deref(), calls),
             )))

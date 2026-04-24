@@ -30,6 +30,8 @@ use crate::{
     schema_utils::normalize_provider_function_schema,
 };
 
+const DEEPSEEK_THINKING_MAX_TOKENS: usize = 65_536;
+
 pub struct OpenAIClient {
     client: reqwest::Client,
     pub(crate) api_key: String,
@@ -629,6 +631,7 @@ impl OpenAIClient {
 
         let mut buffer = String::new();
         let mut content = String::new();
+        let mut reasoning_content = String::new();
         let mut tool_calls: Vec<StreamingToolCallBuilder> = Vec::new();
         let mut last_usage = None;
         let mut last_progress_emit_at = Instant::now();
@@ -692,6 +695,9 @@ impl OpenAIClient {
                         last_progress_char_len = content.chars().count();
                     }
                 }
+                if let Some(delta_reasoning_content) = delta["reasoning_content"].as_str() {
+                    reasoning_content.push_str(delta_reasoning_content);
+                }
                 if let Some(delta_tool_calls) = delta["tool_calls"].as_array() {
                     for tool_call in delta_tool_calls {
                         let Some(index) = tool_call["index"].as_u64().map(|index| index as usize)
@@ -742,6 +748,7 @@ impl OpenAIClient {
                 items,
                 raw_stream_follow_up: true,
                 last_assistant_message: assistant_message,
+                last_reasoning_content: non_empty_string(reasoning_content),
             });
         }
 
@@ -758,6 +765,7 @@ impl OpenAIClient {
                 .collect(),
             raw_stream_follow_up: false,
             last_assistant_message,
+            last_reasoning_content: non_empty_string(reasoning_content),
         })
     }
 
@@ -802,10 +810,11 @@ impl ChatCompletionsAdapter for StandardChatCompletionsAdapter {
                 "function": { "name": request.tool_name }
             },
             "temperature": client.temperature,
-            "max_tokens": client.max_completion_tokens,
+            "max_tokens": max_completion_tokens_for_chat_payload(client),
         });
-        apply_optional_thinking_budget(
+        apply_provider_thinking_config(
             &mut payload,
+            client,
             client.thinking_budget.as_deref(),
             client.adapter_state_guard().thinking_budget_mode,
         );
@@ -845,7 +854,7 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
                 }
             ],
             "temperature": client.temperature,
-            "max_tokens": client.max_completion_tokens,
+            "max_tokens": max_completion_tokens_for_chat_payload(client),
         });
         match self.state.prompt_tool_choice_mode {
             PromptToolChoiceMode::NamedFunction => {
@@ -859,8 +868,9 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
             }
             PromptToolChoiceMode::Omit => {}
         }
-        apply_optional_thinking_budget(
+        apply_provider_thinking_config(
             &mut payload,
+            client,
             client.thinking_budget.as_deref(),
             self.state.thinking_budget_mode,
         );
@@ -942,17 +952,12 @@ fn build_agent_turn_payload_common(
     client: &OpenAIClient,
     request: AgentTurnRequest,
     stream: bool,
-    flatten_unmatched_tool_messages: bool,
+    flatten_orphan_tool_messages: bool,
 ) -> serde_json::Value {
-    let allowed_tool_names = request
-        .tools
-        .iter()
-        .map(|tool| tool.name.clone())
-        .collect::<HashSet<_>>();
     let messages = agent_turn_request_to_openai_messages(
         request.messages,
-        flatten_unmatched_tool_messages,
-        &allowed_tool_names,
+        flatten_orphan_tool_messages,
+        is_deepseek_api_base_url(&client.base_url),
     );
     let tools = request
         .tools
@@ -993,7 +998,7 @@ fn build_agent_turn_payload_common(
         "messages": messages,
         "tools": tools,
         "temperature": client.temperature,
-        "max_tokens": client.max_completion_tokens,
+        "max_tokens": max_completion_tokens_for_chat_payload(client),
         "stream": stream,
         "stream_options": if stream {
             json!({ "include_usage": true })
@@ -1001,12 +1006,107 @@ fn build_agent_turn_payload_common(
             serde_json::Value::Null
         },
     });
-    apply_optional_thinking_budget(
+    apply_provider_thinking_config(
         &mut payload,
+        client,
         client.thinking_budget.as_deref(),
         client.adapter_state_guard().thinking_budget_mode,
     );
     payload
+}
+
+fn max_completion_tokens_for_chat_payload(client: &OpenAIClient) -> usize {
+    if is_deepseek_thinking_request(client) {
+        client
+            .max_completion_tokens
+            .min(DEEPSEEK_THINKING_MAX_TOKENS)
+    } else {
+        client.max_completion_tokens
+    }
+}
+
+fn is_deepseek_api_base_url(base_url: &str) -> bool {
+    base_url
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+        .contains("api.deepseek.com")
+}
+
+fn is_deepseek_thinking_request(client: &OpenAIClient) -> bool {
+    if !is_deepseek_api_base_url(&client.base_url) {
+        return false;
+    }
+    match deepseek_thinking_type(client.thinking_budget.as_deref()) {
+        Some("enabled") => return true,
+        Some("disabled") => return false,
+        _ => {}
+    }
+    deepseek_model_defaults_to_thinking(&client.model)
+}
+
+fn deepseek_model_defaults_to_thinking(model_id: &str) -> bool {
+    let model = model_id.to_ascii_lowercase();
+    matches!(
+        model.as_str(),
+        "deepseek-reasoner" | "deepseek-v4-flash" | "deepseek-v4-pro"
+    ) || model.ends_with("/deepseek-reasoner")
+        || model.ends_with("/deepseek-v4-flash")
+        || model.ends_with("/deepseek-v4-pro")
+}
+
+fn deepseek_thinking_type(value: Option<&str>) -> Option<&'static str> {
+    let value = value?.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return None;
+    }
+    Some(match value.as_str() {
+        "0" | "false" | "off" | "none" | "disable" | "disabled" | "no" => "disabled",
+        _ => "enabled",
+    })
+}
+
+fn deepseek_reasoning_effort(value: Option<&str>) -> Option<&'static str> {
+    let value = value?.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return None;
+    }
+    match value.as_str() {
+        "0" | "false" | "off" | "none" | "disable" | "disabled" | "no" => None,
+        "xhigh" | "max" | "maximum" => Some("max"),
+        // DeepSeek currently accepts high/max. Treat generic low/medium/high budgets as high.
+        _ => Some("high"),
+    }
+}
+
+fn apply_provider_thinking_config(
+    payload: &mut serde_json::Value,
+    client: &OpenAIClient,
+    thinking_budget: Option<&str>,
+    mode: ThinkingBudgetMode,
+) {
+    if is_deepseek_api_base_url(&client.base_url) {
+        apply_optional_deepseek_thinking(payload, thinking_budget);
+    } else {
+        apply_optional_thinking_budget(payload, thinking_budget, mode);
+    }
+}
+
+fn apply_optional_deepseek_thinking(
+    payload: &mut serde_json::Value,
+    thinking_budget: Option<&str>,
+) {
+    let Some(thinking_type) = deepseek_thinking_type(thinking_budget) else {
+        return;
+    };
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    object.insert("thinking".to_string(), json!({ "type": thinking_type }));
+    if let Some(reasoning_effort) = deepseek_reasoning_effort(thinking_budget)
+        && thinking_type == "enabled"
+    {
+        object.insert("reasoning_effort".to_string(), json!(reasoning_effort));
+    }
 }
 
 fn apply_optional_thinking_budget(
@@ -1144,9 +1244,15 @@ fn agent_message_char_count(message: &AgentMessage) -> usize {
         AgentMessage::System { content }
         | AgentMessage::User { content }
         | AgentMessage::Assistant { content } => content.chars().count(),
-        AgentMessage::AssistantToolCallProtocol { content, calls } => {
-            assistant_tool_call_protocol_char_count(content.as_deref(), calls)
-        }
+        AgentMessage::AssistantToolCallProtocol {
+            content,
+            reasoning_content,
+            calls,
+        } => assistant_tool_call_protocol_char_count(
+            content.as_deref(),
+            reasoning_content.as_deref(),
+            calls,
+        ),
         AgentMessage::Tool {
             tool_call_id,
             name,
@@ -1163,6 +1269,10 @@ fn parse_agent_turn_stream_result_from_json(
         .as_str()
         .map(|text| text.to_string())
         .unwrap_or_default();
+    let reasoning_content = message["reasoning_content"]
+        .as_str()
+        .map(|text| text.to_string())
+        .filter(|text| !text.trim().is_empty());
 
     if let Some(tool_calls) = message["tool_calls"].as_array()
         && !tool_calls.is_empty()
@@ -1217,6 +1327,7 @@ fn parse_agent_turn_stream_result_from_json(
             items,
             raw_stream_follow_up: true,
             last_assistant_message: assistant_message,
+            last_reasoning_content: reasoning_content,
         });
     }
 
@@ -1233,6 +1344,7 @@ fn parse_agent_turn_stream_result_from_json(
             .collect(),
         raw_stream_follow_up: false,
         last_assistant_message,
+        last_reasoning_content: reasoning_content,
     })
 }
 
@@ -1384,7 +1496,10 @@ fn prompt_request_to_openai_messages(
         .collect::<Vec<_>>()
 }
 
-fn agent_message_to_openai_message(message: AgentMessage) -> serde_json::Value {
+fn agent_message_to_openai_message(
+    message: AgentMessage,
+    include_reasoning_content: bool,
+) -> serde_json::Value {
     match message {
         AgentMessage::System { content } => json!({
             "role": "system",
@@ -1398,18 +1513,31 @@ fn agent_message_to_openai_message(message: AgentMessage) -> serde_json::Value {
             "role": "assistant",
             "content": content,
         }),
-        AgentMessage::AssistantToolCallProtocol { content, calls } => json!({
-            "role": "assistant",
-            "content": content.unwrap_or_default(),
-            "tool_calls": calls.into_iter().map(|call| json!({
-                "id": call.id,
-                "type": "function",
-                "function": {
-                    "name": call.name,
-                    "arguments": call.arguments.to_string(),
-                }
-            })).collect::<Vec<_>>(),
-        }),
+        AgentMessage::AssistantToolCallProtocol {
+            content,
+            reasoning_content,
+            calls,
+        } => {
+            let mut message = json!({
+                "role": "assistant",
+                "content": content.unwrap_or_default(),
+                "tool_calls": calls.into_iter().map(|call| json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments.to_string(),
+                    }
+                })).collect::<Vec<_>>(),
+            });
+            if include_reasoning_content
+                && let Some(reasoning_content) = reasoning_content
+                && !reasoning_content.trim().is_empty()
+            {
+                message["reasoning_content"] = json!(reasoning_content);
+            }
+            message
+        }
         AgentMessage::Tool {
             tool_call_id,
             name,
@@ -1429,7 +1557,7 @@ fn provider_message_from_agent_message(
 ) -> serde_json::Value {
     if flatten_non_plain_messages {
         match message {
-            AgentMessage::AssistantToolCallProtocol { content, calls } => {
+            AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
                 return json!({
                     "role": "assistant",
                     "content": summarize_assistant_tool_call_protocol(content.as_deref(), calls),
@@ -1444,50 +1572,46 @@ fn provider_message_from_agent_message(
             _ => {}
         }
     }
-    agent_message_to_openai_message(message.clone())
+    agent_message_to_openai_message(message.clone(), false)
 }
 
 fn agent_turn_request_to_openai_messages(
     messages: Vec<AgentMessage>,
-    flatten_unmatched_tool_messages: bool,
-    allowed_tool_names: &HashSet<String>,
+    flatten_orphan_tool_messages: bool,
+    include_reasoning_content: bool,
 ) -> Vec<serde_json::Value> {
     let mut valid_tool_call_ids = HashSet::new();
     let mut serialized = Vec::with_capacity(messages.len());
     for message in messages {
         match message {
-            AgentMessage::AssistantToolCallProtocol { content, calls } => {
-                let all_calls_in_scope = calls
-                    .iter()
-                    .all(|call| allowed_tool_names.contains(&call.name));
-                if flatten_unmatched_tool_messages && !all_calls_in_scope {
-                    serialized.push(json!({
-                        "role": "assistant",
-                        "content": summarize_assistant_tool_call_protocol(content.as_deref(), &calls),
-                    }));
-                    continue;
-                }
-                if flatten_unmatched_tool_messages {
+            AgentMessage::AssistantToolCallProtocol {
+                content,
+                reasoning_content,
+                calls,
+            } => {
+                if flatten_orphan_tool_messages {
                     valid_tool_call_ids.extend(calls.iter().map(|call| call.id.clone()));
                 }
                 serialized.push(agent_message_to_openai_message(
-                    AgentMessage::AssistantToolCallProtocol { content, calls },
+                    AgentMessage::AssistantToolCallProtocol {
+                        content,
+                        reasoning_content,
+                        calls,
+                    },
+                    include_reasoning_content,
                 ));
             }
             AgentMessage::Tool {
                 tool_call_id,
                 name,
                 content,
-            } if flatten_unmatched_tool_messages
-                && (!valid_tool_call_ids.contains(&tool_call_id)
-                    || !allowed_tool_names.contains(&name)) =>
-            {
+            } if flatten_orphan_tool_messages && !valid_tool_call_ids.contains(&tool_call_id) => {
                 serialized.push(json!({
                     "role": "assistant",
                     "content": flatten_tool_result_as_assistant_text(&name, &content),
                 }));
             }
-            other => serialized.push(agent_message_to_openai_message(other)),
+            other => serialized.push(agent_message_to_openai_message(other, false)),
         }
     }
     serialized
@@ -1504,6 +1628,14 @@ fn truncate_for_error(text: &str) -> String {
     }
     let truncated = text.chars().take(MAX_LEN).collect::<String>();
     format!("{truncated}...")
+}
+
+fn non_empty_string(text: String) -> Option<String> {
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 fn looks_like_context_window_error(body: &str) -> bool {
@@ -1766,7 +1898,7 @@ mod tests {
                 AgentMessage::tool("historical-tool", "historical_tool", "summary=updated plan"),
             ],
             true,
-            &HashSet::from(["update_plan".to_string()]),
+            false,
         );
 
         assert_eq!(messages.len(), 2);
@@ -1794,7 +1926,7 @@ mod tests {
                 AgentMessage::tool("call_123", "update_plan", "{\"ok\":true}"),
             ],
             true,
-            &HashSet::from(["update_plan".to_string()]),
+            false,
         );
 
         assert_eq!(messages.len(), 2);
@@ -1834,7 +1966,7 @@ mod tests {
     }
 
     #[test]
-    fn compatible_agent_messages_flatten_out_of_scope_tool_protocol() {
+    fn compatible_agent_messages_preserve_out_of_scope_tool_protocol() {
         let messages = agent_turn_request_to_openai_messages(
             vec![AgentMessage::assistant_tool_call_protocol(
                 None,
@@ -1845,12 +1977,46 @@ mod tests {
                 }],
             )],
             true,
-            &HashSet::from(["finish_and_send".to_string()]),
+            false,
         );
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "assistant");
-        assert!(messages[0].get("tool_calls").is_none());
+        assert!(messages[0].get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn deepseek_reasoning_content_is_forwarded_for_native_tool_protocol() {
+        let historical_call = AgentToolCall {
+            id: "call_old".to_string(),
+            name: "update_plan".to_string(),
+            arguments: json!({"plan": []}),
+        };
+        let current_call = AgentToolCall {
+            id: "call_new".to_string(),
+            name: "update_plan".to_string(),
+            arguments: json!({"plan": []}),
+        };
+        let messages = agent_turn_request_to_openai_messages(
+            vec![
+                AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                    None,
+                    Some("old reasoning".to_string()),
+                    vec![historical_call],
+                ),
+                AgentMessage::user("new task"),
+                AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                    None,
+                    Some("current reasoning".to_string()),
+                    vec![current_call],
+                ),
+            ],
+            false,
+            true,
+        );
+
+        assert_eq!(messages[0]["reasoning_content"], "old reasoning");
+        assert_eq!(messages[2]["reasoning_content"], "current reasoning");
     }
 
     #[test]
@@ -1870,6 +2036,31 @@ mod tests {
         );
 
         assert_eq!(payload["reasoning_effort"], "medium");
+    }
+
+    #[test]
+    fn deepseek_thinking_budget_uses_thinking_and_reasoning_effort_parameters() {
+        let mut model_config = ModelConfig::default();
+        model_config.model_id = "deepseek-reasoner".to_string();
+        model_config.thinking_budget = Some("medium".to_string());
+        model_config.max_completion_tokens = 393_216;
+        let client =
+            OpenAIClient::from_parts("test-key", "https://api.deepseek.com", &model_config);
+
+        let payload = build_agent_turn_payload_common(
+            &client,
+            AgentTurnRequest {
+                messages: vec![AgentMessage::user("hello")],
+                tools: vec![],
+            },
+            true,
+            false,
+        );
+
+        assert_eq!(payload["thinking"]["type"], "enabled");
+        assert_eq!(payload["reasoning_effort"], "high");
+        assert_eq!(payload["max_tokens"], DEEPSEEK_THINKING_MAX_TOKENS);
+        assert!(payload.get("reasoning").is_none());
     }
 
     #[test]
