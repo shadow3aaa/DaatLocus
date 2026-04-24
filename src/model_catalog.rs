@@ -1143,17 +1143,21 @@ const LITELLM_MODEL_CAPACITIES: &[(&str, usize, usize)] = &[
     ("deepinfra/sao10k/l3.1-70b-euryale-v2.2", 131072, 131072),
     ("deepinfra/sao10k/l3.3-70b-euryale-v2.3", 131072, 131072),
     ("deepinfra/zai-org/glm-4.5", 131072, 131072),
-    ("deepseek-chat", 131072, 8192),
-    ("deepseek-reasoner", 131072, 65536),
+    ("deepseek-chat", 1048576, 393216),
+    ("deepseek-reasoner", 1048576, 393216),
     ("deepseek-v3-2-251201", 98304, 32768),
+    ("deepseek-v4-flash", 1048576, 393216),
+    ("deepseek-v4-pro", 1048576, 393216),
     ("deepseek.v3-v1:0", 163840, 81920),
     ("deepseek.v3.2", 163840, 163840),
-    ("deepseek/deepseek-chat", 131072, 8192),
+    ("deepseek/deepseek-chat", 1048576, 393216),
     ("deepseek/deepseek-coder", 128000, 4096),
     ("deepseek/deepseek-r1", 65536, 8192),
-    ("deepseek/deepseek-reasoner", 131072, 65536),
+    ("deepseek/deepseek-reasoner", 1048576, 393216),
     ("deepseek/deepseek-v3", 65536, 8192),
     ("deepseek/deepseek-v3.2", 163840, 163840),
+    ("deepseek/deepseek-v4-flash", 1048576, 393216),
+    ("deepseek/deepseek-v4-pro", 1048576, 393216),
     ("dolphin", 16384, 16384),
     ("eu.amazon.nova-2-lite-v1:0", 1000000, 64000),
     ("eu.amazon.nova-2-pro-preview-20251202-v1:0", 1000000, 64000),
@@ -2633,7 +2637,7 @@ const LITELLM_MODEL_CAPACITIES: &[(&str, usize, usize)] = &[
     ("gpt-5.4-nano", 272000, 128000),
     ("gpt-5.4-pro", 1050000, 128000),
     ("gpt-5.4-pro-2026-03-05", 1050000, 128000),
-    ("gpt-5.5", 272000, 128000),
+    ("gpt-5.5", 1000000, 128000),
     ("gpt-audio", 128000, 16384),
     ("gpt-audio-1.5", 128000, 16384),
     ("gpt-audio-2025-08-28", 128000, 16384),
@@ -3842,3 +3846,24 @@ const LITELLM_MODEL_CAPACITIES: &[(&str, usize, usize)] = &[
     ("zai/glm-5", 200000, 128000),
     ("zai/glm-5-code", 200000, 128000),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::LITELLM_MODEL_CAPACITIES;
+
+    #[test]
+    fn model_capacity_catalog_keys_are_sorted_unique_and_non_empty() {
+        for window in LITELLM_MODEL_CAPACITIES.windows(2) {
+            assert!(
+                window[0].0 < window[1].0,
+                "model catalog must be strictly sorted for binary search: {:?} before {:?}",
+                window[0],
+                window[1]
+            );
+        }
+
+        for (model_id, _, _) in LITELLM_MODEL_CAPACITIES {
+            assert!(!model_id.trim().is_empty(), "model id must not be empty");
+        }
+    }
+}
