@@ -1,3 +1,5 @@
+rust_i18n::i18n!("locales", fallback = "en-US");
+
 mod app;
 mod apply_patch;
 mod browser_app;
@@ -14,6 +16,7 @@ mod daemon;
 mod dashboard;
 mod events;
 mod hindsight;
+mod i18n;
 mod logging;
 mod memory;
 mod model_catalog;
