@@ -1,14 +1,14 @@
 # Workflows
 
-这个目录存放 Daat Locus 的内置 workflow 规范资产。
+This directory stores Daat Locus builtin workflow specification assets.
 
-规则：
+Rules:
 
-- 每个 workflow 一个 markdown 文件
-- 文件名即 workflow id
-- frontmatter 只保留 `id`
-- 这些 workflow 通过 `build.rs` 编译进程序，属于 builtin 基本能力
-- builtin workflow 只读，不会被 `create_workflow`、sleep patch 或 sleep merge 写回
-- runtime 可演化 workflow 只存在于 `~/daat-locus-workspace/workflows`
+- One markdown file per workflow.
+- The file name is the workflow id.
+- Frontmatter only contains `id`.
+- These workflows are compiled into the program by `build.rs` and belong to builtin baseline capabilities.
+- Builtin workflows are read-only and are never written back by `create_workflow`, sleep patch, or sleep merge.
+- Runtime-evolvable workflows only live under `~/daat-locus-workspace/workflows`.
 
-如果未来需要新增内置 workflow，请直接在这个目录下添加对应的 `*.md` 文件。
+To add a builtin workflow later, add the corresponding `*.md` file directly under this directory.

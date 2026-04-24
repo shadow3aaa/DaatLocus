@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn long_telegram_message_chunking_respects_unicode_boundaries() {
-        let text = "好".repeat(TELEGRAM_MESSAGE_CHAR_LIMIT + 1);
+        let text = "x".repeat(TELEGRAM_MESSAGE_CHAR_LIMIT + 1);
         let chunks = split_telegram_message_text(&text);
 
         assert!(chunks.len() > 1);

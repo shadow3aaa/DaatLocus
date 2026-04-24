@@ -27,7 +27,7 @@ pub(super) fn build_agent_turn_payload_common(
                     fallback_schema,
                 } => (
                     format!(
-                        "{}\n\n这是一个 FREEFORM grammar tool。当前 provider 回退为单字符串输入：请把完整工具输入放进 `input` 字段。\nsyntax={syntax}\ndefinition=\n{definition}",
+                        "{}\n\nThis is a FREEFORM grammar tool. The current provider falls back to single-string input: put the complete tool input in the `input` field.\nsyntax={syntax}\ndefinition=\n{definition}",
                         tool.description
                     ),
                     normalize_provider_function_schema(fallback_schema),

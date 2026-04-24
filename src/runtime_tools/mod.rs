@@ -265,16 +265,16 @@ impl RuntimeTool for ApplyPatchRuntimeTool {
     }
 
     fn description(&self) -> &str {
-        r#"使用 `apply_patch` 以 unified diff 格式编辑文件。
+        r#"Use `apply_patch` to edit files with unified diff format.
 
-补丁必须满足：
-- 使用标准 unified diff 文件头：`--- <old_path>` / `+++ <new_path>`
-- 每个变更块都必须包含 `@@ ... @@` hunk 头
-- hunk 中每一行都必须以空格、`+` 或 `-` 开头
-- 新增文件使用 `--- /dev/null` 和 `+++ <path>`
-- 删除文件使用 `--- <path>` 和 `+++ /dev/null`
+Patch requirements:
+- Use standard unified diff file headers: `--- <old_path>` / `+++ <new_path>`
+- Every change block must include an `@@ ... @@` hunk header
+- Every hunk line must start with a space, `+`, or `-`
+- New files use `--- /dev/null` and `+++ <path>`
+- Deleted files use `--- <path>` and `+++ /dev/null`
 
-示例：
+Example:
 --- a/src/app.py
 +++ b/src/app.py
 @@ -1,1 +1,1 @@
@@ -286,10 +286,10 @@ impl RuntimeTool for ApplyPatchRuntimeTool {
 @@ -0,0 +1 @@
 +Hello world
 
-注意：
-- patch 必须使用 workspace 内相对路径
-- 当前不支持 rename patch，请改成删除和新增
-- 不要输出解释文字，只输出完整 unified diff"#
+Notes:
+- Patches must use paths relative to the workspace
+- Rename patches are not currently supported; express them as delete plus add
+- Do not output explanation text; output only the complete unified diff"#
     }
 
     fn input_spec(&self) -> AgentToolInputSpec {

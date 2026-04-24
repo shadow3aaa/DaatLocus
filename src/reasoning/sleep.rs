@@ -873,14 +873,17 @@ mod tests {
                 reflection: WorkflowPlannerReflection {
                     rationale: "blocked + manual fix".to_string(),
                     missing_preconditions: vec![
-                        "执行前确认关键依赖、输入和权限条件都已满足".to_string(),
+                        "Confirm key dependencies, inputs, and permission conditions before execution."
+                            .to_string(),
                     ],
                     weak_workflow_steps: vec![
-                        "进行手工修复前，先固定修复前提并规划复验步骤".to_string(),
+                        "Before manual repair, lock the repair premise and plan verification steps."
+                            .to_string(),
                     ],
                     weak_done_criteria: vec![],
                     weak_recovery: vec![
-                        "出现阻塞时，先回退到上一个稳定步骤，再重新验证关键前提".to_string(),
+                        "When blocked, return to the previous stable step and revalidate key premises."
+                            .to_string(),
                     ],
                     recurring_failure_patterns: vec!["tool_failure".to_string()],
                     confidence: 0.88,
@@ -890,14 +893,17 @@ mod tests {
                     rationale: "add recovery and manual-fix guardrails".to_string(),
                     when_to_use_additions: vec![],
                     precondition_additions: vec![
-                        "执行前确认关键依赖、输入和权限条件都已满足".to_string(),
+                        "Confirm key dependencies, inputs, and permission conditions before execution."
+                            .to_string(),
                     ],
                     workflow_step_additions: vec![
-                        "进行手工修复前，先固定修复前提并规划复验步骤".to_string(),
+                        "Before manual repair, lock the repair premise and plan verification steps."
+                            .to_string(),
                     ],
                     done_criteria_additions: vec![],
                     recovery_additions: vec![
-                        "出现阻塞时，先回退到上一个稳定步骤，再重新验证关键前提".to_string(),
+                        "When blocked, return to the previous stable step and revalidate key premises."
+                            .to_string(),
                     ],
                     confidence: 0.91,
                 }],
@@ -941,11 +947,11 @@ mod tests {
             updated
                 .workflow_steps
                 .iter()
-                .any(|step| step.contains("手工修复") || step.contains("阻塞"))
+                .any(|step| step.contains("manual repair") || step.contains("blocked"))
                 || updated
                     .recovery
                     .iter()
-                    .any(|step| step.contains("阻塞") || step.contains("标准恢复路径"))
+                    .any(|step| step.contains("blocked") || step.contains("stable step"))
         );
     }
 

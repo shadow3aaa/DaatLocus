@@ -22,7 +22,7 @@ pub struct PutAwayAppArgs {}
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TerminalExecArgs {
     pub command: String,
-    /// 显式指定要复用的 session；不填则新建 session
+    /// Explicit session to reuse; omitted means create a new session.
     pub session_id: Option<String>,
     pub workdir: Option<String>,
     pub yield_time_ms: Option<u64>,
@@ -134,11 +134,11 @@ pub struct ActivateWorkflowArgs {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct DeepRecallArgs {
-    /// 要交给长期记忆后端进行深度回忆/反思的自然语言问题
+    /// Natural-language question sent to the long-term memory backend for deeper recall/reflection.
     pub query: String,
-    /// 可选 budget；不填则使用配置默认值
+    /// Optional budget; omitted uses the configured default.
     pub budget: Option<String>,
-    /// 允许返回的最大 token 数
+    /// Maximum number of tokens allowed in the response.
     pub max_tokens: Option<usize>,
 }
 
@@ -183,17 +183,17 @@ impl TokenUsageInfo {
     }
 }
 
-/// LLM 负责思考
+/// LLM provider abstraction.
 #[async_trait]
 pub trait LLM {
-    /// 执行一个结构化 program 请求，返回原始 JSON 参数对象。
+    /// Execute a structured program request and return the raw JSON argument object.
     async fn run_json(
         &self,
         context: &Context,
         request: PromptRequest,
     ) -> Result<serde_json::Value>;
 
-    /// 执行一轮工具驱动的 agent turn，返回 assistant 文本或 tool calls。
+    /// Execute one tool-driven agent turn and return assistant text or tool calls.
     async fn run_agent_turn(
         &self,
         _: &Context,

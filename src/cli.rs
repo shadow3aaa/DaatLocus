@@ -7,6 +7,7 @@ use crate::{
         wait_for_daemon_shutdown,
     },
     dashboard::run_tui_dashboard,
+    i18n::Locale,
     logging::init_logging,
 };
 use crate::{config, config_wizard};
@@ -26,21 +27,21 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum DaatLocusCommand {
-    /// 启动前台运行时（等同于 daemon serve + attach）
+    /// Start the foreground runtime flow.
     Run,
-    /// 连接到已运行的 daemon，进入交互会话
+    /// Attach to an already-running daemon.
     Attach,
-    /// 管理后台 daemon 进程
+    /// Manage the background daemon process.
     Daemon {
         #[command(subcommand)]
         target: DaemonTarget,
     },
-    /// 清除本地状态或缓存数据
+    /// Clear local state or cache data.
     Reset {
         #[command(subcommand)]
         target: ResetTarget,
     },
-    /// 交互式配置管理（无子命令时进入菜单）
+    /// Manage configuration; opens an interactive menu without a subcommand.
     Config {
         #[command(subcommand)]
         target: Option<ConfigTarget>,
@@ -49,44 +50,44 @@ enum DaatLocusCommand {
 
 #[derive(Debug, Subcommand)]
 enum ConfigTarget {
-    /// 显示当前配置摘要（secrets 已遮蔽）
+    /// Show the current config summary with secrets masked.
     Show,
-    /// 交互式添加一个 provider
+    /// Add a provider interactively.
     #[command(name = "add-provider")]
     AddProvider,
-    /// 交互式添加一个 model
+    /// Add a model interactively.
     #[command(name = "add-model")]
     AddModel,
-    /// 更改主模型
+    /// Change the main model.
     #[command(name = "set-main-model")]
     SetMainModel,
-    /// 更改 hindsight 使用的模型
+    /// Change the model used by hindsight.
     #[command(name = "set-hindsight-model")]
     SetHindsightModel,
 }
 
 #[derive(Debug, Subcommand)]
 enum ResetTarget {
-    /// 清除编译缓存（compiled prompts）
+    /// Clear compiled prompt cache.
     #[command(name = "complite", alias = "compile")]
     Complite,
-    /// 清除运行时状态（daemon lock、socket 等）
+    /// Clear runtime state such as daemon locks and sockets.
     State,
-    /// 清除对话历史、hindsight 记录及推理 traces
+    /// Clear conversation history, hindsight records, and reasoning traces.
     Memory,
-    /// 清除全部（state + memory + complite）
+    /// Clear state, memory, and complite data.
     All,
 }
 
 #[derive(Debug, Subcommand)]
 enum DaemonTarget {
-    /// 查看 daemon 运行状态
+    /// Show daemon status.
     Status,
-    /// 停止后台 daemon
+    /// Stop the background daemon.
     Stop,
-    /// 重启后台 daemon
+    /// Restart the background daemon.
     Restart,
-    /// 在前台启动 daemon（内部使用）
+    /// Start the daemon in the foreground.
     Serve,
 }
 
@@ -118,7 +119,7 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
             run_reset_all().await?;
             return Ok(());
         }
-        // Config 子命令：可能在无 config 时运行（add-provider/add-model 除外）
+        // Config subcommands may run before a complete config exists.
         Some(DaatLocusCommand::Config { target }) => {
             return run_config_command(target.as_ref()).await;
         }
@@ -155,12 +156,19 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    // 首次运行：config.toml 不存在时触发交互式 setup
+    // First run starts the interactive setup when config.toml is missing.
     let config = if !config::config_file_exists().await {
         match config_wizard::run_first_time_setup().await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("初始化失败: {e:?}");
+                eprintln!(
+                    "{}",
+                    crate::tr!(
+                        Locale::default(),
+                        "cli.setup_failed",
+                        error = format!("{e:?}")
+                    )
+                );
                 std::process::exit(1);
             }
         }
@@ -169,7 +177,14 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
             Ok(o) => o,
             Err(e) => {
                 tracing::error!("failed to load config: {e}");
-                eprintln!("配置加载失败: {e:?}");
+                eprintln!(
+                    "{}",
+                    crate::tr!(
+                        Locale::default(),
+                        "common.config_load_failed",
+                        error = format!("{e:?}")
+                    )
+                );
                 std::process::exit(1);
             }
         }
@@ -215,15 +230,17 @@ async fn run_daemon_status_command() -> Result<()> {
 }
 
 async fn run_daemon_stop_command() -> Result<()> {
+    let locale = configured_locale().await;
     let client = connect_existing_daemon().await?;
     let port = client.port();
     client.shutdown().await?;
     wait_for_daemon_shutdown(port).await?;
-    println!("daemon stopped");
+    println!("{}", crate::tr!(locale, "daemon.stopped"));
     Ok(())
 }
 
 async fn run_daemon_restart_command() -> Result<()> {
+    let locale = configured_locale().await;
     if let Ok(client) = connect_existing_daemon().await {
         let port = client.port();
         client.shutdown().await?;
@@ -231,8 +248,18 @@ async fn run_daemon_restart_command() -> Result<()> {
     }
     spawn_detached_daemon_process().await?;
     let status = wait_for_daemon_ready().await?;
-    println!("daemon restarted: {}", status_summary(&status));
+    println!(
+        "{}",
+        crate::tr!(locale, "daemon.restarted", status = status_summary(&status))
+    );
     Ok(())
+}
+
+async fn configured_locale() -> Locale {
+    load_config()
+        .await
+        .map(|config| config.locale)
+        .unwrap_or_default()
 }
 
 async fn attach_to_daemon(client: DaemonClient) -> Result<()> {

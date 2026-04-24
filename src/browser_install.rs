@@ -52,7 +52,7 @@ fn browser_runtime_platform() -> Result<&'static str> {
     Err(miette!("unsupported browser runtime platform"))
 }
 
-/// 若 browser runtime 已安装则跳过；否则下载并安装。由 daemon 启动时自动调用。
+/// Download and install the browser runtime when it is missing. Called automatically during daemon startup.
 pub(crate) async fn maybe_setup_browser_runtime() {
     let paths = daat_locus_paths().await;
     if paths.browser_executable_path().exists() {

@@ -1,4 +1,4 @@
-//! 本模块包含 context，它是 Daat Locus 主循环中承载状态的结构体。
+//! Runtime context state carried by the Daat Locus main loop.
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},

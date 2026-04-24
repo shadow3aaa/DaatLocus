@@ -499,8 +499,9 @@ pub async fn spawn_detached_daemon_process() -> Result<()> {
     let current_exe = std::env::current_exe()
         .map_err(|err| miette!("resolve current executable failed: {err}"))?;
 
-    // 将 stderr 重定向到日志文件，方便排查 daemon 启动失败的原因。
-    // stdout 仍然丢弃（emit_startup_progress 的 println! 已由 tracing 记录到文件）。
+    // Redirect stderr to the log file to simplify daemon startup failure diagnosis.
+    // stdout is still discarded because emit_startup_progress println! output is
+    // already recorded through tracing.
     let log_path = daat_locus_paths().await.logs_file("daemon-stderr.log");
     let stderr_file = std::fs::OpenOptions::new()
         .create(true)

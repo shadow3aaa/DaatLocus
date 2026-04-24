@@ -99,7 +99,8 @@ pub fn runtime_system_prompt_doc_from_additions(additions: &[String]) -> PromptD
         PromptNode::Unit(PromptUnitDoc::new(
             "workspace",
             vec![PromptBlock::Paragraph(
-                "运行时 workspace 的绝对路径会在实际系统 prompt 中显式注入。".to_string(),
+                "The absolute runtime workspace path is injected into the real system prompt."
+                    .to_string(),
             )],
             vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHY.to_string())],
             vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHEN.to_string())],
@@ -131,6 +132,10 @@ pub fn runtime_system_prompt_doc_from_additions(additions: &[String]) -> PromptD
             vec![PromptBlock::KeyValueList(vec![
                 ("name".to_string(), persona.name.trim().to_string()),
                 ("language".to_string(), persona.language.trim().to_string()),
+                (
+                    "configured_locale".to_string(),
+                    "injected in live runtime prompt".to_string(),
+                ),
                 (
                     "identity_summary".to_string(),
                     persona.identity_summary.trim().to_string(),

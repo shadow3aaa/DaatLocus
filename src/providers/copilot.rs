@@ -13,7 +13,8 @@ use crate::{
 use super::OpenAIClient;
 
 // ---------------------------------------------------------------------------
-// CopilotClient：首选 session token（内部 API，全模型），失败降级到公共 API
+// CopilotClient prefers a session token for the internal full-model API and
+// falls back to the public API when needed.
 // ---------------------------------------------------------------------------
 
 const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.26.7";
@@ -135,7 +136,7 @@ async fn exchange_copilot_session_token_with_client(
     Ok((token, base_url, expires_at_secs))
 }
 
-/// session token 是分号分隔的 key=value 串，从 proxy-ep 字段派生 API base URL。
+/// Session token is a semicolon-separated key=value string; derive API base URL from proxy-ep.
 fn derive_copilot_base_url(session_token: &str) -> String {
     session_token
         .split(';')

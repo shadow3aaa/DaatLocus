@@ -31,8 +31,9 @@ pub(super) async fn run_prompt_improvement_pipeline(
             ..Default::default()
         });
     }
-    // LLM 调用失败（如推理模型返回 reasoning text 而非 tool_calls）时，降级为空规划，
-    // 不中断整个 pipeline：derive_artifacts、frontier replay 仍能正常执行。
+    // If the LLM call fails, for example when a reasoning model returns reasoning text
+    // instead of tool calls, degrade to an empty plan without interrupting the pipeline.
+    // derive_artifacts and frontier replay can still proceed.
     let PromptPlanningResult {
         reflections: prompt_reflections,
         candidates: prompt_candidates,

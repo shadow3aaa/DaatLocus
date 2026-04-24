@@ -26,7 +26,10 @@ pub(super) async fn maybe_start_forced_sleep(
     if trace_backlog < FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD {
         return None;
     }
-    let status = format!("backlog 过高（traces={}）：已启动后台 sleep", trace_backlog);
+    let status = format!(
+        "backlog too high (traces={}): background sleep started",
+        trace_backlog
+    );
     start_background_sleep(
         context,
         tx,
@@ -38,7 +41,7 @@ pub(super) async fn maybe_start_forced_sleep(
     )
     .await;
     Some(format!(
-        "backlog 过高（traces={}）：后台 sleep 已启动",
+        "backlog too high (traces={}): background sleep started",
         trace_backlog
     ))
 }
@@ -63,7 +66,7 @@ pub(super) async fn maybe_start_idle_sleep(
         return None;
     }
     if *sleep_running {
-        return Some("空闲中：后台 sleep 正在运行".to_string());
+        return Some("idle: background sleep is running".to_string());
     }
     context.last_idle_sleep_at = Some(std::time::Instant::now());
     start_background_sleep(
@@ -73,10 +76,10 @@ pub(super) async fn maybe_start_idle_sleep(
         sleep_running,
         sleep_status,
         SleepTrigger::Idle,
-        "空闲中：已启动后台 sleep",
+        "idle: background sleep started",
     )
     .await;
-    Some("空闲中：已启动后台 sleep".to_string())
+    Some("idle: background sleep started".to_string())
 }
 
 pub(super) async fn start_background_sleep(
@@ -121,8 +124,8 @@ pub(crate) async fn handle_sleep_task_result(
                 context.compiled_prompts = store;
             }
             let prefix = match result.trigger {
-                SleepTrigger::Manual => "sleep 完成",
-                SleepTrigger::Idle => "后台 sleep 完成",
+                SleepTrigger::Manual => "sleep completed",
+                SleepTrigger::Idle => "background sleep completed",
             };
             let prompt = &summary.prompt_improvement;
             let workflow = &summary.workflow_improvement;
@@ -165,19 +168,19 @@ pub(crate) async fn handle_sleep_task_result(
             set_runtime_status(
                 Some(tx),
                 RuntimeStatusLevel::Info,
-                format!("{prefix}：{summary_text}"),
+                format!("{prefix}: {summary_text}"),
             );
         }
         Err(err) => {
             let prefix = match result.trigger {
-                SleepTrigger::Manual => "sleep 失败",
-                SleepTrigger::Idle => "后台 sleep 失败",
+                SleepTrigger::Manual => "sleep failed",
+                SleepTrigger::Idle => "background sleep failed",
             };
             sleep_status.last_result = Some(err.to_string());
             set_runtime_status(
                 Some(tx),
                 RuntimeStatusLevel::Error,
-                format!("{prefix}：{err}"),
+                format!("{prefix}: {err}"),
             );
         }
     }

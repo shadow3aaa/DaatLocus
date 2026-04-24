@@ -206,7 +206,7 @@ pub fn assistant_activity_cell(content: &str) -> Option<ActivityCell> {
     if content.trim().is_empty() {
         return None;
     }
-    if content.starts_with("工具调用失败") || content.starts_with("tool loop 调用失败") {
+    if content.starts_with("tool invocation failed") || content.starts_with("tool loop failed") {
         return Some(ActivityCell::Error(error_cell(
             first_line_or_fallback(content, "tool invocation error"),
             remaining_lines_with_limit(content, 24),
@@ -291,7 +291,8 @@ fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<ActivityCe
                     remaining_lines_with_limit(content, 8),
                 )));
             }
-            if content.starts_with("工具调用失败") || content.starts_with("tool loop 调用失败")
+            if content.starts_with("tool invocation failed")
+                || content.starts_with("tool loop failed")
             {
                 return vec![ActivityCell::Error(error_cell(
                     first_line_or_fallback(content, "tool invocation error"),

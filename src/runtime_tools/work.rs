@@ -50,7 +50,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![
         Box::new(StaticRuntimeTool::new::<FocusAppArgs>(
             "focus_app",
-            "将指定应用切到前景。",
+            "Bring the specified app to the foreground.",
             None,
             summarize_focus_app_tool,
             render_focus_app_call_ui,
@@ -58,7 +58,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<PutAwayAppArgs>(
             "put_away_app",
-            "把当前前景应用放回后台。",
+            "Put the current foreground app back into the background.",
             None,
             summarize_put_away_app_tool,
             render_put_away_app_call_ui,
@@ -66,7 +66,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<EventResolveArgs>(
             "finish_and_send",
-            "显式终结一个事件，并在需要回复用户时发送最终回复。`resolved` 和 `failed` 都必须提供 `reply_message`；`dismissed` 用于静默结束而不发送消息。",
+            "Explicitly finish an event and send the final reply when a user reply is needed. `resolved` and `failed` both require `reply_message`; `dismissed` silently ends without sending a message.",
             None,
             summarize_event_resolve_tool,
             render_event_resolve_call_ui,
@@ -74,7 +74,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<UpdatePlanArgs>(
             "update_plan",
-            "提交当前任务的完整分步 plan。",
+            "Submit the complete step-by-step plan for the current task.",
             None,
             summarize_update_plan_tool,
             render_update_plan_call_ui,
@@ -82,7 +82,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<CreateWorkflowArgs>(
             "create_workflow",
-            "当没有可复用 workflow 时创建一个新 workflow 初稿。",
+            "Create an initial workflow draft when no reusable workflow fits.",
             None,
             summarize_create_workflow_tool,
             render_create_workflow_call_ui,
@@ -90,7 +90,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<ActivateWorkflowArgs>(
             "activate_workflow",
-            "将一个 workflow 绑定到当前任务，供后续多步骤执行复用。",
+            "Bind a workflow to the current task for subsequent multi-step execution.",
             None,
             summarize_activate_workflow_tool,
             render_activate_workflow_call_ui,
@@ -98,7 +98,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         )),
         Box::new(StaticRuntimeTool::new::<DeepRecallArgs>(
             "deep_recall",
-            "对长期记忆执行一次较慢但更深的 reflect 查询，用于线程恢复、项目状态判断、用户偏好推断，以及需要证据链的高层建议或风险分析。",
+            "Run a slower but deeper reflect query over long-term memory for thread recovery, project-state judgment, user-preference inference, and high-level advice or risk analysis that needs evidence.",
             None,
             summarize_deep_recall_tool,
             render_deep_recall_call_ui,

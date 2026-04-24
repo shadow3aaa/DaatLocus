@@ -1,5 +1,4 @@
-// src/runtime_context.rs 文件定义了许多与运行时上下文管理相关的功能和结构，包括依赖模块（如 context::Context、context_budget、memory、reasoning）、运行时压缩相关常量（如 MID_TURN_COMPACTION_KEEP_TOOL_CYCLES、MID_TURN_COMPACTION_SUMMARY_MAX_TOKENS）、以及结构体（如 HistoryCompactionOutput）。
-// src/runtime_context.rs 文件定义了许多与运行时上下文管理相关的功能和结构，包括依赖模块（如 context::Context、context_budget、memory、reasoning）、运行时压缩相关常量（如 MID_TURN_COMPACTION_KEEP_TOOL_CYCLES、MID_TURN_COMPACTION_SUMMARY_MAX_TOKENS）、以及结构体（如 HistoryCompactionOutput）。
+// Runtime context request construction and compaction support.
 use crate::{
     context::Context,
     context_budget::{
@@ -181,7 +180,7 @@ fn build_history_compaction_request(messages: Vec<HistoryMessage>) -> Option<Pro
         system_messages: vec![HISTORY_COMPACTION_PROMPT.to_string()],
         long_term_memory_messages: Vec::new(),
         history_messages: messages,
-        current_user_message: "请基于以上将被压缩移出的运行时上下文，生成一段 handoff summary。只输出 `summary` 字段。"
+        current_user_message: "Generate a handoff summary from the runtime context that will be compacted out above. Output only the `summary` field."
             .to_string(),
         retry_messages: Vec::new(),
     })

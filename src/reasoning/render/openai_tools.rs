@@ -38,12 +38,13 @@ impl Renderer for OpenAIToolRenderer {
         }
 
         let mut user_message = PromptTextBuilder::new();
-        user_message.push_markdown_section("程序签名", render_signature_block(&signature));
+        user_message.push_markdown_section("Program Signature", render_signature_block(&signature));
         if !examples.is_empty() {
-            user_message.push_markdown_section("示例", render_examples_block(&examples));
+            user_message.push_markdown_section("Examples", render_examples_block(&examples));
         }
         if !ir.instructions.is_empty() {
-            user_message.push_labeled_section("任务说明", render_bullet_list(ir.instructions));
+            user_message
+                .push_labeled_section("Task Instructions", render_bullet_list(ir.instructions));
         }
         for section in ir.sections {
             user_message.push_markdown_section(section.title, section.body);
@@ -146,10 +147,10 @@ fn build_long_term_memory_messages(context: &Context) -> Vec<HistoryMessage> {
 
 fn render_signature_block(signature: &Signature) -> String {
     let mut builder = PromptTextBuilder::new();
-    builder.push_labeled_section("程序目标", signature.objective.clone());
+    builder.push_labeled_section("Objective", signature.objective.clone());
     if !signature.inputs.is_empty() {
         builder.push_bullet_list_section(
-            "输入签名",
+            "Input Signature",
             signature
                 .inputs
                 .iter()
@@ -158,7 +159,7 @@ fn render_signature_block(signature: &Signature) -> String {
     }
     if !signature.outputs.is_empty() {
         builder.push_bullet_list_section(
-            "输出签名",
+            "Output Signature",
             signature
                 .outputs
                 .iter()
@@ -166,7 +167,7 @@ fn render_signature_block(signature: &Signature) -> String {
         );
     }
     if !signature.rules.is_empty() {
-        builder.push_bullet_list_section("签名约束", signature.rules.clone());
+        builder.push_bullet_list_section("Signature Rules", signature.rules.clone());
     }
     builder.build()
 }
@@ -177,10 +178,10 @@ fn render_examples_block<O: serde::Serialize>(examples: &[ProgramExample<O>]) ->
         .enumerate()
         .map(|(index, example)| {
             let mut body = PromptTextBuilder::new();
-            body.push_paragraph(format!("### 示例 {}\n{}", index + 1, example.title));
+            body.push_paragraph(format!("### Example {}\n{}", index + 1, example.title));
             if !example.inputs.is_empty() {
                 body.push_bullet_list_section(
-                    "输入",
+                    "Inputs",
                     example
                         .inputs
                         .iter()
@@ -188,7 +189,7 @@ fn render_examples_block<O: serde::Serialize>(examples: &[ProgramExample<O>]) ->
                 );
             }
             body.push_labeled_section(
-                "输出(JSON)",
+                "Output (JSON)",
                 format!(
                     "```json\n{}\n```",
                     serde_json::to_string_pretty(&example.output).unwrap()

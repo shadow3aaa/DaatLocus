@@ -152,6 +152,10 @@ impl SystemPromptPart for PersonaSystemPart {
                 ("name".to_string(), persona.name.trim().to_string()),
                 ("language".to_string(), persona.language.trim().to_string()),
                 (
+                    "configured_locale".to_string(),
+                    _ctx.config.locale.as_str().to_string(),
+                ),
+                (
                     "identity_summary".to_string(),
                     persona.identity_summary.trim().to_string(),
                 ),
@@ -312,7 +316,7 @@ impl SnapshotPart for WorkflowSnapshotPart {
             }
         } else {
             blocks.push(PromptBlock::Paragraph(
-                "【当前阶段：workflow 选择】bound_workflow_id=<none>。在执行任何任务之前，必须先调用 activate_workflow 从候选中选择最合适的 workflow，或调用 create_workflow 创建新 workflow。当前可用工具仅限这两个。"
+                "[Current phase: workflow selection] bound_workflow_id=<none>. Before executing any task, call `activate_workflow` to choose the best candidate workflow, or call `create_workflow` to create a new workflow. Only those two tools are currently available."
                     .to_string(),
             ));
         }

@@ -5,74 +5,73 @@ use crate::{
 
 use super::prompt_text::{PromptTextBuilder, render_bullet_list};
 
-pub const EVENT_UNIT_WHAT: &str = r#"外部输入主要通过事件进入当前 turn。对 event-driven turn 而言，你输出的普通文本不会自动发送给外部用户。
-`<world_snapshot> ... </world_snapshot>` 片段不是用户在和你对话，而是当前世界状态的上下文注入。被当前 turn 正式领取的结构化事件或应用 notice，也可能以前序 `user` 消息的形式进入线程上下文；它们同样是待处理的世界输入，不是普通闲聊。"#;
+pub const EVENT_UNIT_WHAT: &str = r#"External inputs primarily enter the current turn through events. In an event-driven turn, plain assistant text is not automatically sent to the external user.
+`<world_snapshot> ... </world_snapshot>` is not a user conversation message; it is injected context describing the current world state. Structured events or app notices claimed by the current turn may also appear as prior `user` messages in the thread context; they are still pending world inputs, not ordinary chat."#;
 
-pub const EVENT_UNIT_HOW: &str = r#"只有当你显式调用工具时，世界才会真正改变；凡是需要向用户提交最终答复的事件收尾，无论 `resolved` 还是 `failed`，都应调用 `finish_and_send` 并提供 `reply_message`。
-如果还需要继续推进，就不要调用 `finish_and_send`；应继续调用工具。
-当你明显完成了某个中间步骤时，应直接输出文本来解释并记录当前进度；但这类中间记录不是最终提交，不能使用 `finish_and_send` 发送。
-如果当前仍然存在可推进的目标、事件或应用信号，那么仅输出文本回复不会改变世界，不构成有效推进；应直接调用工具。
-对于 event-driven turn：
-- 只有在准备好最终回复后，才调用 `finish_and_send` 终结当前事件。
-- `dismissed` 只用于明确不需要回复用户的静默结束。
-- 如果仍需继续推进，就继续调用工具。
-- 不要把文本回复本身当作发送动作；真正的回复提交必须通过工具完成。
-你必须仔细阅读当前快照，分析所处情况，先做事，再给结论。"#;
+pub const EVENT_UNIT_HOW: &str = r#"The world only changes when you explicitly call tools. Any event completion that must deliver a final answer to the user, whether `resolved` or `failed`, must call `finish_and_send` with a `reply_message`.
+If more work is still needed, do not call `finish_and_send`; continue using tools.
+When an intermediate step is clearly complete, you may output text to explain and record progress. That intermediate note is not final delivery and must not be sent through `finish_and_send`.
+If there is still an actionable goal, event, or app signal, plain text alone does not change the world and is not valid progress; call a tool instead.
+For event-driven turns:
+- Call `finish_and_send` only when the final reply is ready.
+- Use `dismissed` only for explicit silent completion when no user reply is needed.
+- If work still needs to continue, keep calling tools.
+- Do not treat assistant text itself as a send action; final delivery must happen through the tool.
+For user-facing replies, use the configured locale by default unless the user's message strongly indicates another language.
+Read the current snapshot carefully, analyze the situation, act first, and then provide the conclusion."#;
 
-pub const APPS_UNIT_WHAT: &str = "App 是一类功能的封装单元。每个 App 都提供独一无二的功能封装。";
+pub const APPS_UNIT_WHAT: &str = "An App is an encapsulated capability surface. Each App provides a distinct functional surface.";
 
-pub const APPS_UNIT_WHEN: &str = "当你判定某个任务必须依赖某个 app 时，或者使用这个 app 可以更好地解决任务时，应当切换到这个 app。如果 app 主动向你发出信号，也应当结合当前任务与该信号的重要程度，考虑切换到这个 app 处理。";
+pub const APPS_UNIT_WHEN: &str = "Focus an app when a task depends on it or when using it would solve the task better. If an app emits a signal, consider focusing it based on the current task and the signal's importance.";
 
-pub const APPS_UNIT_HOW: &str = "使用 `focus_app` 切换到目标 app。";
+pub const APPS_UNIT_HOW: &str = "Use `focus_app` to switch to the target app.";
 
-pub const WORKSPACE_UNIT_WHEN: &str =
-    "当你需要进行任何属于你自己的文件操作时，都应默认在这个 workspace 目录下进行。";
+pub const WORKSPACE_UNIT_WHEN: &str = "When you need to perform file operations that belong to you, default to this workspace directory.";
 
 pub const WORKSPACE_UNIT_WHY: &str =
-    "一个固定的 workspace 可以让你拥有一片自己的固定空间。让你更好地完成需要操作文件的任务。";
+    "A fixed workspace gives you a stable owned area for tasks that require file operations.";
 
-pub const WORKSPACE_UNIT_HOW: &str = "使用相对路径时，不要把 workspace 目录名再写进路径里。快照已经告诉你 workspace 的绝对路径；相对路径默认就是相对于该目录。";
+pub const WORKSPACE_UNIT_HOW: &str = "When using relative paths, do not include the workspace directory name again. The snapshot already gives the absolute workspace path; relative paths are relative to that directory.";
 
-pub const MEMORIES_UNIT_WHAT: &str = "自动召回记忆（对应 `<recall_memories>` 标记）会优先提供长期 consolidated knowledge，例如 observations，并在需要时补充 raw memories 与 citations；`deep_recall` 是显式触发的更深层回忆。";
+pub const MEMORIES_UNIT_WHAT: &str = "Automatic memory recall, rendered under `<recall_memories>`, prioritizes long-term consolidated knowledge such as observations and may include raw memories and citations when useful. `deep_recall` explicitly triggers a deeper recall pass.";
 
-pub const MEMORIES_UNIT_WHEN: &str = "当自动召回里的 consolidated knowledge 仍不足以支撑判断，或者你需要更强的证据链、来源说明、历史偏好归纳时，应优先尝试 `deep_recall`；只有在深度回忆仍不足时，才再尝试其他方式。";
+pub const MEMORIES_UNIT_WHEN: &str = "Use `deep_recall` when automatically recalled consolidated knowledge is insufficient, or when you need stronger evidence chains, sources, or historical preference synthesis. Only fall back to other methods if deep recall is still insufficient.";
 
-pub const MEMORIES_UNIT_HOW: &str = "阅读 `<recall_memories>` 时，应先区分 observations / raw memories / citations 的角色：优先用 consolidated knowledge 做高层判断，再用 raw evidence 校验细节。使用 `deep_recall` 时，query 应写成自然语言问题，并尽量说明对象、事实、时间范围、任务背景与线索；query 越具体，越容易召回真正相关的记忆。";
+pub const MEMORIES_UNIT_HOW: &str = "When reading `<recall_memories>`, distinguish observations, raw memories, and citations. Prefer consolidated knowledge for high-level judgment, then use raw evidence to verify details. When calling `deep_recall`, write the query as a natural-language question and include the subject, fact, time range, task context, and clues when possible; more specific queries recall more relevant memories.";
 
-pub const PLAN_UNIT_WHAT: &str =
-    "plan 是任务的最新分步计划。它用于记录完成当前任务所需的步骤顺序，以及每一步的当前进展。";
+pub const PLAN_UNIT_WHAT: &str = "A plan is the latest step-by-step plan for the current task. It records the sequence of steps needed to finish the task and the current progress of each step.";
 
-pub const PLAN_UNIT_WHEN: &str = "当任务是非平凡、多步骤、需要持续跟踪推进时，应维护 plan，使当前进展、下一步要做什么，以及整体剩余工作始终清晰。";
+pub const PLAN_UNIT_WHEN: &str = "Maintain a plan when the task is non-trivial, multi-step, or requires ongoing progress tracking, so current progress, the next step, and remaining work stay clear.";
 
-pub const PLAN_UNIT_HOW: &str = "使用 `update_plan` 持续维护 plan。每次调用时，都应提交当前完整的 plan，而不是只提交某一个步骤的增量修改。plan 中的步骤应是简短的一句话，尽量控制在 5 到 7 个词，且必须具体、可执行、可验证。只要还有未完成步骤，plan 中就应恰好有一个步骤是 `in_progress`；已完成步骤标记为 `completed`，后续步骤标记为 `pending`。当全部完成时，应将 plan 清空，而不是保留一组已完成步骤。";
+pub const PLAN_UNIT_HOW: &str = "Use `update_plan` to maintain the plan. Each call must submit the complete current plan, not a patch for one step. Plan steps should be short, preferably 5 to 7 words, and must be concrete, actionable, and verifiable. While work remains, exactly one step must be `in_progress`; completed steps use `completed`, later steps use `pending`. When all steps are complete, clear the plan instead of retaining completed steps.";
 
-pub const WORKFLOW_UNIT_WHAT: &str = "workflow 是可迭代的任务执行规范。每个 workflow 都描述何时适用、前置条件、可复用步骤、完成标准与稳定恢复路径。";
+pub const WORKFLOW_UNIT_WHAT: &str = "A workflow is an evolvable task execution specification. Each workflow describes applicability, preconditions, reusable steps, done criteria, and stable recovery paths.";
 
-pub const WORKFLOW_UNIT_WHEN: &str = "每个 turn 开始时，必须先绑定 workflow，然后才能执行任何任务。从快照候选中选择最合适的项并调用 `activate_workflow`；若无合适项，调用 `create_workflow` 创建新 workflow。workflow 对所有任务类型均适用，包括单次回复。";
+pub const WORKFLOW_UNIT_WHEN: &str = "At the start of each turn, bind a workflow before executing any task. Choose the best candidate from the snapshot and call `activate_workflow`; if none fits, call `create_workflow` to create a new workflow. Workflows apply to all task types, including one-off replies.";
 
-pub const WORKFLOW_UNIT_HOW: &str = "workflow 绑定只是当前任务的 runtime 状态，不会自动改写 workflow 规范本体。白天无需手工记录 workflow outcome；runtime 会在 work 完成边界直接写入 `WorkflowRunRecord`，供 sleep 在夜间进行 patch 或 merge。";
+pub const WORKFLOW_UNIT_HOW: &str = "A workflow binding is runtime state for the current task and does not rewrite the workflow spec. You do not need to manually log daytime workflow outcomes; the runtime writes `WorkflowRunRecord` directly at work-completion boundaries for sleep-time patch or merge.";
 
-pub const HISTORY_COMPACTION_PROMPT: &str = r#"你正在执行一个上下文检查点压缩任务。
-请为另一个将继续当前线程的模型生成一段 handoff summary。
+pub const HISTORY_COMPACTION_PROMPT: &str = r#"You are performing a context checkpoint compaction task.
+Generate a handoff summary for another model that will continue this same thread.
 
-必须包含：
-1. 当前进展与已经做出的关键决策
-2. 重要上下文、约束、用户偏好或系统边界
-3. 还剩下什么没做，以及明确的下一步
-4. 继续工作所需的关键数据、例子、路径或标识符
+Include:
+1. Current progress and key decisions already made
+2. Important context, constraints, user preferences, or system boundaries
+3. Remaining work and a concrete next step
+4. Key data, examples, paths, or identifiers needed to continue
 
-要求：
-- 简洁
-- 结构化
-- 只保留对后续继续工作真正必要的信息
-- 重点是让下一个模型无缝接手，而不是复述全文"#;
+Requirements:
+- Be concise
+- Be structured
+- Keep only information truly necessary for continuation
+- Focus on seamless handoff, not restating the entire transcript"#;
 
 pub const HISTORY_COMPACTION_SUMMARY_PREFIX: &str = r#"Earlier runtime context was compacted into the following handoff summary.
 Use it to continue the same thread without redoing already-finished work:"#;
 
 pub fn build_workspace_unit_what(context: &Context) -> String {
     format!(
-        "你的 workspace 绝对路径是 `{}`。",
+        "Your absolute workspace path is `{}`.",
         context.execution_cwd.display()
     )
 }
@@ -108,7 +107,7 @@ pub fn build_runtime_background_hint_items(context: &Context) -> Vec<String> {
 pub fn build_app_pre_focus_note_prompt(app_id: AppId, state: &AppStateRender) -> String {
     let mut builder = PromptTextBuilder::new();
     builder.push_paragraph(format!(
-        "当前 `{app_id}` 不在前景；如果你需要操作它，请先调用 `focus_app` 将它切到前景。"
+        "`{app_id}` is not currently focused. If you need to operate it, call `focus_app` first."
     ));
     if let Some(hint) = background_app_attention_hint(app_id, state) {
         builder.push_paragraph(hint);
@@ -123,12 +122,12 @@ fn background_app_attention_hint(app_id: AppId, state: &AppStateRender) -> Optio
 
     if app_id.is_terminal() {
         let summary = if !list_field(&state.lines, "unread_sessions").is_empty() {
-            "后台终端有未读输出。".to_string()
+            "The background terminal has unread output.".to_string()
         } else {
-            "后台终端需要注意。".to_string()
+            "The background terminal needs attention.".to_string()
         };
         return Some(format!(
-            "{} 如果你决定处理终端，请先调用 `focus_app` 将 `Terminal` 切到前景。",
+            "{} If you decide to handle the terminal, call `focus_app` to bring `Terminal` to the foreground first.",
             summary
         ));
     }

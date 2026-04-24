@@ -1,4 +1,4 @@
-//! 本模块实现实际的llm api调用
+//! Provider clients and LLM API calls.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -43,9 +43,9 @@ pub struct OpenAIClient {
     client: reqwest::Client,
     pub(crate) api_key: String,
     pub(crate) base_url: String,
-    /// chat completions 路径，默认 "/chat/completions"
+    /// Chat completions path. Defaults to "/chat/completions".
     completions_path: &'static str,
-    /// 每次请求附带的额外 headers（用于 Copilot IDE 鉴权等）
+    /// Extra headers attached to each request, for example Copilot IDE auth.
     extra_headers: reqwest::header::HeaderMap,
     model: String,
     temperature: f64,
@@ -122,7 +122,7 @@ enum ActiveChatCompletionsAdapter {
 }
 
 impl OpenAIClient {
-    /// 从独立的凭据 + ModelConfig 构造。
+    /// Build from standalone credentials and ModelConfig.
     pub fn from_parts(api_key: &str, base_url: &str, model_config: &ModelConfig) -> Self {
         let base_url = normalize_provider_base_url(base_url);
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
@@ -977,10 +977,10 @@ impl LLM for OpenAIClient {
 }
 
 // ---------------------------------------------------------------------------
-// 工厂函数：根据 config 构造 LLM
+// LLM factory from config.
 // ---------------------------------------------------------------------------
 
-/// 根据 model 名称和全局 Config 构造对应的 LLM 实例。
+/// Build the matching LLM instance by model name and global Config.
 pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn LLM + Send + Sync>> {
     let model_config = config
         .models

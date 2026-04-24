@@ -21,7 +21,7 @@ pub enum RuntimeStatusLevel {
     Error,
 }
 
-/// 初始化文件日志，返回必须持有到程序结束的 guard（drop 时 flush）。
+/// Initialize file logging and return the guard that must be held until process exit.
 pub async fn init_logging() -> WorkerGuard {
     let log_dir = daat_locus_paths().await.logs_dir();
     if let Err(err) = tokio::fs::create_dir_all(&log_dir).await {
@@ -29,7 +29,7 @@ pub async fn init_logging() -> WorkerGuard {
             "failed to create log directory {}: {err}",
             log_dir.display()
         );
-        // 回退到 stderr，返回一个 /dev/null appender 的 guard
+        // Fall back to stderr and return a /dev/null appender guard.
         let (non_blocking, guard) = tracing_appender::non_blocking(std::io::sink());
         let _ = tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::new("warn"))
@@ -52,7 +52,7 @@ pub async fn init_logging() -> WorkerGuard {
         .with_writer(non_blocking)
         .try_init()
     {
-        // 全局 subscriber 已被设置（正常情况下不应发生），回退到 stderr。
+        // Global subscriber was already set, which should not normally happen; fall back to stderr.
         eprintln!("init_logging: tracing subscriber already set, falling back to stderr: {err}");
         let (nb_stderr, guard_stderr) = tracing_appender::non_blocking(std::io::stderr());
         let _ = tracing_subscriber::fmt()

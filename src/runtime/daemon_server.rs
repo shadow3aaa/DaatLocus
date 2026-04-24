@@ -42,8 +42,9 @@ use crate::runtime::runtime_loop::{
 pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     let mut lock = DaemonLock::acquire().await?;
 
-    // 提前加载 telegram_acl（廉价 I/O），创建所有 channel，然后立即启动 HTTP 服务器并
-    // 监听固定本机端口——这样 wait_for_daemon_ready 在耗时初始化之前就能返回。
+    // Load telegram_acl first, create all channels, and start the HTTP server
+    // immediately on the fixed local port so wait_for_daemon_ready can return
+    // before expensive initialization starts.
     let telegram_acl = TelegramAclHandle::load().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
@@ -74,9 +75,11 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         "127.0.0.1", daemon_server.port
     ));
 
-    // 在耗时初始化开始前提前注册信号处理，防止冷启动编译期间无法响应 Ctrl+C / SIGTERM。
-    // 收到信号时直接 process::exit(0)；进入主循环后会 abort 此任务，信号处理权交还给主 select!。
-    // DaemonLock 锁文件不会被清理，但 acquire() 的 stale PID 检测会在下次启动时自动移除它。
+    // Register signal handling before expensive initialization so Ctrl+C /
+    // SIGTERM still works during cold-start compile. During startup we exit
+    // directly; after entering the main loop this task is aborted and signal
+    // handling is owned by the main select!. The DaemonLock file may remain, but
+    // acquire() removes it on the next startup via stale PID detection.
     #[cfg(unix)]
     let mut early_sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -102,10 +105,10 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         std::process::exit(0);
     });
 
-    // browser runtime 不存在时自动安装（幂等，已安装则跳过）。
+    // Auto-install the browser runtime when it is missing.
     maybe_setup_browser_runtime().await;
 
-    // 耗时初始化（hindsight + prompt compile）在服务器启动后进行。
+    // Run expensive initialization after the server is already listening.
     let hindsight = connect_bootstrapped_hindsight(&config, true).await?;
     let hindsight_retain = hindsight.spawn_retain_worker();
 
@@ -189,7 +192,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         last_idle_sleep_at: None,
     };
 
-    // context 构建完成后，用真实状态替换占位 dashboard state。
+    // Replace the placeholder dashboard state with real state after context is built.
     let startup_snapshot = Snapshot::new(&mut context).await;
     let startup_snapshot_output = build_runtime_snapshot_text(&context, &startup_snapshot);
     let app_renders = context.apps.state_renders();
@@ -244,11 +247,11 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             None
         };
 
-    // 启动完成，early_shutdown_handle 已不再需要，abort 以让主循环的信号处理独占接管。
+    // Startup is complete; abort early signal handling so the main loop owns it.
     early_shutdown_handle.abort();
 
-    // SIGTERM → graceful shutdown（unix only）。
-    // 在 Windows 等平台上用 pending() 占位，让 select! 的分支结构保持统一。
+    // SIGTERM -> graceful shutdown on Unix. Other platforms use pending() so the
+    // select! structure stays uniform.
     #[cfg(unix)]
     let mut sigterm = {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

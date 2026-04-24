@@ -284,7 +284,7 @@ pub(crate) fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSu
     let prompt = &summary.prompt_improvement;
     let workflow = &summary.workflow_improvement;
     format!(
-        "sleep 完成：prompt traces={}，failure_patterns/reflections/candidates/evaluations/frontier={}/{}/{}/{}/{}，prompt lineage={}/{}/{}，prompt additions={}，workflow evidence/reflections/patch/merge/evaluations/frontier={}/{}/{}/{}/{}/{}，workflow lineage={}/{}/{}，应用 patch/merge={}/{}，回滚 {}",
+        "sleep completed: prompt traces={}, failure_patterns/reflections/candidates/evaluations/frontier={}/{}/{}/{}/{}, prompt lineage={}/{}/{}, prompt additions={}, workflow evidence/reflections/patch/merge/evaluations/frontier={}/{}/{}/{}/{}/{}, workflow lineage={}/{}/{}, applied patch/merge={}/{}, rollbacks={}",
         prompt.consumed_trace_events,
         prompt.failure_patterns.len(),
         prompt.prompt_reflections,

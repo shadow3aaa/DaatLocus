@@ -276,7 +276,7 @@ mod tests {
     fn follow_up_reason_messages_are_structured() {
         assert_eq!(
             RuntimeFollowUpReason::RawStreamRequestedFollowUp.message(),
-            "本次采样仍标记为 needs_follow_up；请继续推进当前 turn。"
+            "This sample is still marked needs_follow_up; continue the current turn."
         );
     }
 

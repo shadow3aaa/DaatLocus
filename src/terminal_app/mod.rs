@@ -24,33 +24,34 @@ use crate::{
     tool_ui::{TerminalUiAction, ToolCallUiEvent, ToolUiEvent, compact_body_lines},
 };
 
-const TERMINAL_USAGE_PURPOSE: &str = "Terminal 是本地命令执行与持续进程交互界面。";
+const TERMINAL_USAGE_PURPOSE: &str =
+    "Terminal is the local command execution and long-running process interaction surface.";
 const TERMINAL_WHEN_TO_FOCUS: &[&str] = &[
-    "需要执行本地命令或脚本时。",
-    "需要查看命令输出、错误信息或文件系统探查结果时。",
-    "需要继续与正在运行的进程交互、等待输出或终止会话时。",
+    "When local commands or scripts need to run.",
+    "When command output, errors, or filesystem inspection results are needed.",
+    "When an already-running process needs continued stdin interaction, output waiting, or termination.",
 ];
 
 #[cfg(windows)]
 const TERMINAL_HOW_TO_USE_LINES: &[&str] = &[
-    "Terminal 通过 terminal tools 操作，不要假设自己要直接输出一段终端输入文本作为动作。",
-    "终端只通过 `terminal_exec / terminal_write_stdin / terminal_terminate` 操作。",
-    "`terminal_exec` 在不提供 `session_id` 时会新建 session；只有显式提供 `session_id` 时才会复用已有 session。",
-    "如果命令仍在运行，后续继续使用 `terminal_write_stdin`，并显式提供目标 `session_id`。当你只是想继续等待输出时，发送空文本即可。",
-    "绝对严禁使用任何交互式全屏终端程序（如 vim, vi, nano, less, top 等）。如果需要查看文件，请使用 `cat`、`grep`、`head`、`tail`、`python -c` 等非交互命令；如果需要修改文件，请优先使用 `apply_patch`，不要依赖 shell 拼接。",
-    "严禁主动启动任何需要人类账号、密码、浏览器授权、设备码授权或交互式登录向导的命令，例如 `gh auth login`、`docker login`、`npm login` 等。优先使用公开可访问的网页、HTTP API、`git clone`、`curl` 或无需认证的查询方式。",
-    "如果终端已经停在你不该进入的交互式认证/登录提示上，不要继续回答向导问题；应优先中断，再改用非交互方案。",
+    "Operate Terminal only through terminal tools; do not assume that plain assistant text is terminal input.",
+    "Use only `terminal_exec / terminal_write_stdin / terminal_terminate` for terminal operations.",
+    "`terminal_exec` creates a new session when `session_id` is omitted and reuses an existing session only when `session_id` is explicitly provided.",
+    "If a command is still running, continue with `terminal_write_stdin` and explicitly provide the target `session_id`. Send empty text when you only want to wait for more output.",
+    "Never use interactive full-screen terminal programs such as vim, vi, nano, less, or top. Use non-interactive commands such as `cat`, `grep`, `head`, `tail`, or `python -c` to inspect files; prefer `apply_patch` for edits instead of shell string assembly.",
+    "Never proactively start commands that require human accounts, passwords, browser authorization, device-code authorization, or interactive login wizards, such as `gh auth login`, `docker login`, or `npm login`. Prefer public webpages, HTTP APIs, `git clone`, `curl`, or unauthenticated lookup paths.",
+    "If the terminal is already stuck in an authentication or login prompt you should not enter, do not continue answering wizard questions; interrupt it and switch to a non-interactive approach.",
 ];
 
 #[cfg(not(windows))]
 const TERMINAL_HOW_TO_USE_LINES: &[&str] = &[
-    "Terminal 通过 terminal tools 操作，不要假设自己要直接输出一段终端输入文本作为动作。",
-    "终端只通过 `terminal_exec / terminal_write_stdin / terminal_terminate` 操作。",
-    "`terminal_exec` 在不提供 `session_id` 时会新建 session；只有显式提供 `session_id` 时才会复用已有 session。",
-    "如果命令仍在运行，后续继续使用 `terminal_write_stdin`，并显式提供目标 `session_id`。当你只是想继续等待输出时，发送空文本即可。",
-    "绝对严禁使用任何交互式全屏终端程序（如 vim, vi, nano, less, top 等）。如果需要查看文件，请使用 `cat`、`grep`、`head`、`tail`、`python -c` 等非交互命令；如果需要修改文件，请优先使用 `apply_patch`，不要依赖 shell 拼接。",
-    "严禁主动启动任何需要人类账号、密码、浏览器授权、设备码授权或交互式登录向导的命令，例如 `gh auth login`、`docker login`、`npm login` 等。优先使用公开可访问的网页、HTTP API、`git clone`、`curl` 或无需认证的查询方式。",
-    "如果终端已经停在你不该进入的交互式认证/登录提示上，不要继续回答向导问题；应优先中断，再改用非交互方案。",
+    "Operate Terminal only through terminal tools; do not assume that plain assistant text is terminal input.",
+    "Use only `terminal_exec / terminal_write_stdin / terminal_terminate` for terminal operations.",
+    "`terminal_exec` creates a new session when `session_id` is omitted and reuses an existing session only when `session_id` is explicitly provided.",
+    "If a command is still running, continue with `terminal_write_stdin` and explicitly provide the target `session_id`. Send empty text when you only want to wait for more output.",
+    "Never use interactive full-screen terminal programs such as vim, vi, nano, less, or top. Use non-interactive commands such as `cat`, `grep`, `head`, `tail`, or `python -c` to inspect files; prefer `apply_patch` for edits instead of shell string assembly.",
+    "Never proactively start commands that require human accounts, passwords, browser authorization, device-code authorization, or interactive login wizards, such as `gh auth login`, `docker login`, or `npm login`. Prefer public webpages, HTTP APIs, `git clone`, `curl`, or unauthenticated lookup paths.",
+    "If the terminal is already stuck in an authentication or login prompt you should not enter, do not continue answering wizard questions; interrupt it and switch to a non-interactive approach.",
 ];
 
 pub struct TerminalApp {
@@ -532,17 +533,17 @@ impl App for TerminalApp {
         Ok(vec![
             AppToolSpec {
                 name: "terminal_exec".to_string(),
-                description: "启动一条终端命令，并在当前输出窗口结束后返回输出。如果提供 `session_id`，则在该 session 中复用执行；如果不提供，则新建 session。若命令仍在运行，结果中会保留 session，后续继续使用 terminal_write_stdin。".to_string(),
+                description: "Start a terminal command and return output after the current output window ends. If `session_id` is provided, reuse that session; otherwise create a new session. If the command is still running, the result keeps the session so later calls can continue with terminal_write_stdin.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(TerminalExecArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "terminal_write_stdin".to_string(),
-                description: "继续一个正在运行的 terminal session。发送文本可写入 stdin；发送空文本可仅等待下一段输出。".to_string(),
+                description: "Continue a running terminal session. Send text to write stdin; send empty text to only wait for the next output chunk.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(TerminalWriteStdinArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "terminal_terminate".to_string(),
-                description: "终止指定 terminal session 的当前前台进程，并返回更新后的 session 状态。".to_string(),
+                description: "Terminate the current foreground process in the specified terminal session and return the updated session state.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(TerminalTerminateArgs)).unwrap(),
             },
         ])

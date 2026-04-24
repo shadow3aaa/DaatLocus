@@ -234,7 +234,7 @@ fn workflow_rollout_detect_runtime_rollback(output: &AgentLoopStepOutput) -> boo
             .join("\n")
     )
     .to_ascii_lowercase();
-    text.contains("rollback") || text.contains("回滚") || text.contains("revert")
+    text.contains("rollback") || text.contains("revert")
 }
 
 fn workflow_rollout_detect_runtime_manual_fix(output: &AgentLoopStepOutput) -> bool {
@@ -248,7 +248,7 @@ fn workflow_rollout_detect_runtime_manual_fix(output: &AgentLoopStepOutput) -> b
 
 fn workflow_rollout_classify_runtime_failure_type(output: &AgentLoopStepOutput) -> Option<String> {
     let text = format!("{}\n{}", output.description, output.observation).to_ascii_lowercase();
-    if text.contains("timeout") || text.contains("超时") {
+    if text.contains("timeout") {
         return Some("timeout".to_string());
     }
     if text.contains("schema") || text.contains("deserialize") || text.contains("json") {
@@ -260,7 +260,7 @@ fn workflow_rollout_classify_runtime_failure_type(output: &AgentLoopStepOutput) 
     if text.contains("tool") && text.contains("failed") {
         return Some("tool_failure".to_string());
     }
-    if text.contains("error") || text.contains("失败") {
+    if text.contains("error") || text.contains("failed") || text.contains("failure") {
         return Some("runtime_error".to_string());
     }
     None

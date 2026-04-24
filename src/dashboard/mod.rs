@@ -776,21 +776,21 @@ fn execute_access_request_command(
     let action = if approve { "approve" } else { "reject" };
 
     let chat_id = if let Some(target) = parts.get(2).copied() {
-        // 有参数：直接当 chat_id 解析
+        // Argument form: parse directly as chat_id.
         match target.parse::<i64>() {
             Ok(id) => id,
             Err(_) => return format!("invalid chat_id: {target}"),
         }
     } else {
-        // 无参数：交互式
+        // No argument: offer interactive guidance.
         match context.requests.len() {
             0 => return format!("no pending requests"),
             1 => {
-                // 只有一个请求，直接执行
+                // Single request: execute directly.
                 context.requests[0].chat_id
             }
             _ => {
-                // 多个请求，列出 chat_id 让用户选择
+                // Multiple requests: list chat_ids for explicit selection.
                 let mut lines = vec![format!(
                     "pending requests — run 'telegram {action} <chat_id>' to proceed:"
                 )];
@@ -1518,10 +1518,10 @@ fn matching_commands(input: &str, context: &DashboardCommandContext<'_>) -> Vec<
         .find(|command| command.accepts(parts[0]))
     {
         if !command.subcommands().is_empty() && (parts.len() > 1 || trailing_space) {
-            // 只在光标仍在 subcommand 单词上时才提供补全：
+            // Complete subcommands only while the cursor is still within the subcommand word:
             //   "telegram "      → trailing_space=true,  parts.len()==1  ✓
             //   "telegram app"   → trailing_space=false, parts.len()==2  ✓
-            // 一旦用户输了 subcommand 名字后加了空格/参数（进入参数阶段）就不再补全：
+            // Once the user has typed a subcommand plus a space or argument, stop completing subcommands:
             //   "telegram approve "   → trailing_space=true,  parts.len()==2  ✗
             //   "telegram approve 1"  → trailing_space=false, parts.len()==3  ✗
             let in_subcommand_word =
@@ -1547,7 +1547,7 @@ fn matching_commands(input: &str, context: &DashboardCommandContext<'_>) -> Vec<
                     return direct;
                 }
             } else {
-                // 进入参数阶段，让命令自己提供参数补全
+                // Argument phase: let the command provide argument completions.
                 let args = command.complete_arguments(&parts, context);
                 if !args.is_empty() {
                     return args;

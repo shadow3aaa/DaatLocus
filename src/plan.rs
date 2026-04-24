@@ -163,7 +163,7 @@ mod tests {
 impl Display for Plan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.steps.is_empty() {
-            return write!(f, "当前没有 plan。");
+            return write!(f, "No current plan.");
         }
 
         for (index, step) in self.steps.iter().enumerate() {
