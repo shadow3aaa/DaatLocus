@@ -609,8 +609,10 @@ impl OpenAIClient {
         let mut reasoning_content = String::new();
         let mut tool_calls: Vec<StreamingToolCallBuilder> = Vec::new();
         let mut last_usage = None;
-        let mut last_progress_emit_at = Instant::now();
-        let mut last_progress_char_len = 0usize;
+        let mut last_assistant_progress_emit_at = Instant::now();
+        let mut last_assistant_progress_char_len = 0usize;
+        let mut last_reasoning_progress_emit_at = Instant::now();
+        let mut last_reasoning_progress_char_len = 0usize;
         let mut stream = response.bytes_stream();
         let mut stream_done = false;
         while !stream_done {
@@ -661,17 +663,28 @@ impl OpenAIClient {
                     let should_emit = content
                         .chars()
                         .count()
-                        .saturating_sub(last_progress_char_len)
+                        .saturating_sub(last_assistant_progress_char_len)
                         >= 64
-                        || last_progress_emit_at.elapsed() >= Duration::from_millis(800);
+                        || last_assistant_progress_emit_at.elapsed() >= Duration::from_millis(800);
                     if should_emit && !content.trim().is_empty() {
                         context.emit_live_assistant_progress(&content);
-                        last_progress_emit_at = Instant::now();
-                        last_progress_char_len = content.chars().count();
+                        last_assistant_progress_emit_at = Instant::now();
+                        last_assistant_progress_char_len = content.chars().count();
                     }
                 }
                 if let Some(delta_reasoning_content) = delta["reasoning_content"].as_str() {
                     reasoning_content.push_str(delta_reasoning_content);
+                    let should_emit = reasoning_content
+                        .chars()
+                        .count()
+                        .saturating_sub(last_reasoning_progress_char_len)
+                        >= 64
+                        || last_reasoning_progress_emit_at.elapsed() >= Duration::from_millis(800);
+                    if should_emit && !reasoning_content.trim().is_empty() {
+                        context.emit_live_reasoning_progress(&reasoning_content);
+                        last_reasoning_progress_emit_at = Instant::now();
+                        last_reasoning_progress_char_len = reasoning_content.chars().count();
+                    }
                 }
                 if let Some(delta_tool_calls) = delta["tool_calls"].as_array() {
                     for tool_call in delta_tool_calls {
@@ -687,7 +700,13 @@ impl OpenAIClient {
                 }
             }
         }
-        if !content.trim().is_empty() && content.chars().count() != last_progress_char_len {
+        if !reasoning_content.trim().is_empty()
+            && reasoning_content.chars().count() != last_reasoning_progress_char_len
+        {
+            context.emit_live_reasoning_progress(&reasoning_content);
+        }
+        if !content.trim().is_empty() && content.chars().count() != last_assistant_progress_char_len
+        {
             context.emit_live_assistant_progress(&content);
         }
         if let Some(usage) = last_usage {

@@ -28,7 +28,7 @@ async fn abort_runtime_turn_before_model(
     if let Some(session) = live_draft_session {
         session.shutdown(context).await;
     } else {
-        context.install_live_assistant_progress(None);
+        context.install_live_progress(None);
     }
     if let Some(fingerprint) = claimed_input_fingerprint {
         context.clear_runtime_overflow_failure(fingerprint);
@@ -301,6 +301,7 @@ pub(crate) async fn execute_agent_loop_step(
             tools: tools.clone(),
         };
         enter_runtime_phase(context, tx, RuntimeTurnPhase::ModelRequest);
+        context.emit_live_generation_started();
         let response = match run_agent_turn_with_retry(context, request, tx).await {
             Ok(response) => response,
             Err(err) => {
@@ -370,6 +371,20 @@ pub(crate) async fn execute_agent_loop_step(
             .last_assistant_message
             .clone()
             .or_else(|| response_assistant_messages.last().cloned());
+        if let Some(reasoning_content) = response.last_reasoning_content.as_deref()
+            && !reasoning_content.trim().is_empty()
+        {
+            context.emit_live_reasoning_progress(reasoning_content);
+        }
+        if let Some(content) = response_assistant_content.as_deref()
+            && !content.trim().is_empty()
+        {
+            context.emit_live_assistant_progress(content);
+        }
+        let tool_titles_in_reasoning = response
+            .last_reasoning_content
+            .as_deref()
+            .is_some_and(|content| !content.trim().is_empty());
 
         if !response_tool_calls.is_empty() {
             let calls = response_tool_calls;
@@ -425,6 +440,9 @@ pub(crate) async fn execute_agent_loop_step(
             }
             append_committed_activity_cells(tx, committed_cells);
             for (call, call_ui_event) in calls.iter().zip(tool_call_ui_events.iter()) {
+                if let Some(title) = live_tool_call_title(call_ui_event) {
+                    context.emit_live_tool_call_title(title, tool_titles_in_reasoning);
+                }
                 let action_record =
                     summarize_action_from_tool_call(context, call).unwrap_or_else(|_| {
                         EpisodeActionRecord {
@@ -630,7 +648,7 @@ pub(crate) async fn execute_agent_loop_step(
     if let Some(session) = live_draft_session {
         session.shutdown(context).await;
     } else {
-        context.install_live_assistant_progress(None);
+        context.install_live_progress(None);
     }
     if let Some(fingerprint) = claimed_input_fingerprint.as_deref() {
         context.clear_runtime_overflow_failure(fingerprint);
@@ -647,6 +665,22 @@ pub(crate) async fn execute_agent_loop_step(
     AgentLoopStepExecution {
         output,
         history_messages,
+    }
+}
+
+fn live_tool_call_title(event: &ToolCallUiEvent) -> Option<&str> {
+    match event {
+        ToolCallUiEvent::Exec(event)
+        | ToolCallUiEvent::Plan(event)
+        | ToolCallUiEvent::CreateWorkflow(event)
+        | ToolCallUiEvent::ActivateWorkflow(event)
+        | ToolCallUiEvent::DeepRecall(event)
+        | ToolCallUiEvent::App(event)
+        | ToolCallUiEvent::Error(event) => Some(event.title.as_str()),
+        ToolCallUiEvent::Terminal(event) => Some(event.title.as_str()),
+        ToolCallUiEvent::Browser(event) => Some(event.title.as_str()),
+        ToolCallUiEvent::Telegram(event) => Some(event.title.as_str()),
+        ToolCallUiEvent::Patch(event) => Some(event.summary_line.as_str()),
     }
 }
 
