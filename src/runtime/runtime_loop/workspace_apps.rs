@@ -1,0 +1,72 @@
+use super::*;
+
+pub(super) fn drain_workspace_app_invalidations(
+    workspace_apps: &mut WorkspaceAppRegistry,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<WorkspaceAppInvalidation>,
+) {
+    loop {
+        match rx.try_recv() {
+            Ok(invalidation) => workspace_apps.record_invalidation(invalidation),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
+pub(super) async fn sync_workspace_apps_from_invalidation(context: &mut Context) {
+    let report = match context
+        .workspace_apps
+        .sync_dirty_apps(&mut context.apps)
+        .await
+    {
+        Ok(report) => report,
+        Err(err) => {
+            tracing::error!("failed to sync workspace apps from invalidation: {err:?}");
+            return;
+        }
+    };
+
+    if report.is_empty() {
+        return;
+    }
+
+    for removed in &report.removed {
+        context.active_app_notices.remove(removed);
+    }
+    if !report.added.is_empty() {
+        tracing::info!(
+            apps = report
+                .added
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            "loaded workspace apps from source changes",
+        );
+    }
+    if !report.reloaded.is_empty() {
+        tracing::info!(
+            apps = report
+                .reloaded
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            "reloaded workspace apps from source changes",
+        );
+    }
+    if !report.removed.is_empty() {
+        tracing::info!(
+            apps = report
+                .removed
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            "unloaded workspace apps removed from source tree",
+        );
+    }
+    for error in report.errors {
+        tracing::warn!("{error}");
+    }
+}
