@@ -1974,17 +1974,24 @@ pub(crate) async fn execute_agent_loop_step(
                     })
                 })
                 .collect::<Vec<_>>();
-            runtime_step.push_agent_message(AgentMessage::assistant_tool_call_protocol(
-                assistant_text.clone(),
-                calls.clone(),
-            ));
+            runtime_step.push_agent_message(
+                AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                    assistant_text.clone(),
+                    response.last_reasoning_content.clone(),
+                    calls.clone(),
+                ),
+            );
             if let Some(content) = assistant_text.clone()
                 && !content.trim().is_empty()
             {
                 runtime_step.push_history_message(HistoryMessage::assistant(content));
             }
             runtime_step.push_history_message(HistoryMessage {
-                message: AgentMessage::assistant_tool_call_protocol(None, calls.clone()),
+                message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                    None,
+                    response.last_reasoning_content.clone(),
+                    calls.clone(),
+                ),
                 tool_ui_event: None,
                 tool_call_ui_events: tool_call_ui_events.clone(),
             });

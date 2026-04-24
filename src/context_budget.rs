@@ -205,11 +205,21 @@ pub fn estimate_agent_turn_request(
                 .iter()
                 .filter_map(|message| match message {
                     AgentMessage::Assistant { .. } => Some(estimate_agent_message_tokens(message)),
-                    AgentMessage::AssistantToolCallProtocol { content, .. } => Some(
+                    AgentMessage::AssistantToolCallProtocol {
+                        content,
+                        reasoning_content,
+                        ..
+                    } => Some(
                         content
                             .as_deref()
                             .map(|content| message_token_cost("assistant", content))
-                            .unwrap_or(0),
+                            .unwrap_or(0)
+                            .saturating_add(
+                                reasoning_content
+                                    .as_deref()
+                                    .map(approx_token_count)
+                                    .unwrap_or(0),
+                            ),
                     ),
                     _ => None,
                 })
@@ -344,11 +354,21 @@ fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
         AgentMessage::System { content } => message_token_cost("system", content),
         AgentMessage::User { content } => message_token_cost("user", content),
         AgentMessage::Assistant { content } => message_token_cost("assistant", content),
-        AgentMessage::AssistantToolCallProtocol { content, calls } => {
+        AgentMessage::AssistantToolCallProtocol {
+            content,
+            reasoning_content,
+            calls,
+        } => {
             let content_tokens = content
                 .as_deref()
                 .map(|content| message_token_cost("assistant", content))
-                .unwrap_or(4);
+                .unwrap_or(4)
+                .saturating_add(
+                    reasoning_content
+                        .as_deref()
+                        .map(approx_token_count)
+                        .unwrap_or(0),
+                );
             content_tokens.saturating_add(estimate_assistant_tool_call_protocol_tokens(
                 calls,
                 estimate_json_value_tokens,

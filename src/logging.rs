@@ -226,9 +226,15 @@ fn render_agent_message_dump(message: &AgentMessage) -> Vec<String> {
                 content.clone(),
             ]
         }
-        AgentMessage::AssistantToolCallProtocol { content, calls } => {
-            render_assistant_tool_call_protocol_dump(content.as_deref(), calls)
-        }
+        AgentMessage::AssistantToolCallProtocol {
+            content,
+            reasoning_content,
+            calls,
+        } => render_assistant_tool_call_protocol_dump(
+            content.as_deref(),
+            reasoning_content.as_deref(),
+            calls,
+        ),
         AgentMessage::Tool {
             tool_call_id,
             name,

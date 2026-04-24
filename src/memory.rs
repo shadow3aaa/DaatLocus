@@ -902,9 +902,14 @@ fn history_message_token_cost(message: &HistoryMessage) -> usize {
         AgentMessage::Assistant { content } => {
             approx_token_count("assistant") + approx_token_count(content) + 4
         }
-        AgentMessage::AssistantToolCallProtocol { content, calls } => {
+        AgentMessage::AssistantToolCallProtocol {
+            content,
+            reasoning_content,
+            calls,
+        } => {
             approx_token_count("assistant")
                 + approx_token_count(content.as_deref().unwrap_or_default())
+                + approx_token_count(reasoning_content.as_deref().unwrap_or_default())
                 + calls
                     .iter()
                     .map(|call| {
@@ -997,9 +1002,15 @@ fn trim_history_message_content(mut message: HistoryMessage) -> HistoryMessage {
         AgentMessage::System { .. } => AgentMessage::system(trimmed),
         AgentMessage::User { .. } => AgentMessage::user(trimmed),
         AgentMessage::Assistant { .. } => AgentMessage::assistant(trimmed),
-        AgentMessage::AssistantToolCallProtocol { calls, .. } => {
-            AgentMessage::assistant_tool_call_protocol(Some(trimmed), calls)
-        }
+        AgentMessage::AssistantToolCallProtocol {
+            reasoning_content,
+            calls,
+            ..
+        } => AgentMessage::assistant_tool_call_protocol_with_reasoning(
+            Some(trimmed),
+            reasoning_content,
+            calls,
+        ),
         AgentMessage::Tool {
             tool_call_id, name, ..
         } => AgentMessage::tool(tool_call_id, name, trimmed),
@@ -1349,6 +1360,36 @@ mod tests {
     }
 
     #[test]
+    fn normalizing_tool_call_history_preserves_reasoning_content() {
+        let message = HistoryMessage {
+            message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                Some("  checking state  ".to_string()),
+                Some("provider reasoning".to_string()),
+                vec![crate::reasoning::runtime::AgentToolCall {
+                    id: "call_1".to_string(),
+                    name: "terminal_exec".to_string(),
+                    arguments: serde_json::json!({ "cmd": "pwd" }),
+                }],
+            ),
+            tool_ui_event: None,
+            tool_call_ui_events: Vec::new(),
+        };
+
+        let normalized = normalize_runtime_prompt_message(message).expect("message should remain");
+        match normalized.message {
+            AgentMessage::AssistantToolCallProtocol {
+                content,
+                reasoning_content,
+                ..
+            } => {
+                assert_eq!(content.as_deref(), Some("checking state"));
+                assert_eq!(reasoning_content.as_deref(), Some("provider reasoning"));
+            }
+            _ => panic!("expected assistant tool-call protocol"),
+        }
+    }
+
+    #[test]
     fn hindsight_retain_transcript_keeps_structured_tool_blocks() {
         let transcript = build_hindsight_retain_transcript(&[
             HistoryMessage::user("user input"),
@@ -1459,7 +1500,7 @@ fn build_hindsight_retain_transcript(messages: &[HistoryMessage]) -> Vec<serde_j
                     }));
                 }
             }
-            AgentMessage::AssistantToolCallProtocol { content, calls } => {
+            AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
                 let mut blocks = Vec::new();
                 if let Some(text) = content.as_deref().map(str::trim)
                     && !text.is_empty()

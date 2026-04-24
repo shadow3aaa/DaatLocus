@@ -85,6 +85,8 @@ pub enum AgentMessage {
     },
     AssistantToolCallProtocol {
         content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
         calls: Vec<AgentToolCall>,
     },
     Tool {
@@ -113,6 +115,8 @@ pub struct AgentTurnStreamResult {
     #[serde(alias = "needs_follow_up")]
     pub raw_stream_follow_up: bool,
     pub last_assistant_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reasoning_content: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -326,7 +330,19 @@ impl AgentMessage {
         content: Option<String>,
         calls: Vec<AgentToolCall>,
     ) -> Self {
-        Self::AssistantToolCallProtocol { content, calls }
+        Self::assistant_tool_call_protocol_with_reasoning(content, None, calls)
+    }
+
+    pub fn assistant_tool_call_protocol_with_reasoning(
+        content: Option<String>,
+        reasoning_content: Option<String>,
+        calls: Vec<AgentToolCall>,
+    ) -> Self {
+        Self::AssistantToolCallProtocol {
+            content,
+            reasoning_content,
+            calls,
+        }
     }
 
     pub fn tool(
@@ -362,9 +378,11 @@ pub fn summarize_assistant_tool_call_protocol(
 
 pub fn assistant_tool_call_protocol_char_count(
     content: Option<&str>,
+    reasoning_content: Option<&str>,
     calls: &[AgentToolCall],
 ) -> usize {
     content.unwrap_or_default().chars().count()
+        + reasoning_content.unwrap_or_default().chars().count()
         + calls
             .iter()
             .map(|call| {
@@ -393,6 +411,7 @@ pub fn estimate_assistant_tool_call_protocol_tokens(
 
 pub fn render_assistant_tool_call_protocol_dump(
     content: Option<&str>,
+    reasoning_content: Option<&str>,
     calls: &[AgentToolCall],
 ) -> Vec<String> {
     let mut lines = vec!["role=assistant".to_string()];
@@ -401,6 +420,9 @@ pub fn render_assistant_tool_call_protocol_dump(
     {
         lines.push("content:".to_string());
         lines.push(content.to_string());
+    }
+    if reasoning_content.is_some_and(|text| !text.trim().is_empty()) {
+        lines.push("reasoning_content=<redacted>".to_string());
     }
     lines.push(format!("tool_call_count={}", calls.len()));
     for (index, call) in calls.iter().enumerate() {
