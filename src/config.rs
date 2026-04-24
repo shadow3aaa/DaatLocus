@@ -10,6 +10,7 @@ use crate::{
         DEFAULT_MAX_COMPLETION_TOKENS, DEFAULT_TOOL_OUTPUT_MAX_TOKENS,
     },
     daat_locus_paths::daat_locus_paths,
+    i18n::Locale,
 };
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -20,7 +21,7 @@ pub fn normalize_provider_base_url(base_url: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Provider 凭据层
+// Provider credentials
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -41,15 +42,15 @@ pub enum ProviderConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Model 能力层
+// Model capabilities
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
-    /// 引用 Config.providers 中的 key
+    /// Key reference into Config.providers.
     pub provider: String,
-    /// 发送给 API 的 model 标识符
+    /// Model identifier sent to the provider API.
     pub model_id: String,
     pub temperature: f64,
     pub thinking_budget: Option<String>,
@@ -139,14 +140,14 @@ impl ModelConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Judge 配置
+// Judge configuration
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JudgeConfig {
     pub enabled: bool,
-    /// None = 使用 main_model
+    /// None = use main_model.
     pub model: Option<String>,
     pub max_pairwise_candidates: usize,
     pub max_pairwise_cases: usize,
@@ -164,17 +165,18 @@ impl Default for JudgeConfig {
 }
 
 // ---------------------------------------------------------------------------
-// 顶层 Config
+// Top-level config
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Provider 凭据注册表，key 为用户自定义名称
+    pub locale: Locale,
+    /// Provider credential registry keyed by user-defined names.
     pub providers: HashMap<String, ProviderConfig>,
-    /// Model 定义注册表，key 为用户自定义名称
+    /// Model definition registry keyed by user-defined names.
     pub models: HashMap<String, ModelConfig>,
-    /// 主模型名称，引用 models 中的 key
+    /// Main model name; key reference into models.
     pub main_model: String,
     pub daemon: DaemonConfig,
     pub judge: JudgeConfig,
@@ -199,6 +201,7 @@ impl Default for Config {
         Self {
             providers,
             models,
+            locale: Locale::default(),
             main_model: "default".to_string(),
             daemon: DaemonConfig::default(),
             judge: JudgeConfig::default(),
@@ -209,14 +212,14 @@ impl Default for Config {
 }
 
 impl Config {
-    /// 返回主模型配置，若 key 不存在则 panic（应在启动时校验）。
+    /// Return the main model config. Missing keys panic because startup validation should catch them.
     pub fn main_model_config(&self) -> &ModelConfig {
         self.models
             .get(&self.main_model)
             .unwrap_or_else(|| panic!("main_model '{}' not found in models", self.main_model))
     }
 
-    /// 返回主模型对应的 provider 配置。
+    /// Return the provider config used by the main model.
     pub fn main_provider_config(&self) -> &ProviderConfig {
         let provider_key = &self.main_model_config().provider;
         self.providers
@@ -224,7 +227,7 @@ impl Config {
             .unwrap_or_else(|| panic!("provider '{}' not found in providers", provider_key))
     }
 
-    /// 返回 judge 使用的模型配置（未指定时退回主模型）。
+    /// Return the judge model config, falling back to the main model when unspecified.
     pub fn judge_model_config(&self) -> &ModelConfig {
         let key = self.judge.model.as_deref().unwrap_or(&self.main_model);
         self.models
@@ -232,7 +235,7 @@ impl Config {
             .unwrap_or_else(|| panic!("judge model '{}' not found in models", key))
     }
 
-    /// 返回 hindsight 使用的模型配置（未指定时退回主模型）。
+    /// Return the hindsight model config, falling back to the main model when unspecified.
     pub fn hindsight_model_config(&self) -> &ModelConfig {
         let key = self.hindsight.model.as_deref().unwrap_or(&self.main_model);
         self.models
@@ -240,7 +243,7 @@ impl Config {
             .unwrap_or_else(|| panic!("hindsight model '{}' not found in models", key))
     }
 
-    /// 返回 hindsight 使用的 provider 配置。
+    /// Return the provider config used by hindsight.
     pub fn hindsight_provider_config(&self) -> &ProviderConfig {
         let provider_key = &self.hindsight_model_config().provider;
         self.providers
@@ -248,7 +251,7 @@ impl Config {
             .unwrap_or_else(|| panic!("provider '{}' not found in providers", provider_key))
     }
 
-    /// 校验 main_model 和 judge model 引用的 provider/model 都存在。
+    /// Validate provider and model references.
     pub fn validate(&self) -> Result<(), String> {
         if self.daemon.port == 0 {
             return Err("daemon.port must be greater than 0".to_string());
@@ -297,7 +300,7 @@ impl Config {
 }
 
 // ---------------------------------------------------------------------------
-// 其他子配置（不变）
+// Other sub-configs
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -369,22 +372,22 @@ impl TelegramConfig {
 }
 
 // ---------------------------------------------------------------------------
-// 错误 & 加载
+// Errors and loading
 // ---------------------------------------------------------------------------
 
 #[derive(Error, Debug, Diagnostic)]
 pub enum ConfigError {
-    #[error("配置文件读取失败: {0}")]
+    #[error("failed to read config file: {0}")]
     IO(#[from] std::io::Error),
     #[error("{0}")]
     #[diagnostic(code(config::syntax_error))]
     Syntax(String),
-    #[error("配置校验失败: {0}")]
+    #[error("config validation failed: {0}")]
     #[diagnostic(code(config::validation_error))]
     Validation(String),
 }
 
-/// config.toml 是否已存在
+/// Return whether config.toml exists.
 pub async fn config_file_exists() -> bool {
     daat_locus_paths()
         .await
@@ -392,7 +395,7 @@ pub async fn config_file_exists() -> bool {
         .exists()
 }
 
-/// 将 Config 序列化并写入 config.toml
+/// Serialize Config and write it to config.toml.
 pub async fn write_config(config: &Config) -> Result<(), ConfigError> {
     let config_path = daat_locus_paths().await.config_file(CONFIG_FILE_NAME);
     let toml_str =
@@ -403,7 +406,7 @@ pub async fn write_config(config: &Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// 加载 config.toml；若文件不存在，返回 IO 错误（不再自动创建默认值）
+/// Load config.toml. Missing files return an IO error; defaults are not auto-created.
 pub async fn load_config() -> Result<Config, ConfigError> {
     let config_path = daat_locus_paths().await.config_file(CONFIG_FILE_NAME);
 

@@ -97,6 +97,7 @@ cargo run -- config set-hindsight-model
 
 - `[providers]`：provider 凭据注册表
 - `[models]`：模型定义注册表
+- `locale`：用户界面本地化语言
 - `main_model`：主模型引用
 - `[daemon]`：daemon 端口
 - `[judge]`：judge / pairwise 评估配置
@@ -106,6 +107,7 @@ cargo run -- config set-hindsight-model
 一个最小可运行示例：
 
 ```toml
+locale = "zh-CN"
 main_model = "default"
 
 [providers.openai]
@@ -146,4 +148,3 @@ poll_timeout_secs = 30
 - `telegram.enabled = true` 但 `bot_token` 仍是占位符时，不会真正启用 Telegram transport。
 - `hindsight.model = "xxx"` 可选；为空时回退到 `main_model`。
 - `judge.model = "xxx"` 可选；为空时同样回退到 `main_model`。
-
