@@ -2,10 +2,20 @@
 
 use std::{collections::HashMap, time::Duration};
 
-use dialoguer::{Confirm, Input, Password, Select, theme::ColorfulTheme};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use miette::{Result, miette};
+use ratatui::{
+    DefaultTerminal, Frame, TerminalOptions, Viewport,
+    layout::{Constraint, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+};
 
-use crate::config::{Config, JudgeConfig, ModelConfig, ProviderConfig, write_config};
+use crate::{
+    config::{Config, JudgeConfig, ModelConfig, ProviderConfig, write_config},
+    model_catalog::{ModelCapacity, catalog_model_capacity, conservative_model_capacity},
+};
 
 // ---------------------------------------------------------------------------
 // GitHub OAuth device code flow
@@ -167,10 +177,6 @@ fn open_browser(url: &str) -> std::io::Result<()> {
 // 工具函数
 // ---------------------------------------------------------------------------
 
-fn theme() -> ColorfulTheme {
-    ColorfulTheme::default()
-}
-
 /// 格式化输出一条信息行
 fn info(msg: &str) {
     println!("  {msg}");
@@ -179,6 +185,514 @@ fn info(msg: &str) {
 fn header(msg: &str) {
     println!("\n{msg}");
     println!("{}", "─".repeat(msg.len()));
+}
+
+fn prompt_cancelled() -> miette::Report {
+    miette!("交互中断")
+}
+
+const PROMPT_VIEWPORT_HEIGHT: u16 = 14;
+
+struct PromptUi {
+    terminal: Option<DefaultTerminal>,
+}
+
+impl PromptUi {
+    fn new() -> Result<Self> {
+        let mut ui = Self { terminal: None };
+        ui.resume()?;
+        Ok(ui)
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        if self.terminal.is_none() {
+            self.terminal = Some(
+                ratatui::try_init_with_options(TerminalOptions {
+                    viewport: Viewport::Inline(PROMPT_VIEWPORT_HEIGHT),
+                })
+                .map_err(|e| miette!("初始化终端 UI 失败: {e}"))?,
+            );
+        }
+        Ok(())
+    }
+
+    fn suspend(&mut self) {
+        if self.terminal.take().is_some() {
+            let _ = ratatui::try_restore();
+        }
+    }
+
+    fn terminal_mut(&mut self) -> Result<&mut DefaultTerminal> {
+        self.resume()?;
+        Ok(self.terminal.as_mut().expect("prompt terminal initialized"))
+    }
+
+    fn select<T: AsRef<str>>(
+        &mut self,
+        prompt: &str,
+        items: &[T],
+        default: usize,
+    ) -> Result<usize> {
+        if items.is_empty() {
+            return Err(miette!("内部错误：选项列表为空"));
+        }
+
+        let mut state = ListState::default().with_selected(Some(default.min(items.len() - 1)));
+
+        loop {
+            self.terminal_mut()?
+                .draw(|frame| render_select_prompt(frame, prompt, items, &mut state))
+                .map_err(|e| miette!("渲染终端 UI 失败: {e}"))?;
+
+            let key = read_prompt_key()?;
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let current = state.selected().unwrap_or(0);
+                    let next = if current == 0 {
+                        items.len() - 1
+                    } else {
+                        current - 1
+                    };
+                    state.select(Some(next));
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let current = state.selected().unwrap_or(0);
+                    let next = if current + 1 >= items.len() {
+                        0
+                    } else {
+                        current + 1
+                    };
+                    state.select(Some(next));
+                }
+                KeyCode::Enter => return Ok(state.selected().unwrap_or(0)),
+                KeyCode::Esc => return Err(prompt_cancelled()),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Err(prompt_cancelled());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn text(&mut self, prompt: &str, default: Option<&str>) -> Result<String> {
+        self.text_inner(prompt, default.unwrap_or_default().to_string(), false, None)
+    }
+
+    fn password(&mut self, prompt: &str) -> Result<String> {
+        self.text_inner(prompt, String::new(), true, None)
+    }
+
+    fn confirm(&mut self, prompt: &str, default: bool) -> Result<bool> {
+        Ok(self.select(prompt, &["是", "否"], if default { 0 } else { 1 })? == 0)
+    }
+
+    fn usize(&mut self, prompt: &str, default: usize) -> Result<usize> {
+        let mut current = default.to_string();
+        let mut error = None;
+        loop {
+            let raw = self.text_inner(prompt, current, false, error)?;
+            match raw.trim().parse::<usize>() {
+                Ok(value) => return Ok(value),
+                Err(_) => {
+                    current = raw;
+                    error = Some("请输入非负整数");
+                }
+            }
+        }
+    }
+
+    fn text_inner(
+        &mut self,
+        prompt: &str,
+        initial: String,
+        secret: bool,
+        error: Option<&str>,
+    ) -> Result<String> {
+        let mut value = initial;
+        let mut cursor = value.len();
+
+        loop {
+            self.terminal_mut()?
+                .draw(|frame| render_text_prompt(frame, prompt, &value, cursor, secret, error))
+                .map_err(|e| miette!("渲染终端 UI 失败: {e}"))?;
+
+            let key = read_prompt_key()?;
+            match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Err(prompt_cancelled());
+                }
+                KeyCode::Esc => return Err(prompt_cancelled()),
+                KeyCode::Enter => return Ok(value),
+                KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    value.insert(cursor, ch);
+                    cursor += ch.len_utf8();
+                }
+                KeyCode::Backspace => {
+                    if cursor > 0 {
+                        let prev = previous_char_boundary(&value, cursor);
+                        value.drain(prev..cursor);
+                        cursor = prev;
+                    }
+                }
+                KeyCode::Delete => {
+                    if cursor < value.len() {
+                        let next = next_char_boundary(&value, cursor);
+                        value.drain(cursor..next);
+                    }
+                }
+                KeyCode::Left => {
+                    cursor = previous_char_boundary(&value, cursor);
+                }
+                KeyCode::Right => {
+                    cursor = next_char_boundary(&value, cursor);
+                }
+                KeyCode::Home => cursor = 0,
+                KeyCode::End => cursor = value.len(),
+                _ => {}
+            }
+        }
+    }
+
+    fn loading(&mut self, prompt: &str, note: &str) -> Result<()> {
+        self.terminal_mut()?
+            .draw(|frame| render_loading_prompt(frame, prompt, note))
+            .map(|_| ())
+            .map_err(|e| miette!("渲染终端 UI 失败: {e}"))
+    }
+
+    fn detail(&mut self, prompt: &str, lines: &[String]) -> Result<()> {
+        loop {
+            self.terminal_mut()?
+                .draw(|frame| render_detail_prompt(frame, prompt, lines))
+                .map_err(|e| miette!("渲染终端 UI 失败: {e}"))?;
+
+            let key = read_prompt_key()?;
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter => return Ok(()),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Err(prompt_cancelled());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl Drop for PromptUi {
+    fn drop(&mut self) {
+        self.suspend();
+    }
+}
+
+fn read_prompt_key() -> Result<crossterm::event::KeyEvent> {
+    loop {
+        let event = event::read().map_err(|e| miette!("读取终端输入失败: {e}"))?;
+        if let Event::Key(key) = event {
+            if key.kind == KeyEventKind::Press {
+                return Ok(key);
+            }
+        }
+    }
+}
+
+fn prompt_panel_block() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Line::from(vec![
+            Span::styled(
+                "Config",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  inline", Style::default().fg(Color::DarkGray)),
+        ]))
+}
+
+fn render_select_prompt<T: AsRef<str>>(
+    frame: &mut Frame,
+    prompt: &str,
+    items: &[T],
+    state: &mut ListState,
+) {
+    let block = prompt_panel_block();
+    let inner = block.inner(frame.area());
+    frame.render_widget(block, frame.area());
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ]);
+    let [kind_area, prompt_area, list_area, help_area] = inner.layout(&layout);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Select", Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+            Span::styled(
+                prompt.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        kind_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{} option(s)", items.len()),
+            Style::default().fg(Color::Gray),
+        ))),
+        prompt_area,
+    );
+
+    let list_items: Vec<ListItem> = items
+        .iter()
+        .map(|item| {
+            ListItem::new(Line::from(vec![
+                Span::styled("· ", Style::default().fg(Color::DarkGray)),
+                Span::styled(item.as_ref().to_string(), Style::default().fg(Color::Gray)),
+            ]))
+        })
+        .collect();
+    let list = List::new(list_items)
+        .highlight_symbol("› ")
+        .highlight_style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_stateful_widget(list, list_area, state);
+    frame.render_widget(
+        Paragraph::new("↑↓ / j k move  Enter confirm  Esc cancel")
+            .style(Style::default().fg(Color::DarkGray)),
+        help_area,
+    );
+}
+
+fn render_text_prompt(
+    frame: &mut Frame,
+    prompt: &str,
+    value: &str,
+    cursor: usize,
+    secret: bool,
+    error: Option<&str>,
+) {
+    let block = prompt_panel_block();
+    let inner = block.inner(frame.area());
+    frame.render_widget(block, frame.area());
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ]);
+    let [kind_area, prompt_area, input_area, help_area, note_area] = inner.layout(&layout);
+
+    let display = if secret {
+        "*".repeat(value.chars().count())
+    } else {
+        value.to_string()
+    };
+    let input = Line::from(vec![
+        Span::styled("> ", Style::default().fg(Color::Cyan)),
+        Span::raw(display),
+    ]);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                if secret { "Secret" } else { "Input" },
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                prompt.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        kind_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Enter to confirm",
+            Style::default().fg(Color::Gray),
+        ))),
+        prompt_area,
+    );
+
+    let field_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if error.is_some() {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::Cyan)
+        })
+        .title(Line::from(Span::styled(
+            "Value",
+            Style::default().fg(Color::DarkGray),
+        )));
+    let field_inner = field_block.inner(input_area);
+    frame.render_widget(
+        Paragraph::new(input)
+            .block(field_block)
+            .wrap(Wrap { trim: false }),
+        input_area,
+    );
+    frame.set_cursor_position((
+        field_inner.x + 2 + value[..cursor].chars().count() as u16,
+        field_inner.y,
+    ));
+
+    frame.render_widget(
+        Paragraph::new("←→ move  Home/End jump  Backspace/Delete edit  Esc cancel")
+            .style(Style::default().fg(Color::DarkGray)),
+        help_area,
+    );
+    frame.render_widget(
+        Paragraph::new(match error {
+            Some(error) => Line::from(Span::styled(
+                error.to_string(),
+                Style::default().fg(Color::Red),
+            )),
+            None if secret => Line::from(Span::styled(
+                "input is masked",
+                Style::default().fg(Color::DarkGray),
+            )),
+            None => Line::from(Span::styled(
+                "plain text input",
+                Style::default().fg(Color::DarkGray),
+            )),
+        }),
+        note_area,
+    );
+}
+
+fn render_loading_prompt(frame: &mut Frame, prompt: &str, note: &str) {
+    let block = prompt_panel_block();
+    let inner = block.inner(frame.area());
+    frame.render_widget(block, frame.area());
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ]);
+    let [kind_area, prompt_area, body_area, help_area] = inner.layout(&layout);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Loading", Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+            Span::styled(
+                prompt.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        kind_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            note.to_string(),
+            Style::default().fg(Color::Gray),
+        ))),
+        prompt_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("•", Style::default().fg(Color::Cyan)),
+            Span::raw(" "),
+            Span::styled("请稍候…", Style::default().fg(Color::White)),
+        ])),
+        body_area,
+    );
+    frame.render_widget(
+        Paragraph::new("等待远端响应").style(Style::default().fg(Color::DarkGray)),
+        help_area,
+    );
+}
+
+fn render_detail_prompt(frame: &mut Frame, prompt: &str, lines: &[String]) {
+    let block = prompt_panel_block();
+    let inner = block.inner(frame.area());
+    frame.render_widget(block, frame.area());
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ]);
+    let [kind_area, prompt_area, body_area, help_area] = inner.layout(&layout);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Detail", Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+            Span::styled(
+                prompt.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        kind_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{} line(s)", lines.len()),
+            Style::default().fg(Color::Gray),
+        ))),
+        prompt_area,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .iter()
+                .map(|line| {
+                    Line::from(Span::styled(line.clone(), Style::default().fg(Color::Gray)))
+                })
+                .collect::<Vec<_>>(),
+        )
+        .wrap(Wrap { trim: false }),
+        body_area,
+    );
+    frame.render_widget(
+        Paragraph::new("Enter / Esc back").style(Style::default().fg(Color::DarkGray)),
+        help_area,
+    );
+}
+
+fn previous_char_boundary(s: &str, index: usize) -> usize {
+    if index == 0 {
+        return 0;
+    }
+    s[..index]
+        .char_indices()
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    s[index..]
+        .char_indices()
+        .nth(1)
+        .map(|(offset, _)| index + offset)
+        .unwrap_or(s.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -209,13 +723,11 @@ impl ProviderKind {
 }
 
 /// 交互式填写一个 provider 的凭据，返回 (provider_name, ProviderConfig)
-async fn prompt_provider(existing_names: &[String]) -> Result<(String, ProviderConfig)> {
-    let kind_idx = Select::with_theme(&theme())
-        .with_prompt("Provider 类型")
-        .items(ProviderKind::LABELS)
-        .default(0)
-        .interact()
-        .map_err(|e| miette!("交互中断: {e}"))?;
+async fn prompt_provider(
+    ui: &mut PromptUi,
+    existing_names: &[String],
+) -> Result<(String, ProviderConfig)> {
+    let kind_idx = ui.select("Provider 类型", ProviderKind::LABELS, 0)?;
     let kind = ProviderKind::from_index(kind_idx);
 
     let default_name = match kind {
@@ -230,28 +742,18 @@ async fn prompt_provider(existing_names: &[String]) -> Result<(String, ProviderC
         default_name.to_string()
     };
 
-    let name: String = Input::with_theme(&theme())
-        .with_prompt("Provider 名称（在 config.toml 中的 key）")
-        .default(default_name)
-        .interact_text()
-        .map_err(|e| miette!("交互中断: {e}"))?;
+    let name = ui.text(
+        "Provider 名称（在 config.toml 中的 key）",
+        Some(&default_name),
+    )?;
 
     let provider = match kind {
         ProviderKind::OpenAI => {
-            let api_key: String = Password::with_theme(&theme())
-                .with_prompt("OpenAI API key（sk-...）")
-                .interact()
-                .map_err(|e| miette!("交互中断: {e}"))?;
-            let use_custom_url = Confirm::with_theme(&theme())
-                .with_prompt("使用自定义 base URL？（默认 api.openai.com）")
-                .default(false)
-                .interact()
-                .map_err(|e| miette!("交互中断: {e}"))?;
+            let api_key = ui.password("OpenAI API key（sk-...）")?;
+            let use_custom_url =
+                ui.confirm("使用自定义 base URL？（默认 api.openai.com）", false)?;
             let base_url = if use_custom_url {
-                let url: String = Input::with_theme(&theme())
-                    .with_prompt("Base URL")
-                    .interact_text()
-                    .map_err(|e| miette!("交互中断: {e}"))?;
+                let url = ui.text("Base URL", None)?;
                 Some(url)
             } else {
                 None
@@ -259,46 +761,37 @@ async fn prompt_provider(existing_names: &[String]) -> Result<(String, ProviderC
             ProviderConfig::Openai { api_key, base_url }
         }
         ProviderKind::GithubCopilot => {
-            let auth_method = Select::with_theme(&theme())
-                .with_prompt("GitHub 认证方式")
-                .items(&[
+            let auth_method = ui.select(
+                "GitHub 认证方式",
+                &[
                     "Device code 登录（推荐，浏览器授权）",
                     "手动填写 GitHub Token（PAT）",
                     "使用环境变量（GITHUB_TOKEN / GH_TOKEN）",
-                ])
-                .default(0)
-                .interact()
-                .map_err(|e| miette!("交互中断: {e}"))?;
+                ],
+                0,
+            )?;
 
             let github_token = match auth_method {
-                0 => run_github_device_flow().await?,
-                1 => {
-                    info(
-                        "在 https://github.com/settings/tokens 创建 Classic Token，scope 选 read:user。",
-                    );
-                    Password::with_theme(&theme())
-                        .with_prompt("GitHub Token（ghp_...）")
-                        .interact()
-                        .map_err(|e| miette!("交互中断: {e}"))?
+                0 => {
+                    ui.suspend();
+                    let result = run_github_device_flow().await;
+                    ui.resume()?;
+                    result?
                 }
-                _ => {
-                    info("启动时将从 GITHUB_TOKEN / GH_TOKEN 环境变量读取。");
-                    "${GITHUB_TOKEN}".to_string()
-                }
+                1 => ui.password("GitHub Token（ghp_...）")?,
+                _ => "${GITHUB_TOKEN}".to_string(),
             };
             ProviderConfig::GithubCopilot { github_token }
         }
         ProviderKind::OpenAICompatible => {
-            let base_url: String = Input::with_theme(&theme())
-                .with_prompt("Base URL（含 /v1，例如 http://localhost:11434/v1）")
-                .default("http://localhost:11434/v1".to_string())
-                .interact_text()
-                .map_err(|e| miette!("交互中断: {e}"))?;
-            let api_key: String = Input::with_theme(&theme())
-                .with_prompt("API key（Ollama 等本地服务可填 ollama 或任意值）")
-                .default("ollama".to_string())
-                .interact_text()
-                .map_err(|e| miette!("交互中断: {e}"))?;
+            let base_url = ui.text(
+                "Base URL（含 /v1，例如 http://localhost:11434/v1）",
+                Some("http://localhost:11434/v1"),
+            )?;
+            let api_key = ui.text(
+                "API key（Ollama 等本地服务可填 ollama 或任意值）",
+                Some("ollama"),
+            )?;
             ProviderConfig::OpenaiCompatible { base_url, api_key }
         }
     };
@@ -324,21 +817,20 @@ const COPILOT_DEFAULT_MODELS: &[&str] = &[
     "o1-mini",
 ];
 
-/// 根据 model_id 推断合理的上下文窗口和最大输出 token 默认值
-fn infer_model_capacity(model_id: &str) -> (usize, usize) {
-    let lower = model_id.to_lowercase();
-    if lower.contains("claude") {
-        (200_000, 16_384)
-    } else if lower.contains("gpt-4.1") {
-        (1_047_576, 32_768)
-    } else if lower.contains("gpt-4o") || lower.contains("gpt-4") {
-        (128_000, 16_384)
-    } else if lower.contains("o1") || lower.contains("o3") {
-        (200_000, 100_000)
-    } else if lower.contains("mini") || lower.contains("nano") {
-        (128_000, 8_192)
-    } else {
-        (32_768, 8_192)
+fn resolve_model_capacity(
+    model_id: &str,
+    detected_context_window: Option<usize>,
+    detected_max_output: Option<usize>,
+) -> ModelCapacity {
+    let catalog = catalog_model_capacity(model_id);
+    let fallback = conservative_model_capacity();
+    ModelCapacity {
+        context_window_tokens: detected_context_window
+            .or_else(|| catalog.map(|capacity| capacity.context_window_tokens))
+            .unwrap_or(fallback.context_window_tokens),
+        max_completion_tokens: detected_max_output
+            .or_else(|| catalog.map(|capacity| capacity.max_completion_tokens))
+            .unwrap_or(fallback.max_completion_tokens),
     }
 }
 
@@ -578,27 +1070,15 @@ fn parse_models_response(json: Option<serde_json::Value>) -> Vec<DiscoveredModel
 
 /// 交互式填写一个 model 定义，返回 (model_name, ModelConfig)
 async fn prompt_model(
+    ui: &mut PromptUi,
     provider_name: &str,
     provider: &ProviderConfig,
 ) -> Result<(String, ModelConfig)> {
-    // 获取模型列表
-    print!("  正在获取 {provider_name} 的模型列表...");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+    ui.loading("获取模型列表", &format!("provider: {provider_name}"))?;
     let discovered = fetch_model_ids(provider).await;
-    println!(
-        "\r  {}                                    ",
-        if discovered.is_empty() {
-            "无法获取模型列表，请手动输入"
-        } else {
-            "模型列表已就绪"
-        }
-    );
 
     let (model_id, api_ctx, api_out) = if discovered.is_empty() {
-        let id = Input::with_theme(&theme())
-            .with_prompt("Model ID")
-            .interact_text()
-            .map_err(|e| miette!("交互中断: {e}"))?;
+        let id = ui.text("Model ID", None)?;
         (id, None, None)
     } else {
         const MANUAL: &str = "手动输入...";
@@ -608,18 +1088,10 @@ async fn prompt_model(
             .chain(std::iter::once(MANUAL.to_string()))
             .collect();
 
-        let idx = Select::with_theme(&theme())
-            .with_prompt("选择模型")
-            .items(&labels)
-            .default(0)
-            .interact()
-            .map_err(|e| miette!("交互中断: {e}"))?;
+        let idx = ui.select("选择模型", &labels, 0)?;
 
         if labels[idx] == MANUAL {
-            let id = Input::with_theme(&theme())
-                .with_prompt("Model ID")
-                .interact_text()
-                .map_err(|e| miette!("交互中断: {e}"))?;
+            let id = ui.text("Model ID", None)?;
             (id, None, None)
         } else {
             let m = &discovered[idx];
@@ -627,33 +1099,18 @@ async fn prompt_model(
         }
     };
 
-    // API 提供的值优先，否则按 model ID 推断
-    let (inferred_ctx, inferred_out) = infer_model_capacity(&model_id);
-    let default_ctx = api_ctx.unwrap_or(inferred_ctx);
-    let default_out = api_out.unwrap_or(inferred_out);
+    let capacity = resolve_model_capacity(&model_id, api_ctx, api_out);
 
     let default_name = model_id
         .split(['/', ':'])
         .last()
         .unwrap_or(&model_id)
         .to_string();
-    let name: String = Input::with_theme(&theme())
-        .with_prompt("Model 名称（config.toml 中的 key）")
-        .default(default_name)
-        .interact_text()
-        .map_err(|e| miette!("交互中断: {e}"))?;
+    let name = ui.text("Model 名称（config.toml 中的 key）", Some(&default_name))?;
 
-    let context_window: usize = Input::with_theme(&theme())
-        .with_prompt("Context window tokens")
-        .default(default_ctx)
-        .interact_text()
-        .map_err(|e| miette!("交互中断: {e}"))?;
+    let context_window = ui.usize("Context window tokens", capacity.context_window_tokens)?;
 
-    let max_completion: usize = Input::with_theme(&theme())
-        .with_prompt("Max completion tokens")
-        .default(default_out)
-        .interact_text()
-        .map_err(|e| miette!("交互中断: {e}"))?;
+    let max_completion = ui.usize("Max completion tokens", capacity.max_completion_tokens)?;
 
     Ok((
         name,
@@ -678,15 +1135,15 @@ pub async fn run_first_time_setup() -> Result<Config> {
     println!("未找到配置文件，先来完成初始化设置。");
     println!();
 
-    let skip = Select::with_theme(&theme())
-        .with_prompt("如何初始化？")
-        .items(&[
+    let mut ui = PromptUi::new()?;
+    let skip = ui.select(
+        "如何初始化？",
+        &[
             "交互式配置（推荐）",
             "跳过，创建默认配置（需手动编辑 config.toml）",
-        ])
-        .default(0)
-        .interact()
-        .map_err(|e| miette!("交互中断: {e}"))?;
+        ],
+        0,
+    )?;
 
     if skip == 1 {
         let config = Config::default();
@@ -697,14 +1154,15 @@ pub async fn run_first_time_setup() -> Result<Config> {
 
     // === 配置第一个 Provider ===
     header("步骤 1/2：添加 Provider");
-    let (provider_name, provider_config) = prompt_provider(&[]).await?;
+    let (provider_name, provider_config) = prompt_provider(&mut ui, &[]).await?;
 
     let mut providers = HashMap::new();
     providers.insert(provider_name.clone(), provider_config.clone());
 
     // === 配置第一个 Model ===
     header("步骤 2/2：添加模型");
-    let (model_name, model_config) = prompt_model(&provider_name, &provider_config).await?;
+    let (model_name, model_config) =
+        prompt_model(&mut ui, &provider_name, &provider_config).await?;
 
     let mut models = HashMap::new();
     models.insert(model_name.clone(), model_config);
@@ -735,14 +1193,11 @@ pub async fn run_add_provider() -> Result<()> {
 
     header("添加 Provider");
     let existing: Vec<String> = config.providers.keys().cloned().collect();
-    let (name, provider) = prompt_provider(&existing).await?;
+    let mut ui = PromptUi::new()?;
+    let (name, provider) = prompt_provider(&mut ui, &existing).await?;
 
     if config.providers.contains_key(&name) {
-        let overwrite = Confirm::with_theme(&theme())
-            .with_prompt(format!("provider '{name}' 已存在，是否覆盖？"))
-            .default(false)
-            .interact()
-            .map_err(|e| miette!("交互中断: {e}"))?;
+        let overwrite = ui.confirm(&format!("provider '{name}' 已存在，是否覆盖？"), false)?;
         if !overwrite {
             info("已取消。");
             return Ok(());
@@ -762,31 +1217,22 @@ pub async fn run_add_model() -> Result<()> {
         .map_err(|e| miette!("加载配置失败: {e}"))?;
 
     header("添加 Model");
+    let mut ui = PromptUi::new()?;
     let provider_names: Vec<String> = config.providers.keys().cloned().collect();
     if provider_names.is_empty() {
         return Err(miette!("没有可用的 provider，请先运行 config add-provider"));
     }
     let provider_idx = if provider_names.len() == 1 {
-        info(&format!("使用 provider: {}", provider_names[0]));
         0
     } else {
-        Select::with_theme(&theme())
-            .with_prompt("绑定 Provider")
-            .items(&provider_names)
-            .default(0)
-            .interact()
-            .map_err(|e| miette!("交互中断: {e}"))?
+        ui.select("绑定 Provider", &provider_names, 0)?
     };
     let provider_name = &provider_names[provider_idx];
     let provider_config = config.providers.get(provider_name).unwrap();
-    let (name, model) = prompt_model(provider_name, provider_config).await?;
+    let (name, model) = prompt_model(&mut ui, provider_name, provider_config).await?;
 
     if config.models.contains_key(&name) {
-        let overwrite = Confirm::with_theme(&theme())
-            .with_prompt(format!("model '{name}' 已存在，是否覆盖？"))
-            .default(false)
-            .interact()
-            .map_err(|e| miette!("交互中断: {e}"))?;
+        let overwrite = ui.confirm(&format!("model '{name}' 已存在，是否覆盖？"), false)?;
         if !overwrite {
             info("已取消。");
             return Ok(());
@@ -795,11 +1241,7 @@ pub async fn run_add_model() -> Result<()> {
 
     config.models.insert(name.clone(), model);
 
-    let set_main = Confirm::with_theme(&theme())
-        .with_prompt(format!("将 '{name}' 设为 main_model？"))
-        .default(false)
-        .interact()
-        .map_err(|e| miette!("交互中断: {e}"))?;
+    let set_main = ui.confirm(&format!("将 '{name}' 设为 main_model？"), false)?;
     if set_main {
         config.main_model = name.clone();
     }
@@ -814,6 +1256,7 @@ pub async fn run_set_main_model() -> Result<()> {
     let mut config = crate::config::load_config()
         .await
         .map_err(|e| miette!("加载配置失败: {e}"))?;
+    let mut ui = PromptUi::new()?;
 
     let model_names: Vec<String> = config.models.keys().cloned().collect();
     if model_names.is_empty() {
@@ -825,12 +1268,7 @@ pub async fn run_set_main_model() -> Result<()> {
         .position(|n| n == &config.main_model)
         .unwrap_or(0);
 
-    let idx = Select::with_theme(&theme())
-        .with_prompt("选择 main_model")
-        .items(&model_names)
-        .default(current_idx)
-        .interact()
-        .map_err(|e| miette!("交互中断: {e}"))?;
+    let idx = ui.select("选择 main_model", &model_names, current_idx)?;
 
     config.main_model = model_names[idx].clone();
     write_config(&config).await?;
@@ -844,7 +1282,18 @@ pub async fn show_config() -> Result<()> {
         .await
         .map_err(|e| miette!("加载配置失败: {e}"))?;
 
-    header("Providers");
+    for line in render_config_summary_lines(&config) {
+        println!("{line}");
+    }
+    println!();
+    Ok(())
+}
+
+fn render_config_summary_lines(config: &Config) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    lines.push("Providers".to_string());
+    lines.push("─────────".to_string());
     for (name, provider) in &config.providers {
         let desc = match provider {
             ProviderConfig::Openai { api_key, base_url } => {
@@ -861,42 +1310,48 @@ pub async fn show_config() -> Result<()> {
                 format!("openai-compatible  url={base_url}  key={masked}")
             }
         };
-        println!("  [{name}]  {desc}");
+        lines.push(format!("  [{name}]  {desc}"));
     }
 
-    header("Models");
+    lines.push(String::new());
+    lines.push("Models".to_string());
+    lines.push("──────".to_string());
     for (name, model) in &config.models {
         let main_mark = if name == &config.main_model {
             " ← main"
         } else {
             ""
         };
-        println!(
+        lines.push(format!(
             "  [{name}]{main_mark}  provider={}  model_id={}  ctx={}  max_out={}",
             model.provider,
             model.model_id,
             model.context_window_tokens,
             model.max_completion_tokens
-        );
+        ));
     }
 
-    header("Judge");
+    lines.push(String::new());
+    lines.push("Judge".to_string());
+    lines.push("─────".to_string());
     let judge_model = config.judge.model.as_deref().unwrap_or(&config.main_model);
-    println!(
+    lines.push(format!(
         "  enabled={}  model={}  candidates={}  cases={}",
         config.judge.enabled,
         judge_model,
         config.judge.max_pairwise_candidates,
         config.judge.max_pairwise_cases
-    );
+    ));
 
-    header("Hindsight");
+    lines.push(String::new());
+    lines.push("Hindsight".to_string());
+    lines.push("─────────".to_string());
     let hindsight_model = config
         .hindsight
         .model
         .as_deref()
         .unwrap_or(&config.main_model);
-    println!(
+    lines.push(format!(
         "  model={}{}  port={}  profile={}",
         hindsight_model,
         if config.hindsight.model.is_none() {
@@ -906,14 +1361,14 @@ pub async fn show_config() -> Result<()> {
         },
         config.hindsight.port,
         config.hindsight.profile,
-    );
+    ));
 
-    println!();
-    Ok(())
+    lines
 }
 
 /// `config`（无子命令）：交互式菜单，循环直到用户选择退出
 pub async fn run_config_menu() -> Result<()> {
+    let mut ui = PromptUi::new()?;
     loop {
         // 加载最新 config 用于状态展示（出错时也继续，允许从无 config 状态开始配置）
         let has_config = crate::config::config_file_exists().await;
@@ -931,8 +1386,6 @@ pub async fn run_config_menu() -> Result<()> {
             "尚未配置".to_string()
         };
 
-        println!("\n当前状态：{status}");
-
         const ITEMS: &[&str] = &[
             "查看配置详情",
             "添加 Provider",
@@ -942,19 +1395,98 @@ pub async fn run_config_menu() -> Result<()> {
             "退出",
         ];
 
-        let idx = Select::with_theme(&theme())
-            .with_prompt("配置管理")
-            .items(ITEMS)
-            .default(0)
-            .interact()
-            .map_err(|e| miette!("交互中断: {e}"))?;
+        let idx = ui.select(&format!("配置管理  {status}"), ITEMS, 0)?;
 
         match idx {
-            0 => show_config().await?,
-            1 => run_add_provider().await?,
-            2 => run_add_model().await?,
-            3 => run_set_main_model().await?,
-            4 => run_set_hindsight_model().await?,
+            0 => match crate::config::load_config().await {
+                Ok(cfg) => ui.detail("配置详情", &render_config_summary_lines(&cfg))?,
+                Err(e) => ui.detail("配置详情", &[format!("加载配置失败: {e}")])?,
+            },
+            1 => {
+                let mut config = crate::config::load_config()
+                    .await
+                    .map_err(|e| miette!("加载配置失败: {e}"))?;
+                let existing: Vec<String> = config.providers.keys().cloned().collect();
+                let (name, provider) = prompt_provider(&mut ui, &existing).await?;
+                if config.providers.contains_key(&name)
+                    && !ui.confirm(&format!("provider '{name}' 已存在，是否覆盖？"), false)?
+                {
+                    continue;
+                }
+                config.providers.insert(name, provider);
+                write_config(&config).await?;
+            }
+            2 => {
+                let mut config = crate::config::load_config()
+                    .await
+                    .map_err(|e| miette!("加载配置失败: {e}"))?;
+                let provider_names: Vec<String> = config.providers.keys().cloned().collect();
+                if provider_names.is_empty() {
+                    ui.suspend();
+                    return Err(miette!("没有可用的 provider，请先运行 config add-provider"));
+                }
+                let provider_idx = if provider_names.len() == 1 {
+                    0
+                } else {
+                    ui.select("绑定 Provider", &provider_names, 0)?
+                };
+                let provider_name = &provider_names[provider_idx];
+                let provider_config = config.providers.get(provider_name).unwrap();
+                let (name, model) = prompt_model(&mut ui, provider_name, provider_config).await?;
+                if config.models.contains_key(&name)
+                    && !ui.confirm(&format!("model '{name}' 已存在，是否覆盖？"), false)?
+                {
+                    continue;
+                }
+                config.models.insert(name.clone(), model);
+                if ui.confirm(&format!("将 '{name}' 设为 main_model？"), false)? {
+                    config.main_model = name;
+                }
+                write_config(&config).await?;
+            }
+            3 => {
+                let mut config = crate::config::load_config()
+                    .await
+                    .map_err(|e| miette!("加载配置失败: {e}"))?;
+                let model_names: Vec<String> = config.models.keys().cloned().collect();
+                if model_names.is_empty() {
+                    ui.suspend();
+                    return Err(miette!("没有已配置的 model，请先运行 config add-model"));
+                }
+                let current_idx = model_names
+                    .iter()
+                    .position(|n| n == &config.main_model)
+                    .unwrap_or(0);
+                let idx = ui.select("选择 main_model", &model_names, current_idx)?;
+                config.main_model = model_names[idx].clone();
+                write_config(&config).await?;
+            }
+            4 => {
+                let mut config = crate::config::load_config()
+                    .await
+                    .map_err(|e| miette!("加载配置失败: {e}"))?;
+                let model_names: Vec<String> = config.models.keys().cloned().collect();
+                if model_names.is_empty() {
+                    ui.suspend();
+                    return Err(miette!("没有已配置的 model，请先运行 config add-model"));
+                }
+                const USE_MAIN: &str = "与 main_model 相同（默认）";
+                let mut items: Vec<String> = model_names.clone();
+                items.push(USE_MAIN.to_string());
+                let current_idx = config
+                    .hindsight
+                    .model
+                    .as_ref()
+                    .and_then(|m| model_names.iter().position(|n| n == m))
+                    .unwrap_or(items.len() - 1);
+                let idx = ui.select("选择 hindsight 使用的模型", &items, current_idx)?;
+                config.hindsight.model = if items[idx] == USE_MAIN {
+                    None
+                } else {
+                    Some(model_names[idx].clone())
+                };
+                write_config(&config).await?;
+            }
             _ => break,
         }
     }
@@ -966,6 +1498,7 @@ pub async fn run_set_hindsight_model() -> Result<()> {
     let mut config = crate::config::load_config()
         .await
         .map_err(|e| miette!("加载配置失败: {e}"))?;
+    let mut ui = PromptUi::new()?;
 
     let model_names: Vec<String> = config.models.keys().cloned().collect();
     if model_names.is_empty() {
@@ -983,12 +1516,7 @@ pub async fn run_set_hindsight_model() -> Result<()> {
         .and_then(|m| model_names.iter().position(|n| n == m))
         .unwrap_or(items.len() - 1); // 默认选最后一项（USE_MAIN）
 
-    let idx = Select::with_theme(&theme())
-        .with_prompt("选择 hindsight 使用的模型")
-        .items(&items)
-        .default(current_idx)
-        .interact()
-        .map_err(|e| miette!("交互中断: {e}"))?;
+    let idx = ui.select("选择 hindsight 使用的模型", &items, current_idx)?;
 
     config.hindsight.model = if items[idx] == USE_MAIN {
         None
@@ -1015,4 +1543,49 @@ fn mask_secret(s: &str) -> String {
     let prefix = &s[..4];
     let suffix = &s[s.len() - 4..];
     format!("{prefix}...{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_capacity_prefers_detected_values() {
+        let capacity = resolve_model_capacity("gpt-4.1", Some(12_345), Some(678));
+
+        assert_eq!(
+            capacity,
+            ModelCapacity {
+                context_window_tokens: 12_345,
+                max_completion_tokens: 678,
+            }
+        );
+    }
+
+    #[test]
+    fn model_capacity_fills_missing_detected_fields_from_exact_catalog_match() {
+        let capacity = resolve_model_capacity("gpt-4.1", Some(12_345), None);
+
+        assert_eq!(
+            capacity,
+            ModelCapacity {
+                context_window_tokens: 12_345,
+                max_completion_tokens: 32_768,
+            }
+        );
+    }
+
+    #[test]
+    fn model_capacity_uses_conservative_defaults_for_unknown_models() {
+        let capacity = resolve_model_capacity("unknown-local-model", None, None);
+
+        assert_eq!(capacity, conservative_model_capacity());
+    }
+
+    #[test]
+    fn model_catalog_does_not_substring_match_similar_model_names() {
+        let capacity = resolve_model_capacity("gpt-4.1-custom", None, None);
+
+        assert_eq!(capacity, conservative_model_capacity());
+    }
 }
