@@ -1394,8 +1394,9 @@ mod tests {
         let transcript = build_hindsight_retain_transcript(&[
             HistoryMessage::user("user input"),
             HistoryMessage {
-                message: AgentMessage::assistant_tool_call_protocol(
+                message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
                     Some("checking state".to_string()),
+                    None,
                     vec![crate::reasoning::runtime::AgentToolCall {
                         id: "call_1".to_string(),
                         name: "terminal_exec".to_string(),
@@ -1435,8 +1436,9 @@ mod tests {
         let transcript = build_hindsight_retain_transcript(&[
             HistoryMessage::user("what changed?"),
             HistoryMessage {
-                message: AgentMessage::assistant_tool_call_protocol(
+                message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
                     Some("checking memory".to_string()),
+                    None,
                     vec![crate::reasoning::runtime::AgentToolCall {
                         id: "call_h1".to_string(),
                         name: "deep_recall".to_string(),

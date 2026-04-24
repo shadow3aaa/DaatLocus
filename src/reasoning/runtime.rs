@@ -24,11 +24,6 @@ pub struct ProgramExecutionOutcome<O> {
     pub output: O,
 }
 
-pub struct ProgramExecutionTelemetry {
-    pub retry_count: usize,
-    pub last_retry_reason: Option<String>,
-}
-
 const DEFAULT_PROGRAM_RETRY_COUNT: usize = 1;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -326,13 +321,6 @@ impl AgentMessage {
         }
     }
 
-    pub fn assistant_tool_call_protocol(
-        content: Option<String>,
-        calls: Vec<AgentToolCall>,
-    ) -> Self {
-        Self::assistant_tool_call_protocol_with_reasoning(content, None, calls)
-    }
-
     pub fn assistant_tool_call_protocol_with_reasoning(
         content: Option<String>,
         reasoning_content: Option<String>,
@@ -511,7 +499,7 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
         trace_origin,
         DEFAULT_PROGRAM_RETRY_COUNT,
         |_| Ok(()),
-        |_, _| {},
+        |_| {},
     )
     .await
 }
@@ -535,7 +523,7 @@ pub async fn execute_program_with_ir_report_with_retry_hook_and_validator<
 ) -> Result<ProgramExecutionOutcome<P::Output>>
 where
     V: FnMut(&P::Output) -> std::result::Result<(), String>,
-    F: FnMut(ProgramExecutionTelemetry, &PromptRequest),
+    F: FnMut(&PromptRequest),
 {
     let request = renderer.render(context, program, ir, tuning);
     execute_prompt_request_with_retry_hook_and_validator(
@@ -566,10 +554,9 @@ async fn execute_prompt_request_with_retry_hook_and_validator<O, V, F>(
 where
     O: DeserializeOwned + Serialize,
     V: FnMut(&O) -> std::result::Result<(), String>,
-    F: FnMut(ProgramExecutionTelemetry, &PromptRequest),
+    F: FnMut(&PromptRequest),
 {
     let mut last_error = None;
-    let mut retry_count = 0usize;
 
     for attempt in 0..=max_retry_count {
         let value = match llm.run_json(context, request.clone()).await {
@@ -590,14 +577,7 @@ where
                 last_error = Some(error_text.clone());
                 if attempt < max_retry_count {
                     request = request.with_schema_retry_note(error_text);
-                    retry_count += 1;
-                    on_retry(
-                        ProgramExecutionTelemetry {
-                            retry_count,
-                            last_retry_reason: Some(last_error.clone().unwrap_or_default()),
-                        },
-                        &request,
-                    );
+                    on_retry(&request);
                 }
                 continue;
             }
@@ -635,14 +615,7 @@ where
                         last_error = Some(validation_error.clone());
                         if attempt < max_retry_count {
                             request = request.with_semantic_retry_note(validation_error);
-                            retry_count += 1;
-                            on_retry(
-                                ProgramExecutionTelemetry {
-                                    retry_count,
-                                    last_retry_reason: Some(last_error.clone().unwrap_or_default()),
-                                },
-                                &request,
-                            );
+                            on_retry(&request);
                         }
                     }
                 }
@@ -662,14 +635,7 @@ where
                 .await;
                 if attempt < max_retry_count {
                     request = request.with_schema_retry_note(err.to_string());
-                    retry_count += 1;
-                    on_retry(
-                        ProgramExecutionTelemetry {
-                            retry_count,
-                            last_retry_reason: Some(last_error.clone().unwrap_or_default()),
-                        },
-                        &request,
-                    );
+                    on_retry(&request);
                 }
             }
         }

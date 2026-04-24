@@ -91,24 +91,6 @@ const RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS: u64 = 60;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ModelConfig, ProviderConfig};
-
-    fn config_with_main_provider(provider: ProviderConfig, model_id: &str) -> Config {
-        let mut config = Config::default();
-        config
-            .providers
-            .insert("test-provider".to_string(), provider);
-        config.models.insert(
-            "test-model".to_string(),
-            ModelConfig {
-                provider: "test-provider".to_string(),
-                model_id: model_id.to_string(),
-                ..ModelConfig::default()
-            },
-        );
-        config.main_model = "test-model".to_string();
-        config
-    }
 
     #[test]
     fn claimed_terminal_status_depends_only_on_statuses() {

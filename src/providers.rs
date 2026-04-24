@@ -1047,7 +1047,8 @@ mod tests {
     fn compatible_agent_messages_keep_matched_tool_results() {
         let messages = agent_turn_request_to_openai_messages(
             vec![
-                AgentMessage::assistant_tool_call_protocol(
+                AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                    None,
                     None,
                     vec![AgentToolCall {
                         id: "call_123".to_string(),
@@ -1114,7 +1115,8 @@ mod tests {
     #[test]
     fn compatible_agent_messages_preserve_out_of_scope_tool_protocol() {
         let messages = agent_turn_request_to_openai_messages(
-            vec![AgentMessage::assistant_tool_call_protocol(
+            vec![AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                None,
                 None,
                 vec![AgentToolCall {
                     id: "call_123".to_string(),

@@ -219,14 +219,6 @@ impl Config {
             .unwrap_or_else(|| panic!("main_model '{}' not found in models", self.main_model))
     }
 
-    /// Return the provider config used by the main model.
-    pub fn main_provider_config(&self) -> &ProviderConfig {
-        let provider_key = &self.main_model_config().provider;
-        self.providers
-            .get(provider_key)
-            .unwrap_or_else(|| panic!("provider '{}' not found in providers", provider_key))
-    }
-
     /// Return the judge model config, falling back to the main model when unspecified.
     pub fn judge_model_config(&self) -> &ModelConfig {
         let key = self.judge.model.as_deref().unwrap_or(&self.main_model);

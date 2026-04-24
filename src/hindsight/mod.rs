@@ -210,15 +210,6 @@ pub struct HindsightBankConfigEnvelope {
     pub overrides: Value,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HindsightDeleteObservationsResponse {
-    pub success: bool,
-    #[serde(default)]
-    pub message: Option<String>,
-    #[serde(default)]
-    pub deleted_count: Option<usize>,
-}
-
 #[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize)]
 pub struct HindsightRetainResponse {
@@ -565,19 +556,6 @@ impl HindsightClient {
         .await
     }
 
-    pub async fn get_bank_config(&self) -> Result<HindsightBankConfigEnvelope> {
-        let url = format!("{}/config", self.bank_url());
-        self.with_restart_retry("get hindsight bank config", || {
-            let url = url.clone();
-            async move {
-                let response = self.authorized(self.http.get(url)).send().await;
-                self.expect_json_success(response, "get hindsight bank config")
-                    .await
-            }
-        })
-        .await
-    }
-
     pub async fn update_bank_config(
         &self,
         updates: serde_json::Map<String, Value>,
@@ -593,19 +571,6 @@ impl HindsightClient {
                     .send()
                     .await;
                 self.expect_json_success(response, "update hindsight bank config")
-                    .await
-            }
-        })
-        .await
-    }
-
-    pub async fn delete_all_observations(&self) -> Result<HindsightDeleteObservationsResponse> {
-        let url = format!("{}/observations", self.bank_url());
-        self.with_restart_retry("delete hindsight observations", || {
-            let url = url.clone();
-            async move {
-                let response = self.authorized(self.http.delete(url)).send().await;
-                self.expect_json_success(response, "delete hindsight observations")
                     .await
             }
         })
