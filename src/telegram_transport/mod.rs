@@ -389,6 +389,7 @@ impl TelegramLiveDraftClient {
                 "chat_id": chat_id,
                 "draft_id": draft_id,
                 "text": text,
+                "parse_mode": "MarkdownV2",
             }))
             .send()
             .await

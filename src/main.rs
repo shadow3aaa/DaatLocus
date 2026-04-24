@@ -17,6 +17,7 @@ mod dashboard;
 mod events;
 mod hindsight;
 mod i18n;
+mod live_progress;
 mod logging;
 mod memory;
 mod model_catalog;

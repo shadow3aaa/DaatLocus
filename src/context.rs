@@ -16,6 +16,7 @@ use crate::{
     dashboard::DashboardState,
     events::EventStore,
     hindsight::{HindsightClient, HindsightRetainHandle},
+    live_progress::LiveProgressEvent,
     memory::Memory,
     pending_work::PendingWorkQueue,
     plan::Plan,
@@ -85,7 +86,7 @@ pub struct Context {
     pub active_app_notices: HashSet<AppId>,
     pub runtime_overflow_failures: Arc<Mutex<HashMap<String, usize>>>,
     pub suppressed_app_notices: Arc<Mutex<HashMap<AppId, SuppressedAppNotice>>>,
-    pub live_assistant_progress_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
+    pub live_progress_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<LiveProgressEvent>>>>,
     pub claimed_event_ids: Vec<String>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
@@ -165,16 +166,39 @@ impl Context {
         }
     }
 
-    pub fn install_live_assistant_progress(
+    pub fn install_live_progress(
         &mut self,
-        tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        tx: Option<tokio::sync::mpsc::UnboundedSender<LiveProgressEvent>>,
     ) {
-        *self.live_assistant_progress_tx.lock() = tx;
+        *self.live_progress_tx.lock() = tx;
+    }
+
+    pub fn emit_live_generation_started(&self) {
+        self.emit_live_progress(LiveProgressEvent::GenerationStarted);
     }
 
     pub fn emit_live_assistant_progress(&self, content: &str) {
-        if let Some(tx) = self.live_assistant_progress_tx.lock().as_ref() {
-            let _ = tx.send(content.to_string());
+        self.emit_live_progress(LiveProgressEvent::AssistantContent {
+            content: content.to_string(),
+        });
+    }
+
+    pub fn emit_live_reasoning_progress(&self, content: &str) {
+        self.emit_live_progress(LiveProgressEvent::ReasoningContent {
+            content: content.to_string(),
+        });
+    }
+
+    pub fn emit_live_tool_call_title(&self, title: &str, in_reasoning: bool) {
+        self.emit_live_progress(LiveProgressEvent::ToolCallTitle {
+            title: title.to_string(),
+            in_reasoning,
+        });
+    }
+
+    fn emit_live_progress(&self, event: LiveProgressEvent) {
+        if let Some(tx) = self.live_progress_tx.lock().as_ref() {
+            let _ = tx.send(event);
         }
     }
 
