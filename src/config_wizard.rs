@@ -13,7 +13,9 @@ use ratatui::{
 };
 
 use crate::{
-    config::{Config, JudgeConfig, ModelConfig, ProviderConfig, write_config},
+    config::{
+        Config, JudgeConfig, ModelConfig, ProviderConfig, normalize_provider_base_url, write_config,
+    },
     model_catalog::{ModelCapacity, catalog_model_capacity, conservative_model_capacity},
 };
 
@@ -753,8 +755,11 @@ async fn prompt_provider(
             let use_custom_url =
                 ui.confirm("使用自定义 base URL？（默认 api.openai.com）", false)?;
             let base_url = if use_custom_url {
-                let url = ui.text("Base URL", None)?;
-                Some(url)
+                let url = ui.text(
+                    "Base URL（API 根路径，例如 https://api.openai.com/v1）",
+                    None,
+                )?;
+                Some(normalize_provider_base_url(&url))
             } else {
                 None
             };
@@ -785,14 +790,17 @@ async fn prompt_provider(
         }
         ProviderKind::OpenAICompatible => {
             let base_url = ui.text(
-                "Base URL（含 /v1，例如 http://localhost:11434/v1）",
+                "Base URL（API 根路径，例如 http://localhost:11434/v1）",
                 Some("http://localhost:11434/v1"),
             )?;
             let api_key = ui.text(
                 "API key（Ollama 等本地服务可填 ollama 或任意值）",
                 Some("ollama"),
             )?;
-            ProviderConfig::OpenaiCompatible { base_url, api_key }
+            ProviderConfig::OpenaiCompatible {
+                base_url: normalize_provider_base_url(&base_url),
+                api_key,
+            }
         }
     };
 
@@ -956,12 +964,12 @@ struct DiscoveredModel {
     max_output_tokens: Option<usize>,
 }
 
-/// 从 provider 的 /v1/models 接口拉取模型列表；失败时返回空 Vec。
+/// 从 provider 的 models 接口拉取模型列表；失败时返回空 Vec。
 async fn fetch_model_ids(provider: &ProviderConfig) -> Vec<DiscoveredModel> {
     match provider {
         ProviderConfig::GithubCopilot { github_token } => fetch_copilot_models(github_token).await,
         ProviderConfig::Openai { api_key, base_url } => {
-            let base = base_url.as_deref().unwrap_or("https://api.openai.com");
+            let base = base_url.as_deref().unwrap_or("https://api.openai.com/v1");
             fetch_openai_models(base, api_key).await
         }
         ProviderConfig::OpenaiCompatible { base_url, api_key } => {
@@ -971,7 +979,7 @@ async fn fetch_model_ids(provider: &ProviderConfig) -> Vec<DiscoveredModel> {
 }
 
 async fn fetch_openai_models(base_url: &str, api_key: &str) -> Vec<DiscoveredModel> {
-    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let url = format!("{}/models", normalize_provider_base_url(base_url));
     fetch_openai_models_path(&url, api_key).await
 }
 
@@ -1298,7 +1306,7 @@ fn render_config_summary_lines(config: &Config) -> Vec<String> {
         let desc = match provider {
             ProviderConfig::Openai { api_key, base_url } => {
                 let masked = mask_secret(api_key);
-                let url = base_url.as_deref().unwrap_or("https://api.openai.com");
+                let url = base_url.as_deref().unwrap_or("https://api.openai.com/v1");
                 format!("openai  url={url}  key={masked}")
             }
             ProviderConfig::GithubCopilot { github_token } => {

@@ -15,7 +15,7 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::{
-    config::{Config, ModelConfig, ProviderConfig},
+    config::{Config, ModelConfig, ProviderConfig, normalize_provider_base_url},
     context::Context,
     context_budget::{
         ContextBudgetExceededError, RequestBudgetBreakdown, RequestBudgetLimits,
@@ -36,7 +36,7 @@ pub struct OpenAIClient {
     client: reqwest::Client,
     pub(crate) api_key: String,
     pub(crate) base_url: String,
-    /// chat completions 路径，默认 "/v1/chat/completions"
+    /// chat completions 路径，默认 "/chat/completions"
     completions_path: &'static str,
     /// 每次请求附带的额外 headers（用于 Copilot IDE 鉴权等）
     extra_headers: reqwest::header::HeaderMap,
@@ -150,6 +150,7 @@ impl StreamingToolCallBuilder {
 impl OpenAIClient {
     /// 从独立的凭据 + ModelConfig 构造。
     pub fn from_parts(api_key: &str, base_url: &str, model_config: &ModelConfig) -> Self {
+        let base_url = normalize_provider_base_url(base_url);
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
         let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
         let client = reqwest::Client::builder()
@@ -163,8 +164,8 @@ impl OpenAIClient {
         Self {
             client,
             api_key: api_key.to_string(),
-            base_url: base_url.to_string(),
-            completions_path: "/v1/chat/completions",
+            base_url: base_url.clone(),
+            completions_path: "/chat/completions",
             extra_headers: reqwest::header::HeaderMap::new(),
             model: model_config.model_id.clone(),
             temperature: model_config.temperature,
@@ -176,7 +177,7 @@ impl OpenAIClient {
             auto_compact_threshold_tokens,
             max_completion_tokens,
             request_rate_limiter: shared_request_rate_limiter(
-                base_url,
+                &base_url,
                 &model_config.model_id,
                 model_config.rpm(),
             ),
@@ -1867,7 +1868,7 @@ pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn LLM + Send
 
     match provider_config {
         ProviderConfig::Openai { api_key, base_url } => {
-            let base = base_url.as_deref().unwrap_or("https://api.openai.com");
+            let base = base_url.as_deref().unwrap_or("https://api.openai.com/v1");
             Ok(Box::new(OpenAIClient::from_parts(
                 api_key,
                 base,
@@ -1962,6 +1963,20 @@ mod tests {
                 .as_str()
                 .unwrap_or_default()
                 .contains("historical tool result")
+        );
+    }
+
+    #[test]
+    fn openai_client_treats_base_url_as_api_root() {
+        let model_config = ModelConfig::default();
+        let plain = OpenAIClient::from_parts("test-key", "https://api.deepseek.com", &model_config);
+        let versioned =
+            OpenAIClient::from_parts("test-key", "https://api.deepseek.com/v1/", &model_config);
+
+        assert_eq!(plain.url(), "https://api.deepseek.com/chat/completions");
+        assert_eq!(
+            versioned.url(),
+            "https://api.deepseek.com/v1/chat/completions"
         );
     }
 

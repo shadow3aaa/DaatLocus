@@ -15,6 +15,10 @@ use crate::{
 const CONFIG_FILE_NAME: &str = "config.toml";
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: i64 = 95;
 
+pub fn normalize_provider_base_url(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Provider 凭据层
 // ---------------------------------------------------------------------------
@@ -413,4 +417,25 @@ pub async fn load_config() -> Result<Config, ConfigError> {
     config.validate().map_err(ConfigError::Validation)?;
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_provider_base_url;
+
+    #[test]
+    fn normalize_provider_base_url_only_trims_whitespace_and_slashes() {
+        assert_eq!(
+            normalize_provider_base_url("https://api.deepseek.com/v1/"),
+            "https://api.deepseek.com/v1"
+        );
+        assert_eq!(
+            normalize_provider_base_url(" http://localhost:11434/v1 "),
+            "http://localhost:11434/v1"
+        );
+        assert_eq!(
+            normalize_provider_base_url("https://example.com/proxy/v1"),
+            "https://example.com/proxy/v1"
+        );
+    }
 }
