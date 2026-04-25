@@ -5,7 +5,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::terminal_app::process::TerminalProcess;
+use crate::terminal_app::process::{
+    DEFAULT_OUTPUT_BUFFER_CAPACITY_BYTES, TerminalOutputChunk, TerminalOutputStats, TerminalProcess,
+};
 use async_trait::async_trait;
 use miette::{Result, bail, miette};
 use schemars::schema_for;
@@ -57,6 +59,7 @@ const TERMINAL_HOW_TO_USE_LINES: &[&str] = &[
 pub struct TerminalApp {
     sessions: BTreeMap<String, TerminalSession>,
     next_session_index: usize,
+    output_buffer_capacity: usize,
 }
 
 struct TerminalSession {
@@ -70,6 +73,10 @@ struct TerminalSession {
 pub struct TerminalToolResult {
     pub session: TerminalSessionState,
     pub output: String,
+    pub output_missed_bytes: usize,
+    pub output_dropped_bytes: usize,
+    pub output_retained_bytes: usize,
+    pub output_buffer_capacity: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +89,14 @@ pub struct TerminalSessionState {
     pub cwd: Option<String>,
     pub has_unread_output: bool,
     pub last_output_preview: String,
+    #[serde(default)]
+    pub output_total_written_bytes: usize,
+    #[serde(default)]
+    pub output_retained_bytes: usize,
+    #[serde(default)]
+    pub output_dropped_bytes: usize,
+    #[serde(default)]
+    pub output_buffer_capacity: usize,
 }
 
 impl TerminalApp {
@@ -95,6 +110,16 @@ impl TerminalApp {
         Self {
             sessions: BTreeMap::new(),
             next_session_index: 1,
+            output_buffer_capacity: DEFAULT_OUTPUT_BUFFER_CAPACITY_BYTES,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_output_buffer_capacity(output_buffer_capacity: usize) -> Self {
+        Self {
+            sessions: BTreeMap::new(),
+            next_session_index: 1,
+            output_buffer_capacity,
         }
     }
 
@@ -161,19 +186,26 @@ impl TerminalApp {
         if let Some(reason) = Self::forbidden_input_reason(&command) {
             bail!(reason);
         }
+        let output_buffer_capacity = self.output_buffer_capacity;
         let effective_workdir = workdir;
         let session = self.session_mut(&target_session_id)?;
         if session.state.status == "running" {
             bail!("terminal session `{target_session_id}` already has a running process");
         }
         session.process = Some(
-            TerminalProcess::spawn(&command, effective_workdir.as_deref(), sandbox_policy)
-                .map_err(|err| miette!("failed to spawn terminal process: {err}"))?,
+            spawn_terminal_process(
+                &command,
+                effective_workdir.as_deref(),
+                sandbox_policy,
+                output_buffer_capacity,
+            )
+            .map_err(|err| miette!("failed to spawn terminal process: {err}"))?,
         );
         session.output_offset = 0;
         session.state.command = Some(command);
         session.state.status = "running".to_string();
         session.state.exit_code = None;
+        session.state.output_buffer_capacity = output_buffer_capacity;
         if let Some(workdir) = effective_workdir.clone() {
             session.state.cwd = Some(workdir);
         }
@@ -191,17 +223,15 @@ impl TerminalApp {
         loop {
             tokio::time::sleep(Duration::from_millis(50)).await;
             refresh_terminal_session(session);
-            let (delta, next_offset) = session
+            let chunk = session
                 .process
                 .as_ref()
-                .map(|process| {
-                    let (delta, next_offset) = process.output_since(progress_offset);
-                    (delta, next_offset)
-                })
-                .unwrap_or_else(|| (String::new(), progress_offset));
-            progress_offset = next_offset;
+                .map(|process| process.output_since(progress_offset))
+                .unwrap_or_else(|| empty_terminal_output_chunk(progress_offset, &session.state));
+            progress_offset = chunk.next_offset;
+            apply_terminal_output_stats(&mut session.state, chunk.stats);
+            let delta = format_terminal_output_chunk(&chunk, max_chars);
             if !delta.is_empty() {
-                let delta = truncate_terminal_output(delta, max_chars);
                 on_progress(&session.state, &delta);
             }
             if session.state.status != "running" || started_at.elapsed() >= timeout {
@@ -209,19 +239,27 @@ impl TerminalApp {
             }
         }
         refresh_terminal_session(session);
-        let (output, next_offset) = session
+        let chunk = session
             .process
             .as_ref()
             .map(|process| process.output_since(start_offset))
-            .unwrap_or_else(|| (String::new(), start_offset));
-        session.output_offset = next_offset;
+            .unwrap_or_else(|| empty_terminal_output_chunk(start_offset, &session.state));
+        session.output_offset = chunk.next_offset;
+        apply_terminal_output_stats(&mut session.state, chunk.stats);
         session.last_activity = Instant::now();
         session.state.has_unread_output = false;
         let state = session.state.clone();
+        let output = format_terminal_output_chunk(&chunk, max_chars);
+        let output_missed_bytes = chunk.missed_bytes;
+        let output_stats = chunk.stats;
         self.prune_exited_sessions();
         Ok(TerminalToolResult {
             session: state,
-            output: truncate_terminal_output(output, max_chars),
+            output,
+            output_missed_bytes,
+            output_dropped_bytes: output_stats.dropped_bytes,
+            output_retained_bytes: output_stats.retained_bytes,
+            output_buffer_capacity: output_stats.buffer_capacity,
         })
     }
 
@@ -267,17 +305,15 @@ impl TerminalApp {
         loop {
             tokio::time::sleep(Duration::from_millis(50)).await;
             refresh_terminal_session(session);
-            let (delta, next_offset) = session
+            let chunk = session
                 .process
                 .as_ref()
-                .map(|process| {
-                    let (delta, next_offset) = process.output_since(progress_offset);
-                    (delta, next_offset)
-                })
-                .unwrap_or_else(|| (String::new(), progress_offset));
-            progress_offset = next_offset;
+                .map(|process| process.output_since(progress_offset))
+                .unwrap_or_else(|| empty_terminal_output_chunk(progress_offset, &session.state));
+            progress_offset = chunk.next_offset;
+            apply_terminal_output_stats(&mut session.state, chunk.stats);
+            let delta = format_terminal_output_chunk(&chunk, max_chars);
             if !delta.is_empty() {
-                let delta = truncate_terminal_output(delta, max_chars);
                 on_progress(&session.state, &delta);
             }
             if session.state.status != "running" || started_at.elapsed() >= timeout {
@@ -285,19 +321,27 @@ impl TerminalApp {
             }
         }
         refresh_terminal_session(session);
-        let (output, next_offset) = session
+        let chunk = session
             .process
             .as_ref()
             .map(|process| process.output_since(start_offset))
-            .unwrap_or_else(|| (String::new(), start_offset));
-        session.output_offset = next_offset;
+            .unwrap_or_else(|| empty_terminal_output_chunk(start_offset, &session.state));
+        session.output_offset = chunk.next_offset;
+        apply_terminal_output_stats(&mut session.state, chunk.stats);
         session.last_activity = Instant::now();
         session.state.has_unread_output = false;
         let state = session.state.clone();
+        let output = format_terminal_output_chunk(&chunk, max_chars);
+        let output_missed_bytes = chunk.missed_bytes;
+        let output_stats = chunk.stats;
         self.prune_exited_sessions();
         Ok(TerminalToolResult {
             session: state,
-            output: truncate_terminal_output(output, max_chars),
+            output,
+            output_missed_bytes,
+            output_dropped_bytes: output_stats.dropped_bytes,
+            output_retained_bytes: output_stats.retained_bytes,
+            output_buffer_capacity: output_stats.buffer_capacity,
         })
     }
 
@@ -347,6 +391,10 @@ impl TerminalApp {
                 cwd: None,
                 has_unread_output: true,
                 last_output_preview: String::new(),
+                output_total_written_bytes: 0,
+                output_retained_bytes: 0,
+                output_dropped_bytes: 0,
+                output_buffer_capacity: self.output_buffer_capacity,
             },
         };
         self.sessions.insert(session_id.clone(), session);
@@ -394,7 +442,7 @@ fn terminal_progress_mode(text: &str) -> &'static str {
 }
 
 fn terminal_session_meta(session: &TerminalSessionState) -> String {
-    format!(
+    let mut meta = format!(
         "{}  {}  exit={}  cwd={}",
         display_session_label(&session.session_id),
         session.status,
@@ -403,7 +451,70 @@ fn terminal_session_meta(session: &TerminalSessionState) -> String {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string()),
         session.cwd.as_deref().unwrap_or("-")
-    )
+    );
+    if session.output_dropped_bytes > 0 {
+        meta.push_str(&format!(
+            "  dropped={}B  buffer={}/{}B",
+            session.output_dropped_bytes,
+            session.output_retained_bytes,
+            session.output_buffer_capacity
+        ));
+    }
+    meta
+}
+
+fn apply_terminal_output_stats(session: &mut TerminalSessionState, stats: TerminalOutputStats) {
+    session.output_total_written_bytes = stats.total_written_bytes;
+    session.output_retained_bytes = stats.retained_bytes;
+    session.output_dropped_bytes = stats.dropped_bytes;
+    session.output_buffer_capacity = stats.buffer_capacity;
+}
+
+fn empty_terminal_output_chunk(
+    next_offset: usize,
+    session: &TerminalSessionState,
+) -> TerminalOutputChunk {
+    TerminalOutputChunk {
+        text: String::new(),
+        next_offset,
+        missed_bytes: 0,
+        stats: TerminalOutputStats {
+            buffer_capacity: session.output_buffer_capacity,
+            total_written_bytes: next_offset,
+            retained_bytes: session.output_retained_bytes,
+            dropped_bytes: session.output_dropped_bytes,
+        },
+    }
+}
+
+fn format_terminal_output_chunk(chunk: &TerminalOutputChunk, max_chars: Option<usize>) -> String {
+    let output = truncate_terminal_output(chunk.text.clone(), max_chars);
+    if chunk.missed_bytes == 0 {
+        return output;
+    }
+
+    let notice = format!(
+        "[terminal output truncated: {} byte(s) dropped before this read]",
+        chunk.missed_bytes
+    );
+    if output.is_empty() {
+        notice
+    } else {
+        format!("{notice}\n{output}")
+    }
+}
+
+fn terminal_output_metadata_lines(result: &TerminalToolResult) -> Vec<String> {
+    if result.output_missed_bytes == 0 && result.output_dropped_bytes == 0 {
+        return Vec::new();
+    }
+    vec![format!(
+        "output_missed_bytes={} output_dropped_bytes={} output_retained_bytes={} output_buffer_capacity={}",
+        result.output_missed_bytes,
+        result.output_dropped_bytes,
+        result.output_retained_bytes,
+        result.output_buffer_capacity
+    )]
 }
 
 fn summarize_terminal_inline_text(text: &str) -> String {
@@ -424,6 +535,24 @@ fn resolve_terminal_path(
     base: Option<&Path>,
 ) -> std::path::PathBuf {
     context.resolve_tool_path(Path::new(raw), base)
+}
+
+fn spawn_terminal_process(
+    command: &str,
+    workdir: Option<&str>,
+    sandbox_policy: &RuntimeSandboxPolicy,
+    output_buffer_capacity: usize,
+) -> std::io::Result<TerminalProcess> {
+    if output_buffer_capacity == DEFAULT_OUTPUT_BUFFER_CAPACITY_BYTES {
+        TerminalProcess::spawn(command, workdir, sandbox_policy)
+    } else {
+        TerminalProcess::spawn_with_output_capacity(
+            command,
+            workdir,
+            sandbox_policy,
+            output_buffer_capacity,
+        )
+    }
 }
 
 fn command_mentions_protected_paths(context: &AppToolExecutionContext, text: &str) -> bool {
@@ -713,19 +842,21 @@ impl App for TerminalApp {
                         display_session_label(&result.session.session_id)
                     )
                 };
+                let mut extra_lines = vec![
+                    format!("running={running}"),
+                    format!(
+                        "yield_time_ms={}",
+                        args.yield_time_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "default".to_string())
+                    ),
+                ];
+                extra_lines.extend(terminal_output_metadata_lines(&result));
                 let model_content = compact_terminal_model_content(
                     &summary,
                     &result.session,
                     &result.output,
-                    &[
-                        format!("running={running}"),
-                        format!(
-                            "yield_time_ms={}",
-                            args.yield_time_ms
-                                .map(|value| value.to_string())
-                                .unwrap_or_else(|| "default".to_string())
-                        ),
-                    ],
+                    &extra_lines,
                     context.tool_output_max_tokens,
                 );
                 Ok(AppToolExecutionResult {
@@ -733,6 +864,10 @@ impl App for TerminalApp {
                     payload: json!({
                         "session": result.session,
                         "output": result.output,
+                        "output_missed_bytes": result.output_missed_bytes,
+                        "output_dropped_bytes": result.output_dropped_bytes,
+                        "output_retained_bytes": result.output_retained_bytes,
+                        "output_buffer_capacity": result.output_buffer_capacity,
                         "running": running,
                         "yield_time_ms": args.yield_time_ms,
                         "max_chars": args.max_chars,
@@ -749,6 +884,7 @@ impl App for TerminalApp {
                         ),
                         {
                             let mut body = vec![terminal_session_meta(&result.session)];
+                            body.extend(terminal_output_metadata_lines(&result));
                             body.extend(compact_body_lines(&result.output, 10));
                             body
                         },
@@ -848,6 +984,7 @@ impl App for TerminalApp {
                         summarize_terminal_inline_text(&args.text)
                     ));
                 }
+                extra_lines.extend(terminal_output_metadata_lines(&result));
                 let model_content = compact_terminal_model_content(
                     &summary,
                     &result.session,
@@ -860,6 +997,10 @@ impl App for TerminalApp {
                     payload: json!({
                         "session": result.session,
                         "output": result.output,
+                        "output_missed_bytes": result.output_missed_bytes,
+                        "output_dropped_bytes": result.output_dropped_bytes,
+                        "output_retained_bytes": result.output_retained_bytes,
+                        "output_buffer_capacity": result.output_buffer_capacity,
                         "running": running,
                         "mode": mode,
                         "yield_time_ms": args.yield_time_ms,
@@ -879,6 +1020,7 @@ impl App for TerminalApp {
                         command_label,
                         {
                             let mut body = vec![terminal_session_meta(&result.session)];
+                            body.extend(terminal_output_metadata_lines(&result));
                             body.extend(compact_body_lines(&result.output, 10));
                             body
                         },
@@ -968,6 +1110,9 @@ fn refresh_terminal_session(session: &mut TerminalSession) {
         .as_ref()
         .map(|process| process.output_tail(800))
         .unwrap_or_default();
+    if let Some(process) = session.process.as_ref() {
+        apply_terminal_output_stats(&mut session.state, process.output_stats());
+    }
     session.state.last_output_preview = summarize_terminal_preview(&output_tail);
     session.state.has_unread_output = session
         .process
@@ -987,7 +1132,7 @@ fn refresh_terminal_session(session: &mut TerminalSession) {
 
 fn render_session_state_line(state: &TerminalSessionState) -> String {
     format!(
-        "session={} status={} pid={} exit={} cwd={} unread={} command={} preview={}",
+        "session={} status={} pid={} exit={} cwd={} unread={} output_total_bytes={} output_retained_bytes={} output_dropped_bytes={} output_buffer_capacity={} command={} preview={}",
         state.session_id,
         state.status,
         state
@@ -1000,6 +1145,10 @@ fn render_session_state_line(state: &TerminalSessionState) -> String {
             .unwrap_or_else(|| "none".to_string()),
         state.cwd.as_deref().unwrap_or("unknown"),
         state.has_unread_output,
+        state.output_total_written_bytes,
+        state.output_retained_bytes,
+        state.output_dropped_bytes,
+        state.output_buffer_capacity,
         state.command.as_deref().unwrap_or("<none>"),
         state.last_output_preview
     )
@@ -1066,6 +1215,14 @@ mod tests {
             "Start-Sleep -Seconds 30".to_string()
         } else {
             "sleep 30".to_string()
+        }
+    }
+
+    fn high_output_command(byte_count: usize) -> String {
+        if cfg!(windows) {
+            format!("[Console]::Out.Write(('x' * {byte_count}))")
+        } else {
+            format!("printf '%{byte_count}s' '' | tr ' ' x")
         }
     }
 
@@ -1224,6 +1381,44 @@ mod tests {
             assert!(result.session.exit_code.is_none());
             assert!(result.output.trim().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn high_output_command_reports_bounded_buffer_truncation() {
+        let mut app = TerminalApp::new_with_output_buffer_capacity(1024);
+        let sandbox_policy = test_sandbox_policy();
+
+        let result = app
+            .exec_command_with_progress(
+                high_output_command(4096),
+                None,
+                None,
+                &sandbox_policy,
+                Some(5_000),
+                None,
+                |_session, _delta| {},
+            )
+            .await
+            .expect("high-output command should succeed");
+
+        assert!(
+            result.output_missed_bytes > 0,
+            "expected stale read to report missed bytes"
+        );
+        assert!(
+            result.output_dropped_bytes > 0,
+            "expected bounded buffer to drop old bytes"
+        );
+        assert_eq!(result.output_buffer_capacity, 1024);
+        assert!(
+            result.output.contains("[terminal output truncated:"),
+            "expected output truncation notice, got {:?}",
+            result.output
+        );
+        assert!(
+            result.output.chars().filter(|ch| *ch == 'x').count() <= 1024,
+            "output should retain only the bounded tail"
+        );
     }
 
     #[tokio::test]

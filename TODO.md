@@ -24,11 +24,11 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Drain submitted handoffs or preserve unfinished work during daemon shutdown.
   - [x] Avoid deleting local queue items until retain handoff is accepted.
 
-- [ ] Add hard memory bounds for terminal process output buffers
-  - [ ] Replace unbounded terminal `Vec<u8>` output storage with a bounded ring buffer.
-  - [ ] Track dropped byte counts when output exceeds the hard limit.
-  - [ ] Surface truncation/drop metadata in terminal tool results and dashboard cells.
-  - [ ] Add tests for high-output commands that exceed the buffer limit.
+- [x] Add hard memory bounds for terminal process output buffers
+  - [x] Replace unbounded terminal `Vec<u8>` output storage with a bounded ring buffer.
+  - [x] Track dropped byte counts when output exceeds the hard limit.
+  - [x] Surface truncation/drop metadata in terminal tool results and dashboard cells.
+  - [x] Add tests for high-output commands that exceed the buffer limit.
 
 - [ ] Add timeout and interruption support for Lua workspace apps
   - [ ] Cover app hooks, tools, render, and notice polling.
