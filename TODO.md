@@ -92,9 +92,11 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Verify browser runtime content length and GCS MD5 hash before extraction.
   - [x] Record installed browser runtime version, revision, URL, and archive hash metadata.
 
-- [ ] Add daemon shutdown drain for retain jobs and runtime persistence
-  - [ ] Ensure shutdown completes outstanding retain and state flush work when possible.
-  - [ ] Preserve unfinished work when clean drain is impossible.
+- [x] Persist mutable runtime state at mutation boundaries
+  - [x] Persist plan immediately after `update_plan` and dashboard clear.
+  - [x] Persist runtime conversation and Hindsight queue immediately after committing a runtime turn.
+  - [x] Persist runtime conversation compaction results when they are applied.
+  - [x] Keep shutdown persistence as a best-effort fallback, not the primary durability boundary.
 
 - [x] Preserve pending Hindsight handoff items across process exits
   - [x] Reset only inflight state that is safe to retry.

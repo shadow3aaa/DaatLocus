@@ -117,16 +117,20 @@ const HINDSIGHT_HANDOFF_BACKLOG_LIMIT: usize = 3;
 impl Memory {
     pub async fn new() -> Self {
         let mut hindsight_queue = HindsightQueue::new().await;
-        hindsight_queue.reset_inflight_retain_state();
+        let reset_inflight = hindsight_queue.reset_inflight_retain_state();
         let runtime_conversation = RuntimeConversation::new(
             hindsight_queue.current_focus(),
             hindsight_queue.bootstrap_messages(),
         )
         .await;
-        Self {
+        let memory = Self {
             runtime_conversation,
             hindsight_queue,
+        };
+        if reset_inflight {
+            memory.hindsight_queue.sync_to_disk().await;
         }
+        memory
     }
 
     pub async fn record_agent_turn(
@@ -144,6 +148,7 @@ impl Memory {
         let jobs = self.collect_pending_retain_jobs();
         let must_flush_before_continue =
             self.hindsight_queue.handoff_backlog_count() >= HINDSIGHT_HANDOFF_BACKLOG_LIMIT;
+        self.sync_to_disk().await;
         MemoryRetainPlan {
             jobs,
             must_flush_before_continue,
@@ -195,12 +200,16 @@ impl Memory {
             .plan_compaction(max_tokens, min_messages, summary_max_tokens)
     }
 
-    pub fn apply_runtime_conversation_compaction(
+    pub async fn apply_runtime_conversation_compaction(
         &mut self,
         plan: RuntimeConversationCompactionPlan,
         outcome: Option<RuntimeCompactionOutcome>,
     ) -> bool {
-        self.runtime_conversation.apply_compaction(plan, outcome)
+        let changed = self.runtime_conversation.apply_compaction(plan, outcome);
+        if changed {
+            self.runtime_conversation.sync_to_disk().await;
+        }
+        changed
     }
 
     pub fn runtime_conversation_slice(
@@ -261,12 +270,16 @@ impl Memory {
     }
 
     pub async fn shutdown(self) {
-        self.runtime_conversation.sync_to_disk().await;
-        self.hindsight_queue.sync_to_disk().await;
+        self.sync_to_disk().await;
     }
 
     fn collect_pending_retain_jobs(&mut self) -> Vec<HindsightRetainJob> {
         self.hindsight_queue.collect_pending_retain_jobs()
+    }
+
+    async fn sync_to_disk(&self) {
+        self.runtime_conversation.sync_to_disk().await;
+        self.hindsight_queue.sync_to_disk().await;
     }
 }
 
@@ -798,12 +811,15 @@ impl HindsightQueue {
             .await
     }
 
-    fn reset_inflight_retain_state(&mut self) {
+    fn reset_inflight_retain_state(&mut self) -> bool {
+        let mut changed = false;
         for item in &mut self.trail {
             if !item.submitted {
+                changed |= item.inflight;
                 item.inflight = false;
             }
         }
+        changed
     }
 
     fn current_focus(&self) -> Option<String> {

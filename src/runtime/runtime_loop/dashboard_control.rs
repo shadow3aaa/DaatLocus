@@ -33,7 +33,11 @@ pub(crate) async fn handle_dashboard_control_command(
         }
         DashboardControlCommand::ClearConversation => {
             let retain_plan = context.memory.clear_runtime_conversation().await;
-            let _ = context.plan.clear();
+            if context.plan.clear()
+                && let Err(err) = context.plan.sync_to_disk().await
+            {
+                tracing::error!("failed to persist cleared plan: {err}");
+            }
             for job in retain_plan.jobs {
                 if let Err(err) = context.hindsight_retain.enqueue(job) {
                     tracing::error!("failed to enqueue hindsight retain job during clear: {err:?}");

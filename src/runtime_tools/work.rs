@@ -354,6 +354,9 @@ fn execute_update_plan_tool<'a>(
         let args: UpdatePlanArgs = parse_tool_args(call)?;
         let plan = build_plan_from_args(args)?;
         let changed = context.plan.replace(plan.steps().to_vec());
+        if changed {
+            context.plan.sync_to_disk().await?;
+        }
         let effective_steps = context.plan.steps().to_vec();
         let summary = if effective_steps.is_empty() {
             if changed {

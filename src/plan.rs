@@ -98,12 +98,17 @@ impl Plan {
             .filter(|step| !matches!(step.status, PlanStatus::Completed))
     }
 
-    pub async fn shutdown(self) {
+    pub async fn sync_to_disk(&self) -> miette::Result<()> {
         PersistenceStore::runtime()
             .await
-            .write_postcard_memory(PLAN_FILE_NAME, &self)
+            .write_postcard_memory(PLAN_FILE_NAME, self)
             .await
-            .unwrap();
+    }
+
+    pub async fn shutdown(self) {
+        if let Err(err) = self.sync_to_disk().await {
+            tracing::error!("persist plan during shutdown failed: {err}");
+        }
     }
 }
 

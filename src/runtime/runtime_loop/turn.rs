@@ -276,7 +276,8 @@ pub(crate) async fn execute_agent_loop_step(
         };
         let _ = context
             .memory
-            .apply_runtime_conversation_compaction(plan, summary);
+            .apply_runtime_conversation_compaction(plan, summary)
+            .await;
     }
     let mut conversation_slice = context.memory.runtime_conversation_slice(
         runtime_conversation_budget,
