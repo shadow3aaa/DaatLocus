@@ -156,15 +156,29 @@ pub(crate) async fn connect_bootstrapped_hindsight(
     Ok(hindsight)
 }
 
-pub(crate) async fn sandbox_policy_for_runtime() -> RuntimeSandboxPolicy {
+pub(crate) async fn sandbox_policy_for_runtime(
+    config: &crate::config::Config,
+) -> RuntimeSandboxPolicy {
     let daat_locus_home = daat_locus_paths().await.root().to_path_buf();
-    RuntimeSandboxPolicy::protect_daat_locus_runtime(&daat_locus_home)
+    RuntimeSandboxPolicy::protect_daat_locus_runtime_with_options(
+        &daat_locus_home,
+        daat_locus_source_root().as_deref(),
+        config.protected_secret_env_vars(),
+    )
 }
 
-pub(crate) fn build_runtime_apps(execution_cwd: &Path) -> RuntimeAppsBootstrap {
+fn daat_locus_source_root() -> Option<PathBuf> {
+    let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    source_root.exists().then_some(source_root)
+}
+
+pub(crate) fn build_runtime_apps(
+    execution_cwd: &Path,
+    sandbox_policy: &RuntimeSandboxPolicy,
+) -> RuntimeAppsBootstrap {
     let mut apps: Vec<Box<dyn crate::app::App>> =
         vec![Box::new(BrowserApp::new()), Box::new(TerminalApp::new())];
-    let bootstrap = bootstrap_workspace_apps(execution_cwd);
+    let bootstrap = bootstrap_workspace_apps(execution_cwd, sandbox_policy.protected_env_vars());
     for error in &bootstrap.errors {
         tracing::warn!("{error}");
     }
@@ -193,7 +207,7 @@ pub(crate) async fn build_eval_context_with_compiled(
             workspace_apps_dir(&execution_cwd).display()
         )
     });
-    let sandbox_policy = sandbox_policy_for_runtime().await;
+    let sandbox_policy = sandbox_policy_for_runtime(&config).await;
     let memory = Memory::new().await;
     let plan = Plan::new().await;
     let events = EventStore::new().await;
@@ -203,7 +217,7 @@ pub(crate) async fn build_eval_context_with_compiled(
     let telegram = TelegramTransportState::new();
     let telegram_handle = telegram.handle();
     bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
-    let runtime_apps = build_runtime_apps(&execution_cwd);
+    let runtime_apps = build_runtime_apps(&execution_cwd, &sandbox_policy);
     let apps = AppManager::new(Some(AppId::terminal()), runtime_apps.apps)
         .await
         .unwrap();

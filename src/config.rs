@@ -243,6 +243,25 @@ impl Config {
             .unwrap_or_else(|| panic!("provider '{}' not found in providers", provider_key))
     }
 
+    pub fn protected_secret_env_vars(&self) -> Vec<String> {
+        let mut vars = Vec::new();
+        for provider in self.providers.values() {
+            match provider {
+                ProviderConfig::Openai { api_key, .. }
+                | ProviderConfig::OpenaiCompatible { api_key, .. } => {
+                    push_secret_env_ref(&mut vars, api_key);
+                }
+                ProviderConfig::GithubCopilot { github_token } => {
+                    push_secret_env_ref(&mut vars, github_token);
+                }
+            }
+        }
+        push_secret_env_ref(&mut vars, &self.telegram.bot_token);
+        vars.sort_by_key(|name| name.to_ascii_uppercase());
+        vars.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        vars
+    }
+
     /// Validate provider and model references.
     pub fn validate(&self) -> Result<(), String> {
         if self.daemon.port == 0 {
@@ -289,6 +308,43 @@ impl Config {
 
         Ok(())
     }
+}
+
+fn push_secret_env_ref(vars: &mut Vec<String>, value: &str) {
+    if let Some(name) = secret_env_ref_name(value) {
+        vars.push(name);
+    }
+}
+
+fn secret_env_ref_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let name = if let Some(inner) = trimmed
+        .strip_prefix("${")
+        .and_then(|inner| inner.strip_suffix('}'))
+    {
+        inner
+    } else if let Some(inner) = trimmed.strip_prefix("env:") {
+        inner
+    } else if let Some(inner) = trimmed.strip_prefix('$') {
+        inner
+    } else {
+        return None;
+    };
+    let name = name.trim();
+    if is_valid_env_ref_name(name) {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_valid_env_ref_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 // ---------------------------------------------------------------------------
@@ -416,7 +472,7 @@ pub async fn load_config() -> Result<Config, ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_provider_base_url;
+    use super::{Config, ProviderConfig, normalize_provider_base_url};
 
     #[test]
     fn normalize_provider_base_url_only_trims_whitespace_and_slashes() {
@@ -431,6 +487,42 @@ mod tests {
         assert_eq!(
             normalize_provider_base_url("https://example.com/proxy/v1"),
             "https://example.com/proxy/v1"
+        );
+    }
+
+    #[test]
+    fn protected_secret_env_vars_are_collected_from_config_refs() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "openai".to_string(),
+            ProviderConfig::Openai {
+                api_key: "${OPENAI_API_KEY}".to_string(),
+                base_url: None,
+            },
+        );
+        config.providers.insert(
+            "compatible".to_string(),
+            ProviderConfig::OpenaiCompatible {
+                base_url: "https://example.com/v1".to_string(),
+                api_key: "env:COMPATIBLE_TOKEN".to_string(),
+            },
+        );
+        config.providers.insert(
+            "copilot".to_string(),
+            ProviderConfig::GithubCopilot {
+                github_token: "$GITHUB_TOKEN".to_string(),
+            },
+        );
+        config.telegram.bot_token = "$TELEGRAM_BOT_TOKEN".to_string();
+
+        assert_eq!(
+            config.protected_secret_env_vars(),
+            vec![
+                "COMPATIBLE_TOKEN",
+                "GITHUB_TOKEN",
+                "OPENAI_API_KEY",
+                "TELEGRAM_BOT_TOKEN",
+            ]
         );
     }
 }

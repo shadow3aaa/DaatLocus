@@ -12,6 +12,8 @@ use std::{
 use miette::{Result, miette};
 use uuid::Uuid;
 
+#[cfg(not(test))]
+use crate::sandbox::RuntimeSandboxPolicy;
 use crate::{
     app::AppId,
     workspace_app::{
@@ -34,6 +36,7 @@ pub(super) struct WorkspaceAppWorkerClient {
     entry_relative_path: String,
     request_timeout: Duration,
     cold_start_timeout: Duration,
+    protected_env_vars: Vec<String>,
     next_request_id: u64,
     handle: Option<WorkspaceAppWorkerHandle>,
     reader: Option<BufReader<TcpStream>>,
@@ -54,6 +57,7 @@ impl WorkspaceAppWorkerClient {
         app_dir: PathBuf,
         state_dir: PathBuf,
         entry_relative_path: String,
+        protected_env_vars: Vec<String>,
     ) -> Result<Self> {
         let mut client = Self {
             app_id,
@@ -62,6 +66,7 @@ impl WorkspaceAppWorkerClient {
             entry_relative_path,
             request_timeout: WORKSPACE_APP_REQUEST_TIMEOUT,
             cold_start_timeout: WORKSPACE_APP_COLD_START_TIMEOUT,
+            protected_env_vars,
             next_request_id: 1,
             handle: None,
             reader: None,
@@ -206,6 +211,7 @@ impl WorkspaceAppWorkerClient {
                 token: token.clone(),
             },
             &self.app_id,
+            &self.protected_env_vars,
         )?;
 
         let stream = match accept_worker_connection(&listener, &mut handle, &self.app_id) {
@@ -420,10 +426,12 @@ impl WorkspaceAppWorkerHandle {
 fn spawn_worker_handle(
     args: WorkspaceAppWorkerArgs,
     app_id: &AppId,
+    protected_env_vars: &[String],
 ) -> Result<WorkspaceAppWorkerHandle> {
     let executable = std::env::current_exe()
         .map_err(|err| miette!("failed to locate current executable for app worker: {err}"))?;
-    let child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("workspace-app-worker")
         .arg("--app-id")
         .arg(args.app_id)
@@ -439,14 +447,20 @@ fn spawn_worker_handle(
         .arg(args.token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|err| {
-            miette!(
-                "failed to spawn workspace app `{}` worker process: {err}",
-                app_id
-            )
-        })?;
+        .stderr(Stdio::inherit());
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(|name| {
+            RuntimeSandboxPolicy::is_env_var_protected_by_list(name, protected_env_vars)
+        }) {
+            command.env_remove(&name);
+        }
+    }
+    let child = command.spawn().map_err(|err| {
+        miette!(
+            "failed to spawn workspace app `{}` worker process: {err}",
+            app_id
+        )
+    })?;
     Ok(WorkspaceAppWorkerHandle::Process(child))
 }
 
@@ -454,6 +468,7 @@ fn spawn_worker_handle(
 fn spawn_worker_handle(
     args: WorkspaceAppWorkerArgs,
     app_id: &AppId,
+    _protected_env_vars: &[String],
 ) -> Result<WorkspaceAppWorkerHandle> {
     let app_id_for_log = app_id.clone();
     let handle = std::thread::Builder::new()

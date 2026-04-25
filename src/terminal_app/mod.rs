@@ -1185,9 +1185,37 @@ fn truncate_terminal_output(content: String, max_chars: Option<usize>) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::{env, time::Duration};
 
     use crate::sandbox::{FileSystemSandboxPolicy, RuntimeSandboxPolicy};
+
+    struct EnvOverride {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvOverride {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = env::var(key).ok();
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvOverride {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => unsafe {
+                    env::set_var(self.key, previous);
+                },
+                None => unsafe {
+                    env::remove_var(self.key);
+                },
+            }
+        }
+    }
 
     fn test_sandbox_policy() -> RuntimeSandboxPolicy {
         RuntimeSandboxPolicy {
@@ -1199,6 +1227,7 @@ mod tests {
                 deny_read_paths: Vec::new(),
                 deny_write_paths: Vec::new(),
             },
+            protected_env_vars: Vec::new(),
         }
     }
 
@@ -1223,6 +1252,16 @@ mod tests {
             format!("[Console]::Out.Write(('x' * {byte_count}))")
         } else {
             format!("printf '%{byte_count}s' '' | tr ' ' x")
+        }
+    }
+
+    fn env_value_command(name: &str) -> String {
+        if cfg!(windows) {
+            format!(
+                "if ($env:{name}) {{ [Console]::Out.Write($env:{name}) }} else {{ [Console]::Out.Write('missing') }}"
+            )
+        } else {
+            format!("printf '%s' \"${{{name}-missing}}\"")
         }
     }
 
@@ -1419,6 +1458,36 @@ mod tests {
             result.output.chars().filter(|ch| *ch == 'x').count() <= 1024,
             "output should retain only the bounded tail"
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_exec_strips_protected_env_vars() {
+        let _env = EnvOverride::set("DAAT_LOCUS_TEST_ENV", "super-secret-value");
+        let mut app = TerminalApp::new();
+        let mut sandbox_policy = test_sandbox_policy();
+        sandbox_policy
+            .protected_env_vars
+            .push("DAAT_LOCUS_TEST_ENV".to_string());
+
+        let result = app
+            .exec_command_with_progress(
+                env_value_command("DAAT_LOCUS_TEST_ENV"),
+                None,
+                None,
+                &sandbox_policy,
+                Some(5_000),
+                None,
+                |_session, _delta| {},
+            )
+            .await
+            .expect("env check command should run");
+
+        assert!(
+            result.output.contains("missing"),
+            "protected env var should be removed from terminal child process: {:?}",
+            result.output
+        );
+        assert!(!result.output.contains("super-secret-value"));
     }
 
     #[tokio::test]
