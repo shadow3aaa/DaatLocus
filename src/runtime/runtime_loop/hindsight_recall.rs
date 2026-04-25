@@ -166,7 +166,7 @@ fn select_recent_runtime_conversation_for_hindsight(
 ) -> Vec<String> {
     let contextual_messages = slice_recent_runtime_conversation_turns(messages, 1);
     contextual_messages
-        .into_iter()
+        .iter()
         .filter_map(|message| format_runtime_message_for_hindsight(message, latest_input))
         .collect()
 }

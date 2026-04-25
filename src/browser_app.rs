@@ -498,20 +498,20 @@ fn build_snapshot_line(
         ));
     }
 
-    if let Some(node_ref) = node.node_ref.as_deref() {
-        if should_create_snapshot_ref(role, name) {
-            let key = format!("{role}:{}", name.unwrap_or(""));
-            let nth = duplicate_seen.entry(key.clone()).or_insert(0);
-            let current_nth = *nth;
-            *nth += 1;
-            line.push_str(&format!(" [ref={node_ref}]"));
-            if duplicate_counts.get(&key).copied().unwrap_or(0) > 1 && current_nth > 0 {
-                line.push_str(&format!(" [nth={current_nth}]"));
-            }
-            stats.ref_count += 1;
-            if is_interactive_role(role) {
-                stats.interactive_ref_count += 1;
-            }
+    if let Some(node_ref) = node.node_ref.as_deref()
+        && should_create_snapshot_ref(role, name)
+    {
+        let key = format!("{role}:{}", name.unwrap_or(""));
+        let nth = duplicate_seen.entry(key.clone()).or_insert(0);
+        let current_nth = *nth;
+        *nth += 1;
+        line.push_str(&format!(" [ref={node_ref}]"));
+        if duplicate_counts.get(&key).copied().unwrap_or(0) > 1 && current_nth > 0 {
+            line.push_str(&format!(" [nth={current_nth}]"));
+        }
+        stats.ref_count += 1;
+        if is_interactive_role(role) {
+            stats.interactive_ref_count += 1;
         }
     }
 

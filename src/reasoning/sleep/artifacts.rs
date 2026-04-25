@@ -361,12 +361,14 @@ pub(super) async fn optimize_workflows_from_run_records(
                 let merge_plan = planner
                     .plan_workflow_merge(
                         context,
-                        target,
-                        target_reflection,
-                        &target_evidence,
-                        source,
-                        source_reflection,
-                        &source_evidence,
+                        WorkflowMergePlanningInput {
+                            target_workflow: target,
+                            target_reflection,
+                            target_evidence: &target_evidence,
+                            source_workflow: source,
+                            source_reflection,
+                            source_evidence: &source_evidence,
+                        },
                     )
                     .await?;
                 if let Some(evaluation) = merge_plan.evaluation {

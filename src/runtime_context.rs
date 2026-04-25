@@ -116,13 +116,15 @@ pub async fn execute_pre_turn_runtime_compaction(
     let retained_user_message_count = plan.retained_user_messages().len();
     execute_runtime_compaction(
         context,
-        plan.source_messages(),
-        retained_user_message_count,
-        plan.summary_max_tokens(),
-        RuntimeCompactionPhase::PreTurn,
-        RuntimeCompactionReason::BudgetThreshold,
-        RuntimeCompactionReinjectionStrategy::RebuildRuntimeEnvelope,
-        fallback_summary,
+        RuntimeCompactionRequest {
+            source_messages: plan.source_messages(),
+            retained_user_message_count,
+            max_tokens: plan.summary_max_tokens(),
+            phase: RuntimeCompactionPhase::PreTurn,
+            reason: RuntimeCompactionReason::BudgetThreshold,
+            reinjection_strategy: RuntimeCompactionReinjectionStrategy::RebuildRuntimeEnvelope,
+            fallback_summary,
+        },
     )
     .await
     .map(|execution| execution.outcome)
@@ -305,16 +307,30 @@ fn trim_compaction_source_items_to_fit_budget(
     }
 }
 
-async fn execute_runtime_compaction(
-    context: &Context,
-    source_messages: &[HistoryMessage],
+struct RuntimeCompactionRequest<'a> {
+    source_messages: &'a [HistoryMessage],
     retained_user_message_count: usize,
     max_tokens: usize,
     phase: RuntimeCompactionPhase,
     reason: RuntimeCompactionReason,
     reinjection_strategy: RuntimeCompactionReinjectionStrategy,
     fallback_summary: String,
+}
+
+async fn execute_runtime_compaction(
+    context: &Context,
+    request: RuntimeCompactionRequest<'_>,
 ) -> Option<RuntimeCompactionExecution> {
+    let RuntimeCompactionRequest {
+        source_messages,
+        retained_user_message_count,
+        max_tokens,
+        phase,
+        reason,
+        reinjection_strategy,
+        fallback_summary,
+    } = request;
+
     let source_items = build_history_compaction_source_items(source_messages);
     let before_tokens = history_messages_total_token_cost(source_messages);
     let trimmed = trim_compaction_source_items_to_fit_budget(
@@ -531,24 +547,20 @@ fn build_runtime_prompt_history_summary_fallback(
 ) -> Option<String> {
     let rendered = messages
         .iter()
-        .filter_map(|message| {
+        .map(|message| {
             let content = message.text_content().unwrap_or_default();
             match &message.message {
-                AgentMessage::System { .. } => Some(format!(
-                    "system: {}",
-                    summarize_runtime_inline_text(content)
-                )),
+                AgentMessage::System { .. } => {
+                    format!("system: {}", summarize_runtime_inline_text(content))
+                }
                 AgentMessage::User { .. } => {
-                    Some(format!("user: {}", summarize_runtime_inline_text(content)))
+                    format!("user: {}", summarize_runtime_inline_text(content))
                 }
                 AgentMessage::Assistant { .. } | AgentMessage::AssistantToolCallProtocol { .. } => {
-                    Some(format!(
-                        "assistant: {}",
-                        summarize_runtime_inline_text(content)
-                    ))
+                    format!("assistant: {}", summarize_runtime_inline_text(content))
                 }
                 AgentMessage::Tool { .. } => {
-                    Some(format!("tool: {}", summarize_tool_message_content(content)))
+                    format!("tool: {}", summarize_tool_message_content(content))
                 }
             }
         })
@@ -602,13 +614,16 @@ async fn build_mid_turn_compaction_outcome(
         .count();
     execute_runtime_compaction(
         context,
-        &compacted_messages,
-        retained_user_message_count,
-        max_tokens,
-        RuntimeCompactionPhase::MidTurn,
-        reason,
-        RuntimeCompactionReinjectionStrategy::PreserveSystemAndRecentUsers,
-        fallback_summary,
+        RuntimeCompactionRequest {
+            source_messages: &compacted_messages,
+            retained_user_message_count,
+            max_tokens,
+            phase: RuntimeCompactionPhase::MidTurn,
+            reason,
+            reinjection_strategy:
+                RuntimeCompactionReinjectionStrategy::PreserveSystemAndRecentUsers,
+            fallback_summary,
+        },
     )
     .await
     .map(|execution| execution.outcome)

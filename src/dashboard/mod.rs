@@ -784,7 +784,7 @@ fn execute_access_request_command(
     } else {
         // No argument: offer interactive guidance.
         match context.requests.len() {
-            0 => return format!("no pending requests"),
+            0 => return "no pending requests".to_string(),
             1 => {
                 // Single request: execute directly.
                 context.requests[0].chat_id
@@ -1011,17 +1011,19 @@ pub async fn run_tui_dashboard(
             render_command_bar(
                 f,
                 root[1],
-                &command_input,
-                &DashboardCommandContext {
-                    requests: &pending_requests,
-                    state: &state,
-                    executor: None,
+                CommandBarRenderState {
+                    input: &command_input,
+                    context: &DashboardCommandContext {
+                        requests: &pending_requests,
+                        state: &state,
+                        executor: None,
+                    },
+                    runtime_status: state.runtime_status.as_deref(),
+                    footer_context: &state.footer_context,
+                    overlay_open: command_overlay.is_some(),
+                    popup_selection: command_popup_selection,
+                    popup_scroll: command_popup_scroll,
                 },
-                state.runtime_status.as_deref(),
-                &state.footer_context,
-                command_overlay.is_some(),
-                command_popup_selection,
-                command_popup_scroll,
             );
         })?;
     }
@@ -1312,17 +1314,27 @@ fn render_command_popup(
     );
 }
 
-fn render_command_bar(
-    f: &mut Frame,
-    area: Rect,
-    input: &str,
-    context: &DashboardCommandContext<'_>,
-    runtime_status: Option<&str>,
-    footer_context: &str,
+struct CommandBarRenderState<'a> {
+    input: &'a str,
+    context: &'a DashboardCommandContext<'a>,
+    runtime_status: Option<&'a str>,
+    footer_context: &'a str,
     overlay_open: bool,
     popup_selection: usize,
     popup_scroll: usize,
-) {
+}
+
+fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_>) {
+    let CommandBarRenderState {
+        input,
+        context,
+        runtime_status,
+        footer_context,
+        overlay_open,
+        popup_selection,
+        popup_scroll,
+    } = state;
+
     let completion = selected_command_completion(input, 0, context);
     let hint = command_hint(input, context);
     let popup_rows = if overlay_open {

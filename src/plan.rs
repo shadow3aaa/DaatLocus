@@ -26,18 +26,13 @@ pub struct PlanStep {
     pub last_updated_at_ms: i64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, JsonSchema)]
+#[derive(Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanStatus {
+    #[default]
     Pending,
     InProgress,
     Completed,
-}
-
-impl Default for PlanStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 impl Plan {

@@ -172,6 +172,7 @@ impl FileSystemSandboxPolicy {
 }
 
 impl RuntimeSandboxPolicy {
+    #[cfg(test)]
     pub fn protect_daat_locus_runtime(daat_locus_home: &Path) -> Self {
         Self::protect_daat_locus_runtime_with_options(daat_locus_home, None, Vec::<String>::new())
     }
@@ -256,7 +257,7 @@ impl RuntimeSandboxPolicy {
     pub fn shell_spawn_spec(&self, program: &str, args: Vec<String>) -> Result<SandboxSpawnSpec> {
         #[cfg(target_os = "macos")]
         {
-            return macos::wrap_shell_command(self, program, args);
+            macos::wrap_shell_command(self, program, args)
         }
 
         #[cfg(not(target_os = "macos"))]

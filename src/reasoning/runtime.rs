@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::{
     context::Context,
-    core::LLM,
+    core::Llm,
     hindsight::HindsightRecallResult,
     logging::{RuntimeStatusLevel, set_runtime_status},
     tool_ui::{ToolCallUiEvent, ToolUiEvent},
@@ -17,11 +17,32 @@ use super::{
     program::Program,
     render::Renderer,
     signature::Signature,
-    trace::{ProgramTraceRecord, TraceOrigin, append_program_trace},
+    trace::{ProgramTraceRecord, ProgramTraceRecordParts, TraceOrigin, append_program_trace},
 };
 
 pub struct ProgramExecutionOutcome<O> {
     pub output: O,
+}
+
+struct ProgramExecutionRequest<'a, P: Program, R: Renderer> {
+    llm: &'a (dyn Llm + Send + Sync),
+    context: &'a Context,
+    renderer: &'a R,
+    program: &'a P,
+    ir: super::ir::PromptIR,
+    tuning: &'a PromptTuningConfig<P::Output>,
+    trace_origin: TraceOrigin,
+    max_retry_count: usize,
+}
+
+struct PromptRequestExecution<'a> {
+    llm: &'a (dyn Llm + Send + Sync),
+    context: &'a Context,
+    program_name: &'a str,
+    signature: Signature,
+    request: PromptRequest,
+    trace_origin: TraceOrigin,
+    max_retry_count: usize,
 }
 
 const DEFAULT_PROGRAM_RETRY_COUNT: usize = 1;
@@ -481,7 +502,7 @@ fn log_prompt_compile_event(context: &Context, message: String) {
 }
 
 pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
-    llm: &(dyn LLM + Send + Sync),
+    llm: &(dyn Llm + Send + Sync),
     context: &Context,
     renderer: &R,
     program: &P,
@@ -490,34 +511,29 @@ pub async fn execute_program_with_ir_report<P: Program, R: Renderer>(
     trace_origin: TraceOrigin,
 ) -> Result<ProgramExecutionOutcome<P::Output>> {
     execute_program_with_ir_report_with_retry_hook_and_validator(
-        llm,
-        context,
-        renderer,
-        program,
-        ir,
-        tuning,
-        trace_origin,
-        DEFAULT_PROGRAM_RETRY_COUNT,
+        ProgramExecutionRequest {
+            llm,
+            context,
+            renderer,
+            program,
+            ir,
+            tuning,
+            trace_origin,
+            max_retry_count: DEFAULT_PROGRAM_RETRY_COUNT,
+        },
         |_| Ok(()),
         |_| {},
     )
     .await
 }
 
-pub async fn execute_program_with_ir_report_with_retry_hook_and_validator<
+async fn execute_program_with_ir_report_with_retry_hook_and_validator<
     P: Program,
     R: Renderer,
     V,
     F,
 >(
-    llm: &(dyn LLM + Send + Sync),
-    context: &Context,
-    renderer: &R,
-    program: &P,
-    ir: super::ir::PromptIR,
-    tuning: &PromptTuningConfig<P::Output>,
-    trace_origin: TraceOrigin,
-    max_retry_count: usize,
+    execution: ProgramExecutionRequest<'_, P, R>,
     mut validate_output: V,
     mut on_retry: F,
 ) -> Result<ProgramExecutionOutcome<P::Output>>
@@ -525,15 +541,28 @@ where
     V: FnMut(&P::Output) -> std::result::Result<(), String>,
     F: FnMut(&PromptRequest),
 {
-    let request = renderer.render(context, program, ir, tuning);
-    execute_prompt_request_with_retry_hook_and_validator(
+    let ProgramExecutionRequest {
         llm,
         context,
-        program.name(),
-        program.signature(),
-        request,
+        renderer,
+        program,
+        ir,
+        tuning,
         trace_origin,
         max_retry_count,
+    } = execution;
+
+    let request = renderer.render(context, program, ir, tuning);
+    execute_prompt_request_with_retry_hook_and_validator(
+        PromptRequestExecution {
+            llm,
+            context,
+            program_name: program.name(),
+            signature: program.signature(),
+            request,
+            trace_origin,
+            max_retry_count,
+        },
         &mut validate_output,
         &mut on_retry,
     )
@@ -541,13 +570,7 @@ where
 }
 
 async fn execute_prompt_request_with_retry_hook_and_validator<O, V, F>(
-    llm: &(dyn LLM + Send + Sync),
-    context: &Context,
-    program_name: &str,
-    signature: Signature,
-    mut request: PromptRequest,
-    trace_origin: TraceOrigin,
-    max_retry_count: usize,
+    execution: PromptRequestExecution<'_>,
     validate_output: &mut V,
     on_retry: &mut F,
 ) -> Result<ProgramExecutionOutcome<O>>
@@ -556,6 +579,16 @@ where
     V: FnMut(&O) -> std::result::Result<(), String>,
     F: FnMut(&PromptRequest),
 {
+    let PromptRequestExecution {
+        llm,
+        context,
+        program_name,
+        signature,
+        mut request,
+        trace_origin,
+        max_retry_count,
+    } = execution;
+
     let mut last_error = None;
 
     for attempt in 0..=max_retry_count {
@@ -563,16 +596,16 @@ where
             Ok(value) => value,
             Err(err) => {
                 let error_text = err.to_string();
-                append_program_trace(ProgramTraceRecord::new(
-                    trace_origin,
-                    program_name,
-                    attempt + 1,
-                    signature.clone(),
-                    request.clone(),
-                    json!({ "provider_error": error_text }),
-                    None,
-                    Some(err.to_string()),
-                ))
+                append_program_trace(ProgramTraceRecord::new(ProgramTraceRecordParts {
+                    origin: trace_origin,
+                    program_name: program_name.to_string(),
+                    attempt: attempt + 1,
+                    signature: signature.clone(),
+                    request: request.clone(),
+                    raw_response: json!({ "provider_error": error_text }),
+                    parsed_output: None,
+                    deserialization_error: Some(err.to_string()),
+                }))
                 .await;
                 last_error = Some(error_text.clone());
                 if attempt < max_retry_count {
@@ -587,30 +620,30 @@ where
                 let parsed_output = serde_json::to_value(&output).ok();
                 match validate_output(&output) {
                     Ok(()) => {
-                        append_program_trace(ProgramTraceRecord::new(
-                            trace_origin,
-                            program_name,
-                            attempt + 1,
-                            signature.clone(),
-                            request.clone(),
-                            value,
+                        append_program_trace(ProgramTraceRecord::new(ProgramTraceRecordParts {
+                            origin: trace_origin,
+                            program_name: program_name.to_string(),
+                            attempt: attempt + 1,
+                            signature: signature.clone(),
+                            request: request.clone(),
+                            raw_response: value,
                             parsed_output,
-                            None,
-                        ))
+                            deserialization_error: None,
+                        }))
                         .await;
                         return Ok(ProgramExecutionOutcome { output });
                     }
                     Err(validation_error) => {
-                        append_program_trace(ProgramTraceRecord::new(
-                            trace_origin,
-                            program_name,
-                            attempt + 1,
-                            signature.clone(),
-                            request.clone(),
-                            value,
+                        append_program_trace(ProgramTraceRecord::new(ProgramTraceRecordParts {
+                            origin: trace_origin,
+                            program_name: program_name.to_string(),
+                            attempt: attempt + 1,
+                            signature: signature.clone(),
+                            request: request.clone(),
+                            raw_response: value,
                             parsed_output,
-                            Some(validation_error.clone()),
-                        ))
+                            deserialization_error: Some(validation_error.clone()),
+                        }))
                         .await;
                         last_error = Some(validation_error.clone());
                         if attempt < max_retry_count {
@@ -622,16 +655,16 @@ where
             }
             Err(err) => {
                 last_error = Some(err.to_string());
-                append_program_trace(ProgramTraceRecord::new(
-                    trace_origin,
-                    program_name,
-                    attempt + 1,
-                    signature.clone(),
-                    request.clone(),
-                    value,
-                    None,
-                    Some(err.to_string()),
-                ))
+                append_program_trace(ProgramTraceRecord::new(ProgramTraceRecordParts {
+                    origin: trace_origin,
+                    program_name: program_name.to_string(),
+                    attempt: attempt + 1,
+                    signature: signature.clone(),
+                    request: request.clone(),
+                    raw_response: value,
+                    parsed_output: None,
+                    deserialization_error: Some(err.to_string()),
+                }))
                 .await;
                 if attempt < max_retry_count {
                     request = request.with_schema_retry_note(err.to_string());

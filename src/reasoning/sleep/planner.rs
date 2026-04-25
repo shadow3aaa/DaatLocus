@@ -1,5 +1,24 @@
 use super::*;
 
+pub(super) struct WorkflowMergePlanningInput<'a> {
+    pub target_workflow: &'a WorkflowSpec,
+    pub target_reflection: &'a EvaluationArtifactWorkflowReflection,
+    pub target_evidence: &'a [WorkflowRunRecord],
+    pub source_workflow: &'a WorkflowSpec,
+    pub source_reflection: &'a EvaluationArtifactWorkflowReflection,
+    pub source_evidence: &'a [WorkflowRunRecord],
+}
+
+pub(super) struct WorkflowFrontierReplayInput<'a> {
+    pub entry: &'a WorkflowFrontierEntry,
+    pub target_workflow: &'a WorkflowSpec,
+    pub target_reflection: Option<&'a EvaluationArtifactWorkflowReflection>,
+    pub target_evidence: &'a [WorkflowRunRecord],
+    pub source_workflow: Option<&'a WorkflowSpec>,
+    pub source_reflection: Option<&'a EvaluationArtifactWorkflowReflection>,
+    pub source_evidence: &'a [WorkflowRunRecord],
+}
+
 #[async_trait]
 pub(super) trait SleepPlannerRuntime: Send + Sync {
     async fn plan_prompt_improvement(
@@ -18,12 +37,7 @@ pub(super) trait SleepPlannerRuntime: Send + Sync {
     async fn plan_workflow_merge(
         &self,
         context: &mut Context,
-        target_workflow: &WorkflowSpec,
-        target_reflection: &EvaluationArtifactWorkflowReflection,
-        target_evidence: &[WorkflowRunRecord],
-        source_workflow: &WorkflowSpec,
-        source_reflection: &EvaluationArtifactWorkflowReflection,
-        source_evidence: &[WorkflowRunRecord],
+        input: WorkflowMergePlanningInput<'_>,
     ) -> Result<WorkflowMergePlanningResult>;
 
     async fn replay_prompt_candidate(
@@ -37,13 +51,7 @@ pub(super) trait SleepPlannerRuntime: Send + Sync {
     async fn replay_workflow_frontier_entry(
         &self,
         context: &mut Context,
-        entry: &WorkflowFrontierEntry,
-        target_workflow: &WorkflowSpec,
-        target_reflection: Option<&EvaluationArtifactWorkflowReflection>,
-        target_evidence: &[WorkflowRunRecord],
-        source_workflow: Option<&WorkflowSpec>,
-        source_reflection: Option<&EvaluationArtifactWorkflowReflection>,
-        source_evidence: &[WorkflowRunRecord],
+        input: WorkflowFrontierReplayInput<'_>,
     ) -> Result<EvaluationArtifactWorkflowCandidateEvaluation>;
 }
 
@@ -135,13 +143,17 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
     async fn plan_workflow_merge(
         &self,
         context: &mut Context,
-        target_workflow: &WorkflowSpec,
-        target_reflection: &EvaluationArtifactWorkflowReflection,
-        target_evidence: &[WorkflowRunRecord],
-        source_workflow: &WorkflowSpec,
-        source_reflection: &EvaluationArtifactWorkflowReflection,
-        source_evidence: &[WorkflowRunRecord],
+        input: WorkflowMergePlanningInput<'_>,
     ) -> Result<WorkflowMergePlanningResult> {
+        let WorkflowMergePlanningInput {
+            target_workflow,
+            target_reflection,
+            target_evidence,
+            source_workflow,
+            source_reflection,
+            source_evidence,
+        } = input;
+
         let renderer = OpenAIToolRenderer;
         let program = WorkflowMergePlannerProgram;
         let tuning = resolve_program_tuning(context, &program).await;
@@ -212,14 +224,18 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
     async fn replay_workflow_frontier_entry(
         &self,
         context: &mut Context,
-        entry: &WorkflowFrontierEntry,
-        target_workflow: &WorkflowSpec,
-        target_reflection: Option<&EvaluationArtifactWorkflowReflection>,
-        target_evidence: &[WorkflowRunRecord],
-        source_workflow: Option<&WorkflowSpec>,
-        source_reflection: Option<&EvaluationArtifactWorkflowReflection>,
-        source_evidence: &[WorkflowRunRecord],
+        input: WorkflowFrontierReplayInput<'_>,
     ) -> Result<EvaluationArtifactWorkflowCandidateEvaluation> {
+        let WorkflowFrontierReplayInput {
+            entry,
+            target_workflow,
+            target_reflection,
+            target_evidence,
+            source_workflow,
+            source_reflection,
+            source_evidence,
+        } = input;
+
         let renderer = OpenAIToolRenderer;
         let program = WorkflowCandidateRolloutEvaluatorProgram;
         let tuning = resolve_program_tuning(context, &program).await;

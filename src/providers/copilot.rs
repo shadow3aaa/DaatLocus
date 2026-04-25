@@ -6,7 +6,7 @@ use miette::{Result, miette};
 use crate::{
     config::{ModelConfig, redact_secret_text},
     context::Context,
-    core::{LLM, TokenUsageInfo},
+    core::{Llm, TokenUsageInfo},
     reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
 };
 
@@ -161,7 +161,7 @@ fn derive_copilot_base_url(session_token: &str) -> String {
 }
 
 #[async_trait]
-impl LLM for CopilotClient {
+impl Llm for CopilotClient {
     async fn run_json(
         &self,
         context: &Context,

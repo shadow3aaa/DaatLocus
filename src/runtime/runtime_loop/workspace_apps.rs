@@ -4,12 +4,8 @@ pub(super) fn drain_workspace_app_invalidations(
     workspace_apps: &mut WorkspaceAppRegistry,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<WorkspaceAppInvalidation>,
 ) {
-    loop {
-        match rx.try_recv() {
-            Ok(invalidation) => workspace_apps.record_invalidation(invalidation),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-            | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-        }
+    while let Ok(invalidation) = rx.try_recv() {
+        workspace_apps.record_invalidation(invalidation);
     }
 }
 

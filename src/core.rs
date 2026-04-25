@@ -192,7 +192,7 @@ impl TokenUsageInfo {
 
 /// LLM provider abstraction.
 #[async_trait]
-pub trait LLM {
+pub trait Llm {
     /// Execute a structured program request and return the raw JSON argument object.
     async fn run_json(
         &self,

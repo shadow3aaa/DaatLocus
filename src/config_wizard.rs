@@ -52,10 +52,7 @@ async fn run_github_device_flow(locale: Locale) -> Result<String> {
         .post(GITHUB_DEVICE_CODE_URL)
         .header("Accept", "application/json")
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(format!(
-            "client_id={}&scope=read%3Auser",
-            urlenc(&client_id)
-        ))
+        .body(format!("client_id={}&scope=read%3Auser", urlenc(client_id)))
         .send()
         .await
         .map_err(|e| {
@@ -134,7 +131,7 @@ async fn run_github_device_flow(locale: Locale) -> Result<String> {
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(format!(
                 "client_id={}&device_code={}&grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code",
-                urlenc(&client_id),
+                urlenc(client_id),
                 urlenc(&device_code),
             ))
             .send()
@@ -387,15 +384,7 @@ impl PromptUi {
             let locale = self.locale;
             self.terminal_mut()?
                 .draw(|frame| {
-                    render_text_prompt(
-                        frame,
-                        locale,
-                        prompt,
-                        &value,
-                        cursor,
-                        secret,
-                        error.as_deref(),
-                    )
+                    render_text_prompt(frame, locale, prompt, &value, cursor, secret, error)
                 })
                 .map_err(|e| {
                     miette!(
@@ -415,18 +404,14 @@ impl PromptUi {
                     value.insert(cursor, ch);
                     cursor += ch.len_utf8();
                 }
-                KeyCode::Backspace => {
-                    if cursor > 0 {
-                        let prev = previous_char_boundary(&value, cursor);
-                        value.drain(prev..cursor);
-                        cursor = prev;
-                    }
+                KeyCode::Backspace if cursor > 0 => {
+                    let prev = previous_char_boundary(&value, cursor);
+                    value.drain(prev..cursor);
+                    cursor = prev;
                 }
-                KeyCode::Delete => {
-                    if cursor < value.len() {
-                        let next = next_char_boundary(&value, cursor);
-                        value.drain(cursor..next);
-                    }
+                KeyCode::Delete if cursor < value.len() => {
+                    let next = next_char_boundary(&value, cursor);
+                    value.drain(cursor..next);
                 }
                 KeyCode::Left => {
                     cursor = previous_char_boundary(&value, cursor);
@@ -487,10 +472,10 @@ impl Drop for PromptUi {
 fn read_prompt_key() -> Result<crossterm::event::KeyEvent> {
     loop {
         let event = event::read().map_err(|e| miette!("failed to read terminal input: {e}"))?;
-        if let Event::Key(key) = event {
-            if key.kind == KeyEventKind::Press {
-                return Ok(key);
-            }
+        if let Event::Key(key) = event
+            && key.kind == KeyEventKind::Press
+        {
+            return Ok(key);
         }
     }
 }
@@ -802,7 +787,7 @@ fn previous_char_boundary(s: &str, index: usize) -> usize {
     }
     s[..index]
         .char_indices()
-        .last()
+        .next_back()
         .map(|(i, _)| i)
         .unwrap_or(0)
 }
@@ -1226,7 +1211,7 @@ async fn prompt_model(
 
     let default_name = model_id
         .split(['/', ':'])
-        .last()
+        .next_back()
         .unwrap_or(&model_id)
         .to_string();
     let name = ui.text(

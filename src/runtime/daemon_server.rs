@@ -5,7 +5,7 @@ use crate::{
     context::Context,
     daemon::{
         DaemonControlCommand as RuntimeDaemonControlCommand, DaemonLifecycleHandle,
-        DaemonLifecycleState, DaemonLock, start_server,
+        DaemonLifecycleState, DaemonLock, DaemonServerStartParams, start_server,
     },
     dashboard::render::{
         SleepDashboardStatus, render_activity_for_dashboard,
@@ -70,18 +70,18 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         tokio::sync::mpsc::unbounded_channel::<RuntimeDaemonControlCommand>();
     let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::oneshot::channel();
 
-    let daemon_server = start_server(
-        config.daemon.port,
-        daemon_token_registry,
-        daemon_lifecycle.clone(),
-        tx.subscribe(),
-        telegram_acl.clone(),
-        events.clone(),
-        pending_work.clone(),
-        dashboard_control_tx.clone(),
-        daemon_control_tx.clone(),
-        server_shutdown_rx,
-    )
+    let daemon_server = start_server(DaemonServerStartParams {
+        port: config.daemon.port,
+        auth_registry: daemon_token_registry,
+        lifecycle: daemon_lifecycle.clone(),
+        dashboard_rx: tx.subscribe(),
+        telegram_acl: telegram_acl.clone(),
+        events: events.clone(),
+        pending_work: pending_work.clone(),
+        dashboard_control_tx: dashboard_control_tx.clone(),
+        daemon_control_tx: daemon_control_tx.clone(),
+        shutdown_rx: server_shutdown_rx,
+    })
     .await?;
     emit_startup_progress(format!(
         "[daemon] listening on http://{}:{}",

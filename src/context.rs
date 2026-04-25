@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use crate::{
     app::{AppId, AppManager},
     config::Config,
-    core::LLM,
+    core::Llm,
     dashboard::DashboardState,
     events::EventStore,
     hindsight::{HindsightClient, HindsightRetainHandle},
@@ -56,8 +56,8 @@ impl RuntimeTurnPhase {
 }
 
 pub struct Context {
-    pub llm: Box<dyn LLM + Send + Sync>,
-    pub judge_llm: Box<dyn LLM + Send + Sync>,
+    pub llm: Box<dyn Llm + Send + Sync>,
+    pub judge_llm: Box<dyn Llm + Send + Sync>,
     pub config: Config,
     pub hindsight: HindsightClient,
     pub hindsight_retain: HindsightRetainHandle,

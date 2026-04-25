@@ -23,7 +23,7 @@ use crate::{
         ContextBudgetExceededError, RequestBudgetBreakdown, RequestBudgetLimits,
         estimate_agent_turn_request, estimate_prompt_request,
     },
-    core::{LLM, TokenUsage, TokenUsageInfo},
+    core::{Llm, TokenUsage, TokenUsageInfo},
     reasoning::runtime::{
         AgentMessage, AgentToolCall, AgentToolInputSpec, AgentTurnItem, AgentTurnRequest,
         AgentTurnStreamResult, PromptRequest, assistant_tool_call_protocol_char_count,
@@ -92,9 +92,11 @@ impl Default for ChatCompletionsAdapterState {
     }
 }
 
-static REQUEST_RATE_LIMITERS: LazyLock<
-    ParkingLotMutex<HashMap<String, Arc<tokio::sync::Mutex<VecDeque<Instant>>>>>,
-> = LazyLock::new(|| ParkingLotMutex::new(HashMap::new()));
+type RequestRateLimiter = Arc<tokio::sync::Mutex<VecDeque<Instant>>>;
+type RequestRateLimiterMap = HashMap<String, RequestRateLimiter>;
+
+static REQUEST_RATE_LIMITERS: LazyLock<ParkingLotMutex<RequestRateLimiterMap>> =
+    LazyLock::new(|| ParkingLotMutex::new(HashMap::new()));
 
 trait ChatCompletionsAdapter {
     fn build_prompt_payload(
@@ -960,7 +962,7 @@ fn extract_json_value_from_content(content: &str) -> Option<serde_json::Value> {
 }
 
 #[async_trait]
-impl LLM for OpenAIClient {
+impl Llm for OpenAIClient {
     async fn run_json(
         &self,
         _context: &Context,
@@ -991,7 +993,7 @@ impl LLM for OpenAIClient {
 // ---------------------------------------------------------------------------
 
 /// Build the matching LLM instance by model name and global Config.
-pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn LLM + Send + Sync>> {
+pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn Llm + Send + Sync>> {
     let model_config = config
         .models
         .get(model_name)
@@ -1185,8 +1187,10 @@ mod tests {
 
     #[test]
     fn thinking_budget_is_injected_as_reasoning_effort_by_default() {
-        let mut model_config = ModelConfig::default();
-        model_config.thinking_budget = Some("medium".to_string());
+        let model_config = ModelConfig {
+            thinking_budget: Some("medium".to_string()),
+            ..Default::default()
+        };
         let client = OpenAIClient::from_parts("test-key", "https://api.openai.com", &model_config);
 
         let payload = build_agent_turn_payload_common(
@@ -1204,10 +1208,12 @@ mod tests {
 
     #[test]
     fn deepseek_thinking_budget_uses_thinking_and_reasoning_effort_parameters() {
-        let mut model_config = ModelConfig::default();
-        model_config.model_id = "deepseek-reasoner".to_string();
-        model_config.thinking_budget = Some("medium".to_string());
-        model_config.max_completion_tokens = 393_216;
+        let model_config = ModelConfig {
+            model_id: "deepseek-reasoner".to_string(),
+            thinking_budget: Some("medium".to_string()),
+            max_completion_tokens: 393_216,
+            ..Default::default()
+        };
         let client =
             OpenAIClient::from_parts("test-key", "https://api.deepseek.com", &model_config);
 

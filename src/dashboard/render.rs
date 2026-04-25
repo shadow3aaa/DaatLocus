@@ -91,15 +91,13 @@ pub fn render_dashboard_footer_context(
         .effective_context_window_tokens()
         .max(1);
     let Some(info) = context.llm.token_usage_info() else {
-        return format!(
-            "{}",
-            render_footer_context_with_usage(
-                &model,
-                estimated_input_tokens,
-                effective_window,
-                &focused_app
-            )
-        );
+        return render_footer_context_with_usage(
+            &model,
+            estimated_input_tokens,
+            effective_window,
+            &focused_app,
+        )
+        .to_string();
     };
     let used = usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
     let footer_usage = if used > 0 {

@@ -343,10 +343,8 @@ fn env_ref_name(value: &str) -> Option<String> {
         inner
     } else if let Some(inner) = trimmed.strip_prefix("env:") {
         inner
-    } else if let Some(inner) = trimmed.strip_prefix('$') {
-        inner
     } else {
-        return None;
+        trimmed.strip_prefix('$')?
     };
     let name = name.trim();
     if is_valid_env_ref_name(name) {

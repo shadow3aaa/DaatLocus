@@ -14,16 +14,28 @@ fn enter_runtime_phase(
     );
 }
 
-async fn abort_runtime_turn_before_model(
-    context: &mut Context,
-    _tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+struct RuntimeTurnAbort<'a> {
     live_draft_session: Option<TelegramLiveDraftSession>,
-    claimed_input_fingerprint: Option<&str>,
-    claimed_event_ids: &[String],
-    claimed_app_notices: &[AppNoticeKey],
+    claimed_input_fingerprint: Option<&'a str>,
+    claimed_event_ids: &'a [String],
+    claimed_app_notices: &'a [AppNoticeKey],
     observation: String,
     description: String,
+}
+
+async fn abort_runtime_turn_before_model(
+    context: &mut Context,
+    abort: RuntimeTurnAbort<'_>,
 ) -> AgentLoopStepExecution {
+    let RuntimeTurnAbort {
+        live_draft_session,
+        claimed_input_fingerprint,
+        claimed_event_ids,
+        claimed_app_notices,
+        observation,
+        description,
+    } = abort;
+
     context.set_runtime_phase(None);
     if let Some(session) = live_draft_session {
         session.shutdown(context).await;
@@ -124,13 +136,14 @@ pub(crate) async fn execute_agent_loop_step(
             );
             return abort_runtime_turn_before_model(
                 context,
-                tx,
-                None,
-                claimed_input_fingerprint.as_deref(),
-                &claimed_event_ids,
-                &claimed_app_notice_entries,
-                format!("runtime preflight failed: {err}"),
-                "Failed to build hindsight memory context.".to_string(),
+                RuntimeTurnAbort {
+                    live_draft_session: None,
+                    claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
+                    claimed_event_ids: &claimed_event_ids,
+                    claimed_app_notices: &claimed_app_notice_entries,
+                    observation: format!("runtime preflight failed: {err}"),
+                    description: "Failed to build hindsight memory context.".to_string(),
+                },
             )
             .await;
         }
@@ -190,13 +203,14 @@ pub(crate) async fn execute_agent_loop_step(
             );
             return abort_runtime_turn_before_model(
                 context,
-                tx,
-                live_draft_session,
-                claimed_input_fingerprint.as_deref(),
-                &claimed_event_ids,
-                &claimed_app_notice_entries,
-                format!("runtime preflight failed: {err}"),
-                "Failed to build runtime snapshot.".to_string(),
+                RuntimeTurnAbort {
+                    live_draft_session,
+                    claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
+                    claimed_event_ids: &claimed_event_ids,
+                    claimed_app_notices: &claimed_app_notice_entries,
+                    observation: format!("runtime preflight failed: {err}"),
+                    description: "Failed to build runtime snapshot.".to_string(),
+                },
             )
             .await;
         }
@@ -260,13 +274,14 @@ pub(crate) async fn execute_agent_loop_step(
                 );
                 return abort_runtime_turn_before_model(
                     context,
-                    tx,
-                    live_draft_session,
-                    claimed_input_fingerprint.as_deref(),
-                    &claimed_event_ids,
-                    &claimed_app_notice_entries,
-                    format!("runtime preflight failed: {err}"),
-                    "Failed to execute pre-turn context compaction.".to_string(),
+                    RuntimeTurnAbort {
+                        live_draft_session,
+                        claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
+                        claimed_event_ids: &claimed_event_ids,
+                        claimed_app_notices: &claimed_app_notice_entries,
+                        observation: format!("runtime preflight failed: {err}"),
+                        description: "Failed to execute pre-turn context compaction.".to_string(),
+                    },
                 )
                 .await;
             }

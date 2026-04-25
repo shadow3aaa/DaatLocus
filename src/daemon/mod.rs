@@ -189,6 +189,19 @@ pub struct DaemonServerHandle {
     join: JoinHandle<()>,
 }
 
+pub struct DaemonServerStartParams {
+    pub port: u16,
+    pub auth_registry: DaemonTokenRegistryHandle,
+    pub lifecycle: DaemonLifecycleHandle,
+    pub dashboard_rx: watch::Receiver<DashboardState>,
+    pub telegram_acl: TelegramAclHandle,
+    pub events: EventStore,
+    pub pending_work: PendingWorkQueue,
+    pub dashboard_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
+    pub daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
+    pub shutdown_rx: oneshot::Receiver<()>,
+}
+
 impl DaemonServerHandle {
     pub async fn shutdown(self) {
         let _ = self.join.await;
@@ -278,18 +291,20 @@ fn process_exists(pid: u32) -> bool {
     system.process(Pid::from_u32(pid)).is_some()
 }
 
-pub async fn start_server(
-    port: u16,
-    auth_registry: DaemonTokenRegistryHandle,
-    lifecycle: DaemonLifecycleHandle,
-    dashboard_rx: watch::Receiver<DashboardState>,
-    telegram_acl: TelegramAclHandle,
-    events: EventStore,
-    pending_work: PendingWorkQueue,
-    dashboard_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
-    daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
-    shutdown_rx: oneshot::Receiver<()>,
-) -> Result<DaemonServerHandle> {
+pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServerHandle> {
+    let DaemonServerStartParams {
+        port,
+        auth_registry,
+        lifecycle,
+        dashboard_rx,
+        telegram_acl,
+        events,
+        pending_work,
+        dashboard_control_tx,
+        daemon_control_tx,
+        shutdown_rx,
+    } = params;
+
     let listener = TcpListener::bind((LOCALHOST, port))
         .await
         .map_err(|err| miette!("bind daemon listener failed: {err}"))?;

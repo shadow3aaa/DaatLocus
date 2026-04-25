@@ -53,9 +53,7 @@ pub(super) async fn maybe_start_idle_sleep(
     sleep_running: &mut bool,
     sleep_status: &mut SleepDashboardStatus,
 ) -> Option<String> {
-    let Some(idle_since) = context.idle_since else {
-        return None;
-    };
+    let idle_since = context.idle_since?;
     if idle_since.elapsed() < AUTO_SLEEP_IDLE_THRESHOLD {
         return None;
     }

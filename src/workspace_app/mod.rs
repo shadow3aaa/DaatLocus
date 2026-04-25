@@ -781,16 +781,13 @@ fn validate_value_against_schema(value: &JsonValue, schema: &JsonValue, label: &
         Some("string") => validate_string_value(value, object, label)?,
         Some("integer") => validate_integer_value(value, object, label)?,
         Some("number") => validate_number_value(value, object, label)?,
-        Some("boolean") => {
-            if !value.is_boolean() {
-                return Err(miette!("{label} must be a boolean"));
-            }
+        Some("boolean") if !value.is_boolean() => {
+            return Err(miette!("{label} must be a boolean"));
         }
-        Some("null") => {
-            if !value.is_null() {
-                return Err(miette!("{label} must be null"));
-            }
+        Some("null") if !value.is_null() => {
+            return Err(miette!("{label} must be null"));
         }
+        Some("boolean" | "null") => {}
         Some(other) => return Err(miette!("{label} schema uses unsupported type `{other}`")),
         None => {}
     }

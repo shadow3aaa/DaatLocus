@@ -197,7 +197,7 @@ impl TurnCompileEngine {
         for demo in turn_demos.iter().cloned() {
             let mut isolated_context =
                 IsolatedEvalContext::new(config.clone(), compiled_prompts.clone()).await?;
-            let tuning = resolve_program_tuning(&mut isolated_context.context, &program).await;
+            let tuning = resolve_program_tuning(&isolated_context.context, &program).await;
             let trace = run_turn_demo(
                 &mut isolated_context.context,
                 &TurnCompileSpec::from_demo(&demo),

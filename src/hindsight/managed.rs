@@ -283,11 +283,11 @@ impl HindsightManagedServer {
         let mut attempt = 0u32;
         while std::time::Instant::now() < deadline {
             attempt += 1;
-            if let Ok(r) = client.get(&url).send().await {
-                if r.status().is_success() {
-                    tracing::debug!("[hindsight:managed] health check passed (attempt {attempt})");
-                    return Ok(());
-                }
+            if let Ok(r) = client.get(&url).send().await
+                && r.status().is_success()
+            {
+                tracing::debug!("[hindsight:managed] health check passed (attempt {attempt})");
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(HEALTH_POLL_INTERVAL_MS)).await;
         }

@@ -148,7 +148,7 @@ impl TelegramTransportStateHandle {
                     None
                 },
                 settle_status_on_delivery: if is_last {
-                    settle_status_on_delivery.clone()
+                    settle_status_on_delivery
                 } else {
                     None
                 },

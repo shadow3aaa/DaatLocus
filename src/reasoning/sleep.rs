@@ -78,7 +78,10 @@ use artifacts::*;
 mod planner;
 mod prompt_pipeline;
 mod workflow_pipeline;
-use planner::{LlmSleepPlannerRuntime, SleepPlannerRuntime, load_sleep_inputs};
+use planner::{
+    LlmSleepPlannerRuntime, SleepPlannerRuntime, WorkflowFrontierReplayInput,
+    WorkflowMergePlanningInput, load_sleep_inputs,
+};
 use prompt_pipeline::run_prompt_improvement_pipeline;
 use workflow_pipeline::run_workflow_improvement_pipeline;
 #[derive(Clone, Default)]
@@ -491,13 +494,15 @@ async fn replay_workflow_frontier_entries(
         updated.evaluation = planner
             .replay_workflow_frontier_entry(
                 context,
-                &updated,
-                target_workflow,
-                target_reflection,
-                target_evidence,
-                source_workflow,
-                source_reflection,
-                source_evidence,
+                WorkflowFrontierReplayInput {
+                    entry: &updated,
+                    target_workflow,
+                    target_reflection,
+                    target_evidence,
+                    source_workflow,
+                    source_reflection,
+                    source_evidence,
+                },
             )
             .await?;
         replayed.push(updated);

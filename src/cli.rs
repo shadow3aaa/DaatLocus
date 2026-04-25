@@ -251,14 +251,12 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
         }
     };
 
-    match cli.command.as_ref() {
-        Some(DaatLocusCommand::Daemon {
-            target: DaemonTarget::Serve,
-        }) => {
-            crate::runtime::daemon_server::run_daemon_serve(config).await?;
-            return Ok(());
-        }
-        _ => {}
+    if let Some(DaatLocusCommand::Daemon {
+        target: DaemonTarget::Serve,
+    }) = cli.command.as_ref()
+    {
+        crate::runtime::daemon_server::run_daemon_serve(config).await?;
+        return Ok(());
     }
 
     if matches!(cli.command, None | Some(DaatLocusCommand::Run)) {
@@ -271,7 +269,6 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
 
 /// Tail `~/.hindsight/profiles/<profile>.log` and forward new lines to stdout/tracing.
 /// Designed to run concurrently with `HindsightManagedServer::start()` so the user
-
 async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
     match target {
         None => config_wizard::run_config_menu().await,

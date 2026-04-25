@@ -47,6 +47,17 @@ pub struct RuntimeTraceBatch {
     pub next_offset: u64,
 }
 
+pub struct ProgramTraceRecordParts {
+    pub origin: TraceOrigin,
+    pub program_name: String,
+    pub attempt: usize,
+    pub signature: Signature,
+    pub request: PromptRequest,
+    pub raw_response: Value,
+    pub parsed_output: Option<Value>,
+    pub deserialization_error: Option<String>,
+}
+
 pub async fn append_program_trace(record: ProgramTraceRecord) {
     let trace_io_guard = trace_io_lock().lock().await;
     let path = daat_locus_paths().await.journal_file(TRACE_FILE_NAME);
@@ -60,20 +71,22 @@ pub async fn append_program_trace(record: ProgramTraceRecord) {
 }
 
 impl ProgramTraceRecord {
-    pub fn new(
-        origin: TraceOrigin,
-        program_name: impl Into<String>,
-        attempt: usize,
-        signature: Signature,
-        request: PromptRequest,
-        raw_response: Value,
-        parsed_output: Option<Value>,
-        deserialization_error: Option<String>,
-    ) -> Self {
+    pub fn new(parts: ProgramTraceRecordParts) -> Self {
+        let ProgramTraceRecordParts {
+            origin,
+            program_name,
+            attempt,
+            signature,
+            request,
+            raw_response,
+            parsed_output,
+            deserialization_error,
+        } = parts;
+
         Self {
             timestamp_ms: Utc::now().timestamp_millis(),
             origin,
-            program_name: program_name.into(),
+            program_name,
             attempt,
             signature,
             request,

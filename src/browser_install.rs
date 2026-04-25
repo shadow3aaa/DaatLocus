@@ -319,13 +319,13 @@ fn verify_browser_archive_integrity(
     archive_bytes: &[u8],
     integrity: &BrowserArchiveIntegrity,
 ) -> Result<()> {
-    if let Some(content_length) = integrity.content_length {
-        if archive_bytes.len() as u64 != content_length {
-            return Err(miette!(
-                "browser runtime archive length mismatch: expected {content_length}, got {}",
-                archive_bytes.len()
-            ));
-        }
+    if let Some(content_length) = integrity.content_length
+        && archive_bytes.len() as u64 != content_length
+    {
+        return Err(miette!(
+            "browser runtime archive length mismatch: expected {content_length}, got {}",
+            archive_bytes.len()
+        ));
     }
 
     let expected_md5 = integrity

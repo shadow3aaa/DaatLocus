@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use miette::{Result, miette};
 
@@ -66,12 +66,12 @@ pub async fn run_memory_reset() -> Result<()> {
     Ok(())
 }
 
-async fn clear_memory_state(home: &PathBuf) -> Result<()> {
+async fn clear_memory_state(home: &Path) -> Result<()> {
     let config = load_config()
         .await
         .map_err(|err| miette!("failed to load config for memory-reset: {err}"))?;
     clear_hindsight_bank(&config).await?;
-    let paths = DaatLocusPaths::from_root(home.clone());
+    let paths = DaatLocusPaths::from_root(home.to_path_buf());
     clear_files(&[
         paths.memory_file("runtime_conversation"),
         paths.memory_file("hindsight_queue"),
@@ -99,8 +99,8 @@ pub async fn run_state_reset() -> Result<()> {
     Ok(())
 }
 
-async fn clear_state_files(home: &PathBuf) -> Result<Vec<String>> {
-    let paths = DaatLocusPaths::from_root(home.clone());
+async fn clear_state_files(home: &Path) -> Result<Vec<String>> {
+    let paths = DaatLocusPaths::from_root(home.to_path_buf());
     let files = ["events", "pending_work_queue", "telegram_transport_state"];
     clear_named_files(paths.state_dir(), &files).await
 }
@@ -124,9 +124,9 @@ pub async fn run_complite_reset() -> Result<()> {
     Ok(())
 }
 
-async fn clear_compiled_artifacts(home: &PathBuf) -> Result<Vec<String>> {
+async fn clear_compiled_artifacts(home: &Path) -> Result<Vec<String>> {
     let mut cleared = Vec::new();
-    let paths = DaatLocusPaths::from_root(home.clone());
+    let paths = DaatLocusPaths::from_root(home.to_path_buf());
 
     for dir_name in [COMPILED_DIR_NAME, "evaluations"] {
         let path = paths.artifact_dir(dir_name);
@@ -177,9 +177,9 @@ pub async fn run_reset_all() -> Result<()> {
     Ok(())
 }
 
-async fn clear_log_dirs(home: &PathBuf) -> Result<Vec<String>> {
+async fn clear_log_dirs(home: &Path) -> Result<Vec<String>> {
     let mut cleared = Vec::new();
-    let paths = DaatLocusPaths::from_root(home.clone());
+    let paths = DaatLocusPaths::from_root(home.to_path_buf());
     let path = paths.logs_dir();
     if path.exists() {
         tokio::fs::remove_dir_all(&path)

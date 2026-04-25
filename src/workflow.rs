@@ -366,10 +366,10 @@ impl WorkflowStore {
         write_workflow_file(&target_path, &target.spec).await?;
 
         for source_id in &source_ids {
-            if let Some(stored) = self.workflows.remove(source_id) {
-                if let Some(path) = stored.path {
-                    let _ = tokio::fs::remove_file(path).await;
-                }
+            if let Some(stored) = self.workflows.remove(source_id)
+                && let Some(path) = stored.path
+            {
+                let _ = tokio::fs::remove_file(path).await;
             }
         }
 

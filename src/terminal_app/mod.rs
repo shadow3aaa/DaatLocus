@@ -62,6 +62,15 @@ pub struct TerminalApp {
     output_buffer_capacity: usize,
 }
 
+pub struct TerminalExecCommandRequest<'a> {
+    pub command: String,
+    pub session_id: Option<String>,
+    pub workdir: Option<String>,
+    pub sandbox_policy: &'a RuntimeSandboxPolicy,
+    pub yield_time_ms: Option<u64>,
+    pub max_chars: Option<usize>,
+}
+
 struct TerminalSession {
     process: Option<TerminalProcess>,
     output_offset: usize,
@@ -171,17 +180,21 @@ impl TerminalApp {
 
     pub async fn exec_command_with_progress<F>(
         &mut self,
-        command: String,
-        session_id: Option<String>,
-        workdir: Option<String>,
-        sandbox_policy: &RuntimeSandboxPolicy,
-        yield_time_ms: Option<u64>,
-        max_chars: Option<usize>,
+        request: TerminalExecCommandRequest<'_>,
         mut on_progress: F,
     ) -> Result<TerminalToolResult>
     where
         F: FnMut(&TerminalSessionState, &str) + Send,
     {
+        let TerminalExecCommandRequest {
+            command,
+            session_id,
+            workdir,
+            sandbox_policy,
+            yield_time_ms,
+            max_chars,
+        } = request;
+
         let target_session_id = session_id.unwrap_or_else(|| self.create_session());
         if let Some(reason) = Self::forbidden_input_reason(&command) {
             bail!(reason);
@@ -294,9 +307,10 @@ impl TerminalApp {
         session.state.has_unread_output = true;
         let requested_yield_ms = yield_time_ms.unwrap_or(Self::DEFAULT_WRITE_STDIN_YIELD_TIME_MS);
         let effective_yield_ms = if text.is_empty() {
-            requested_yield_ms
-                .max(Self::MIN_EMPTY_POLL_YIELD_TIME_MS)
-                .min(Self::MAX_WRITE_STDIN_YIELD_TIME_MS)
+            requested_yield_ms.clamp(
+                Self::MIN_EMPTY_POLL_YIELD_TIME_MS,
+                Self::MAX_WRITE_STDIN_YIELD_TIME_MS,
+            )
         } else {
             requested_yield_ms.min(Self::MAX_WRITE_STDIN_YIELD_TIME_MS)
         };
@@ -802,12 +816,14 @@ impl App for TerminalApp {
                 let dashboard_tx = context.dashboard_tx.clone();
                 let result = self
                     .exec_command_with_progress(
-                        args.command.clone(),
-                        args.session_id.clone(),
-                        effective_workdir,
-                        &context.sandbox_policy,
-                        args.yield_time_ms,
-                        args.max_chars,
+                        TerminalExecCommandRequest {
+                            command: args.command.clone(),
+                            session_id: args.session_id.clone(),
+                            workdir: effective_workdir,
+                            sandbox_policy: &context.sandbox_policy,
+                            yield_time_ms: args.yield_time_ms,
+                            max_chars: args.max_chars,
+                        },
                         move |session, delta| {
                             if let Some(tx) = &dashboard_tx {
                                 tx.send_modify(|state| {
@@ -1122,8 +1138,6 @@ fn refresh_terminal_session(session: &mut TerminalSession) {
     if !session.state.status.starts_with("exited") {
         session.state.status = if process_running {
             "running".to_string()
-        } else if session.state.command.is_some() {
-            "idle".to_string()
         } else {
             "idle".to_string()
         };
@@ -1272,12 +1286,14 @@ mod tests {
 
         let created = app
             .exec_command_with_progress(
-                echo_command("session-a"),
-                None,
-                None,
-                &sandbox_policy,
-                None,
-                None,
+                TerminalExecCommandRequest {
+                    command: echo_command("session-a"),
+                    session_id: None,
+                    workdir: None,
+                    sandbox_policy: &sandbox_policy,
+                    yield_time_ms: None,
+                    max_chars: None,
+                },
                 |_session, _delta| {},
             )
             .await
@@ -1303,12 +1319,14 @@ mod tests {
 
         let created = app
             .exec_command_with_progress(
-                long_running_command(),
-                None,
-                None,
-                &sandbox_policy,
-                None,
-                None,
+                TerminalExecCommandRequest {
+                    command: long_running_command(),
+                    session_id: None,
+                    workdir: None,
+                    sandbox_policy: &sandbox_policy,
+                    yield_time_ms: None,
+                    max_chars: None,
+                },
                 |_session, _delta| {},
             )
             .await
@@ -1341,12 +1359,14 @@ mod tests {
 
         let created = app
             .exec_command_with_progress(
-                long_running_command(),
-                None,
-                None,
-                &sandbox_policy,
-                None,
-                None,
+                TerminalExecCommandRequest {
+                    command: long_running_command(),
+                    session_id: None,
+                    workdir: None,
+                    sandbox_policy: &sandbox_policy,
+                    yield_time_ms: None,
+                    max_chars: None,
+                },
                 |_session, _delta| {},
             )
             .await
@@ -1365,12 +1385,14 @@ mod tests {
         for idx in 0..(TerminalApp::MAX_EXITED_SESSION_TOMBSTONES + 2) {
             let created = app
                 .exec_command_with_progress(
-                    echo_command(&format!("session-{idx}")),
-                    None,
-                    None,
-                    &sandbox_policy,
-                    None,
-                    None,
+                    TerminalExecCommandRequest {
+                        command: echo_command(&format!("session-{idx}")),
+                        session_id: None,
+                        workdir: None,
+                        sandbox_policy: &sandbox_policy,
+                        yield_time_ms: None,
+                        max_chars: None,
+                    },
                     |_session, _delta| {},
                 )
                 .await
@@ -1400,12 +1422,14 @@ mod tests {
 
         let result = app
             .exec_command_with_progress(
-                long_running_command(),
-                None,
-                None,
-                &sandbox_policy,
-                Some(100),
-                None,
+                TerminalExecCommandRequest {
+                    command: long_running_command(),
+                    session_id: None,
+                    workdir: None,
+                    sandbox_policy: &sandbox_policy,
+                    yield_time_ms: Some(100),
+                    max_chars: None,
+                },
                 |_session, _delta| {},
             )
             .await
@@ -1429,12 +1453,14 @@ mod tests {
 
         let result = app
             .exec_command_with_progress(
-                high_output_command(4096),
-                None,
-                None,
-                &sandbox_policy,
-                Some(5_000),
-                None,
+                TerminalExecCommandRequest {
+                    command: high_output_command(4096),
+                    session_id: None,
+                    workdir: None,
+                    sandbox_policy: &sandbox_policy,
+                    yield_time_ms: Some(5_000),
+                    max_chars: None,
+                },
                 |_session, _delta| {},
             )
             .await
@@ -1471,12 +1497,14 @@ mod tests {
 
         let result = app
             .exec_command_with_progress(
-                env_value_command("DAAT_LOCUS_TEST_ENV"),
-                None,
-                None,
-                &sandbox_policy,
-                Some(5_000),
-                None,
+                TerminalExecCommandRequest {
+                    command: env_value_command("DAAT_LOCUS_TEST_ENV"),
+                    session_id: None,
+                    workdir: None,
+                    sandbox_policy: &sandbox_policy,
+                    yield_time_ms: Some(5_000),
+                    max_chars: None,
+                },
                 |_session, _delta| {},
             )
             .await
@@ -1497,16 +1525,18 @@ mod tests {
 
         let started = app
             .exec_command_with_progress(
-                if cfg!(windows) {
-                    "powershell.exe".to_string()
-                } else {
-                    "bash".to_string()
+                TerminalExecCommandRequest {
+                    command: if cfg!(windows) {
+                        "powershell.exe".to_string()
+                    } else {
+                        "bash".to_string()
+                    },
+                    session_id: None,
+                    workdir: None,
+                    sandbox_policy: &sandbox_policy,
+                    yield_time_ms: Some(50),
+                    max_chars: None,
                 },
-                None,
-                None,
-                &sandbox_policy,
-                Some(50),
-                None,
                 |_session, _delta| {},
             )
             .await

@@ -1244,6 +1244,246 @@ fn format_message_for_memory(message: &HistoryMessage) -> String {
     format!("{role}:\n{}", parts.join("\n"))
 }
 
+impl HindsightQueueItem {
+    fn render_for_retain(&self) -> String {
+        let transcript = build_hindsight_retain_transcript(&self.messages);
+        serde_json::to_string(&transcript).unwrap_or_else(|_| "[]".to_string())
+    }
+}
+
+fn build_hindsight_retain_transcript(messages: &[HistoryMessage]) -> Vec<serde_json::Value> {
+    let mut transcript = Vec::new();
+    let mut skipped_tool_call_ids = HashSet::new();
+
+    for message in messages {
+        match &message.message {
+            AgentMessage::User { .. } => {
+                let text = history_message_content(message).trim();
+                if !text.is_empty() {
+                    transcript.push(json!({
+                        "role": "user",
+                        "content": [{ "type": "text", "text": text }],
+                    }));
+                }
+            }
+            AgentMessage::Assistant { .. } => {
+                let text = history_message_content(message).trim();
+                if !text.is_empty() {
+                    transcript.push(json!({
+                        "role": "assistant",
+                        "content": [{ "type": "text", "text": text }],
+                    }));
+                }
+            }
+            AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
+                let mut blocks = Vec::new();
+                if let Some(text) = content.as_deref().map(str::trim)
+                    && !text.is_empty()
+                {
+                    blocks.push(json!({
+                        "type": "text",
+                        "text": text,
+                    }));
+                }
+                blocks.extend(calls.iter().filter_map(|call| {
+                    if is_hindsight_operational_tool(&call.name) {
+                        skipped_tool_call_ids.insert(call.id.clone());
+                        return None;
+                    }
+                    Some(json!({
+                        "type": "tool_use",
+                        "id": call.id,
+                        "name": call.name,
+                        "input": call.arguments,
+                    }))
+                }));
+                if !blocks.is_empty() {
+                    transcript.push(json!({
+                        "role": "assistant",
+                        "content": blocks,
+                    }));
+                }
+            }
+            AgentMessage::Tool {
+                tool_call_id,
+                name: _,
+                ..
+            } => {
+                if skipped_tool_call_ids.contains(tool_call_id) {
+                    continue;
+                }
+                let result = strip_tool_history_envelope(history_message_content(message));
+                if result.trim().is_empty() {
+                    continue;
+                }
+                let block = json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": result,
+                });
+                if let Some(last) = transcript.last_mut()
+                    && last.get("role").and_then(serde_json::Value::as_str) == Some("user")
+                    && last
+                        .get("content")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|items| {
+                            items.iter().all(|item| {
+                                item.get("type").and_then(serde_json::Value::as_str)
+                                    == Some("tool_result")
+                            })
+                        })
+                    && let Some(items) = last
+                        .get_mut("content")
+                        .and_then(serde_json::Value::as_array_mut)
+                {
+                    items.push(block);
+                    continue;
+                }
+                transcript.push(json!({
+                    "role": "user",
+                    "content": [block],
+                }));
+            }
+            AgentMessage::System { .. } => {}
+        }
+    }
+
+    transcript
+}
+
+fn is_hindsight_operational_tool(name: &str) -> bool {
+    matches!(name.trim(), "deep_recall")
+}
+
+fn strip_tool_history_envelope(content: &str) -> String {
+    let mut lines = content.lines();
+    let first = lines.next().unwrap_or_default();
+    let second = lines.next().unwrap_or_default();
+    if first.starts_with("tool_call_id=") && second.starts_with("name=") {
+        return lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    }
+    content.trim().to_string()
+}
+
+fn message_has_workspace_signal(message: &HistoryMessage) -> bool {
+    if message
+        .tool_call_ui_events
+        .iter()
+        .any(tool_call_event_is_workspace_signal)
+    {
+        return true;
+    }
+    match &message.tool_ui_event {
+        Some(event) => tool_event_is_workspace_signal(event),
+        None => false,
+    }
+}
+
+fn message_has_telegram_signal(message: &HistoryMessage) -> bool {
+    if message
+        .tool_call_ui_events
+        .iter()
+        .any(|event| matches!(event, ToolCallUiEvent::Telegram(_)))
+    {
+        return true;
+    }
+    matches!(message.tool_ui_event, Some(ToolUiEvent::Telegram(_)))
+}
+
+fn message_has_failure_signal(message: &HistoryMessage) -> bool {
+    if history_message_content(message)
+        .to_ascii_lowercase()
+        .contains("failed")
+    {
+        return true;
+    }
+    if message
+        .tool_call_ui_events
+        .iter()
+        .any(|event| matches!(event, ToolCallUiEvent::Error(_)))
+    {
+        return true;
+    }
+    matches!(message.tool_ui_event, Some(ToolUiEvent::Error(_)))
+}
+
+fn message_has_preference_signal(message: &HistoryMessage) -> bool {
+    let content = history_message_content(message).to_ascii_lowercase();
+    content.contains("prefer") || matches!(message.tool_ui_event, Some(ToolUiEvent::Telegram(_)))
+}
+
+fn tool_call_event_is_workspace_signal(event: &ToolCallUiEvent) -> bool {
+    matches!(
+        event,
+        ToolCallUiEvent::Exec(_)
+            | ToolCallUiEvent::Terminal(_)
+            | ToolCallUiEvent::Browser(_)
+            | ToolCallUiEvent::Patch(_)
+            | ToolCallUiEvent::App(_)
+    )
+}
+
+fn tool_event_is_workspace_signal(event: &ToolUiEvent) -> bool {
+    matches!(
+        event,
+        ToolUiEvent::Exec(_)
+            | ToolUiEvent::Terminal(_)
+            | ToolUiEvent::Browser(_)
+            | ToolUiEvent::Patch(_)
+            | ToolUiEvent::App(_)
+    )
+}
+
+fn format_tool_call_ui_event_for_memory(event: &crate::tool_ui::ToolCallUiEvent) -> String {
+    match event {
+        crate::tool_ui::ToolCallUiEvent::Exec(data)
+        | crate::tool_ui::ToolCallUiEvent::Plan(data)
+        | crate::tool_ui::ToolCallUiEvent::CreateWorkflow(data)
+        | crate::tool_ui::ToolCallUiEvent::ActivateWorkflow(data)
+        | crate::tool_ui::ToolCallUiEvent::DeepRecall(data)
+        | crate::tool_ui::ToolCallUiEvent::App(data)
+        | crate::tool_ui::ToolCallUiEvent::Error(data) => {
+            let mut lines = vec![format!("tool_call: {}", data.title)];
+            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
+            lines.join("\n")
+        }
+        crate::tool_ui::ToolCallUiEvent::Browser(data) => {
+            let mut lines = vec![format!("tool_call: {}", data.title)];
+            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
+            lines.join("\n")
+        }
+        crate::tool_ui::ToolCallUiEvent::Telegram(data) => {
+            let mut lines = vec![format!("tool_call: {}", data.title)];
+            lines.extend(data.detail_lines.iter().map(|line| format!("  {line}")));
+            lines.extend(data.message_lines.iter().map(|line| format!("  {line}")));
+            lines.join("\n")
+        }
+        crate::tool_ui::ToolCallUiEvent::Terminal(data) => {
+            let mut lines = vec![format!("tool_call: {}", data.title)];
+            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
+            lines.join("\n")
+        }
+        crate::tool_ui::ToolCallUiEvent::Patch(data) => {
+            let mut lines = vec![
+                "tool_call: apply_patch".to_string(),
+                format!("  {}", data.summary_line),
+            ];
+            lines.extend(data.files.iter().map(|file| {
+                let marker = match file.operation {
+                    crate::tool_ui::PatchFileOperation::Add => "+",
+                    crate::tool_ui::PatchFileOperation::Delete => "-",
+                    crate::tool_ui::PatchFileOperation::Update => "~",
+                };
+                format!(
+                    "  {marker} {} (+{} -{})",
+                    file.path, file.added_lines, file.removed_lines
+                )
+            }));
+            lines.join("\n")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1516,247 +1756,5 @@ mod tests {
                 })
             })
         }));
-    }
-}
-
-impl HindsightQueueItem {
-    fn render_for_retain(&self) -> String {
-        let transcript = build_hindsight_retain_transcript(&self.messages);
-        serde_json::to_string(&transcript).unwrap_or_else(|_| "[]".to_string())
-    }
-}
-
-fn build_hindsight_retain_transcript(messages: &[HistoryMessage]) -> Vec<serde_json::Value> {
-    let mut transcript = Vec::new();
-    let mut skipped_tool_call_ids = HashSet::new();
-
-    for message in messages {
-        match &message.message {
-            AgentMessage::User { .. } => {
-                let text = history_message_content(message).trim();
-                if !text.is_empty() {
-                    transcript.push(json!({
-                        "role": "user",
-                        "content": [{ "type": "text", "text": text }],
-                    }));
-                }
-            }
-            AgentMessage::Assistant { .. } => {
-                let text = history_message_content(message).trim();
-                if !text.is_empty() {
-                    transcript.push(json!({
-                        "role": "assistant",
-                        "content": [{ "type": "text", "text": text }],
-                    }));
-                }
-            }
-            AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
-                let mut blocks = Vec::new();
-                if let Some(text) = content.as_deref().map(str::trim)
-                    && !text.is_empty()
-                {
-                    blocks.push(json!({
-                        "type": "text",
-                        "text": text,
-                    }));
-                }
-                blocks.extend(calls.iter().filter_map(|call| {
-                    if is_hindsight_operational_tool(&call.name) {
-                        skipped_tool_call_ids.insert(call.id.clone());
-                        return None;
-                    }
-                    Some(json!({
-                        "type": "tool_use",
-                        "id": call.id,
-                        "name": call.name,
-                        "input": call.arguments,
-                    }))
-                }));
-                if !blocks.is_empty() {
-                    transcript.push(json!({
-                        "role": "assistant",
-                        "content": blocks,
-                    }));
-                }
-            }
-            AgentMessage::Tool {
-                tool_call_id,
-                name: _,
-                ..
-            } => {
-                if skipped_tool_call_ids.contains(tool_call_id) {
-                    continue;
-                }
-                let result = strip_tool_history_envelope(history_message_content(message));
-                if result.trim().is_empty() {
-                    continue;
-                }
-                let block = json!({
-                    "type": "tool_result",
-                    "tool_use_id": tool_call_id,
-                    "content": result,
-                });
-                if let Some(last) = transcript.last_mut()
-                    && last.get("role").and_then(serde_json::Value::as_str) == Some("user")
-                    && last
-                        .get("content")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|items| {
-                            items.iter().all(|item| {
-                                item.get("type").and_then(serde_json::Value::as_str)
-                                    == Some("tool_result")
-                            })
-                        })
-                {
-                    if let Some(items) = last
-                        .get_mut("content")
-                        .and_then(serde_json::Value::as_array_mut)
-                    {
-                        items.push(block);
-                        continue;
-                    }
-                }
-                transcript.push(json!({
-                    "role": "user",
-                    "content": [block],
-                }));
-            }
-            AgentMessage::System { .. } => {}
-        }
-    }
-
-    transcript
-}
-
-fn is_hindsight_operational_tool(name: &str) -> bool {
-    matches!(name.trim(), "deep_recall")
-}
-
-fn strip_tool_history_envelope(content: &str) -> String {
-    let mut lines = content.lines();
-    let first = lines.next().unwrap_or_default();
-    let second = lines.next().unwrap_or_default();
-    if first.starts_with("tool_call_id=") && second.starts_with("name=") {
-        return lines.collect::<Vec<_>>().join("\n").trim().to_string();
-    }
-    content.trim().to_string()
-}
-
-fn message_has_workspace_signal(message: &HistoryMessage) -> bool {
-    if message
-        .tool_call_ui_events
-        .iter()
-        .any(tool_call_event_is_workspace_signal)
-    {
-        return true;
-    }
-    match &message.tool_ui_event {
-        Some(event) => tool_event_is_workspace_signal(event),
-        None => false,
-    }
-}
-
-fn message_has_telegram_signal(message: &HistoryMessage) -> bool {
-    if message
-        .tool_call_ui_events
-        .iter()
-        .any(|event| matches!(event, ToolCallUiEvent::Telegram(_)))
-    {
-        return true;
-    }
-    matches!(message.tool_ui_event, Some(ToolUiEvent::Telegram(_)))
-}
-
-fn message_has_failure_signal(message: &HistoryMessage) -> bool {
-    if history_message_content(message)
-        .to_ascii_lowercase()
-        .contains("failed")
-    {
-        return true;
-    }
-    if message
-        .tool_call_ui_events
-        .iter()
-        .any(|event| matches!(event, ToolCallUiEvent::Error(_)))
-    {
-        return true;
-    }
-    matches!(message.tool_ui_event, Some(ToolUiEvent::Error(_)))
-}
-
-fn message_has_preference_signal(message: &HistoryMessage) -> bool {
-    let content = history_message_content(message).to_ascii_lowercase();
-    content.contains("prefer") || matches!(message.tool_ui_event, Some(ToolUiEvent::Telegram(_)))
-}
-
-fn tool_call_event_is_workspace_signal(event: &ToolCallUiEvent) -> bool {
-    matches!(
-        event,
-        ToolCallUiEvent::Exec(_)
-            | ToolCallUiEvent::Terminal(_)
-            | ToolCallUiEvent::Browser(_)
-            | ToolCallUiEvent::Patch(_)
-            | ToolCallUiEvent::App(_)
-    )
-}
-
-fn tool_event_is_workspace_signal(event: &ToolUiEvent) -> bool {
-    matches!(
-        event,
-        ToolUiEvent::Exec(_)
-            | ToolUiEvent::Terminal(_)
-            | ToolUiEvent::Browser(_)
-            | ToolUiEvent::Patch(_)
-            | ToolUiEvent::App(_)
-    )
-}
-
-fn format_tool_call_ui_event_for_memory(event: &crate::tool_ui::ToolCallUiEvent) -> String {
-    match event {
-        crate::tool_ui::ToolCallUiEvent::Exec(data)
-        | crate::tool_ui::ToolCallUiEvent::Plan(data)
-        | crate::tool_ui::ToolCallUiEvent::CreateWorkflow(data)
-        | crate::tool_ui::ToolCallUiEvent::ActivateWorkflow(data)
-        | crate::tool_ui::ToolCallUiEvent::DeepRecall(data)
-        | crate::tool_ui::ToolCallUiEvent::App(data)
-        | crate::tool_ui::ToolCallUiEvent::Error(data) => {
-            let mut lines = vec![format!("tool_call: {}", data.title)];
-            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
-            lines.join("\n")
-        }
-        crate::tool_ui::ToolCallUiEvent::Browser(data) => {
-            let mut lines = vec![format!("tool_call: {}", data.title)];
-            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
-            lines.join("\n")
-        }
-        crate::tool_ui::ToolCallUiEvent::Telegram(data) => {
-            let mut lines = vec![format!("tool_call: {}", data.title)];
-            lines.extend(data.detail_lines.iter().map(|line| format!("  {line}")));
-            lines.extend(data.message_lines.iter().map(|line| format!("  {line}")));
-            lines.join("\n")
-        }
-        crate::tool_ui::ToolCallUiEvent::Terminal(data) => {
-            let mut lines = vec![format!("tool_call: {}", data.title)];
-            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
-            lines.join("\n")
-        }
-        crate::tool_ui::ToolCallUiEvent::Patch(data) => {
-            let mut lines = vec![
-                "tool_call: apply_patch".to_string(),
-                format!("  {}", data.summary_line),
-            ];
-            lines.extend(data.files.iter().map(|file| {
-                let marker = match file.operation {
-                    crate::tool_ui::PatchFileOperation::Add => "+",
-                    crate::tool_ui::PatchFileOperation::Delete => "-",
-                    crate::tool_ui::PatchFileOperation::Update => "~",
-                };
-                format!(
-                    "  {marker} {} (+{} -{})",
-                    file.path, file.added_lines, file.removed_lines
-                )
-            }));
-            lines.join("\n")
-        }
     }
 }
