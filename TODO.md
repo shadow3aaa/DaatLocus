@@ -30,10 +30,13 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Surface truncation/drop metadata in terminal tool results and dashboard cells.
   - [x] Add tests for high-output commands that exceed the buffer limit.
 
-- [ ] Add timeout and interruption support for Lua workspace apps
-  - [ ] Cover app hooks, tools, render, and notice polling.
-  - [ ] Add Lua interruption through instruction hooks or equivalent cancellation.
-  - [ ] Convert timeout and resource failures into stable app errors instead of blocking runtime.
+- [x] Add request timeout and worker recovery for Lua workspace apps
+  - [x] Cover app hooks, tools, render, and notice polling.
+  - [x] Run Lua `config(ctx)` before cold start so apps can adjust request and cold-start timeouts.
+  - [x] Run worker cold start through explicit initialization with a separate timeout.
+  - [x] Treat Lua `init(ctx, state)` as a worker cold-start hook, not a one-time state factory.
+  - [x] Enforce app request timeouts by terminating and restarting worker processes.
+  - [x] Convert timeout and resource failures into stable app errors instead of blocking runtime.
 
 - [ ] Tighten the default runtime sandbox policy
   - [ ] Move beyond protecting only `.daat-locus`.

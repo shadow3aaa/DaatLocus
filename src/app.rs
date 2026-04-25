@@ -72,7 +72,7 @@ pub enum AppToolScope {
     Terminal,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppStateRender {
     pub title: String,
     pub lines: Vec<String>,
@@ -91,14 +91,14 @@ pub struct AppHowToUse {
     pub body_markdown: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppDynamicToolSpec {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppDynamicToolResult {
     pub summary: String,
     pub payload: Value,
