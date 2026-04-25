@@ -101,6 +101,13 @@ pub struct EventResolveArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct NoticeResolvedArgs {
+    pub app: AppId,
+    pub reason: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct UpdatePlanStepArgs {
     pub step: String,
     pub status: PlanStatus,

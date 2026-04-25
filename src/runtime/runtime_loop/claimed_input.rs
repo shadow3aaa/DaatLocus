@@ -88,8 +88,12 @@ pub(super) fn claim_pending_runtime_inputs(
                     }
                 }
             }
-            PendingWork::AppNotice { app, reason } => {
-                let Some(current_reason) = context.apps.notice_reason(&app) else {
+            PendingWork::AppNotice { app, reason: _ } => {
+                let Some(current_reason) = context
+                    .apps
+                    .notice_reason(&app)
+                    .and_then(|reason| crate::context::normalize_app_notice_reason(&reason))
+                else {
                     if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
                         app: app.clone(),
                         reason: String::new(),
@@ -100,11 +104,30 @@ pub(super) fn claim_pending_runtime_inputs(
                     }
                     continue;
                 };
-                let reason = if current_reason.trim().is_empty() {
-                    reason
-                } else {
-                    current_reason
-                };
+                if context.is_app_notice_suppressed(&app, &current_reason) {
+                    if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
+                        app: app.clone(),
+                        reason: String::new(),
+                    }) {
+                        tracing::error!(
+                            "failed to consume suppressed app notice driver for {app}: {err:?}"
+                        );
+                    }
+                    continue;
+                }
+                let reason = current_reason;
+                let key = AppNoticeKey::new(app.clone(), reason.clone());
+                if context.app_notice_is_resolved(&key) {
+                    if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
+                        app: app.clone(),
+                        reason: String::new(),
+                    }) {
+                        tracing::error!(
+                            "failed to consume already resolved app notice driver for {app}: {err:?}"
+                        );
+                    }
+                    continue;
+                }
                 claimed_inputs.push(ClaimedRuntimeInput::AppNotice { app, reason });
             }
         }
@@ -138,7 +161,7 @@ pub(super) fn handle_runtime_overflow(
     context: &mut Context,
     fingerprint: Option<&str>,
     event_ids: &[String],
-    app_notices: &[(AppId, String)],
+    app_notices: &[AppNoticeKey],
     error_text: &str,
 ) -> bool {
     let Some(fingerprint) = fingerprint else {
@@ -156,7 +179,7 @@ pub(super) fn handle_runtime_overflow(
             claimed_events = event_ids.join(","),
             claimed_app_notices = app_notices
                 .iter()
-                .map(|(app, _)| app.to_string())
+                .map(|notice| notice.app.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
             "runtime context overflow persisted; requeueing claimed inputs",
@@ -188,13 +211,18 @@ pub(super) fn handle_runtime_overflow(
         }
     }
 
-    for (app, reason) in app_notices {
-        context.suppress_app_notice(app, reason.clone(), APP_NOTICE_OVERFLOW_SUPPRESSION);
-        context.active_app_notices.remove(app);
+    for notice in app_notices {
+        context.suppress_app_notice(
+            &notice.app,
+            notice.reason.clone(),
+            APP_NOTICE_OVERFLOW_SUPPRESSION,
+        );
+        context.clear_active_app_notice(&notice.app);
         if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
-            app: app.clone(),
+            app: notice.app.clone(),
             reason: String::new(),
         }) {
+            let app = &notice.app;
             tracing::error!(
                 "failed to consume overflowed app notice driver for {app} after fuse trip: {err:?}"
             );
@@ -209,7 +237,7 @@ pub(super) fn handle_runtime_overflow(
         claimed_events = event_ids.join(","),
         claimed_app_notices = app_notices
             .iter()
-            .map(|(app, _)| app.to_string())
+            .map(|notice| notice.app.to_string())
             .collect::<Vec<_>>()
             .join(","),
         "runtime context overflow fuse tripped; claimed inputs were terminated instead of requeued",
@@ -266,36 +294,107 @@ pub(super) fn finalize_claimed_runtime_events(
 
 pub(super) async fn finalize_claimed_runtime_app_notices(
     context: &mut Context,
-    apps: &[AppId],
+    notices: &[AppNoticeKey],
     output: &AgentLoopStepOutput,
 ) {
-    if apps.is_empty() {
+    if notices.is_empty() {
         return;
     }
 
     let mut released = Vec::new();
-    for app in apps {
+    let mut resolved = Vec::new();
+    let mut suppressed = Vec::new();
+    for notice in notices {
+        let app = &notice.app;
         if let Err(err) = context.apps.refresh_notice_for(app).await {
             tracing::error!("failed to refresh app notice for {app}: {err:?}");
         }
-        let still_noticed = context.apps.notice_reason(app).is_some();
         let work = PendingWork::AppNotice {
             app: app.clone(),
-            reason: String::new(),
+            reason: notice.reason.clone(),
         };
-        if still_noticed {
-            match context.pending_work.release_claimed(work) {
-                Ok(true) => released.push(app.to_string()),
-                Ok(false) => {}
-                Err(err) => {
+
+        if context.app_notice_is_resolved(notice) {
+            if let Err(err) = context.pending_work.consume(work) {
+                tracing::error!("failed to consume resolved app notice driver for {app}: {err:?}");
+            } else {
+                resolved.push(format!("{app}:{}", notice.reason));
+            }
+            continue;
+        }
+
+        let current_reason = context
+            .apps
+            .notice_reason(app)
+            .and_then(|reason| crate::context::normalize_app_notice_reason(&reason));
+
+        match current_reason {
+            Some(current_reason) if current_reason == notice.reason => {
+                let attempts = context.record_unresolved_app_notice_turn(notice);
+                if attempts >= APP_NOTICE_UNRESOLVED_SUPPRESSION_THRESHOLD {
+                    context.suppress_app_notice(
+                        app,
+                        notice.reason.clone(),
+                        APP_NOTICE_OVERFLOW_SUPPRESSION,
+                    );
+                    context.clear_active_app_notice(app);
+                    if let Err(err) = context.pending_work.consume(work) {
+                        tracing::error!(
+                            "failed to consume suppressed unresolved app notice driver for {app}: {err:?}"
+                        );
+                    }
+                    suppressed.push(format!("{app}:{}", notice.reason));
+                    continue;
+                }
+
+                match context.pending_work.release_claimed(work) {
+                    Ok(true) => released.push(app.to_string()),
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::error!(
+                            "failed to release claimed app notice driver for {app}: {err:?}"
+                        );
+                    }
+                }
+            }
+            Some(current_reason) => {
+                context.activate_app_notice(app.clone(), current_reason.clone());
+                if let Err(err) = context.pending_work.requeue_front(PendingWork::AppNotice {
+                    app: app.clone(),
+                    reason: current_reason.clone(),
+                }) {
                     tracing::error!(
-                        "failed to release claimed app notice driver for {app}: {err:?}"
+                        "failed to requeue changed app notice driver for {app}: {err:?}"
+                    );
+                }
+                released.push(format!("{app}:{current_reason}"));
+            }
+            None => {
+                context.clear_active_app_notice(app);
+                if let Err(err) = context.pending_work.consume(work) {
+                    tracing::error!(
+                        "failed to consume cleared app notice driver for {app}: {err:?}"
                     );
                 }
             }
-        } else if let Err(err) = context.pending_work.consume(work) {
-            tracing::error!("failed to consume app notice driver for {app}: {err:?}");
         }
+    }
+
+    if !resolved.is_empty() {
+        tracing::info!(
+            resolved_app_notice_drivers = resolved.len(),
+            app_notices = resolved.join(","),
+            "consumed explicitly resolved runtime app notice drivers",
+        );
+    }
+
+    if !suppressed.is_empty() {
+        tracing::warn!(
+            suppression_secs = APP_NOTICE_OVERFLOW_SUPPRESSION.as_secs(),
+            suppressed_app_notice_drivers = suppressed.len(),
+            app_notices = suppressed.join(","),
+            "suppressed repeatedly unresolved runtime app notice drivers",
+        );
     }
 
     if !released.is_empty() {
@@ -406,7 +505,7 @@ pub(super) fn prompt_message_for_claimed_input(
             )),
         },
         ClaimedRuntimeInput::AppNotice { app, reason } => HistoryMessage::user(format!(
-            "<app_notice app=\"{}\">\nreason: {}\n</app_notice>",
+            "<app_notice app=\"{}\">\nreason: {}\nresolution: call `notice_resolved` with this app and reason when handled\n</app_notice>",
             app, reason,
         )),
     }
@@ -421,11 +520,14 @@ pub(super) enum RuntimeFollowUpDecision {
 pub(super) enum RuntimeFollowUpReason {
     RawStreamRequestedFollowUp,
     ClaimedEventNeedsExplicitResolution,
+    ClaimedAppNoticeNeedsExplicitResolution,
 }
 
 pub(super) struct RuntimeTurnFollowUpState<'a> {
     pub(super) raw_stream_requested_follow_up: bool,
     pub(super) claimed_statuses: &'a [EventStatus],
+    pub(super) has_claimed_app_notice: bool,
+    pub(super) claimed_app_notice_resolved: bool,
 }
 
 impl RuntimeFollowUpReason {
@@ -436,6 +538,9 @@ impl RuntimeFollowUpReason {
             }
             Self::ClaimedEventNeedsExplicitResolution => {
                 "The current turn has claimed events. Do not end by only outputting text; keep calling tools, and explicitly call `finish_and_send` with `reply_message` when the final reply is ready."
+            }
+            Self::ClaimedAppNoticeNeedsExplicitResolution => {
+                "The current turn has claimed an app notice. Do not end by only outputting text; keep calling tools, and explicitly call `notice_resolved` for the claimed app and reason when the notice has been handled."
             }
         }
     }
@@ -454,6 +559,8 @@ pub(super) fn runtime_turn_follow_up_decision(
     let state = RuntimeTurnFollowUpState {
         raw_stream_requested_follow_up: raw_stream_follow_up,
         claimed_statuses: &claimed_statuses,
+        has_claimed_app_notice: !context.claimed_app_notices.is_empty(),
+        claimed_app_notice_resolved: context.claimed_app_notices_are_resolved(),
     };
 
     runtime_turn_follow_up_decision_from_state(&state)
@@ -471,6 +578,12 @@ pub(super) fn runtime_turn_follow_up_decision_from_state(
     if summarize_claimed_event_statuses(state.claimed_statuses).has_claimed {
         return RuntimeFollowUpDecision::Continue {
             reason: RuntimeFollowUpReason::ClaimedEventNeedsExplicitResolution,
+        };
+    }
+
+    if state.has_claimed_app_notice && !state.claimed_app_notice_resolved {
+        return RuntimeFollowUpDecision::Continue {
+            reason: RuntimeFollowUpReason::ClaimedAppNoticeNeedsExplicitResolution,
         };
     }
 

@@ -143,6 +143,8 @@ pub struct TelegramUiData {
 pub struct ReplyUiData {
     pub disposition: ReplyDisposition,
     #[serde(default)]
+    pub subject: ReplySubject,
+    #[serde(default)]
     pub message_lines: Vec<String>,
 }
 
@@ -192,6 +194,14 @@ pub enum ReplyDisposition {
     Resolved,
     Dismissed,
     Failed,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplySubject {
+    #[default]
+    Message,
+    Notice,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,6 +264,15 @@ impl ToolUiEvent {
     pub fn reply(disposition: ReplyDisposition, message_lines: Vec<String>) -> Self {
         Self::Reply(ReplyUiData {
             disposition,
+            subject: ReplySubject::Message,
+            message_lines,
+        })
+    }
+
+    pub fn notice_reply(disposition: ReplyDisposition, message_lines: Vec<String>) -> Self {
+        Self::Reply(ReplyUiData {
+            disposition,
+            subject: ReplySubject::Notice,
             message_lines,
         })
     }

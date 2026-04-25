@@ -3,7 +3,9 @@ use std::time::Duration;
 use crate::{
     app::AppId,
     apply_patch::summarize_apply_patch_error,
-    context::{ActiveWorkflowRunSession, Context, PendingWorkflowRunFlush, RuntimeTurnPhase},
+    context::{
+        ActiveWorkflowRunSession, AppNoticeKey, Context, PendingWorkflowRunFlush, RuntimeTurnPhase,
+    },
     context_budget::{
         approx_token_count, estimate_agent_turn_request, is_context_budget_exceeded,
         truncate_text_to_token_budget,
@@ -82,6 +84,7 @@ use workspace_apps::{drain_workspace_app_invalidations, sync_workspace_apps_from
 
 const RUNTIME_EVENT_CLAIM_BATCH_SIZE: usize = 1;
 const RUNTIME_OVERFLOW_FUSE_THRESHOLD: usize = 3;
+const APP_NOTICE_UNRESOLVED_SUPPRESSION_THRESHOLD: usize = 3;
 const APP_NOTICE_OVERFLOW_SUPPRESSION: Duration = Duration::from_secs(300);
 const RUNTIME_HISTORY_MIN_MESSAGES: usize = 0;
 const RUNTIME_HISTORY_SUMMARY_MAX_TOKENS: usize = 800;
@@ -162,6 +165,8 @@ mod tests {
         let state = RuntimeTurnFollowUpState {
             raw_stream_requested_follow_up: true,
             claimed_statuses: &[],
+            has_claimed_app_notice: false,
+            claimed_app_notice_resolved: false,
         };
         assert!(matches!(
             runtime_turn_follow_up_decision_from_state(&state),
@@ -171,6 +176,8 @@ mod tests {
         let state = RuntimeTurnFollowUpState {
             raw_stream_requested_follow_up: false,
             claimed_statuses: &[EventStatus::Claimed],
+            has_claimed_app_notice: false,
+            claimed_app_notice_resolved: false,
         };
         assert!(matches!(
             runtime_turn_follow_up_decision_from_state(&state),
@@ -180,6 +187,8 @@ mod tests {
         let state = RuntimeTurnFollowUpState {
             raw_stream_requested_follow_up: false,
             claimed_statuses: &[EventStatus::Resolved],
+            has_claimed_app_notice: false,
+            claimed_app_notice_resolved: false,
         };
         assert!(matches!(
             runtime_turn_follow_up_decision_from_state(&state),
@@ -189,6 +198,19 @@ mod tests {
         let state = RuntimeTurnFollowUpState {
             raw_stream_requested_follow_up: false,
             claimed_statuses: &[EventStatus::Resolved],
+            has_claimed_app_notice: true,
+            claimed_app_notice_resolved: false,
+        };
+        assert!(matches!(
+            runtime_turn_follow_up_decision_from_state(&state),
+            RuntimeFollowUpDecision::Continue { .. }
+        ));
+
+        let state = RuntimeTurnFollowUpState {
+            raw_stream_requested_follow_up: false,
+            claimed_statuses: &[EventStatus::Resolved],
+            has_claimed_app_notice: true,
+            claimed_app_notice_resolved: true,
         };
         assert!(matches!(
             runtime_turn_follow_up_decision_from_state(&state),
