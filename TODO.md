@@ -38,10 +38,19 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Enforce app request timeouts by terminating and restarting worker processes.
   - [x] Convert timeout and resource failures into stable app errors instead of blocking runtime.
 
-- [ ] Tighten the default runtime sandbox policy
-  - [ ] Move beyond protecting only `.daat-locus`.
-  - [ ] Define explicit readable and writable runtime/workspace roots.
-  - [ ] Add tests for protected runtime paths.
+- [x] Tighten the default runtime self-protection policy
+  - [x] Keep the default policy lightweight: the user owns the machine, so do not build a broad filesystem jail.
+  - [x] Prevent tools from reading or writing Daat Locus private config/runtime state.
+  - [x] Prevent tools from writing Daat Locus's own source tree when the source root is known.
+  - [x] Prevent terminal tools from inheriting provider secret environment variables.
+  - [x] Add tests for protected runtime paths, source writes, and secret env stripping.
+
+- [ ] Consider optional strong sandbox backends for Linux and Windows
+  - [ ] Keep strong sandboxing out of the default path; the default policy remains a lightweight self-protection guard.
+  - [ ] Evaluate Linux options such as Landlock, namespaces, or bubblewrap for terminal and workspace app worker processes.
+  - [ ] Evaluate Windows options such as restricted tokens, Job Objects, or AppContainer.
+  - [ ] Document platform support and failure modes before enabling any backend.
+  - [ ] Add conformance tests for protected runtime paths when a backend is enabled.
 
 - [ ] Resolve symlinks and canonical paths for sandbox enforcement
   - [ ] Canonicalize paths before read/write checks where possible.

@@ -71,6 +71,14 @@ impl TerminalProcess {
             .map_err(std::io::Error::other)?;
         let mut process = Command::new(&spawn_spec.program);
         process.args(&spawn_spec.args);
+        for (name, _) in std::env::vars_os() {
+            if name
+                .to_str()
+                .is_some_and(|name| sandbox_policy.is_env_var_protected(name))
+            {
+                process.env_remove(&name);
+            }
+        }
         if let Some(workdir) = workdir {
             process.current_dir(workdir);
         }

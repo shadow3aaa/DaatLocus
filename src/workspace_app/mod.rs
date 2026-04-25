@@ -44,6 +44,7 @@ pub struct WorkspaceAppBootstrap {
 pub struct WorkspaceAppRegistry {
     apps_root: PathBuf,
     state_root: PathBuf,
+    protected_env_vars: Vec<String>,
     records: BTreeMap<String, WorkspaceAppRecord>,
     dirty_apps: BTreeSet<String>,
     full_rescan_needed: bool,
@@ -174,19 +175,24 @@ struct WorkspaceNoticeOutput {
     state: Option<JsonValue>,
 }
 
-pub fn bootstrap_workspace_apps(workspace_root: &Path) -> WorkspaceAppBootstrap {
+pub fn bootstrap_workspace_apps(
+    workspace_root: &Path,
+    protected_env_vars: &[String],
+) -> WorkspaceAppBootstrap {
     let state_root = daat_locus_paths_sync().state_dir().join("apps");
-    bootstrap_workspace_apps_with_state_root(workspace_root, &state_root)
+    bootstrap_workspace_apps_with_state_root(workspace_root, &state_root, protected_env_vars)
 }
 
 fn bootstrap_workspace_apps_with_state_root(
     workspace_root: &Path,
     state_root: &Path,
+    protected_env_vars: &[String],
 ) -> WorkspaceAppBootstrap {
     let apps_root = workspace_apps_dir(workspace_root);
     let registry = WorkspaceAppRegistry {
         apps_root: apps_root.clone(),
         state_root: state_root.to_path_buf(),
+        protected_env_vars: protected_env_vars.to_vec(),
         ..WorkspaceAppRegistry::default()
     };
     let mut report = WorkspaceAppBootstrap {
@@ -231,7 +237,7 @@ fn bootstrap_workspace_apps_with_state_root(
                 continue;
             }
         };
-        match WorkspaceApp::load_from_dir(&app_dir, state_root, &folder_name) {
+        match WorkspaceApp::load_from_dir(&app_dir, state_root, &folder_name, protected_env_vars) {
             Ok(app) => {
                 let app_id = app.id();
                 report.registry.records.insert(
@@ -352,7 +358,12 @@ impl WorkspaceAppRegistry {
             return Ok(());
         }
 
-        match WorkspaceApp::load_from_dir(&app_dir, &self.state_root, folder_name) {
+        match WorkspaceApp::load_from_dir(
+            &app_dir,
+            &self.state_root,
+            folder_name,
+            &self.protected_env_vars,
+        ) {
             Ok(app) => {
                 let app_id = app.id();
                 let disposition = apps.install_or_replace(Box::new(app)).await?;
@@ -925,7 +936,12 @@ fn validate_numeric_bounds(
 }
 
 impl WorkspaceApp {
-    fn load_from_dir(app_dir: &Path, state_root: &Path, folder_name: &str) -> Result<Self> {
+    fn load_from_dir(
+        app_dir: &Path,
+        state_root: &Path,
+        folder_name: &str,
+        protected_env_vars: &[String],
+    ) -> Result<Self> {
         let id = AppId::from_workspace_folder(folder_name.to_string())?;
         let manifest = load_manifest(app_dir)?;
         let entry_relative_path = manifest
@@ -950,6 +966,7 @@ impl WorkspaceApp {
             app_dir.to_path_buf(),
             state_dir,
             entry_relative_path.clone(),
+            protected_env_vars.to_vec(),
         )?;
         let render = match worker.request(WorkerRequestOp::RenderState)? {
             WorkerResponsePayload::RenderState(render) => render,
@@ -1303,7 +1320,7 @@ return app
         );
 
         let mut bootstrap =
-            bootstrap_workspace_apps_with_state_root(root.path(), state_root.path());
+            bootstrap_workspace_apps_with_state_root(root.path(), state_root.path(), &[]);
         assert!(
             bootstrap.errors.is_empty(),
             "unexpected loader errors: {:?}",
@@ -1361,7 +1378,7 @@ return app
         );
 
         let app_dir = root.path().join("apps").join("stateful");
-        let app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "stateful")
+        let app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "stateful", &[])
             .expect("load stateful app");
 
         let first = app.render_state();
@@ -1404,7 +1421,7 @@ return app
         );
 
         let app_dir = root.path().join("apps").join("cold-init");
-        let mut app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "cold-init")
+        let mut app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "cold-init", &[])
             .expect("load cold-init app");
 
         assert!(
@@ -1498,7 +1515,7 @@ return app
 
         let app_dir = root.path().join("apps").join("configured-timeout");
         let mut app =
-            WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "configured-timeout")
+            WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "configured-timeout", &[])
                 .expect("load configured-timeout app");
 
         assert!(
@@ -1570,7 +1587,7 @@ return app
         );
 
         let app_dir = root.path().join("apps").join("timeout-app");
-        let mut app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "timeout-app")
+        let mut app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "timeout-app", &[])
             .expect("load timeout app");
         app.set_request_timeout_for_tests(Duration::from_millis(25));
 
@@ -1620,7 +1637,8 @@ return app
 "#,
         );
 
-        let bootstrap = bootstrap_workspace_apps_with_state_root(root.path(), state_root.path());
+        let bootstrap =
+            bootstrap_workspace_apps_with_state_root(root.path(), state_root.path(), &[]);
         assert!(
             bootstrap.errors.is_empty(),
             "bootstrap errors: {:?}",
@@ -1705,7 +1723,8 @@ return app
 "#,
         );
 
-        let bootstrap = bootstrap_workspace_apps_with_state_root(root.path(), state_root.path());
+        let bootstrap =
+            bootstrap_workspace_apps_with_state_root(root.path(), state_root.path(), &[]);
         assert!(
             bootstrap.errors.is_empty(),
             "bootstrap errors: {:?}",
@@ -1819,7 +1838,8 @@ return app
 "#,
         );
 
-        let bootstrap = bootstrap_workspace_apps_with_state_root(root.path(), state_root.path());
+        let bootstrap =
+            bootstrap_workspace_apps_with_state_root(root.path(), state_root.path(), &[]);
         assert!(
             bootstrap.errors.is_empty(),
             "bootstrap errors: {:?}",
@@ -1912,7 +1932,8 @@ return M
         .expect("write helper module");
         fs::write(app_dir.join("payload.txt"), "hello from payload\n").expect("write payload");
 
-        let bootstrap = bootstrap_workspace_apps_with_state_root(root.path(), state_root.path());
+        let bootstrap =
+            bootstrap_workspace_apps_with_state_root(root.path(), state_root.path(), &[]);
         assert!(
             bootstrap.errors.is_empty(),
             "bootstrap errors: {:?}",
@@ -1970,7 +1991,8 @@ return app
 "#,
         );
 
-        let bootstrap = bootstrap_workspace_apps_with_state_root(root.path(), state_root.path());
+        let bootstrap =
+            bootstrap_workspace_apps_with_state_root(root.path(), state_root.path(), &[]);
         assert!(
             bootstrap.errors.is_empty(),
             "bootstrap errors: {:?}",
@@ -2032,7 +2054,8 @@ return app
 "#,
         );
 
-        let bootstrap = bootstrap_workspace_apps_with_state_root(root.path(), state_root.path());
+        let bootstrap =
+            bootstrap_workspace_apps_with_state_root(root.path(), state_root.path(), &[]);
         assert!(
             bootstrap.errors.is_empty(),
             "bootstrap errors: {:?}",
