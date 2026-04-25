@@ -121,11 +121,11 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [ ] Run `cargo test`.
   - [ ] Add dependency/license checks.
 
-- [ ] Add release checklist
-  - [ ] Cover daemon auth.
-  - [ ] Cover state migration.
-  - [ ] Cover supply chain pins.
-  - [ ] Cover backwards compatibility for config and workspace app behavior.
+- [x] Add release checklist
+  - [x] Cover daemon auth.
+  - [x] Cover state migration.
+  - [x] Cover supply chain pins.
+  - [x] Cover backwards compatibility for config and workspace app behavior.
 
 - [ ] Track license and attribution obligations
   - [ ] Add a dependency license audit note for transitive dependencies.
