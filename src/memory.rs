@@ -1,4 +1,4 @@
-//! Runtime conversation state and the hindsight retain queue.
+//! Runtime conversation state and the hindsight handoff queue.
 use std::{
     collections::{HashSet, VecDeque},
     fmt::Display,
@@ -112,7 +112,7 @@ pub struct RuntimeStepCompactionPolicy {
     pub max_recoveries: usize,
 }
 
-const HINDSIGHT_RETAIN_BACKLOG_LIMIT: usize = 3;
+const HINDSIGHT_HANDOFF_BACKLOG_LIMIT: usize = 3;
 
 impl Memory {
     pub async fn new() -> Self {
@@ -143,7 +143,7 @@ impl Memory {
         self.hindsight_queue.push_turn(current_doing, messages);
         let jobs = self.collect_pending_retain_jobs();
         let must_flush_before_continue =
-            self.hindsight_queue.retain_backlog_count() >= HINDSIGHT_RETAIN_BACKLOG_LIMIT;
+            self.hindsight_queue.handoff_backlog_count() >= HINDSIGHT_HANDOFF_BACKLOG_LIMIT;
         MemoryRetainPlan {
             jobs,
             must_flush_before_continue,
@@ -224,16 +224,18 @@ impl Memory {
         &mut self.runtime_conversation
     }
 
-    pub fn retain_backlog_count(&self) -> usize {
-        self.hindsight_queue.retain_backlog_count()
+    pub fn handoff_backlog_count(&self) -> usize {
+        self.hindsight_queue.handoff_backlog_count()
     }
 
-    pub fn should_block_new_turns_on_retain_backlog(&self) -> bool {
-        self.retain_backlog_count() >= HINDSIGHT_RETAIN_BACKLOG_LIMIT
+    pub fn should_block_new_turns_on_handoff_backlog(&self) -> bool {
+        self.handoff_backlog_count() >= HINDSIGHT_HANDOFF_BACKLOG_LIMIT
     }
 
-    pub fn mark_queued_retained(&mut self) {
-        self.hindsight_queue.mark_queued_retained();
+    pub async fn mark_handoffs_submitted(&mut self, handoff_ids: &[Uuid]) {
+        if self.hindsight_queue.mark_handoffs_submitted(handoff_ids) {
+            self.hindsight_queue.sync_to_disk().await;
+        }
     }
 
     pub async fn clear_runtime_conversation(&mut self) -> MemoryRetainPlan {
@@ -246,7 +248,7 @@ impl Memory {
                 self.hindsight_queue.push_turn(current_doing, messages);
                 let jobs = self.collect_pending_retain_jobs();
                 let must_flush_before_continue =
-                    self.hindsight_queue.retain_backlog_count() >= HINDSIGHT_RETAIN_BACKLOG_LIMIT;
+                    self.hindsight_queue.handoff_backlog_count() >= HINDSIGHT_HANDOFF_BACKLOG_LIMIT;
                 MemoryRetainPlan {
                     jobs,
                     must_flush_before_continue,
@@ -282,9 +284,9 @@ struct HindsightQueueItem {
     current_doing: String,
     messages: Vec<HistoryMessage>,
     #[serde(default)]
-    queued: bool,
+    inflight: bool,
     #[serde(default)]
-    retained: bool,
+    submitted: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -811,8 +813,8 @@ impl HindsightQueue {
 
     fn reset_inflight_retain_state(&mut self) {
         for item in &mut self.trail {
-            if !item.retained {
-                item.queued = false;
+            if !item.submitted {
+                item.inflight = false;
             }
         }
     }
@@ -833,8 +835,8 @@ impl HindsightQueue {
             id: Uuid::new_v4(),
             current_doing,
             messages,
-            queued: false,
-            retained: false,
+            inflight: false,
+            submitted: false,
         });
     }
 
@@ -857,11 +859,12 @@ impl HindsightQueue {
     fn collect_pending_retain_jobs(&mut self) -> Vec<HindsightRetainJob> {
         let mut jobs = Vec::new();
         for item in &mut self.trail {
-            if item.retained || item.queued {
+            if item.submitted || item.inflight {
                 continue;
             }
-            item.queued = true;
+            item.inflight = true;
             jobs.push(HindsightRetainJob {
+                handoff_id: item.id,
                 items: vec![item.to_hindsight_item()],
                 document_id: Some(HINDSIGHT_RUNTIME_DOCUMENT_ID.to_string()),
             });
@@ -869,25 +872,30 @@ impl HindsightQueue {
         jobs
     }
 
-    fn retain_backlog_count(&self) -> usize {
-        self.trail.iter().filter(|item| !item.retained).count()
+    fn handoff_backlog_count(&self) -> usize {
+        self.trail.iter().filter(|item| !item.submitted).count()
     }
 
-    fn mark_queued_retained(&mut self) {
+    fn mark_handoffs_submitted(&mut self, handoff_ids: &[Uuid]) -> bool {
+        let handoff_ids = handoff_ids.iter().copied().collect::<HashSet<_>>();
+        let mut changed = false;
         for item in &mut self.trail {
-            if item.queued && !item.retained {
-                item.queued = false;
-                item.retained = true;
+            if handoff_ids.contains(&item.id) && !item.submitted {
+                item.inflight = false;
+                item.submitted = true;
+                changed = true;
             }
         }
         while self
             .trail
             .front()
-            .map(|item| item.retained)
+            .map(|item| item.submitted)
             .unwrap_or(false)
         {
             self.trail.pop_front();
+            changed = true;
         }
+        changed
     }
 }
 
@@ -1387,6 +1395,49 @@ mod tests {
             }
             _ => panic!("expected assistant tool-call protocol"),
         }
+    }
+
+    #[test]
+    fn hindsight_queue_tracks_handoff_inflight_and_submitted_ids() {
+        let mut queue = HindsightQueue::default();
+        queue.push_turn(
+            "testing handoff".to_string(),
+            vec![HistoryMessage::user("remember this")],
+        );
+
+        let jobs = queue.collect_pending_retain_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(queue.handoff_backlog_count(), 1);
+        assert_eq!(queue.trail.len(), 1);
+        assert!(queue.trail[0].inflight);
+        assert!(!queue.trail[0].submitted);
+
+        let handoff_id = jobs[0].handoff_id;
+        assert!(!queue.mark_handoffs_submitted(&[]));
+        assert!(queue.mark_handoffs_submitted(&[handoff_id]));
+        assert_eq!(queue.handoff_backlog_count(), 0);
+        assert!(queue.trail.is_empty());
+    }
+
+    #[test]
+    fn hindsight_queue_resets_inflight_handoff_state_on_startup() {
+        let mut queue = HindsightQueue::default();
+        queue.push_turn(
+            "testing retry".to_string(),
+            vec![HistoryMessage::user("retry this")],
+        );
+
+        let jobs = queue.collect_pending_retain_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert!(queue.trail[0].inflight);
+
+        queue.reset_inflight_retain_state();
+        assert!(!queue.trail[0].inflight);
+        assert!(!queue.trail[0].submitted);
+
+        let retry_jobs = queue.collect_pending_retain_jobs();
+        assert_eq!(retry_jobs.len(), 1);
+        assert_eq!(retry_jobs[0].handoff_id, queue.trail[0].id);
     }
 
     #[test]

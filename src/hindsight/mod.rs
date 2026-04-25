@@ -3,13 +3,18 @@
 pub mod env;
 pub mod managed;
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use miette::{Result, miette};
 use reqwest::{StatusCode, multipart};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
+use uuid::Uuid;
 
 use crate::config::HindsightConfig;
 use crate::hindsight::managed::HindsightManagedServer;
@@ -27,6 +32,7 @@ pub struct HindsightClient {
 pub struct HindsightRetainHandle {
     client: Arc<HindsightClient>,
     bank_ready: Arc<Mutex<bool>>,
+    handoffs: Arc<HindsightHandoffTracker>,
 }
 
 #[derive(Clone, Debug)]
@@ -43,8 +49,21 @@ struct HindsightRestartSupport {
 
 #[derive(Clone, Debug)]
 pub struct HindsightRetainJob {
+    pub handoff_id: Uuid,
     pub items: Vec<HindsightRetainItem>,
     pub document_id: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct HindsightHandoffTracker {
+    state: StdMutex<HindsightHandoffState>,
+    notify: Notify,
+}
+
+#[derive(Debug, Default)]
+struct HindsightHandoffState {
+    pending: HashSet<Uuid>,
+    submitted: Vec<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -389,6 +408,7 @@ impl HindsightClient {
         HindsightRetainHandle {
             client: Arc::new(self.clone()),
             bank_ready: Arc::new(Mutex::new(false)),
+            handoffs: Arc::new(HindsightHandoffTracker::default()),
         }
     }
 
@@ -840,12 +860,16 @@ impl HindsightRetainHandle {
     pub fn enqueue(&self, job: HindsightRetainJob) -> Result<()> {
         let client = self.client.clone();
         let bank_ready = self.bank_ready.clone();
+        let handoffs = self.handoffs.clone();
+        let handoff_id = job.handoff_id;
+        handoffs.register(handoff_id);
         tokio::spawn(async move {
             let job_summary = summarize_retain_job(job.clone(), &client.config);
             let mut outage_cycle = 0usize;
             loop {
                 match retain_job_with_retry(&client, &bank_ready, job.clone()).await {
                     Ok(()) => {
+                        handoffs.mark_submitted(handoff_id).await;
                         if outage_cycle > 0 {
                             tracing::info!(
                                 "[hindsight] retain recovered after extended outage (cycle {}): {}",
@@ -873,14 +897,64 @@ impl HindsightRetainHandle {
         Ok(())
     }
 
-    /// With async=true retain, hindsight processes in the background.
-    /// There is no local queue to drain, so this is always a no-op.
-    pub async fn flush(&self) -> Result<()> {
-        Ok(())
+    /// Wait until all locally enqueued retain handoffs have been accepted by
+    /// Hindsight. This does not wait for Hindsight's async extraction to finish.
+    pub async fn flush(&self) -> Result<Vec<Uuid>> {
+        Ok(self.handoffs.flush().await)
     }
 
-    pub async fn shutdown(&self) {
-        // No worker task to stop.
+    pub async fn drain_submitted(&self) -> Vec<Uuid> {
+        self.handoffs.drain_submitted().await
+    }
+
+    pub async fn shutdown(&self) -> Vec<Uuid> {
+        self.drain_submitted().await
+    }
+}
+
+impl HindsightHandoffTracker {
+    fn register(&self, id: Uuid) {
+        self.state
+            .lock()
+            .expect("hindsight handoff tracker poisoned")
+            .pending
+            .insert(id);
+    }
+
+    async fn mark_submitted(&self, id: Uuid) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("hindsight handoff tracker poisoned");
+        if state.pending.remove(&id) {
+            state.submitted.push(id);
+        }
+        drop(state);
+        self.notify.notify_waiters();
+    }
+
+    async fn flush(&self) -> Vec<Uuid> {
+        loop {
+            let notified = self.notify.notified();
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("hindsight handoff tracker poisoned");
+                if state.pending.is_empty() {
+                    return std::mem::take(&mut state.submitted);
+                }
+            }
+            notified.await;
+        }
+    }
+
+    async fn drain_submitted(&self) -> Vec<Uuid> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("hindsight handoff tracker poisoned");
+        std::mem::take(&mut state.submitted)
     }
 }
 
@@ -1265,6 +1339,22 @@ mod tests {
             fallback_hindsight_document_id(&item, 0),
             "hindsight-step:1234"
         );
+    }
+
+    #[tokio::test]
+    async fn handoff_tracker_flush_waits_for_submitted_jobs() {
+        let tracker = Arc::new(HindsightHandoffTracker::default());
+        let handoff_id = Uuid::new_v4();
+        tracker.register(handoff_id);
+
+        let submitter = tracker.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            submitter.mark_submitted(handoff_id).await;
+        });
+
+        assert_eq!(tracker.flush().await, vec![handoff_id]);
+        assert!(tracker.flush().await.is_empty());
     }
 
     #[test]

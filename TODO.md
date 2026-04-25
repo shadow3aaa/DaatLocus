@@ -14,15 +14,15 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Reject runtime commands until daemon initialization reaches `ready`.
   - [x] Make `attach` render startup progress without implying the runtime is ready.
 
-- [ ] Replace Hindsight retain flush no-op with real ack tracking
-  - [ ] Track queued and inflight retain jobs inside `HindsightRetainHandle`.
-  - [ ] Return retain job completion only after backend success is confirmed.
-  - [ ] Make `flush()` wait for inflight jobs or return a real error.
+- [x] Replace Hindsight retain flush no-op with real handoff ack tracking
+  - [x] Track pending and inflight handoff jobs inside `HindsightRetainHandle`.
+  - [x] Treat backend success as Hindsight accepting the async retain request.
+  - [x] Make `flush()` wait for local handoff submission acks.
 
-- [ ] Mark Hindsight queue items retained only after backend success
-  - [ ] Preserve queued and inflight retain items across process exits.
-  - [ ] Drain or explicitly preserve retain work during daemon shutdown.
-  - [ ] Avoid `mark_queued_retained()` unless retain delivery is confirmed.
+- [x] Remove Hindsight handoff items only after backend accepts submission
+  - [x] Preserve pending and inflight handoff items across process exits.
+  - [x] Drain submitted handoffs or preserve unfinished work during daemon shutdown.
+  - [x] Avoid deleting local queue items until retain handoff is accepted.
 
 - [ ] Add hard memory bounds for terminal process output buffers
   - [ ] Replace unbounded terminal `Vec<u8>` output storage with a bounded ring buffer.
@@ -80,9 +80,9 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [ ] Ensure shutdown completes outstanding retain and state flush work when possible.
   - [ ] Preserve unfinished work when clean drain is impossible.
 
-- [ ] Preserve queued Hindsight retain items across process exits
-  - [ ] Reset only inflight state that is safe to retry.
-  - [ ] Keep queued but undelivered items visible in the local queue.
+- [x] Preserve pending Hindsight handoff items across process exits
+  - [x] Reset only inflight state that is safe to retry.
+  - [x] Keep pending but unsubmitted items visible in the local queue.
 
 - [ ] Add bounded retry and recovery behavior for stuck app notices
   - [ ] Prevent app notices from spinning forever.

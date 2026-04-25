@@ -244,8 +244,10 @@ impl Context {
     }
 
     pub async fn shutdown(mut self) {
-        self.memory.mark_queued_retained();
-        self.hindsight_retain.shutdown().await;
+        let submitted_handoffs = self.hindsight_retain.shutdown().await;
+        self.memory
+            .mark_handoffs_submitted(&submitted_handoffs)
+            .await;
         self.workflows.shutdown().await;
         self.memory.shutdown().await;
         self.plan.shutdown().await;

@@ -70,12 +70,19 @@ pub(crate) async fn daat_locus_loop(
             return;
         }
     }
-    if context.memory.should_block_new_turns_on_retain_backlog() {
-        let retain_backlog = context.memory.retain_backlog_count();
+    let submitted_handoffs = context.hindsight_retain.drain_submitted().await;
+    context
+        .memory
+        .mark_handoffs_submitted(&submitted_handoffs)
+        .await;
+    if context.memory.should_block_new_turns_on_handoff_backlog() {
+        let handoff_backlog = context.memory.handoff_backlog_count();
         set_runtime_status(
             Some(tx),
             RuntimeStatusLevel::Info,
-            format!("processing: waiting for hindsight retain backlog ({retain_backlog} turn(s))"),
+            format!(
+                "processing: waiting for hindsight handoff backlog ({handoff_backlog} turn(s))"
+            ),
         );
         sync_dashboard_state(
             context,
@@ -84,9 +91,14 @@ pub(crate) async fn daat_locus_loop(
             Some(cycle_started_at.elapsed().as_millis()),
         );
         match context.hindsight_retain.flush().await {
-            Ok(()) => context.memory.mark_queued_retained(),
+            Ok(submitted_handoffs) => {
+                context
+                    .memory
+                    .mark_handoffs_submitted(&submitted_handoffs)
+                    .await;
+            }
             Err(err) => {
-                tracing::error!("failed to flush hindsight retain queue before new turn: {err:?}");
+                tracing::error!("failed to flush hindsight handoff queue before new turn: {err:?}");
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }

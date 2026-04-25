@@ -39,12 +39,18 @@ pub(crate) async fn handle_dashboard_control_command(
                     tracing::error!("failed to enqueue hindsight retain job during clear: {err:?}");
                 }
             }
-            if retain_plan.must_flush_before_continue || context.memory.retain_backlog_count() > 0 {
+            if retain_plan.must_flush_before_continue || context.memory.handoff_backlog_count() > 0
+            {
                 match context.hindsight_retain.flush().await {
-                    Ok(()) => context.memory.mark_queued_retained(),
+                    Ok(submitted_handoffs) => {
+                        context
+                            .memory
+                            .mark_handoffs_submitted(&submitted_handoffs)
+                            .await;
+                    }
                     Err(err) => {
                         tracing::error!(
-                            "failed to flush hindsight retain queue during clear: {err:?}"
+                            "failed to flush hindsight handoff queue during clear: {err:?}"
                         );
                     }
                 }

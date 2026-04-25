@@ -24,10 +24,16 @@ pub(super) async fn record_runtime_history_messages(
         }
     }
     if retain_plan.must_flush_before_continue {
-        if let Err(err) = context.hindsight_retain.flush().await {
-            tracing::error!("failed to flush hindsight retain queue: {err:?}");
-        } else {
-            context.memory.mark_queued_retained();
+        match context.hindsight_retain.flush().await {
+            Ok(submitted_handoffs) => {
+                context
+                    .memory
+                    .mark_handoffs_submitted(&submitted_handoffs)
+                    .await;
+            }
+            Err(err) => {
+                tracing::error!("failed to flush hindsight handoff queue: {err:?}");
+            }
         }
     }
 }
