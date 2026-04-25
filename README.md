@@ -5,6 +5,7 @@
 # Daat Locus
 
 [![简体中文][readme-cn-badge]][readme-cn-url]
+[![License][license-badge]][license-url]
 
 A long-running agent runtime with self-governance, persistent memory, app-scoped tools, and asynchronous self-improvement.
 
@@ -12,6 +13,8 @@ A long-running agent runtime with self-governance, persistent memory, app-scoped
 
 [readme-cn-badge]: https://img.shields.io/badge/README-简体中文-blue.svg?style=for-the-badge
 [readme-cn-url]: docs/README_zh-CN.md
+[license-badge]: https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge
+[license-url]: LICENSE
 
 ## Features
 
@@ -63,6 +66,12 @@ cargo run
 ```
 
 On first run, if `~/.daat-locus/config.toml` does not exist, Daat Locus starts the interactive setup wizard.
+
+## License
+
+Daat Locus is licensed under the [Apache License 2.0](LICENSE).
+
+Copyright 2026 shadow3 <shadow3aaaa@gmail.com>.
 
 ## Runtime Model
 

@@ -5,10 +5,14 @@
 <img src="../assets/logo.svg" alt="Logo" style="width:250px; height:auto;" />
 
 [English](../README.md)
+[![License][license-badge]][license-url]
 
 一个长期运行、具备自我治理能力的 agent runtime。
 
 </div>
+
+[license-badge]: https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge
+[license-url]: ../LICENSE
 
 ## 特性
 
@@ -60,6 +64,12 @@ cargo run
 ```
 
 第一次运行如果不存在 `~/.daat-locus/config.toml`，会自动进入交互式配置向导。
+
+## 许可证
+
+Daat Locus 使用 [Apache License 2.0](../LICENSE) 授权。
+
+版权所有 2026 shadow3 <shadow3aaaa@gmail.com>。
 
 ## 运行模型
 
