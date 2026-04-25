@@ -1,4 +1,7 @@
-use std::path::{Component, Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Component, Path, PathBuf},
+};
 
 use miette::{Result, miette};
 
@@ -13,14 +16,11 @@ pub struct WritableRoot {
 
 impl WritableRoot {
     pub fn is_path_writable(&self, path: &Path) -> bool {
-        let normalized = normalize_path(path);
-        let root = normalize_path(&self.root);
-        normalized.starts_with(&root)
+        path_is_or_descends_resolved(path, &self.root)
             && !self
                 .read_only_subpaths
                 .iter()
-                .map(|subpath| normalize_path(subpath))
-                .any(|subpath| normalized == subpath || normalized.starts_with(&subpath))
+                .any(|subpath| path_is_or_descends_logical_or_resolved(path, subpath))
     }
 }
 
@@ -60,13 +60,82 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
+pub(crate) fn resolve_path_for_check(path: &Path) -> PathBuf {
+    let normalized = normalize_path(path);
+    if !normalized.is_absolute() {
+        return normalized;
+    }
+    if let Ok(resolved) = std::fs::canonicalize(&normalized) {
+        return normalize_path(&resolved);
+    }
+
+    let mut existing = normalized.as_path();
+    let mut missing_suffix = Vec::<OsString>::new();
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(existing) {
+            let mut resolved = normalize_path(&resolved);
+            for component in missing_suffix.iter().rev() {
+                resolved.push(component);
+            }
+            return normalize_path(&resolved);
+        }
+
+        let Some(parent) = existing.parent() else {
+            return normalized;
+        };
+        let Some(file_name) = existing.file_name() else {
+            return normalized;
+        };
+        missing_suffix.push(file_name.to_os_string());
+        existing = parent;
+    }
+}
+
+pub(crate) fn policy_paths_with_resolved(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut expanded = paths
+        .iter()
+        .flat_map(|path| [normalize_path(path), resolve_path_for_check(path)])
+        .collect::<Vec<_>>();
+    expanded.sort();
+    expanded.dedup();
+    expanded
+}
+
+fn path_is_or_descends(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
+
+fn path_is_or_descends_logical_or_resolved(path: &Path, root: &Path) -> bool {
+    let normalized = normalize_path(path);
+    let normalized_root = normalize_path(root);
+    if path_is_or_descends(&normalized, &normalized_root) {
+        return true;
+    }
+
+    let resolved = resolve_path_for_check(&normalized);
+    let resolved_root = resolve_path_for_check(&normalized_root);
+    path_is_or_descends(&resolved, &resolved_root)
+}
+
+fn path_is_or_descends_resolved(path: &Path, root: &Path) -> bool {
+    let resolved = resolve_path_for_check(path);
+    let resolved_root = resolve_path_for_check(root);
+    path_is_or_descends(&resolved, &resolved_root)
+}
+
+fn path_is_denied(path: &Path, denied_roots: &[PathBuf]) -> bool {
+    denied_roots
+        .iter()
+        .any(|denied| path_is_or_descends_logical_or_resolved(path, denied))
+}
+
 impl FileSystemSandboxPolicy {
     pub fn protected_paths(&self) -> Vec<PathBuf> {
         let mut paths = self
             .deny_read_paths
             .iter()
             .chain(self.deny_write_paths.iter())
-            .map(|path| normalize_path(path))
+            .flat_map(|path| [normalize_path(path), resolve_path_for_check(path)])
             .collect::<Vec<_>>();
         paths.sort();
         paths.dedup();
@@ -74,13 +143,7 @@ impl FileSystemSandboxPolicy {
     }
 
     pub fn is_path_readable(&self, path: &Path) -> bool {
-        let normalized = normalize_path(path);
-        if self
-            .deny_read_paths
-            .iter()
-            .map(|path| normalize_path(path))
-            .any(|denied| normalized == denied || normalized.starts_with(&denied))
-        {
+        if path_is_denied(path, &self.deny_read_paths) {
             return false;
         }
         if self.full_disk_read {
@@ -88,22 +151,15 @@ impl FileSystemSandboxPolicy {
         }
         self.readable_roots
             .iter()
-            .map(|root| normalize_path(root))
-            .any(|root| normalized == root || normalized.starts_with(&root))
+            .any(|root| path_is_or_descends_resolved(path, root))
             || self
                 .writable_roots
                 .iter()
-                .any(|root| root.is_path_writable(&normalized))
+                .any(|root| root.is_path_writable(path))
     }
 
     pub fn is_path_writable(&self, path: &Path) -> bool {
-        let normalized = normalize_path(path);
-        if self
-            .deny_write_paths
-            .iter()
-            .map(|path| normalize_path(path))
-            .any(|denied| normalized == denied || normalized.starts_with(&denied))
-        {
+        if path_is_denied(path, &self.deny_write_paths) {
             return false;
         }
         if self.full_disk_write {
@@ -111,7 +167,7 @@ impl FileSystemSandboxPolicy {
         }
         self.writable_roots
             .iter()
-            .any(|root| root.is_path_writable(&normalized))
+            .any(|root| root.is_path_writable(path))
     }
 }
 
@@ -258,7 +314,7 @@ fn is_sensitive_env_var_name(name: &str) -> bool {
 mod tests {
     use std::path::Path;
 
-    use super::RuntimeSandboxPolicy;
+    use super::{FileSystemSandboxPolicy, RuntimeSandboxPolicy, WritableRoot};
 
     #[test]
     fn default_runtime_policy_protects_private_home_without_locking_machine() {
@@ -306,6 +362,84 @@ mod tests {
         assert!(!policy.is_env_var_protected("PATH"));
         assert!(!policy.is_env_var_protected("SSH_AUTH_SOCK"));
         assert_eq!(policy.protected_env_vars, vec!["CUSTOM_PROVIDER_TOKEN"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_policy_denies_symlink_to_private_home() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let daat_locus_home = tempdir.path().join(".daat-locus");
+        let workspace_dir = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&daat_locus_home).expect("create protected home");
+        std::fs::create_dir_all(&workspace_dir).expect("create workspace");
+        std::fs::write(daat_locus_home.join("config.toml"), "secret").expect("write secret");
+        let linked_home = workspace_dir.join("linked-home");
+        symlink(&daat_locus_home, &linked_home).expect("symlink protected home");
+
+        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime(&daat_locus_home);
+
+        assert!(!policy.is_path_readable(&linked_home));
+        assert!(!policy.is_path_readable(&linked_home.join("config.toml")));
+        assert!(!policy.is_path_writable(&linked_home.join("new-state")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_policy_denies_source_writes_through_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let daat_locus_home = tempdir.path().join(".daat-locus");
+        let source_root = tempdir.path().join("source");
+        let workspace_dir = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&daat_locus_home).expect("create protected home");
+        std::fs::create_dir_all(source_root.join("src")).expect("create source");
+        std::fs::write(source_root.join("src/main.rs"), "fn main() {}").expect("write source");
+        std::fs::create_dir_all(&workspace_dir).expect("create workspace");
+        let linked_source = workspace_dir.join("linked-source");
+        symlink(&source_root, &linked_source).expect("symlink source");
+
+        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime_with_options(
+            &daat_locus_home,
+            Some(&source_root),
+            Vec::<String>::new(),
+        );
+
+        assert!(policy.is_path_readable(&linked_source.join("src/main.rs")));
+        assert!(!policy.is_path_writable(&linked_source));
+        assert!(!policy.is_path_writable(&linked_source.join("src/main.rs")));
+        assert!(!policy.is_path_writable(&linked_source.join("new.rs")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_root_does_not_allow_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace_dir = tempdir.path().join("workspace");
+        let outside_dir = tempdir.path().join("outside");
+        std::fs::create_dir_all(&workspace_dir).expect("create workspace");
+        std::fs::create_dir_all(&outside_dir).expect("create outside");
+        let linked_outside = workspace_dir.join("outside-link");
+        symlink(&outside_dir, &linked_outside).expect("symlink outside");
+
+        let policy = FileSystemSandboxPolicy {
+            full_disk_read: false,
+            full_disk_write: false,
+            readable_roots: Vec::new(),
+            writable_roots: vec![WritableRoot {
+                root: workspace_dir.clone(),
+                read_only_subpaths: Vec::new(),
+            }],
+            deny_read_paths: Vec::new(),
+            deny_write_paths: Vec::new(),
+        };
+
+        assert!(policy.is_path_writable(&workspace_dir.join("normal.txt")));
+        assert!(!policy.is_path_writable(&linked_outside.join("escaped.txt")));
     }
 
     #[cfg(target_os = "macos")]

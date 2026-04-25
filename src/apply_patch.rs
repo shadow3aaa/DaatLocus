@@ -785,4 +785,42 @@ mod tests {
             ]
         );
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn apply_patch_rejects_symlink_escape_to_source_root() {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = tempdir.path().join("workspace");
+        let source = tempdir.path().join("source");
+        let daat_locus_home = tempdir.path().join(".daat-locus");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::create_dir_all(&source).expect("create source");
+        std::fs::create_dir_all(&daat_locus_home).expect("create protected home");
+        symlink(&source, workspace.join("source-link")).expect("symlink source");
+
+        let sandbox_policy =
+            crate::sandbox::RuntimeSandboxPolicy::protect_daat_locus_runtime_with_options(
+                &daat_locus_home,
+                Some(&source),
+                Vec::<String>::new(),
+            );
+        let patch = "\
+--- /dev/null
++++ b/source-link/new.rs
+@@ -0,0 +1 @@
++fn main() {}";
+
+        let error = match apply_patch_in_root(&workspace, &sandbox_policy, patch).await {
+            Ok(_) => panic!("patch through source symlink should be denied"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("sandbox denies write access"),
+            "unexpected error: {error}"
+        );
+        assert!(!source.join("new.rs").exists());
+    }
 }

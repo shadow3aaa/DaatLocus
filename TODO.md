@@ -52,10 +52,10 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [ ] Document platform support and failure modes before enabling any backend.
   - [ ] Add conformance tests for protected runtime paths when a backend is enabled.
 
-- [ ] Resolve symlinks and canonical paths for sandbox enforcement
-  - [ ] Canonicalize paths before read/write checks where possible.
-  - [ ] Add tests for symlink escape attempts.
-  - [ ] Keep behavior deterministic when target paths do not exist yet.
+- [x] Resolve symlinks and canonical paths for sandbox enforcement
+  - [x] Canonicalize paths before read/write checks where possible.
+  - [x] Add tests for symlink escape attempts.
+  - [x] Keep behavior deterministic when target paths do not exist yet.
 
 - [x] Introduce a unified persistence store for runtime state files
   - [x] Centralize runtime config, state, and memory file path access.

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use miette::Result;
 
-use super::{RuntimeSandboxPolicy, SandboxSpawnSpec};
+use super::{RuntimeSandboxPolicy, SandboxSpawnSpec, policy_paths_with_resolved};
 
 const SANDBOX_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 
@@ -67,17 +67,19 @@ fn render_read_policy(policy: &RuntimeSandboxPolicy) -> String {
                 .to_string(),
         );
     } else {
-        for root in &fs.readable_roots {
+        for root in policy_paths_with_resolved(&fs.readable_roots) {
             lines.push(format!(
                 "(allow file-read* file-map-executable file-test-existence file-read-metadata (subpath \"{}\"))",
                 root.display()
             ));
         }
         for root in &fs.writable_roots {
-            lines.push(format!(
+            for root_path in policy_paths_with_resolved(std::slice::from_ref(&root.root)) {
+                lines.push(format!(
                 "(allow file-read* file-map-executable file-test-existence file-read-metadata (subpath \"{}\"))",
-                root.root.display()
+                root_path.display()
             ));
+            }
         }
     }
     lines.join("\n")
@@ -90,11 +92,13 @@ fn render_write_policy(policy: &RuntimeSandboxPolicy) -> String {
         lines.push("(allow file-write* (subpath \"/\"))".to_string());
     } else {
         for root in &fs.writable_roots {
-            lines.push(format!(
-                "(allow file-write* file-read-metadata file-test-existence (subpath \"{}\"))",
-                root.root.display()
-            ));
-            for subpath in &root.read_only_subpaths {
+            for root_path in policy_paths_with_resolved(std::slice::from_ref(&root.root)) {
+                lines.push(format!(
+                    "(allow file-write* file-read-metadata file-test-existence (subpath \"{}\"))",
+                    root_path.display()
+                ));
+            }
+            for subpath in policy_paths_with_resolved(&root.read_only_subpaths) {
                 lines.push(format!(
                     "(deny file-write* (subpath \"{}\"))",
                     subpath.display()
@@ -107,13 +111,13 @@ fn render_write_policy(policy: &RuntimeSandboxPolicy) -> String {
 
 fn render_protected_path_denies(policy: &RuntimeSandboxPolicy) -> String {
     let mut lines = Vec::new();
-    for path in &policy.filesystem.deny_read_paths {
+    for path in policy_paths_with_resolved(&policy.filesystem.deny_read_paths) {
         lines.push(format!(
             "(deny file-read* file-map-executable file-test-existence file-read-metadata (subpath \"{}\"))",
             path.display()
         ));
     }
-    for path in &policy.filesystem.deny_write_paths {
+    for path in policy_paths_with_resolved(&policy.filesystem.deny_write_paths) {
         lines.push(format!(
             "(deny file-write* (subpath \"{}\"))",
             path.display()
