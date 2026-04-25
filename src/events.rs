@@ -111,11 +111,7 @@ impl EventStore {
         let mut state: PersistedEventStore = persistence
             .read_postcard_state_or_default(EVENTS_FILE_NAME, "events")
             .await;
-        for event in state.events.values_mut() {
-            if matches!(event.status, EventStatus::Claimed) {
-                event.status = EventStatus::Pending;
-            }
-        }
+        reset_claimed_events_on_startup(&mut state);
         Self {
             inner: Arc::new(Mutex::new(EventStoreInner { path, state })),
         }
@@ -414,6 +410,14 @@ fn persist_locked(inner: &EventStoreInner) -> Result<()> {
     .map_err(|err| miette!("write events file failed: {err}"))
 }
 
+fn reset_claimed_events_on_startup(state: &mut PersistedEventStore) {
+    for event in state.events.values_mut() {
+        if matches!(event.status, EventStatus::Claimed) {
+            event.status = EventStatus::Pending;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +462,108 @@ mod tests {
             }
             EventPayload::TelegramIncoming(_) => panic!("expected terminal payload"),
         }
+    }
+
+    #[test]
+    fn startup_requeues_claimed_events() {
+        let event_id = Uuid::new_v4();
+        let mut state = PersistedEventStore::default();
+        state.order.push(event_id);
+        state.events.insert(
+            event_id,
+            Event {
+                source: EventSource::Terminal,
+                status: EventStatus::Claimed,
+                arrived_at_ms: 1,
+                last_updated_at_ms: 1,
+                payload: EventPayload::TerminalIncoming(TerminalIncomingEvent {
+                    origin: "dashboard".to_string(),
+                    incoming_text: "finish this".to_string(),
+                }),
+                last_error: None,
+            },
+        );
+
+        reset_claimed_events_on_startup(&mut state);
+
+        assert_eq!(
+            state.events.get(&event_id).map(|event| event.status),
+            Some(EventStatus::Pending)
+        );
+    }
+
+    #[test]
+    fn requeue_if_claimed_restores_pending_attention() {
+        let store = test_store();
+        let event_id = store
+            .register_terminal_incoming(TerminalIncomingEvent {
+                origin: "dashboard".to_string(),
+                incoming_text: "still needs work".to_string(),
+            })
+            .expect("register terminal event");
+        let claimed = store
+            .claim_event_if_pending(event_id)
+            .expect("claim event")
+            .expect("pending event should claim");
+        assert_eq!(claimed.status, EventStatus::Claimed);
+
+        assert!(
+            store
+                .requeue_if_claimed(&event_id.to_string())
+                .expect("requeue claimed event")
+        );
+
+        let event = store.view(&event_id.to_string()).expect("view event");
+        assert_eq!(event.status, EventStatus::Pending);
+        assert!(event.last_error.is_none());
+    }
+
+    #[test]
+    fn failed_event_status_keeps_explicit_reason() {
+        let store = test_store();
+        let event_id = store
+            .register_terminal_incoming(TerminalIncomingEvent {
+                origin: "dashboard".to_string(),
+                incoming_text: "cannot complete".to_string(),
+            })
+            .expect("register terminal event");
+
+        store
+            .set_status(
+                &event_id.to_string(),
+                EventStatus::Failed,
+                Some("runtime context overflow persisted after 3 attempts".to_string()),
+            )
+            .expect("mark failed");
+
+        let event = store.view(&event_id.to_string()).expect("view event");
+        assert_eq!(event.status, EventStatus::Failed);
+        assert_eq!(
+            event.last_error.as_deref(),
+            Some("runtime context overflow persisted after 3 attempts")
+        );
+    }
+
+    #[test]
+    fn terminal_event_can_resolve_without_delivery_handoff() {
+        let store = test_store();
+        let event_id = store
+            .register_terminal_incoming(TerminalIncomingEvent {
+                origin: "dashboard".to_string(),
+                incoming_text: "local runtime question".to_string(),
+            })
+            .expect("register terminal event");
+        let _ = store
+            .claim_event_if_pending(event_id)
+            .expect("claim terminal event")
+            .expect("terminal event should claim");
+
+        store
+            .set_status(&event_id.to_string(), EventStatus::Resolved, None)
+            .expect("resolve terminal event");
+
+        let event = store.view(&event_id.to_string()).expect("view event");
+        assert_eq!(event.status, EventStatus::Resolved);
+        assert!(event.last_error.is_none());
     }
 }

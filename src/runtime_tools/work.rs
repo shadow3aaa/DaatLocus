@@ -164,11 +164,12 @@ fn execute_focus_app_tool<'a>(context: &'a mut Context, call: &'a AgentToolCall)
             json!({ "app": app.to_string() }),
             ToolUiEvent::focus_app(app.to_string()),
         )
-        .with_turn_boundary(format!(
-            "focused app changed to {}; re-render world state in a new turn",
-            app
-        )))
+        .with_turn_boundary(focus_app_turn_boundary_reason(&app)))
     })
+}
+
+fn focus_app_turn_boundary_reason(app: &crate::app::AppId) -> String {
+    format!("focused app changed to {app}; re-render world state in a new turn")
 }
 
 fn summarize_put_away_app_tool(_call: &AgentToolCall) -> Result<EpisodeActionRecord> {
@@ -801,5 +802,13 @@ mod tests {
             }
             other => panic!("expected app call ui, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn focus_app_tool_declares_turn_boundary_reason() {
+        assert_eq!(
+            focus_app_turn_boundary_reason(&crate::app::AppId::terminal()),
+            "focused app changed to Terminal; re-render world state in a new turn"
+        );
     }
 }

@@ -70,11 +70,7 @@ impl PendingWorkQueue {
         let mut state: PersistedPendingWorkQueue = persistence
             .read_postcard_state_or_default(PENDING_WORK_FILE_NAME, "pending work queue")
             .await;
-        for entry in &mut state.queue {
-            if matches!(entry.state, PendingWorkEntryState::Claimed) {
-                entry.state = PendingWorkEntryState::Pending;
-            }
-        }
+        reset_claimed_entries_on_startup(&mut state);
         Self {
             inner: Arc::new(Mutex::new(PendingWorkQueueInner { path, state })),
         }
@@ -241,6 +237,14 @@ fn persist_locked(inner: &PendingWorkQueueInner) -> Result<()> {
     .map_err(|err| miette!("persist pending work queue failed: {err}"))
 }
 
+fn reset_claimed_entries_on_startup(state: &mut PersistedPendingWorkQueue) {
+    for entry in &mut state.queue {
+        if matches!(entry.state, PendingWorkEntryState::Claimed) {
+            entry.state = PendingWorkEntryState::Pending;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +344,31 @@ mod tests {
             } => assert_eq!(*reclaimed_event_id, event_id),
             other => panic!("expected requeued event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn startup_releases_claimed_pending_work_entries() {
+        let event_id = Uuid::new_v4();
+        let mut state = PersistedPendingWorkQueue::default();
+        state.queue.push_back(PendingWorkEntry {
+            work: PendingWork::Event { event_id },
+            state: PendingWorkEntryState::Claimed,
+        });
+        state.queue.push_back(PendingWorkEntry {
+            work: PendingWork::AppNotice {
+                app: AppId::terminal(),
+                reason: "terminal changed".to_string(),
+            },
+            state: PendingWorkEntryState::Claimed,
+        });
+
+        reset_claimed_entries_on_startup(&mut state);
+
+        assert!(
+            state
+                .queue
+                .iter()
+                .all(|entry| matches!(entry.state, PendingWorkEntryState::Pending))
+        );
     }
 }

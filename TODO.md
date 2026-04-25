@@ -110,10 +110,10 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Re-enqueue app notice work only when the app reports a different reason or after the notice clears and later reappears.
   - [x] Keep bounded retry or suppression only as a fallback for repeatedly unresolved claimed notices.
 
-- [ ] Add tests for pending work recovery paths
-  - [ ] Cover event claim, requeue, overflow fuse, and terminal resolution paths.
-  - [ ] Audit turn-boundary behavior after focus/app/tool changes.
-  - [ ] Ensure unresolved claimed inputs are requeued or failed with explicit reason.
+- [x] Add tests for pending work recovery paths
+  - [x] Cover event claim, requeue, overflow fuse, and terminal resolution paths.
+  - [x] Audit turn-boundary behavior after focus/app/tool changes.
+  - [x] Ensure unresolved claimed inputs are requeued or failed with explicit reason.
 
 - [x] Document model catalog source and update process
   - [x] Record source, generation process, and update date.

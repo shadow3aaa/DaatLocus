@@ -282,6 +282,24 @@ mod tests {
             RuntimeFollowUpReason::RawStreamRequestedFollowUp.message(),
             "This sample is still marked needs_follow_up; continue the current turn."
         );
+        assert!(
+            RuntimeFollowUpReason::ClaimedEventNeedsExplicitResolution
+                .message()
+                .contains("finish_and_send")
+        );
+        assert!(
+            RuntimeFollowUpReason::ClaimedAppNoticeNeedsExplicitResolution
+                .message()
+                .contains("notice_resolved")
+        );
+    }
+
+    #[test]
+    fn overflow_failure_note_includes_attempt_count_and_error() {
+        assert_eq!(
+            runtime_overflow_failure_note(3, "context limit exceeded"),
+            "runtime context overflow persisted after 3 attempts: context limit exceeded"
+        );
     }
 
     #[test]

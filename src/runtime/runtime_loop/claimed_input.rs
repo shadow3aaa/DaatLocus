@@ -190,8 +190,7 @@ pub(super) fn handle_runtime_overflow(
         return false;
     }
 
-    let failure_note =
-        format!("runtime context overflow persisted after {attempts} attempts: {error_text}");
+    let failure_note = runtime_overflow_failure_note(attempts, error_text);
     for event_id in event_ids {
         if let Err(err) =
             context
@@ -243,6 +242,10 @@ pub(super) fn handle_runtime_overflow(
         "runtime context overflow fuse tripped; claimed inputs were terminated instead of requeued",
     );
     true
+}
+
+pub(super) fn runtime_overflow_failure_note(attempts: usize, error_text: &str) -> String {
+    format!("runtime context overflow persisted after {attempts} attempts: {error_text}")
 }
 
 pub(super) fn finalize_claimed_runtime_events(
