@@ -15,7 +15,7 @@ use ratatui::{
 use crate::{
     config::{
         Config, JudgeConfig, ModelConfig, ProviderConfig, normalize_provider_base_url,
-        resolve_env_reference, write_config,
+        redact_secret_text, resolve_env_reference, write_config,
     },
     i18n::Locale,
     model_catalog::{ModelCapacity, catalog_model_capacity, conservative_model_capacity},
@@ -1077,10 +1077,12 @@ async fn fetch_model_ids(provider: &ProviderConfig) -> Vec<DiscoveredModel> {
         ProviderConfig::GithubCopilot { github_token } => fetch_copilot_models(github_token).await,
         ProviderConfig::Openai { api_key, base_url } => {
             let base = base_url.as_deref().unwrap_or("https://api.openai.com/v1");
-            fetch_openai_models(base, api_key).await
+            let api_key = resolve_env_reference(api_key);
+            fetch_openai_models(base, &api_key).await
         }
         ProviderConfig::OpenaiCompatible { base_url, api_key } => {
-            fetch_openai_models(base_url, api_key).await
+            let api_key = resolve_env_reference(api_key);
+            fetch_openai_models(base_url, &api_key).await
         }
     }
 }
@@ -1117,6 +1119,7 @@ async fn fetch_openai_models_path(url: &str, api_key: &str) -> Vec<DiscoveredMod
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        let body = redact_secret_text(&body, api_key);
         tracing::warn!(url = %url, http_status = %status, body = %body, "fetch_openai_models: non-2xx response");
         return vec![];
     }
@@ -1146,6 +1149,7 @@ async fn fetch_copilot_internal_models(
     if !resp.status().is_success() {
         let s = resp.status();
         let b = resp.text().await.unwrap_or_default();
+        let b = redact_secret_text(&b, session_token);
         tracing::warn!(url, http_status = %s, body = %b, "copilot internal models non-2xx");
         return vec![];
     }

@@ -12,7 +12,9 @@
 //!
 //! Startup sequence (mirrors @vectorize-io/hindsight-all):
 //!   1. `<runner> hindsight-embed[@ver] profile create <profile> --merge --port <port> --env K=V ...`
+//!      for non-secret profile values only.
 //!   2. `<runner> hindsight-embed[@ver] daemon --profile <profile> start`
+//!      with LLM credentials supplied through the daemon start environment.
 //!   3. Poll `GET /health` until 200 or deadline.
 
 use std::io::Read;
@@ -180,13 +182,16 @@ impl HindsightManagedServer {
         tracing::info!("[hindsight:managed] starting daemon process");
         let mut cmd = invoker.embed_command(&self.package_spec());
         cmd.args(self.daemon_profile_args()).arg("start");
+        for (k, v) in self.daemon_env_vars() {
+            cmd.env(k, v);
+        }
         // Use a long timeout: first run downloads HuggingFace models (~100 MB).
         self.run_command_with_timeout(cmd, "daemon.start", DAEMON_START_TIMEOUT_SECS)
             .await
     }
 
     fn profile_env_vars(&self) -> Vec<(String, String)> {
-        let mut vars = self.llm_env_vars.clone();
+        let mut vars = Vec::new();
         // Use a daat-locus-specific pg0 instance so the database does not
         // collide with other apps that also use hindsight-embed.
         // Data lands at ~/.pg0/instances/daat-locus/data/
@@ -203,6 +208,12 @@ impl HindsightManagedServer {
             ));
             vars.push(("HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU".into(), "1".into()));
         }
+        vars
+    }
+
+    fn daemon_env_vars(&self) -> Vec<(String, String)> {
+        let mut vars = self.profile_env_vars();
+        vars.extend(self.llm_env_vars.clone());
         vars
     }
 
@@ -308,6 +319,42 @@ impl HindsightManagedServer {
         );
         download_uv(&cache_bin).await?;
         Ok(UvInvoker::Uv(cache_bin))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_env_vars_do_not_persist_llm_secrets() {
+        let server = HindsightManagedServer::new(
+            HindsightConfig::default(),
+            vec![
+                (
+                    "HINDSIGHT_API_LLM_API_KEY".to_string(),
+                    "secret-value".to_string(),
+                ),
+                (
+                    "HINDSIGHT_API_LLM_MODEL".to_string(),
+                    "gpt-test".to_string(),
+                ),
+            ],
+        );
+
+        let profile_vars = server.profile_env_vars();
+        assert!(
+            !profile_vars
+                .iter()
+                .any(|(key, _)| key == "HINDSIGHT_API_LLM_API_KEY")
+        );
+
+        let daemon_vars = server.daemon_env_vars();
+        assert!(
+            daemon_vars
+                .iter()
+                .any(|(key, value)| key == "HINDSIGHT_API_LLM_API_KEY" && value == "secret-value")
+        );
     }
 }
 

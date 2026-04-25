@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use miette::{Result, miette};
 
 use crate::{
-    config::ModelConfig,
+    config::{ModelConfig, redact_secret_text},
     context::Context,
     core::{LLM, TokenUsageInfo},
     reasoning::runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
@@ -120,6 +120,7 @@ async fn exchange_copilot_session_token_with_client(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        let body = redact_secret_text(&body, github_token);
         tracing::debug!(http_status = %status, body = %body, "copilot session token exchange non-2xx");
         return Err(miette!("HTTP {status}"));
     }
