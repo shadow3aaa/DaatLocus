@@ -2,9 +2,10 @@ use crate::{
     commands::reset::{run_complite_reset, run_memory_reset, run_reset_all, run_state_reset},
     config::load_config,
     daemon::{
-        DaemonClient, connect_existing_daemon, connect_or_start_daemon,
-        spawn_detached_daemon_process, status_summary, wait_for_daemon_ready,
-        wait_for_daemon_shutdown,
+        CreatedDaemonToken, DaemonClient, DaemonTokenListEntry, connect_daemon_status,
+        connect_existing_daemon, connect_or_start_daemon, create_daemon_token, list_daemon_tokens,
+        revoke_daemon_token, rotate_daemon_token, spawn_detached_daemon_process, status_summary,
+        wait_for_daemon_ready, wait_for_daemon_shutdown,
     },
     dashboard::run_tui_dashboard,
     i18n::Locale,
@@ -83,12 +84,29 @@ enum ResetTarget {
 enum DaemonTarget {
     /// Show daemon status.
     Status,
+    /// Manage daemon access tokens.
+    Token {
+        #[command(subcommand)]
+        target: DaemonTokenTarget,
+    },
     /// Stop the background daemon.
     Stop,
     /// Restart the background daemon.
     Restart,
     /// Start the daemon in the foreground.
     Serve,
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonTokenTarget {
+    /// Create a new full-access daemon token.
+    Create { name: String },
+    /// List daemon token metadata without revealing token secrets.
+    List,
+    /// Revoke a daemon token by id or name.
+    Revoke { selector: String },
+    /// Rotate a daemon token by id or name and print the new secret once.
+    Rotate { selector: String },
 }
 
 pub(crate) async fn async_main(cli: Cli) -> Result<()> {
@@ -127,6 +145,12 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
             target: DaemonTarget::Status,
         }) => {
             run_daemon_status_command().await?;
+            return Ok(());
+        }
+        Some(DaatLocusCommand::Daemon {
+            target: DaemonTarget::Token { target },
+        }) => {
+            run_daemon_token_command(target).await?;
             return Ok(());
         }
         Some(DaatLocusCommand::Daemon {
@@ -223,10 +247,62 @@ async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
 }
 
 async fn run_daemon_status_command() -> Result<()> {
-    let client = connect_existing_daemon().await?;
+    let client = connect_daemon_status().await?;
     let status = client.status().await?;
     println!("{}", status_summary(&status));
     Ok(())
+}
+
+async fn run_daemon_token_command(target: &DaemonTokenTarget) -> Result<()> {
+    match target {
+        DaemonTokenTarget::Create { name } => {
+            let token = create_daemon_token(name).await?;
+            print_created_daemon_token("Created daemon token", &token);
+        }
+        DaemonTokenTarget::List => {
+            let tokens = list_daemon_tokens().await?;
+            print_daemon_token_list(&tokens);
+        }
+        DaemonTokenTarget::Revoke { selector } => {
+            let token = revoke_daemon_token(selector).await?;
+            println!("Revoked daemon token {} ({})", token.name, token.id);
+        }
+        DaemonTokenTarget::Rotate { selector } => {
+            let token = rotate_daemon_token(selector).await?;
+            print_created_daemon_token("Rotated daemon token", &token);
+        }
+    }
+    Ok(())
+}
+
+fn print_created_daemon_token(label: &str, token: &CreatedDaemonToken) {
+    println!("{label}:");
+    println!("  id: {}", token.id);
+    println!("  name: {}", token.name);
+    println!("  token: {}", token.token);
+    println!("Store this token now; it will not be shown again.");
+}
+
+fn print_daemon_token_list(tokens: &[DaemonTokenListEntry]) {
+    println!("{:<36}  {:<20}  {:<25}  LAST USED", "ID", "NAME", "CREATED");
+    for token in tokens {
+        println!(
+            "{:<36}  {:<20}  {:<25}  {}",
+            token.id,
+            token.name,
+            format_timestamp_ms(token.created_at_ms),
+            token
+                .last_used_at_ms
+                .map(format_timestamp_ms)
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
+}
+
+fn format_timestamp_ms(timestamp_ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms)
+        .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| timestamp_ms.to_string())
 }
 
 async fn run_daemon_stop_command() -> Result<()> {
@@ -266,7 +342,7 @@ async fn attach_to_daemon(client: DaemonClient) -> Result<()> {
     let initial = client.snapshot().await?;
     let (tx, mut rx) = tokio::sync::watch::channel(initial);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    let stream_client = DaemonClient::new(client.port());
+    let stream_client = client.clone();
     let stream_task = tokio::spawn(async move {
         let _ = stream_client.stream_to(tx, stop_rx).await;
     });

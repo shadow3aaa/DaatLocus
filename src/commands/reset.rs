@@ -5,7 +5,7 @@ use miette::{Result, miette};
 use crate::{
     config::load_config,
     daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
-    daemon::connect_existing_daemon,
+    daemon::connect_daemon_status,
     hindsight::{HindsightClient, env::hindsight_llm_env_vars, managed::HindsightManagedServer},
     reasoning::compiled::COMPILED_DIR_NAME,
 };
@@ -15,7 +15,7 @@ async fn get_daat_locus_home() -> PathBuf {
 }
 
 async fn reject_if_daemon_running(reset_name: &str) -> Result<()> {
-    if connect_existing_daemon().await.is_ok() {
+    if connect_daemon_status().await.is_ok() {
         return Err(miette!(
             "{reset_name} refused while DaatLocus daemon is running; run `daat-locus daemon stop` first"
         ));

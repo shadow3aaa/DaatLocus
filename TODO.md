@@ -2,11 +2,11 @@
 
 This file tracks hardening work for making Daat Locus a reliable long-running local agent runtime.
 
-- [ ] Add daemon authentication for local control endpoints
-  - [ ] Protect `/commands/run`, `/daemon/shutdown`, dashboard snapshot, and dashboard stream.
-  - [ ] Store a per-install random daemon token in the protected runtime directory.
-  - [ ] Make the CLI client send the token on every protected request.
-  - [ ] Keep `/health` minimal and unauthenticated for readiness probing.
+- [x] Add daemon authentication for local control endpoints
+  - [x] Protect `/commands/run`, `/daemon/shutdown`, dashboard snapshot, and dashboard stream.
+  - [x] Store a per-install random daemon token in the protected runtime directory.
+  - [x] Make the CLI client send the token on every protected request.
+  - [x] Keep `/health` minimal and unauthenticated for readiness probing.
 
 - [ ] Add daemon ready-state gating before accepting runtime commands
   - [ ] Add explicit daemon states: `initializing`, `ready`, `stopping`, and `failed`.
