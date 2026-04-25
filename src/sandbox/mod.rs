@@ -4,7 +4,10 @@ use std::{
 };
 
 use miette::{Result, miette};
+use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
@@ -38,12 +41,22 @@ pub struct FileSystemSandboxPolicy {
 pub struct RuntimeSandboxPolicy {
     pub filesystem: FileSystemSandboxPolicy,
     pub protected_env_vars: Vec<String>,
+    pub strong_filesystem: StrongFilesystemSandboxMode,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SandboxSpawnSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrongFilesystemSandboxMode {
+    #[default]
+    Off,
+    Auto,
+    Required,
 }
 
 pub fn normalize_path(path: &Path) -> PathBuf {
@@ -177,10 +190,25 @@ impl RuntimeSandboxPolicy {
         Self::protect_daat_locus_runtime_with_options(daat_locus_home, None, Vec::<String>::new())
     }
 
+    #[cfg(test)]
     pub fn protect_daat_locus_runtime_with_options(
         daat_locus_home: &Path,
         daat_locus_source_root: Option<&Path>,
         protected_env_vars: Vec<String>,
+    ) -> Self {
+        Self::protect_daat_locus_runtime_with_strong_filesystem(
+            daat_locus_home,
+            daat_locus_source_root,
+            protected_env_vars,
+            StrongFilesystemSandboxMode::Off,
+        )
+    }
+
+    pub fn protect_daat_locus_runtime_with_strong_filesystem(
+        daat_locus_home: &Path,
+        daat_locus_source_root: Option<&Path>,
+        protected_env_vars: Vec<String>,
+        strong_filesystem: StrongFilesystemSandboxMode,
     ) -> Self {
         let protected_runtime_paths = vec![normalize_path(daat_locus_home)];
         let mut deny_write_paths = protected_runtime_paths.clone();
@@ -208,6 +236,7 @@ impl RuntimeSandboxPolicy {
                 deny_write_paths,
             },
             protected_env_vars,
+            strong_filesystem,
         }
     }
 
@@ -254,13 +283,52 @@ impl RuntimeSandboxPolicy {
         self.filesystem.is_path_writable(path)
     }
 
+    pub fn strong_command_spawn_spec(
+        &self,
+        program: PathBuf,
+        args: Vec<String>,
+    ) -> Result<SandboxSpawnSpec> {
+        if self.strong_filesystem == StrongFilesystemSandboxMode::Off {
+            return Ok(SandboxSpawnSpec { program, args });
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            macos::wrap_command(self, program, args)
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            linux::wrap_command(self, program, args)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(target_os = "linux"))]
+        {
+            match self.strong_filesystem {
+                StrongFilesystemSandboxMode::Required => Err(miette!(
+                    "strong filesystem sandbox is not supported on this platform"
+                )),
+                StrongFilesystemSandboxMode::Auto | StrongFilesystemSandboxMode::Off => {
+                    Ok(SandboxSpawnSpec { program, args })
+                }
+            }
+        }
+    }
+
     pub fn shell_spawn_spec(&self, program: &str, args: Vec<String>) -> Result<SandboxSpawnSpec> {
         #[cfg(target_os = "macos")]
         {
             macos::wrap_shell_command(self, program, args)
         }
 
+        #[cfg(target_os = "linux")]
+        {
+            linux::wrap_shell_command(self, program, args)
+        }
+
         #[cfg(not(target_os = "macos"))]
+        #[cfg(not(target_os = "linux"))]
         {
             Ok(SandboxSpawnSpec {
                 program: PathBuf::from(program),
@@ -315,7 +383,9 @@ fn is_sensitive_env_var_name(name: &str) -> bool {
 mod tests {
     use std::path::Path;
 
-    use super::{FileSystemSandboxPolicy, RuntimeSandboxPolicy, WritableRoot};
+    use super::{
+        FileSystemSandboxPolicy, RuntimeSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot,
+    };
 
     #[test]
     fn default_runtime_policy_protects_private_home_without_locking_machine() {
@@ -363,6 +433,38 @@ mod tests {
         assert!(!policy.is_env_var_protected("PATH"));
         assert!(!policy.is_env_var_protected("SSH_AUTH_SOCK"));
         assert_eq!(policy.protected_env_vars, vec!["CUSTOM_PROVIDER_TOKEN"]);
+    }
+
+    #[test]
+    fn runtime_policy_records_strong_filesystem_mode() {
+        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime_with_strong_filesystem(
+            Path::new("/Users/test/.daat-locus"),
+            None,
+            Vec::<String>::new(),
+            StrongFilesystemSandboxMode::Required,
+        );
+
+        assert_eq!(
+            policy.strong_filesystem,
+            StrongFilesystemSandboxMode::Required
+        );
+    }
+
+    #[test]
+    fn strong_command_spawn_spec_is_passthrough_when_disabled() {
+        let policy = RuntimeSandboxPolicy::protect_daat_locus_runtime_with_strong_filesystem(
+            Path::new("/Users/test/.daat-locus"),
+            None,
+            Vec::<String>::new(),
+            StrongFilesystemSandboxMode::Off,
+        );
+
+        let spec = policy
+            .strong_command_spawn_spec(Path::new("/bin/echo").to_path_buf(), vec!["ok".into()])
+            .expect("spawn spec");
+
+        assert_eq!(spec.program, Path::new("/bin/echo"));
+        assert_eq!(spec.args, vec!["ok"]);
     }
 
     #[cfg(unix)]

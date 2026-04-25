@@ -160,10 +160,11 @@ pub(crate) async fn sandbox_policy_for_runtime(
     config: &crate::config::Config,
 ) -> RuntimeSandboxPolicy {
     let daat_locus_home = daat_locus_paths().await.root().to_path_buf();
-    RuntimeSandboxPolicy::protect_daat_locus_runtime_with_options(
+    RuntimeSandboxPolicy::protect_daat_locus_runtime_with_strong_filesystem(
         &daat_locus_home,
         daat_locus_source_root().as_deref(),
         config.protected_secret_env_vars(),
+        config.sandbox.strong_filesystem,
     )
 }
 
@@ -178,7 +179,7 @@ pub(crate) fn build_runtime_apps(
 ) -> RuntimeAppsBootstrap {
     let mut apps: Vec<Box<dyn crate::app::App>> =
         vec![Box::new(BrowserApp::new()), Box::new(TerminalApp::new())];
-    let bootstrap = bootstrap_workspace_apps(execution_cwd, sandbox_policy.protected_env_vars());
+    let bootstrap = bootstrap_workspace_apps(execution_cwd, sandbox_policy);
     for error in &bootstrap.errors {
         tracing::warn!("{error}");
     }
