@@ -27,6 +27,7 @@ use crate::{
     },
     daat_locus_paths::daat_locus_paths_sync,
     persistence::PersistenceStore,
+    sandbox::{RuntimeSandboxPolicy, StrongFilesystemSandboxMode},
     schema_utils::normalize_openai_json_schema,
 };
 use client::WorkspaceAppWorkerClient;
@@ -46,6 +47,7 @@ pub struct WorkspaceAppRegistry {
     apps_root: PathBuf,
     state_root: PathBuf,
     protected_env_vars: Vec<String>,
+    strong_filesystem: StrongFilesystemSandboxMode,
     records: BTreeMap<String, WorkspaceAppRecord>,
     dirty_apps: BTreeSet<String>,
     full_rescan_needed: bool,
@@ -178,22 +180,43 @@ struct WorkspaceNoticeOutput {
 
 pub fn bootstrap_workspace_apps(
     workspace_root: &Path,
-    protected_env_vars: &[String],
+    sandbox_policy: &RuntimeSandboxPolicy,
 ) -> WorkspaceAppBootstrap {
     let state_root = daat_locus_paths_sync().state_dir().join("apps");
-    bootstrap_workspace_apps_with_state_root(workspace_root, &state_root, protected_env_vars)
+    bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
+        workspace_root,
+        &state_root,
+        sandbox_policy.protected_env_vars(),
+        sandbox_policy.strong_filesystem,
+    )
 }
 
+#[cfg(test)]
 fn bootstrap_workspace_apps_with_state_root(
     workspace_root: &Path,
     state_root: &Path,
     protected_env_vars: &[String],
+) -> WorkspaceAppBootstrap {
+    bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
+        workspace_root,
+        state_root,
+        protected_env_vars,
+        StrongFilesystemSandboxMode::Off,
+    )
+}
+
+fn bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
+    workspace_root: &Path,
+    state_root: &Path,
+    protected_env_vars: &[String],
+    strong_filesystem: StrongFilesystemSandboxMode,
 ) -> WorkspaceAppBootstrap {
     let apps_root = workspace_apps_dir(workspace_root);
     let registry = WorkspaceAppRegistry {
         apps_root: apps_root.clone(),
         state_root: state_root.to_path_buf(),
         protected_env_vars: protected_env_vars.to_vec(),
+        strong_filesystem,
         ..WorkspaceAppRegistry::default()
     };
     let mut report = WorkspaceAppBootstrap {
@@ -238,7 +261,13 @@ fn bootstrap_workspace_apps_with_state_root(
                 continue;
             }
         };
-        match WorkspaceApp::load_from_dir(&app_dir, state_root, &folder_name, protected_env_vars) {
+        match WorkspaceApp::load_from_dir(
+            &app_dir,
+            state_root,
+            &folder_name,
+            protected_env_vars,
+            strong_filesystem,
+        ) {
             Ok(app) => {
                 let app_id = app.id();
                 report.registry.records.insert(
@@ -364,6 +393,7 @@ impl WorkspaceAppRegistry {
             &self.state_root,
             folder_name,
             &self.protected_env_vars,
+            self.strong_filesystem,
         ) {
             Ok(app) => {
                 let app_id = app.id();
@@ -939,6 +969,7 @@ impl WorkspaceApp {
         state_root: &Path,
         folder_name: &str,
         protected_env_vars: &[String],
+        strong_filesystem: StrongFilesystemSandboxMode,
     ) -> Result<Self> {
         let id = AppId::from_workspace_folder(folder_name.to_string())?;
         let manifest = load_manifest(app_dir)?;
@@ -965,6 +996,7 @@ impl WorkspaceApp {
             state_dir,
             entry_relative_path.clone(),
             protected_env_vars.to_vec(),
+            strong_filesystem,
         )?;
         let render = match worker.request(WorkerRequestOp::RenderState)? {
             WorkerResponsePayload::RenderState(render) => render,
@@ -1369,8 +1401,14 @@ return app
         );
 
         let app_dir = root.path().join("apps").join("stateful");
-        let app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "stateful", &[])
-            .expect("load stateful app");
+        let app = WorkspaceApp::load_from_dir(
+            &app_dir,
+            state_root.path(),
+            "stateful",
+            &[],
+            StrongFilesystemSandboxMode::Off,
+        )
+        .expect("load stateful app");
 
         let first = app.render_state();
         let second = app.render_state();
@@ -1412,8 +1450,14 @@ return app
         );
 
         let app_dir = root.path().join("apps").join("cold-init");
-        let mut app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "cold-init", &[])
-            .expect("load cold-init app");
+        let mut app = WorkspaceApp::load_from_dir(
+            &app_dir,
+            state_root.path(),
+            "cold-init",
+            &[],
+            StrongFilesystemSandboxMode::Off,
+        )
+        .expect("load cold-init app");
 
         assert!(
             app.render_state()
@@ -1505,9 +1549,14 @@ return app
         );
 
         let app_dir = root.path().join("apps").join("configured-timeout");
-        let mut app =
-            WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "configured-timeout", &[])
-                .expect("load configured-timeout app");
+        let mut app = WorkspaceApp::load_from_dir(
+            &app_dir,
+            state_root.path(),
+            "configured-timeout",
+            &[],
+            StrongFilesystemSandboxMode::Off,
+        )
+        .expect("load configured-timeout app");
 
         assert!(
             app.render_state()
@@ -1578,8 +1627,14 @@ return app
         );
 
         let app_dir = root.path().join("apps").join("timeout-app");
-        let mut app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "timeout-app", &[])
-            .expect("load timeout app");
+        let mut app = WorkspaceApp::load_from_dir(
+            &app_dir,
+            state_root.path(),
+            "timeout-app",
+            &[],
+            StrongFilesystemSandboxMode::Off,
+        )
+        .expect("load timeout app");
         app.set_request_timeout_for_tests(Duration::from_millis(25));
 
         let first = app

@@ -12,8 +12,9 @@ use std::{
 use miette::{Result, miette};
 use uuid::Uuid;
 
-#[cfg(not(test))]
-use crate::sandbox::RuntimeSandboxPolicy;
+use crate::sandbox::{
+    FileSystemSandboxPolicy, RuntimeSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot,
+};
 use crate::{
     app::AppId,
     workspace_app::{
@@ -37,6 +38,7 @@ pub(super) struct WorkspaceAppWorkerClient {
     request_timeout: Duration,
     cold_start_timeout: Duration,
     protected_env_vars: Vec<String>,
+    strong_filesystem: StrongFilesystemSandboxMode,
     next_request_id: u64,
     handle: Option<WorkspaceAppWorkerHandle>,
     reader: Option<BufReader<TcpStream>>,
@@ -58,6 +60,7 @@ impl WorkspaceAppWorkerClient {
         state_dir: PathBuf,
         entry_relative_path: String,
         protected_env_vars: Vec<String>,
+        strong_filesystem: StrongFilesystemSandboxMode,
     ) -> Result<Self> {
         let mut client = Self {
             app_id,
@@ -67,6 +70,7 @@ impl WorkspaceAppWorkerClient {
             request_timeout: WORKSPACE_APP_REQUEST_TIMEOUT,
             cold_start_timeout: WORKSPACE_APP_COLD_START_TIMEOUT,
             protected_env_vars,
+            strong_filesystem,
             next_request_id: 1,
             handle: None,
             reader: None,
@@ -201,6 +205,13 @@ impl WorkspaceAppWorkerClient {
             .local_addr()
             .map_err(|err| miette!("failed to inspect workspace app worker listener: {err}"))?;
         let token = Uuid::new_v4().to_string();
+        std::fs::create_dir_all(&self.state_dir).map_err(|err| {
+            miette!(
+                "failed to create workspace app `{}` state directory {}: {err}",
+                self.app_id,
+                self.state_dir.display()
+            )
+        })?;
         let mut handle = spawn_worker_handle(
             WorkspaceAppWorkerArgs {
                 app_id: self.app_id.to_string(),
@@ -212,6 +223,7 @@ impl WorkspaceAppWorkerClient {
             },
             &self.app_id,
             &self.protected_env_vars,
+            self.strong_filesystem,
         )?;
 
         let stream = match accept_worker_connection(&listener, &mut handle, &self.app_id) {
@@ -427,31 +439,25 @@ fn spawn_worker_handle(
     args: WorkspaceAppWorkerArgs,
     app_id: &AppId,
     protected_env_vars: &[String],
+    strong_filesystem: StrongFilesystemSandboxMode,
 ) -> Result<WorkspaceAppWorkerHandle> {
     let executable = std::env::current_exe()
         .map_err(|err| miette!("failed to locate current executable for app worker: {err}"))?;
-    let mut command = Command::new(executable);
+    let worker_policy =
+        workspace_app_worker_sandbox_policy(&args, protected_env_vars, strong_filesystem);
+    let spawn_args = workspace_worker_command_args(&args);
+    let spawn_spec = worker_policy.strong_command_spawn_spec(executable, spawn_args)?;
+    let mut command = Command::new(spawn_spec.program);
     command
-        .arg("workspace-app-worker")
-        .arg("--app-id")
-        .arg(args.app_id)
-        .arg("--app-dir")
-        .arg(args.app_dir)
-        .arg("--state-dir")
-        .arg(args.state_dir)
-        .arg("--entry")
-        .arg(args.entry)
-        .arg("--connect-addr")
-        .arg(args.connect_addr)
-        .arg("--token")
-        .arg(args.token)
+        .args(spawn_spec.args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     for (name, _) in std::env::vars_os() {
-        if name.to_str().is_some_and(|name| {
-            RuntimeSandboxPolicy::is_env_var_protected_by_list(name, protected_env_vars)
-        }) {
+        if name
+            .to_str()
+            .is_some_and(|name| worker_policy.is_env_var_protected(name))
+        {
             command.env_remove(&name);
         }
     }
@@ -464,11 +470,77 @@ fn spawn_worker_handle(
     Ok(WorkspaceAppWorkerHandle::Process(child))
 }
 
+fn workspace_worker_command_args(args: &WorkspaceAppWorkerArgs) -> Vec<String> {
+    vec![
+        "workspace-app-worker".to_string(),
+        "--app-id".to_string(),
+        args.app_id.clone(),
+        "--app-dir".to_string(),
+        args.app_dir.display().to_string(),
+        "--state-dir".to_string(),
+        args.state_dir.display().to_string(),
+        "--entry".to_string(),
+        args.entry.clone(),
+        "--connect-addr".to_string(),
+        args.connect_addr.clone(),
+        "--token".to_string(),
+        args.token.clone(),
+    ]
+}
+
+fn workspace_app_worker_sandbox_policy(
+    args: &WorkspaceAppWorkerArgs,
+    protected_env_vars: &[String],
+    strong_filesystem: StrongFilesystemSandboxMode,
+) -> RuntimeSandboxPolicy {
+    let deny_read_paths = protected_runtime_read_paths_for_worker(&args.state_dir);
+    RuntimeSandboxPolicy {
+        filesystem: FileSystemSandboxPolicy {
+            full_disk_read: true,
+            full_disk_write: false,
+            readable_roots: Vec::new(),
+            writable_roots: vec![WritableRoot {
+                root: args.state_dir.clone(),
+                read_only_subpaths: Vec::new(),
+            }],
+            deny_read_paths,
+            deny_write_paths: vec![args.app_dir.clone()],
+        },
+        protected_env_vars: protected_env_vars.to_vec(),
+        strong_filesystem,
+    }
+}
+
+fn protected_runtime_read_paths_for_worker(state_dir: &Path) -> Vec<PathBuf> {
+    let Some(apps_dir) = state_dir.parent() else {
+        return Vec::new();
+    };
+    let Some(state_root) = apps_dir.parent() else {
+        return Vec::new();
+    };
+    let Some(runtime_root) = state_root.parent() else {
+        return Vec::new();
+    };
+    [
+        "config",
+        "memory",
+        "runtime",
+        "cache",
+        "artifacts",
+        "journals",
+        "logs",
+    ]
+    .into_iter()
+    .map(|name| runtime_root.join(name))
+    .collect()
+}
+
 #[cfg(test)]
 fn spawn_worker_handle(
     args: WorkspaceAppWorkerArgs,
     app_id: &AppId,
     _protected_env_vars: &[String],
+    _strong_filesystem: StrongFilesystemSandboxMode,
 ) -> Result<WorkspaceAppWorkerHandle> {
     let app_id_for_log = app_id.clone();
     let handle = std::thread::Builder::new()
@@ -487,5 +559,64 @@ fn spawn_worker_handle(
     Ok(WorkspaceAppWorkerHandle::Thread(handle))
 }
 
-#[allow(dead_code)]
-fn _assert_path(_: &Path) {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_sandbox_policy_allows_only_app_state_writes() {
+        let root = PathBuf::from("/home/user/.daat-locus");
+        let args = WorkspaceAppWorkerArgs {
+            app_id: "sample".to_string(),
+            app_dir: PathBuf::from("/home/user/daat-locus-workspace/apps/sample"),
+            state_dir: root.join("state/apps/sample"),
+            entry: "runtime/app.lua".to_string(),
+            connect_addr: "127.0.0.1:12345".to_string(),
+            token: "token".to_string(),
+        };
+
+        let policy = workspace_app_worker_sandbox_policy(
+            &args,
+            &["APP_SECRET".to_string()],
+            StrongFilesystemSandboxMode::Required,
+        );
+
+        assert_eq!(
+            policy.strong_filesystem,
+            StrongFilesystemSandboxMode::Required
+        );
+        assert!(policy.is_path_writable(&args.state_dir.join("state.json")));
+        assert!(!policy.is_path_writable(&args.app_dir.join("app.toml")));
+        assert!(!policy.is_path_readable(&root.join("config/config.toml")));
+        assert!(policy.is_env_var_protected("APP_SECRET"));
+    }
+
+    #[test]
+    fn worker_command_args_keep_worker_ipc_arguments_explicit() {
+        let args = WorkspaceAppWorkerArgs {
+            app_id: "sample".to_string(),
+            app_dir: PathBuf::from("/apps/sample"),
+            state_dir: PathBuf::from("/state/sample"),
+            entry: "runtime/app.lua".to_string(),
+            connect_addr: "127.0.0.1:12345".to_string(),
+            token: "token".to_string(),
+        };
+
+        let command_args = workspace_worker_command_args(&args);
+
+        assert_eq!(
+            command_args.first().map(String::as_str),
+            Some("workspace-app-worker")
+        );
+        assert!(
+            command_args
+                .windows(2)
+                .any(|item| item == ["--app-id", "sample"])
+        );
+        assert!(
+            command_args
+                .windows(2)
+                .any(|item| item == ["--token", "token"])
+        );
+    }
+}

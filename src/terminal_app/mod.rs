@@ -1201,7 +1201,9 @@ mod tests {
     use super::*;
     use std::{env, time::Duration};
 
-    use crate::sandbox::{FileSystemSandboxPolicy, RuntimeSandboxPolicy};
+    use crate::sandbox::{
+        FileSystemSandboxPolicy, RuntimeSandboxPolicy, StrongFilesystemSandboxMode,
+    };
 
     struct EnvOverride {
         key: &'static str,
@@ -1242,6 +1244,7 @@ mod tests {
                 deny_write_paths: Vec::new(),
             },
             protected_env_vars: Vec::new(),
+            strong_filesystem: StrongFilesystemSandboxMode::Off,
         }
     }
 

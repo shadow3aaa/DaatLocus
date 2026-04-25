@@ -20,8 +20,15 @@ concurrency:
 
 jobs:
   rust:
-    name: Rust quality gates
-    runs-on: ubuntu-latest
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
 
     steps:
       - name: Check out repository
@@ -36,6 +43,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all -- --check
 
       - name: Run clippy
@@ -43,6 +51,19 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
 
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"

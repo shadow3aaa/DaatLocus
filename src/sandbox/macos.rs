@@ -34,6 +34,14 @@ pub fn wrap_shell_command(
     program: &str,
     args: Vec<String>,
 ) -> Result<SandboxSpawnSpec> {
+    wrap_command(policy, PathBuf::from(program), args)
+}
+
+pub fn wrap_command(
+    policy: &RuntimeSandboxPolicy,
+    program: PathBuf,
+    args: Vec<String>,
+) -> Result<SandboxSpawnSpec> {
     let mut sections = vec![SEATBELT_BASE_POLICY.to_string()];
     sections.push(render_read_policy(policy));
     sections.push(render_write_policy(policy));
@@ -49,7 +57,7 @@ pub fn wrap_shell_command(
         "-p".to_string(),
         profile,
         "--".to_string(),
-        program.to_string(),
+        program.to_string_lossy().into_owned(),
     ];
     sandbox_args.extend(args);
     Ok(SandboxSpawnSpec {

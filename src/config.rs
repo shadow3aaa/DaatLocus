@@ -11,6 +11,7 @@ use crate::{
     },
     i18n::Locale,
     persistence::{PersistenceFileMode, PersistenceStore, write_bytes_atomic},
+    sandbox::StrongFilesystemSandboxMode,
 };
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -198,6 +199,7 @@ pub struct Config {
     pub main_model: String,
     pub daemon: DaemonConfig,
     pub judge: JudgeConfig,
+    pub sandbox: SandboxConfig,
     pub hindsight: HindsightConfig,
     pub telegram: TelegramConfig,
 }
@@ -223,6 +225,7 @@ impl Default for Config {
             main_model: "default".to_string(),
             daemon: DaemonConfig::default(),
             judge: JudgeConfig::default(),
+            sandbox: SandboxConfig::default(),
             hindsight: HindsightConfig::default(),
             telegram: TelegramConfig::default(),
         }
@@ -381,6 +384,20 @@ impl Default for DaemonConfig {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct SandboxConfig {
+    pub strong_filesystem: StrongFilesystemSandboxMode,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            strong_filesystem: StrongFilesystemSandboxMode::Off,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HindsightConfig {
     pub namespace: String,
     pub bank_id: String,
@@ -504,6 +521,7 @@ mod tests {
         Config, ProviderConfig, normalize_provider_base_url, resolve_env_reference,
         write_config_to_path,
     };
+    use crate::sandbox::StrongFilesystemSandboxMode;
 
     struct EnvOverride {
         key: &'static str,
@@ -615,6 +633,55 @@ mod tests {
             "Bearer [redacted]"
         );
         assert_eq!(super::redact_secret_text("unchanged", ""), "unchanged");
+    }
+
+    #[test]
+    fn sandbox_config_defaults_to_no_strong_filesystem_backend() {
+        let config: Config = toml::from_str(
+            r#"
+main_model = "default"
+
+[providers.openai]
+type = "openai"
+api_key = "test"
+
+[models.default]
+provider = "openai"
+model_id = "gpt-4.1"
+"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(
+            config.sandbox.strong_filesystem,
+            StrongFilesystemSandboxMode::Off
+        );
+    }
+
+    #[test]
+    fn sandbox_config_parses_strong_filesystem_mode() {
+        let config: Config = toml::from_str(
+            r#"
+main_model = "default"
+
+[providers.openai]
+type = "openai"
+api_key = "test"
+
+[models.default]
+provider = "openai"
+model_id = "gpt-4.1"
+
+[sandbox]
+strong_filesystem = "required"
+"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(
+            config.sandbox.strong_filesystem,
+            StrongFilesystemSandboxMode::Required
+        );
     }
 
     #[cfg(unix)]
