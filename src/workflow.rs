@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     sync::OnceLock,
@@ -568,7 +569,8 @@ struct WorkflowFrontmatter {
 }
 
 fn parse_workflow_file(content: &str) -> Result<WorkflowSpec> {
-    let (frontmatter_text, body) = split_frontmatter(content)?;
+    let content = normalize_workflow_line_endings(content);
+    let (frontmatter_text, body) = split_frontmatter(content.as_ref())?;
     let frontmatter: WorkflowFrontmatter = serde_yaml::from_str(frontmatter_text)
         .map_err(|err| miette!("parse workflow frontmatter failed: {err}"))?;
     let sections = parse_markdown_sections(body);
@@ -581,6 +583,14 @@ fn parse_workflow_file(content: &str) -> Result<WorkflowSpec> {
         recovery: parse_markdown_list(sections.get("Recovery")),
     }
     .normalize()
+}
+
+fn normalize_workflow_line_endings(content: &str) -> Cow<'_, str> {
+    if content.contains('\r') {
+        Cow::Owned(content.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(content)
+    }
 }
 
 async fn write_workflow_file(path: &Path, spec: &WorkflowSpec) -> Result<()> {
@@ -831,6 +841,18 @@ mod tests {
             .expect_err("builtin workflow patch should be rejected");
 
         assert!(err.to_string().contains("read-only"));
+    }
+
+    #[test]
+    fn parse_workflow_file_accepts_crlf_line_endings() {
+        let spec = parse_workflow_file(
+            "---\r\nid: crlf-workflow\r\n---\r\n\r\n## When To Use\r\n- Windows checkout\r\n\r\n## Preconditions\r\n- A workflow file uses CRLF\r\n\r\n## Workflow\r\n1. Parse frontmatter\r\n\r\n## Done Criteria\r\n- Workflow is loaded\r\n\r\n## Recovery\r\n- Retry with normalized line endings\r\n",
+        )
+        .expect("parse CRLF workflow");
+
+        assert_eq!(spec.id, "crlf-workflow");
+        assert_eq!(spec.workflow_steps, vec!["Parse frontmatter"]);
+        assert_eq!(spec.done_criteria, vec!["Workflow is loaded"]);
     }
 
     #[tokio::test]
