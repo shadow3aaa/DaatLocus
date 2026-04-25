@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
@@ -455,11 +455,30 @@ pub async fn config_file_exists() -> bool {
 /// Serialize Config and write it to config.toml.
 pub async fn write_config(config: &Config) -> Result<(), ConfigError> {
     let config_path = daat_locus_paths().await.config_file(CONFIG_FILE_NAME);
+    write_config_to_path(&config_path, config).await
+}
+
+async fn write_config_to_path(config_path: &Path, config: &Config) -> Result<(), ConfigError> {
     let toml_str =
         toml::to_string_pretty(config).map_err(|e| ConfigError::Syntax(e.to_string()))?;
     tokio::fs::write(&config_path, toml_str)
         .await
         .map_err(ConfigError::IO)?;
+    set_private_file_permissions(config_path).map_err(ConfigError::IO)?;
+    Ok(())
+}
+
+pub(crate) fn set_private_file_permissions(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
     Ok(())
 }
 
@@ -481,7 +500,10 @@ pub async fn load_config() -> Result<Config, ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ProviderConfig, normalize_provider_base_url, resolve_env_reference};
+    use super::{
+        Config, ProviderConfig, normalize_provider_base_url, resolve_env_reference,
+        write_config_to_path,
+    };
 
     struct EnvOverride {
         key: &'static str,
@@ -584,5 +606,25 @@ mod tests {
             "env:DAAT_LOCUS_TEST_MISSING_SECRET"
         );
         assert_eq!(resolve_env_reference("literal-secret"), "literal-secret");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_config_sets_private_permissions_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let path = tempdir.path().join("config.toml");
+
+        write_config_to_path(&path, &Config::default())
+            .await
+            .expect("write config");
+
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }
