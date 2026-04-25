@@ -11,7 +11,7 @@ use axum::{
         State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -35,6 +35,14 @@ use crate::{
     events::EventStore,
     pending_work::PendingWorkQueue,
     telegram_acl::TelegramAclHandle,
+};
+
+mod auth;
+
+pub use auth::{
+    CreatedDaemonToken, DaemonAuthToken, DaemonTokenListEntry, DaemonTokenRegistryHandle,
+    create_daemon_token, list_daemon_tokens, load_daemon_auth_token,
+    load_or_create_daemon_token_registry, revoke_daemon_token, rotate_daemon_token,
 };
 
 const LOCALHOST: &str = "127.0.0.1";
@@ -75,6 +83,7 @@ pub enum DaemonControlCommand {
 struct ServerState {
     started_at_ms: i64,
     port: u16,
+    auth_registry: DaemonTokenRegistryHandle,
     dashboard_rx: watch::Receiver<DashboardState>,
     telegram_acl: TelegramAclHandle,
     events: EventStore,
@@ -180,6 +189,7 @@ fn process_exists(pid: u32) -> bool {
 
 pub async fn start_server(
     port: u16,
+    auth_registry: DaemonTokenRegistryHandle,
     dashboard_rx: watch::Receiver<DashboardState>,
     telegram_acl: TelegramAclHandle,
     events: EventStore,
@@ -199,6 +209,7 @@ pub async fn start_server(
     let app_state = ServerState {
         started_at_ms,
         port: local_addr.port(),
+        auth_registry,
         dashboard_rx,
         telegram_acl,
         events,
@@ -249,21 +260,35 @@ async fn status_handler(State(state): State<ServerState>) -> impl IntoResponse {
     .into_response()
 }
 
-async fn snapshot_handler(State(state): State<ServerState>) -> impl IntoResponse {
+async fn snapshot_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     Json(state.dashboard_rx.borrow().clone()).into_response()
 }
 
 async fn stream_handler(
     ws: WebSocketUpgrade,
     State(state): State<ServerState>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     ws.on_upgrade(move |socket| dashboard_ws(socket, state))
 }
 
 async fn command_handler(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     Json(request): Json<CommandRequest>,
 ) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let snapshot = state.dashboard_rx.borrow().clone();
     let output = execute_remote_command(
         &request.command,
@@ -276,7 +301,13 @@ async fn command_handler(
     Json(CommandResponse { output }).into_response()
 }
 
-async fn shutdown_handler(State(state): State<ServerState>) -> impl IntoResponse {
+async fn shutdown_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let (completion_tx, completion_rx) = oneshot::channel();
     if state
         .daemon_control_tx
@@ -315,9 +346,11 @@ async fn dashboard_ws(mut socket: WebSocket, state: ServerState) {
         .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[derive(Clone)]
 pub struct DaemonClient {
     port: u16,
     http: reqwest::Client,
+    auth_token: Option<DaemonAuthToken>,
 }
 
 impl DaemonClient {
@@ -325,7 +358,16 @@ impl DaemonClient {
         Self {
             port,
             http: reqwest::Client::new(),
+            auth_token: None,
         }
+    }
+
+    pub async fn authenticated(port: u16) -> Result<Self> {
+        Ok(Self {
+            port,
+            http: reqwest::Client::new(),
+            auth_token: Some(load_daemon_auth_token().await?),
+        })
     }
 
     pub fn port(&self) -> u16 {
@@ -338,6 +380,29 @@ impl DaemonClient {
 
     fn ws_url(&self) -> String {
         format!("ws://{}:{}/dashboard/stream", LOCALHOST, self.port)
+    }
+
+    fn with_auth(&self, request: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
+        let token = self
+            .auth_token
+            .as_ref()
+            .ok_or_else(|| miette!("daemon auth token is not loaded"))?;
+        Ok(request.bearer_auth(token.as_str()))
+    }
+
+    fn websocket_request(&self) -> Result<axum::http::Request<()>> {
+        let token = self
+            .auth_token
+            .as_ref()
+            .ok_or_else(|| miette!("daemon auth token is not loaded"))?;
+        let mut request = self
+            .ws_url()
+            .into_client_request()
+            .map_err(|err| miette!("build dashboard ws request failed: {err}"))?;
+        let auth_value = HeaderValue::from_str(&token.bearer_value())
+            .map_err(|err| miette!("build daemon auth header failed: {err}"))?;
+        request.headers_mut().insert(AUTHORIZATION, auth_value);
+        Ok(request)
     }
 
     pub async fn status(&self) -> Result<StatusResponse> {
@@ -354,25 +419,29 @@ impl DaemonClient {
     }
 
     pub async fn snapshot(&self) -> Result<DashboardState> {
-        self.http
-            .get(format!("{}/dashboard/snapshot", self.base_url()))
-            .send()
-            .await
-            .map_err(|err| miette!("dashboard snapshot request failed: {err}"))?
-            .error_for_status()
-            .map_err(|err| miette!("dashboard snapshot returned error: {err}"))?
-            .json::<DashboardState>()
-            .await
-            .map_err(|err| miette!("decode dashboard snapshot failed: {err}"))
+        self.with_auth(
+            self.http
+                .get(format!("{}/dashboard/snapshot", self.base_url())),
+        )?
+        .send()
+        .await
+        .map_err(|err| miette!("dashboard snapshot request failed: {err}"))?
+        .error_for_status()
+        .map_err(|err| miette!("dashboard snapshot returned error: {err}"))?
+        .json::<DashboardState>()
+        .await
+        .map_err(|err| miette!("decode dashboard snapshot failed: {err}"))
     }
 
     pub async fn send_command(&self, command: &str) -> Result<String> {
         let response = self
-            .http
-            .post(format!("{}/commands/run", self.base_url()))
-            .json(&CommandRequest {
-                command: command.to_string(),
-            })
+            .with_auth(
+                self.http
+                    .post(format!("{}/commands/run", self.base_url()))
+                    .json(&CommandRequest {
+                        command: command.to_string(),
+                    }),
+            )?
             .send()
             .await
             .map_err(|err| miette!("run command request failed: {err}"))?
@@ -385,13 +454,15 @@ impl DaemonClient {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
-        self.http
-            .post(format!("{}/daemon/shutdown", self.base_url()))
-            .send()
-            .await
-            .map_err(|err| miette!("daemon shutdown request failed: {err}"))?
-            .error_for_status()
-            .map_err(|err| miette!("daemon shutdown returned error: {err}"))?;
+        self.with_auth(
+            self.http
+                .post(format!("{}/daemon/shutdown", self.base_url())),
+        )?
+        .send()
+        .await
+        .map_err(|err| miette!("daemon shutdown request failed: {err}"))?
+        .error_for_status()
+        .map_err(|err| miette!("daemon shutdown returned error: {err}"))?;
         Ok(())
     }
 
@@ -400,10 +471,7 @@ impl DaemonClient {
         tx: watch::Sender<DashboardState>,
         mut stop_rx: oneshot::Receiver<()>,
     ) -> Result<()> {
-        let request = self
-            .ws_url()
-            .into_client_request()
-            .map_err(|err| miette!("build dashboard ws request failed: {err}"))?;
+        let request = self.websocket_request()?;
 
         let (ws, _) = tokio::select! {
             result = tokio_tungstenite::connect_async(request) => {
@@ -574,11 +642,16 @@ fn daemonize_current_process() -> Result<()> {
     Ok(())
 }
 
-pub async fn connect_existing_daemon() -> Result<DaemonClient> {
+pub async fn connect_daemon_status() -> Result<DaemonClient> {
     let port = configured_daemon_port().await?;
     let client = DaemonClient::new(port);
     client.status().await?;
     Ok(client)
+}
+
+pub async fn connect_existing_daemon() -> Result<DaemonClient> {
+    let status_client = connect_daemon_status().await?;
+    DaemonClient::authenticated(status_client.port()).await
 }
 
 pub async fn connect_or_start_daemon() -> Result<DaemonClient> {
@@ -587,7 +660,7 @@ pub async fn connect_or_start_daemon() -> Result<DaemonClient> {
         Err(_) => {
             spawn_detached_daemon_process().await?;
             let status = wait_for_daemon_ready().await?;
-            let client = DaemonClient::new(status.port);
+            let client = DaemonClient::authenticated(status.port).await?;
             Ok(client)
         }
     }

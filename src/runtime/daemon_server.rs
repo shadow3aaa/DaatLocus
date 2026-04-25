@@ -41,6 +41,7 @@ use crate::runtime::runtime_loop::{
 
 pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     let mut lock = DaemonLock::acquire().await?;
+    let daemon_token_registry = crate::daemon::load_or_create_daemon_token_registry().await?;
 
     // Load telegram_acl first, create all channels, and start the HTTP server
     // immediately on the fixed local port so wait_for_daemon_ready can return
@@ -61,6 +62,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
 
     let daemon_server = start_server(
         config.daemon.port,
+        daemon_token_registry,
         tx.subscribe(),
         telegram_acl.clone(),
         events.clone(),

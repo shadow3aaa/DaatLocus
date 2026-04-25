@@ -86,6 +86,14 @@ impl DaatLocusPaths {
         self.runtime_dir().join("daemon.lock")
     }
 
+    pub fn daemon_token_file(&self) -> PathBuf {
+        self.runtime_dir().join("daemon.token")
+    }
+
+    pub fn daemon_token_registry_file(&self) -> PathBuf {
+        self.runtime_dir().join("daemon_tokens.json")
+    }
+
     pub fn browser_executable_path(&self) -> PathBuf {
         #[cfg(target_os = "macos")]
         {
