@@ -46,15 +46,17 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Add tests for protected runtime paths, source writes, and secret env stripping.
 
 - [ ] Consider optional strong sandbox backends for Linux and Windows
-  - [ ] Keep strong sandboxing out of the default path; the default policy remains a lightweight self-protection guard.
+  - [x] Keep strong sandboxing out of the default path; the default policy remains a lightweight self-protection guard.
   - [x] Scope the strong sandbox to filesystem permissions only; network/web restrictions are out of scope.
   - [x] Select Codex-style Linux bubblewrap as the primary filesystem backend direction.
   - [x] Keep Linux Landlock as a legacy or fallback reference, not the primary backend.
   - [x] Select Codex-style Windows restricted-token, capability SID, ACL, and Job Object design as the Windows direction.
   - [x] Document platform support and failure-mode expectations before implementation.
   - [x] Add a platform-neutral strong sandbox spawn layer for Terminal and workspace app worker processes.
+  - [x] Route Terminal and workspace app worker process creation through sandbox-owned launch wrappers.
   - [x] Implement the optional Linux bubblewrap filesystem backend.
-  - [ ] Implement or port the optional Windows backend in a later milestone.
+  - [x] Implement the optional Windows workspace app worker backend with restricted tokens and temporary ACL guards.
+  - [ ] Extend the optional Windows backend to Terminal pipes and process-tree cleanup.
   - [ ] Add conformance tests for protected runtime paths when a backend is enabled.
 
 - [x] Resolve symlinks and canonical paths for sandbox enforcement

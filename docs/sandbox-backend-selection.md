@@ -91,6 +91,22 @@ Windows should be treated as a later implementation milestone than Linux because
 the practical backend includes identity setup, ACL refresh, credential handling,
 and process spawning.
 
+The first Windows milestone uses the legacy restricted-token path rather than
+the elevated setup path:
+
+- generate a per-launch Daat Locus capability SID for the worker process
+- create restricted child tokens with those capability SIDs
+- apply temporary allow ACEs for writable roots and deny-write ACEs for
+  protected subpaths
+- launch children with `CreateProcessAsUserW`
+- keep ACL changes short-lived where possible, and revoke temporary ACEs after
+  the process exits
+- add a Job Object kill-on-close wrapper for process-tree cleanup
+
+This cannot be represented as only a wrapper command. The Windows backend must
+own process creation so it can create the token, adjust ACLs, wire stdio, launch
+the child, wait for exit, and clean up guards.
+
 ## Integration Shape
 
 Add a platform-neutral strong sandbox layer before implementing per-platform
@@ -114,8 +130,18 @@ Current implementation:
 - macOS Terminal keeps the existing Seatbelt self-protection behavior.
 - Workspace app workers use a narrower worker policy that allows writes to the
   app's protected state directory while keeping app source read-only.
+- Terminal and workspace app worker process creation now flow through
+  sandbox-owned launch wrappers instead of calling `Command::new` directly at
+  each call site.
 - Linux uses `bwrap` when available and enabled; `required` fails when `bwrap`
   is missing.
+- Windows workspace app workers use a restricted-token backend with temporary
+  ACL guards and a kill-on-close Job Object when `strong_filesystem` is enabled.
+  `auto` falls back to the lightweight default guard if restricted spawn fails;
+  `required` fails the worker launch.
+- Windows Terminal strong sandboxing is still pending because it needs
+  backend-owned stdin/stdout/stderr pipe support. In `required` mode, Terminal
+  strong sandbox launch fails on Windows until that backend is implemented.
 
 ## Conformance Tests
 

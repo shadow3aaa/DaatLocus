@@ -1,5 +1,3 @@
-#[cfg(not(test))]
-use std::process::{Child, Command, Stdio};
 #[cfg(test)]
 use std::thread::JoinHandle;
 use std::{
@@ -15,6 +13,8 @@ use uuid::Uuid;
 use crate::sandbox::{
     FileSystemSandboxPolicy, RuntimeSandboxPolicy, StrongFilesystemSandboxMode, WritableRoot,
 };
+#[cfg(not(test))]
+use crate::sandbox::{SandboxChild, SandboxProcessOptions, SandboxStdio};
 use crate::{
     app::AppId,
     workspace_app::{
@@ -48,7 +48,7 @@ pub(super) struct WorkspaceAppWorkerClient {
 #[derive(Debug)]
 enum WorkspaceAppWorkerHandle {
     #[cfg(not(test))]
-    Process(Child),
+    Process(SandboxChild),
     #[cfg(test)]
     Thread(JoinHandle<()>),
 }
@@ -446,22 +446,18 @@ fn spawn_worker_handle(
     let worker_policy =
         workspace_app_worker_sandbox_policy(&args, protected_env_vars, strong_filesystem);
     let spawn_args = workspace_worker_command_args(&args);
-    let spawn_spec = worker_policy.strong_command_spawn_spec(executable, spawn_args)?;
-    let mut command = Command::new(spawn_spec.program);
-    command
-        .args(spawn_spec.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
-    for (name, _) in std::env::vars_os() {
-        if name
-            .to_str()
-            .is_some_and(|name| worker_policy.is_env_var_protected(name))
-        {
-            command.env_remove(&name);
-        }
-    }
-    let child = command.spawn().map_err(|err| {
+    let child = SandboxChild::spawn_strong(
+        &worker_policy,
+        executable,
+        spawn_args,
+        SandboxProcessOptions {
+            stdin: SandboxStdio::Null,
+            stdout: SandboxStdio::Null,
+            stderr: SandboxStdio::Inherit,
+            ..Default::default()
+        },
+    )
+    .map_err(|err| {
         miette!(
             "failed to spawn workspace app `{}` worker process: {err}",
             app_id
@@ -498,7 +494,7 @@ fn workspace_app_worker_sandbox_policy(
         filesystem: FileSystemSandboxPolicy {
             full_disk_read: true,
             full_disk_write: false,
-            readable_roots: Vec::new(),
+            readable_roots: vec![args.app_dir.clone()],
             writable_roots: vec![WritableRoot {
                 root: args.state_dir.clone(),
                 read_only_subpaths: Vec::new(),
@@ -586,6 +582,7 @@ mod tests {
             StrongFilesystemSandboxMode::Required
         );
         assert!(policy.is_path_writable(&args.state_dir.join("state.json")));
+        assert!(policy.is_path_readable(&args.app_dir.join("runtime/app.lua")));
         assert!(!policy.is_path_writable(&args.app_dir.join("app.toml")));
         assert!(!policy.is_path_readable(&root.join("config/config.toml")));
         assert!(policy.is_env_var_protected("APP_SECRET"));

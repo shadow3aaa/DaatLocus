@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    process::Stdio,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -8,15 +8,17 @@ use std::{
 use parking_lot::Mutex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    process::{Child, ChildStdin, Command},
+    process::ChildStdin,
 };
 
-use crate::sandbox::RuntimeSandboxPolicy;
+use crate::sandbox::{
+    RuntimeSandboxPolicy, SandboxAsyncChild, SandboxProcessOptions, SandboxStdio,
+};
 
 pub const DEFAULT_OUTPUT_BUFFER_CAPACITY_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct TerminalProcess {
-    child: Child,
+    child: SandboxAsyncChild,
     stdin: Option<ChildStdin>,
     last_update: Arc<Mutex<Instant>>,
     output: Arc<Mutex<BoundedOutputBuffer>>,
@@ -66,32 +68,20 @@ impl TerminalProcess {
         output_buffer_capacity: usize,
     ) -> std::io::Result<Self> {
         let (shell_program, shell_args) = shell_invocation(command);
-        let spawn_spec = sandbox_policy
-            .shell_spawn_spec(shell_program, shell_args)
-            .map_err(std::io::Error::other)?;
-        let mut process = Command::new(&spawn_spec.program);
-        process.args(&spawn_spec.args);
-        for (name, _) in std::env::vars_os() {
-            if name
-                .to_str()
-                .is_some_and(|name| sandbox_policy.is_env_var_protected(name))
-            {
-                process.env_remove(&name);
-            }
-        }
-        if let Some(workdir) = workdir {
-            process.current_dir(workdir);
-        }
-
-        process
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = process.spawn()?;
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        let mut child = SandboxAsyncChild::spawn_shell(
+            sandbox_policy,
+            shell_program,
+            shell_args,
+            SandboxProcessOptions {
+                current_dir: workdir.map(PathBuf::from),
+                stdin: SandboxStdio::Piped,
+                stdout: SandboxStdio::Piped,
+                stderr: SandboxStdio::Piped,
+            },
+        )?;
+        let stdin = child.take_stdin();
+        let stdout = child.take_stdout();
+        let stderr = child.take_stderr();
         let last_update = Arc::new(Mutex::new(Instant::now()));
         let output = Arc::new(Mutex::new(BoundedOutputBuffer::new(output_buffer_capacity)));
 
