@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::daat_locus_paths::daat_locus_paths;
+use crate::persistence::{PersistenceStore, read_postcard_optional};
 
 const PLAN_FILE_NAME: &str = "plan";
 const LEGACY_PLAN_FILE_NAME: &str = "todo_board";
@@ -42,20 +42,15 @@ impl Default for PlanStatus {
 
 impl Plan {
     pub async fn new() -> Self {
-        let paths = daat_locus_paths().await;
-        let primary_path = paths.memory_file(PLAN_FILE_NAME);
-        let legacy_path = paths.memory_file(LEGACY_PLAN_FILE_NAME);
-        let Some(data) = tokio::fs::read(&primary_path)
-            .await
-            .ok()
-            .or_else(|| std::fs::read(&legacy_path).ok())
-        else {
-            return Self::default();
-        };
-
-        if let Ok(plan) = postcard::from_bytes::<Self>(&data) {
+        let persistence = PersistenceStore::runtime().await;
+        let primary_path = persistence.memory_file(PLAN_FILE_NAME);
+        let legacy_path = persistence.memory_file(LEGACY_PLAN_FILE_NAME);
+        if let Some(plan) = read_postcard_optional::<Self>(&primary_path, "plan").await {
             return plan;
         }
+        let Some(data) = std::fs::read(&legacy_path).ok() else {
+            return Self::default();
+        };
         if let Ok(legacy_plan) = postcard::from_bytes::<LegacyPlan>(&data) {
             return legacy_plan.into_plan();
         }
@@ -104,9 +99,11 @@ impl Plan {
     }
 
     pub async fn shutdown(self) {
-        let persistence_path = daat_locus_paths().await.memory_file(PLAN_FILE_NAME);
-        let data = postcard::to_allocvec(&self).unwrap();
-        tokio::fs::write(persistence_path, data).await.unwrap();
+        PersistenceStore::runtime()
+            .await
+            .write_postcard_memory(PLAN_FILE_NAME, &self)
+            .await
+            .unwrap();
     }
 }
 

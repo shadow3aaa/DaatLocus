@@ -16,8 +16,8 @@ use crate::{
         estimate_runtime_request_envelope, truncate_text_to_token_budget,
         truncate_text_to_token_budget_with_notice,
     },
-    daat_locus_paths::daat_locus_paths,
     hindsight::{HINDSIGHT_RUNTIME_DOCUMENT_ID, HindsightRetainItem, HindsightRetainJob},
+    persistence::PersistenceStore,
     reasoning::runtime::{AgentMessage, AgentToolSpec, HistoryMessage},
     tool_ui::{
         ActivateWorkflowUiData, CreateWorkflowUiData, DeepRecallUiData, PatchUiData, PlanUiData,
@@ -528,13 +528,10 @@ fn select_recent_user_agent_messages_for_compaction(
 
 impl RuntimeConversation {
     async fn new(bootstrap_focus: Option<String>, bootstrap_messages: Vec<HistoryMessage>) -> Self {
-        let persistence_path = daat_locus_paths()
+        let persistence = PersistenceStore::runtime().await;
+        persistence
+            .read_postcard_memory(RUNTIME_CONVERSATION_FILE_NAME, "runtime conversation")
             .await
-            .memory_file(RUNTIME_CONVERSATION_FILE_NAME);
-        tokio::fs::read(persistence_path)
-            .await
-            .ok()
-            .and_then(|data| postcard::from_bytes::<Self>(&data).ok())
             .unwrap_or_else(|| Self {
                 last_focus: bootstrap_focus,
                 messages: bootstrap_messages,
@@ -686,17 +683,11 @@ impl RuntimeConversation {
     }
 
     async fn sync_to_disk(&self) {
-        let persistence_path = daat_locus_paths()
+        let persistence = PersistenceStore::runtime().await;
+        if let Err(err) = persistence
+            .write_postcard_memory(RUNTIME_CONVERSATION_FILE_NAME, self)
             .await
-            .memory_file(RUNTIME_CONVERSATION_FILE_NAME);
-        let data = match postcard::to_allocvec(self) {
-            Ok(data) => data,
-            Err(err) => {
-                tracing::error!("serialize runtime conversation failed: {err}");
-                return;
-            }
-        };
-        if let Err(err) = tokio::fs::write(persistence_path, data).await {
+        {
             tracing::error!("persist runtime conversation failed: {err}");
         }
     }
@@ -801,14 +792,10 @@ impl HindsightQueueItem {
 
 impl HindsightQueue {
     async fn new() -> Self {
-        let persistence_path = daat_locus_paths()
+        PersistenceStore::runtime()
             .await
-            .memory_file(HINDSIGHT_QUEUE_FILE_NAME);
-        tokio::fs::read(persistence_path)
+            .read_postcard_memory_or_default(HINDSIGHT_QUEUE_FILE_NAME, "hindsight queue")
             .await
-            .ok()
-            .and_then(|data| postcard::from_bytes::<Self>(&data).ok())
-            .unwrap_or_default()
     }
 
     fn reset_inflight_retain_state(&mut self) {
@@ -841,17 +828,11 @@ impl HindsightQueue {
     }
 
     async fn sync_to_disk(&self) {
-        let persistence_path = daat_locus_paths()
+        let persistence = PersistenceStore::runtime().await;
+        if let Err(err) = persistence
+            .write_postcard_memory(HINDSIGHT_QUEUE_FILE_NAME, self)
             .await
-            .memory_file(HINDSIGHT_QUEUE_FILE_NAME);
-        let data = match postcard::to_allocvec(self) {
-            Ok(data) => data,
-            Err(err) => {
-                tracing::error!("serialize hindsight queue failed: {err}");
-                return;
-            }
-        };
-        if let Err(err) = tokio::fs::write(persistence_path, data).await {
+        {
             tracing::error!("persist hindsight queue failed: {err}");
         }
     }

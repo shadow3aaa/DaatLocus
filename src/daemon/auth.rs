@@ -4,9 +4,12 @@ use axum::http::{HeaderMap, header::AUTHORIZATION};
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{io::AsyncWriteExt, sync::Mutex};
+use tokio::sync::Mutex;
 
-use crate::daat_locus_paths::daat_locus_paths;
+use crate::{
+    daat_locus_paths::daat_locus_paths,
+    persistence::{PersistenceFileMode, write_bytes_atomic},
+};
 
 const BEARER_PREFIX: &str = "Bearer ";
 const LOCAL_CLI_TOKEN_ID: &str = "local-cli";
@@ -355,33 +358,13 @@ async fn write_local_daemon_auth_token_at(path: &Path, token: &DaemonAuthToken) 
 }
 
 async fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|err| {
-            miette!(
-                "create daemon token directory {} failed: {err}",
-                parent.display()
-            )
-        })?;
-    }
-
-    let mut options = tokio::fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    {
-        options.mode(0o600);
-    }
-
-    let mut file = options
-        .open(path)
-        .await
-        .map_err(|err| miette!("open daemon token file {} failed: {err}", path.display()))?;
-    file.write_all(bytes)
-        .await
-        .map_err(|err| miette!("write daemon token file {} failed: {err}", path.display()))?;
-    file.flush()
-        .await
-        .map_err(|err| miette!("flush daemon token file {} failed: {err}", path.display()))?;
-    harden_private_file_permissions(path).await
+    write_bytes_atomic(
+        path.to_path_buf(),
+        bytes.to_vec(),
+        PersistenceFileMode::Private,
+    )
+    .await
+    .map_err(|err| miette!("write daemon token file {} failed: {err}", path.display()))
 }
 
 #[cfg(unix)]

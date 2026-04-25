@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{app::AppId, daat_locus_paths::daat_locus_paths};
+use crate::{app::AppId, persistence::PersistenceStore};
 
 const PENDING_WORK_FILE_NAME: &str = "pending_work_queue";
 
@@ -65,12 +65,11 @@ impl PendingWork {
 
 impl PendingWorkQueue {
     pub async fn new() -> Self {
-        let path = daat_locus_paths().await.state_file(PENDING_WORK_FILE_NAME);
-        let mut state = tokio::fs::read(&path)
-            .await
-            .ok()
-            .and_then(|bytes| postcard::from_bytes::<PersistedPendingWorkQueue>(&bytes).ok())
-            .unwrap_or_default();
+        let persistence = PersistenceStore::runtime().await;
+        let path = persistence.state_file(PENDING_WORK_FILE_NAME);
+        let mut state: PersistedPendingWorkQueue = persistence
+            .read_postcard_state_or_default(PENDING_WORK_FILE_NAME, "pending work queue")
+            .await;
         for entry in &mut state.queue {
             if matches!(entry.state, PendingWorkEntryState::Claimed) {
                 entry.state = PendingWorkEntryState::Pending;
@@ -234,11 +233,12 @@ fn same_work_payload(left: &PendingWork, right: &PendingWork) -> bool {
 }
 
 fn persist_locked(inner: &PendingWorkQueueInner) -> Result<()> {
-    let bytes = postcard::to_allocvec(&inner.state)
-        .map_err(|err| miette!("serialize pending work queue failed: {err}"))?;
-    std::fs::write(&inner.path, bytes)
-        .map_err(|err| miette!("persist pending work queue failed: {err}"))?;
-    Ok(())
+    crate::persistence::write_postcard_atomic_sync(
+        &inner.path,
+        &inner.state,
+        crate::persistence::PersistenceFileMode::Default,
+    )
+    .map_err(|err| miette!("persist pending work queue failed: {err}"))
 }
 
 #[cfg(test)]

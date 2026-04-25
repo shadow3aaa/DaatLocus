@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::fs;
 
-use crate::daat_locus_paths::daat_locus_paths;
+use crate::{
+    daat_locus_paths::daat_locus_paths,
+    persistence::{PersistenceFileMode, write_bytes_atomic},
+};
 
 use super::{
     examples::{ExampleField, ProgramExample},
@@ -313,7 +316,7 @@ pub async fn save_compiled_program_for_model(
     let path = dir.join(format!("{compile_key}.json"));
     let bytes = serde_json::to_vec_pretty(compiled)
         .map_err(|err| miette!("failed to serialize compiled prompt config: {err}"))?;
-    fs::write(path, bytes)
+    write_bytes_atomic(path, bytes, PersistenceFileMode::Default)
         .await
         .map_err(|err| miette!("failed to write compiled prompt config: {err}"))?;
     Ok(())
@@ -381,7 +384,7 @@ async fn save_compiled_runtime_system_prompt_by_key(
     let path = dir.join(format!("{compile_key}.json"));
     let bytes = serde_json::to_vec_pretty(&compiled.clone().with_compile_key(compile_key))
         .map_err(|err| miette!("failed to serialize runtime system prompt config: {err}"))?;
-    fs::write(path, bytes)
+    write_bytes_atomic(path, bytes, PersistenceFileMode::Default)
         .await
         .map_err(|err| miette!("failed to write runtime system prompt config: {err}"))?;
     Ok(())

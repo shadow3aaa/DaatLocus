@@ -22,6 +22,7 @@ mod logging;
 mod memory;
 mod model_catalog;
 mod pending_work;
+mod persistence;
 mod plan;
 mod providers;
 mod reasoning;

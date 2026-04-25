@@ -8,7 +8,7 @@ use miette::{Result, miette};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::{config::set_private_file_permissions, daat_locus_paths::daat_locus_paths};
+use crate::persistence::{PersistenceFileMode, PersistenceStore, write_json_pretty_atomic_sync};
 
 const TELEGRAM_ACL_FILE_NAME: &str = "telegram_acl.json";
 
@@ -60,12 +60,11 @@ pub enum AccessDecision {
 
 impl TelegramAclHandle {
     pub async fn load() -> Self {
-        let path = daat_locus_paths().await.config_file(TELEGRAM_ACL_FILE_NAME);
-        let state = tokio::fs::read(&path)
-            .await
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<TelegramAclState>(&bytes).ok())
-            .unwrap_or_default();
+        let persistence = PersistenceStore::runtime().await;
+        let path = persistence.config_file(TELEGRAM_ACL_FILE_NAME);
+        let state = persistence
+            .read_json_config_or_default(TELEGRAM_ACL_FILE_NAME, "telegram acl")
+            .await;
         Self {
             inner: Arc::new(Mutex::new(TelegramAclInner { path, state })),
         }
@@ -216,11 +215,6 @@ impl TelegramAclHandle {
 }
 
 fn persist_locked(inner: &TelegramAclInner) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(&inner.state)
-        .map_err(|err| miette!("serialize telegram acl failed: {err}"))?;
-    std::fs::write(&inner.path, bytes)
-        .map_err(|err| miette!("write telegram acl file failed: {err}"))?;
-    set_private_file_permissions(&inner.path)
-        .map_err(|err| miette!("set telegram acl file permissions failed: {err}"))?;
-    Ok(())
+    write_json_pretty_atomic_sync(&inner.path, &inner.state, PersistenceFileMode::Private)
+        .map_err(|err| miette!("write telegram acl file failed: {err}"))
 }

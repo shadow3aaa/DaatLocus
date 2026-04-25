@@ -12,6 +12,7 @@ use crate::{
         RuntimeConversationCompactionPlan, RuntimeRequestEnvelope, RuntimeStepCompactionPolicy,
         RuntimeStepConversation,
     },
+    persistence::append_bytes_durable,
     reasoning::{
         prompt_renderer::LlmPromptRenderer,
         prompts::{HISTORY_COMPACTION_PROMPT, HISTORY_COMPACTION_SUMMARY_PREFIX},
@@ -26,7 +27,6 @@ use chrono::Utc;
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
-use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 use tracing::{error, warn};
 
 const MID_TURN_COMPACTION_SUMMARY_MAX_TOKENS: usize = 900;
@@ -619,15 +619,6 @@ async fn append_runtime_compaction_event(event: RuntimeCompactionTelemetryEvent)
     let path = daat_locus_paths()
         .await
         .journal_file(RUNTIME_COMPACTION_EVENT_FILE_NAME);
-    let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await
-    else {
-        drop(guard);
-        return;
-    };
     let mut line = match serde_json::to_vec(&event) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -637,7 +628,9 @@ async fn append_runtime_compaction_event(event: RuntimeCompactionTelemetryEvent)
         }
     };
     line.push(b'\n');
-    let _ = file.write_all(&line).await;
+    if let Err(err) = append_bytes_durable(path, line).await {
+        error!("failed to append runtime compaction telemetry event: {err}");
+    }
     drop(guard);
 }
 

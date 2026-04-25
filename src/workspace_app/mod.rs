@@ -26,6 +26,7 @@ use crate::{
         AppManager, AppStateRender, AppUsage,
     },
     daat_locus_paths::daat_locus_paths_sync,
+    persistence::PersistenceStore,
     schema_utils::normalize_openai_json_schema,
 };
 use client::WorkspaceAppWorkerClient;
@@ -1210,16 +1211,9 @@ fn resolve_relative_child_path(root: &Path, relative: &str) -> Result<PathBuf> {
 }
 
 fn load_runtime_state(path: &Path) -> Result<WorkspaceAppRuntimeState> {
-    if !path.exists() {
-        return Ok(WorkspaceAppRuntimeState {
-            state: JsonValue::Object(Default::default()),
-            notice_reason: None,
-        });
-    }
-    let content = fs::read_to_string(path)
-        .map_err(|err| miette!("failed to read app state {}: {err}", path.display()))?;
-    let state = serde_json::from_str::<JsonValue>(&content)
-        .map_err(|err| miette!("failed to parse app state {}: {err}", path.display()))?;
+    let state = PersistenceStore::runtime_sync()
+        .read_json_file_sync(path, "workspace app state")
+        .unwrap_or_else(|| JsonValue::Object(Default::default()));
     Ok(WorkspaceAppRuntimeState {
         state,
         notice_reason: None,

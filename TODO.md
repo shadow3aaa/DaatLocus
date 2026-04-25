@@ -57,14 +57,18 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [ ] Add tests for symlink escape attempts.
   - [ ] Keep behavior deterministic when target paths do not exist yet.
 
-- [ ] Add atomic write helpers for persistent runtime state
-  - [ ] Use temp-file, fsync, and rename semantics.
-  - [ ] Add corruption handling for partially written state files.
-  - [ ] Add tests for interrupted writes where practical.
+- [x] Introduce a unified persistence store for runtime state files
+  - [x] Centralize runtime config, state, and memory file path access.
+  - [x] Use temp-file, fsync, and rename semantics for replace-style writes.
+  - [x] Add corruption quarantine for unreadable persisted state files.
+  - [x] Add durable append helpers for append-only runtime records.
+  - [x] Add tests for atomic writes, private permissions, corrupt files, and durable append.
 
-- [ ] Apply atomic persistence to state stores
-  - [ ] Cover memory, events, pending work, plan, config, and ACL state.
-  - [ ] Avoid direct `tokio::fs::write` or `std::fs::write` for durable state.
+- [x] Apply unified persistence to state stores
+  - [x] Cover memory, events, pending work, plan, config, and ACL state.
+  - [x] Cover daemon auth files, Telegram transport state, workspace app state, workflow specs, workflow run records, and reasoning compile/frontier artifacts.
+  - [x] Cover append-only runtime trace and compaction journals.
+  - [x] Avoid direct `tokio::fs::write` or `std::fs::write` for durable state.
 
 - [x] Support env-based secret references for all provider credentials
   - [x] Accept `env:NAME` or `$NAME` references consistently.

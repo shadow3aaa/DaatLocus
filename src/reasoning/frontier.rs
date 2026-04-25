@@ -4,7 +4,10 @@ use miette::{IntoDiagnostic, Result};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::daat_locus_paths::daat_locus_paths;
+use crate::{
+    daat_locus_paths::daat_locus_paths,
+    persistence::{PersistenceFileMode, write_bytes_atomic},
+};
 
 use super::evaluation_artifacts::{
     EvaluationArtifactRuntimePromptCandidate, EvaluationArtifactRuntimePromptCandidateEvaluation,
@@ -301,7 +304,9 @@ where
         fs::create_dir_all(parent).await.into_diagnostic()?;
     }
     let bytes = serde_json::to_vec_pretty(entries).into_diagnostic()?;
-    fs::write(path, bytes).await.into_diagnostic()
+    write_bytes_atomic(path, bytes, PersistenceFileMode::Default)
+        .await
+        .into_diagnostic()
 }
 
 fn dedupe_prompt_frontier_entries(

@@ -5,8 +5,11 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::daat_locus_paths::daat_locus_paths;
 use crate::reasoning::examples::ExampleField;
+use crate::{
+    daat_locus_paths::daat_locus_paths,
+    persistence::{PersistenceFileMode, write_bytes_atomic},
+};
 
 const EVALUATIONS_DIR_NAME: &str = "evaluations";
 const FAILURE_PATTERNS_DIR: &str = "failure_patterns";
@@ -560,12 +563,14 @@ where
     let path = dir.join(file_name);
     let bytes = serde_json::to_vec_pretty(artifact)
         .map_err(|err| miette!("failed to serialize evaluation artifact: {err}"))?;
-    fs::write(&path, bytes).await.map_err(|err| {
-        miette!(
-            "failed to write evaluation artifact {}: {err}",
-            path.display()
-        )
-    })?;
+    write_bytes_atomic(path.clone(), bytes, PersistenceFileMode::Default)
+        .await
+        .map_err(|err| {
+            miette!(
+                "failed to write evaluation artifact {}: {err}",
+                path.display()
+            )
+        })?;
     Ok(path)
 }
 

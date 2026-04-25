@@ -9,8 +9,8 @@ use crate::{
         DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS, DEFAULT_CONTEXT_WINDOW_TOKENS,
         DEFAULT_MAX_COMPLETION_TOKENS, DEFAULT_TOOL_OUTPUT_MAX_TOKENS,
     },
-    daat_locus_paths::daat_locus_paths,
     i18n::Locale,
+    persistence::{PersistenceFileMode, PersistenceStore, write_bytes_atomic},
 };
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -455,7 +455,7 @@ pub enum ConfigError {
 
 /// Return whether config.toml exists.
 pub async fn config_file_exists() -> bool {
-    daat_locus_paths()
+    PersistenceStore::runtime()
         .await
         .config_file(CONFIG_FILE_NAME)
         .exists()
@@ -463,37 +463,30 @@ pub async fn config_file_exists() -> bool {
 
 /// Serialize Config and write it to config.toml.
 pub async fn write_config(config: &Config) -> Result<(), ConfigError> {
-    let config_path = daat_locus_paths().await.config_file(CONFIG_FILE_NAME);
+    let config_path = PersistenceStore::runtime()
+        .await
+        .config_file(CONFIG_FILE_NAME);
     write_config_to_path(&config_path, config).await
 }
 
 async fn write_config_to_path(config_path: &Path, config: &Config) -> Result<(), ConfigError> {
     let toml_str =
         toml::to_string_pretty(config).map_err(|e| ConfigError::Syntax(e.to_string()))?;
-    tokio::fs::write(&config_path, toml_str)
-        .await
-        .map_err(ConfigError::IO)?;
-    set_private_file_permissions(config_path).map_err(ConfigError::IO)?;
-    Ok(())
-}
-
-pub(crate) fn set_private_file_permissions(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
+    write_bytes_atomic(
+        config_path.to_path_buf(),
+        toml_str.into_bytes(),
+        PersistenceFileMode::Private,
+    )
+    .await
+    .map_err(ConfigError::IO)?;
     Ok(())
 }
 
 /// Load config.toml. Missing files return an IO error; defaults are not auto-created.
 pub async fn load_config() -> Result<Config, ConfigError> {
-    let config_path = daat_locus_paths().await.config_file(CONFIG_FILE_NAME);
+    let config_path = PersistenceStore::runtime()
+        .await
+        .config_file(CONFIG_FILE_NAME);
 
     let content = tokio::fs::read_to_string(config_path)
         .await

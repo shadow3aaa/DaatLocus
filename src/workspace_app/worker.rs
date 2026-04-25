@@ -9,6 +9,7 @@ use mlua::{Function, Lua, LuaSerdeExt, Table, Value as LuaValue};
 
 use crate::{
     app::{AppDynamicToolResult, AppDynamicToolSpec, AppId, AppStateRender},
+    persistence::PersistenceStore,
     workspace_app::{
         WorkspaceAppConfigOutput, WorkspaceAppRuntimeState, WorkspaceLuaRuntime,
         WorkspaceNoticeOutput, WorkspaceRenderOutput, WorkspaceToolCallOutput,
@@ -544,22 +545,14 @@ impl LuaWorkerRuntime {
     }
 
     fn persist_runtime_state(&self) -> Result<()> {
-        if let Some(parent) = self.state_file.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| {
+        PersistenceStore::runtime_sync()
+            .write_json_file_sync(&self.state_file, &self.runtime.state)
+            .map_err(|err| {
                 miette!(
-                    "failed to create app state directory {}: {err}",
-                    parent.display()
+                    "failed to write app state {}: {err}",
+                    self.state_file.display()
                 )
             })?;
-        }
-        let content = serde_json::to_vec_pretty(&self.runtime.state)
-            .map_err(|err| miette!("failed to encode app state for `{}`: {err}", self.id))?;
-        std::fs::write(&self.state_file, content).map_err(|err| {
-            miette!(
-                "failed to write app state {}: {err}",
-                self.state_file.display()
-            )
-        })?;
         Ok(())
     }
 

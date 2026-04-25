@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::{daat_locus_paths::daat_locus_paths_sync, events::EventStatus};
+use crate::{events::EventStatus, persistence::PersistenceStore};
 
 const TELEGRAM_TRANSPORT_STATE_FILE_NAME: &str = "telegram_transport_state";
 const TELEGRAM_MESSAGE_CHAR_LIMIT: usize = 4096;
@@ -356,17 +356,15 @@ impl From<&TelegramChat> for PersistedTelegramChat {
 }
 
 fn telegram_transport_state_path() -> PathBuf {
-    daat_locus_paths_sync().state_file(TELEGRAM_TRANSPORT_STATE_FILE_NAME)
+    PersistenceStore::runtime_sync().state_file(TELEGRAM_TRANSPORT_STATE_FILE_NAME)
 }
 
 fn load_telegram_state() -> TelegramState {
-    let path = telegram_transport_state_path();
-    let Ok(bytes) = std::fs::read(&path) else {
-        return TelegramState::default();
-    };
-    let Ok(persisted) = postcard::from_bytes::<PersistedTelegramState>(&bytes) else {
-        return TelegramState::default();
-    };
+    let persisted: PersistedTelegramState = PersistenceStore::runtime_sync()
+        .read_postcard_state_or_default_sync(
+            TELEGRAM_TRANSPORT_STATE_FILE_NAME,
+            "telegram transport state",
+        );
     persisted.into()
 }
 
@@ -381,15 +379,12 @@ fn persist_telegram_state_result(inner: &TelegramInner, state: &TelegramState) -
 }
 
 fn persist_telegram_state_bytes(path: &Path, state: &TelegramState) -> Result<()> {
-    let bytes = postcard::to_stdvec(&PersistedTelegramState::from(state))
-        .map_err(|err| miette!("serialize telegram transport state failed: {err}"))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| miette!("create telegram transport state dir failed: {err}"))?;
-    }
-    std::fs::write(path, bytes)
-        .map_err(|err| miette!("write telegram transport state failed: {err}"))?;
-    Ok(())
+    crate::persistence::write_postcard_atomic_sync(
+        path,
+        &PersistedTelegramState::from(state),
+        crate::persistence::PersistenceFileMode::Default,
+    )
+    .map_err(|err| miette!("write telegram transport state failed: {err}"))
 }
 
 #[cfg(test)]

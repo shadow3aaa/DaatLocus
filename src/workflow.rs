@@ -10,11 +10,13 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     fs,
     fs::OpenOptions,
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, BufReader},
 };
 
 use crate::{
-    daat_locus_paths::daat_locus_paths, workspace_app::paths::resolve_runtime_workspace_dir,
+    daat_locus_paths::daat_locus_paths,
+    persistence::{PersistenceFileMode, append_bytes_durable, write_bytes_atomic},
+    workspace_app::paths::resolve_runtime_workspace_dir,
 };
 
 const MAX_SUMMARY_ITEMS: usize = 12;
@@ -534,19 +536,8 @@ pub async fn append_workflow_run_records(records: &[WorkflowRunRecord]) -> Resul
         }
     }
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .await
-        .map_err(|err| {
-            miette!(
-                "failed to open workflow run records for append {}: {err}",
-                path.display()
-            )
-        })?;
-
     let mut appended = 0usize;
+    let mut batch = Vec::new();
     for record in records {
         if !existing_ids.insert(record.run_id.clone()) {
             continue;
@@ -554,13 +545,18 @@ pub async fn append_workflow_run_records(records: &[WorkflowRunRecord]) -> Resul
         let mut bytes = serde_json::to_vec(record)
             .map_err(|err| miette!("failed to serialize workflow run record: {err}"))?;
         bytes.push(b'\n');
-        file.write_all(&bytes).await.map_err(|err| {
-            miette!(
-                "failed to append workflow run record {}: {err}",
-                path.display()
-            )
-        })?;
+        batch.extend(bytes);
         appended += 1;
+    }
+    if !batch.is_empty() {
+        append_bytes_durable(path.clone(), batch)
+            .await
+            .map_err(|err| {
+                miette!(
+                    "failed to append workflow run record {}: {err}",
+                    path.display()
+                )
+            })?;
     }
     drop(workflow_run_records_io_guard);
     Ok(appended)
@@ -604,9 +600,13 @@ async fn write_workflow_file(path: &Path, spec: &WorkflowSpec) -> Result<()> {
         .map_err(|err| miette!("serialize workflow frontmatter failed: {err}"))?;
     let body = render_workflow_markdown_body(spec);
     let content = format!("---\n{}---\n\n{}", frontmatter_text, body);
-    tokio::fs::write(path, content)
-        .await
-        .map_err(|err| miette!("write workflow file {} failed: {err}", path.display()))
+    write_bytes_atomic(
+        path.to_path_buf(),
+        content.into_bytes(),
+        PersistenceFileMode::Default,
+    )
+    .await
+    .map_err(|err| miette!("write workflow file {} failed: {err}", path.display()))
 }
 
 fn render_workflow_markdown_body(spec: &WorkflowSpec) -> String {

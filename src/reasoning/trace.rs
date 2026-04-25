@@ -2,9 +2,12 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::OnceLock;
-use tokio::{fs, fs::OpenOptions, io::AsyncWriteExt};
+use tokio::fs;
 
-use crate::daat_locus_paths::daat_locus_paths;
+use crate::{
+    daat_locus_paths::daat_locus_paths,
+    persistence::{PersistenceFileMode, append_bytes_durable, write_bytes_atomic},
+};
 
 use super::{runtime::PromptRequest, signature::Signature};
 
@@ -47,21 +50,12 @@ pub struct RuntimeTraceBatch {
 pub async fn append_program_trace(record: ProgramTraceRecord) {
     let trace_io_guard = trace_io_lock().lock().await;
     let path = daat_locus_paths().await.journal_file(TRACE_FILE_NAME);
-    let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await
-    else {
-        return;
-    };
-
     let mut line = match serde_json::to_vec(&record) {
         Ok(bytes) => bytes,
         Err(_) => return,
     };
     line.push(b'\n');
-    let _ = file.write_all(&line).await;
+    let _ = append_bytes_durable(path, line).await;
     drop(trace_io_guard);
 }
 
@@ -161,13 +155,15 @@ pub async fn compact_runtime_trace_file(consumed_offset: u64) -> miette::Result<
         }
     };
     let keep_from = (consumed_offset as usize).min(bytes.len());
-    let remaining = &bytes[keep_from..];
-    fs::write(&trace_path, remaining).await.map_err(|err| {
-        miette::miette!(
-            "failed to rewrite reasoning trace file {} during compaction: {err}",
-            trace_path.display()
-        )
-    })?;
+    let remaining = bytes[keep_from..].to_vec();
+    write_bytes_atomic(trace_path.clone(), remaining, PersistenceFileMode::Default)
+        .await
+        .map_err(|err| {
+            miette::miette!(
+                "failed to rewrite reasoning trace file {} during compaction: {err}",
+                trace_path.display()
+            )
+        })?;
     drop(trace_io_guard);
     Ok(())
 }

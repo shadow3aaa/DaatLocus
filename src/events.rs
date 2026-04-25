@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::daat_locus_paths::daat_locus_paths;
+use crate::persistence::PersistenceStore;
 
 const EVENTS_FILE_NAME: &str = "events";
 
@@ -106,12 +106,11 @@ pub struct EventView {
 
 impl EventStore {
     pub async fn new() -> Self {
-        let path = daat_locus_paths().await.state_file(EVENTS_FILE_NAME);
-        let mut state = tokio::fs::read(&path)
-            .await
-            .ok()
-            .and_then(|bytes| postcard::from_bytes::<PersistedEventStore>(&bytes).ok())
-            .unwrap_or_default();
+        let persistence = PersistenceStore::runtime().await;
+        let path = persistence.state_file(EVENTS_FILE_NAME);
+        let mut state: PersistedEventStore = persistence
+            .read_postcard_state_or_default(EVENTS_FILE_NAME, "events")
+            .await;
         for event in state.events.values_mut() {
             if matches!(event.status, EventStatus::Claimed) {
                 event.status = EventStatus::Pending;
@@ -407,10 +406,12 @@ fn find_existing_telegram_event(
 }
 
 fn persist_locked(inner: &EventStoreInner) -> Result<()> {
-    let bytes = postcard::to_allocvec(&inner.state)
-        .map_err(|err| miette!("serialize events failed: {err}"))?;
-    std::fs::write(&inner.path, bytes).map_err(|err| miette!("write events file failed: {err}"))?;
-    Ok(())
+    crate::persistence::write_postcard_atomic_sync(
+        &inner.path,
+        &inner.state,
+        crate::persistence::PersistenceFileMode::Default,
+    )
+    .map_err(|err| miette!("write events file failed: {err}"))
 }
 
 #[cfg(test)]
