@@ -20,6 +20,15 @@ pub fn normalize_provider_base_url(base_url: &str) -> String {
     base_url.trim().trim_end_matches('/').to_string()
 }
 
+pub fn resolve_env_reference(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Some(name) = env_ref_name(trimmed) {
+        std::env::var(name).unwrap_or_else(|_| trimmed.to_string())
+    } else {
+        trimmed.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Provider credentials
 // ---------------------------------------------------------------------------
@@ -311,12 +320,12 @@ impl Config {
 }
 
 fn push_secret_env_ref(vars: &mut Vec<String>, value: &str) {
-    if let Some(name) = secret_env_ref_name(value) {
+    if let Some(name) = env_ref_name(value) {
         vars.push(name);
     }
 }
 
-fn secret_env_ref_name(value: &str) -> Option<String> {
+fn env_ref_name(value: &str) -> Option<String> {
     let trimmed = value.trim();
     let name = if let Some(inner) = trimmed
         .strip_prefix("${")
@@ -472,7 +481,35 @@ pub async fn load_config() -> Result<Config, ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ProviderConfig, normalize_provider_base_url};
+    use super::{Config, ProviderConfig, normalize_provider_base_url, resolve_env_reference};
+
+    struct EnvOverride {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvOverride {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvOverride {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => unsafe {
+                    std::env::set_var(self.key, previous);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
 
     #[test]
     fn normalize_provider_base_url_only_trims_whitespace_and_slashes() {
@@ -524,5 +561,28 @@ mod tests {
                 "TELEGRAM_BOT_TOKEN",
             ]
         );
+    }
+
+    #[test]
+    fn resolve_env_reference_supports_all_config_ref_forms() {
+        let _env = EnvOverride::set("DAAT_LOCUS_TEST_SECRET_REF", "resolved-secret");
+
+        assert_eq!(
+            resolve_env_reference("$DAAT_LOCUS_TEST_SECRET_REF"),
+            "resolved-secret"
+        );
+        assert_eq!(
+            resolve_env_reference("${DAAT_LOCUS_TEST_SECRET_REF}"),
+            "resolved-secret"
+        );
+        assert_eq!(
+            resolve_env_reference("env:DAAT_LOCUS_TEST_SECRET_REF"),
+            "resolved-secret"
+        );
+        assert_eq!(
+            resolve_env_reference("env:DAAT_LOCUS_TEST_MISSING_SECRET"),
+            "env:DAAT_LOCUS_TEST_MISSING_SECRET"
+        );
+        assert_eq!(resolve_env_reference("literal-secret"), "literal-secret");
     }
 }

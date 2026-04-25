@@ -14,7 +14,8 @@ use ratatui::{
 
 use crate::{
     config::{
-        Config, JudgeConfig, ModelConfig, ProviderConfig, normalize_provider_base_url, write_config,
+        Config, JudgeConfig, ModelConfig, ProviderConfig, normalize_provider_base_url,
+        resolve_env_reference, write_config,
     },
     i18n::Locale,
     model_catalog::{ModelCapacity, catalog_model_capacity, conservative_model_capacity},
@@ -960,18 +961,6 @@ fn resolve_model_capacity(
     }
 }
 
-/// Resolve `${VAR}` / `$VAR` environment references. Missing variables become empty strings.
-fn resolve_token(raw: &str) -> String {
-    let t = raw.trim();
-    if let Some(inner) = t.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
-        return std::env::var(inner).unwrap_or_default();
-    }
-    if let Some(var) = t.strip_prefix('$') {
-        return std::env::var(var).unwrap_or_default();
-    }
-    t.to_string()
-}
-
 /// Discover Copilot models via the internal session-token API, falling back to a static list.
 async fn fetch_copilot_models(github_token: &str) -> Vec<DiscoveredModel> {
     let fallback = || {
@@ -985,7 +974,7 @@ async fn fetch_copilot_models(github_token: &str) -> Vec<DiscoveredModel> {
             .collect::<Vec<_>>()
     };
 
-    let token = resolve_token(github_token);
+    let token = resolve_env_reference(github_token);
     if token.is_empty() {
         tracing::warn!("copilot model discovery: github token empty, using static list");
         return fallback();
