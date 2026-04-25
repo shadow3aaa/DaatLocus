@@ -5,6 +5,7 @@
 # Daat Locus
 
 [![简体中文][readme-cn-badge]][readme-cn-url]
+[![CI][ci-badge]][ci-url]
 [![License][license-badge]][license-url]
 
 A long-running agent runtime with self-governance, persistent memory, app-scoped tools, and asynchronous self-improvement.
@@ -13,6 +14,8 @@ A long-running agent runtime with self-governance, persistent memory, app-scoped
 
 [readme-cn-badge]: https://img.shields.io/badge/README-简体中文-blue.svg?style=for-the-badge
 [readme-cn-url]: docs/README_zh-CN.md
+[ci-badge]: https://img.shields.io/github/actions/workflow/status/shadow3aaa/DaatLocus/ci.yml?style=for-the-badge&label=CI
+[ci-url]: https://github.com/shadow3aaa/DaatLocus/actions/workflows/ci.yml
 [license-badge]: https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge
 [license-url]: LICENSE
 
