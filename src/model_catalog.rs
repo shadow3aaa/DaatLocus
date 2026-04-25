@@ -3853,7 +3853,10 @@ const LITELLM_MODEL_CAPACITIES: &[(&str, usize, usize)] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::LITELLM_MODEL_CAPACITIES;
+    use super::{
+        LITELLM_MODEL_CAPACITIES, ModelCapacity, catalog_model_capacity,
+        conservative_model_capacity,
+    };
 
     #[test]
     fn model_capacity_catalog_keys_are_sorted_unique_and_non_empty() {
@@ -3869,5 +3872,23 @@ mod tests {
         for (model_id, _, _) in LITELLM_MODEL_CAPACITIES {
             assert!(!model_id.trim().is_empty(), "model id must not be empty");
         }
+    }
+
+    #[test]
+    fn model_capacity_catalog_exact_lookup_normalizes_case_and_space() {
+        assert_eq!(
+            catalog_model_capacity(" GPT-4.1 "),
+            Some(ModelCapacity {
+                context_window_tokens: 1_047_576,
+                max_completion_tokens: 32_768,
+            })
+        );
+    }
+
+    #[test]
+    fn model_capacity_catalog_unknown_and_similar_models_do_not_match() {
+        assert_eq!(catalog_model_capacity("unknown-local-model"), None);
+        assert_eq!(catalog_model_capacity("gpt-4.1-custom"), None);
+        assert_eq!(conservative_model_capacity().context_window_tokens, 32_768);
     }
 }

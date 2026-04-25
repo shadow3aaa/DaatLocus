@@ -110,10 +110,10 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Add a refresh script or documented manual process.
   - [x] Keep generated/catalog data clearly separated from handwritten provider logic.
 
-- [ ] Add model catalog fallback tests
-  - [ ] Cover unknown model IDs.
-  - [ ] Cover stale or similar model names.
-  - [ ] Confirm conservative defaults are used safely.
+- [x] Add model catalog fallback tests
+  - [x] Cover unknown model IDs.
+  - [x] Cover stale or similar model names.
+  - [x] Confirm conservative defaults are used safely.
 
 - [ ] Add CI quality gates
   - [ ] Run `cargo fmt --check`.
