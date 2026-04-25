@@ -70,9 +70,9 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Accept `env:NAME` or `$NAME` references consistently.
   - [x] Resolve OpenAI and OpenAI-compatible API keys through the same resolver as Copilot.
 
-- [ ] Write config files with private permissions
-  - [ ] Set `0600` on Unix-like systems.
-  - [ ] Preserve safe behavior when rewriting existing config files.
+- [x] Write config files with private permissions
+  - [x] Set `0600` on Unix-like systems.
+  - [x] Preserve safe behavior when rewriting existing config files.
 
 - [ ] Avoid leaking provider secrets in UI and logs
   - [ ] Mask provider secrets in config summaries.

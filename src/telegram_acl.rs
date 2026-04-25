@@ -8,7 +8,7 @@ use miette::{Result, miette};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::daat_locus_paths::daat_locus_paths;
+use crate::{config::set_private_file_permissions, daat_locus_paths::daat_locus_paths};
 
 const TELEGRAM_ACL_FILE_NAME: &str = "telegram_acl.json";
 
@@ -220,5 +220,7 @@ fn persist_locked(inner: &TelegramAclInner) -> Result<()> {
         .map_err(|err| miette!("serialize telegram acl failed: {err}"))?;
     std::fs::write(&inner.path, bytes)
         .map_err(|err| miette!("write telegram acl file failed: {err}"))?;
+    set_private_file_permissions(&inner.path)
+        .map_err(|err| miette!("set telegram acl file permissions failed: {err}"))?;
     Ok(())
 }
