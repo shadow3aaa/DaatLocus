@@ -15,7 +15,9 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::{
-    config::{Config, ModelConfig, ProviderConfig, normalize_provider_base_url},
+    config::{
+        Config, ModelConfig, ProviderConfig, normalize_provider_base_url, resolve_env_reference,
+    },
     context::Context,
     context_budget::{
         ContextBudgetExceededError, RequestBudgetBreakdown, RequestBudgetLimits,
@@ -914,17 +916,6 @@ fn is_standard_openai_base_url(base_url: &str) -> bool {
     normalized.contains("api.openai.com") || normalized.contains("chatgpt.com/backend-api/codex")
 }
 
-fn resolve_env_var_ref(value: &str) -> String {
-    let trimmed = value.trim();
-    if let Some(inner) = trimmed.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
-        std::env::var(inner).unwrap_or_else(|_| trimmed.to_string())
-    } else if let Some(inner) = trimmed.strip_prefix('$') {
-        std::env::var(inner).unwrap_or_else(|_| trimmed.to_string())
-    } else {
-        trimmed.to_string()
-    }
-}
-
 fn shared_request_rate_limiter(
     base_url: &str,
     model_id: &str,
@@ -1019,17 +1010,23 @@ pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn LLM + Send
     match provider_config {
         ProviderConfig::Openai { api_key, base_url } => {
             let base = base_url.as_deref().unwrap_or("https://api.openai.com/v1");
+            let api_key = resolve_env_reference(api_key);
             Ok(Box::new(OpenAIClient::from_parts(
-                api_key,
+                &api_key,
                 base,
                 model_config,
             )))
         }
-        ProviderConfig::OpenaiCompatible { base_url, api_key } => Ok(Box::new(
-            OpenAIClient::from_parts(api_key, base_url, model_config),
-        )),
+        ProviderConfig::OpenaiCompatible { base_url, api_key } => {
+            let api_key = resolve_env_reference(api_key);
+            Ok(Box::new(OpenAIClient::from_parts(
+                &api_key,
+                base_url,
+                model_config,
+            )))
+        }
         ProviderConfig::GithubCopilot { github_token } => {
-            let resolved = resolve_env_var_ref(github_token);
+            let resolved = resolve_env_reference(github_token);
             Ok(Box::new(CopilotClient::new(&resolved, model_config)))
         }
     }
