@@ -87,10 +87,10 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Pin auto-downloaded uv versions instead of using GitHub `latest`.
   - [x] Verify downloads with checksums before execution.
 
-- [ ] Pin and verify browser runtime downloads
-  - [ ] Pin browser runtime versions instead of always using latest stable.
-  - [ ] Verify browser runtime downloads before extraction.
-  - [ ] Document how to disable auto-downloads for locked-down environments.
+- [x] Verify browser runtime downloads without pinning latest stable
+  - [x] Keep using Chrome for Testing latest stable to receive browser security updates.
+  - [x] Verify browser runtime content length and GCS MD5 hash before extraction.
+  - [x] Record installed browser runtime version, revision, URL, and archive hash metadata.
 
 - [ ] Add daemon shutdown drain for retain jobs and runtime persistence
   - [ ] Ensure shutdown completes outstanding retain and state flush work when possible.
