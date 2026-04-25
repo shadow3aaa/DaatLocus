@@ -127,7 +127,7 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Cover supply chain pins.
   - [x] Cover backwards compatibility for config and workspace app behavior.
 
-- [ ] Track license and attribution obligations
-  - [ ] Add a dependency license audit note for transitive dependencies.
-  - [ ] Track dependencies with weak-copyleft or attribution-sensitive licenses.
-  - [ ] Document when a project-level `NOTICE` file becomes necessary.
+- [x] Track license and attribution obligations
+  - [x] Add a dependency license audit note for transitive dependencies.
+  - [x] Track dependencies with weak-copyleft or attribution-sensitive licenses.
+  - [x] Document when a project-level `NOTICE` file becomes necessary.
