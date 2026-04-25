@@ -1,4 +1,7 @@
+mod client;
 pub mod paths;
+mod protocol;
+pub mod worker;
 use crate::workspace_app::paths::workspace_apps_dir;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -9,10 +12,10 @@ use std::{
 
 use async_trait::async_trait;
 use miette::{Context as _, Result, miette};
-use mlua::{Function, Lua, LuaOptions, LuaSerdeExt, StdLib, Table, Value as LuaValue};
+use mlua::{Lua, LuaOptions, StdLib, Table};
 use notify::{Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::UnboundedSender;
@@ -25,6 +28,11 @@ use crate::{
     daat_locus_paths::daat_locus_paths_sync,
     schema_utils::normalize_openai_json_schema,
 };
+use client::WorkspaceAppWorkerClient;
+use protocol::{WorkerRequestOp, WorkerResponsePayload};
+
+const WORKSPACE_APP_COLD_START_TIMEOUT: Duration = Duration::from_secs(120);
+const WORKSPACE_APP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct WorkspaceAppBootstrap {
     pub apps: Vec<Box<dyn App>>,
@@ -93,14 +101,9 @@ impl Drop for WorkspaceAppWatcherHandle {
 #[derive(Debug)]
 pub struct WorkspaceApp {
     id: AppId,
-    app_dir: PathBuf,
-    state_dir: PathBuf,
-    state_file: PathBuf,
-    entry_relative_path: String,
-    entry_source: String,
     usage_markdown: String,
     how_to_use_markdown: String,
-    runtime_state: Mutex<WorkspaceAppRuntimeState>,
+    handle_state: Mutex<WorkspaceAppHandleState>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -110,12 +113,33 @@ struct WorkspaceAppManifest {
 
 #[derive(Debug)]
 struct WorkspaceAppRuntimeState {
-    initialized: bool,
     state: JsonValue,
     notice_reason: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug)]
+struct WorkspaceLuaRuntime {
+    lua: Lua,
+    module: Table,
+}
+
+#[derive(Debug)]
+struct WorkspaceAppHandleState {
+    worker: WorkspaceAppWorkerClient,
+    render: AppStateRender,
+    render_cache_served: bool,
+    tool_specs: Vec<AppDynamicToolSpec>,
+    notice_reason: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub(crate) struct WorkspaceAppConfigOutput {
+    request_timeout_ms: Option<u64>,
+    cold_start_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct WorkspaceRenderOutput {
     title: Option<String>,
     #[serde(default)]
@@ -123,7 +147,7 @@ struct WorkspaceRenderOutput {
     state: Option<JsonValue>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct WorkspaceToolDescriptor {
     name: String,
     description: String,
@@ -131,7 +155,7 @@ struct WorkspaceToolDescriptor {
     output_schema: Option<JsonValue>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct WorkspaceToolCallOutput {
     summary: String,
     #[serde(default)]
@@ -143,7 +167,7 @@ struct WorkspaceToolCallOutput {
     turn_boundary: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct WorkspaceNoticeOutput {
     #[serde(default)]
     notices: Vec<String>,
@@ -583,7 +607,7 @@ fn collect_digest_file(
 }
 
 fn new_workspace_app_lua_runtime(app_dir: &Path, app_id: Option<&AppId>) -> Result<Lua> {
-    let lua = Lua::new_with(WorkspaceApp::app_stdlib(), LuaOptions::default()).map_err(|err| {
+    let lua = Lua::new_with(StdLib::ALL_SAFE, LuaOptions::default()).map_err(|err| {
         if let Some(app_id) = app_id {
             miette!("failed to create lua runtime for app `{app_id}`: {err}")
         } else {
@@ -593,6 +617,22 @@ fn new_workspace_app_lua_runtime(app_dir: &Path, app_id: Option<&AppId>) -> Resu
     configure_workspace_app_lua_runtime(&lua, app_dir)
         .wrap_err("failed to configure workspace app lua runtime")?;
     Ok(lua)
+}
+
+fn load_workspace_lua_runtime(
+    app_id: &AppId,
+    app_dir: &Path,
+    entry_relative_path: &str,
+    entry_source: &str,
+) -> Result<WorkspaceLuaRuntime> {
+    let lua = new_workspace_app_lua_runtime(app_dir, Some(app_id))
+        .map_err(|err| miette!("failed to create lua runtime for app `{app_id}`: {err}"))?;
+    let module = lua
+        .load(entry_source)
+        .set_name(format!("{app_id}:{entry_relative_path}"))
+        .eval::<Table>()
+        .map_err(|err| miette!("lua app `{app_id}` load module: {err}"))?;
+    Ok(WorkspaceLuaRuntime { lua, module })
 }
 
 fn configure_workspace_app_lua_runtime(lua: &Lua, app_dir: &Path) -> Result<()> {
@@ -893,232 +933,90 @@ impl WorkspaceApp {
             .unwrap_or_else(|| AppId::DEFAULT_WORKSPACE_ENTRY.to_string());
         let entry_path = resolve_relative_child_path(app_dir, &entry_relative_path)
             .wrap_err("invalid app entry path")?;
-        let entry_source = fs::read_to_string(&entry_path)
-            .map_err(|err| miette!("failed to read lua entry {}: {err}", entry_path.display()))?;
-        validate_lua_entry(&id, app_dir, &entry_relative_path, &entry_source)?;
+        if !entry_path.is_file() {
+            return Err(miette!(
+                "workspace app `{id}` entry {} is not a file",
+                entry_path.display()
+            ));
+        }
 
         let usage_markdown = fs::read_to_string(app_dir.join("prompt").join("usage.md"))
             .map_err(|err| miette!("failed to read prompt/usage.md for app `{id}`: {err}"))?;
         let how_to_use_markdown = fs::read_to_string(app_dir.join("prompt").join("how_to_use.md"))
             .map_err(|err| miette!("failed to read prompt/how_to_use.md for app `{id}`: {err}"))?;
         let state_dir = state_root.join(id.as_str());
-        let state_file = state_dir.join("state.json");
-        let runtime_state = load_runtime_state(&state_file)
-            .wrap_err_with(|| format!("failed to load state for app `{id}`"))?;
+        let mut worker = WorkspaceAppWorkerClient::start(
+            id.clone(),
+            app_dir.to_path_buf(),
+            state_dir,
+            entry_relative_path.clone(),
+        )?;
+        let render = match worker.request(WorkerRequestOp::RenderState)? {
+            WorkerResponsePayload::RenderState(render) => render,
+            other => {
+                return Err(miette!(
+                    "workspace app `{id}` worker returned unexpected render payload: {other:?}"
+                ));
+            }
+        };
+        let tool_specs = match worker.request(WorkerRequestOp::ListTools)? {
+            WorkerResponsePayload::ToolSpecs(tool_specs) => tool_specs,
+            other => {
+                return Err(miette!(
+                    "workspace app `{id}` worker returned unexpected tool spec payload: {other:?}"
+                ));
+            }
+        };
 
         Ok(Self {
             id,
-            app_dir: app_dir.to_path_buf(),
-            state_dir,
-            state_file,
-            entry_relative_path,
-            entry_source,
             usage_markdown,
             how_to_use_markdown,
-            runtime_state: Mutex::new(runtime_state),
+            handle_state: Mutex::new(WorkspaceAppHandleState {
+                worker,
+                render,
+                render_cache_served: false,
+                tool_specs,
+                notice_reason: None,
+                last_error: None,
+            }),
         })
     }
 
-    fn app_stdlib() -> StdLib {
-        StdLib::ALL_SAFE
-    }
-
-    fn map_lua<T>(&self, action: &str, result: mlua::Result<T>) -> Result<T> {
-        result.map_err(|err| miette!("lua app `{}` {action}: {err}", self.id))
-    }
-
-    fn lua_context(&self, lua: &Lua) -> Result<Table> {
-        let ctx = self.map_lua("failed to create context table", lua.create_table())?;
-        self.map_lua(
-            "failed to set `app_id` in context",
-            ctx.set("app_id", self.id.to_string()),
-        )?;
-        self.map_lua(
-            "failed to set `app_dir` in context",
-            ctx.set("app_dir", self.app_dir.display().to_string()),
-        )?;
-        self.map_lua(
-            "failed to set `state_dir` in context",
-            ctx.set("state_dir", self.state_dir.display().to_string()),
-        )?;
-        Ok(ctx)
-    }
-
-    fn with_loaded_module<T>(
-        &self,
-        callback: impl FnOnce(&Lua, Table, Table, &mut WorkspaceAppRuntimeState) -> Result<T>,
-    ) -> Result<T> {
-        let lua = new_workspace_app_lua_runtime(&self.app_dir, Some(&self.id))
-            .map_err(|err| miette!("failed to create lua runtime for app `{}`: {err}", self.id))?;
-        let module: Table = lua
-            .load(&self.entry_source)
-            .set_name(format!("{}:{}", self.id, self.entry_relative_path))
-            .eval()
-            .map_err(|err| {
-                miette!(
-                    "failed to evaluate lua app `{}` from {}: {err}",
-                    self.id,
-                    self.entry_relative_path
-                )
-            })?;
-        let ctx = self.lua_context(&lua)?;
-        let mut runtime = self.runtime_state.lock();
-        self.ensure_initialized(&lua, &module, &ctx, &mut runtime)?;
-        callback(&lua, module, ctx, &mut runtime)
-    }
-
-    fn ensure_initialized(
-        &self,
-        lua: &Lua,
-        module: &Table,
-        ctx: &Table,
-        runtime: &mut WorkspaceAppRuntimeState,
-    ) -> Result<()> {
-        if runtime.initialized {
-            return Ok(());
-        }
-        fs::create_dir_all(&self.state_dir).map_err(|err| {
-            miette!(
-                "failed to create app state directory {} before init: {err}",
-                self.state_dir.display()
-            )
-        })?;
-        let init_fn = self.map_lua(
-            "failed to resolve `init`",
-            module.get::<Option<Function>>("init"),
-        )?;
-        runtime.state = if let Some(init_fn) = init_fn {
-            let result = self.map_lua(
-                "failed to execute `init`",
-                init_fn.call::<LuaValue>(ctx.clone()),
-            )?;
-            match result {
-                LuaValue::Nil => JsonValue::Object(Default::default()),
-                value => self.map_lua("failed to decode `init` result", lua.from_value(value))?,
+    fn refresh_worker_cache(state: &mut WorkspaceAppHandleState) -> Result<()> {
+        state.render = match state.worker.request(WorkerRequestOp::RenderState)? {
+            WorkerResponsePayload::RenderState(render) => render,
+            other => {
+                return Err(miette!(
+                    "unexpected workspace app render payload: {other:?}"
+                ));
             }
-        } else {
-            JsonValue::Object(Default::default())
         };
-        runtime.initialized = true;
-        self.persist_runtime_state(runtime)?;
+        state.render_cache_served = false;
+        state.tool_specs = match state.worker.request(WorkerRequestOp::ListTools)? {
+            WorkerResponsePayload::ToolSpecs(tool_specs) => tool_specs,
+            other => {
+                return Err(miette!(
+                    "unexpected workspace app tool spec payload: {other:?}"
+                ));
+            }
+        };
+        state.last_error = None;
         Ok(())
     }
 
-    fn summarize_notices(notices: &[String]) -> Option<String> {
-        let mut notices = notices
-            .iter()
-            .map(|notice| notice.trim())
-            .filter(|notice| !notice.is_empty())
-            .collect::<Vec<_>>();
-        if notices.is_empty() {
-            return None;
-        }
-        if notices.len() == 1 {
-            return Some(notices.remove(0).to_string());
-        }
-        let preview = notices
-            .iter()
-            .take(3)
-            .copied()
-            .collect::<Vec<_>>()
-            .join("; ");
-        if notices.len() <= 3 {
-            Some(format!("{} notices pending: {}", notices.len(), preview))
-        } else {
-            Some(format!(
-                "{} notices pending: {}; +{} more",
-                notices.len(),
-                preview,
-                notices.len() - 3
-            ))
-        }
+    #[cfg(test)]
+    fn set_request_timeout_for_tests(&mut self, timeout: Duration) {
+        let mut state = self.handle_state.lock();
+        state.worker.set_request_timeout_for_tests(timeout);
+        state.last_error = None;
     }
 
-    fn load_tool_descriptors(
-        &self,
-        lua: &Lua,
-        module: &Table,
-        ctx: &Table,
-        runtime: &WorkspaceAppRuntimeState,
-    ) -> Result<Vec<WorkspaceToolDescriptor>> {
-        let Some(list_tools_fn) = self.map_lua(
-            "failed to resolve `list_tools`",
-            module.get::<Option<Function>>("list_tools"),
-        )?
-        else {
-            return Ok(Vec::new());
-        };
-        let state_value = self.map_lua(
-            "failed to encode runtime state for `list_tools`",
-            lua.to_value(&runtime.state),
-        )?;
-        let value = self.map_lua(
-            "failed to execute `list_tools`",
-            list_tools_fn.call::<LuaValue>((ctx.clone(), state_value)),
-        )?;
-        let mut descriptors = match value {
-            LuaValue::Nil => Vec::new(),
-            value => self.map_lua(
-                "failed to decode `list_tools` result",
-                lua.from_value::<Vec<WorkspaceToolDescriptor>>(value),
-            )?,
-        };
-        for descriptor in &mut descriptors {
-            descriptor.input_schema =
-                normalize_workspace_input_schema(descriptor.input_schema.clone());
-            validate_workspace_tool_schema(
-                &descriptor.input_schema,
-                &format!("workspace app tool `{}` input_schema", descriptor.name),
-            )?;
-            if let Some(output_schema) = descriptor.output_schema.as_ref() {
-                validate_workspace_tool_schema(
-                    output_schema,
-                    &format!("workspace app tool `{}` output_schema", descriptor.name),
-                )?;
-            }
-        }
-        Ok(descriptors)
-    }
-
-    fn persist_runtime_state(&self, runtime: &WorkspaceAppRuntimeState) -> Result<()> {
-        if let Some(parent) = self.state_file.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                miette!(
-                    "failed to create app state directory {}: {err}",
-                    parent.display()
-                )
-            })?;
-        }
-        let content = serde_json::to_vec_pretty(&runtime.state)
-            .map_err(|err| miette!("failed to encode app state for `{}`: {err}", self.id))?;
-        fs::write(&self.state_file, content).map_err(|err| {
-            miette!(
-                "failed to write app state {}: {err}",
-                self.state_file.display()
-            )
-        })?;
-        Ok(())
-    }
-
-    fn default_render_state(&self) -> AppStateRender {
-        let lines = vec![
-            "kind=workspace_app".to_string(),
-            format!("entry={}", self.entry_relative_path),
-            format!("source_dir={}", self.app_dir.display()),
-        ];
-        AppStateRender {
-            title: self.id.to_string(),
-            lines,
-        }
-    }
-
-    fn error_render_state(&self, error: &miette::Report) -> AppStateRender {
-        let mut render = self.default_render_state();
-        render.lines.push(format!(
-            "last_error={}",
-            error.to_string().replace('\n', " | ")
-        ));
-        render
+    #[cfg(test)]
+    fn restart_worker_for_tests(&mut self) {
+        let mut state = self.handle_state.lock();
+        state.worker.restart_for_tests();
+        state.last_error = None;
     }
 }
 
@@ -1129,45 +1027,32 @@ impl App for WorkspaceApp {
     }
 
     fn render_state(&self) -> AppStateRender {
-        match self.with_loaded_module(|lua, module, ctx, runtime| {
-            let Some(render_fn) = self.map_lua(
-                "failed to resolve `render_state`",
-                module.get::<Option<Function>>("render_state"),
-            )?
-            else {
-                return Ok(self.default_render_state());
-            };
-            let state_value = self.map_lua(
-                "failed to encode runtime state for `render_state`",
-                lua.to_value(&runtime.state),
-            )?;
-            let result = self.map_lua(
-                "failed to execute `render_state`",
-                render_fn.call::<LuaValue>((ctx, state_value)),
-            )?;
-            let output = match result {
-                LuaValue::Nil => WorkspaceRenderOutput::default(),
-                value => self.map_lua(
-                    "failed to decode `render_state` result",
-                    lua.from_value::<WorkspaceRenderOutput>(value),
-                )?,
-            };
-            if let Some(next_state) = output.state {
-                runtime.state = next_state;
-                self.persist_runtime_state(runtime)?;
+        let mut state = self.handle_state.lock();
+        if state.render_cache_served {
+            match state.worker.request(WorkerRequestOp::RenderState) {
+                Ok(WorkerResponsePayload::RenderState(render)) => {
+                    state.render = render;
+                    state.last_error = None;
+                }
+                Ok(other) => {
+                    state.last_error = Some(format!(
+                        "unexpected workspace app render payload: {other:?}"
+                    ));
+                }
+                Err(err) => {
+                    state.last_error = Some(err.to_string());
+                }
             }
-            let mut lines = output.lines;
-            if !lines.iter().any(|line| line.starts_with("kind=")) {
-                lines.insert(0, "kind=workspace_app".to_string());
-            }
-            Ok(AppStateRender {
-                title: output.title.unwrap_or_else(|| self.id.to_string()),
-                lines,
-            })
-        }) {
-            Ok(render) => render,
-            Err(err) => self.error_render_state(&err),
+        } else {
+            state.render_cache_served = true;
         }
+        let mut render = state.render.clone();
+        if let Some(error) = state.last_error.as_ref() {
+            render
+                .lines
+                .push(format!("worker_error={}", error.replace('\n', " | ")));
+        }
+        render
     }
 
     fn usage(&self) -> AppUsage {
@@ -1186,17 +1071,7 @@ impl App for WorkspaceApp {
     }
 
     fn dynamic_tools(&self) -> Result<Vec<AppDynamicToolSpec>> {
-        self.with_loaded_module(|lua, module, ctx, runtime| {
-            let descriptors = self.load_tool_descriptors(lua, &module, &ctx, runtime)?;
-            Ok(descriptors
-                .into_iter()
-                .map(|descriptor| AppDynamicToolSpec {
-                    name: descriptor.name,
-                    description: descriptor.description,
-                    input_schema: descriptor.input_schema,
-                })
-                .collect())
-        })
+        Ok(self.handle_state.lock().tool_specs.clone())
     }
 
     async fn execute_dynamic_tool(
@@ -1204,159 +1079,79 @@ impl App for WorkspaceApp {
         name: &str,
         arguments: JsonValue,
     ) -> Result<AppDynamicToolResult> {
-        self.with_loaded_module(|lua, module, ctx, runtime| {
-            let descriptors = self.load_tool_descriptors(lua, &module, &ctx, runtime)?;
-            let descriptor = descriptors
-                .into_iter()
-                .find(|descriptor| descriptor.name == name)
-                .ok_or_else(|| {
-                    miette!("workspace app `{}` does not declare tool `{name}`", self.id)
-                })?;
-            validate_workspace_tool_value(
-                &arguments,
-                &descriptor.input_schema,
-                &format!("arguments for workspace app tool `{}`", descriptor.name),
-            )?;
-            let call_tool_fn = self
-                .map_lua(
-                    "failed to resolve `call_tool`",
-                    module.get::<Option<Function>>("call_tool"),
-                )?
-                .ok_or_else(|| {
-                    miette!("workspace app `{}` does not define `call_tool`", self.id)
-                })?;
-            let state_value = self.map_lua(
-                "failed to encode runtime state for `call_tool`",
-                lua.to_value(&runtime.state),
-            )?;
-            let args_value = self.map_lua(
-                "failed to encode tool arguments for `call_tool`",
-                lua.to_value(&arguments),
-            )?;
-            let value = self.map_lua(
-                "failed to execute `call_tool`",
-                call_tool_fn.call::<LuaValue>((ctx, state_value, name.to_string(), args_value)),
-            )?;
-            let output = self.map_lua(
-                "failed to decode `call_tool` result",
-                lua.from_value::<WorkspaceToolCallOutput>(value),
-            )?;
-            if output.summary.trim().is_empty() {
+        let mut state = self.handle_state.lock();
+        let result = match state.worker.request(WorkerRequestOp::CallTool {
+            name: name.to_string(),
+            arguments,
+        }) {
+            Ok(WorkerResponsePayload::ToolResult(result)) => result,
+            Ok(other) => {
                 return Err(miette!(
-                    "workspace app `{}` tool `{}` returned an empty summary",
-                    self.id,
-                    descriptor.name
+                    "workspace app `{}` worker returned unexpected tool result payload: {other:?}",
+                    self.id
                 ));
             }
-            if let Some(output_schema) = descriptor.output_schema.as_ref() {
-                validate_workspace_tool_value(
-                    &output.payload,
-                    output_schema,
-                    &format!("payload for workspace app tool `{}`", descriptor.name),
-                )?;
+            Err(err) => {
+                state.last_error = Some(err.to_string());
+                return Err(err);
             }
-            if let Some(next_state) = output.state {
-                runtime.state = next_state;
-                self.persist_runtime_state(runtime)?;
-            }
-            Ok(AppDynamicToolResult {
-                summary: output.summary,
-                payload: output.payload,
-                model_content: output.model_content,
-                ui_lines: output.ui_lines,
-                turn_boundary_reason: output.turn_boundary,
-            })
-        })
+        };
+        if let Err(err) = Self::refresh_worker_cache(&mut state) {
+            state.last_error = Some(err.to_string());
+        }
+        Ok(result)
     }
 
     async fn on_focus(&mut self) -> Result<()> {
-        self.with_loaded_module(|lua, module, ctx, runtime| {
-            let Some(on_focus_fn) = self.map_lua(
-                "failed to resolve `on_focus`",
-                module.get::<Option<Function>>("on_focus"),
-            )?
-            else {
-                return Ok(());
-            };
-            let state_value = self.map_lua(
-                "failed to encode runtime state for `on_focus`",
-                lua.to_value(&runtime.state),
-            )?;
-            let value = self.map_lua(
-                "failed to execute `on_focus`",
-                on_focus_fn.call::<LuaValue>((ctx, state_value)),
-            )?;
-            if !matches!(value, LuaValue::Nil) {
-                runtime.state =
-                    self.map_lua("failed to decode `on_focus` result", lua.from_value(value))?;
-                self.persist_runtime_state(runtime)?;
+        let mut state = self.handle_state.lock();
+        match state.worker.request(WorkerRequestOp::OnFocus) {
+            Ok(WorkerResponsePayload::Unit) => {}
+            Ok(other) => return Err(miette!("unexpected workspace app focus payload: {other:?}")),
+            Err(err) => {
+                state.last_error = Some(err.to_string());
+                return Err(err);
             }
-            Ok(())
-        })
+        }
+        Self::refresh_worker_cache(&mut state)
     }
 
     async fn on_blur(&mut self) -> Result<()> {
-        self.with_loaded_module(|lua, module, ctx, runtime| {
-            let Some(on_blur_fn) = self.map_lua(
-                "failed to resolve `on_blur`",
-                module.get::<Option<Function>>("on_blur"),
-            )?
-            else {
-                return Ok(());
-            };
-            let state_value = self.map_lua(
-                "failed to encode runtime state for `on_blur`",
-                lua.to_value(&runtime.state),
-            )?;
-            let value = self.map_lua(
-                "failed to execute `on_blur`",
-                on_blur_fn.call::<LuaValue>((ctx, state_value)),
-            )?;
-            if !matches!(value, LuaValue::Nil) {
-                runtime.state =
-                    self.map_lua("failed to decode `on_blur` result", lua.from_value(value))?;
-                self.persist_runtime_state(runtime)?;
+        let mut state = self.handle_state.lock();
+        match state.worker.request(WorkerRequestOp::OnBlur) {
+            Ok(WorkerResponsePayload::Unit) => {}
+            Ok(other) => return Err(miette!("unexpected workspace app blur payload: {other:?}")),
+            Err(err) => {
+                state.last_error = Some(err.to_string());
+                return Err(err);
             }
-            Ok(())
-        })
+        }
+        Self::refresh_worker_cache(&mut state)
     }
 
     async fn refresh_notice(&mut self) -> Result<()> {
-        self.with_loaded_module(|lua, module, ctx, runtime| {
-            let Some(poll_notices_fn) = self.map_lua(
-                "failed to resolve `poll_notices`",
-                module.get::<Option<Function>>("poll_notices"),
-            )?
-            else {
-                runtime.notice_reason = None;
-                return Ok(());
-            };
-            let state_value = self.map_lua(
-                "failed to encode runtime state for `poll_notices`",
-                lua.to_value(&runtime.state),
-            )?;
-            let value = self.map_lua(
-                "failed to execute `poll_notices`",
-                poll_notices_fn.call::<LuaValue>((ctx, state_value)),
-            )?;
-            let output = match value {
-                LuaValue::Nil => WorkspaceNoticeOutput::default(),
-                value => self.map_lua(
-                    "failed to decode `poll_notices` result",
-                    lua.from_value::<WorkspaceNoticeOutput>(value),
-                )?,
-            };
-            if let Some(next_state) = output.state {
-                runtime.state = next_state;
-                self.persist_runtime_state(runtime)?;
+        let mut state = self.handle_state.lock();
+        state.notice_reason = match state.worker.request(WorkerRequestOp::PollNotices) {
+            Ok(WorkerResponsePayload::Notice(reason)) => reason,
+            Ok(other) => {
+                return Err(miette!(
+                    "unexpected workspace app notice payload: {other:?}"
+                ));
             }
-            runtime.notice_reason = Self::summarize_notices(&output.notices);
-            Ok(())
-        })
+            Err(err) => {
+                state.last_error = Some(err.to_string());
+                return Err(err);
+            }
+        };
+        Self::refresh_worker_cache(&mut state)
     }
 
     fn notice_reason(&self) -> Option<String> {
-        self.runtime_state.lock().notice_reason.clone()
+        self.handle_state.lock().notice_reason.clone()
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        self.handle_state.lock().worker.shutdown();
+        Ok(())
     }
 }
 
@@ -1397,28 +1192,10 @@ fn resolve_relative_child_path(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(root.join(relative_path))
 }
 
-fn validate_lua_entry(
-    app_id: &AppId,
-    app_dir: &Path,
-    entry_relative_path: &str,
-    source: &str,
-) -> Result<()> {
-    let lua = new_workspace_app_lua_runtime(&app_dir, Some(app_id))
-        .map_err(|err| miette!("failed to create lua validator for app `{app_id}`: {err}"))?;
-    lua.load(source)
-        .set_name(format!("{app_id}:{entry_relative_path}"))
-        .eval::<Table>()
-        .map_err(|err| {
-            miette!("lua entry validation failed for app `{app_id}` ({entry_relative_path}): {err}")
-        })?;
-    Ok(())
-}
-
 fn load_runtime_state(path: &Path) -> Result<WorkspaceAppRuntimeState> {
     if !path.exists() {
         return Ok(WorkspaceAppRuntimeState {
-            initialized: false,
-            state: JsonValue::Null,
+            state: JsonValue::Object(Default::default()),
             notice_reason: None,
         });
     }
@@ -1427,7 +1204,6 @@ fn load_runtime_state(path: &Path) -> Result<WorkspaceAppRuntimeState> {
     let state = serde_json::from_str::<JsonValue>(&content)
         .map_err(|err| miette!("failed to parse app state {}: {err}", path.display()))?;
     Ok(WorkspaceAppRuntimeState {
-        initialized: true,
         state,
         notice_reason: None,
     })
@@ -1559,6 +1335,268 @@ return app
                 .lines
                 .iter()
                 .any(|line| line == "count=5")
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_app_reuses_single_lua_runtime_until_reload() {
+        let root = TempDir::new().expect("create temp workspace root");
+        let state_root = TempDir::new().expect("create temp workspace state root");
+        write_workspace_app(
+            root.path(),
+            "stateful",
+            r#"local app = {}
+local render_count = 0
+
+function app.render_state(ctx, state)
+  render_count = render_count + 1
+  return {
+    title = "Stateful",
+    lines = { "render_count=" .. tostring(render_count) },
+  }
+end
+
+return app
+"#,
+        );
+
+        let app_dir = root.path().join("apps").join("stateful");
+        let app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "stateful")
+            .expect("load stateful app");
+
+        let first = app.render_state();
+        let second = app.render_state();
+
+        assert!(
+            first.lines.iter().any(|line| line == "render_count=1"),
+            "first render should initialize module state"
+        );
+        assert!(
+            second.lines.iter().any(|line| line == "render_count=2"),
+            "second render should reuse the same Lua module instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_app_init_runs_on_each_worker_cold_start() {
+        let root = TempDir::new().expect("create temp workspace root");
+        let state_root = TempDir::new().expect("create temp workspace state root");
+        write_workspace_app(
+            root.path(),
+            "cold-init",
+            r#"local app = {}
+
+function app.init(ctx, state)
+  return {
+    init_runs = (state.init_runs or 0) + 1
+  }
+end
+
+function app.render_state(ctx, state)
+  return {
+    title = "Cold Init",
+    lines = { "init_runs=" .. tostring(state.init_runs or 0) },
+  }
+end
+
+return app
+"#,
+        );
+
+        let app_dir = root.path().join("apps").join("cold-init");
+        let mut app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "cold-init")
+            .expect("load cold-init app");
+
+        assert!(
+            app.render_state()
+                .lines
+                .iter()
+                .any(|line| line == "init_runs=1"),
+            "init should run during initial worker cold start"
+        );
+
+        app.restart_worker_for_tests();
+
+        assert!(
+            app.render_state()
+                .lines
+                .iter()
+                .any(|line| line == "init_runs=2"),
+            "init should run again after worker restart and receive persisted state"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_app_config_runs_before_init_and_sets_request_timeout() {
+        let root = TempDir::new().expect("create temp workspace root");
+        let state_root = TempDir::new().expect("create temp workspace state root");
+        write_workspace_app(
+            root.path(),
+            "configured-timeout",
+            r#"local app = {}
+local configured = false
+local ok_calls = 0
+
+function app.config(ctx)
+  configured = true
+  return {
+    request_timeout_ms = 25
+  }
+end
+
+function app.init(ctx, state)
+  return {
+    configured_before_init = configured
+  }
+end
+
+function app.render_state(ctx, state)
+  return {
+    title = "Configured Timeout",
+    lines = { "configured_before_init=" .. tostring(state.configured_before_init or false) },
+  }
+end
+
+function app.list_tools(ctx, state)
+  return {
+    {
+      name = "ok",
+      description = "Return the current module counter",
+      input_schema = {
+        type = "object",
+        properties = {}
+      }
+    },
+    {
+      name = "hang",
+      description = "Run longer than the configured request timeout",
+      input_schema = {
+        type = "object",
+        properties = {}
+      }
+    }
+  }
+end
+
+function app.call_tool(ctx, state, name, args)
+  if name == "hang" then
+    local total = 0
+    for i = 1, 100000000 do
+      total = total + i
+    end
+  end
+  ok_calls = ok_calls + 1
+  return {
+    summary = "ok",
+    payload = { ok_calls = ok_calls },
+  }
+end
+
+return app
+"#,
+        );
+
+        let app_dir = root.path().join("apps").join("configured-timeout");
+        let mut app =
+            WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "configured-timeout")
+                .expect("load configured-timeout app");
+
+        assert!(
+            app.render_state()
+                .lines
+                .iter()
+                .any(|line| line == "configured_before_init=true"),
+            "config should run before init during worker cold start"
+        );
+
+        app.execute_dynamic_tool("hang", serde_json::json!({}))
+            .await
+            .expect_err("configured request timeout should stop long-running tool");
+
+        let result = app
+            .execute_dynamic_tool("ok", serde_json::json!({}))
+            .await
+            .expect("ok call after configured timeout should restart worker");
+        assert_eq!(result.payload, serde_json::json!({ "ok_calls": 1 }));
+    }
+
+    #[tokio::test]
+    async fn workspace_app_request_timeout_restarts_worker_runtime() {
+        let root = TempDir::new().expect("create temp workspace root");
+        let state_root = TempDir::new().expect("create temp workspace state root");
+        write_workspace_app(
+            root.path(),
+            "timeout-app",
+            r#"local app = {}
+local ok_calls = 0
+
+function app.list_tools(ctx, state)
+  return {
+    {
+      name = "ok",
+      description = "Return the current module counter",
+      input_schema = {
+        type = "object",
+        properties = {}
+      }
+    },
+    {
+      name = "hang",
+      description = "Spin forever",
+      input_schema = {
+        type = "object",
+        properties = {}
+      }
+    }
+  }
+end
+
+function app.call_tool(ctx, state, name, args)
+  if name == "hang" then
+    local total = 0
+    for i = 1, 100000000 do
+      total = total + i
+    end
+  end
+  ok_calls = ok_calls + 1
+  return {
+    summary = "ok",
+    payload = { ok_calls = ok_calls },
+  }
+end
+
+return app
+"#,
+        );
+
+        let app_dir = root.path().join("apps").join("timeout-app");
+        let mut app = WorkspaceApp::load_from_dir(&app_dir, state_root.path(), "timeout-app")
+            .expect("load timeout app");
+        app.set_request_timeout_for_tests(Duration::from_millis(25));
+
+        let first = app
+            .execute_dynamic_tool("ok", serde_json::json!({}))
+            .await
+            .expect("first ok call should succeed");
+        assert_eq!(first.payload, serde_json::json!({ "ok_calls": 1 }));
+
+        let err = app
+            .execute_dynamic_tool("hang", serde_json::json!({}))
+            .await
+            .expect_err("hanging tool should time out");
+        assert!(
+            err.to_string().contains("did not respond"),
+            "expected timeout error, got {err:?}"
+        );
+
+        let second = app
+            .execute_dynamic_tool("ok", serde_json::json!({}))
+            .await
+            .expect("ok call after timeout should rebuild Lua runtime");
+        assert_eq!(
+            second.payload,
+            serde_json::json!({ "ok_calls": 1 }),
+            "timeout should discard the poisoned Lua VM and reset module-local state"
         );
     }
 

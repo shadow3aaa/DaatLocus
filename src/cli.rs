@@ -14,6 +14,7 @@ use crate::{
 use crate::{config, config_wizard};
 use clap::{Parser, Subcommand};
 use miette::{Result, miette};
+use std::path::PathBuf;
 
 pub(crate) fn parse_args() -> Cli {
     Cli::parse()
@@ -46,6 +47,22 @@ enum DaatLocusCommand {
     Config {
         #[command(subcommand)]
         target: Option<ConfigTarget>,
+    },
+    /// Internal workspace app worker process.
+    #[command(name = "workspace-app-worker", hide = true)]
+    WorkspaceAppWorker {
+        #[arg(long)]
+        app_id: String,
+        #[arg(long)]
+        app_dir: PathBuf,
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        entry: String,
+        #[arg(long)]
+        connect_addr: String,
+        #[arg(long)]
+        token: String,
     },
 }
 
@@ -113,6 +130,26 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
     let _log_guard = init_logging().await;
 
     match cli.command.as_ref() {
+        Some(DaatLocusCommand::WorkspaceAppWorker {
+            app_id,
+            app_dir,
+            state_dir,
+            entry,
+            connect_addr,
+            token,
+        }) => {
+            crate::workspace_app::worker::run_workspace_app_worker(
+                crate::workspace_app::worker::WorkspaceAppWorkerArgs {
+                    app_id: app_id.clone(),
+                    app_dir: app_dir.clone(),
+                    state_dir: state_dir.clone(),
+                    entry: entry.clone(),
+                    connect_addr: connect_addr.clone(),
+                    token: token.clone(),
+                },
+            )?;
+            return Ok(());
+        }
         Some(DaatLocusCommand::Reset {
             target: ResetTarget::Complite,
         }) => {
