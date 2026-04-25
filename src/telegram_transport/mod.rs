@@ -247,9 +247,9 @@ impl TelegramTransport {
             }))
             .send()
             .await
-            .map_err(|err| miette!("telegram getUpdates request failed: {err}"))?
+            .map_err(|err| miette!("telegram getUpdates request failed: {}", err.without_url()))?
             .error_for_status()
-            .map_err(|err| miette!("telegram getUpdates http error: {err}"))?;
+            .map_err(|err| miette!("telegram getUpdates http error: {}", err.without_url()))?;
 
         let payload: TelegramApiResponse<Vec<TelegramUpdate>> = response
             .json()
@@ -273,9 +273,9 @@ impl TelegramTransport {
             .post(self.endpoint("getMe"))
             .send()
             .await
-            .map_err(|err| miette!("telegram getMe request failed: {err}"))?
+            .map_err(|err| miette!("telegram getMe request failed: {}", err.without_url()))?
             .error_for_status()
-            .map_err(|err| miette!("telegram getMe http error: {err}"))?;
+            .map_err(|err| miette!("telegram getMe http error: {}", err.without_url()))?;
         let payload: TelegramApiResponse<TelegramBotProfile> = response
             .json()
             .await
@@ -302,9 +302,14 @@ impl TelegramTransport {
             }))
             .send()
             .await
-            .map_err(|err| miette!("telegram setMyCommands request failed: {err}"))?
+            .map_err(|err| {
+                miette!(
+                    "telegram setMyCommands request failed: {}",
+                    err.without_url()
+                )
+            })?
             .error_for_status()
-            .map_err(|err| miette!("telegram setMyCommands http error: {err}"))?;
+            .map_err(|err| miette!("telegram setMyCommands http error: {}", err.without_url()))?;
         let payload: TelegramApiResponse<bool> = response
             .json()
             .await
@@ -332,9 +337,9 @@ impl TelegramTransport {
             }))
             .send()
             .await
-            .map_err(|err| miette!("telegram sendMessage request failed: {err}"))?
+            .map_err(|err| miette!("telegram sendMessage request failed: {}", err.without_url()))?
             .error_for_status()
-            .map_err(|err| miette!("telegram sendMessage http error: {err}"))?;
+            .map_err(|err| miette!("telegram sendMessage http error: {}", err.without_url()))?;
 
         let payload: TelegramApiResponse<serde_json::Value> = response
             .json()
@@ -393,9 +398,19 @@ impl TelegramLiveDraftClient {
             }))
             .send()
             .await
-            .map_err(|err| miette!("telegram sendMessageDraft request failed: {err}"))?
+            .map_err(|err| {
+                miette!(
+                    "telegram sendMessageDraft request failed: {}",
+                    err.without_url()
+                )
+            })?
             .error_for_status()
-            .map_err(|err| miette!("telegram sendMessageDraft http error: {err}"))?;
+            .map_err(|err| {
+                miette!(
+                    "telegram sendMessageDraft http error: {}",
+                    err.without_url()
+                )
+            })?;
 
         let payload: TelegramApiResponse<bool> = response
             .json()

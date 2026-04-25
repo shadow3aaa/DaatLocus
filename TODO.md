@@ -74,10 +74,10 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Set `0600` on Unix-like systems.
   - [x] Preserve safe behavior when rewriting existing config files.
 
-- [ ] Avoid leaking provider secrets in UI and logs
-  - [ ] Mask provider secrets in config summaries.
-  - [ ] Avoid printing raw credentials in errors and debug output.
-  - [ ] Avoid persisting unmasked secrets outside config.
+- [x] Avoid leaking provider secrets in UI and logs
+  - [x] Mask provider secrets in config summaries.
+  - [x] Avoid printing raw credentials in errors and debug output.
+  - [x] Avoid persisting unmasked secrets outside config.
 
 - [ ] Pin and verify managed uv downloads
   - [ ] Pin auto-downloaded uv versions instead of using GitHub `latest`.

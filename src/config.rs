@@ -29,6 +29,15 @@ pub fn resolve_env_reference(value: &str) -> String {
     }
 }
 
+pub fn redact_secret_text(text: &str, secret: &str) -> String {
+    let secret = secret.trim();
+    if secret.is_empty() {
+        text.to_string()
+    } else {
+        text.replace(secret, "[redacted]")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Provider credentials
 // ---------------------------------------------------------------------------
@@ -606,6 +615,15 @@ mod tests {
             "env:DAAT_LOCUS_TEST_MISSING_SECRET"
         );
         assert_eq!(resolve_env_reference("literal-secret"), "literal-secret");
+    }
+
+    #[test]
+    fn redact_secret_text_replaces_secret_values() {
+        assert_eq!(
+            super::redact_secret_text("Bearer secret-token", "secret-token"),
+            "Bearer [redacted]"
+        );
+        assert_eq!(super::redact_secret_text("unchanged", ""), "unchanged");
     }
 
     #[cfg(unix)]
