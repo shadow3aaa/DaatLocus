@@ -1,7 +1,7 @@
 //! Runtime context state carried by the Daat Locus main loop.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -83,11 +83,12 @@ pub struct Context {
     pub active_runtime_turn: bool,
     pub active_runtime_phase: Option<RuntimeTurnPhase>,
     pub runtime_turn_started_at: Option<Instant>,
-    pub active_app_notices: HashSet<AppId>,
+    pub active_app_notices: HashMap<AppNoticeKey, ActiveAppNotice>,
     pub runtime_overflow_failures: Arc<Mutex<HashMap<String, usize>>>,
-    pub suppressed_app_notices: Arc<Mutex<HashMap<AppId, SuppressedAppNotice>>>,
+    pub suppressed_app_notices: Arc<Mutex<HashMap<AppNoticeKey, SuppressedAppNotice>>>,
     pub live_progress_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<LiveProgressEvent>>>>,
     pub claimed_event_ids: Vec<String>,
+    pub claimed_app_notices: Vec<AppNoticeKey>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
 }
@@ -112,10 +113,39 @@ pub struct PendingWorkflowRunFlush {
     pub outcome: WorkflowRunOutcome,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AppNoticeKey {
+    pub app: AppId,
+    pub reason: String,
+}
+
+impl AppNoticeKey {
+    pub fn new(app: AppId, reason: impl Into<String>) -> Self {
+        Self {
+            app,
+            reason: normalize_app_notice_reason_lossy(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveAppNotice {
+    pub resolved: bool,
+    pub unresolved_turns: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct SuppressedAppNotice {
-    pub reason: String,
     pub until: Instant,
+}
+
+pub fn normalize_app_notice_reason(reason: &str) -> Option<String> {
+    let normalized = normalize_app_notice_reason_lossy(reason);
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn normalize_app_notice_reason_lossy(reason: impl AsRef<str>) -> String {
+    reason.as_ref().trim().to_string()
 }
 
 impl Context {
@@ -219,28 +249,90 @@ impl Context {
 
     pub fn suppress_app_notice(&self, app: &AppId, reason: impl Into<String>, duration: Duration) {
         self.suppressed_app_notices.lock().insert(
-            app.clone(),
+            AppNoticeKey::new(app.clone(), reason),
             SuppressedAppNotice {
-                reason: reason.into(),
                 until: Instant::now() + duration,
             },
         );
     }
 
     pub fn clear_app_notice_suppression(&self, app: &AppId) {
-        self.suppressed_app_notices.lock().remove(app);
+        self.suppressed_app_notices
+            .lock()
+            .retain(|key, _| &key.app != app);
     }
 
     pub fn is_app_notice_suppressed(&self, app: &AppId, reason: &str) -> bool {
         let mut suppressed = self.suppressed_app_notices.lock();
-        let Some(entry) = suppressed.get(app) else {
+        let key = AppNoticeKey::new(app.clone(), reason);
+        let Some(entry) = suppressed.get(&key) else {
             return false;
         };
-        if entry.reason != reason || Instant::now() >= entry.until {
-            suppressed.remove(app);
+        if Instant::now() >= entry.until {
+            suppressed.remove(&key);
             return false;
         }
         true
+    }
+
+    pub fn activate_app_notice(&mut self, app: AppId, reason: impl Into<String>) {
+        self.clear_active_app_notice(&app);
+        self.active_app_notices.insert(
+            AppNoticeKey::new(app, reason),
+            ActiveAppNotice {
+                resolved: false,
+                unresolved_turns: 0,
+            },
+        );
+    }
+
+    pub fn clear_active_app_notice(&mut self, app: &AppId) {
+        self.active_app_notices.retain(|key, _| &key.app != app);
+    }
+
+    pub fn app_notice_is_resolved(&self, key: &AppNoticeKey) -> bool {
+        self.active_app_notices
+            .get(key)
+            .is_some_and(|notice| notice.resolved)
+    }
+
+    pub fn resolve_claimed_app_notice(&mut self, key: &AppNoticeKey) -> bool {
+        if !self
+            .claimed_app_notices
+            .iter()
+            .any(|claimed| claimed == key)
+        {
+            return false;
+        }
+        self.clear_active_app_notice(&key.app);
+        self.active_app_notices.insert(
+            key.clone(),
+            ActiveAppNotice {
+                resolved: true,
+                unresolved_turns: 0,
+            },
+        );
+        true
+    }
+
+    pub fn record_unresolved_app_notice_turn(&mut self, key: &AppNoticeKey) -> usize {
+        let entry = self
+            .active_app_notices
+            .entry(key.clone())
+            .or_insert_with(|| ActiveAppNotice {
+                resolved: false,
+                unresolved_turns: 0,
+            });
+        entry.unresolved_turns += 1;
+        entry.unresolved_turns
+    }
+
+    pub fn claimed_app_notices_are_resolved(&self) -> bool {
+        !self.claimed_app_notices.is_empty()
+            && self
+                .claimed_app_notices
+                .iter()
+                .all(|notice| self.app_notice_is_resolved(notice))
     }
 
     pub async fn shutdown(mut self) {

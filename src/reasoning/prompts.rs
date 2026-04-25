@@ -9,6 +9,7 @@ pub const EVENT_UNIT_WHAT: &str = r#"External inputs primarily enter the current
 `<world_snapshot> ... </world_snapshot>` is not a user conversation message; it is injected context describing the current world state. Structured events or app notices claimed by the current turn may also appear as prior `user` messages in the thread context; they are still pending world inputs, not ordinary chat."#;
 
 pub const EVENT_UNIT_HOW: &str = r#"The world only changes when you explicitly call tools. Any event completion that must deliver a final answer to the user, whether `resolved` or `failed`, must call `finish_and_send` with a `reply_message`.
+Any claimed app notice that has been handled must be explicitly completed with `notice_resolved`; assistant text alone does not resolve an app notice.
 If more work is still needed, do not call `finish_and_send`; continue using tools.
 When an intermediate step is clearly complete, you may output text to explain and record progress. That intermediate note is not final delivery and must not be sent through `finish_and_send`.
 If there is still an actionable goal, event, or app signal, plain text alone does not change the world and is not valid progress; call a tool instead.

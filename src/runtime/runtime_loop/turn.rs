@@ -20,7 +20,7 @@ async fn abort_runtime_turn_before_model(
     live_draft_session: Option<TelegramLiveDraftSession>,
     claimed_input_fingerprint: Option<&str>,
     claimed_event_ids: &[String],
-    claimed_app_notices: &[AppId],
+    claimed_app_notices: &[AppNoticeKey],
     observation: String,
     description: String,
 ) -> AgentLoopStepExecution {
@@ -44,6 +44,7 @@ async fn abort_runtime_turn_before_model(
     };
     finalize_claimed_runtime_events(context, claimed_event_ids, &output);
     finalize_claimed_runtime_app_notices(context, claimed_app_notices, &output).await;
+    context.claimed_app_notices.clear();
     record_workflow_run_evidence(context, &output).await;
     context.current_work_origin = None;
     context.workflow_step_started_bound_id = None;
@@ -73,16 +74,12 @@ pub(crate) async fn execute_agent_loop_step(
         .iter()
         .filter_map(|input| match input {
             ClaimedRuntimeInput::Event(_) => None,
-            ClaimedRuntimeInput::AppNotice { app, reason } => Some((app.clone(), reason.clone())),
+            ClaimedRuntimeInput::AppNotice { app, reason } => {
+                Some(AppNoticeKey::new(app.clone(), reason.clone()))
+            }
         })
         .collect::<Vec<_>>();
-    let claimed_app_notices = claimed_inputs
-        .iter()
-        .filter_map(|input| match input {
-            ClaimedRuntimeInput::Event(_) => None,
-            ClaimedRuntimeInput::AppNotice { app, .. } => Some(app.clone()),
-        })
-        .collect::<Vec<_>>();
+    context.claimed_app_notices = claimed_app_notice_entries.clone();
 
     let preflight_timeout = Duration::from_secs(RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS);
     enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightMemory);
@@ -131,7 +128,7 @@ pub(crate) async fn execute_agent_loop_step(
                 None,
                 claimed_input_fingerprint.as_deref(),
                 &claimed_event_ids,
-                &claimed_app_notices,
+                &claimed_app_notice_entries,
                 format!("runtime preflight failed: {err}"),
                 "Failed to build hindsight memory context.".to_string(),
             )
@@ -197,7 +194,7 @@ pub(crate) async fn execute_agent_loop_step(
                 live_draft_session,
                 claimed_input_fingerprint.as_deref(),
                 &claimed_event_ids,
-                &claimed_app_notices,
+                &claimed_app_notice_entries,
                 format!("runtime preflight failed: {err}"),
                 "Failed to build runtime snapshot.".to_string(),
             )
@@ -267,7 +264,7 @@ pub(crate) async fn execute_agent_loop_step(
                     live_draft_session,
                     claimed_input_fingerprint.as_deref(),
                     &claimed_event_ids,
-                    &claimed_app_notices,
+                    &claimed_app_notice_entries,
                     format!("runtime preflight failed: {err}"),
                     "Failed to execute pre-turn context compaction.".to_string(),
                 )
@@ -600,6 +597,25 @@ pub(crate) async fn execute_agent_loop_step(
                         actions: actions.clone(),
                     };
                 }
+                if context.claimed_app_notices_are_resolved() {
+                    if actions.is_empty() {
+                        actions.push(EpisodeActionRecord {
+                            kind: "claimed_app_notices_completed".to_string(),
+                            summary: "claimed app notices were explicitly resolved".to_string(),
+                        });
+                    }
+                    break 'agent_loop AgentLoopStepOutput {
+                        observation: if tool_results.is_empty() {
+                            "claimed app notices were explicitly resolved".to_string()
+                        } else {
+                            tool_results.join("\n")
+                        },
+                        description: "Claimed app notices for this turn were explicitly resolved, so the turn ends immediately after the relevant tool."
+                            .to_string(),
+                        current_doing: "waiting for next tool decision".to_string(),
+                        actions: actions.clone(),
+                    };
+                }
             }
             continue 'agent_loop;
         }
@@ -655,7 +671,8 @@ pub(crate) async fn execute_agent_loop_step(
         context.clear_runtime_overflow_failure(fingerprint);
     }
     finalize_claimed_runtime_events(context, &claimed_event_ids, &output);
-    finalize_claimed_runtime_app_notices(context, &claimed_app_notices, &output).await;
+    finalize_claimed_runtime_app_notices(context, &claimed_app_notice_entries, &output).await;
+    context.claimed_app_notices.clear();
     let history_messages = runtime_step.history_messages().to_vec();
     if !runtime_step.is_history_empty() {
         record_runtime_history_messages(context, runtime_step.into_turn_draft()).await;

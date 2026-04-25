@@ -102,9 +102,13 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Reset only inflight state that is safe to retry.
   - [x] Keep pending but unsubmitted items visible in the local queue.
 
-- [ ] Add bounded retry and recovery behavior for stuck app notices
-  - [ ] Prevent app notices from spinning forever.
-  - [ ] Surface stable failure reasons when notices are suppressed or dropped.
+- [x] Add explicit app notice resolution
+  - [x] Add a `notice_resolved` tool that can resolve only app notices claimed by the current turn.
+  - [x] Render `notice_resolved` with the same resolved completion UI used by `finish_and_send`, without implying an outbound reply was sent.
+  - [x] Track active and resolved app notice state by `(app, reason)` instead of app id alone.
+  - [x] Do not requeue a claimed app notice after the model explicitly resolves that exact notice.
+  - [x] Re-enqueue app notice work only when the app reports a different reason or after the notice clears and later reappears.
+  - [x] Keep bounded retry or suppression only as a fallback for repeatedly unresolved claimed notices.
 
 - [ ] Add tests for pending work recovery paths
   - [ ] Cover event claim, requeue, overflow fuse, and terminal resolution paths.

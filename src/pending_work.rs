@@ -289,6 +289,33 @@ mod tests {
     }
 
     #[test]
+    fn app_notice_enqueue_updates_reason_for_same_app() {
+        let queue = test_queue();
+        queue
+            .enqueue(PendingWork::AppNotice {
+                app: AppId::terminal(),
+                reason: "old reason".to_string(),
+            })
+            .expect("enqueue old app notice");
+        queue
+            .enqueue(PendingWork::AppNotice {
+                app: AppId::terminal(),
+                reason: "new reason".to_string(),
+            })
+            .expect("update app notice reason");
+
+        let claimed = queue.claim_batch(2).expect("claim work");
+        assert_eq!(claimed.len(), 1);
+        match &claimed[0] {
+            PendingWork::AppNotice { app, reason } => {
+                assert_eq!(*app, AppId::terminal());
+                assert_eq!(reason, "new reason");
+            }
+            other => panic!("expected app notice, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn requeue_front_reactivates_claimed_event_driver() {
         let queue = test_queue();
         let event_id = Uuid::new_v4();

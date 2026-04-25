@@ -175,30 +175,60 @@ fn sync_driver_frontier_from_sources(context: &Context) {
 
 fn enqueue_app_notice_work(context: &mut Context) {
     for app_id in context.apps.app_ids() {
-        if let Some(reason) = context.apps.notice_reason(&app_id) {
-            if context.is_app_notice_suppressed(&app_id, &reason) {
-                context.active_app_notices.remove(&app_id);
+        let Some(reason) = context
+            .apps
+            .notice_reason(&app_id)
+            .and_then(|reason| crate::context::normalize_app_notice_reason(&reason))
+        else {
+            context.clear_active_app_notice(&app_id);
+            context.clear_app_notice_suppression(&app_id);
+            if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
+                app: app_id.clone(),
+                reason: String::new(),
+            }) {
+                tracing::error!("failed to remove cleared app notice work for {app_id}: {err:?}");
+            }
+            continue;
+        };
+
+        if context.is_app_notice_suppressed(&app_id, &reason) {
+            context.clear_active_app_notice(&app_id);
+            if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
+                app: app_id.clone(),
+                reason: String::new(),
+            }) {
+                tracing::error!(
+                    "failed to remove suppressed app notice work for {app_id}: {err:?}"
+                );
+            }
+            continue;
+        }
+
+        let key = AppNoticeKey::new(app_id.clone(), reason.clone());
+        let should_enqueue = match context.active_app_notices.get(&key) {
+            Some(active) if active.resolved => {
                 if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
                     app: app_id.clone(),
                     reason: String::new(),
                 }) {
                     tracing::error!(
-                        "failed to remove suppressed app notice work for {app_id}: {err:?}"
+                        "failed to remove resolved app notice work for {app_id}: {err:?}"
                     );
                 }
-                continue;
+                false
             }
-            if context.active_app_notices.insert(app_id.clone()) {
-                if let Err(err) = context.pending_work.enqueue(PendingWork::AppNotice {
-                    app: app_id.clone(),
-                    reason,
-                }) {
-                    tracing::error!("failed to enqueue app notice work for {app_id}: {err:?}");
-                }
+            Some(_) => false,
+            None => true,
+        };
+
+        if should_enqueue {
+            context.activate_app_notice(app_id.clone(), reason.clone());
+            if let Err(err) = context.pending_work.enqueue(PendingWork::AppNotice {
+                app: app_id.clone(),
+                reason,
+            }) {
+                tracing::error!("failed to enqueue app notice work for {app_id}: {err:?}");
             }
-        } else {
-            context.active_app_notices.remove(&app_id);
-            context.clear_app_notice_suppression(&app_id);
         }
     }
 }

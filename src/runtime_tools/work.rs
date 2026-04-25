@@ -6,7 +6,7 @@ use crate::{
     context::Context,
     core::{
         ActivateWorkflowArgs, CreateWorkflowArgs, DeepRecallArgs, EventResolveArgs, FocusAppArgs,
-        PutAwayAppArgs, UpdatePlanArgs,
+        NoticeResolvedArgs, PutAwayAppArgs, UpdatePlanArgs,
     },
     events::{EventDisposition, EventPayload, EventStatus},
     hindsight::HindsightReflectOptions,
@@ -71,6 +71,14 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             summarize_event_resolve_tool,
             render_event_resolve_call_ui,
             execute_event_resolve_tool,
+        )),
+        Box::new(StaticRuntimeTool::new::<NoticeResolvedArgs>(
+            "notice_resolved",
+            "Explicitly resolve an app notice claimed by the current turn. This completes the notice without sending an external reply.",
+            None,
+            summarize_notice_resolved_tool,
+            render_notice_resolved_call_ui,
+            execute_notice_resolved_tool,
         )),
         Box::new(StaticRuntimeTool::new::<UpdatePlanArgs>(
             "update_plan",
@@ -322,6 +330,72 @@ fn execute_event_resolve_tool<'a>(
                 },
                 reply_lines,
             ),
+        ))
+    })
+}
+
+fn summarize_notice_resolved_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: NoticeResolvedArgs = parse_tool_args(call)?;
+    Ok(EpisodeActionRecord {
+        kind: "notice_resolved".to_string(),
+        summary: format!(
+            "app={} reason={}",
+            args.app,
+            summarize_inline_text(args.reason.trim())
+        ),
+    })
+}
+
+fn render_notice_resolved_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: NoticeResolvedArgs = parse_tool_args(call)?;
+    let mut lines = vec![
+        format!("app={}", args.app),
+        format!("reason={}", summarize_inline_text(args.reason.trim())),
+    ];
+    if let Some(note) = args.note.as_deref()
+        && !note.trim().is_empty()
+    {
+        lines.push(format!("note={}", summarize_inline_text(note)));
+    }
+    Ok(ToolCallUiEvent::app("notice_resolved", lines))
+}
+
+fn execute_notice_resolved_tool<'a>(
+    context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let args: NoticeResolvedArgs = parse_tool_args(call)?;
+        let key = crate::context::AppNoticeKey::new(args.app.clone(), args.reason.clone());
+        if !context.resolve_claimed_app_notice(&key) {
+            let claimed = context
+                .claimed_app_notices
+                .iter()
+                .map(|notice| format!("{}:{}", notice.app, notice.reason))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(miette::miette!(
+                "notice_resolved can only resolve an app notice claimed by the current turn; requested={}:{} claimed=[{}]",
+                key.app,
+                key.reason,
+                claimed,
+            ));
+        }
+
+        context.queue_active_workflow_run_for_flush(WorkflowRunOutcome::Completed);
+        context.bound_workflow_id = None;
+        let result_lines = vec![
+            format!("App notice resolved: {}", key.app),
+            format!("Reason: {}", summarize_inline_text(&key.reason)),
+        ];
+        Ok(ToolExecutionResult::new(
+            format!("resolved app notice {}: {}", key.app, key.reason),
+            json!({
+                "app": key.app,
+                "reason": key.reason,
+                "note": args.note,
+            }),
+            ToolUiEvent::notice_reply(ReplyDisposition::Resolved, result_lines),
         ))
     })
 }
@@ -698,5 +772,34 @@ mod tests {
         assert!(disposition_requires_reply(EventDisposition::Resolved));
         assert!(disposition_requires_reply(EventDisposition::Failed));
         assert!(!disposition_requires_reply(EventDisposition::Dismissed));
+    }
+
+    #[test]
+    fn notice_resolved_call_ui_renders_claimed_notice_identity() {
+        let call = AgentToolCall {
+            id: "call_1".to_string(),
+            name: "notice_resolved".to_string(),
+            arguments: json!({
+                "app": "Terminal",
+                "reason": "terminal output reviewed",
+                "note": "handled",
+            }),
+        };
+
+        let event = render_notice_resolved_call_ui(&call).expect("render notice resolved call");
+        match event {
+            ToolCallUiEvent::App(data) => {
+                assert_eq!(data.title, "notice_resolved");
+                assert_eq!(
+                    data.body_lines,
+                    vec![
+                        "app=Terminal".to_string(),
+                        "reason=terminal output reviewed".to_string(),
+                        "note=handled".to_string(),
+                    ]
+                );
+            }
+            other => panic!("expected app call ui, got {other:?}"),
+        }
     }
 }

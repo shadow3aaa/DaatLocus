@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::tool_ui::{
     PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, PatchUiData, ReplyDisposition,
-    ReplyUiData, TelegramUiAction, TelegramUiData,
+    ReplySubject, ReplyUiData, TelegramUiAction, TelegramUiData,
 };
 
 use super::highlight::{diff_scope_backgrounds, highlight_patch_lines};
@@ -28,6 +28,7 @@ pub struct TelegramActivityCell {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplyActivityCell {
     pub disposition: ReplyDisposition,
+    pub subject: ReplySubject,
     pub message_lines: Vec<String>,
 }
 
@@ -116,7 +117,7 @@ impl Cell for TelegramActivityCell {
 impl Cell for ReplyActivityCell {
     fn render_lines(&self) -> Vec<Line<'static>> {
         let (title, color) = match self.disposition {
-            ReplyDisposition::Resolved => ("Resolved", Color::LightGreen),
+            ReplyDisposition::Resolved => (self.resolved_title(), Color::LightGreen),
             ReplyDisposition::Dismissed => ("Dismissed", Color::DarkGray),
             ReplyDisposition::Failed => ("Failed", Color::Red),
         };
@@ -135,6 +136,15 @@ impl Cell for ReplyActivityCell {
             )]));
         }
         lines
+    }
+}
+
+impl ReplyActivityCell {
+    fn resolved_title(&self) -> &'static str {
+        match self.subject {
+            ReplySubject::Message => "Resolved Message",
+            ReplySubject::Notice => "Resolved Notice",
+        }
     }
 }
 
@@ -171,6 +181,7 @@ impl From<ReplyUiData> for ReplyActivityCell {
     fn from(data: ReplyUiData) -> Self {
         ReplyActivityCell {
             disposition: data.disposition,
+            subject: data.subject,
             message_lines: data.message_lines,
         }
     }
@@ -387,5 +398,30 @@ mod tests {
                 .iter()
                 .any(|line| line.contains('+') && line.contains("println!(\"new\");"))
         );
+    }
+
+    #[test]
+    fn reply_activity_cell_distinguishes_message_and_notice_resolution() {
+        let message = ReplyActivityCell {
+            disposition: ReplyDisposition::Resolved,
+            subject: ReplySubject::Message,
+            message_lines: Vec::new(),
+        }
+        .render_lines()
+        .into_iter()
+        .map(|line| line_text(&line))
+        .collect::<Vec<_>>();
+        assert!(message.iter().any(|line| line.contains("Resolved Message")));
+
+        let notice = ReplyActivityCell {
+            disposition: ReplyDisposition::Resolved,
+            subject: ReplySubject::Notice,
+            message_lines: Vec::new(),
+        }
+        .render_lines()
+        .into_iter()
+        .map(|line| line_text(&line))
+        .collect::<Vec<_>>();
+        assert!(notice.iter().any(|line| line.contains("Resolved Notice")));
     }
 }
