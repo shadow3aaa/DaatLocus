@@ -1,7 +1,10 @@
 use std::{
     path::PathBuf,
     process::Stdio,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -61,7 +64,94 @@ pub struct StatusResponse {
     pub started_at_ms: i64,
     pub version: String,
     pub port: u16,
+    pub state: DaemonLifecycleState,
     pub connected_clients: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonLifecycleState {
+    Initializing,
+    Ready,
+    Stopping,
+    Failed,
+}
+
+impl DaemonLifecycleState {
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::Initializing => 0,
+            Self::Ready => 1,
+            Self::Stopping => 2,
+            Self::Failed => 3,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Ready,
+            2 => Self::Stopping,
+            3 => Self::Failed,
+            _ => Self::Initializing,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Initializing => "initializing",
+            Self::Ready => "ready",
+            Self::Stopping => "stopping",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn allows_runtime_commands(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+impl std::fmt::Display for DaemonLifecycleState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DaemonLifecycleHandle {
+    state: Arc<AtomicU8>,
+}
+
+impl DaemonLifecycleHandle {
+    pub fn new(state: DaemonLifecycleState) -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(state.as_u8())),
+        }
+    }
+
+    pub fn get(&self) -> DaemonLifecycleState {
+        DaemonLifecycleState::from_u8(self.state.load(Ordering::SeqCst))
+    }
+
+    pub fn set(&self, state: DaemonLifecycleState) {
+        self.state.store(state.as_u8(), Ordering::SeqCst);
+    }
+
+    pub fn mark_ready(&self) {
+        self.set(DaemonLifecycleState::Ready);
+    }
+
+    pub fn mark_stopping(&self) {
+        self.set(DaemonLifecycleState::Stopping);
+    }
+
+    pub fn mark_failed_if_initializing(&self) {
+        let _ = self.state.compare_exchange(
+            DaemonLifecycleState::Initializing.as_u8(),
+            DaemonLifecycleState::Failed.as_u8(),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,6 +174,7 @@ struct ServerState {
     started_at_ms: i64,
     port: u16,
     auth_registry: DaemonTokenRegistryHandle,
+    lifecycle: DaemonLifecycleHandle,
     dashboard_rx: watch::Receiver<DashboardState>,
     telegram_acl: TelegramAclHandle,
     events: EventStore,
@@ -190,6 +281,7 @@ fn process_exists(pid: u32) -> bool {
 pub async fn start_server(
     port: u16,
     auth_registry: DaemonTokenRegistryHandle,
+    lifecycle: DaemonLifecycleHandle,
     dashboard_rx: watch::Receiver<DashboardState>,
     telegram_acl: TelegramAclHandle,
     events: EventStore,
@@ -210,6 +302,7 @@ pub async fn start_server(
         started_at_ms,
         port: local_addr.port(),
         auth_registry,
+        lifecycle,
         dashboard_rx,
         telegram_acl,
         events,
@@ -253,6 +346,7 @@ async fn status_handler(State(state): State<ServerState>) -> impl IntoResponse {
         started_at_ms: state.started_at_ms,
         version: env!("CARGO_PKG_VERSION").to_string(),
         port: state.port,
+        state: state.lifecycle.get(),
         connected_clients: state
             .connected_clients
             .load(std::sync::atomic::Ordering::Relaxed),
@@ -289,6 +383,9 @@ async fn command_handler(
     if !state.auth_registry.authorize_headers(&headers).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    if !state.lifecycle.get().allows_runtime_commands() {
+        return runtime_not_ready_response(state.lifecycle.get());
+    }
     let snapshot = state.dashboard_rx.borrow().clone();
     let output = execute_remote_command(
         &request.command,
@@ -308,6 +405,7 @@ async fn shutdown_handler(
     if !state.auth_registry.authorize_headers(&headers).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    state.lifecycle.mark_stopping();
     let (completion_tx, completion_rx) = oneshot::channel();
     if state
         .daemon_control_tx
@@ -320,6 +418,14 @@ async fn shutdown_handler(
         Ok(()) => StatusCode::OK.into_response(),
         Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
+}
+
+fn runtime_not_ready_response(state: DaemonLifecycleState) -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!("daemon is {state}; runtime commands are accepted only when ready"),
+    )
+        .into_response()
 }
 
 async fn dashboard_ws(mut socket: WebSocket, state: ServerState) {
@@ -531,7 +637,13 @@ pub async fn wait_for_daemon_ready() -> Result<StatusResponse> {
     let mut last_error = None;
     while Instant::now() < deadline {
         match client.status().await {
-            Ok(status) => return Ok(status),
+            Ok(status) if status.state == DaemonLifecycleState::Ready => return Ok(status),
+            Ok(status) if status.state == DaemonLifecycleState::Failed => {
+                return Err(miette!("daemon startup failed"));
+            }
+            Ok(status) => {
+                last_error = Some(format!("daemon is {}", status.state));
+            }
             Err(err) => last_error = Some(err.to_string()),
         }
         tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
@@ -668,12 +780,37 @@ pub async fn connect_or_start_daemon() -> Result<DaemonClient> {
 
 pub fn status_summary(status: &StatusResponse) -> String {
     format!(
-        "daemon pid={} {}:{} started_at_ms={} version={} connected_clients={}",
+        "daemon pid={} {}:{} state={} started_at_ms={} version={} connected_clients={}",
         status.pid,
         LOCALHOST,
         status.port,
+        status.state,
         status.started_at_ms,
         status.version,
         status.connected_clients,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_lifecycle_state_serializes_as_snake_case() {
+        let encoded = serde_json::to_string(&DaemonLifecycleState::Initializing).unwrap();
+        assert_eq!(encoded, "\"initializing\"");
+        let decoded: DaemonLifecycleState = serde_json::from_str("\"ready\"").unwrap();
+        assert_eq!(decoded, DaemonLifecycleState::Ready);
+    }
+
+    #[test]
+    fn daemon_lifecycle_handle_transitions_to_failed_only_during_initializing() {
+        let lifecycle = DaemonLifecycleHandle::new(DaemonLifecycleState::Initializing);
+        lifecycle.mark_failed_if_initializing();
+        assert_eq!(lifecycle.get(), DaemonLifecycleState::Failed);
+
+        lifecycle.set(DaemonLifecycleState::Ready);
+        lifecycle.mark_failed_if_initializing();
+        assert_eq!(lifecycle.get(), DaemonLifecycleState::Ready);
+    }
 }

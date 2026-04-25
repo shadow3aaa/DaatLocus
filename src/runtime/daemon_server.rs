@@ -3,7 +3,10 @@ use std::{collections::HashMap, time::Duration};
 use crate::{
     app::{AppId, AppManager},
     context::Context,
-    daemon::{DaemonControlCommand as RuntimeDaemonControlCommand, DaemonLock, start_server},
+    daemon::{
+        DaemonControlCommand as RuntimeDaemonControlCommand, DaemonLifecycleHandle,
+        DaemonLifecycleState, DaemonLock, start_server,
+    },
     dashboard::render::{
         SleepDashboardStatus, render_activity_for_dashboard,
         render_app_status_outputs_for_dashboard, render_dashboard_footer_context,
@@ -42,6 +45,8 @@ use crate::runtime::runtime_loop::{
 pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
     let mut lock = DaemonLock::acquire().await?;
     let daemon_token_registry = crate::daemon::load_or_create_daemon_token_registry().await?;
+    let daemon_lifecycle = DaemonLifecycleHandle::new(DaemonLifecycleState::Initializing);
+    let mut startup_failure_guard = DaemonStartupFailureGuard::new(daemon_lifecycle.clone());
 
     // Load telegram_acl first, create all channels, and start the HTTP server
     // immediately on the fixed local port so wait_for_daemon_ready can return
@@ -49,7 +54,12 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     let telegram_acl = TelegramAclHandle::load().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
-    let (tx, _rx) = tokio::sync::watch::channel(DashboardState::default());
+    let (tx, _rx) = tokio::sync::watch::channel(DashboardState {
+        runtime_status: Some("Daemon initializing".to_string()),
+        footer_context: "Daemon is initializing; runtime commands are disabled until ready."
+            .to_string(),
+        ..DashboardState::default()
+    });
     let (dashboard_control_tx, mut dashboard_control_rx) =
         tokio::sync::mpsc::unbounded_channel::<DashboardControlCommand>();
     let (sleep_result_tx, mut sleep_result_rx) =
@@ -63,6 +73,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     let daemon_server = start_server(
         config.daemon.port,
         daemon_token_registry,
+        daemon_lifecycle.clone(),
         tx.subscribe(),
         telegram_acl.clone(),
         events.clone(),
@@ -249,7 +260,11 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             None
         };
 
-    // Startup is complete; abort early signal handling so the main loop owns it.
+    // Startup is complete; runtime commands may now be accepted.
+    daemon_lifecycle.mark_ready();
+    startup_failure_guard.disarm();
+
+    // Abort early signal handling so the main loop owns it.
     early_shutdown_handle.abort();
 
     // SIGTERM -> graceful shutdown on Unix. Other platforms use pending() so the
@@ -316,6 +331,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         }
     }
 
+    daemon_lifecycle.mark_stopping();
     drop(workspace_app_watcher);
     if let Some(handle) = telegram_transport {
         handle.abort();
@@ -342,4 +358,30 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     let _ = server_shutdown_tx.send(());
     daemon_server.shutdown().await;
     Ok(())
+}
+
+struct DaemonStartupFailureGuard {
+    lifecycle: DaemonLifecycleHandle,
+    armed: bool,
+}
+
+impl DaemonStartupFailureGuard {
+    fn new(lifecycle: DaemonLifecycleHandle) -> Self {
+        Self {
+            lifecycle,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DaemonStartupFailureGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.lifecycle.mark_failed_if_initializing();
+        }
+    }
 }
