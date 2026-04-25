@@ -7,8 +7,8 @@
 //! Runner resolution order:
 //!   1. `uvx` on PATH  (alias for `uv tool run`)
 //!   2. `uv` on PATH
-//!   3. `~/.daat-locus/cache/bin/uv[.exe]`  (previously auto-downloaded)
-//!   4. Download `uv` latest from GitHub Releases into the cache dir above
+//!   3. Verified `~/.daat-locus/cache/bin/uv[.exe]` matching the pinned release
+//!   4. Download the pinned `uv` release from GitHub Releases into the cache dir above
 //!
 //! Startup sequence (mirrors @vectorize-io/hindsight-all):
 //!   1. `<runner> hindsight-embed[@ver] profile create <profile> --merge --port <port> --env K=V ...`
@@ -22,10 +22,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use miette::{Result, miette};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::process::Command;
 
-use crate::config::HindsightConfig;
-use crate::daat_locus_paths::daat_locus_paths;
+use crate::{
+    config::HindsightConfig,
+    daat_locus_paths::daat_locus_paths,
+    persistence::{PersistenceFileMode, write_bytes_atomic},
+};
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 
@@ -37,11 +42,14 @@ const COMMAND_TIMEOUT_SECS: u64 = 60;
 const DAEMON_START_TIMEOUT_SECS: u64 = 600;
 /// 5-minute window for the first-run uv download on slow connections.
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
+const PINNED_UV_VERSION: &str = "0.11.7";
 
 #[cfg(windows)]
 const UV_EXE: &str = "uv.exe";
 #[cfg(not(windows))]
 const UV_EXE: &str = "uv";
+
+const UV_CACHE_METADATA_FILE: &str = "uv.install.json";
 
 // ── UvInvoker ─────────────────────────────────────────────────────────────────
 
@@ -300,24 +308,33 @@ impl HindsightManagedServer {
             tracing::debug!("[hindsight:managed] using uv from PATH");
             return Ok(UvInvoker::Uv(PathBuf::from("uv")));
         }
-        // 3. Previously downloaded binary
-        let cache_bin = daat_locus_paths()
-            .await
-            .cache_dir()
-            .join("bin")
-            .join(UV_EXE);
-        if cache_bin.exists() {
+        // 3. Previously downloaded binary, if it matches the pinned release.
+        let cache_dir = daat_locus_paths().await.cache_dir().join("bin");
+        let cache_bin = cache_dir.join(UV_EXE);
+        let cache_metadata = cache_dir.join(UV_CACHE_METADATA_FILE);
+        let spec = uv_download_spec().ok_or_else(|| {
+            miette!(
+                "[hindsight:managed] unsupported platform ({}/{}): cannot auto-download uv. \
+                 Install uv manually from https://docs.astral.sh/uv/ and ensure it is on PATH.",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+            )
+        })?;
+        if cached_uv_is_valid(&cache_bin, &cache_metadata, spec).await {
             tracing::debug!(
-                "[hindsight:managed] using cached uv at {}",
+                "[hindsight:managed] using verified cached uv {} at {}",
+                PINNED_UV_VERSION,
                 cache_bin.display()
             );
             return Ok(UvInvoker::Uv(cache_bin));
         }
-        // 4. Download
+
+        // 4. Download the pinned release.
         tracing::info!(
-            "[hindsight:managed] uv/uvx not found on PATH — downloading uv automatically"
+            "[hindsight:managed] uv/uvx not found on PATH — downloading pinned uv {} automatically",
+            PINNED_UV_VERSION,
         );
-        download_uv(&cache_bin).await?;
+        download_uv(&cache_bin, &cache_metadata, spec).await?;
         Ok(UvInvoker::Uv(cache_bin))
     }
 }
@@ -356,6 +373,61 @@ mod tests {
                 .any(|(key, value)| key == "HINDSIGHT_API_LLM_API_KEY" && value == "secret-value")
         );
     }
+
+    #[test]
+    fn uv_download_url_uses_pinned_release() {
+        if let Some(spec) = uv_download_spec() {
+            let url = spec.download_url();
+            assert!(url.contains(&format!("/download/{PINNED_UV_VERSION}/")));
+            assert!(!url.contains("/latest/"));
+            assert_eq!(spec.archive_sha256.len(), 64);
+        }
+    }
+
+    #[test]
+    fn verify_sha256_rejects_mismatched_download() {
+        let expected = sha256_hex(b"expected");
+        verify_sha256("test", b"expected", &expected).expect("matching hash");
+
+        let err =
+            verify_sha256("test", b"tampered", &expected).expect_err("mismatched hash should fail");
+        assert!(err.to_string().contains("checksum mismatch"));
+    }
+
+    #[tokio::test]
+    async fn cached_uv_requires_matching_metadata_and_binary_hash() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let uv_path = tempdir.path().join(UV_EXE);
+        let metadata_path = tempdir.path().join(UV_CACHE_METADATA_FILE);
+        let spec = UvDownloadSpec {
+            asset_name: "uv-test.tar.gz",
+            archive_kind: UvArchiveKind::TarGz,
+            archive_sha256: "archive-hash",
+        };
+        tokio::fs::write(&uv_path, b"uv-binary")
+            .await
+            .expect("write uv");
+        let metadata = CachedUvMetadata::from_install(spec, sha256_hex(b"uv-binary"));
+        tokio::fs::write(
+            &metadata_path,
+            serde_json::to_vec_pretty(&metadata).expect("serialize metadata"),
+        )
+        .await
+        .expect("write metadata");
+
+        assert!(
+            cached_uv_is_valid(&uv_path, &metadata_path, spec).await,
+            "matching metadata and binary hash should be valid"
+        );
+
+        tokio::fs::write(&uv_path, b"tampered")
+            .await
+            .expect("tamper uv");
+        assert!(
+            !cached_uv_is_valid(&uv_path, &metadata_path, spec).await,
+            "tampered cached uv should be invalid before execution"
+        );
+    }
 }
 
 // ── Binary detection & download ───────────────────────────────────────────────
@@ -371,48 +443,146 @@ fn probe_binary(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// GitHub "latest release" asset URL for uv on the current platform.
-/// Uses the `/latest/download/` redirect so no explicit version pin is needed.
-fn uv_download_url() -> Option<&'static str> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UvArchiveKind {
+    TarGz,
+    Zip,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UvDownloadSpec {
+    asset_name: &'static str,
+    archive_kind: UvArchiveKind,
+    archive_sha256: &'static str,
+}
+
+impl UvDownloadSpec {
+    fn download_url(self) -> String {
+        format!(
+            "https://github.com/astral-sh/uv/releases/download/{}/{}",
+            PINNED_UV_VERSION, self.asset_name
+        )
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CachedUvMetadata {
+    version: String,
+    asset_name: String,
+    archive_sha256: String,
+    binary_sha256: String,
+}
+
+impl CachedUvMetadata {
+    fn from_install(spec: UvDownloadSpec, binary_sha256: String) -> Self {
+        Self {
+            version: PINNED_UV_VERSION.to_string(),
+            asset_name: spec.asset_name.to_string(),
+            archive_sha256: spec.archive_sha256.to_string(),
+            binary_sha256,
+        }
+    }
+
+    fn matches_install(&self, spec: UvDownloadSpec, binary_sha256: &str) -> bool {
+        self.version == PINNED_UV_VERSION
+            && self.asset_name == spec.asset_name
+            && self.archive_sha256 == spec.archive_sha256
+            && self.binary_sha256 == binary_sha256
+    }
+}
+
+/// Pinned GitHub release asset and SHA256 for uv on the current platform.
+/// Hashes come from the pinned release's `sha256.sum` asset.
+fn uv_download_spec() -> Option<UvDownloadSpec> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => Some(
-            "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-apple-darwin.tar.gz",
-        ),
-        ("macos", "x86_64") => Some(
-            "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-apple-darwin.tar.gz",
-        ),
-        ("linux", "x86_64") => Some(
-            "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-musl.tar.gz",
-        ),
-        ("linux", "aarch64") => Some(
-            "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-unknown-linux-musl.tar.gz",
-        ),
-        ("windows", "x86_64") => Some(
-            "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip",
-        ),
-        ("windows", "aarch64") => Some(
-            "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-pc-windows-msvc.zip",
-        ),
+        ("macos", "aarch64") => Some(UvDownloadSpec {
+            asset_name: "uv-aarch64-apple-darwin.tar.gz",
+            archive_kind: UvArchiveKind::TarGz,
+            archive_sha256: "66e37d91f839e12481d7b932a1eccbfe732560f42c1cfb89faddfa2454534ba8",
+        }),
+        ("macos", "x86_64") => Some(UvDownloadSpec {
+            asset_name: "uv-x86_64-apple-darwin.tar.gz",
+            archive_kind: UvArchiveKind::TarGz,
+            archive_sha256: "0a4bc8fcde4974ea3560be21772aeecab600a6f43fa6e58169f9fa7b3b71d302",
+        }),
+        ("linux", "x86_64") => Some(UvDownloadSpec {
+            asset_name: "uv-x86_64-unknown-linux-musl.tar.gz",
+            archive_kind: UvArchiveKind::TarGz,
+            archive_sha256: "64ddb5f1087649e3f75aa50d139aa4f36ddde728a5295a141e0fa9697bfb7b0f",
+        }),
+        ("linux", "aarch64") => Some(UvDownloadSpec {
+            asset_name: "uv-aarch64-unknown-linux-musl.tar.gz",
+            archive_kind: UvArchiveKind::TarGz,
+            archive_sha256: "46647dc16cbb7d6700f762fdd7a67d220abe18570914732bc310adc91308d272",
+        }),
+        ("windows", "x86_64") => Some(UvDownloadSpec {
+            asset_name: "uv-x86_64-pc-windows-msvc.zip",
+            archive_kind: UvArchiveKind::Zip,
+            archive_sha256: "fe0c7815acf4fc45f8a5eff58ed3cf7ae2e15c3cf1dceadbd10c816ec1690cc1",
+        }),
+        ("windows", "aarch64") => Some(UvDownloadSpec {
+            asset_name: "uv-aarch64-pc-windows-msvc.zip",
+            archive_kind: UvArchiveKind::Zip,
+            archive_sha256: "1387e1c94e15196351196b79fce4c1e6f4b30f19cdaaf9ff85fbd6b046018aa2",
+        }),
         _ => None,
     }
 }
 
-async fn download_uv(dest: &Path) -> Result<()> {
-    let url = uv_download_url().ok_or_else(|| {
-        miette!(
-            "[hindsight:managed] unsupported platform ({}/{}): cannot auto-download uv. \
-             Install uv manually from https://docs.astral.sh/uv/ and ensure it is on PATH.",
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-        )
-    })?;
+async fn cached_uv_is_valid(uv_path: &Path, metadata_path: &Path, spec: UvDownloadSpec) -> bool {
+    let metadata = match tokio::fs::read(metadata_path).await {
+        Ok(bytes) => match serde_json::from_slice::<CachedUvMetadata>(&bytes) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                tracing::warn!(
+                    "[hindsight:managed] ignoring invalid uv cache metadata {}: {err}",
+                    metadata_path.display()
+                );
+                return false;
+            }
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(err) => {
+            tracing::warn!(
+                "[hindsight:managed] failed to read uv cache metadata {}: {err}",
+                metadata_path.display()
+            );
+            return false;
+        }
+    };
 
+    let bytes = match tokio::fs::read(uv_path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(err) => {
+            tracing::warn!(
+                "[hindsight:managed] failed to read cached uv binary {}: {err}",
+                uv_path.display()
+            );
+            return false;
+        }
+    };
+    let binary_sha256 = sha256_hex(&bytes);
+    if metadata.matches_install(spec, &binary_sha256) {
+        true
+    } else {
+        tracing::warn!(
+            "[hindsight:managed] cached uv at {} does not match pinned uv {}; redownloading",
+            uv_path.display(),
+            PINNED_UV_VERSION
+        );
+        false
+    }
+}
+
+async fn download_uv(dest: &Path, metadata_path: &Path, spec: UvDownloadSpec) -> Result<()> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| miette!("create uv cache dir: {e}"))?;
     }
 
+    let url = spec.download_url();
     tracing::info!("[hindsight:managed] downloading uv from {url}");
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
@@ -436,21 +606,32 @@ async fn download_uv(dest: &Path) -> Result<()> {
         .bytes()
         .await
         .map_err(|e| miette!("read uv download body: {e}"))?;
+    verify_sha256("uv download archive", &archive_bytes, spec.archive_sha256)?;
 
     tracing::info!(
         "[hindsight:managed] extracting uv binary ({:.1} MiB compressed)",
         archive_bytes.len() as f64 / 1_048_576.0
     );
 
-    let uv_bytes = if url.ends_with(".zip") {
-        extract_uv_from_zip(&archive_bytes)?
-    } else {
-        extract_uv_from_targz(&archive_bytes)?
+    let uv_bytes = match spec.archive_kind {
+        UvArchiveKind::Zip => extract_uv_from_zip(&archive_bytes)?,
+        UvArchiveKind::TarGz => extract_uv_from_targz(&archive_bytes)?,
     };
+    let binary_sha256 = sha256_hex(&uv_bytes);
 
-    tokio::fs::write(dest, &uv_bytes)
-        .await
-        .map_err(|e| miette!("write uv binary to {}: {e}", dest.display()))?;
+    #[cfg(windows)]
+    {
+        let _ = tokio::fs::remove_file(dest).await;
+        let _ = tokio::fs::remove_file(metadata_path).await;
+    }
+
+    write_bytes_atomic(
+        dest.to_path_buf(),
+        uv_bytes.clone(),
+        PersistenceFileMode::Default,
+    )
+    .await
+    .map_err(|e| miette!("write uv binary to {}: {e}", dest.display()))?;
 
     // Mark executable on Unix.
     #[cfg(unix)]
@@ -466,12 +647,56 @@ async fn download_uv(dest: &Path) -> Result<()> {
             .map_err(|e| miette!("chmod uv binary: {e}"))?;
     }
 
+    let metadata = CachedUvMetadata::from_install(spec, binary_sha256);
+    let metadata_bytes = serde_json::to_vec_pretty(&metadata)
+        .map_err(|e| miette!("serialize uv cache metadata: {e}"))?;
+    write_bytes_atomic(
+        metadata_path.to_path_buf(),
+        metadata_bytes,
+        PersistenceFileMode::Default,
+    )
+    .await
+    .map_err(|e| {
+        miette!(
+            "write uv cache metadata to {}: {e}",
+            metadata_path.display()
+        )
+    })?;
+
     tracing::info!(
-        "[hindsight:managed] uv installed at {} ({:.1} MiB)",
+        "[hindsight:managed] uv {} installed at {} ({:.1} MiB)",
+        PINNED_UV_VERSION,
         dest.display(),
         uv_bytes.len() as f64 / 1_048_576.0
     );
     Ok(())
+}
+
+fn verify_sha256(label: &str, bytes: &[u8], expected: &str) -> Result<()> {
+    let actual = sha256_hex(bytes);
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(miette!(
+            "[hindsight:managed] {label} checksum mismatch: expected sha256:{expected}, got sha256:{actual}"
+        ))
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex_encode(&hasher.finalize())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 // ── Archive extraction ────────────────────────────────────────────────────────

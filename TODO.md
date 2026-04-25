@@ -83,9 +83,9 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Avoid printing raw credentials in errors and debug output.
   - [x] Avoid persisting unmasked secrets outside config.
 
-- [ ] Pin and verify managed uv downloads
-  - [ ] Pin auto-downloaded uv versions instead of using GitHub `latest`.
-  - [ ] Verify downloads with checksums or signatures before execution.
+- [x] Pin and verify managed uv downloads
+  - [x] Pin auto-downloaded uv versions instead of using GitHub `latest`.
+  - [x] Verify downloads with checksums before execution.
 
 - [ ] Pin and verify browser runtime downloads
   - [ ] Pin browser runtime versions instead of always using latest stable.
