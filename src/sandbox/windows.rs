@@ -24,9 +24,9 @@ use windows_sys::Win32::{
         AdjustTokenPrivileges, CONTAINER_INHERIT_ACE, CopySid, CreateRestrictedToken,
         CreateWellKnownSid, DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE, GetLengthSid,
         GetTokenInformation, LUA_TOKEN, LookupPrivilegeValueW, OBJECT_INHERIT_ACE, PSID,
-        SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES, TOKEN_ADJUST_SESSIONID,
-        TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_PRIVILEGES, TOKEN_QUERY,
-        TokenDefaultDacl, TokenGroups, WRITE_RESTRICTED,
+        SID_AND_ATTRIBUTES, SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES,
+        TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE,
+        TOKEN_PRIVILEGES, TOKEN_QUERY, TokenDefaultDacl, TokenGroups, WRITE_RESTRICTED,
     },
     Storage::FileSystem::{
         CreateFileW, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_DELETE_CHILD,
@@ -187,7 +187,10 @@ fn spawn_restricted_inner(
     acl_guards: &mut Vec<PathBuf>,
 ) -> io::Result<RestrictedWindowsChild> {
     apply_policy_acl_rules(policy, program, psid_capability, acl_guards)?;
-    let current_dir = options.current_dir.unwrap_or(std::env::current_dir()?);
+    let current_dir = options
+        .current_dir
+        .clone()
+        .unwrap_or(std::env::current_dir()?);
     let argv = command_argv(program, args);
     let mut command_line = to_wide(argv_to_command_line(&argv));
     let program_wide = to_wide(program.as_os_str());
@@ -321,9 +324,9 @@ fn add_explicit_ace(path: &Path, psid: PSID, mask: u32, mode: i32) -> io::Result
         ));
     }
     let _security_descriptor = LocalMem(security_descriptor);
-    let mut explicit = explicit_access(psid, mask, mode, inheritance_for_path(path));
+    let explicit = explicit_access(psid, mask, mode, inheritance_for_path(path));
     let mut new_dacl = ptr::null_mut();
-    let code = unsafe { SetEntriesInAclW(1, &mut explicit, dacl, &mut new_dacl) };
+    let code = unsafe { SetEntriesInAclW(1, &explicit, dacl, &mut new_dacl) };
     if code != ERROR_SUCCESS {
         return Err(win32_error(
             code,
@@ -386,9 +389,9 @@ fn revoke_ace(path: &Path, psid: PSID) -> io::Result<()> {
         ));
     }
     let _security_descriptor = LocalMem(security_descriptor);
-    let mut explicit = explicit_access(psid, 0, REVOKE_ACCESS, inheritance_for_path(path));
+    let explicit = explicit_access(psid, 0, REVOKE_ACCESS, inheritance_for_path(path));
     let mut new_dacl = ptr::null_mut();
-    let code = unsafe { SetEntriesInAclW(1, &mut explicit, dacl, &mut new_dacl) };
+    let code = unsafe { SetEntriesInAclW(1, &explicit, dacl, &mut new_dacl) };
     if code != ERROR_SUCCESS {
         return Err(win32_error(
             code,
@@ -850,13 +853,14 @@ impl StartupHandles {
 }
 
 fn startup_info(handles: &StartupHandles) -> STARTUPINFOW {
-    let mut startup_info = STARTUPINFOW::default();
-    startup_info.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-    startup_info.dwFlags = STARTF_USESTDHANDLES;
-    startup_info.hStdInput = handles.stdin;
-    startup_info.hStdOutput = handles.stdout;
-    startup_info.hStdError = handles.stderr;
-    startup_info
+    STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        dwFlags: STARTF_USESTDHANDLES,
+        hStdInput: handles.stdin,
+        hStdOutput: handles.stdout,
+        hStdError: handles.stderr,
+        ..Default::default()
+    }
 }
 
 fn stdio_handle(

@@ -134,8 +134,7 @@ impl SandboxChild {
                     }
                 }
             }
-            return windows::spawn_plain(policy, program, args, options)
-                .map(|inner| Self { inner });
+            windows::spawn_plain(policy, program, args, options).map(|inner| Self { inner })
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -365,6 +364,7 @@ pub(crate) fn resolve_path_for_check(path: &Path) -> PathBuf {
     }
 }
 
+#[cfg(any(not(target_os = "windows"), not(test)))]
 pub(crate) fn policy_paths_with_resolved(paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut expanded = paths
         .iter()
@@ -544,6 +544,7 @@ impl RuntimeSandboxPolicy {
         self.filesystem.is_path_writable(path)
     }
 
+    #[cfg(any(not(target_os = "windows"), test))]
     pub fn strong_command_spawn_spec(
         &self,
         program: PathBuf,
@@ -644,10 +645,7 @@ fn is_sensitive_env_var_name(name: &str) -> bool {
 mod tests {
     use std::path::Path;
 
-    use super::{
-        FileSystemSandboxPolicy, RuntimeSandboxPolicy, SandboxStdio, StrongFilesystemSandboxMode,
-        WritableRoot,
-    };
+    use super::{RuntimeSandboxPolicy, SandboxStdio, StrongFilesystemSandboxMode};
 
     #[test]
     fn sandbox_stdio_variants_are_stable() {
@@ -797,11 +795,11 @@ mod tests {
         let linked_outside = workspace_dir.join("outside-link");
         symlink(&outside_dir, &linked_outside).expect("symlink outside");
 
-        let policy = FileSystemSandboxPolicy {
+        let policy = super::FileSystemSandboxPolicy {
             full_disk_read: false,
             full_disk_write: false,
             readable_roots: Vec::new(),
-            writable_roots: vec![WritableRoot {
+            writable_roots: vec![super::WritableRoot {
                 root: workspace_dir.clone(),
                 read_only_subpaths: Vec::new(),
             }],
