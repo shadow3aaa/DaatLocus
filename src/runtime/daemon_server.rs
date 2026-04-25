@@ -275,9 +275,6 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .map_err(|err| miette!("failed to install SIGTERM handler: {err}"))?
     };
-    #[cfg(not(unix))]
-    let sigterm_never = std::future::pending::<Option<()>>();
-
     let mut sleep_running = false;
     let mut sleep_status = SleepDashboardStatus::default();
     let mut shutdown_completion_tx = None;
@@ -324,7 +321,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             }
             _ = {
                 #[cfg(unix)] { sigterm.recv() }
-                #[cfg(not(unix))] { sigterm_never }
+                #[cfg(not(unix))] { std::future::pending::<Option<()>>() }
             } => {
                 tracing::info!("daemon received SIGTERM, shutting down");
                 break;

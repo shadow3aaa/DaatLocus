@@ -517,10 +517,7 @@ pub async fn load_config() -> Result<Config, ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Config, ProviderConfig, normalize_provider_base_url, resolve_env_reference,
-        write_config_to_path,
-    };
+    use super::{Config, ProviderConfig, normalize_provider_base_url, resolve_env_reference};
     use crate::sandbox::StrongFilesystemSandboxMode;
 
     struct EnvOverride {
@@ -692,7 +689,7 @@ strong_filesystem = "required"
         let tempdir = tempfile::tempdir().expect("tempdir");
         let path = tempdir.path().join("config.toml");
 
-        write_config_to_path(&path, &Config::default())
+        super::write_config_to_path(&path, &Config::default())
             .await
             .expect("write config");
 

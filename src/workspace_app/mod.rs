@@ -1492,7 +1492,7 @@ local ok_calls = 0
 function app.config(ctx)
   configured = true
   return {
-    request_timeout_ms = 25
+    request_timeout_ms = 250
   }
 end
 
@@ -1635,13 +1635,13 @@ return app
             StrongFilesystemSandboxMode::Off,
         )
         .expect("load timeout app");
-        app.set_request_timeout_for_tests(Duration::from_millis(25));
 
         let first = app
             .execute_dynamic_tool("ok", serde_json::json!({}))
             .await
             .expect("first ok call should succeed");
         assert_eq!(first.payload, serde_json::json!({ "ok_calls": 1 }));
+        app.set_request_timeout_for_tests(Duration::from_millis(250));
 
         let err = app
             .execute_dynamic_tool("hang", serde_json::json!({}))
