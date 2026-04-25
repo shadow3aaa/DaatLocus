@@ -1,8 +1,6 @@
 # TODO
 
-This file tracks hardening work that should be completed before treating Daat Locus as a reliable long-running local agent runtime.
-
-## P0: Security And Data Integrity
+This file tracks hardening work for making Daat Locus a reliable long-running local agent runtime.
 
 - [ ] Add daemon authentication for local control endpoints
   - [ ] Protect `/commands/run`, `/daemon/shutdown`, dashboard snapshot, and dashboard stream.
@@ -56,8 +54,6 @@ This file tracks hardening work that should be completed before treating Daat Lo
   - [ ] Cover memory, events, pending work, plan, config, and ACL state.
   - [ ] Avoid direct `tokio::fs::write` or `std::fs::write` for durable state.
 
-## P1: Secret And Supply Chain Safety
-
 - [ ] Support env-based secret references for all provider credentials
   - [ ] Accept `env:NAME` or `$NAME` references consistently.
   - [ ] Resolve OpenAI and OpenAI-compatible API keys through the same resolver as Copilot.
@@ -80,8 +76,6 @@ This file tracks hardening work that should be completed before treating Daat Lo
   - [ ] Verify browser runtime downloads before extraction.
   - [ ] Document how to disable auto-downloads for locked-down environments.
 
-## P1: Runtime Reliability
-
 - [ ] Add daemon shutdown drain for retain jobs and runtime persistence
   - [ ] Ensure shutdown completes outstanding retain and state flush work when possible.
   - [ ] Preserve unfinished work when clean drain is impossible.
@@ -98,8 +92,6 @@ This file tracks hardening work that should be completed before treating Daat Lo
   - [ ] Cover event claim, requeue, overflow fuse, and terminal resolution paths.
   - [ ] Audit turn-boundary behavior after focus/app/tool changes.
   - [ ] Ensure unresolved claimed inputs are requeued or failed with explicit reason.
-
-## P2: Maintainability
 
 - [ ] Document model catalog source and update process
   - [ ] Record source, generation process, and update date.
