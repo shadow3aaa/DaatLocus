@@ -20,10 +20,12 @@ Useful commands:
 ```sh
 cargo tree
 cargo metadata --format-version 1
+cargo deny check bans sources licenses
 ```
 
-If a dedicated license checker is added later, document the exact command in
-`docs/release-checklist.md`.
+The CI dependency policy is defined in `deny.toml`. Keep reviewed exceptions
+small and update this document when a dependency introduces a new
+attribution-sensitive license.
 
 ## Watch List
 

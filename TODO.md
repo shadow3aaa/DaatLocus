@@ -125,11 +125,11 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Cover stale or similar model names.
   - [x] Confirm conservative defaults are used safely.
 
-- [ ] Add CI quality gates
-  - [ ] Run `cargo fmt --check`.
-  - [ ] Run `cargo clippy --all-targets`.
-  - [ ] Run `cargo test`.
-  - [ ] Add dependency/license checks.
+- [x] Add CI quality gates
+  - [x] Run `cargo fmt --check`.
+  - [x] Run `cargo clippy --all-targets`.
+  - [x] Run `cargo test`.
+  - [x] Add dependency/license checks.
 
 - [x] Add release checklist
   - [x] Cover daemon auth.

@@ -54,7 +54,9 @@ Use this checklist before tagging a Daat Locus release.
 ## Quality Gates
 
 - Run `cargo fmt --check`.
+- Run `cargo clippy --all-targets`.
 - Run `cargo test --no-default-features`.
+- Run `cargo deny check bans sources licenses`.
 - Run targeted manual smoke tests for:
   - first-time setup
   - daemon start and attach
