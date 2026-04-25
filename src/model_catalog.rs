@@ -1,3 +1,7 @@
+//! Static model capacity fallback catalog.
+//!
+//! See `docs/model-catalog.md` for source, refresh, and boundary rules.
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModelCapacity {
     pub context_window_tokens: usize,

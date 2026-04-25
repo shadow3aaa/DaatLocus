@@ -105,10 +105,10 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [ ] Audit turn-boundary behavior after focus/app/tool changes.
   - [ ] Ensure unresolved claimed inputs are requeued or failed with explicit reason.
 
-- [ ] Document model catalog source and update process
-  - [ ] Record source, generation process, and update date.
-  - [ ] Add a refresh script or documented manual process.
-  - [ ] Keep generated/catalog data clearly separated from handwritten provider logic.
+- [x] Document model catalog source and update process
+  - [x] Record source, generation process, and update date.
+  - [x] Add a refresh script or documented manual process.
+  - [x] Keep generated/catalog data clearly separated from handwritten provider logic.
 
 - [ ] Add model catalog fallback tests
   - [ ] Cover unknown model IDs.
