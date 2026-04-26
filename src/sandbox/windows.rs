@@ -458,15 +458,21 @@ fn apply_policy_acl_rules(
     for path in policy_paths_with_resolved(&policy.filesystem.deny_write_paths) {
         add_guarded_ace_recursive(&path, psid, WORKER_DENY_WRITE_MASK, DENY_ACCESS, acl_guards)?;
     }
-    // Read access can be satisfied through the broader restricted SIDs, so
-    // deny-read guards must cover them as well as the per-launch capability SID.
+    // File reads can be satisfied through the broader restricted SIDs, so
+    // file-level deny-read guards must cover them as well as the capability SID.
     let deny_read_entries = [
         (psid, WORKER_DENY_READ_MASK, DENY_ACCESS),
         (psid_logon, WORKER_DENY_READ_MASK, DENY_ACCESS),
         (psid_everyone, WORKER_DENY_READ_MASK, DENY_ACCESS),
     ];
+    let deny_read_directory_entries = [(psid, WORKER_DENY_READ_MASK, DENY_ACCESS)];
     for path in policy_paths_with_resolved(&policy.filesystem.deny_read_paths) {
-        add_guarded_aces_recursive(&path, &deny_read_entries, acl_guards)?;
+        add_guarded_read_denies_recursive(
+            &path,
+            &deny_read_entries,
+            &deny_read_directory_entries,
+            acl_guards,
+        )?;
     }
     Ok(())
 }
@@ -558,6 +564,37 @@ fn add_guarded_aces_recursive(
         }
     }
     add_guarded_aces(path, entries, acl_guards)?;
+    Ok(())
+}
+
+fn add_guarded_read_denies_recursive(
+    path: &Path,
+    file_entries: &[(PSID, u32, i32)],
+    directory_entries: &[(PSID, u32, i32)],
+    acl_guards: &mut Vec<AclGuard>,
+) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let child = entry.path();
+            if entry.file_type()?.is_dir() {
+                add_guarded_read_denies_recursive(
+                    &child,
+                    file_entries,
+                    directory_entries,
+                    acl_guards,
+                )?;
+            } else {
+                add_guarded_aces(&child, file_entries, acl_guards)?;
+            }
+        }
+        add_guarded_aces(path, directory_entries, acl_guards)?;
+    } else {
+        add_guarded_aces(path, file_entries, acl_guards)?;
+    }
     Ok(())
 }
 
