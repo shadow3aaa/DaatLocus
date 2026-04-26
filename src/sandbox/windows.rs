@@ -15,9 +15,9 @@ use std::{
 use uuid::Uuid;
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, ERROR_SUCCESS, GENERIC_ALL, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
-        INVALID_HANDLE_VALUE, LUID, LocalFree, SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0,
-        WAIT_TIMEOUT,
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_SUCCESS, GENERIC_ALL, GetLastError, HANDLE,
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, LUID, LocalFree, SetHandleInformation,
+        WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::Authorization::{
         ConvertStringSidToSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GetNamedSecurityInfoW,
@@ -406,15 +406,9 @@ fn apply_policy_acl_rules(
     acl_guards: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
     if let Some(parent) = program.parent() {
-        add_guarded_ace(parent, psid, WORKER_READ_ALLOW_MASK, SET_ACCESS, acl_guards)?;
+        add_program_read_ace(parent, psid, acl_guards)?;
     }
-    add_guarded_ace(
-        program,
-        psid,
-        WORKER_READ_ALLOW_MASK,
-        SET_ACCESS,
-        acl_guards,
-    )?;
+    add_program_read_ace(program, psid, acl_guards)?;
 
     for root in policy_paths_with_resolved(&policy.filesystem.readable_roots) {
         add_guarded_ace(&root, psid, WORKER_READ_ALLOW_MASK, SET_ACCESS, acl_guards)?;
@@ -440,6 +434,20 @@ fn apply_policy_acl_rules(
         add_guarded_ace(&path, psid, WORKER_DENY_READ_MASK, DENY_ACCESS, acl_guards)?;
     }
     Ok(())
+}
+
+fn add_program_read_ace(path: &Path, psid: PSID, acl_guards: &mut Vec<PathBuf>) -> io::Result<()> {
+    match add_guarded_ace(path, psid, WORKER_READ_ALLOW_MASK, SET_ACCESS, acl_guards) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            tracing::warn!(
+                "Windows sandbox could not add read ACE for executable path {}; relying on existing ACLs: {err}",
+                path.display()
+            );
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn add_guarded_ace(
@@ -1271,9 +1279,14 @@ fn last_os_error(context: &str) -> io::Error {
 }
 
 fn win32_error(code: u32, context: impl Into<String>) -> io::Error {
-    io::Error::other(format!(
+    let message = format!(
         "{}: {}",
         context.into(),
         io::Error::from_raw_os_error(code as i32)
-    ))
+    );
+    if code == ERROR_ACCESS_DENIED {
+        io::Error::new(io::ErrorKind::PermissionDenied, message)
+    } else {
+        io::Error::other(message)
+    }
 }
