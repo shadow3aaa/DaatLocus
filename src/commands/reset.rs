@@ -107,21 +107,21 @@ async fn clear_state_files(home: &Path) -> Result<Vec<String>> {
     clear_named_files(paths.state_dir(), &files).await
 }
 
-pub async fn run_complite_reset() -> Result<()> {
+pub async fn run_compile_reset() -> Result<()> {
     let home = get_daat_locus_home().await;
-    reject_if_daemon_running("complite reset").await?;
+    reject_if_daemon_running("compile reset").await?;
     let cleared = clear_compiled_artifacts(&home).await?;
 
     println!(
-        "[complite-reset] cleared compile/evaluation artifacts under {}",
+        "[compile-reset] cleared compile/evaluation artifacts under {}",
         home.display()
     );
     if cleared.is_empty() {
-        println!("[complite-reset] nothing to remove");
+        println!("[compile-reset] nothing to remove");
     } else {
-        println!("[complite-reset] cleared: {}", cleared.join(", "));
+        println!("[compile-reset] cleared: {}", cleared.join(", "));
     }
-    println!("[complite-reset] preserved: config/, state/, memory, logs/");
+    println!("[compile-reset] preserved: config/, state/, memory, logs/");
 
     Ok(())
 }
@@ -162,10 +162,10 @@ pub async fn run_reset_all() -> Result<()> {
         "[reset] cleared memory: runtime_conversation, hindsight_queue, reasoning_traces.jsonl, hindsight bank, observations"
     );
     if artifact_cleared.is_empty() {
-        println!("[reset] cleared complite artifacts: none");
+        println!("[reset] cleared compile artifacts: none");
     } else {
         println!(
-            "[reset] cleared complite artifacts: {}",
+            "[reset] cleared compile artifacts: {}",
             artifact_cleared.join(", ")
         );
     }

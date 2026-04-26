@@ -1,5 +1,5 @@
 use crate::{
-    commands::reset::{run_complite_reset, run_memory_reset, run_reset_all, run_state_reset},
+    commands::reset::{run_compile_reset, run_memory_reset, run_reset_all, run_state_reset},
     config::load_config,
     daemon::{
         CreatedDaemonToken, DaemonClient, DaemonTokenListEntry, connect_daemon_status,
@@ -90,13 +90,13 @@ enum ConfigTarget {
 #[derive(Debug, Subcommand)]
 enum ResetTarget {
     /// Clear compiled prompt cache.
-    #[command(name = "complite", alias = "compile")]
-    Complite,
+    #[command(name = "compile", alias = "complite")]
+    Compile,
     /// Clear runtime state such as daemon locks and sockets.
     State,
     /// Clear conversation history, hindsight records, and reasoning traces.
     Memory,
-    /// Clear state, memory, and complite data.
+    /// Clear state, memory, and compile data.
     All,
 }
 
@@ -154,9 +154,9 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
             return Ok(());
         }
         Some(DaatLocusCommand::Reset {
-            target: ResetTarget::Complite,
+            target: ResetTarget::Compile,
         }) => {
-            run_complite_reset().await?;
+            run_compile_reset().await?;
             return Ok(());
         }
         Some(DaatLocusCommand::Reset {
