@@ -460,17 +460,13 @@ fn apply_policy_acl_rules(
     }
     // Read access can be satisfied through the broader restricted SIDs, so
     // deny-read guards must cover them as well as the per-launch capability SID.
-    let deny_read_sids = [psid, psid_logon, psid_everyone];
+    let deny_read_entries = [
+        (psid, WORKER_DENY_READ_MASK, DENY_ACCESS),
+        (psid_logon, WORKER_DENY_READ_MASK, DENY_ACCESS),
+        (psid_everyone, WORKER_DENY_READ_MASK, DENY_ACCESS),
+    ];
     for path in policy_paths_with_resolved(&policy.filesystem.deny_read_paths) {
-        for deny_sid in deny_read_sids {
-            add_guarded_ace_recursive(
-                &path,
-                deny_sid,
-                WORKER_DENY_READ_MASK,
-                DENY_ACCESS,
-                acl_guards,
-            )?;
-        }
+        add_guarded_aces_recursive(&path, &deny_read_entries, acl_guards)?;
     }
     Ok(())
 }
@@ -500,7 +496,20 @@ fn add_guarded_ace(
         return Ok(());
     }
     ensure_acl_guard(path, acl_guards)?;
-    add_explicit_ace(path, psid, mask, mode)?;
+    add_explicit_aces(path, &[(psid, mask, mode)])?;
+    Ok(())
+}
+
+fn add_guarded_aces(
+    path: &Path,
+    entries: &[(PSID, u32, i32)],
+    acl_guards: &mut Vec<AclGuard>,
+) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    ensure_acl_guard(path, acl_guards)?;
+    add_explicit_aces(path, entries)?;
     Ok(())
 }
 
@@ -526,6 +535,29 @@ fn add_guarded_ace_recursive(
         }
     }
     add_guarded_ace(path, psid, mask, mode, acl_guards)?;
+    Ok(())
+}
+
+fn add_guarded_aces_recursive(
+    path: &Path,
+    entries: &[(PSID, u32, i32)],
+    acl_guards: &mut Vec<AclGuard>,
+) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let child = entry.path();
+            if entry.file_type()?.is_dir() {
+                add_guarded_aces_recursive(&child, entries, acl_guards)?;
+            } else {
+                add_guarded_aces(&child, entries, acl_guards)?;
+            }
+        }
+    }
+    add_guarded_aces(path, entries, acl_guards)?;
     Ok(())
 }
 
@@ -584,7 +616,7 @@ fn capture_dacl(path: &Path) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes.to_vec()))
 }
 
-fn add_explicit_ace(path: &Path, psid: PSID, mask: u32, mode: i32) -> io::Result<()> {
+fn add_explicit_aces(path: &Path, entries: &[(PSID, u32, i32)]) -> io::Result<()> {
     let path_wide = to_wide(path.as_os_str());
     let mut security_descriptor: PSID = ptr::null_mut();
     let mut dacl = ptr::null_mut();
@@ -607,9 +639,20 @@ fn add_explicit_ace(path: &Path, psid: PSID, mask: u32, mode: i32) -> io::Result
         ));
     }
     let _security_descriptor = LocalMem(security_descriptor);
-    let explicit = explicit_access(psid, mask, mode, inheritance_for_path(path));
+    let inheritance = inheritance_for_path(path);
+    let explicits = entries
+        .iter()
+        .map(|(psid, mask, mode)| explicit_access(*psid, *mask, *mode, inheritance))
+        .collect::<Vec<_>>();
     let mut new_dacl = ptr::null_mut();
-    let code = unsafe { SetEntriesInAclW(1, &explicit, dacl, &mut new_dacl) };
+    let code = unsafe {
+        SetEntriesInAclW(
+            explicits.len() as u32,
+            explicits.as_ptr(),
+            dacl,
+            &mut new_dacl,
+        )
+    };
     if code != ERROR_SUCCESS {
         return Err(win32_error(
             code,
