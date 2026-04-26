@@ -200,6 +200,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         suppressed_app_notices: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         live_progress_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        telegram_live_drafts: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         claimed_event_ids: Vec::new(),
         claimed_app_notices: Vec::new(),
         idle_since: None,

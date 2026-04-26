@@ -87,11 +87,20 @@ pub struct Context {
     pub runtime_overflow_failures: Arc<Mutex<HashMap<String, usize>>>,
     pub suppressed_app_notices: Arc<Mutex<HashMap<AppNoticeKey, SuppressedAppNotice>>>,
     pub live_progress_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<LiveProgressEvent>>>>,
+    pub telegram_live_drafts: TelegramLiveDraftRegistry,
     pub claimed_event_ids: Vec<String>,
     pub claimed_app_notices: Vec<AppNoticeKey>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
 }
+
+#[derive(Debug, Clone)]
+pub struct TelegramLiveDraftRecord {
+    pub draft_id: i64,
+    pub last_sent_text: Option<String>,
+}
+
+pub type TelegramLiveDraftRegistry = Arc<Mutex<HashMap<String, TelegramLiveDraftRecord>>>;
 
 #[derive(Debug, Clone)]
 pub struct ActiveWorkflowRunSession {
@@ -201,6 +210,26 @@ impl Context {
         tx: Option<tokio::sync::mpsc::UnboundedSender<LiveProgressEvent>>,
     ) {
         *self.live_progress_tx.lock() = tx;
+    }
+
+    pub fn get_or_create_telegram_live_draft(
+        &self,
+        event_id: impl Into<String>,
+        draft_id: i64,
+    ) -> (i64, Option<String>) {
+        let event_id = event_id.into();
+        let mut drafts = self.telegram_live_drafts.lock();
+        let record = drafts
+            .entry(event_id)
+            .or_insert_with(|| TelegramLiveDraftRecord {
+                draft_id,
+                last_sent_text: None,
+            });
+        (record.draft_id, record.last_sent_text.clone())
+    }
+
+    pub fn clear_telegram_live_draft(&self, event_id: &str) {
+        self.telegram_live_drafts.lock().remove(event_id);
     }
 
     pub fn emit_live_generation_started(&self) {
