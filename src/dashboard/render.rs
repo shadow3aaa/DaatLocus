@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use crate::{app::AppId, context::Context, reasoning::trace::unread_runtime_trace_count};
+use crate::{
+    app::AppId, context::Context, events::EventStatus, reasoning::trace::unread_runtime_trace_count,
+};
 
 use super::{DashboardState, render_activity_from_messages};
 
@@ -428,7 +430,7 @@ pub fn render_status_command_output_for_dashboard(
         .map(|app| app.to_string())
         .unwrap_or_else(|| "none".to_string());
     let active_plans = context.plan.active_steps().count();
-    let active_events = context.pending_work.pending_count();
+    let event_summary = render_status_event_summary(context);
     let bound_workflow = context
         .bound_workflow_id
         .clone()
@@ -442,7 +444,7 @@ pub fn render_status_command_output_for_dashboard(
         "idle".to_string()
     };
     sections.push(format!(
-        "Overview\nRuntime turn: {runtime_turn}\nFocused app: {focused}\nBound workflow: {bound_workflow}\nPlans: {active_plans}\nEvents: {active_events}"
+        "Overview\nRuntime turn: {runtime_turn}\nFocused app: {focused}\nBound workflow: {bound_workflow}\nPlans: {active_plans}\nEvents: {event_summary}"
     ));
 
     let usage_lines = render_status_usage_lines(context);
@@ -452,6 +454,55 @@ pub fn render_status_command_output_for_dashboard(
     sections.push(format!("Plan\n{}", plan_lines.join("\n")));
 
     sections.join("\n\n")
+}
+
+fn render_status_event_summary(context: &Context) -> String {
+    render_status_event_summary_from_statuses(
+        context
+            .events
+            .driver_event_statuses()
+            .into_iter()
+            .map(|(_, status)| status),
+    )
+}
+
+fn render_status_event_summary_from_statuses(
+    statuses: impl IntoIterator<Item = EventStatus>,
+) -> String {
+    let mut pending = 0usize;
+    let mut claimed = 0usize;
+    let mut awaiting_delivery = 0usize;
+    let mut failed = 0usize;
+
+    for status in statuses {
+        match status {
+            EventStatus::Pending => pending += 1,
+            EventStatus::Claimed => claimed += 1,
+            EventStatus::AwaitingDelivery => awaiting_delivery += 1,
+            EventStatus::Failed => failed += 1,
+            EventStatus::Resolved | EventStatus::Dismissed => {}
+        }
+    }
+
+    let active = pending + claimed + awaiting_delivery + failed;
+    if active == 0 {
+        return "0".to_string();
+    }
+
+    let mut parts = Vec::new();
+    if pending > 0 {
+        parts.push(format!("pending={pending}"));
+    }
+    if claimed > 0 {
+        parts.push(format!("claimed={claimed}"));
+    }
+    if awaiting_delivery > 0 {
+        parts.push(format!("awaiting_delivery={awaiting_delivery}"));
+    }
+    if failed > 0 {
+        parts.push(format!("failed={failed}"));
+    }
+    format!("{active} active ({})", parts.join(", "))
 }
 
 fn render_status_usage_lines(context: &Context) -> Vec<String> {
@@ -567,4 +618,43 @@ pub fn render_telegram_status_for_dashboard(context: &Context) -> String {
 
 pub fn render_activity_for_dashboard(context: &Context) -> Vec<crate::dashboard::ActivityCell> {
     render_activity_from_messages(context.memory.runtime_conversation_messages())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_summary_counts_claimed_events_as_active() {
+        assert_eq!(
+            render_status_event_summary_from_statuses([EventStatus::Claimed]),
+            "1 active (claimed=1)"
+        );
+    }
+
+    #[test]
+    fn event_summary_reports_active_event_states() {
+        assert_eq!(
+            render_status_event_summary_from_statuses([
+                EventStatus::Pending,
+                EventStatus::Claimed,
+                EventStatus::AwaitingDelivery,
+                EventStatus::Failed,
+                EventStatus::Resolved,
+                EventStatus::Dismissed,
+            ]),
+            "4 active (pending=1, claimed=1, awaiting_delivery=1, failed=1)"
+        );
+    }
+
+    #[test]
+    fn event_summary_ignores_terminal_success_states() {
+        assert_eq!(
+            render_status_event_summary_from_statuses([
+                EventStatus::Resolved,
+                EventStatus::Dismissed,
+            ]),
+            "0"
+        );
+    }
 }
