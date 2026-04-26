@@ -31,6 +31,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+const TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS: usize = 8;
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardState {
     pub focused_app: Option<AppId>,
@@ -65,6 +67,35 @@ struct CommandOverlay {
     title: String,
     text: String,
     scroll: u16,
+}
+
+struct TelegramAccessPicker {
+    action: TelegramAccessAction,
+    requests: Vec<PendingAccessRequest>,
+    selected: usize,
+    scroll: usize,
+}
+
+#[derive(Clone, Copy)]
+enum TelegramAccessAction {
+    Approve,
+    Reject,
+}
+
+impl TelegramAccessAction {
+    fn verb(self) -> &'static str {
+        match self {
+            TelegramAccessAction::Approve => "approve",
+            TelegramAccessAction::Reject => "reject",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            TelegramAccessAction::Approve => "TELEGRAM APPROVE",
+            TelegramAccessAction::Reject => "TELEGRAM REJECT",
+        }
+    }
 }
 
 struct DashboardCommandContext<'a> {
@@ -776,33 +807,12 @@ fn execute_access_request_command(
     let action = if approve { "approve" } else { "reject" };
 
     let chat_id = if let Some(target) = parts.get(2).copied() {
-        // Argument form: parse directly as chat_id.
         match target.parse::<i64>() {
             Ok(id) => id,
             Err(_) => return format!("invalid chat_id: {target}"),
         }
     } else {
-        // No argument: offer interactive guidance.
-        match context.requests.len() {
-            0 => return "no pending requests".to_string(),
-            1 => {
-                // Single request: execute directly.
-                context.requests[0].chat_id
-            }
-            _ => {
-                // Multiple requests: list chat_ids for explicit selection.
-                let mut lines = vec![format!(
-                    "pending requests — run 'telegram {action} <chat_id>' to proceed:"
-                )];
-                lines.extend(context.requests.iter().map(|r| {
-                    format!(
-                        "  {} | {} | {} | {}",
-                        r.chat_id, r.title, r.sender, r.last_message_preview
-                    )
-                }));
-                return lines.join("\n");
-            }
-        }
+        return render_pending_access_requests(action, context.requests);
     };
 
     let result = if approve {
@@ -822,6 +832,63 @@ fn execute_access_request_command(
     }
 }
 
+fn render_pending_access_requests(action: &str, requests: &[PendingAccessRequest]) -> String {
+    if requests.is_empty() {
+        return "no pending requests".to_string();
+    }
+
+    let mut lines = vec![format!(
+        "pending requests - send '/telegram {action} <chat_id>' to proceed:"
+    )];
+    lines.extend(requests.iter().map(|request| {
+        format!(
+            "  {} | {} | {} | {}",
+            request.chat_id, request.title, request.sender, request.last_message_preview
+        )
+    }));
+    lines.join("\n")
+}
+
+fn telegram_access_picker_for_input(
+    input: &str,
+    requests: &[PendingAccessRequest],
+) -> Option<TelegramAccessPicker> {
+    if requests.is_empty() {
+        return None;
+    }
+
+    let command = dashboard_command_body(input)?;
+    let parts = command.split_whitespace().collect::<Vec<_>>();
+    let action = match parts.as_slice() {
+        ["telegram", "approve"] => TelegramAccessAction::Approve,
+        ["telegram", "reject"] => TelegramAccessAction::Reject,
+        _ => return None,
+    };
+
+    Some(TelegramAccessPicker {
+        action,
+        requests: requests.to_vec(),
+        selected: 0,
+        scroll: 0,
+    })
+}
+
+fn adjusted_picker_scroll(current_scroll: usize, selected_index: usize, total: usize) -> usize {
+    if total <= TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS {
+        return 0;
+    }
+    let max_scroll = total.saturating_sub(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS);
+    if selected_index < current_scroll {
+        selected_index
+    } else if selected_index >= current_scroll + TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS {
+        (selected_index + 1)
+            .saturating_sub(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS)
+            .min(max_scroll)
+    } else {
+        current_scroll.min(max_scroll)
+    }
+}
+
 pub async fn run_tui_dashboard(
     rx: &mut tokio::sync::watch::Receiver<DashboardState>,
     command_runner: &dyn DashboardCommandRunner,
@@ -835,6 +902,7 @@ pub async fn run_tui_dashboard(
     let mut command_popup_selection: usize = 0;
     let mut command_popup_scroll: usize = 0;
     let mut command_overlay: Option<CommandOverlay> = None;
+    let mut telegram_access_picker: Option<TelegramAccessPicker> = None;
 
     loop {
         let pending_requests = rx.borrow().pending_access_requests.clone();
@@ -843,6 +911,90 @@ pub async fn run_tui_dashboard(
             && let Event::Key(key) = crossterm::event::read()?
             && key.kind == KeyEventKind::Press
         {
+            if telegram_access_picker.is_some() {
+                let mut command_to_run: Option<String> = None;
+                let mut close_picker = false;
+                if let Some(picker) = telegram_access_picker.as_mut() {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            close_picker = true;
+                        }
+                        KeyCode::Up => {
+                            picker.selected = picker
+                                .selected
+                                .saturating_sub(1)
+                                .min(picker.requests.len().saturating_sub(1));
+                            picker.scroll = adjusted_picker_scroll(
+                                picker.scroll,
+                                picker.selected,
+                                picker.requests.len(),
+                            );
+                        }
+                        KeyCode::Down => {
+                            picker.selected =
+                                (picker.selected + 1).min(picker.requests.len().saturating_sub(1));
+                            picker.scroll = adjusted_picker_scroll(
+                                picker.scroll,
+                                picker.selected,
+                                picker.requests.len(),
+                            );
+                        }
+                        KeyCode::PageUp => {
+                            picker.selected = picker.selected.saturating_sub(8);
+                            picker.scroll = adjusted_picker_scroll(
+                                picker.scroll,
+                                picker.selected,
+                                picker.requests.len(),
+                            );
+                        }
+                        KeyCode::PageDown => {
+                            picker.selected =
+                                (picker.selected + 8).min(picker.requests.len().saturating_sub(1));
+                            picker.scroll = adjusted_picker_scroll(
+                                picker.scroll,
+                                picker.selected,
+                                picker.requests.len(),
+                            );
+                        }
+                        KeyCode::Home => {
+                            picker.selected = 0;
+                            picker.scroll = 0;
+                        }
+                        KeyCode::End => {
+                            picker.selected = picker.requests.len().saturating_sub(1);
+                            picker.scroll = adjusted_picker_scroll(
+                                picker.scroll,
+                                picker.selected,
+                                picker.requests.len(),
+                            );
+                        }
+                        KeyCode::Enter => {
+                            if let Some(request) = picker.requests.get(picker.selected) {
+                                command_to_run = Some(format!(
+                                    "/telegram {} {}",
+                                    picker.action.verb(),
+                                    request.chat_id
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if close_picker {
+                    telegram_access_picker = None;
+                }
+                if let Some(command) = command_to_run {
+                    telegram_access_picker = None;
+                    let state = rx.borrow().clone();
+                    let response = command_runner.run_command(&command, &state).await;
+                    command_overlay = Some(CommandOverlay {
+                        title: command.to_uppercase(),
+                        text: response,
+                        scroll: 0,
+                    });
+                }
+                continue;
+            }
             if let Some(overlay) = command_overlay.as_mut() {
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
@@ -963,6 +1115,15 @@ pub async fn run_tui_dashboard(
                         if matches!(dashboard_command_body(&input), Some("quit" | "q" | "exit")) {
                             break;
                         }
+                        if let Some(picker) =
+                            telegram_access_picker_for_input(&input, &pending_requests)
+                        {
+                            telegram_access_picker = Some(picker);
+                            command_input.clear();
+                            command_popup_selection = 0;
+                            command_popup_scroll = 0;
+                            continue;
+                        }
                         let response = command_runner.run_command(&input, &state).await;
                         if is_dashboard_command_input(&input) {
                             command_overlay = Some(CommandOverlay {
@@ -983,7 +1144,7 @@ pub async fn run_tui_dashboard(
         }
 
         let state = rx.borrow();
-        let popup_rows = if command_overlay.is_none() {
+        let popup_rows = if command_overlay.is_none() && telegram_access_picker.is_none() {
             let command_context = DashboardCommandContext {
                 requests: &pending_requests,
                 state: &state,
@@ -1008,6 +1169,9 @@ pub async fn run_tui_dashboard(
             if let Some(overlay) = command_overlay.as_ref() {
                 render_command_overlay(f, root[0], overlay);
             }
+            if let Some(picker) = telegram_access_picker.as_ref() {
+                render_telegram_access_picker(f, root[0], picker);
+            }
             render_command_bar(
                 f,
                 root[1],
@@ -1020,7 +1184,7 @@ pub async fn run_tui_dashboard(
                     },
                     runtime_status: state.runtime_status.as_deref(),
                     footer_context: &state.footer_context,
-                    overlay_open: command_overlay.is_some(),
+                    overlay_open: command_overlay.is_some() || telegram_access_picker.is_some(),
                     popup_selection: command_popup_selection,
                     popup_scroll: command_popup_scroll,
                 },
@@ -1178,6 +1342,79 @@ fn render_command_overlay(f: &mut Frame, area: Rect, overlay: &CommandOverlay) {
             Style::default().fg(Color::DarkGray),
         )])),
         rows[1],
+    );
+}
+
+fn render_telegram_access_picker(f: &mut Frame, area: Rect, picker: &TelegramAccessPicker) {
+    let outer = centered_rect(area, 92, 70);
+    let block = panel(format!("  {}  ", picker.action.title()));
+    let inner = block.inner(outer);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS as u16),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    f.render_widget(Clear, outer);
+    f.render_widget(block, outer);
+    f.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::from(vec![Span::styled(
+                format!("Select a pending request to {}.", picker.action.verb()),
+                Style::default().fg(Color::Gray),
+            )]),
+            Line::from(vec![Span::styled(
+                "chat_id  title  sender  last message",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+        ])),
+        rows[0],
+    );
+
+    let lines = picker
+        .requests
+        .iter()
+        .skip(picker.scroll)
+        .take(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS)
+        .enumerate()
+        .map(|(visible_idx, request)| {
+            let idx = picker.scroll + visible_idx;
+            let selected = idx == picker.selected;
+            let marker = if selected { ">" } else { " " };
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::from(vec![Span::styled(
+                format!(
+                    "{marker} {}  {}  {}  {}",
+                    request.chat_id, request.title, request.sender, request.last_message_preview
+                ),
+                style,
+            )])
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        rows[1],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            format!(
+                "Enter {} selected   Up/Down move   PgUp/PgDn page   Esc cancel",
+                picker.action.verb()
+            ),
+            Style::default().fg(Color::DarkGray),
+        )])),
+        rows[2],
     );
 }
 
@@ -1643,6 +1880,17 @@ fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
 mod tests {
     use super::*;
 
+    fn pending_request(chat_id: i64) -> PendingAccessRequest {
+        PendingAccessRequest {
+            chat_id,
+            title: format!("chat-{chat_id}"),
+            sender: format!("sender-{chat_id}"),
+            last_message_preview: format!("message-{chat_id}"),
+            first_seen_at_ms: chat_id,
+            last_seen_at_ms: chat_id,
+        }
+    }
+
     fn test_command_context<'a>() -> DashboardCommandContext<'a> {
         DashboardCommandContext {
             requests: &[],
@@ -1683,5 +1931,39 @@ mod tests {
         assert!(!commands.contains(&"snapshot"));
         assert!(!commands.contains(&"system_prompt"));
         assert!(!commands.contains(&"quit"));
+    }
+
+    #[test]
+    fn telegram_access_without_chat_id_lists_pending_requests() {
+        let requests = vec![pending_request(42)];
+        let state = DashboardState::default();
+        let context = DashboardCommandContext {
+            requests: &requests,
+            state: &state,
+            executor: None,
+        };
+
+        let output = execute_access_request_command(true, &["telegram", "approve"], &context);
+
+        assert!(output.contains("pending requests"));
+        assert!(output.contains("/telegram approve <chat_id>"));
+        assert!(output.contains("42"));
+    }
+
+    #[test]
+    fn local_telegram_access_picker_matches_no_arg_commands() {
+        let requests = vec![pending_request(42), pending_request(7)];
+
+        let approve = telegram_access_picker_for_input("/telegram approve", &requests)
+            .expect("approve command should open picker");
+        assert_eq!(approve.action.verb(), "approve");
+        assert_eq!(approve.requests.len(), 2);
+
+        let reject = telegram_access_picker_for_input("/telegram reject ", &requests)
+            .expect("reject command should open picker");
+        assert_eq!(reject.action.verb(), "reject");
+
+        assert!(telegram_access_picker_for_input("/telegram approve 42", &requests).is_none());
+        assert!(telegram_access_picker_for_input("/status", &requests).is_none());
     }
 }
