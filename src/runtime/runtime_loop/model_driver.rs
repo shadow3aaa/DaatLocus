@@ -67,9 +67,9 @@ pub(super) async fn run_agent_turn_with_retry(
                 return Ok(response);
             }
             Ok(Err(err)) => {
-                let will_retry = !is_context_budget_exceeded(&err);
+                let will_retry = should_retry_agent_turn_error(&err);
                 write_current_turn_response_error_dump(&err.to_string(), attempt, will_retry).await;
-                if is_context_budget_exceeded(&err) {
+                if !will_retry {
                     clear_runtime_status(tx);
                     return Err(err);
                 }
@@ -85,5 +85,40 @@ pub(super) async fn run_agent_turn_with_retry(
                 attempt += 1;
             }
         }
+    }
+}
+
+fn should_retry_agent_turn_error(err: &miette::Report) -> bool {
+    if is_context_budget_exceeded(err) {
+        return false;
+    }
+    !looks_like_permanent_model_request_error(&err.to_string())
+}
+
+fn looks_like_permanent_model_request_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("http 400 bad request")
+        || lower.contains("invalid_request_error")
+        || lower.contains("invalid_value")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_request_errors_are_not_retried() {
+        let err = miette!(
+            "Codex Responses returned HTTP 400 Bad Request: {{\"error\":{{\"type\":\"invalid_request_error\",\"code\":\"invalid_value\"}}}}"
+        );
+
+        assert!(!should_retry_agent_turn_error(&err));
+    }
+
+    #[test]
+    fn transient_request_errors_are_retried() {
+        let err = miette!("Codex Responses request failed: connection reset");
+
+        assert!(should_retry_agent_turn_error(&err));
     }
 }
