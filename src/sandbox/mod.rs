@@ -1,11 +1,14 @@
 use std::{
     ffi::OsString,
     path::{Component, Path, PathBuf},
+    pin::Pin,
     process::Stdio,
+    task::{Context, Poll},
 };
 
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -80,7 +83,43 @@ pub struct SandboxChild {
 }
 
 pub struct SandboxAsyncChild {
-    inner: tokio::process::Child,
+    inner: SandboxAsyncChildInner,
+}
+
+enum SandboxAsyncChildInner {
+    Tokio(tokio::process::Child),
+    #[cfg(all(not(test), target_os = "windows"))]
+    Windows(windows::WindowsSandboxAsyncChild),
+}
+
+pub struct SandboxChildStdin {
+    inner: SandboxChildStdinInner,
+}
+
+enum SandboxChildStdinInner {
+    Tokio(tokio::process::ChildStdin),
+    #[cfg(all(not(test), target_os = "windows"))]
+    File(tokio::fs::File),
+}
+
+pub struct SandboxChildStdout {
+    inner: SandboxChildStdoutInner,
+}
+
+enum SandboxChildStdoutInner {
+    Tokio(tokio::process::ChildStdout),
+    #[cfg(all(not(test), target_os = "windows"))]
+    File(tokio::fs::File),
+}
+
+pub struct SandboxChildStderr {
+    inner: SandboxChildStderrInner,
+}
+
+enum SandboxChildStderrInner {
+    Tokio(tokio::process::ChildStderr),
+    #[cfg(all(not(test), target_os = "windows"))]
+    File(tokio::fs::File),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,24 +223,36 @@ impl SandboxAsyncChild {
         args: Vec<String>,
         options: SandboxProcessOptions,
     ) -> std::io::Result<Self> {
-        #[cfg(target_os = "windows")]
+        #[cfg(all(not(test), target_os = "windows"))]
         {
             if policy.strong_filesystem != StrongFilesystemSandboxMode::Off
                 && filesystem_policy_requires_backend(&policy.filesystem)
             {
-                return match policy.strong_filesystem {
-                    StrongFilesystemSandboxMode::Required => Err(std::io::Error::other(
-                        "Windows strong filesystem sandbox for Terminal is not implemented yet",
-                    )),
-                    StrongFilesystemSandboxMode::Auto => {
-                        tracing::warn!(
-                            "Windows strong filesystem sandbox requested for Terminal in auto mode, but Terminal sandbox spawning is not implemented yet"
-                        );
-                        Ok(())
+                let spawn_spec = policy
+                    .shell_spawn_spec(program, args.clone())
+                    .map_err(std::io::Error::other)?;
+                match windows::spawn_restricted_async(
+                    policy,
+                    spawn_spec.program,
+                    spawn_spec.args,
+                    options.clone(),
+                ) {
+                    Ok(inner) => {
+                        return Ok(Self {
+                            inner: SandboxAsyncChildInner::Windows(inner),
+                        });
                     }
-                    StrongFilesystemSandboxMode::Off => Ok(()),
+                    Err(err)
+                        if policy.strong_filesystem == StrongFilesystemSandboxMode::Required =>
+                    {
+                        return Err(err);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "Windows strong filesystem sandbox requested for Terminal in auto mode, but restricted spawn failed: {err}"
+                        );
+                    }
                 }
-                .and_then(|()| Self::spawn_shell_unwrapped(policy, program, args, options));
             }
         }
 
@@ -221,31 +272,176 @@ impl SandboxAsyncChild {
         command.args(spawn_spec.args);
         apply_tokio_command_options(policy, &mut command, options);
         let inner = command.spawn()?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner: SandboxAsyncChildInner::Tokio(inner),
+        })
     }
 
-    pub fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
-        self.inner.stdin.take()
+    pub fn take_stdin(&mut self) -> Option<SandboxChildStdin> {
+        match &mut self.inner {
+            SandboxAsyncChildInner::Tokio(child) => child.stdin.take().map(SandboxChildStdin::from),
+            #[cfg(all(not(test), target_os = "windows"))]
+            SandboxAsyncChildInner::Windows(child) => {
+                child.take_stdin().map(SandboxChildStdin::from_file)
+            }
+        }
     }
 
-    pub fn take_stdout(&mut self) -> Option<tokio::process::ChildStdout> {
-        self.inner.stdout.take()
+    pub fn take_stdout(&mut self) -> Option<SandboxChildStdout> {
+        match &mut self.inner {
+            SandboxAsyncChildInner::Tokio(child) => {
+                child.stdout.take().map(SandboxChildStdout::from)
+            }
+            #[cfg(all(not(test), target_os = "windows"))]
+            SandboxAsyncChildInner::Windows(child) => {
+                child.take_stdout().map(SandboxChildStdout::from_file)
+            }
+        }
     }
 
-    pub fn take_stderr(&mut self) -> Option<tokio::process::ChildStderr> {
-        self.inner.stderr.take()
+    pub fn take_stderr(&mut self) -> Option<SandboxChildStderr> {
+        match &mut self.inner {
+            SandboxAsyncChildInner::Tokio(child) => {
+                child.stderr.take().map(SandboxChildStderr::from)
+            }
+            #[cfg(all(not(test), target_os = "windows"))]
+            SandboxAsyncChildInner::Windows(child) => {
+                child.take_stderr().map(SandboxChildStderr::from_file)
+            }
+        }
     }
 
     pub fn start_kill(&mut self) -> std::io::Result<()> {
-        self.inner.start_kill()
+        match &mut self.inner {
+            SandboxAsyncChildInner::Tokio(child) => child.start_kill(),
+            #[cfg(all(not(test), target_os = "windows"))]
+            SandboxAsyncChildInner::Windows(child) => child.start_kill(),
+        }
     }
 
     pub fn id(&self) -> Option<u32> {
-        self.inner.id()
+        match &self.inner {
+            SandboxAsyncChildInner::Tokio(child) => child.id(),
+            #[cfg(all(not(test), target_os = "windows"))]
+            SandboxAsyncChildInner::Windows(child) => Some(child.id()),
+        }
     }
 
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.inner.try_wait()
+        match &mut self.inner {
+            SandboxAsyncChildInner::Tokio(child) => child.try_wait(),
+            #[cfg(all(not(test), target_os = "windows"))]
+            SandboxAsyncChildInner::Windows(child) => child.try_wait(),
+        }
+    }
+}
+
+impl From<tokio::process::ChildStdin> for SandboxChildStdin {
+    fn from(stdin: tokio::process::ChildStdin) -> Self {
+        Self {
+            inner: SandboxChildStdinInner::Tokio(stdin),
+        }
+    }
+}
+
+impl From<tokio::process::ChildStdout> for SandboxChildStdout {
+    fn from(stdout: tokio::process::ChildStdout) -> Self {
+        Self {
+            inner: SandboxChildStdoutInner::Tokio(stdout),
+        }
+    }
+}
+
+impl From<tokio::process::ChildStderr> for SandboxChildStderr {
+    fn from(stderr: tokio::process::ChildStderr) -> Self {
+        Self {
+            inner: SandboxChildStderrInner::Tokio(stderr),
+        }
+    }
+}
+
+impl SandboxChildStdin {
+    #[cfg(all(not(test), target_os = "windows"))]
+    fn from_file(file: tokio::fs::File) -> Self {
+        Self {
+            inner: SandboxChildStdinInner::File(file),
+        }
+    }
+}
+
+impl SandboxChildStdout {
+    #[cfg(all(not(test), target_os = "windows"))]
+    fn from_file(file: tokio::fs::File) -> Self {
+        Self {
+            inner: SandboxChildStdoutInner::File(file),
+        }
+    }
+}
+
+impl SandboxChildStderr {
+    #[cfg(all(not(test), target_os = "windows"))]
+    fn from_file(file: tokio::fs::File) -> Self {
+        Self {
+            inner: SandboxChildStderrInner::File(file),
+        }
+    }
+}
+
+impl AsyncWrite for SandboxChildStdin {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match &mut self.inner {
+            SandboxChildStdinInner::Tokio(stdin) => Pin::new(stdin).poll_write(cx, buf),
+            #[cfg(all(not(test), target_os = "windows"))]
+            SandboxChildStdinInner::File(file) => Pin::new(file).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match &mut self.inner {
+            SandboxChildStdinInner::Tokio(stdin) => Pin::new(stdin).poll_flush(cx),
+            #[cfg(all(not(test), target_os = "windows"))]
+            SandboxChildStdinInner::File(file) => Pin::new(file).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match &mut self.inner {
+            SandboxChildStdinInner::Tokio(stdin) => Pin::new(stdin).poll_shutdown(cx),
+            #[cfg(all(not(test), target_os = "windows"))]
+            SandboxChildStdinInner::File(file) => Pin::new(file).poll_shutdown(cx),
+        }
+    }
+}
+
+impl AsyncRead for SandboxChildStdout {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match &mut self.inner {
+            SandboxChildStdoutInner::Tokio(stdout) => Pin::new(stdout).poll_read(cx, buf),
+            #[cfg(all(not(test), target_os = "windows"))]
+            SandboxChildStdoutInner::File(file) => Pin::new(file).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncRead for SandboxChildStderr {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match &mut self.inner {
+            SandboxChildStderrInner::Tokio(stderr) => Pin::new(stderr).poll_read(cx, buf),
+            #[cfg(all(not(test), target_os = "windows"))]
+            SandboxChildStderrInner::File(file) => Pin::new(file).poll_read(cx, buf),
+        }
     }
 }
 

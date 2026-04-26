@@ -56,7 +56,7 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Route Terminal and workspace app worker process creation through sandbox-owned launch wrappers.
   - [x] Implement the optional Linux bubblewrap filesystem backend.
   - [x] Implement the optional Windows workspace app worker backend with restricted tokens and temporary ACL guards.
-  - [ ] Extend the optional Windows backend to Terminal pipes and process-tree cleanup.
+  - [x] Extend the optional Windows backend to Terminal pipes and process-tree cleanup.
   - [ ] Add conformance tests for protected runtime paths when a backend is enabled.
 
 - [x] Resolve symlinks and canonical paths for sandbox enforcement

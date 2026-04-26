@@ -139,9 +139,12 @@ Current implementation:
   ACL guards and a kill-on-close Job Object when `strong_filesystem` is enabled.
   `auto` falls back to the lightweight default guard if restricted spawn fails;
   `required` fails the worker launch.
-- Windows Terminal strong sandboxing is still pending because it needs
-  backend-owned stdin/stdout/stderr pipe support. In `required` mode, Terminal
-  strong sandbox launch fails on Windows until that backend is implemented.
+- Windows Terminal strong sandboxing uses the same restricted-token and
+  kill-on-close Job Object backend. Terminal stdio is owned by the sandbox layer:
+  piped stdin/stdout/stderr are created with Windows pipe handles and exposed
+  through the platform-neutral async child wrapper. `auto` falls back to the
+  lightweight default guard if restricted spawn fails; `required` fails the
+  Terminal launch.
 
 ## Conformance Tests
 

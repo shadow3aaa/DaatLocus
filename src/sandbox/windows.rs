@@ -2,7 +2,11 @@ use std::{
     collections::BTreeMap,
     ffi::{OsStr, c_void},
     io,
-    os::windows::{ffi::OsStrExt, process::ExitStatusExt},
+    os::windows::{
+        ffi::OsStrExt,
+        io::{FromRawHandle, RawHandle},
+        process::ExitStatusExt,
+    },
     path::{Path, PathBuf},
     process::ExitStatus,
     ptr,
@@ -41,6 +45,7 @@ use windows_sys::Win32::{
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
             SetInformationJobObject, TerminateJobObject,
         },
+        Pipes::CreatePipe,
         SystemServices::SE_GROUP_LOGON_ID,
         Threading::{
             CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, GetCurrentProcess,
@@ -75,6 +80,15 @@ pub enum WindowsSandboxChild {
 
 unsafe impl Send for WindowsSandboxChild {}
 
+pub struct WindowsSandboxAsyncChild {
+    child: RestrictedWindowsChild,
+    stdin: Option<tokio::fs::File>,
+    stdout: Option<tokio::fs::File>,
+    stderr: Option<tokio::fs::File>,
+}
+
+unsafe impl Send for WindowsSandboxAsyncChild {}
+
 pub struct RestrictedWindowsChild {
     process: HANDLE,
     thread: HANDLE,
@@ -101,6 +115,13 @@ struct StartupHandles {
     stdout: HANDLE,
     stderr: HANDLE,
     _owned: Vec<OwnedHandle>,
+}
+
+#[derive(Default)]
+struct ParentPipeHandles {
+    stdin: Option<OwnedHandle>,
+    stdout: Option<OwnedHandle>,
+    stderr: Option<OwnedHandle>,
 }
 
 impl WindowsSandboxChild {
@@ -130,6 +151,32 @@ impl WindowsSandboxChild {
             Self::Plain(child) => child.wait(),
             Self::Restricted(child) => child.wait(),
         }
+    }
+}
+
+impl WindowsSandboxAsyncChild {
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub fn take_stdin(&mut self) -> Option<tokio::fs::File> {
+        self.stdin.take()
+    }
+
+    pub fn take_stdout(&mut self) -> Option<tokio::fs::File> {
+        self.stdout.take()
+    }
+
+    pub fn take_stderr(&mut self) -> Option<tokio::fs::File> {
+        self.stderr.take()
+    }
+
+    pub fn start_kill(&mut self) -> io::Result<()> {
+        self.child.kill()
+    }
+
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
     }
 }
 
@@ -173,6 +220,36 @@ pub fn spawn_restricted(
     };
     drop(token);
     Ok(WindowsSandboxChild::Restricted(process))
+}
+
+pub fn spawn_restricted_async(
+    policy: &RuntimeSandboxPolicy,
+    program: PathBuf,
+    args: Vec<String>,
+    options: SandboxProcessOptions,
+) -> io::Result<WindowsSandboxAsyncChild> {
+    let cap_sid = random_capability_sid();
+    let cap_sid_ptr = LocalSid::from_string(&cap_sid)?;
+    let token = create_restricted_token(&cap_sid_ptr)?;
+    let mut acl_guards = Vec::new();
+    let process = match spawn_restricted_async_inner(
+        policy,
+        &program,
+        args,
+        options,
+        &cap_sid,
+        cap_sid_ptr.as_ptr(),
+        token.raw(),
+        &mut acl_guards,
+    ) {
+        Ok(process) => process,
+        Err(err) => {
+            revoke_acl_guards(&acl_guards, &cap_sid);
+            return Err(err);
+        }
+    };
+    drop(token);
+    Ok(process)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -240,6 +317,82 @@ fn spawn_restricted_inner(
         acl_guards: std::mem::take(acl_guards),
         cap_sid: cap_sid.to_string(),
         acl_cleaned: false,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_restricted_async_inner(
+    policy: &RuntimeSandboxPolicy,
+    program: &Path,
+    args: Vec<String>,
+    options: SandboxProcessOptions,
+    cap_sid: &str,
+    psid_capability: PSID,
+    token: HANDLE,
+    acl_guards: &mut Vec<PathBuf>,
+) -> io::Result<WindowsSandboxAsyncChild> {
+    apply_policy_acl_rules(policy, program, psid_capability, acl_guards)?;
+    let current_dir = options
+        .current_dir
+        .clone()
+        .unwrap_or(std::env::current_dir()?);
+    let argv = command_argv(program, args);
+    let mut command_line = to_wide(argv_to_command_line(&argv));
+    let program_wide = to_wide(program.as_os_str());
+    let current_dir_wide = to_wide(current_dir.as_os_str());
+    let env_block = environment_block(policy);
+    let (stdio, parent_pipes) = StartupHandles::new_with_parent_pipes(options)?;
+    let startup_info = startup_info(&stdio);
+    let mut process_info = PROCESS_INFORMATION::default();
+
+    let created = unsafe {
+        CreateProcessAsUserW(
+            token,
+            program_wide.as_ptr(),
+            command_line.as_mut_ptr(),
+            ptr::null(),
+            ptr::null(),
+            1,
+            CREATE_UNICODE_ENVIRONMENT,
+            env_block.as_ptr().cast::<c_void>(),
+            current_dir_wide.as_ptr(),
+            &startup_info,
+            &mut process_info,
+        )
+    };
+    if created == 0 {
+        return Err(last_os_error("CreateProcessAsUserW failed"));
+    }
+
+    let job = match create_kill_on_close_job(process_info.hProcess) {
+        Ok(job) => job,
+        Err(err) => {
+            unsafe {
+                TerminateProcess(process_info.hProcess, 1);
+                CloseHandle(process_info.hThread);
+                CloseHandle(process_info.hProcess);
+            }
+            return Err(err);
+        }
+    };
+
+    let child = RestrictedWindowsChild {
+        process: process_info.hProcess,
+        thread: process_info.hThread,
+        job,
+        process_id: unsafe { GetProcessId(process_info.hProcess) },
+        exit_status: None,
+        acl_guards: std::mem::take(acl_guards),
+        cap_sid: cap_sid.to_string(),
+        acl_cleaned: false,
+    };
+    let (stdin, stdout, stderr) = parent_pipes.into_async_files()?;
+
+    Ok(WindowsSandboxAsyncChild {
+        child,
+        stdin,
+        stdout,
+        stderr,
     })
 }
 
@@ -824,6 +977,12 @@ impl OwnedHandle {
     fn raw(&self) -> HANDLE {
         self.0
     }
+
+    fn into_raw(mut self) -> HANDLE {
+        let handle = self.0;
+        self.0 = ptr::null_mut();
+        handle
+    }
 }
 
 impl Drop for OwnedHandle {
@@ -850,6 +1009,80 @@ impl StartupHandles {
             _owned: owned,
         })
     }
+
+    fn new_with_parent_pipes(
+        options: SandboxProcessOptions,
+    ) -> io::Result<(Self, ParentPipeHandles)> {
+        let mut owned = Vec::new();
+        let mut parent = ParentPipeHandles::default();
+        let stdin = match options.stdin {
+            SandboxStdio::Piped => {
+                let (child_read, parent_write) = create_pipe_pair("stdin")?;
+                set_handle_inherit(child_read.raw(), true)?;
+                set_handle_inherit(parent_write.raw(), false)?;
+                let child_handle = child_read.raw();
+                owned.push(child_read);
+                parent.stdin = Some(parent_write);
+                child_handle
+            }
+            mode => stdio_handle(mode, STD_INPUT_HANDLE, true, &mut owned)?,
+        };
+        let stdout = match options.stdout {
+            SandboxStdio::Piped => {
+                let (parent_read, child_write) = create_pipe_pair("stdout")?;
+                set_handle_inherit(child_write.raw(), true)?;
+                set_handle_inherit(parent_read.raw(), false)?;
+                let child_handle = child_write.raw();
+                owned.push(child_write);
+                parent.stdout = Some(parent_read);
+                child_handle
+            }
+            mode => stdio_handle(mode, STD_OUTPUT_HANDLE, false, &mut owned)?,
+        };
+        let stderr = match options.stderr {
+            SandboxStdio::Piped => {
+                let (parent_read, child_write) = create_pipe_pair("stderr")?;
+                set_handle_inherit(child_write.raw(), true)?;
+                set_handle_inherit(parent_read.raw(), false)?;
+                let child_handle = child_write.raw();
+                owned.push(child_write);
+                parent.stderr = Some(parent_read);
+                child_handle
+            }
+            mode => stdio_handle(mode, STD_ERROR_HANDLE, false, &mut owned)?,
+        };
+        Ok((
+            Self {
+                stdin,
+                stdout,
+                stderr,
+                _owned: owned,
+            },
+            parent,
+        ))
+    }
+}
+
+impl ParentPipeHandles {
+    fn into_async_files(
+        self,
+    ) -> io::Result<(
+        Option<tokio::fs::File>,
+        Option<tokio::fs::File>,
+        Option<tokio::fs::File>,
+    )> {
+        Ok((
+            owned_handle_to_async_file(self.stdin),
+            owned_handle_to_async_file(self.stdout),
+            owned_handle_to_async_file(self.stderr),
+        ))
+    }
+}
+
+fn owned_handle_to_async_file(handle: Option<OwnedHandle>) -> Option<tokio::fs::File> {
+    let handle = handle?;
+    let raw = handle.into_raw();
+    Some(unsafe { tokio::fs::File::from_raw_handle(raw as RawHandle) })
 }
 
 fn startup_info(handles: &StartupHandles) -> STARTUPINFOW {
@@ -885,11 +1118,27 @@ fn stdio_handle(
             ));
         }
     };
-    let ok = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+    set_handle_inherit(handle, true)?;
+    Ok(handle)
+}
+
+fn create_pipe_pair(label: &str) -> io::Result<(OwnedHandle, OwnedHandle)> {
+    let mut read: HANDLE = ptr::null_mut();
+    let mut write: HANDLE = ptr::null_mut();
+    let ok = unsafe { CreatePipe(&mut read, &mut write, ptr::null_mut(), 0) };
+    if ok == 0 {
+        return Err(last_os_error(&format!("CreatePipe({label}) failed")));
+    }
+    Ok((OwnedHandle(read), OwnedHandle(write)))
+}
+
+fn set_handle_inherit(handle: HANDLE, inherit: bool) -> io::Result<()> {
+    let flags = if inherit { HANDLE_FLAG_INHERIT } else { 0 };
+    let ok = unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags) };
     if ok == 0 {
         Err(last_os_error("SetHandleInformation failed"))
     } else {
-        Ok(handle)
+        Ok(())
     }
 }
 

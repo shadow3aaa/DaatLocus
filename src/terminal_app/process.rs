@@ -6,20 +6,17 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    process::ChildStdin,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::sandbox::{
-    RuntimeSandboxPolicy, SandboxAsyncChild, SandboxProcessOptions, SandboxStdio,
+    RuntimeSandboxPolicy, SandboxAsyncChild, SandboxChildStdin, SandboxProcessOptions, SandboxStdio,
 };
 
 pub const DEFAULT_OUTPUT_BUFFER_CAPACITY_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct TerminalProcess {
     child: SandboxAsyncChild,
-    stdin: Option<ChildStdin>,
+    stdin: Option<SandboxChildStdin>,
     last_update: Arc<Mutex<Instant>>,
     output: Arc<Mutex<BoundedOutputBuffer>>,
 }
