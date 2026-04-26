@@ -1,7 +1,8 @@
 //! Interactive configuration wizard for first-run setup and `config` subcommands.
 
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use base64::Engine;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use miette::{Result, miette};
 use ratatui::{
@@ -19,7 +20,13 @@ use crate::{
     },
     i18n::Locale,
     model_catalog::{ModelCapacity, catalog_model_capacity, conservative_model_capacity},
+    providers::{
+        CodexOAuthTokens, codex_oauth_access_from_file, codex_oauth_auth_file,
+        codex_oauth_client_version, codex_oauth_default_base_url, write_codex_oauth_tokens,
+    },
 };
+use sha2::Digest;
+use tokio::{net::TcpListener, sync::oneshot};
 
 // ---------------------------------------------------------------------------
 // GitHub OAuth device code flow
@@ -32,6 +39,17 @@ const GITHUB_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
+
+// Public client id and OAuth endpoints used by OpenAI Codex CLI for ChatGPT login.
+const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_OAUTH_ISSUER: &str = "https://auth.openai.com";
+const CODEX_OAUTH_DEFAULT_BROWSER_PORT: u16 = 1455;
+const CODEX_DEVICE_USER_CODE_PATH: &str = "/api/accounts/deviceauth/usercode";
+const CODEX_DEVICE_TOKEN_PATH: &str = "/api/accounts/deviceauth/token";
+const CODEX_OAUTH_TOKEN_PATH: &str = "/oauth/token";
+const CODEX_OAUTH_ORIGINATOR: &str = "codex_cli_rs";
+const CODEX_OAUTH_SCOPES: &str =
+    "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
 /// Run the GitHub OAuth device code flow and return an access token.
 async fn run_github_device_flow(locale: Locale) -> Result<String> {
@@ -182,16 +200,467 @@ async fn run_github_device_flow(locale: Locale) -> Result<String> {
     }
 }
 
-/// Minimal percent-encoding for client_id and device_code form fields.
+#[derive(serde::Deserialize)]
+struct CodexDeviceUserCodeResponse {
+    device_auth_id: String,
+    #[serde(alias = "usercode")]
+    user_code: String,
+    #[serde(default)]
+    interval: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+struct CodexDeviceTokenResponse {
+    authorization_code: String,
+    code_verifier: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CodexOAuthTokenResponse {
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+}
+
+#[derive(Debug, Clone)]
+struct CodexPkceCodes {
+    code_verifier: String,
+    code_challenge: String,
+}
+
+#[derive(Clone)]
+struct CodexOAuthCallbackState {
+    expected_state: String,
+    callback_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<CodexOAuthCallbackResult>>>>,
+}
+
+#[derive(Debug)]
+enum CodexOAuthCallbackResult {
+    Code(String),
+    Error(String),
+}
+
+#[derive(serde::Deserialize)]
+struct CodexOAuthCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+async fn run_codex_oauth_browser_flow(locale: Locale) -> Result<CodexOAuthTokens> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| miette!("Codex OAuth HTTP client failed: {e}"))?;
+
+    let pkce = generate_codex_pkce();
+    let state = generate_codex_oauth_state();
+    let listener = bind_codex_oauth_callback_listener().await?;
+    let actual_port = listener
+        .local_addr()
+        .map_err(|e| miette!("Codex OAuth callback listener address failed: {e}"))?
+        .port();
+    let redirect_uri = format!("http://localhost:{actual_port}/auth/callback");
+    let auth_url = build_codex_authorize_url(&redirect_uri, &pkce, &state);
+    let (callback_tx, callback_rx) = oneshot::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+    let app = axum::Router::new()
+        .route(
+            "/auth/callback",
+            axum::routing::get(handle_codex_oauth_callback),
+        )
+        .with_state(CodexOAuthCallbackState {
+            expected_state: state,
+            callback_tx: Arc::new(tokio::sync::Mutex::new(Some(callback_tx))),
+        });
+
+    let server_handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    println!(
+        "  {}",
+        crate::tr!(locale, "codex_oauth.request_browser_login")
+    );
+    println!(
+        "  {}",
+        crate::tr!(locale, "codex_oauth.open_url", url = auth_url.clone())
+    );
+    println!(
+        "  {}",
+        crate::tr!(
+            locale,
+            "codex_oauth.callback_waiting",
+            url = redirect_uri.clone()
+        )
+    );
+    println!();
+
+    let _ = open_browser(&auth_url);
+
+    let callback = tokio::time::timeout(Duration::from_secs(15 * 60), callback_rx)
+        .await
+        .map_err(|_| miette!("Codex OAuth browser authorization timed out"))?
+        .map_err(|_| miette!("Codex OAuth callback server stopped before authorization"))?;
+    let _ = shutdown_tx.send(());
+    match tokio::time::timeout(Duration::from_secs(2), server_handle).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(err))) => tracing::debug!("Codex OAuth callback server stopped: {err}"),
+        Ok(Err(err)) => tracing::debug!("Codex OAuth callback server task failed: {err}"),
+        Err(_) => tracing::debug!("Codex OAuth callback server did not stop within timeout"),
+    }
+
+    let authorization_code = match callback {
+        CodexOAuthCallbackResult::Code(code) => {
+            println!("  {}", crate::tr!(locale, "codex_oauth.success"));
+            code
+        }
+        CodexOAuthCallbackResult::Error(error) => {
+            return Err(miette!(
+                "{}",
+                crate::tr!(locale, "codex_oauth.browser_failed", error = error)
+            ));
+        }
+    };
+
+    exchange_codex_authorization_code_with_pkce(
+        &http,
+        &authorization_code,
+        &pkce.code_verifier,
+        &redirect_uri,
+    )
+    .await
+}
+
+async fn bind_codex_oauth_callback_listener() -> Result<TcpListener> {
+    let default_addr =
+        std::net::SocketAddr::from(([127, 0, 0, 1], CODEX_OAUTH_DEFAULT_BROWSER_PORT));
+    match TcpListener::bind(default_addr).await {
+        Ok(listener) => Ok(listener),
+        Err(default_err) => {
+            let fallback_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+            TcpListener::bind(fallback_addr).await.map_err(|fallback_err| {
+                miette!(
+                    "Codex OAuth callback listener failed on {default_addr} ({default_err}) and on an ephemeral port ({fallback_err})"
+                )
+            })
+        }
+    }
+}
+
+async fn handle_codex_oauth_callback(
+    axum::extract::State(state): axum::extract::State<CodexOAuthCallbackState>,
+    axum::extract::Query(query): axum::extract::Query<CodexOAuthCallbackQuery>,
+) -> impl axum::response::IntoResponse {
+    let result = match (query.error, query.code, query.state) {
+        (Some(error), _, _) => {
+            let detail = query
+                .error_description
+                .filter(|description| !description.trim().is_empty())
+                .map(|description| format!("{error}: {description}"))
+                .unwrap_or(error);
+            CodexOAuthCallbackResult::Error(detail)
+        }
+        (_, Some(code), Some(callback_state)) if callback_state == state.expected_state => {
+            CodexOAuthCallbackResult::Code(code)
+        }
+        (_, Some(_), _) => {
+            CodexOAuthCallbackResult::Error("OAuth callback state did not match".to_string())
+        }
+        _ => CodexOAuthCallbackResult::Error(
+            "OAuth callback did not include an authorization code".to_string(),
+        ),
+    };
+
+    let is_success = matches!(result, CodexOAuthCallbackResult::Code(_));
+    if let Some(tx) = state.callback_tx.lock().await.take() {
+        let _ = tx.send(result);
+    }
+
+    let status = if is_success {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::BAD_REQUEST
+    };
+    let title = if is_success {
+        "OpenAI Codex OAuth complete"
+    } else {
+        "OpenAI Codex OAuth failed"
+    };
+    let body = if is_success {
+        "Authorization is complete. You can close this tab and return to Daat Locus."
+    } else {
+        "Authorization failed. Return to Daat Locus for details."
+    };
+    (
+        status,
+        axum::response::Html(codex_oauth_callback_html(title, body)),
+    )
+}
+
+fn codex_oauth_callback_html(title: &str, body: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 3rem; line-height: 1.5; }}
+    main {{ max-width: 42rem; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{title}</h1>
+    <p>{body}</p>
+  </main>
+</body>
+</html>"#
+    )
+}
+
+fn build_codex_authorize_url(redirect_uri: &str, pkce: &CodexPkceCodes, state: &str) -> String {
+    let query = [
+        ("response_type", "code"),
+        ("client_id", CODEX_OAUTH_CLIENT_ID),
+        ("redirect_uri", redirect_uri),
+        ("scope", CODEX_OAUTH_SCOPES),
+        ("code_challenge", pkce.code_challenge.as_str()),
+        ("code_challenge_method", "S256"),
+        ("id_token_add_organizations", "true"),
+        ("codex_cli_simplified_flow", "true"),
+        ("state", state),
+        ("originator", CODEX_OAUTH_ORIGINATOR),
+    ];
+    let qs = query
+        .into_iter()
+        .map(|(key, value)| format!("{key}={}", urlenc(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{CODEX_OAUTH_ISSUER}/oauth/authorize?{qs}")
+}
+
+fn generate_codex_pkce() -> CodexPkceCodes {
+    let mut bytes = [0u8; 64];
+    fill_uuid_random_bytes(&mut bytes);
+    let code_verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let digest = sha2::Sha256::digest(code_verifier.as_bytes());
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    CodexPkceCodes {
+        code_verifier,
+        code_challenge,
+    }
+}
+
+fn generate_codex_oauth_state() -> String {
+    let mut bytes = [0u8; 32];
+    fill_uuid_random_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn fill_uuid_random_bytes(bytes: &mut [u8]) {
+    for chunk in bytes.chunks_mut(16) {
+        let uuid = uuid::Uuid::new_v4();
+        chunk.copy_from_slice(&uuid.as_bytes()[..chunk.len()]);
+    }
+}
+
+async fn run_codex_oauth_device_flow(locale: Locale) -> Result<CodexOAuthTokens> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| miette!("Codex OAuth HTTP client failed: {e}"))?;
+
+    println!(
+        "  {}",
+        crate::tr!(locale, "codex_oauth.request_device_code")
+    );
+    let user_code_url = format!("{CODEX_OAUTH_ISSUER}{CODEX_DEVICE_USER_CODE_PATH}");
+    let resp = http
+        .post(user_code_url)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "client_id": CODEX_OAUTH_CLIENT_ID }))
+        .send()
+        .await
+        .map_err(|e| miette!("Codex OAuth device code request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(miette!(
+            "Codex OAuth device code request returned HTTP {status}: {body}"
+        ));
+    }
+
+    let device: CodexDeviceUserCodeResponse = resp
+        .json()
+        .await
+        .map_err(|e| miette!("Codex OAuth device code response parse failed: {e}"))?;
+    let interval_secs = parse_codex_device_interval(&device.interval).max(5);
+    let verification_url = format!("{CODEX_OAUTH_ISSUER}/codex/device");
+
+    println!();
+    println!("  {}", crate::tr!(locale, "codex_oauth.authorization"));
+    println!(
+        "  1. {}",
+        crate::tr!(locale, "codex_oauth.open_url", url = verification_url)
+    );
+    println!(
+        "  2. {}",
+        crate::tr!(locale, "codex_oauth.enter_code", code = device.user_code)
+    );
+    println!("  {}", crate::tr!(locale, "codex_oauth.code_warning"));
+    println!();
+
+    let _ = open_browser(&verification_url);
+
+    let token_response = poll_codex_device_authorization(
+        &http,
+        locale,
+        &device.device_auth_id,
+        &device.user_code,
+        Duration::from_secs(interval_secs),
+    )
+    .await?;
+    let redirect_uri = format!("{CODEX_OAUTH_ISSUER}/deviceauth/callback");
+    let tokens = exchange_codex_authorization_code_with_pkce(
+        &http,
+        &token_response.authorization_code,
+        &token_response.code_verifier,
+        &redirect_uri,
+    )
+    .await?;
+    Ok(tokens)
+}
+
+fn parse_codex_device_interval(value: &serde_json::Value) -> u64 {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        .unwrap_or(5)
+}
+
+async fn poll_codex_device_authorization(
+    http: &reqwest::Client,
+    locale: Locale,
+    device_auth_id: &str,
+    user_code: &str,
+    interval: Duration,
+) -> Result<CodexDeviceTokenResponse> {
+    let token_url = format!("{CODEX_OAUTH_ISSUER}{CODEX_DEVICE_TOKEN_PATH}");
+    let expires_at = std::time::Instant::now() + Duration::from_secs(15 * 60);
+    let mut dots = 0usize;
+
+    loop {
+        if std::time::Instant::now() >= expires_at {
+            return Err(miette!("Codex OAuth device authorization expired"));
+        }
+
+        tokio::time::sleep(interval).await;
+        dots = (dots + 1) % 4;
+        print!(
+            "\r  {}",
+            crate::tr!(locale, "codex_oauth.waiting", dots = ".".repeat(dots + 1))
+        );
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        let resp = http
+            .post(&token_url)
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({
+                "device_auth_id": device_auth_id,
+                "user_code": user_code,
+            }))
+            .send()
+            .await
+            .map_err(|e| miette!("Codex OAuth device polling failed: {e}"))?;
+
+        let status = resp.status();
+        if status.is_success() {
+            println!(
+                "\r  {}                                  ",
+                crate::tr!(locale, "codex_oauth.success")
+            );
+            return resp
+                .json()
+                .await
+                .map_err(|e| miette!("Codex OAuth device token response parse failed: {e}"));
+        }
+
+        if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND {
+            continue;
+        }
+
+        let body = resp.text().await.unwrap_or_default();
+        return Err(miette!(
+            "Codex OAuth device polling returned HTTP {status}: {body}"
+        ));
+    }
+}
+
+async fn exchange_codex_authorization_code_with_pkce(
+    http: &reqwest::Client,
+    authorization_code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> Result<CodexOAuthTokens> {
+    let token_url = format!("{CODEX_OAUTH_ISSUER}{CODEX_OAUTH_TOKEN_PATH}");
+    let resp = http
+        .post(token_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
+            urlenc(authorization_code),
+            urlenc(redirect_uri),
+            urlenc(CODEX_OAUTH_CLIENT_ID),
+            urlenc(code_verifier),
+        ))
+        .send()
+        .await
+        .map_err(|e| miette!("Codex OAuth token exchange failed: {e}"))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| miette!("Codex OAuth token exchange body read failed: {e}"))?;
+    if !status.is_success() {
+        return Err(miette!(
+            "Codex OAuth token exchange returned HTTP {status}: {body}"
+        ));
+    }
+
+    let tokens: CodexOAuthTokenResponse = serde_json::from_str(&body)
+        .map_err(|e| miette!("Codex OAuth token exchange response parse failed: {e}"))?;
+    Ok(CodexOAuthTokens {
+        id_token: tokens.id_token,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        account_id: None,
+        last_refresh_at_ms: chrono::Utc::now().timestamp_millis(),
+    })
+}
+
+/// Minimal percent-encoding for OAuth form fields and query values.
 fn urlenc(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => {
-                vec![c]
+    let mut encoded = String::new();
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
             }
-            _ => format!("%{:02X}", c as u32).chars().collect(),
-        })
-        .collect()
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 fn open_browser(url: &str) -> std::io::Result<()> {
@@ -810,6 +1279,7 @@ fn next_char_boundary(s: &str, index: usize) -> usize {
 #[derive(Debug, Clone, Copy)]
 enum ProviderKind {
     OpenAI,
+    OpenAICodexOauth,
     GithubCopilot,
     OpenAICompatible,
 }
@@ -818,6 +1288,7 @@ impl ProviderKind {
     fn labels(locale: Locale) -> Vec<String> {
         vec![
             "OpenAI".to_string(),
+            "OpenAI Codex OAuth".to_string(),
             "GitHub Copilot".to_string(),
             crate::tr!(locale, "config.provider_openai_compatible"),
         ]
@@ -826,7 +1297,8 @@ impl ProviderKind {
     fn from_index(i: usize) -> Self {
         match i {
             0 => Self::OpenAI,
-            1 => Self::GithubCopilot,
+            1 => Self::OpenAICodexOauth,
+            2 => Self::GithubCopilot,
             _ => Self::OpenAICompatible,
         }
     }
@@ -844,6 +1316,7 @@ async fn prompt_provider(
 
     let default_name = match kind {
         ProviderKind::OpenAI => "openai",
+        ProviderKind::OpenAICodexOauth => "codex-oauth",
         ProviderKind::GithubCopilot => "copilot",
         ProviderKind::OpenAICompatible => "local",
     };
@@ -871,6 +1344,52 @@ async fn prompt_provider(
                 None
             };
             ProviderConfig::Openai { api_key, base_url }
+        }
+        ProviderKind::OpenAICodexOauth => {
+            let auth_method = ui.select(
+                &crate::tr!(locale, "config.codex_oauth_auth_method"),
+                &[
+                    crate::tr!(locale, "config.codex_oauth_browser_login"),
+                    crate::tr!(locale, "config.codex_oauth_device_login"),
+                    crate::tr!(locale, "config.codex_oauth_auth_file"),
+                ],
+                0,
+            )?;
+            let default_auth_file = codex_oauth_auth_file(&name, None);
+            let auth_file = if auth_method == 0 {
+                ui.suspend();
+                let result = run_codex_oauth_browser_flow(locale).await;
+                ui.resume()?;
+                let tokens = result?;
+                write_codex_oauth_tokens(&default_auth_file, &tokens).await?;
+                Some(default_auth_file.to_string_lossy().to_string())
+            } else if auth_method == 1 {
+                ui.suspend();
+                let result = run_codex_oauth_device_flow(locale).await;
+                ui.resume()?;
+                let tokens = result?;
+                write_codex_oauth_tokens(&default_auth_file, &tokens).await?;
+                Some(default_auth_file.to_string_lossy().to_string())
+            } else {
+                let default_auth_file_display = default_auth_file.to_string_lossy().to_string();
+                let path = ui.text(
+                    &crate::tr!(locale, "config.codex_oauth_auth_file_path"),
+                    Some(&default_auth_file_display),
+                )?;
+                Some(path)
+            };
+            let use_custom_url =
+                ui.confirm(&crate::tr!(locale, "config.custom_base_url"), false)?;
+            let base_url = if use_custom_url {
+                let url = ui.text(&crate::tr!(locale, "config.base_url_openai"), None)?;
+                Some(normalize_provider_base_url(&url))
+            } else {
+                None
+            };
+            ProviderConfig::OpenaiCodexOauth {
+                auth_file,
+                base_url,
+            }
         }
         ProviderKind::GithubCopilot => {
             let auth_method = ui.select(
@@ -928,6 +1447,24 @@ const COPILOT_DEFAULT_MODELS: &[&str] = &[
     "o1",
     "o1-mini",
 ];
+
+/// Static fallback for Codex OAuth. The ChatGPT Codex backend may return an
+/// empty `/models` list while still accepting current Codex model slugs.
+const CODEX_OAUTH_DEFAULT_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini"];
+
+fn codex_oauth_fallback_models() -> Vec<DiscoveredModel> {
+    CODEX_OAUTH_DEFAULT_MODELS
+        .iter()
+        .map(|id| {
+            let capacity = catalog_model_capacity(id);
+            DiscoveredModel {
+                id: (*id).to_string(),
+                context_window: capacity.map(|capacity| capacity.context_window_tokens),
+                max_output_tokens: capacity.map(|capacity| capacity.max_completion_tokens),
+            }
+        })
+        .collect()
+}
 
 fn resolve_model_capacity(
     model_id: &str,
@@ -1057,13 +1594,22 @@ struct DiscoveredModel {
 }
 
 /// Fetch provider model IDs. Failures return an empty list.
-async fn fetch_model_ids(provider: &ProviderConfig) -> Vec<DiscoveredModel> {
+async fn fetch_model_ids(provider_name: &str, provider: &ProviderConfig) -> Vec<DiscoveredModel> {
     match provider {
         ProviderConfig::GithubCopilot { github_token } => fetch_copilot_models(github_token).await,
         ProviderConfig::Openai { api_key, base_url } => {
             let base = base_url.as_deref().unwrap_or("https://api.openai.com/v1");
             let api_key = resolve_env_reference(api_key);
             fetch_openai_models(base, &api_key).await
+        }
+        ProviderConfig::OpenaiCodexOauth {
+            auth_file,
+            base_url,
+        } => {
+            let base = base_url
+                .as_deref()
+                .unwrap_or(codex_oauth_default_base_url());
+            fetch_codex_oauth_models(provider_name, auth_file.as_deref(), base).await
         }
         ProviderConfig::OpenaiCompatible { base_url, api_key } => {
             let api_key = resolve_env_reference(api_key);
@@ -1111,6 +1657,70 @@ async fn fetch_openai_models_path(url: &str, api_key: &str) -> Vec<DiscoveredMod
     parse_models_response(resp.json().await.ok())
 }
 
+async fn fetch_codex_oauth_models(
+    provider_name: &str,
+    auth_file: Option<&str>,
+    base_url: &str,
+) -> Vec<DiscoveredModel> {
+    let auth_file = codex_oauth_auth_file(provider_name, auth_file);
+    let access = match codex_oauth_access_from_file(&auth_file).await {
+        Ok(access) => access,
+        Err(err) => {
+            tracing::warn!(
+                auth_file = %auth_file.display(),
+                "Codex OAuth model discovery: auth unavailable: {err}"
+            );
+            return vec![];
+        }
+    };
+    let url = format!(
+        "{}/models?client_version={}",
+        normalize_provider_base_url(base_url),
+        codex_oauth_client_version()
+    );
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Codex OAuth model discovery: failed to build http client: {e}");
+            return vec![];
+        }
+    };
+    let mut request = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", access.access_token))
+        .header("version", codex_oauth_client_version())
+        .header("originator", "codex_cli_rs");
+    if let Some(account_id) = access.account_id.as_deref() {
+        request = request.header("ChatGPT-Account-ID", account_id);
+    }
+    if access.is_fedramp_account {
+        request = request.header("X-OpenAI-Fedramp", "true");
+    }
+    let resp = match request.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(url = %url, "Codex OAuth model discovery request failed: {e}");
+            return vec![];
+        }
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let body = redact_secret_text(&body, &access.access_token);
+        tracing::warn!(url = %url, http_status = %status, body = %body, "Codex OAuth model discovery non-2xx");
+        return vec![];
+    }
+    let models = parse_models_response(resp.json().await.ok());
+    if models.is_empty() {
+        codex_oauth_fallback_models()
+    } else {
+        models
+    }
+}
+
 async fn fetch_copilot_internal_models(
     client: &reqwest::Client,
     url: &str,
@@ -1146,17 +1756,31 @@ fn parse_models_response(json: Option<serde_json::Value>) -> Vec<DiscoveredModel
         Some(j) => j,
         None => return vec![],
     };
-    let mut models: Vec<DiscoveredModel> = json["data"]
-        .as_array()
-        .unwrap_or(&vec![])
+    let items = json
+        .get("data")
+        .or_else(|| json.get("models"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut models: Vec<DiscoveredModel> = items
         .iter()
         .filter_map(|m| {
-            let id = m["id"].as_str()?.to_string();
+            if m["supported_in_api"].as_bool() == Some(false)
+                || m["visibility"].as_str() == Some("hide")
+            {
+                return None;
+            }
+            let id = m["id"].as_str().or_else(|| m["slug"].as_str())?.to_string();
             let limits = &m["capabilities"]["limits"];
             let context_window = limits["max_context_window_tokens"]
                 .as_u64()
+                .or_else(|| m["context_window"].as_u64())
+                .or_else(|| m["max_context_window"].as_u64())
                 .map(|v| v as usize);
-            let max_output_tokens = limits["max_output_tokens"].as_u64().map(|v| v as usize);
+            let max_output_tokens = limits["max_output_tokens"]
+                .as_u64()
+                .or_else(|| m["max_output_tokens"].as_u64())
+                .map(|v| v as usize);
             Some(DiscoveredModel {
                 id,
                 context_window,
@@ -1183,7 +1807,7 @@ async fn prompt_model(
         &crate::tr!(locale, "config.discover_models"),
         &format!("provider: {provider_name}"),
     )?;
-    let discovered = fetch_model_ids(provider).await;
+    let discovered = fetch_model_ids(provider_name, provider).await;
 
     let (model_id, api_ctx, api_out) = if discovered.is_empty() {
         let id = ui.text("Model ID", None)?;
@@ -1478,6 +2102,16 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
             ProviderConfig::GithubCopilot { github_token } => {
                 let masked = mask_secret(github_token);
                 format!("github-copilot  token={masked}")
+            }
+            ProviderConfig::OpenaiCodexOauth {
+                auth_file,
+                base_url,
+            } => {
+                let url = base_url
+                    .as_deref()
+                    .unwrap_or(codex_oauth_default_base_url());
+                let auth_file = auth_file.as_deref().unwrap_or("<default>");
+                format!("openai-codex-oauth  url={url}  auth_file={auth_file}")
             }
             ProviderConfig::OpenaiCompatible { base_url, api_key } => {
                 let masked = mask_secret(api_key);
@@ -1825,5 +2459,93 @@ mod tests {
         let capacity = resolve_model_capacity("gpt-4.1-custom", None, None);
 
         assert_eq!(capacity, conservative_model_capacity());
+    }
+
+    #[test]
+    fn urlenc_percent_encodes_utf8_bytes() {
+        assert_eq!(urlenc("a b/你"), "a%20b%2F%E4%BD%A0");
+    }
+
+    #[test]
+    fn codex_authorize_url_matches_codex_callback_flow() {
+        let pkce = CodexPkceCodes {
+            code_verifier: "verifier".to_string(),
+            code_challenge: "challenge".to_string(),
+        };
+        let url = build_codex_authorize_url("http://localhost:1455/auth/callback", &pkce, "state");
+
+        assert!(url.starts_with("https://auth.openai.com/oauth/authorize?"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+        assert!(url.contains("scope=openid%20profile%20email%20offline_access%20api.connectors.read%20api.connectors.invoke"));
+        assert!(url.contains("code_challenge=challenge"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("id_token_add_organizations=true"));
+        assert!(url.contains("codex_cli_simplified_flow=true"));
+        assert!(url.contains("state=state"));
+        assert!(url.contains("originator=codex_cli_rs"));
+    }
+
+    #[test]
+    fn codex_pkce_codes_are_url_safe_and_have_expected_lengths() {
+        let pkce = generate_codex_pkce();
+        let state = generate_codex_oauth_state();
+
+        assert_eq!(pkce.code_verifier.len(), 86);
+        assert_eq!(pkce.code_challenge.len(), 43);
+        assert_eq!(state.len(), 43);
+        assert!(
+            pkce.code_verifier
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+        assert!(
+            pkce.code_challenge
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+        assert!(
+            state
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+    }
+
+    #[test]
+    fn parse_models_response_accepts_codex_models_shape() {
+        let models = parse_models_response(Some(serde_json::json!({
+            "models": [
+                {
+                    "slug": "gpt-5.4-mini",
+                    "display_name": "GPT-5.4-Mini",
+                    "context_window": 272000
+                },
+                {
+                    "slug": "gpt-5.5",
+                    "display_name": "GPT-5.5",
+                    "max_context_window": 400000,
+                    "max_output_tokens": 128000
+                },
+                {
+                    "slug": "gpt-5.3-codex-spark",
+                    "display_name": "GPT-5.3-Codex-Spark",
+                    "supported_in_api": false
+                },
+                {
+                    "slug": "codex-auto-review",
+                    "display_name": "Codex Auto Review",
+                    "visibility": "hide"
+                }
+            ]
+        })));
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "gpt-5.4-mini");
+        assert_eq!(models[0].context_window, Some(272000));
+        assert_eq!(models[0].max_output_tokens, None);
+        assert_eq!(models[1].id, "gpt-5.5");
+        assert_eq!(models[1].context_window, Some(400000));
+        assert_eq!(models[1].max_output_tokens, Some(128000));
     }
 }
