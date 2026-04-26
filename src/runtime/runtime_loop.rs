@@ -12,8 +12,7 @@ use crate::{
     },
     dashboard::render::{
         AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD,
-        SleepDashboardStatus, refresh_sleep_backlogs, render_dashboard_footer_context,
-        sync_dashboard_state,
+        render_dashboard_footer_context, sync_dashboard_state,
     },
     dashboard::{
         DashboardActivityEvent, DashboardControlCommand, DashboardState,
@@ -45,6 +44,9 @@ use crate::{
         ToolExecutionResult, build_runtime_tool_specs, execute_agent_tool_call,
         render_telegram_tool_result_status, render_tool_call_ui_event,
         summarize_action_from_tool_call,
+    },
+    sleep_status::{
+        SleepStatusSnapshot, persist_sleep_status_snapshot, refresh_sleep_status_queues,
     },
     snapshot::Snapshot,
     telegram_transport::TelegramLiveDraftClient,

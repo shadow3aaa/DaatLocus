@@ -31,6 +31,7 @@ mod runtime_context;
 mod runtime_tools;
 mod sandbox;
 mod schema_utils;
+mod sleep_status;
 mod snapshot;
 mod system_info;
 mod telegram_acl;

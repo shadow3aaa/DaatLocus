@@ -8,10 +8,10 @@ use crate::{
         DaemonLifecycleState, DaemonLock, DaemonServerStartParams, start_server,
     },
     dashboard::render::{
-        SleepDashboardStatus, render_activity_for_dashboard,
-        render_app_status_outputs_for_dashboard, render_dashboard_footer_context,
-        render_sleep_status_output_for_dashboard, render_status_command_output_for_dashboard,
-        render_system_prompt_output_for_dashboard, render_telegram_status_for_dashboard,
+        render_activity_for_dashboard, render_app_status_outputs_for_dashboard,
+        render_dashboard_footer_context, render_sleep_status_output_for_dashboard,
+        render_status_command_output_for_dashboard, render_system_prompt_output_for_dashboard,
+        render_telegram_status_for_dashboard,
     },
     dashboard::{DashboardControlCommand, DashboardState},
     events::EventStore,
@@ -22,6 +22,7 @@ use crate::{
     providers::build_llm,
     reasoning::runtime::PromptMemoryContext,
     runtime_context::build_runtime_snapshot_text,
+    sleep_status::load_sleep_status_snapshot,
     snapshot::Snapshot,
     telegram_acl::TelegramAclHandle,
     telegram_transport::TelegramTransport,
@@ -207,6 +208,8 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         last_idle_sleep_at: None,
     };
 
+    let mut sleep_status = load_sleep_status_snapshot().await;
+
     // Replace the placeholder dashboard state with real state after context is built.
     let startup_snapshot = Snapshot::new(&mut context).await;
     let startup_snapshot_output = build_runtime_snapshot_text(&context, &startup_snapshot);
@@ -215,10 +218,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         *state = DashboardState {
             focused_app: context.apps.focused(),
             status_output: render_status_command_output_for_dashboard(&context, &app_renders),
-            sleep_status_output: render_sleep_status_output_for_dashboard(
-                &context,
-                &SleepDashboardStatus::default(),
-            ),
+            sleep_status_output: render_sleep_status_output_for_dashboard(&context, &sleep_status),
             inspect_telegram_output: render_telegram_status_for_dashboard(&context),
             system_prompt_output: render_system_prompt_output_for_dashboard(&context),
             snapshot_output: startup_snapshot_output,
@@ -276,8 +276,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .map_err(|err| miette!("failed to install SIGTERM handler: {err}"))?
     };
-    let mut sleep_running = false;
-    let mut sleep_status = SleepDashboardStatus::default();
+    let mut sleep_running = sleep_status.running;
     let mut shutdown_completion_tx = None;
     let mut ctrl_c_disabled = false;
     loop {

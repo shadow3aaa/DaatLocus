@@ -2,9 +2,7 @@
 
 use std::time::Duration;
 
-use crate::{
-    app::AppId, context::Context, events::EventStatus, reasoning::trace::unread_runtime_trace_count,
-};
+use crate::{app::AppId, context::Context, events::EventStatus, sleep_status::SleepStatusSnapshot};
 
 use super::{DashboardState, render_activity_from_messages};
 
@@ -13,49 +11,10 @@ pub const AUTO_SLEEP_IDLE_THRESHOLD: Duration = Duration::from_secs(300);
 pub const AUTO_SLEEP_MIN_INTERVAL: Duration = Duration::from_secs(300);
 pub const FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD: usize = 128;
 
-/// Status structure for sleep dashboard display.
-#[derive(Default)]
-pub struct SleepDashboardStatus {
-    pub running: bool,
-    pub current_trigger: Option<&'static str>,
-    pub last_result: Option<String>,
-    pub unread_trace_backlog: usize,
-    pub total_runs: usize,
-    pub total_prompt_consumed_trace_events: usize,
-    pub total_failure_patterns: usize,
-    pub total_prompt_reflections: usize,
-    pub total_prompt_candidates: usize,
-    pub total_prompt_candidate_evaluations: usize,
-    pub total_prompt_frontier_entries: usize,
-    pub latest_prompt_frontier_root_entries: usize,
-    pub latest_prompt_frontier_branched_entries: usize,
-    pub latest_prompt_frontier_max_generation: usize,
-    pub total_bootstrap_demos: usize,
-    pub total_stress_cases: usize,
-    pub total_instruction_hypotheses: usize,
-    pub total_runtime_demos: usize,
-    pub total_turn_demos: usize,
-    pub total_prompt_system_additions: usize,
-    pub total_compiled_prompt_updates: usize,
-    pub total_workflow_evidence_run_records: usize,
-    pub total_workflow_reflections: usize,
-    pub total_workflow_patch_candidates: usize,
-    pub total_workflow_merge_candidates: usize,
-    pub total_workflow_candidate_evaluations: usize,
-    pub total_workflow_frontier_entries: usize,
-    pub latest_workflow_frontier_root_entries: usize,
-    pub latest_workflow_frontier_branched_entries: usize,
-    pub latest_workflow_frontier_max_generation: usize,
-    pub total_workflow_patch_applied: usize,
-    pub total_workflow_merge_applied: usize,
-    pub total_workflow_update_rollbacks: usize,
-    pub total_workflow_optimization_rounds: usize,
-}
-
 pub fn sync_dashboard_state(
     context: &Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
-    sleep_status: &SleepDashboardStatus,
+    sleep_status: &SleepStatusSnapshot,
     last_cycle_elapsed_ms: Option<u128>,
 ) {
     tx.send_modify(|state| {
@@ -224,15 +183,9 @@ fn format_compact_tokens(tokens: usize) -> String {
     }
 }
 
-pub async fn refresh_sleep_backlogs(sleep_status: &mut SleepDashboardStatus) {
-    if let Ok(backlog) = unread_runtime_trace_count().await {
-        sleep_status.unread_trace_backlog = backlog;
-    }
-}
-
 pub fn render_sleep_status_output_for_dashboard(
     context: &Context,
-    sleep_status: &SleepDashboardStatus,
+    sleep_status: &SleepStatusSnapshot,
 ) -> String {
     let mut sections = Vec::new();
     let state = if sleep_status.running {
@@ -248,6 +201,18 @@ pub fn render_sleep_status_output_for_dashboard(
         overview_lines.push(format!("Last result: {last_result}"));
     }
     sections.push(format!("Overview\n{}", overview_lines.join("\n")));
+
+    let queue_lines = [
+        format!(
+            "• Prompt trace queue: {}",
+            sleep_status.unread_trace_backlog
+        ),
+        format!(
+            "• Workflow evidence records: {}",
+            sleep_status.workflow_evidence_records
+        ),
+    ];
+    sections.push(format!("Queues\n{}", queue_lines.join("\n")));
 
     let prompt_lines = vec![
         format!("• Total runs: {}", sleep_status.total_runs),
@@ -304,7 +269,10 @@ pub fn render_sleep_status_output_for_dashboard(
             sleep_status.total_compiled_prompt_updates
         ),
     ];
-    sections.push(format!("Prompt Improvement\n{}", prompt_lines.join("\n")));
+    sections.push(format!(
+        "Prompt Improvement Totals\n{}",
+        prompt_lines.join("\n")
+    ));
 
     let workflow_lines = vec![
         format!(
@@ -355,7 +323,7 @@ pub fn render_sleep_status_output_for_dashboard(
         ),
     ];
     sections.push(format!(
-        "Workflow Improvement\n{}",
+        "Workflow Improvement Totals\n{}",
         workflow_lines.join("\n")
     ));
 
@@ -365,7 +333,7 @@ pub fn render_sleep_status_output_for_dashboard(
             FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD
         ),
         format!(
-            "• Current trace backlog: {}",
+            "• Current prompt trace queue: {}",
             sleep_status.unread_trace_backlog
         ),
         format!(

@@ -6,7 +6,7 @@ pub(crate) async fn daat_locus_loop(
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
     sleep_running: &mut bool,
-    sleep_status: &mut SleepDashboardStatus,
+    sleep_status: &mut SleepStatusSnapshot,
     workspace_app_invalidation_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
         WorkspaceAppInvalidation,
     >,
@@ -17,7 +17,7 @@ pub(crate) async fn daat_locus_loop(
     if let Err(err) = context.apps.refresh_all_notices().await {
         tracing::error!("failed to refresh app notices: {err:?}");
     }
-    refresh_sleep_backlogs(sleep_status).await;
+    refresh_sleep_status_queues(sleep_status).await;
     let forced_sleep_status =
         maybe_start_forced_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await;
     enqueue_app_notice_work(context);
@@ -152,7 +152,7 @@ pub(crate) async fn daat_locus_loop(
     context.active_runtime_turn = false;
     context.runtime_turn_started_at = None;
     context.set_runtime_phase(None);
-    refresh_sleep_backlogs(sleep_status).await;
+    refresh_sleep_status_queues(sleep_status).await;
     sync_dashboard_state(
         context,
         tx,

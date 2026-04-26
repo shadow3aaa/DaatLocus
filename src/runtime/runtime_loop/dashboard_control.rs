@@ -6,7 +6,7 @@ pub(crate) async fn handle_dashboard_control_command(
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
     sleep_running: &mut bool,
-    sleep_status: &mut SleepDashboardStatus,
+    sleep_status: &mut SleepStatusSnapshot,
     command: DashboardControlCommand,
 ) {
     match command {

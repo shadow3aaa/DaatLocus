@@ -498,6 +498,39 @@ pub async fn load_workflow_run_batch() -> Result<WorkflowRunBatch> {
     Ok(WorkflowRunBatch { records })
 }
 
+pub async fn workflow_run_record_count() -> Result<usize> {
+    let workflow_run_records_io_guard = workflow_run_records_io_lock().lock().await;
+    let path = workflow_run_records_file_path().await;
+    let file = match OpenOptions::new().read(true).open(&path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            drop(workflow_run_records_io_guard);
+            return Ok(0);
+        }
+        Err(err) => {
+            drop(workflow_run_records_io_guard);
+            return Err(miette!(
+                "failed to open workflow run records {}: {err}",
+                path.display()
+            ));
+        }
+    };
+    let mut lines = BufReader::new(file).lines();
+    let mut records = 0usize;
+    while let Some(line) = lines.next_line().await.map_err(|err| {
+        miette!(
+            "failed to read workflow run records {}: {err}",
+            path.display()
+        )
+    })? {
+        if !line.trim().is_empty() {
+            records += 1;
+        }
+    }
+    drop(workflow_run_records_io_guard);
+    Ok(records)
+}
+
 pub async fn append_workflow_run_records(records: &[WorkflowRunRecord]) -> Result<usize> {
     if records.is_empty() {
         return Ok(0);
@@ -931,6 +964,9 @@ mod tests {
         let batch = load_workflow_run_batch()
             .await
             .expect("load workflow run records");
+        let count = workflow_run_record_count()
+            .await
+            .expect("count workflow run records");
 
         match previous_home {
             Some(previous_home) => unsafe {
@@ -942,6 +978,7 @@ mod tests {
         }
 
         assert_eq!(batch.records.len(), 1);
+        assert_eq!(count, 1);
         assert_eq!(batch.records[0].run_id, record.run_id);
         assert_eq!(batch.records[0].workflow_id, record.workflow_id);
     }
