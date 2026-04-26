@@ -301,34 +301,4 @@ mod tests {
             "runtime context overflow persisted after 3 attempts: context limit exceeded"
         );
     }
-
-    #[test]
-    fn hindsight_copilot_llm_env_vars_keep_copilot_llm_enabled() {
-        let vars: std::collections::HashMap<_, _> =
-            crate::hindsight::env::hindsight_copilot_llm_env_vars(
-                "copilot_session_token",
-                "https://api.individual.githubcopilot.com",
-                "gpt-4o",
-            )
-            .into_iter()
-            .collect();
-
-        assert_eq!(
-            vars.get("HINDSIGHT_API_LLM_PROVIDER").map(String::as_str),
-            Some("openai")
-        );
-        assert_eq!(
-            vars.get("HINDSIGHT_API_LLM_API_KEY").map(String::as_str),
-            Some("copilot_session_token")
-        );
-        assert_eq!(
-            vars.get("HINDSIGHT_API_LLM_MODEL").map(String::as_str),
-            Some("gpt-4o")
-        );
-        assert_eq!(
-            vars.get("HINDSIGHT_API_LLM_BASE_URL").map(String::as_str),
-            Some("https://api.individual.githubcopilot.com")
-        );
-        assert!(!vars.contains_key("HINDSIGHT_API_SKIP_LLM_VERIFICATION"));
-    }
 }

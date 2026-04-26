@@ -33,7 +33,7 @@ use crate::{
 };
 
 mod copilot;
-pub use copilot::{CopilotClient, exchange_copilot_session_token};
+pub use copilot::CopilotClient;
 mod codex_oauth;
 pub(crate) use codex_oauth::{
     CodexOAuthClient, CodexOAuthTokens, codex_oauth_access_from_file, codex_oauth_auth_file,
@@ -505,6 +505,50 @@ impl OpenAIClient {
                 truncate_for_error(arguments_str)
             )
         })
+    }
+
+    pub(crate) async fn post_compatible_chat_completion(
+        &self,
+        mut payload: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let url = self.url();
+        if payload
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
+            payload["model"] = json!(self.model);
+        }
+        let request_context = vec![format!(
+            "hindsight LLM proxy chat completion: model={}, url={url}",
+            payload
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&self.model)
+        )];
+        let response = self
+            .post_json_with_rate_limit_retry(&url, &payload, &request_context)
+            .await?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|err| miette!("llm response body read failed: {err}"))?;
+        if !status.is_success() {
+            return Err(miette!(
+                "llm api returned HTTP {}: {}",
+                status,
+                truncate_for_error(&body)
+            ));
+        }
+        let response_json: serde_json::Value = serde_json::from_str(&body).map_err(|err| {
+            miette!(
+                "llm response is not valid JSON: {err}; body={}",
+                truncate_for_error(&body)
+            )
+        })?;
+        self.record_usage_from_response(&response_json);
+        Ok(response_json)
     }
 
     async fn call_agent_turn(

@@ -10,7 +10,7 @@ use crate::{
     context::Context,
     daat_locus_paths::daat_locus_paths,
     events::EventStore,
-    hindsight::{HindsightClient, env::hindsight_llm_env_vars, managed::HindsightManagedServer},
+    hindsight::{HindsightClient, llm_proxy::HindsightLlmProxy, managed::HindsightManagedServer},
     memory::Memory,
     pending_work::PendingWorkQueue,
     plan::Plan,
@@ -108,13 +108,12 @@ pub(crate) async fn connect_bootstrapped_hindsight(
         hindsight_config.namespace,
         hindsight_config.bank_id,
     ));
-    let server = HindsightManagedServer::new(
-        hindsight_config.clone(),
-        hindsight_llm_env_vars(config).await?,
-    );
+    emit_startup_progress("[hindsight] starting local LLM proxy...");
+    let llm_proxy = HindsightLlmProxy::start(config).await?;
+    emit_startup_progress("[hindsight] local LLM proxy ready");
+    let llm_env_vars = llm_proxy.env_vars();
+    let server = HindsightManagedServer::new(hindsight_config.clone(), llm_env_vars.clone());
     if ensure_fresh {
-        // Always reconfigure the profile so that model/env changes take effect.
-        server.reconfigure_profile().await?;
         if server.check_health().await {
             // Daemon is running but may have stale config — restart to reload profile.
             emit_startup_progress(
@@ -150,7 +149,8 @@ pub(crate) async fn connect_bootstrapped_hindsight(
     ));
     let hindsight = HindsightClient::connect(&hindsight_config)
         .await?
-        .with_restart_support(hindsight_llm_env_vars(config).await?);
+        .with_restart_support(llm_env_vars)
+        .with_llm_proxy(llm_proxy);
     hindsight.bootstrap_bank().await?;
     emit_startup_progress("[hindsight] bank ready");
     Ok(hindsight)

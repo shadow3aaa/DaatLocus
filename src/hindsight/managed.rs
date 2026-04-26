@@ -11,7 +11,8 @@
 //!   4. Download the pinned `uv` release from GitHub Releases into the cache dir above
 //!
 //! Startup sequence (mirrors @vectorize-io/hindsight-all):
-//!   1. `<runner> hindsight-embed[@ver] profile create <profile> --merge --port <port> --env K=V ...`
+//!   1. `<runner> hindsight-embed[@ver] profile delete <profile>` best-effort, then
+//!      `<runner> hindsight-embed[@ver] profile create <profile> --port <port> --env K=V ...`
 //!      for non-secret profile values only.
 //!   2. `<runner> hindsight-embed[@ver] daemon --profile <profile> start`
 //!      with LLM credentials supplied through the daemon start environment.
@@ -109,13 +110,6 @@ impl HindsightManagedServer {
         Ok(())
     }
 
-    /// Update the profile configuration without restarting the daemon.
-    /// Call this before starting or restarting to ensure env vars are current.
-    pub async fn reconfigure_profile(&self) -> Result<()> {
-        let invoker = self.ensure_uv_invoker().await?;
-        self.configure_profile(&invoker).await
-    }
-
     /// Stop the daemon gracefully.
     pub async fn stop(&self) -> Result<()> {
         if !self.check_health().await {
@@ -171,12 +165,12 @@ impl HindsightManagedServer {
             "[hindsight:managed] configuring profile '{}'",
             self.config.profile
         );
+        self.delete_profile_if_exists(invoker).await?;
         let mut cmd = invoker.embed_command(&self.package_spec());
         cmd.args([
             "profile",
             "create",
             &self.config.profile,
-            "--merge",
             "--port",
             &self.config.port.to_string(),
         ]);
@@ -184,6 +178,16 @@ impl HindsightManagedServer {
             cmd.args(["--env", &format!("{k}={v}")]);
         }
         self.run_command(cmd, "profile.create").await
+    }
+
+    async fn delete_profile_if_exists(&self, invoker: &UvInvoker) -> Result<()> {
+        let mut cmd = invoker.embed_command(&self.package_spec());
+        cmd.args(["profile", "delete", &self.config.profile]);
+        match self.run_command(cmd, "profile.delete").await {
+            Ok(()) => Ok(()),
+            Err(err) if err.to_string().contains("does not exist") => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     async fn start_daemon(&self, invoker: &UvInvoker) -> Result<()> {

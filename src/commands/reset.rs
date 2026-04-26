@@ -6,7 +6,7 @@ use crate::{
     config::load_config,
     daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
     daemon::connect_daemon_status,
-    hindsight::{HindsightClient, env::hindsight_llm_env_vars, managed::HindsightManagedServer},
+    hindsight::{HindsightClient, llm_proxy::HindsightLlmProxy, managed::HindsightManagedServer},
     reasoning::compiled::COMPILED_DIR_NAME,
 };
 
@@ -24,9 +24,10 @@ async fn reject_if_daemon_running(reset_name: &str) -> Result<()> {
 }
 
 async fn clear_hindsight_bank(config: &crate::config::Config) -> Result<()> {
-    let llm_env_vars = hindsight_llm_env_vars(config)
+    let llm_proxy = HindsightLlmProxy::start(config)
         .await
-        .map_err(|err| miette!("failed to build hindsight env for memory-reset: {err}"))?;
+        .map_err(|err| miette!("failed to start hindsight LLM proxy for memory-reset: {err}"))?;
+    let llm_env_vars = llm_proxy.env_vars();
     let server = HindsightManagedServer::new(config.hindsight.clone(), llm_env_vars.clone());
     let was_running = server.check_health().await;
     if !was_running {
@@ -36,7 +37,8 @@ async fn clear_hindsight_bank(config: &crate::config::Config) -> Result<()> {
     let delete_result = async {
         let hindsight = HindsightClient::connect(&config.hindsight)
             .await?
-            .with_restart_support(llm_env_vars);
+            .with_restart_support(llm_env_vars)
+            .with_llm_proxy(llm_proxy);
         hindsight.delete_bank().await
     }
     .await;

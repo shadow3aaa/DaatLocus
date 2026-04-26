@@ -15,7 +15,7 @@ use crate::{
     },
     dashboard::{DashboardControlCommand, DashboardState},
     events::EventStore,
-    hindsight::{env::hindsight_llm_env_vars, managed::HindsightManagedServer},
+    hindsight::managed::HindsightManagedServer,
     memory::Memory,
     pending_work::PendingWorkQueue,
     plan::Plan,
@@ -335,11 +335,8 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         handle.abort();
     }
     let hindsight_config = context.config.hindsight.clone();
-    let hindsight_llm_vars = hindsight_llm_env_vars(&context.config)
-        .await
-        .unwrap_or_default();
     context.shutdown().await;
-    let managed = HindsightManagedServer::new(hindsight_config, hindsight_llm_vars);
+    let managed = HindsightManagedServer::new(hindsight_config, Vec::new());
     match tokio::time::timeout(Duration::from_secs(10), managed.stop()).await {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {

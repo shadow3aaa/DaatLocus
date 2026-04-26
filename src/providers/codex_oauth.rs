@@ -375,7 +375,7 @@ impl CodexResponsesClient {
         }
 
         let result = self
-            .parse_responses_stream(context, response, false)
+            .parse_responses_stream(Some(context), response, false)
             .await?;
         let content = result.last_assistant_message.as_deref().unwrap_or_default();
         if let Some(value) = super::extract_json_value_from_content(content) {
@@ -435,12 +435,13 @@ impl CodexResponsesClient {
                 truncate_for_error(&body)
             ));
         }
-        self.parse_responses_stream(context, response, true).await
+        self.parse_responses_stream(Some(context), response, true)
+            .await
     }
 
     async fn parse_responses_stream(
         &self,
-        context: &Context,
+        context: Option<&Context>,
         response: reqwest::Response,
         emit_progress: bool,
     ) -> Result<AgentTurnStreamResult> {
@@ -509,7 +510,9 @@ impl CodexResponsesClient {
                                     || last_assistant_progress_emit_at.elapsed()
                                         >= Duration::from_millis(800);
                                 if should_emit && !delta_content.trim().is_empty() {
-                                    context.emit_live_assistant_progress(&delta_content);
+                                    if let Some(context) = context {
+                                        context.emit_live_assistant_progress(&delta_content);
+                                    }
                                     last_assistant_progress_emit_at = Instant::now();
                                     last_assistant_progress_char_len =
                                         delta_content.chars().count();
@@ -530,7 +533,9 @@ impl CodexResponsesClient {
                                     || last_reasoning_progress_emit_at.elapsed()
                                         >= Duration::from_millis(800);
                                 if should_emit && !reasoning_content.trim().is_empty() {
-                                    context.emit_live_reasoning_progress(&reasoning_content);
+                                    if let Some(context) = context {
+                                        context.emit_live_reasoning_progress(&reasoning_content);
+                                    }
                                     last_reasoning_progress_emit_at = Instant::now();
                                     last_reasoning_progress_char_len =
                                         reasoning_content.chars().count();
@@ -572,12 +577,14 @@ impl CodexResponsesClient {
         if emit_progress
             && !reasoning_content.trim().is_empty()
             && reasoning_content.chars().count() != last_reasoning_progress_char_len
+            && let Some(context) = context
         {
             context.emit_live_reasoning_progress(&reasoning_content);
         }
         if emit_progress
             && !delta_content.trim().is_empty()
             && delta_content.chars().count() != last_assistant_progress_char_len
+            && let Some(context) = context
         {
             context.emit_live_assistant_progress(&delta_content);
         }
@@ -621,6 +628,39 @@ impl CodexResponsesClient {
 
     fn model_name(&self) -> Option<String> {
         Some(self.model.clone())
+    }
+
+    async fn post_compatible_chat_completion(&self, request: Value) -> Result<Value> {
+        let payload = build_compatible_chat_responses_payload(self, &request)?;
+        let request_context = vec![format!(
+            "hindsight LLM proxy Codex Responses request: model={}, url={}",
+            self.model,
+            self.url()
+        )];
+        let response = self
+            .post_responses_with_retry(&payload, &request_context)
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .map_err(|err| miette!("Codex Responses body read failed: {err}"))?;
+            return Err(miette!(
+                "Codex Responses returned HTTP {}: {}",
+                status,
+                truncate_for_error(&body)
+            ));
+        }
+
+        let result = self.parse_responses_stream(None, response, false).await?;
+        Ok(openai_chat_completion_response(
+            &self.model,
+            result.last_assistant_message.unwrap_or_default(),
+            self.token_usage_info()
+                .map(|info| info.last_token_usage)
+                .unwrap_or_default(),
+        ))
     }
 }
 
@@ -684,6 +724,15 @@ impl CodexOAuthClient {
         inner.set_auth(access.access_token.clone(), headers);
         *self.cached.lock().await = Some(access);
         Ok(())
+    }
+
+    pub(crate) async fn post_compatible_chat_completion(&self, payload: Value) -> Result<Value> {
+        self.ensure_auth().await?;
+        self.inner
+            .lock()
+            .await
+            .post_compatible_chat_completion(payload)
+            .await
     }
 }
 
@@ -779,6 +828,170 @@ fn base_responses_payload(
     payload
 }
 
+fn build_compatible_chat_responses_payload(
+    client: &CodexResponsesClient,
+    request: &Value,
+) -> Result<Value> {
+    let messages = request
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| miette!("chat completion request missing messages array"))?;
+    let (instructions, input) = chat_messages_to_responses_parts(messages);
+    let mut payload = base_responses_payload(client, instructions, input, Vec::new());
+    apply_chat_response_format(&mut payload, request);
+    Ok(payload)
+}
+
+fn chat_messages_to_responses_parts(messages: &[Value]) -> (String, Vec<Value>) {
+    let mut instructions = Vec::new();
+    let mut input = Vec::new();
+
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        let content = chat_message_text(message.get("content"));
+        if content.trim().is_empty() {
+            continue;
+        }
+        match role {
+            "system" | "developer" => instructions.push(content),
+            "assistant" => input.push(responses_message("assistant", "output_text", content)),
+            "tool" | "function" => {
+                let name = message
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool");
+                input.push(responses_message(
+                    "assistant",
+                    "output_text",
+                    format!("{name} result:\n{content}"),
+                ));
+            }
+            _ => input.push(responses_message("user", "input_text", content)),
+        }
+    }
+
+    if input.is_empty() {
+        input.push(responses_message(
+            "user",
+            "input_text",
+            "Continue.".to_string(),
+        ));
+    }
+    (instructions.join("\n\n"), input)
+}
+
+fn chat_message_text(content: Option<&Value>) -> String {
+    match content {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| match part {
+                Value::String(text) => Some(text.as_str()),
+                Value::Object(object) => object
+                    .get("text")
+                    .or_else(|| object.get("content"))
+                    .and_then(Value::as_str),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(Value::Object(object)) => object
+            .get("text")
+            .or_else(|| object.get("content"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| Value::Object(object.clone()).to_string()),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn apply_chat_response_format(payload: &mut Value, request: &Value) {
+    let Some(response_format) = request.get("response_format").and_then(Value::as_object) else {
+        return;
+    };
+    match response_format.get("type").and_then(Value::as_str) {
+        Some("json_schema") => {
+            let json_schema = response_format
+                .get("json_schema")
+                .and_then(Value::as_object);
+            let name = json_schema
+                .and_then(|schema| schema.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("hindsight_proxy_response");
+            let schema = json_schema
+                .and_then(|schema| schema.get("schema"))
+                .cloned()
+                .unwrap_or_else(open_object_schema);
+            let strict = json_schema
+                .and_then(|schema| schema.get("strict"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            payload["text"] = json!({
+                "format": {
+                    "type": "json_schema",
+                    "name": sanitize_text_format_name(name),
+                    "strict": strict,
+                    "schema": normalize_provider_function_schema(schema),
+                }
+            });
+        }
+        Some("json_object") => {
+            payload["text"] = json!({
+                "format": {
+                    "type": "json_schema",
+                    "name": "hindsight_proxy_response",
+                    "strict": false,
+                    "schema": open_object_schema(),
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
+fn open_object_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+    })
+}
+
+fn openai_chat_completion_response(model: &str, content: String, usage: TokenUsage) -> Value {
+    json!({
+        "id": format!("chatcmpl-{}", Uuid::new_v4()),
+        "object": "chat.completion",
+        "created": now_secs(),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content,
+            },
+            "finish_reason": "stop",
+        }],
+        "usage": openai_usage_json(&usage),
+    })
+}
+
+fn openai_usage_json(usage: &TokenUsage) -> Value {
+    json!({
+        "prompt_tokens": usage.input_tokens,
+        "completion_tokens": usage.output_tokens,
+        "total_tokens": usage.total_tokens,
+        "prompt_tokens_details": {
+            "cached_tokens": usage.cached_input_tokens,
+        },
+        "completion_tokens_details": {
+            "reasoning_tokens": usage.reasoning_output_tokens,
+        },
+    })
+}
+
 fn history_messages_to_responses_parts(messages: Vec<HistoryMessage>) -> (String, Vec<Value>) {
     let messages = messages
         .into_iter()
@@ -863,18 +1076,37 @@ fn agent_tool_to_responses_tool(tool: crate::reasoning::runtime::AgentToolSpec) 
         AgentToolInputSpec::FreeformGrammar {
             syntax,
             definition,
-            fallback_schema: _,
-        } => json!({
-            "type": "custom",
-            "name": tool.name,
-            "description": tool.description,
-            "format": {
-                "type": "grammar",
-                "syntax": syntax,
-                "definition": definition,
-            },
-        }),
+            fallback_schema,
+        } => {
+            if codex_responses_supports_custom_tool_grammar(&syntax) {
+                json!({
+                    "type": "custom",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "format": {
+                        "type": "grammar",
+                        "syntax": syntax,
+                        "definition": definition,
+                    },
+                })
+            } else {
+                json!({
+                    "type": "function",
+                    "name": tool.name,
+                    "description": format!(
+                        "{}\n\nThis is a FREEFORM grammar tool. Codex Responses only accepts `lark` or `regex` custom tool grammars, so this provider falls back to single-string input: put the complete tool input in the `input` field.\nsyntax={syntax}\ndefinition=\n{definition}",
+                        tool.description
+                    ),
+                    "strict": false,
+                    "parameters": normalize_provider_function_schema(fallback_schema),
+                })
+            }
+        }
     }
+}
+
+fn codex_responses_supports_custom_tool_grammar(syntax: &str) -> bool {
+    matches!(syntax, "lark" | "regex")
 }
 
 fn sanitize_text_format_name(name: &str) -> String {
@@ -1226,6 +1458,13 @@ fn decode_jwt_payload<T: DeserializeOwned>(jwt: &str) -> Result<T> {
     serde_json::from_slice(&bytes).map_err(|err| miette!("invalid JWT JSON payload: {err}"))
 }
 
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1347,6 +1586,74 @@ mod tests {
     }
 
     #[test]
+    fn compatible_chat_payload_uses_responses_json_schema_format() {
+        let client = test_client();
+        let request = json!({
+            "model": "ignored-by-codex-target",
+            "messages": [
+                {"role": "system", "content": "base instructions"},
+                {"role": "user", "content": "remember this"},
+                {"role": "assistant", "content": [{"type": "text", "text": "noted"}]},
+                {"role": "user", "content": "return json"}
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "memory_result",
+                    "strict": true,
+                    "schema": {
+                        "type": "object",
+                        "required": ["ok"],
+                        "properties": {"ok": {"type": "boolean"}},
+                        "additionalProperties": false
+                    }
+                }
+            }
+        });
+
+        let payload = build_compatible_chat_responses_payload(&client, &request).unwrap();
+
+        assert_eq!(payload["model"], "gpt-5.4");
+        assert_eq!(payload["instructions"], "base instructions");
+        assert_eq!(payload["input"][0]["role"], "user");
+        assert_eq!(payload["input"][0]["content"][0]["text"], "remember this");
+        assert_eq!(payload["input"][1]["role"], "assistant");
+        assert_eq!(payload["input"][1]["content"][0]["text"], "noted");
+        assert_eq!(payload["input"][2]["content"][0]["text"], "return json");
+        assert_eq!(payload["text"]["format"]["type"], "json_schema");
+        assert_eq!(payload["text"]["format"]["name"], "memory_result");
+        assert_eq!(payload["text"]["format"]["schema"]["required"][0], "ok");
+    }
+
+    #[test]
+    fn compatible_chat_response_shape_matches_openai() {
+        let response = openai_chat_completion_response(
+            "gpt-5.4",
+            "{\"ok\":true}".to_string(),
+            TokenUsage {
+                input_tokens: 11,
+                cached_input_tokens: 2,
+                output_tokens: 7,
+                reasoning_output_tokens: 3,
+                total_tokens: 18,
+            },
+        );
+
+        assert_eq!(response["object"], "chat.completion");
+        assert_eq!(response["model"], "gpt-5.4");
+        assert_eq!(response["choices"][0]["message"]["role"], "assistant");
+        assert_eq!(
+            response["choices"][0]["message"]["content"],
+            "{\"ok\":true}"
+        );
+        assert_eq!(response["usage"]["prompt_tokens"], 11);
+        assert_eq!(
+            response["usage"]["completion_tokens_details"]["reasoning_tokens"],
+            3
+        );
+    }
+
+    #[test]
     fn agent_payload_preserves_responses_tool_call_history() {
         let client = test_client();
         let request = AgentTurnRequest {
@@ -1383,7 +1690,16 @@ mod tests {
                     input_spec: AgentToolInputSpec::FreeformGrammar {
                         syntax: "unified_diff".to_string(),
                         definition: "patch := text".to_string(),
-                        fallback_schema: json!({}),
+                        fallback_schema: json!({
+                            "type": "object",
+                            "properties": {
+                                "input": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["input"],
+                            "additionalProperties": false
+                        }),
                     },
                 },
             ],
@@ -1399,8 +1715,52 @@ mod tests {
         assert_eq!(payload["input"][2]["output"], "plan updated");
         assert_eq!(payload["tools"][0]["type"], "function");
         assert_eq!(payload["tools"][0]["name"], "update_plan");
-        assert_eq!(payload["tools"][1]["type"], "custom");
-        assert_eq!(payload["tools"][1]["format"]["syntax"], "unified_diff");
+        assert_eq!(payload["tools"][1]["type"], "function");
+        assert_eq!(payload["tools"][1]["name"], "apply_patch");
+        assert_eq!(payload["tools"][1]["strict"], false);
+        assert_eq!(
+            payload["tools"][1]["parameters"]["properties"]["input"]["type"],
+            "string"
+        );
+        assert!(
+            payload["tools"][1]["description"]
+                .as_str()
+                .unwrap()
+                .contains("syntax=unified_diff")
+        );
+    }
+
+    #[test]
+    fn supported_freeform_grammars_use_custom_tools() {
+        let client = test_client();
+        let request = AgentTurnRequest {
+            messages: vec![AgentMessage::user("do work")],
+            tools: vec![crate::reasoning::runtime::AgentToolSpec {
+                name: "structured_patch".to_string(),
+                description: "Apply structured patch".to_string(),
+                input_spec: AgentToolInputSpec::FreeformGrammar {
+                    syntax: "lark".to_string(),
+                    definition: "start: /.+/".to_string(),
+                    fallback_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string"
+                            }
+                        },
+                        "required": ["input"],
+                        "additionalProperties": false
+                    }),
+                },
+            }],
+        };
+
+        let payload = build_agent_responses_payload(&client, request);
+
+        assert_eq!(payload["tools"][0]["type"], "custom");
+        assert_eq!(payload["tools"][0]["format"]["type"], "grammar");
+        assert_eq!(payload["tools"][0]["format"]["syntax"], "lark");
+        assert_eq!(payload["tools"][0]["format"]["definition"], "start: /.+/");
     }
 
     #[test]

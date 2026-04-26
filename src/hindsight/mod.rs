@@ -1,6 +1,6 @@
 //! Hindsight long-term memory system.
 
-pub mod env;
+pub(crate) mod llm_proxy;
 pub mod managed;
 
 use std::{
@@ -17,6 +17,7 @@ use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 use crate::config::HindsightConfig;
+use crate::hindsight::llm_proxy::HindsightLlmProxy;
 use crate::hindsight::managed::HindsightManagedServer;
 
 #[derive(Clone)]
@@ -26,6 +27,7 @@ pub struct HindsightClient {
     retain_api: HindsightRetainApi,
     supports_update_mode_append: bool,
     restart_support: Option<Arc<HindsightRestartSupport>>,
+    _llm_proxy: Option<HindsightLlmProxy>,
 }
 
 #[derive(Clone)]
@@ -386,6 +388,7 @@ impl HindsightClient {
             retain_api: HindsightRetainApi::MemoriesEndpoint,
             supports_update_mode_append: false,
             restart_support: None,
+            _llm_proxy: None,
         };
         let (retain_api, supports_update_mode_append) =
             bootstrap.detect_retain_capabilities().await?;
@@ -401,6 +404,11 @@ impl HindsightClient {
             llm_env_vars,
             restart_lock: Mutex::new(()),
         }));
+        self
+    }
+
+    pub(crate) fn with_llm_proxy(mut self, proxy: HindsightLlmProxy) -> Self {
+        self._llm_proxy = Some(proxy);
         self
     }
 
