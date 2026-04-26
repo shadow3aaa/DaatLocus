@@ -202,6 +202,20 @@ impl PendingWorkQueue {
         Ok(true)
     }
 
+    pub fn clear_events(&self) -> Result<usize> {
+        let mut inner = self.inner.lock();
+        let before = inner.state.queue.len();
+        inner
+            .state
+            .queue
+            .retain(|entry| !matches!(entry.work, PendingWork::Event { .. }));
+        let cleared = before.saturating_sub(inner.state.queue.len());
+        if cleared > 0 {
+            persist_locked(&inner)?;
+        }
+        Ok(cleared)
+    }
+
     pub async fn shutdown(self) {
         let inner = self.inner.lock();
         let _ = persist_locked(&inner);
@@ -370,5 +384,35 @@ mod tests {
                 .iter()
                 .all(|entry| matches!(entry.state, PendingWorkEntryState::Pending))
         );
+    }
+
+    #[test]
+    fn clear_events_removes_event_work_and_preserves_app_notices() {
+        let queue = test_queue();
+        let claimed_event_id = Uuid::new_v4();
+        let pending_event_id = Uuid::new_v4();
+        queue
+            .enqueue(PendingWork::Event {
+                event_id: claimed_event_id,
+            })
+            .expect("enqueue event");
+        queue
+            .enqueue(PendingWork::AppNotice {
+                app: AppId::terminal(),
+                reason: "terminal changed".to_string(),
+            })
+            .expect("enqueue app notice");
+        queue.claim_batch(1).expect("claim first event work");
+        queue
+            .enqueue(PendingWork::Event {
+                event_id: pending_event_id,
+            })
+            .expect("enqueue pending event");
+
+        assert_eq!(queue.clear_events().expect("clear events"), 2);
+
+        let remaining = queue.claim_batch(2).expect("claim remaining work");
+        assert_eq!(remaining.len(), 1);
+        assert!(matches!(remaining[0], PendingWork::AppNotice { .. }));
     }
 }

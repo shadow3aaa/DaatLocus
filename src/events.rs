@@ -317,6 +317,18 @@ impl EventStore {
         })
     }
 
+    pub fn clear_all(&self) -> Result<usize> {
+        let mut inner = self.inner.lock();
+        let cleared = inner.state.events.len();
+        if cleared == 0 && inner.state.order.is_empty() {
+            return Ok(0);
+        }
+        inner.state.events.clear();
+        inner.state.order.clear();
+        persist_locked(&inner)?;
+        Ok(cleared)
+    }
+
     pub async fn shutdown(self) {
         let inner = self.inner.lock();
         let _ = persist_locked(&inner);
@@ -565,5 +577,74 @@ mod tests {
         let event = store.view(&event_id.to_string()).expect("view event");
         assert_eq!(event.status, EventStatus::Resolved);
         assert!(event.last_error.is_none());
+    }
+
+    #[test]
+    fn clear_all_removes_events_in_every_status() {
+        let store = test_store();
+        let pending = store
+            .register_terminal_incoming(TerminalIncomingEvent {
+                origin: "dashboard".to_string(),
+                incoming_text: "pending".to_string(),
+            })
+            .expect("register pending");
+        let claimed = store
+            .register_terminal_incoming(TerminalIncomingEvent {
+                origin: "dashboard".to_string(),
+                incoming_text: "claimed".to_string(),
+            })
+            .expect("register claimed");
+        store
+            .claim_event_if_pending(claimed)
+            .expect("claim")
+            .expect("event should claim");
+        let awaiting = store
+            .register_terminal_incoming(TerminalIncomingEvent {
+                origin: "dashboard".to_string(),
+                incoming_text: "awaiting".to_string(),
+            })
+            .expect("register awaiting");
+        store
+            .set_status(
+                &awaiting.to_string(),
+                EventStatus::AwaitingDelivery,
+                Some("queued".to_string()),
+            )
+            .expect("mark awaiting");
+        let resolved = store
+            .register_terminal_incoming(TerminalIncomingEvent {
+                origin: "dashboard".to_string(),
+                incoming_text: "resolved".to_string(),
+            })
+            .expect("register resolved");
+        store
+            .set_status(&resolved.to_string(), EventStatus::Resolved, None)
+            .expect("mark resolved");
+        let dismissed = store
+            .register_terminal_incoming(TerminalIncomingEvent {
+                origin: "dashboard".to_string(),
+                incoming_text: "dismissed".to_string(),
+            })
+            .expect("register dismissed");
+        store
+            .set_status(&dismissed.to_string(), EventStatus::Dismissed, None)
+            .expect("mark dismissed");
+        let failed = store
+            .register_terminal_incoming(TerminalIncomingEvent {
+                origin: "dashboard".to_string(),
+                incoming_text: "failed".to_string(),
+            })
+            .expect("register failed");
+        store
+            .set_status(
+                &failed.to_string(),
+                EventStatus::Failed,
+                Some("failed".to_string()),
+            )
+            .expect("mark failed");
+
+        assert_eq!(store.clear_all().expect("clear events"), 6);
+        assert!(store.driver_event_statuses().is_empty());
+        assert!(store.view(&pending.to_string()).is_err());
     }
 }
