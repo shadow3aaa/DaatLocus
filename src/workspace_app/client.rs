@@ -17,6 +17,7 @@ use crate::sandbox::{
 use crate::sandbox::{SandboxChild, SandboxProcessOptions, SandboxStdio};
 use crate::{
     app::AppId,
+    daemon::DAEMONIZE_ENV,
     workspace_app::{
         WORKSPACE_APP_COLD_START_TIMEOUT, WORKSPACE_APP_REQUEST_TIMEOUT, WorkspaceAppConfigOutput,
         protocol::{
@@ -490,6 +491,8 @@ fn workspace_app_worker_sandbox_policy(
     strong_filesystem: StrongFilesystemSandboxMode,
 ) -> RuntimeSandboxPolicy {
     let deny_read_paths = protected_runtime_read_paths_for_worker(&args.state_dir);
+    let mut protected_env_vars = protected_env_vars.to_vec();
+    protected_env_vars.push(DAEMONIZE_ENV.to_string());
     RuntimeSandboxPolicy {
         filesystem: FileSystemSandboxPolicy {
             full_disk_read: true,
@@ -502,7 +505,7 @@ fn workspace_app_worker_sandbox_policy(
             deny_read_paths,
             deny_write_paths: vec![args.app_dir.clone()],
         },
-        protected_env_vars: protected_env_vars.to_vec(),
+        protected_env_vars,
         strong_filesystem,
     }
 }
@@ -586,6 +589,7 @@ mod tests {
         assert!(!policy.is_path_writable(&args.app_dir.join("app.toml")));
         assert!(!policy.is_path_readable(&root.join("config/config.toml")));
         assert!(policy.is_env_var_protected("APP_SECRET"));
+        assert!(policy.is_env_var_protected(DAEMONIZE_ENV));
     }
 
     #[test]

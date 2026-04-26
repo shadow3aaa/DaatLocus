@@ -49,8 +49,14 @@ pub use auth::{
 };
 
 const LOCALHOST: &str = "127.0.0.1";
-const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// Daemon cold start can include browser runtime install plus hindsight/uv
+/// first-run setup. Hindsight itself allows 10 minutes for daemon start, so the
+/// outer readiness window must be longer than that inner startup budget.
+const READY_TIMEOUT: Duration = Duration::from_secs(900);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const DAEMON_MAIN_LOG: &str = "daat-locus.log";
+const DAEMON_STDERR_LOG: &str = "daemon-stderr.log";
 pub const DAEMONIZE_ENV: &str = "DAAT_LOCUS_DAEMONIZE";
 
 #[derive(Debug, Serialize)]
@@ -648,13 +654,16 @@ async fn configured_daemon_port() -> Result<u16> {
 pub async fn wait_for_daemon_ready() -> Result<StatusResponse> {
     let port = configured_daemon_port().await?;
     let client = DaemonClient::new(port);
-    let deadline = Instant::now() + START_TIMEOUT;
+    let deadline = Instant::now() + READY_TIMEOUT;
     let mut last_error = None;
     while Instant::now() < deadline {
         match client.status().await {
             Ok(status) if status.state == DaemonLifecycleState::Ready => return Ok(status),
             Ok(status) if status.state == DaemonLifecycleState::Failed => {
-                return Err(miette!("daemon startup failed"));
+                return Err(miette!(
+                    "daemon startup failed{}",
+                    daemon_startup_log_tail_suffix().await
+                ));
             }
             Ok(status) => {
                 last_error = Some(format!("daemon is {}", status.state));
@@ -664,18 +673,19 @@ pub async fn wait_for_daemon_ready() -> Result<StatusResponse> {
         tokio::time::sleep(HEALTH_POLL_INTERVAL).await;
     }
     Err(miette!(
-        "daemon did not become ready within {}s{}",
-        START_TIMEOUT.as_secs(),
+        "daemon did not become ready within {}s{}{}",
+        READY_TIMEOUT.as_secs(),
         last_error
             .as_deref()
             .map(|err| format!(": {err}"))
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        daemon_startup_log_tail_suffix().await
     ))
 }
 
 pub async fn wait_for_daemon_shutdown(port: u16) -> Result<()> {
     let client = DaemonClient::new(port);
-    let deadline = Instant::now() + START_TIMEOUT;
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
     while Instant::now() < deadline {
         if client.status().await.is_err() {
             return Ok(());
@@ -686,7 +696,7 @@ pub async fn wait_for_daemon_shutdown(port: u16) -> Result<()> {
         "daemon on {}:{} did not stop accepting connections within {}s",
         LOCALHOST,
         port,
-        START_TIMEOUT.as_secs()
+        SHUTDOWN_TIMEOUT.as_secs()
     ))
 }
 
@@ -697,10 +707,11 @@ pub async fn spawn_detached_daemon_process() -> Result<()> {
     // Redirect stderr to the log file to simplify daemon startup failure diagnosis.
     // stdout is still discarded because emit_startup_progress println! output is
     // already recorded through tracing.
-    let log_path = daat_locus_paths().await.logs_file("daemon-stderr.log");
+    let log_path = daemon_stderr_log_path().await;
     let stderr_file = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
+        .write(true)
+        .truncate(true)
         .open(&log_path)
         .map_err(|err| miette!("open daemon stderr log {}: {err}", log_path.display()))?;
 
@@ -728,9 +739,61 @@ pub async fn spawn_detached_daemon_process() -> Result<()> {
     Ok(())
 }
 
+async fn daemon_stderr_log_path() -> PathBuf {
+    daat_locus_paths().await.logs_file(DAEMON_STDERR_LOG)
+}
+
+async fn daemon_main_log_path() -> PathBuf {
+    daat_locus_paths().await.logs_file(DAEMON_MAIN_LOG)
+}
+
+async fn daemon_startup_log_tail_suffix() -> String {
+    let mut sections = Vec::new();
+    if let Some(section) = log_tail_section(daemon_main_log_path().await, "recent daemon log").await
+    {
+        sections.push(section);
+    }
+    if let Some(section) =
+        log_tail_section(daemon_stderr_log_path().await, "recent daemon stderr").await
+    {
+        sections.push(section);
+    }
+    if sections.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{}", sections.join("\n\n"))
+    }
+}
+
+async fn log_tail_section(path: PathBuf, title: &str) -> Option<String> {
+    let Ok(text) = tokio::fs::read_to_string(&path).await else {
+        return None;
+    };
+    let tail = text
+        .lines()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if tail.trim().is_empty() {
+        None
+    } else {
+        Some(format!("{title} ({}):\n{tail}", path.display()))
+    }
+}
+
 pub fn daemonize_current_process_if_requested() -> Result<()> {
     if std::env::var_os(DAEMONIZE_ENV).is_none() {
         return Ok(());
+    }
+    // This marker is only for the top-level daemon child. If it survives in the
+    // daemon environment, later helper processes such as workspace app workers
+    // will daemonize themselves before running their actual subcommand.
+    unsafe {
+        std::env::remove_var(DAEMONIZE_ENV);
     }
     daemonize_current_process()
 }
