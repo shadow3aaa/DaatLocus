@@ -418,7 +418,7 @@ fn apply_policy_acl_rules(
             add_guarded_ace(&root, psid, WORKER_WRITE_ALLOW_MASK, SET_ACCESS, acl_guards)?;
         }
         for subpath in policy_paths_with_resolved(&writable_root.read_only_subpaths) {
-            add_guarded_ace(
+            add_guarded_ace_recursive(
                 &subpath,
                 psid,
                 WORKER_DENY_WRITE_MASK,
@@ -428,10 +428,10 @@ fn apply_policy_acl_rules(
         }
     }
     for path in policy_paths_with_resolved(&policy.filesystem.deny_write_paths) {
-        add_guarded_ace(&path, psid, WORKER_DENY_WRITE_MASK, DENY_ACCESS, acl_guards)?;
+        add_guarded_ace_recursive(&path, psid, WORKER_DENY_WRITE_MASK, DENY_ACCESS, acl_guards)?;
     }
     for path in policy_paths_with_resolved(&policy.filesystem.deny_read_paths) {
-        add_guarded_ace(&path, psid, WORKER_DENY_READ_MASK, DENY_ACCESS, acl_guards)?;
+        add_guarded_ace_recursive(&path, psid, WORKER_DENY_READ_MASK, DENY_ACCESS, acl_guards)?;
     }
     Ok(())
 }
@@ -462,6 +462,32 @@ fn add_guarded_ace(
     }
     add_explicit_ace(path, psid, mask, mode)?;
     acl_guards.push(path.to_path_buf());
+    Ok(())
+}
+
+fn add_guarded_ace_recursive(
+    path: &Path,
+    psid: PSID,
+    mask: u32,
+    mode: i32,
+    acl_guards: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    add_guarded_ace(path, psid, mask, mode, acl_guards)?;
+    if !path.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let child = entry.path();
+        if entry.file_type()?.is_dir() {
+            add_guarded_ace_recursive(&child, psid, mask, mode, acl_guards)?;
+        } else {
+            add_guarded_ace(&child, psid, mask, mode, acl_guards)?;
+        }
+    }
     Ok(())
 }
 

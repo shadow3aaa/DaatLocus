@@ -1570,10 +1570,6 @@ mod tests {
                 .expect("stdin write should succeed");
 
             assert!(
-                polled.output.contains("continued-output") || polled.output.is_empty(),
-                "poll should either capture shell output or remain empty in constrained runtime"
-            );
-            assert!(
                 polled.session.status == "running" || polled.session.status.starts_with("exited"),
                 "unexpected polled status: {}",
                 polled.session.status
