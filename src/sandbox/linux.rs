@@ -7,7 +7,7 @@ use miette::{Result, miette};
 
 use super::{
     FileSystemSandboxPolicy, RuntimeSandboxPolicy, SandboxSpawnSpec, StrongFilesystemSandboxMode,
-    policy_paths_with_resolved,
+    path_is_denied, policy_paths_with_resolved,
 };
 
 const BWRAP_PROGRAM: &str = "bwrap";
@@ -141,6 +141,10 @@ fn push_deny_read_mounts(args: &mut Vec<String>, policy: &FileSystemSandboxPolic
         if path.is_dir() {
             args.push("--tmpfs".to_string());
             args.push(path_to_arg(&path));
+            if path_is_denied(&path, &policy.deny_write_paths) {
+                args.push("--remount-ro".to_string());
+                args.push(path_to_arg(&path));
+            }
         } else if path.is_file() {
             push_mount(args, "--ro-bind", Path::new("/dev/null"), &path);
         }
@@ -200,6 +204,31 @@ mod tests {
         ));
         assert_eq!(args.iter().filter(|arg| *arg == "--").count(), 1);
         assert_eq!(args.last().map(String::as_str), Some("-lc"));
+    }
+
+    #[test]
+    fn bwrap_args_hide_read_and_write_denied_directories_as_read_only() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let protected_home = tempdir.path().join(".daat-locus");
+        std::fs::create_dir_all(&protected_home).expect("create protected home");
+        let policy = FileSystemSandboxPolicy {
+            full_disk_read: true,
+            full_disk_write: true,
+            readable_roots: Vec::new(),
+            writable_roots: Vec::new(),
+            deny_read_paths: vec![protected_home.clone()],
+            deny_write_paths: vec![protected_home.clone()],
+        };
+
+        let args = create_bwrap_args(&policy, vec!["sh".to_string()]);
+
+        let protected_home = protected_home.to_string_lossy();
+        assert!(contains_pair(&args, "--tmpfs", protected_home.as_ref()));
+        assert!(contains_pair(
+            &args,
+            "--remount-ro",
+            protected_home.as_ref()
+        ));
     }
 
     #[test]

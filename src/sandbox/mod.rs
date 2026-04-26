@@ -14,7 +14,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(all(not(test), target_os = "windows"))]
+#[cfg(target_os = "windows")]
+#[cfg_attr(test, allow(dead_code))]
 mod windows;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,7 +89,7 @@ pub struct SandboxAsyncChild {
 
 enum SandboxAsyncChildInner {
     Tokio(tokio::process::Child),
-    #[cfg(all(not(test), target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     Windows(windows::WindowsSandboxAsyncChild),
 }
 
@@ -98,7 +99,7 @@ pub struct SandboxChildStdin {
 
 enum SandboxChildStdinInner {
     Tokio(tokio::process::ChildStdin),
-    #[cfg(all(not(test), target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     File(tokio::fs::File),
 }
 
@@ -108,7 +109,7 @@ pub struct SandboxChildStdout {
 
 enum SandboxChildStdoutInner {
     Tokio(tokio::process::ChildStdout),
-    #[cfg(all(not(test), target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     File(tokio::fs::File),
 }
 
@@ -118,7 +119,7 @@ pub struct SandboxChildStderr {
 
 enum SandboxChildStderrInner {
     Tokio(tokio::process::ChildStderr),
-    #[cfg(all(not(test), target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     File(tokio::fs::File),
 }
 
@@ -223,7 +224,7 @@ impl SandboxAsyncChild {
         args: Vec<String>,
         options: SandboxProcessOptions,
     ) -> std::io::Result<Self> {
-        #[cfg(all(not(test), target_os = "windows"))]
+        #[cfg(target_os = "windows")]
         {
             if policy.strong_filesystem != StrongFilesystemSandboxMode::Off
                 && filesystem_policy_requires_backend(&policy.filesystem)
@@ -280,7 +281,7 @@ impl SandboxAsyncChild {
     pub fn take_stdin(&mut self) -> Option<SandboxChildStdin> {
         match &mut self.inner {
             SandboxAsyncChildInner::Tokio(child) => child.stdin.take().map(SandboxChildStdin::from),
-            #[cfg(all(not(test), target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => {
                 child.take_stdin().map(SandboxChildStdin::from_file)
             }
@@ -292,7 +293,7 @@ impl SandboxAsyncChild {
             SandboxAsyncChildInner::Tokio(child) => {
                 child.stdout.take().map(SandboxChildStdout::from)
             }
-            #[cfg(all(not(test), target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => {
                 child.take_stdout().map(SandboxChildStdout::from_file)
             }
@@ -304,7 +305,7 @@ impl SandboxAsyncChild {
             SandboxAsyncChildInner::Tokio(child) => {
                 child.stderr.take().map(SandboxChildStderr::from)
             }
-            #[cfg(all(not(test), target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => {
                 child.take_stderr().map(SandboxChildStderr::from_file)
             }
@@ -314,7 +315,7 @@ impl SandboxAsyncChild {
     pub fn start_kill(&mut self) -> std::io::Result<()> {
         match &mut self.inner {
             SandboxAsyncChildInner::Tokio(child) => child.start_kill(),
-            #[cfg(all(not(test), target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => child.start_kill(),
         }
     }
@@ -322,7 +323,7 @@ impl SandboxAsyncChild {
     pub fn id(&self) -> Option<u32> {
         match &self.inner {
             SandboxAsyncChildInner::Tokio(child) => child.id(),
-            #[cfg(all(not(test), target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => Some(child.id()),
         }
     }
@@ -330,7 +331,7 @@ impl SandboxAsyncChild {
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         match &mut self.inner {
             SandboxAsyncChildInner::Tokio(child) => child.try_wait(),
-            #[cfg(all(not(test), target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             SandboxAsyncChildInner::Windows(child) => child.try_wait(),
         }
     }
@@ -361,7 +362,7 @@ impl From<tokio::process::ChildStderr> for SandboxChildStderr {
 }
 
 impl SandboxChildStdin {
-    #[cfg(all(not(test), target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     fn from_file(file: tokio::fs::File) -> Self {
         Self {
             inner: SandboxChildStdinInner::File(file),
@@ -370,7 +371,7 @@ impl SandboxChildStdin {
 }
 
 impl SandboxChildStdout {
-    #[cfg(all(not(test), target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     fn from_file(file: tokio::fs::File) -> Self {
         Self {
             inner: SandboxChildStdoutInner::File(file),
@@ -379,7 +380,7 @@ impl SandboxChildStdout {
 }
 
 impl SandboxChildStderr {
-    #[cfg(all(not(test), target_os = "windows"))]
+    #[cfg(target_os = "windows")]
     fn from_file(file: tokio::fs::File) -> Self {
         Self {
             inner: SandboxChildStderrInner::File(file),
@@ -395,7 +396,7 @@ impl AsyncWrite for SandboxChildStdin {
     ) -> Poll<std::io::Result<usize>> {
         match &mut self.inner {
             SandboxChildStdinInner::Tokio(stdin) => Pin::new(stdin).poll_write(cx, buf),
-            #[cfg(all(not(test), target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             SandboxChildStdinInner::File(file) => Pin::new(file).poll_write(cx, buf),
         }
     }
@@ -403,7 +404,7 @@ impl AsyncWrite for SandboxChildStdin {
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match &mut self.inner {
             SandboxChildStdinInner::Tokio(stdin) => Pin::new(stdin).poll_flush(cx),
-            #[cfg(all(not(test), target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             SandboxChildStdinInner::File(file) => Pin::new(file).poll_flush(cx),
         }
     }
@@ -411,7 +412,7 @@ impl AsyncWrite for SandboxChildStdin {
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         match &mut self.inner {
             SandboxChildStdinInner::Tokio(stdin) => Pin::new(stdin).poll_shutdown(cx),
-            #[cfg(all(not(test), target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             SandboxChildStdinInner::File(file) => Pin::new(file).poll_shutdown(cx),
         }
     }
@@ -425,7 +426,7 @@ impl AsyncRead for SandboxChildStdout {
     ) -> Poll<std::io::Result<()>> {
         match &mut self.inner {
             SandboxChildStdoutInner::Tokio(stdout) => Pin::new(stdout).poll_read(cx, buf),
-            #[cfg(all(not(test), target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             SandboxChildStdoutInner::File(file) => Pin::new(file).poll_read(cx, buf),
         }
     }
@@ -439,13 +440,13 @@ impl AsyncRead for SandboxChildStderr {
     ) -> Poll<std::io::Result<()>> {
         match &mut self.inner {
             SandboxChildStderrInner::Tokio(stderr) => Pin::new(stderr).poll_read(cx, buf),
-            #[cfg(all(not(test), target_os = "windows"))]
+            #[cfg(target_os = "windows")]
             SandboxChildStderrInner::File(file) => Pin::new(file).poll_read(cx, buf),
         }
     }
 }
 
-#[cfg(not(test))]
+#[cfg(any(not(test), all(test, target_os = "windows")))]
 pub(super) fn apply_std_command_options(
     policy: &RuntimeSandboxPolicy,
     command: &mut std::process::Command,
@@ -476,7 +477,7 @@ fn apply_tokio_command_options(
         .stderr(options.stderr.to_stdio());
 }
 
-#[cfg(not(test))]
+#[cfg(any(not(test), all(test, target_os = "windows")))]
 fn strip_protected_env_from_std_command(
     policy: &RuntimeSandboxPolicy,
     command: &mut std::process::Command,
@@ -491,7 +492,7 @@ fn strip_protected_env_from_std_command(
     }
 }
 
-#[cfg(all(not(test), target_os = "windows"))]
+#[cfg(target_os = "windows")]
 fn filesystem_policy_requires_backend(policy: &FileSystemSandboxPolicy) -> bool {
     !(policy.full_disk_read
         && policy.full_disk_write
@@ -560,7 +561,6 @@ pub(crate) fn resolve_path_for_check(path: &Path) -> PathBuf {
     }
 }
 
-#[cfg(any(not(target_os = "windows"), not(test)))]
 pub(crate) fn policy_paths_with_resolved(paths: &[PathBuf]) -> Vec<PathBuf> {
     let mut expanded = paths
         .iter()
@@ -593,7 +593,7 @@ fn path_is_or_descends_resolved(path: &Path, root: &Path) -> bool {
     path_is_or_descends(&resolved, &resolved_root)
 }
 
-fn path_is_denied(path: &Path, denied_roots: &[PathBuf]) -> bool {
+pub(super) fn path_is_denied(path: &Path, denied_roots: &[PathBuf]) -> bool {
     denied_roots
         .iter()
         .any(|denied| path_is_or_descends_logical_or_resolved(path, denied))
@@ -839,9 +839,12 @@ fn is_sensitive_env_var_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, process::ExitStatus, time::Duration};
 
-    use super::{RuntimeSandboxPolicy, SandboxStdio, StrongFilesystemSandboxMode};
+    use super::{
+        FileSystemSandboxPolicy, RuntimeSandboxPolicy, SandboxAsyncChild, SandboxProcessOptions,
+        SandboxStdio, StrongFilesystemSandboxMode, WritableRoot,
+    };
 
     #[test]
     fn sandbox_stdio_variants_are_stable() {
@@ -927,6 +930,215 @@ mod tests {
 
         assert_eq!(spec.program, Path::new("/bin/echo"));
         assert_eq!(spec.args, vec!["ok"]);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[tokio::test]
+    async fn strong_backend_denies_protected_runtime_paths_when_available() {
+        use tokio::io::AsyncReadExt;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let protected_home = tempdir.path().join(".daat-locus");
+        let protected_config = protected_home.join("config");
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&protected_config).expect("create protected config");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let secret_file = protected_config.join("secret.txt");
+        let protected_write_file = protected_home.join("created-by-sandbox.txt");
+        let public_file = workspace.join("public.txt");
+        let workspace_output = workspace.join("output.txt");
+        std::fs::write(&secret_file, "secret").expect("write protected secret");
+        std::fs::write(&public_file, "public").expect("write public file");
+
+        let policy = RuntimeSandboxPolicy {
+            filesystem: FileSystemSandboxPolicy {
+                full_disk_read: true,
+                full_disk_write: false,
+                readable_roots: Vec::new(),
+                writable_roots: vec![WritableRoot {
+                    root: workspace.clone(),
+                    read_only_subpaths: Vec::new(),
+                }],
+                deny_read_paths: vec![protected_home.clone()],
+                deny_write_paths: vec![protected_home.clone()],
+            },
+            protected_env_vars: Vec::new(),
+            strong_filesystem: StrongFilesystemSandboxMode::Required,
+        };
+        let (program, args) = conformance_probe_command(
+            &secret_file,
+            &protected_write_file,
+            &public_file,
+            &workspace_output,
+        );
+        let options = SandboxProcessOptions {
+            current_dir: Some(workspace.clone()),
+            stdin: SandboxStdio::Null,
+            stdout: SandboxStdio::Piped,
+            stderr: SandboxStdio::Piped,
+        };
+
+        let mut child = match SandboxAsyncChild::spawn_shell(&policy, &program, args, options) {
+            Ok(child) => child,
+            Err(err) if strong_backend_is_unavailable(&err) => {
+                eprintln!("skipping strong sandbox conformance test: {err}");
+                return;
+            }
+            Err(err) => panic!("failed to spawn conformance probe: {err}"),
+        };
+        let mut stdout = child.take_stdout();
+        let mut stderr = child.take_stderr();
+        let status = wait_for_child(&mut child).await.expect("wait for probe");
+
+        let mut stdout_text = String::new();
+        if let Some(stdout) = stdout.as_mut() {
+            stdout
+                .read_to_string(&mut stdout_text)
+                .await
+                .expect("read stdout");
+        }
+        let mut stderr_text = String::new();
+        if let Some(stderr) = stderr.as_mut() {
+            stderr
+                .read_to_string(&mut stderr_text)
+                .await
+                .expect("read stderr");
+        }
+
+        assert!(
+            status.success(),
+            "conformance probe failed with {status}; stdout={stdout_text:?}; stderr={stderr_text:?}"
+        );
+        assert!(
+            !protected_write_file.exists(),
+            "sandboxed child wrote into protected runtime path"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&workspace_output).expect("read workspace output"),
+            "ok"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    async fn wait_for_child(child: &mut SandboxAsyncChild) -> std::io::Result<ExitStatus> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let _ = child.start_kill();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "sandbox conformance probe timed out",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn strong_backend_is_unavailable(error: &std::io::Error) -> bool {
+        error
+            .to_string()
+            .contains("Linux filesystem sandbox requires `bwrap` on PATH")
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn strong_backend_is_unavailable(_error: &std::io::Error) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    fn conformance_probe_command(
+        secret_file: &Path,
+        protected_write_file: &Path,
+        public_file: &Path,
+        workspace_output: &Path,
+    ) -> (String, Vec<String>) {
+        let script = format!(
+            r#"secret={secret}
+protected_write={protected_write}
+public_file={public_file}
+workspace_output={workspace_output}
+read_denied=0
+cat "$secret" >/dev/null 2>&1 || read_denied=1
+write_denied=0
+printf bad > "$protected_write" 2>/dev/null || write_denied=1
+public_ok=0
+[ "$(cat "$public_file")" = public ] && public_ok=1
+write_ok=0
+printf ok > "$workspace_output" 2>/dev/null && write_ok=1
+if [ "$read_denied" = 1 ] && [ "$write_denied" = 1 ] && [ "$public_ok" = 1 ] && [ "$write_ok" = 1 ]; then
+    exit 0
+fi
+printf 'read_denied=%s write_denied=%s public_ok=%s write_ok=%s\n' "$read_denied" "$write_denied" "$public_ok" "$write_ok"
+exit 42
+"#,
+            secret = sh_quote(secret_file),
+            protected_write = sh_quote(protected_write_file),
+            public_file = sh_quote(public_file),
+            workspace_output = sh_quote(workspace_output),
+        );
+        ("/bin/sh".to_string(), vec!["-c".to_string(), script])
+    }
+
+    #[cfg(unix)]
+    fn sh_quote(path: &Path) -> String {
+        let value = path.to_string_lossy();
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn conformance_probe_command(
+        secret_file: &Path,
+        protected_write_file: &Path,
+        public_file: &Path,
+        workspace_output: &Path,
+    ) -> (String, Vec<String>) {
+        let system_root = std::env::var_os("SystemRoot")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        let powershell = system_root
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        let script = [
+            format!("$secret = {}", ps_quote(secret_file)),
+            format!("$protectedWrite = {}", ps_quote(protected_write_file)),
+            format!("$publicFile = {}", ps_quote(public_file)),
+            format!("$workspaceOutput = {}", ps_quote(workspace_output)),
+            "$readDenied = $false".to_string(),
+            "try { Get-Content -Raw -LiteralPath $secret -ErrorAction Stop | Out-Null } catch { $readDenied = $true }".to_string(),
+            "$writeDenied = $false".to_string(),
+            "try { Set-Content -LiteralPath $protectedWrite -Value 'bad' -NoNewline -ErrorAction Stop } catch { $writeDenied = $true }".to_string(),
+            "$publicOk = $false".to_string(),
+            "try { $publicOk = (Get-Content -Raw -LiteralPath $publicFile -ErrorAction Stop) -eq 'public' } catch { }".to_string(),
+            "$writeOk = $false".to_string(),
+            "try { Set-Content -LiteralPath $workspaceOutput -Value 'ok' -NoNewline -ErrorAction Stop; $writeOk = $true } catch { }".to_string(),
+            "if ($readDenied -and $writeDenied -and $publicOk -and $writeOk) { exit 0 }".to_string(),
+            "Write-Output \"readDenied=$readDenied writeDenied=$writeDenied publicOk=$publicOk writeOk=$writeOk\"".to_string(),
+            "exit 42".to_string(),
+        ]
+        .join("; ");
+        (
+            powershell.to_string_lossy().into_owned(),
+            vec![
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                script,
+            ],
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    fn ps_quote(path: &Path) -> String {
+        let value = path.to_string_lossy();
+        format!("'{}'", value.replace('\'', "''"))
     }
 
     #[cfg(unix)]
