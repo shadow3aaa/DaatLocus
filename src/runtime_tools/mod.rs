@@ -9,12 +9,13 @@ use crate::{
     app::{AppToolExecutionContext, AppToolScope},
     context::Context,
     context_budget::truncate_text_to_token_budget_with_notice,
+    live_progress::TelegramLiveStatus,
     reasoning::{
         episode::EpisodeActionRecord,
         runtime::{AgentToolCall, AgentToolInputSpec, AgentToolSpec},
     },
     schema_utils::normalize_openai_json_schema,
-    tool_ui::{ToolCallUiEvent, ToolUiEvent},
+    tool_ui::{AppAttentionUiAction, ToolCallUiEvent, ToolUiEvent, glyph},
 };
 
 mod work;
@@ -516,6 +517,181 @@ pub fn render_tool_call_ui_event(
     find_runtime_tool(&tools, &call.name)?.call_ui_event(call)
 }
 
+pub fn render_telegram_tool_result_status(
+    call: &AgentToolCall,
+    result: &ToolExecutionResult,
+) -> Option<TelegramLiveStatus> {
+    if telegram_status_ignored_tool(&call.name) {
+        return None;
+    }
+    if matches!(result.ui_event, ToolUiEvent::Error(_)) {
+        return telegram_tool_failure_status(&call.name);
+    }
+
+    match call.name.as_str() {
+        "update_plan" => Some(telegram_status(glyph::PLAN, "Plan Updated")),
+        "deep_recall" => match &result.ui_event {
+            ToolUiEvent::DeepRecall(event) => Some(telegram_status(
+                glyph::MEMORY,
+                format!(
+                    "Recalled {} {}",
+                    event.memory_count,
+                    plural_noun(event.memory_count, "Memory", "Memories")
+                ),
+            )),
+            _ => Some(telegram_status(glyph::MEMORY, "Recalled Memories")),
+        },
+        "apply_patch" => match &result.ui_event {
+            ToolUiEvent::Patch(event) => Some(telegram_status(
+                glyph::PATCH,
+                format!(
+                    "Edited {} {}",
+                    event.files.len(),
+                    plural_noun(event.files.len(), "File", "Files")
+                ),
+            )),
+            _ => Some(telegram_status(glyph::PATCH, "Edited Files")),
+        },
+        "terminal_exec" => {
+            if result
+                .payload
+                .get("running")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                Some(telegram_status(glyph::EXEC, "Command Running"))
+            } else {
+                Some(telegram_status(glyph::EXEC, "Command Ran"))
+            }
+        }
+        "terminal_write_stdin" => Some(telegram_status(glyph::EXEC, "Terminal Continued")),
+        "terminal_terminate" => Some(telegram_status(glyph::EXEC, "Terminal Stopped")),
+        "browser_open_page" => Some(telegram_status(glyph::BROWSER, "Browser Opened")),
+        "browser_snapshot" => Some(telegram_status(glyph::BROWSER, "Browser Read")),
+        "browser_wait" => Some(telegram_status(glyph::BROWSER, "Browser Waited")),
+        "browser_click" | "browser_fill" => Some(telegram_status(glyph::BROWSER, "Browser Acted")),
+        "browser_back" | "browser_forward" => {
+            Some(telegram_status(glyph::BROWSER, "Browser Navigated"))
+        }
+        "browser_reload" => Some(telegram_status(glyph::BROWSER, "Browser Reloaded")),
+        "browser_close_page" => Some(telegram_status(glyph::BROWSER, "Browser Closed")),
+        "create_workflow" => Some(telegram_status(
+            glyph::WORKFLOW,
+            format!(
+                "Workflow Created: {}",
+                compact_telegram_status_detail(
+                    workflow_id_from_result(&result.ui_event)
+                        .or_else(|| call_arg_string(call, "id"))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                )
+            ),
+        )),
+        "activate_workflow" => Some(telegram_status(
+            glyph::WORKFLOW,
+            format!(
+                "Workflow Active: {}",
+                compact_telegram_status_detail(
+                    workflow_id_from_result(&result.ui_event)
+                        .or_else(|| call_arg_string(call, "workflow_id"))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                )
+            ),
+        )),
+        "focus_app" => Some(telegram_status(
+            glyph::APP_ATTENTION,
+            format!(
+                "App Focused: {}",
+                compact_telegram_status_detail(
+                    focused_app_from_result(&result.ui_event)
+                        .or_else(|| call_arg_string(call, "app"))
+                        .unwrap_or_else(|| "unknown".to_string()),
+                )
+            ),
+        )),
+        _ => Some(telegram_status(glyph::EXEC, "App Updated")),
+    }
+}
+
+fn telegram_status_ignored_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "finish_and_send" | "notice_resolved" | "put_away_app"
+    )
+}
+
+fn telegram_tool_failure_status(tool_name: &str) -> Option<TelegramLiveStatus> {
+    match tool_name {
+        "finish_and_send" | "notice_resolved" | "put_away_app" => None,
+        "update_plan" => Some(telegram_status(glyph::ERROR, "Plan Update Failed")),
+        "deep_recall" => Some(telegram_status(glyph::ERROR, "Memory Recall Failed")),
+        "apply_patch" => Some(telegram_status(glyph::ERROR, "File Edit Failed")),
+        "terminal_exec" => Some(telegram_status(glyph::ERROR, "Command Failed")),
+        "terminal_write_stdin" => Some(telegram_status(glyph::ERROR, "Terminal Write Failed")),
+        "terminal_terminate" => Some(telegram_status(glyph::ERROR, "Terminal Stop Failed")),
+        "browser_open_page" | "browser_snapshot" | "browser_wait" | "browser_click"
+        | "browser_fill" | "browser_back" | "browser_forward" | "browser_reload"
+        | "browser_close_page" => Some(telegram_status(glyph::ERROR, "Browser Action Failed")),
+        "create_workflow" => Some(telegram_status(glyph::ERROR, "Workflow Creation Failed")),
+        "activate_workflow" => Some(telegram_status(glyph::ERROR, "Workflow Activation Failed")),
+        "focus_app" => Some(telegram_status(glyph::ERROR, "App Focus Failed")),
+        _ => Some(telegram_status(glyph::ERROR, "App Failed")),
+    }
+}
+
+fn telegram_status(icon: impl Into<String>, text: impl Into<String>) -> TelegramLiveStatus {
+    TelegramLiveStatus {
+        icon: icon.into(),
+        text: text.into(),
+    }
+}
+
+fn call_arg_string(call: &AgentToolCall, name: &str) -> Option<String> {
+    call.arguments.get(name).and_then(|value| match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
+        _ => None,
+    })
+}
+
+fn workflow_id_from_result(event: &ToolUiEvent) -> Option<String> {
+    match event {
+        ToolUiEvent::CreateWorkflow(event) => Some(event.workflow_id.clone()),
+        ToolUiEvent::ActivateWorkflow(event) => Some(event.workflow_id.clone()),
+        _ => None,
+    }
+}
+
+fn focused_app_from_result(event: &ToolUiEvent) -> Option<String> {
+    match event {
+        ToolUiEvent::AppAttention(event)
+            if matches!(&event.action, AppAttentionUiAction::Focus) =>
+        {
+            event.app.clone()
+        }
+        _ => None,
+    }
+}
+
+fn compact_telegram_status_detail(detail: String) -> String {
+    const MAX_CHARS: usize = 40;
+
+    let compact = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = compact.chars();
+    let mut truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        truncated.push_str("...");
+    }
+    if truncated.is_empty() {
+        "unknown".to_string()
+    } else {
+        truncated
+    }
+}
+
+fn plural_noun(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
+    if count == 1 { singular } else { plural }
+}
+
 pub async fn execute_agent_tool_call(
     context: &mut Context,
     call: &AgentToolCall,
@@ -565,5 +741,125 @@ mod tests {
             Some("repo-analysis-summary"),
             "terminal_exec"
         ));
+    }
+
+    fn tool_result(tool_name: &str, payload: Value, ui_event: ToolUiEvent) -> ToolExecutionResult {
+        ToolExecutionResult::new(format!("{tool_name} summary"), payload, ui_event)
+    }
+
+    #[test]
+    fn telegram_tool_status_renders_plan_update_without_steps() {
+        let call = AgentToolCall {
+            id: "call_1".to_string(),
+            name: "update_plan".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let result = tool_result(
+            "update_plan",
+            serde_json::json!({}),
+            ToolUiEvent::plan(vec![]),
+        );
+
+        let status = render_telegram_tool_result_status(&call, &result).unwrap();
+
+        assert_eq!(status.icon, glyph::PLAN);
+        assert_eq!(status.text, "Plan Updated");
+    }
+
+    #[test]
+    fn telegram_tool_status_renders_deep_recall_count() {
+        let call = AgentToolCall {
+            id: "call_1".to_string(),
+            name: "deep_recall".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let result = tool_result(
+            "deep_recall",
+            serde_json::json!({}),
+            ToolUiEvent::deep_recall(4),
+        );
+
+        let status = render_telegram_tool_result_status(&call, &result).unwrap();
+
+        assert_eq!(status.icon, glyph::MEMORY);
+        assert_eq!(status.text, "Recalled 4 Memories");
+    }
+
+    #[test]
+    fn telegram_tool_status_hides_final_reply_tool() {
+        let call = AgentToolCall {
+            id: "call_1".to_string(),
+            name: "finish_and_send".to_string(),
+            arguments: serde_json::json!({
+                "disposition": "resolved",
+                "reply_message": "done",
+            }),
+        };
+        let result = tool_result(
+            "finish_and_send",
+            serde_json::json!({}),
+            ToolUiEvent::reply(crate::tool_ui::ReplyDisposition::Resolved, Vec::new()),
+        );
+
+        assert!(render_telegram_tool_result_status(&call, &result).is_none());
+    }
+
+    #[test]
+    fn telegram_tool_status_renders_terminal_running_and_finished() {
+        let call = AgentToolCall {
+            id: "call_1".to_string(),
+            name: "terminal_exec".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let running = tool_result(
+            "terminal_exec",
+            serde_json::json!({ "running": true }),
+            ToolUiEvent::terminal(
+                crate::tool_ui::TerminalUiAction::Execute,
+                "cargo test",
+                Vec::new(),
+            ),
+        );
+        let finished = tool_result(
+            "terminal_exec",
+            serde_json::json!({ "running": false }),
+            ToolUiEvent::terminal(
+                crate::tool_ui::TerminalUiAction::Continue,
+                "cargo test",
+                Vec::new(),
+            ),
+        );
+
+        assert_eq!(
+            render_telegram_tool_result_status(&call, &running)
+                .unwrap()
+                .text,
+            "Command Running"
+        );
+        assert_eq!(
+            render_telegram_tool_result_status(&call, &finished)
+                .unwrap()
+                .text,
+            "Command Ran"
+        );
+    }
+
+    #[test]
+    fn telegram_tool_status_renders_workflow_activation_failure() {
+        let call = AgentToolCall {
+            id: "call_1".to_string(),
+            name: "activate_workflow".to_string(),
+            arguments: serde_json::json!({ "workflow_id": "repo-analysis-summary" }),
+        };
+        let result = tool_result(
+            "activate_workflow",
+            serde_json::json!({ "error": "unknown workflow" }),
+            ToolUiEvent::error("activate_workflow failed", Vec::new()),
+        );
+
+        let status = render_telegram_tool_result_status(&call, &result).unwrap();
+
+        assert_eq!(status.icon, glyph::ERROR);
+        assert_eq!(status.text, "Workflow Activation Failed");
     }
 }

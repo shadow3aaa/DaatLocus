@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+pub mod glyph {
+    pub const APP_ATTENTION: &str = "◉";
+    pub const BROWSER: &str = "↗";
+    pub const ERROR: &str = "!";
+    pub const EXEC: &str = "•";
+    pub const MEMORY: &str = "⟲";
+    pub const PATCH: &str = "∂";
+    pub const PLAN: &str = "∷";
+    pub const REPLY: &str = "✣";
+    pub const TELEGRAM: &str = "◦";
+    pub const WORKFLOW: &str = "⌘";
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind")]
 pub enum ToolUiEvent {

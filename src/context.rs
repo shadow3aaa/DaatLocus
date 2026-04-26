@@ -16,7 +16,7 @@ use crate::{
     dashboard::DashboardState,
     events::EventStore,
     hindsight::{HindsightClient, HindsightRetainHandle},
-    live_progress::LiveProgressEvent,
+    live_progress::{LiveProgressEvent, TelegramLiveStatus},
     memory::Memory,
     pending_work::PendingWorkQueue,
     plan::Plan,
@@ -248,11 +248,8 @@ impl Context {
         });
     }
 
-    pub fn emit_live_tool_call_title(&self, title: &str, in_reasoning: bool) {
-        self.emit_live_progress(LiveProgressEvent::ToolCallTitle {
-            title: title.to_string(),
-            in_reasoning,
-        });
+    pub fn emit_live_telegram_status(&self, status: TelegramLiveStatus) {
+        self.emit_live_progress(LiveProgressEvent::TelegramStatus(status));
     }
 
     fn emit_live_progress(&self, event: LiveProgressEvent) {

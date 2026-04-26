@@ -4,7 +4,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::tool_ui::{PlanStepUiStatus, PlanUiData};
+use crate::tool_ui::{PlanStepUiStatus, PlanUiData, glyph};
 
 use super::primitives::Cell;
 
@@ -30,7 +30,7 @@ impl Cell for PlanActivityCell {
     fn render_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![Line::from(vec![
             Span::styled(
-                "∷",
+                glyph::PLAN,
                 Style::default()
                     .fg(Color::LightBlue)
                     .add_modifier(Modifier::BOLD),

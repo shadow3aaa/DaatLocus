@@ -43,7 +43,8 @@ use crate::{
     },
     runtime_tools::{
         ToolExecutionResult, build_runtime_tool_specs, execute_agent_tool_call,
-        render_tool_call_ui_event, summarize_action_from_tool_call,
+        render_telegram_tool_result_status, render_tool_call_ui_event,
+        summarize_action_from_tool_call,
     },
     snapshot::Snapshot,
     telegram_transport::TelegramLiveDraftClient,

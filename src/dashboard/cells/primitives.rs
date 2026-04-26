@@ -3,6 +3,8 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use crate::tool_ui::glyph;
+
 pub trait Cell {
     fn render_lines(&self) -> Vec<Line<'static>>;
 }
@@ -88,7 +90,7 @@ pub fn render_wait_activity_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(vec![
         Span::styled(
-            "•",
+            glyph::EXEC,
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -113,7 +115,7 @@ pub fn render_wait_activity_lines(
 pub fn render_error_lines(title: &str, body_lines: &[String], limit: usize) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(vec![
         Span::styled(
-            "!",
+            glyph::ERROR,
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),

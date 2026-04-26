@@ -1,7 +1,7 @@
 use ratatui::{style::Color, text::Line};
 use serde::{Deserialize, Serialize};
 
-use crate::tool_ui::ToolUiData;
+use crate::tool_ui::{ToolUiData, glyph};
 
 use super::primitives::{
     Cell, render_error_lines, render_text_activity_lines, render_wait_activity_lines,
@@ -45,14 +45,21 @@ impl Cell for AssistantActivityCell {
 
 impl Cell for UserActivityCell {
     fn render_lines(&self) -> Vec<Line<'static>> {
-        render_text_activity_lines("•", Color::Green, &self.title, &self.body_lines, 6, None)
+        render_text_activity_lines(
+            glyph::EXEC,
+            Color::Green,
+            &self.title,
+            &self.body_lines,
+            6,
+            None,
+        )
     }
 }
 
 impl Cell for GenericAppActivityCell {
     fn render_lines(&self) -> Vec<Line<'static>> {
         render_text_activity_lines(
-            "•",
+            glyph::EXEC,
             Color::LightGreen,
             &format!("App: {}", self.title),
             &[],

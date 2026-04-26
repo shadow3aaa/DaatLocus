@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::tool_ui::{
     PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, PatchUiData, ReplyDisposition,
-    ReplySubject, ReplyUiData, TelegramUiAction, TelegramUiData,
+    ReplySubject, ReplyUiData, TelegramUiAction, TelegramUiData, glyph,
 };
 
 use super::highlight::{diff_scope_backgrounds, highlight_patch_lines};
@@ -60,7 +60,7 @@ impl Cell for PatchActivityCell {
 
         let mut lines = vec![Line::from(vec![
             Span::styled(
-                "∂",
+                glyph::PATCH,
                 Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
@@ -103,7 +103,7 @@ impl Cell for PatchActivityCell {
 impl Cell for TelegramActivityCell {
     fn render_lines(&self) -> Vec<Line<'static>> {
         render_message_activity_lines(
-            "◦",
+            glyph::TELEGRAM,
             Color::Cyan,
             &self.title,
             &self.detail_lines,
@@ -122,7 +122,10 @@ impl Cell for ReplyActivityCell {
             ReplyDisposition::Failed => ("Failed", Color::Red),
         };
         let mut lines = vec![Line::from(vec![
-            Span::styled("✣", Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                glyph::REPLY,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::styled(
                 title,

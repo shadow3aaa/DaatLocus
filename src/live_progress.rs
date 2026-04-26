@@ -5,5 +5,11 @@ pub enum LiveProgressEvent {
     GenerationStarted,
     AssistantContent { content: String },
     ReasoningContent { content: String },
-    ToolCallTitle { title: String, in_reasoning: bool },
+    TelegramStatus(TelegramLiveStatus),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelegramLiveStatus {
+    pub icon: String,
+    pub text: String,
 }

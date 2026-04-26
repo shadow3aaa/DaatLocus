@@ -4,7 +4,9 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::tool_ui::{AppAttentionUiAction, AppAttentionUiData, BrowserUiAction, BrowserUiData};
+use crate::tool_ui::{
+    AppAttentionUiAction, AppAttentionUiData, BrowserUiAction, BrowserUiData, glyph,
+};
 
 use super::primitives::{Cell, render_text_activity_lines};
 
@@ -33,7 +35,7 @@ pub struct LiveBrowserActivityCell {
 impl Cell for AppAttentionActivityCell {
     fn render_lines(&self) -> Vec<Line<'static>> {
         render_text_activity_lines(
-            "◉",
+            glyph::APP_ATTENTION,
             Color::LightBlue,
             &self.title,
             &self.body_lines,
@@ -47,7 +49,7 @@ impl Cell for BrowserActivityCell {
     fn render_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![Line::from(vec![
             Span::styled(
-                "↗",
+                glyph::BROWSER,
                 Style::default()
                     .fg(Color::LightBlue)
                     .add_modifier(Modifier::BOLD),
@@ -92,7 +94,7 @@ impl Cell for LiveBrowserActivityCell {
             .unwrap_or_else(|| self.title.clone());
         let mut lines = vec![Line::from(vec![
             Span::styled(
-                "↗",
+                glyph::BROWSER,
                 Style::default()
                     .fg(Color::LightBlue)
                     .add_modifier(Modifier::BOLD),

@@ -4,7 +4,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::tool_ui::{ActivateWorkflowUiData, CreateWorkflowUiData, DeepRecallUiData};
+use crate::tool_ui::{ActivateWorkflowUiData, CreateWorkflowUiData, DeepRecallUiData, glyph};
 
 use super::primitives::Cell;
 
@@ -27,7 +27,7 @@ impl Cell for ActivateWorkflowActivityCell {
     fn render_lines(&self) -> Vec<Line<'static>> {
         vec![Line::from(vec![
             Span::styled(
-                "⌘",
+                glyph::WORKFLOW,
                 Style::default()
                     .fg(Color::LightBlue)
                     .add_modifier(Modifier::BOLD),
@@ -47,7 +47,7 @@ impl Cell for CreateWorkflowActivityCell {
     fn render_lines(&self) -> Vec<Line<'static>> {
         vec![Line::from(vec![
             Span::styled(
-                "⌘",
+                glyph::WORKFLOW,
                 Style::default()
                     .fg(Color::LightBlue)
                     .add_modifier(Modifier::BOLD),
@@ -67,7 +67,7 @@ impl Cell for DeepRecallActivityCell {
     fn render_lines(&self) -> Vec<Line<'static>> {
         vec![Line::from(vec![
             Span::styled(
-                "⟲",
+                glyph::MEMORY,
                 Style::default()
                     .fg(Color::LightBlue)
                     .add_modifier(Modifier::BOLD),

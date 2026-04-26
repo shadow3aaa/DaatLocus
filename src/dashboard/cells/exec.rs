@@ -6,7 +6,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::tool_ui::{TerminalUiData, ToolUiData};
+use crate::tool_ui::{TerminalUiData, ToolUiData, glyph};
 
 use super::primitives::Cell;
 
@@ -41,7 +41,7 @@ impl Cell for ExecResultActivityCell {
                 .add_modifier(Modifier::BOLD)
         };
         let mut lines = vec![Line::from(vec![
-            Span::styled("•", indicator_style),
+            Span::styled(glyph::EXEC, indicator_style),
             Span::raw("  "),
             Span::styled(
                 "Ran",
@@ -175,7 +175,7 @@ fn current_time_ms() -> i64 {
 }
 
 fn exec_spinner(elapsed: Option<Duration>) -> String {
-    const FRAMES: &[&str] = &["•", "◦", "▪", "◦"];
+    const FRAMES: &[&str] = &[glyph::EXEC, "◦", "▪", "◦"];
     let index = elapsed
         .map(|duration| ((duration.as_millis() / 200) as usize) % FRAMES.len())
         .unwrap_or(0);
