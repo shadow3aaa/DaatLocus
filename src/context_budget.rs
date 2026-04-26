@@ -49,7 +49,7 @@ impl RequestBudgetLimits {
         let reserved_output_tokens = self.reserved_output_tokens.clamp(1, context_window_tokens);
         let auto_compact_threshold_tokens = self
             .auto_compact_threshold_tokens
-            .clamp(reserved_output_tokens, context_window_tokens);
+            .clamp(1, context_window_tokens);
         Self {
             context_window_tokens,
             auto_compact_threshold_tokens,
@@ -80,7 +80,13 @@ impl RequestBudgetBreakdown {
     }
 
     pub fn above_auto_compact_threshold(&self) -> bool {
-        self.total_with_reserve_tokens >= self.auto_compact_threshold_tokens
+        let threshold = self.auto_compact_input_threshold_tokens();
+        threshold > 0 && self.total_input_tokens >= threshold
+    }
+
+    pub fn auto_compact_input_threshold_tokens(&self) -> usize {
+        self.auto_compact_threshold_tokens
+            .min(self.input_budget_tokens())
     }
 
     pub fn input_budget_tokens(&self) -> usize {
@@ -100,6 +106,10 @@ impl RequestBudgetBreakdown {
             format!(
                 "auto_compact_threshold_tokens={}",
                 self.auto_compact_threshold_tokens
+            ),
+            format!(
+                "auto_compact_input_threshold_tokens={}",
+                self.auto_compact_input_threshold_tokens()
             ),
             format!("input_budget_tokens={}", self.input_budget_tokens()),
             format!(
@@ -416,4 +426,46 @@ fn message_token_cost(role: &str, content: &str) -> usize {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn breakdown_for(input_tokens: usize, limits: RequestBudgetLimits) -> RequestBudgetBreakdown {
+        RequestBudgetBreakdown::new(
+            vec![BudgetSection {
+                name: "user_messages",
+                tokens: input_tokens,
+            }],
+            limits,
+        )
+    }
+
+    #[test]
+    fn auto_compact_threshold_is_based_on_input_tokens() {
+        let limits = RequestBudgetLimits {
+            context_window_tokens: 128_000,
+            auto_compact_threshold_tokens: 100_000,
+            reserved_output_tokens: 4_000,
+        };
+
+        assert!(!breakdown_for(99_999, limits).above_auto_compact_threshold());
+        assert!(breakdown_for(100_000, limits).above_auto_compact_threshold());
+    }
+
+    #[test]
+    fn large_reserved_output_does_not_force_auto_compaction_for_small_input() {
+        let limits = RequestBudgetLimits {
+            context_window_tokens: 258_400,
+            auto_compact_threshold_tokens: 128_000,
+            reserved_output_tokens: 128_000,
+        };
+        let breakdown = breakdown_for(5_538, limits);
+
+        assert_eq!(breakdown.input_budget_tokens(), 130_400);
+        assert_eq!(breakdown.auto_compact_input_threshold_tokens(), 128_000);
+        assert!(breakdown.within_context_window());
+        assert!(!breakdown.above_auto_compact_threshold());
+    }
 }
