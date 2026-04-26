@@ -63,9 +63,7 @@ pub(super) fn maybe_start_telegram_live_draft_session(
                 maybe_event = rx.recv() => {
                     match maybe_event {
                         Some(event) => {
-                            if state.apply(event) {
-                                dirty = true;
-                            }
+                            apply_live_progress_event(&mut state, &mut dirty, event);
                         }
                         None => break,
                     }
@@ -120,6 +118,24 @@ fn record_live_draft_sent(
 ) {
     if let Some(record) = live_drafts.lock().get_mut(event_id) {
         record.last_sent_text = Some(text.to_string());
+    }
+}
+
+fn apply_live_progress_event(
+    state: &mut TelegramLiveDraftState,
+    dirty: &mut bool,
+    event: LiveProgressEvent,
+) {
+    match event {
+        LiveProgressEvent::GenerationStarted => {
+            state.apply(LiveProgressEvent::GenerationStarted);
+            *dirty = false;
+        }
+        event => {
+            if state.apply(event) {
+                *dirty = true;
+            }
+        }
     }
 }
 
@@ -344,6 +360,27 @@ mod tests {
             in_reasoning: false,
         });
         assert_eq!(state.render_markdown_v2(), "· terminal\\_exec");
+    }
+
+    #[test]
+    fn live_draft_generation_started_cancels_unflushed_dirty_state() {
+        let mut state = TelegramLiveDraftState::working();
+        let mut dirty = false;
+
+        apply_live_progress_event(
+            &mut state,
+            &mut dirty,
+            LiveProgressEvent::ToolCallTitle {
+                title: "activate_workflow".to_string(),
+                in_reasoning: false,
+            },
+        );
+        assert!(dirty);
+
+        apply_live_progress_event(&mut state, &mut dirty, LiveProgressEvent::GenerationStarted);
+
+        assert!(!dirty);
+        assert_eq!(state.render_markdown_v2(), "Working\\.\\.\\.");
     }
 
     #[test]
