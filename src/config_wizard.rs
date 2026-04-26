@@ -52,7 +52,10 @@ const CODEX_OAUTH_SCOPES: &str =
     "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
 /// Run the GitHub OAuth device code flow and return an access token.
-async fn run_github_device_flow(locale: Locale) -> Result<String> {
+async fn run_github_device_flow<F>(locale: Locale, mut status: F) -> Result<String>
+where
+    F: FnMut(String, Vec<String>) -> Result<()>,
+{
     let client_id = GITHUB_CLIENT_ID;
 
     let http = reqwest::Client::builder()
@@ -65,7 +68,10 @@ async fn run_github_device_flow(locale: Locale) -> Result<String> {
             )
         })?;
 
-    println!("  {}", crate::tr!(locale, "github.request_device_code"));
+    status(
+        crate::tr!(locale, "github.authorization"),
+        vec![crate::tr!(locale, "github.request_device_code")],
+    )?;
     let resp = http
         .post(GITHUB_DEVICE_CODE_URL)
         .header("Accept", "application/json")
@@ -111,17 +117,12 @@ async fn run_github_device_flow(locale: Locale) -> Result<String> {
     let expires_in = device["expires_in"].as_u64().unwrap_or(900);
     let interval_secs = device["interval"].as_u64().unwrap_or(5).max(5);
 
-    println!();
-    println!("  {}", crate::tr!(locale, "github.authorization"));
-    println!(
-        "  1. {}",
-        crate::tr!(locale, "github.open_url", url = verification_uri)
-    );
-    println!(
-        "  2. {}",
-        crate::tr!(locale, "github.enter_code", code = user_code)
-    );
-    println!();
+    let auth_title = crate::tr!(locale, "github.authorization");
+    let auth_lines = vec![
+        crate::tr!(locale, "github.open_url", url = verification_uri.clone()),
+        crate::tr!(locale, "github.enter_code", code = user_code.clone()),
+    ];
+    status(auth_title.clone(), auth_lines.clone())?;
 
     let _ = open_browser(&verification_uri);
 
@@ -137,11 +138,13 @@ async fn run_github_device_flow(locale: Locale) -> Result<String> {
         tokio::time::sleep(poll_interval).await;
 
         dots = (dots + 1) % 4;
-        print!(
-            "\r  {}",
-            crate::tr!(locale, "github.waiting", dots = ".".repeat(dots + 1))
-        );
-        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut lines = auth_lines.clone();
+        lines.push(crate::tr!(
+            locale,
+            "github.waiting",
+            dots = ".".repeat(dots + 1)
+        ));
+        status(auth_title.clone(), lines)?;
 
         let poll_resp = http
             .post(GITHUB_ACCESS_TOKEN_URL)
@@ -164,10 +167,10 @@ async fn run_github_device_flow(locale: Locale) -> Result<String> {
         })?;
 
         if let Some(token) = body["access_token"].as_str() {
-            println!(
-                "\r  {}                                  ",
-                crate::tr!(locale, "github.success")
-            );
+            status(
+                auth_title.clone(),
+                vec![crate::tr!(locale, "github.success")],
+            )?;
             return Ok(token.to_string());
         }
 
@@ -248,7 +251,18 @@ struct CodexOAuthCallbackQuery {
     error_description: Option<String>,
 }
 
-async fn run_codex_oauth_browser_flow(locale: Locale) -> Result<CodexOAuthTokens> {
+struct CodexDevicePollContext<'a> {
+    auth_title: String,
+    auth_lines: Vec<String>,
+    device_auth_id: &'a str,
+    user_code: &'a str,
+    interval: Duration,
+}
+
+async fn run_codex_oauth_browser_flow<F>(locale: Locale, mut status: F) -> Result<CodexOAuthTokens>
+where
+    F: FnMut(String, Vec<String>) -> Result<()>,
+{
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -284,23 +298,19 @@ async fn run_codex_oauth_browser_flow(locale: Locale) -> Result<CodexOAuthTokens
             .await
     });
 
-    println!(
-        "  {}",
-        crate::tr!(locale, "codex_oauth.request_browser_login")
-    );
-    println!(
-        "  {}",
-        crate::tr!(locale, "codex_oauth.open_url", url = auth_url.clone())
-    );
-    println!(
-        "  {}",
-        crate::tr!(
-            locale,
-            "codex_oauth.callback_waiting",
-            url = redirect_uri.clone()
-        )
-    );
-    println!();
+    let auth_title = crate::tr!(locale, "codex_oauth.authorization");
+    status(
+        auth_title.clone(),
+        vec![
+            crate::tr!(locale, "codex_oauth.request_browser_login"),
+            crate::tr!(locale, "codex_oauth.open_url", url = auth_url.clone()),
+            crate::tr!(
+                locale,
+                "codex_oauth.callback_waiting",
+                url = redirect_uri.clone()
+            ),
+        ],
+    )?;
 
     let _ = open_browser(&auth_url);
 
@@ -318,7 +328,10 @@ async fn run_codex_oauth_browser_flow(locale: Locale) -> Result<CodexOAuthTokens
 
     let authorization_code = match callback {
         CodexOAuthCallbackResult::Code(code) => {
-            println!("  {}", crate::tr!(locale, "codex_oauth.success"));
+            status(
+                auth_title.clone(),
+                vec![crate::tr!(locale, "codex_oauth.success")],
+            )?;
             code
         }
         CodexOAuthCallbackResult::Error(error) => {
@@ -473,16 +486,20 @@ fn fill_uuid_random_bytes(bytes: &mut [u8]) {
     }
 }
 
-async fn run_codex_oauth_device_flow(locale: Locale) -> Result<CodexOAuthTokens> {
+async fn run_codex_oauth_device_flow<F>(locale: Locale, mut status: F) -> Result<CodexOAuthTokens>
+where
+    F: FnMut(String, Vec<String>) -> Result<()>,
+{
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| miette!("Codex OAuth HTTP client failed: {e}"))?;
 
-    println!(
-        "  {}",
-        crate::tr!(locale, "codex_oauth.request_device_code")
-    );
+    let auth_title = crate::tr!(locale, "codex_oauth.authorization");
+    status(
+        auth_title.clone(),
+        vec![crate::tr!(locale, "codex_oauth.request_device_code")],
+    )?;
     let user_code_url = format!("{CODEX_OAUTH_ISSUER}{CODEX_DEVICE_USER_CODE_PATH}");
     let resp = http
         .post(user_code_url)
@@ -507,27 +524,34 @@ async fn run_codex_oauth_device_flow(locale: Locale) -> Result<CodexOAuthTokens>
     let interval_secs = parse_codex_device_interval(&device.interval).max(5);
     let verification_url = format!("{CODEX_OAUTH_ISSUER}/codex/device");
 
-    println!();
-    println!("  {}", crate::tr!(locale, "codex_oauth.authorization"));
-    println!(
-        "  1. {}",
-        crate::tr!(locale, "codex_oauth.open_url", url = verification_url)
-    );
-    println!(
-        "  2. {}",
-        crate::tr!(locale, "codex_oauth.enter_code", code = device.user_code)
-    );
-    println!("  {}", crate::tr!(locale, "codex_oauth.code_warning"));
-    println!();
+    let auth_lines = vec![
+        crate::tr!(
+            locale,
+            "codex_oauth.open_url",
+            url = verification_url.clone()
+        ),
+        crate::tr!(
+            locale,
+            "codex_oauth.enter_code",
+            code = device.user_code.clone()
+        ),
+        crate::tr!(locale, "codex_oauth.code_warning"),
+    ];
+    status(auth_title.clone(), auth_lines.clone())?;
 
     let _ = open_browser(&verification_url);
 
     let token_response = poll_codex_device_authorization(
         &http,
         locale,
-        &device.device_auth_id,
-        &device.user_code,
-        Duration::from_secs(interval_secs),
+        status,
+        CodexDevicePollContext {
+            auth_title,
+            auth_lines,
+            device_auth_id: &device.device_auth_id,
+            user_code: &device.user_code,
+            interval: Duration::from_secs(interval_secs),
+        },
     )
     .await?;
     let redirect_uri = format!("{CODEX_OAUTH_ISSUER}/deviceauth/callback");
@@ -548,13 +572,15 @@ fn parse_codex_device_interval(value: &serde_json::Value) -> u64 {
         .unwrap_or(5)
 }
 
-async fn poll_codex_device_authorization(
+async fn poll_codex_device_authorization<F>(
     http: &reqwest::Client,
     locale: Locale,
-    device_auth_id: &str,
-    user_code: &str,
-    interval: Duration,
-) -> Result<CodexDeviceTokenResponse> {
+    mut show_status: F,
+    context: CodexDevicePollContext<'_>,
+) -> Result<CodexDeviceTokenResponse>
+where
+    F: FnMut(String, Vec<String>) -> Result<()>,
+{
     let token_url = format!("{CODEX_OAUTH_ISSUER}{CODEX_DEVICE_TOKEN_PATH}");
     let expires_at = std::time::Instant::now() + Duration::from_secs(15 * 60);
     let mut dots = 0usize;
@@ -564,20 +590,22 @@ async fn poll_codex_device_authorization(
             return Err(miette!("Codex OAuth device authorization expired"));
         }
 
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(context.interval).await;
         dots = (dots + 1) % 4;
-        print!(
-            "\r  {}",
-            crate::tr!(locale, "codex_oauth.waiting", dots = ".".repeat(dots + 1))
-        );
-        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut lines = context.auth_lines.clone();
+        lines.push(crate::tr!(
+            locale,
+            "codex_oauth.waiting",
+            dots = ".".repeat(dots + 1)
+        ));
+        show_status(context.auth_title.clone(), lines)?;
 
         let resp = http
             .post(&token_url)
             .header("Content-Type", "application/json")
             .json(&serde_json::json!({
-                "device_auth_id": device_auth_id,
-                "user_code": user_code,
+                "device_auth_id": context.device_auth_id,
+                "user_code": context.user_code,
             }))
             .send()
             .await
@@ -585,10 +613,10 @@ async fn poll_codex_device_authorization(
 
         let status = resp.status();
         if status.is_success() {
-            println!(
-                "\r  {}                                  ",
-                crate::tr!(locale, "codex_oauth.success")
-            );
+            show_status(
+                context.auth_title.clone(),
+                vec![crate::tr!(locale, "codex_oauth.success")],
+            )?;
             return resp
                 .json()
                 .await
@@ -680,19 +708,6 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         .spawn()?
         .wait()?;
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
-
-fn info(msg: &str) {
-    println!("  {msg}");
-}
-
-fn header(msg: &str) {
-    println!("\n{msg}");
-    println!("{}", "─".repeat(msg.len()));
 }
 
 fn prompt_cancelled(locale: Locale) -> miette::Report {
@@ -899,6 +914,19 @@ impl PromptUi {
         let locale = self.locale;
         self.terminal_mut()?
             .draw(|frame| render_loading_prompt(frame, locale, prompt, note))
+            .map(|_| ())
+            .map_err(|e| {
+                miette!(
+                    "{}",
+                    crate::tr!(locale, "prompt_ui.render_failed", error = e)
+                )
+            })
+    }
+
+    fn status(&mut self, prompt: &str, lines: &[String]) -> Result<()> {
+        let locale = self.locale;
+        self.terminal_mut()?
+            .draw(|frame| render_status_prompt(frame, locale, prompt, lines))
             .map(|_| ())
             .map_err(|e| {
                 miette!(
@@ -1250,6 +1278,61 @@ fn render_detail_prompt(frame: &mut Frame, locale: Locale, prompt: &str, lines: 
     );
 }
 
+fn render_status_prompt(frame: &mut Frame, locale: Locale, prompt: &str, lines: &[String]) {
+    let block = prompt_panel_block(locale);
+    let inner = block.inner(frame.area());
+    frame.render_widget(block, frame.area());
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ]);
+    let [kind_area, prompt_area, body_area, help_area] = inner.layout(&layout);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                crate::tr!(locale, "prompt_ui.loading"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                prompt.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        kind_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            crate::tr!(locale, "prompt_ui.line_count", count = lines.len()),
+            Style::default().fg(Color::Gray),
+        ))),
+        prompt_area,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .iter()
+                .map(|line| {
+                    Line::from(Span::styled(line.clone(), Style::default().fg(Color::Gray)))
+                })
+                .collect::<Vec<_>>(),
+        )
+        .wrap(Wrap { trim: false }),
+        body_area,
+    );
+    frame.render_widget(
+        Paragraph::new(crate::tr!(locale, "prompt_ui.loading_help"))
+            .style(Style::default().fg(Color::DarkGray)),
+        help_area,
+    );
+}
+
 fn previous_char_boundary(s: &str, index: usize) -> usize {
     if index == 0 {
         return 0;
@@ -1357,16 +1440,17 @@ async fn prompt_provider(
             )?;
             let default_auth_file = codex_oauth_auth_file(&name, None);
             let auth_file = if auth_method == 0 {
-                ui.suspend();
-                let result = run_codex_oauth_browser_flow(locale).await;
-                ui.resume()?;
+                let result = run_codex_oauth_browser_flow(locale, |prompt, lines| {
+                    ui.status(&prompt, &lines)
+                })
+                .await;
                 let tokens = result?;
                 write_codex_oauth_tokens(&default_auth_file, &tokens).await?;
                 Some(default_auth_file.to_string_lossy().to_string())
             } else if auth_method == 1 {
-                ui.suspend();
-                let result = run_codex_oauth_device_flow(locale).await;
-                ui.resume()?;
+                let result =
+                    run_codex_oauth_device_flow(locale, |prompt, lines| ui.status(&prompt, &lines))
+                        .await;
                 let tokens = result?;
                 write_codex_oauth_tokens(&default_auth_file, &tokens).await?;
                 Some(default_auth_file.to_string_lossy().to_string())
@@ -1404,9 +1488,9 @@ async fn prompt_provider(
 
             let github_token = match auth_method {
                 0 => {
-                    ui.suspend();
-                    let result = run_github_device_flow(locale).await;
-                    ui.resume()?;
+                    let result =
+                        run_github_device_flow(locale, |prompt, lines| ui.status(&prompt, &lines))
+                            .await;
                     result?
                 }
                 1 => ui.password(&crate::tr!(locale, "config.github_token"))?,
@@ -1865,10 +1949,6 @@ async fn prompt_model(
 
 /// Run the first-time setup wizard, write config.toml, and return the generated Config.
 pub async fn run_first_time_setup() -> Result<Config> {
-    println!();
-    println!("Daat Locus setup");
-    println!();
-
     let mut ui = PromptUi::new(Locale::default())?;
     let language_items = [
         crate::tr!(Locale::EnUs, "setup.language_english"),
@@ -1881,11 +1961,6 @@ pub async fn run_first_time_setup() -> Result<Config> {
     )?;
     let locale = Locale::from_language_setup_index(language_idx);
     ui.set_locale(locale);
-
-    println!();
-    println!("{}", crate::tr!(locale, "setup.welcome"));
-    println!("{}", crate::tr!(locale, "setup.missing_config"));
-    println!();
 
     let skip = ui.select(
         &crate::tr!(locale, "setup.init_mode"),
@@ -1902,17 +1977,18 @@ pub async fn run_first_time_setup() -> Result<Config> {
             ..Config::default()
         };
         write_config(&config).await?;
-        info(&crate::tr!(locale, "setup.default_created"));
+        ui.detail(
+            &crate::tr!(locale, "setup.written"),
+            &[crate::tr!(locale, "setup.default_created")],
+        )?;
         return Ok(config);
     }
 
-    header(&crate::tr!(locale, "setup.provider_step"));
     let (provider_name, provider_config) = prompt_provider(&mut ui, &[]).await?;
 
     let mut providers = HashMap::new();
     providers.insert(provider_name.clone(), provider_config.clone());
 
-    header(&crate::tr!(locale, "setup.model_step"));
     let (model_name, model_config) =
         prompt_model(&mut ui, &provider_name, &provider_config).await?;
 
@@ -1930,10 +2006,12 @@ pub async fn run_first_time_setup() -> Result<Config> {
 
     write_config(&config).await?;
 
-    println!();
-    println!("{}", crate::tr!(locale, "setup.written"));
-    println!("  main_model = \"{model_name}\" （provider: {provider_name}）");
-    println!();
+    ui.detail(
+        &crate::tr!(locale, "setup.written"),
+        &[format!(
+            "main_model = \"{model_name}\" (provider: {provider_name})"
+        )],
+    )?;
 
     Ok(config)
 }
@@ -1948,7 +2026,6 @@ pub async fn run_add_provider() -> Result<()> {
     })?;
     let locale = config.locale;
 
-    header(&crate::tr!(locale, "config.add_provider"));
     let existing: Vec<String> = config.providers.keys().cloned().collect();
     let mut ui = PromptUi::new(locale)?;
     let (name, provider) = prompt_provider(&mut ui, &existing).await?;
@@ -1959,14 +2036,20 @@ pub async fn run_add_provider() -> Result<()> {
             false,
         )?;
         if !overwrite {
-            info(&crate::tr!(locale, "common.cancelled_action"));
+            ui.detail(
+                &crate::tr!(locale, "config.add_provider"),
+                &[crate::tr!(locale, "common.cancelled_action")],
+            )?;
             return Ok(());
         }
     }
 
     config.providers.insert(name.clone(), provider);
     write_config(&config).await?;
-    info(&crate::tr!(locale, "config.provider_saved", name = name));
+    ui.detail(
+        &crate::tr!(locale, "config.add_provider"),
+        &[crate::tr!(locale, "config.provider_saved", name = name)],
+    )?;
     Ok(())
 }
 
@@ -1980,7 +2063,6 @@ pub async fn run_add_model() -> Result<()> {
     })?;
     let locale = config.locale;
 
-    header(&crate::tr!(locale, "config.add_model"));
     let mut ui = PromptUi::new(locale)?;
     let provider_names: Vec<String> = config.providers.keys().cloned().collect();
     if provider_names.is_empty() {
@@ -2005,7 +2087,10 @@ pub async fn run_add_model() -> Result<()> {
             false,
         )?;
         if !overwrite {
-            info(&crate::tr!(locale, "common.cancelled_action"));
+            ui.detail(
+                &crate::tr!(locale, "config.add_model"),
+                &[crate::tr!(locale, "common.cancelled_action")],
+            )?;
             return Ok(());
         }
     }
@@ -2021,7 +2106,10 @@ pub async fn run_add_model() -> Result<()> {
     }
 
     write_config(&config).await?;
-    info(&crate::tr!(locale, "config.model_saved", name = name));
+    ui.detail(
+        &crate::tr!(locale, "config.add_model"),
+        &[crate::tr!(locale, "config.model_saved", name = name)],
+    )?;
     Ok(())
 }
 
@@ -2054,11 +2142,14 @@ pub async fn run_set_main_model() -> Result<()> {
 
     config.main_model = model_names[idx].clone();
     write_config(&config).await?;
-    info(&crate::tr!(
-        locale,
-        "config.main_model_set",
-        name = config.main_model.clone()
-    ));
+    ui.detail(
+        &crate::tr!(locale, "config.select_main_model"),
+        &[crate::tr!(
+            locale,
+            "config.main_model_set",
+            name = config.main_model.clone()
+        )],
+    )?;
     Ok(())
 }
 
@@ -2398,11 +2489,14 @@ pub async fn run_set_hindsight_model() -> Result<()> {
         .model
         .as_deref()
         .unwrap_or(&config.main_model);
-    info(&crate::tr!(
-        locale,
-        "config.hindsight_model_set",
-        name = display
-    ));
+    ui.detail(
+        &crate::tr!(locale, "config.select_hindsight_model"),
+        &[crate::tr!(
+            locale,
+            "config.hindsight_model_set",
+            name = display
+        )],
+    )?;
     Ok(())
 }
 
