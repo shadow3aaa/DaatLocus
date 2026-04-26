@@ -544,29 +544,6 @@ fn add_guarded_ace_recursive(
     Ok(())
 }
 
-fn add_guarded_aces_recursive(
-    path: &Path,
-    entries: &[(PSID, u32, i32)],
-    acl_guards: &mut Vec<AclGuard>,
-) -> io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    if path.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let child = entry.path();
-            if entry.file_type()?.is_dir() {
-                add_guarded_aces_recursive(&child, entries, acl_guards)?;
-            } else {
-                add_guarded_aces(&child, entries, acl_guards)?;
-            }
-        }
-    }
-    add_guarded_aces(path, entries, acl_guards)?;
-    Ok(())
-}
-
 fn add_guarded_read_denies_recursive(
     path: &Path,
     file_entries: &[(PSID, u32, i32)],
