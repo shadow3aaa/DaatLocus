@@ -530,6 +530,22 @@ fn execute_activate_workflow_tool<'a>(
             .get(&workflow_id)
             .cloned()
             .ok_or_else(|| miette::miette!("unknown workflow_id `{workflow_id}`"))?;
+        if context.bound_workflow_id.as_deref() == Some(activated.id.as_str()) {
+            context.begin_workflow_run_session(activated.id.clone());
+            let summary = format!("workflow {} is already active", activated.id);
+            return Ok(ToolExecutionResult::new(
+                summary.clone(),
+                json!({
+                    "bound_workflow_id": context.bound_workflow_id,
+                    "activated": activated,
+                    "already_active": true,
+                }),
+                ToolUiEvent::activate_workflow(workflow_id),
+            )
+            .with_model_content(format!(
+                "summary={summary}\nalready_active=true\nContinue the task using the currently bound workflow; do not call activate_workflow again for this workflow."
+            )));
+        }
         if context.bound_workflow_id.as_deref() != Some(activated.id.as_str()) {
             context.queue_active_workflow_run_for_flush(WorkflowRunOutcome::Superseded);
         }

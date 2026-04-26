@@ -472,16 +472,26 @@ fn find_runtime_tool<'a>(
 
 pub fn build_runtime_tool_specs(context: &Context) -> Vec<AgentToolSpec> {
     let tools = build_runtime_tools(context);
-    let workflow_selection_phase = context.bound_workflow_id.is_none();
     tools
         .into_iter()
         .filter(|tool| tool.is_available(context))
         .filter(|tool| {
-            !workflow_selection_phase
-                || matches!(tool.name(), "activate_workflow" | "create_workflow")
+            tool_visible_for_workflow_phase(context.bound_workflow_id.as_deref(), tool.name())
         })
         .map(|tool| tool.spec())
         .collect()
+}
+
+fn is_workflow_binding_tool(name: &str) -> bool {
+    matches!(name, "activate_workflow" | "create_workflow")
+}
+
+fn tool_visible_for_workflow_phase(bound_workflow_id: Option<&str>, tool_name: &str) -> bool {
+    if bound_workflow_id.is_none() {
+        is_workflow_binding_tool(tool_name)
+    } else {
+        !is_workflow_binding_tool(tool_name)
+    }
 }
 
 pub fn summarize_action_from_tool_call(
@@ -523,4 +533,37 @@ pub async fn execute_agent_tool_call(
             .tool_output_max_tokens
             .max(1),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_selection_phase_exposes_only_binding_tools() {
+        assert!(tool_visible_for_workflow_phase(None, "activate_workflow"));
+        assert!(tool_visible_for_workflow_phase(None, "create_workflow"));
+        assert!(!tool_visible_for_workflow_phase(None, "finish_and_send"));
+        assert!(!tool_visible_for_workflow_phase(None, "terminal_exec"));
+    }
+
+    #[test]
+    fn bound_workflow_phase_hides_binding_tools() {
+        assert!(!tool_visible_for_workflow_phase(
+            Some("repo-analysis-summary"),
+            "activate_workflow"
+        ));
+        assert!(!tool_visible_for_workflow_phase(
+            Some("repo-analysis-summary"),
+            "create_workflow"
+        ));
+        assert!(tool_visible_for_workflow_phase(
+            Some("repo-analysis-summary"),
+            "finish_and_send"
+        ));
+        assert!(tool_visible_for_workflow_phase(
+            Some("repo-analysis-summary"),
+            "terminal_exec"
+        ));
+    }
 }
