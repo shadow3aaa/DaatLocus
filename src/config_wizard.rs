@@ -15,8 +15,8 @@ use ratatui::{
 
 use crate::{
     config::{
-        Config, JudgeConfig, ModelConfig, ProviderConfig, normalize_provider_base_url,
-        redact_secret_text, resolve_env_reference, write_config,
+        Config, JudgeConfig, ModelConfig, ProviderConfig, TelegramConfig,
+        normalize_provider_base_url, redact_secret_text, resolve_env_reference, write_config,
     },
     i18n::Locale,
     model_catalog::{ModelCapacity, catalog_model_capacity, conservative_model_capacity},
@@ -1995,12 +1995,15 @@ pub async fn run_first_time_setup() -> Result<Config> {
     let mut models = HashMap::new();
     models.insert(model_name.clone(), model_config);
 
+    let telegram = prompt_telegram_config(&mut ui, None)?;
+
     let config = Config {
         locale,
         providers,
         models,
         main_model: model_name.clone(),
         judge: JudgeConfig::default(),
+        telegram,
         ..Config::default()
     };
 
@@ -2260,6 +2263,26 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
         hindsight_model, fallback_mark, config.hindsight.port, config.hindsight.profile,
     ));
 
+    lines.push(String::new());
+    lines.push(crate::tr!(locale, "config.telegram_heading"));
+    lines.push("────────".to_string());
+    let token_status = if config.telegram.has_real_credentials() {
+        mask_secret(&config.telegram.bot_token)
+    } else {
+        crate::tr!(locale, "config.telegram_token_missing")
+    };
+    let active_status = if config.telegram.enabled && config.telegram.has_real_credentials() {
+        crate::tr!(locale, "config.telegram_active")
+    } else if config.telegram.enabled {
+        crate::tr!(locale, "config.telegram_waiting_for_token")
+    } else {
+        crate::tr!(locale, "config.telegram_disabled")
+    };
+    lines.push(format!(
+        "  {}  enabled={}  token={}  poll_timeout_secs={}",
+        active_status, config.telegram.enabled, token_status, config.telegram.poll_timeout_secs
+    ));
+
     lines
 }
 
@@ -2300,6 +2323,7 @@ pub async fn run_config_menu() -> Result<()> {
             crate::tr!(locale, "config.add_model"),
             crate::tr!(locale, "config.change_main_model"),
             crate::tr!(locale, "config.change_hindsight_model"),
+            crate::tr!(locale, "config.configure_telegram"),
             crate::tr!(locale, "config.exit"),
         ];
 
@@ -2438,10 +2462,97 @@ pub async fn run_config_menu() -> Result<()> {
                 };
                 write_config(&config).await?;
             }
+            5 => {
+                let mut config = crate::config::load_config().await.map_err(|e| {
+                    miette!(
+                        "{}",
+                        crate::tr!(locale, "common.config_load_failed", error = e)
+                    )
+                })?;
+                config.telegram = prompt_telegram_config(&mut ui, Some(&config.telegram))?;
+                write_config(&config).await?;
+            }
             _ => break,
         }
     }
     Ok(())
+}
+
+fn prompt_telegram_config(
+    ui: &mut PromptUi,
+    current: Option<&TelegramConfig>,
+) -> Result<TelegramConfig> {
+    let locale = ui.locale();
+    let default = TelegramConfig::default();
+    let enabled = ui.confirm(
+        &crate::tr!(locale, "config.telegram_enable"),
+        current.map(|config| config.enabled).unwrap_or(false),
+    )?;
+    let poll_timeout_secs = current
+        .map(|config| config.poll_timeout_secs)
+        .unwrap_or(default.poll_timeout_secs);
+    let existing_token = current
+        .map(|config| config.bot_token.clone())
+        .unwrap_or_else(|| default.bot_token.clone());
+
+    if !enabled {
+        return Ok(TelegramConfig {
+            enabled,
+            bot_token: existing_token,
+            poll_timeout_secs,
+        });
+    }
+
+    let has_existing_token = current
+        .map(|config| config.has_real_credentials())
+        .unwrap_or(false);
+    let mut token_options = Vec::new();
+    if has_existing_token {
+        token_options.push(crate::tr!(locale, "config.telegram_keep_existing_token"));
+    }
+    token_options.push(crate::tr!(locale, "config.telegram_env_token"));
+    token_options.push(crate::tr!(locale, "config.telegram_manual_token"));
+
+    let token_idx = ui.select(
+        &crate::tr!(locale, "config.telegram_token_source"),
+        &token_options,
+        0,
+    )?;
+    let bot_token = if has_existing_token && token_idx == 0 {
+        existing_token
+    } else {
+        let adjusted_idx = if has_existing_token {
+            token_idx.saturating_sub(1)
+        } else {
+            token_idx
+        };
+        match adjusted_idx {
+            0 => {
+                let name = ui.text(
+                    &crate::tr!(locale, "config.telegram_token_env_name"),
+                    Some("TELEGRAM_BOT_TOKEN"),
+                )?;
+                let name = if name.trim().is_empty() {
+                    "TELEGRAM_BOT_TOKEN"
+                } else {
+                    name.trim()
+                };
+                format!("${name}")
+            }
+            _ => ui.password(&crate::tr!(locale, "config.telegram_bot_token"))?,
+        }
+    };
+
+    let poll_timeout_secs = ui.usize(
+        &crate::tr!(locale, "config.telegram_poll_timeout_secs"),
+        usize::try_from(poll_timeout_secs).unwrap_or(30),
+    )? as u64;
+
+    Ok(TelegramConfig {
+        enabled,
+        bot_token,
+        poll_timeout_secs,
+    })
 }
 
 /// `config set-hindsight-model` subcommand.
@@ -2496,6 +2607,26 @@ pub async fn run_set_hindsight_model() -> Result<()> {
             "config.hindsight_model_set",
             name = display
         )],
+    )?;
+    Ok(())
+}
+
+/// `config set-telegram` subcommand.
+pub async fn run_set_telegram() -> Result<()> {
+    let mut config = crate::config::load_config().await.map_err(|e| {
+        miette!(
+            "{}",
+            crate::tr!(Locale::default(), "common.config_load_failed", error = e)
+        )
+    })?;
+    let locale = config.locale;
+    let mut ui = PromptUi::new(locale)?;
+
+    config.telegram = prompt_telegram_config(&mut ui, Some(&config.telegram))?;
+    write_config(&config).await?;
+    ui.detail(
+        &crate::tr!(locale, "config.configure_telegram"),
+        &[crate::tr!(locale, "config.telegram_saved")],
     )?;
     Ok(())
 }
@@ -2641,5 +2772,24 @@ mod tests {
         assert_eq!(models[1].id, "gpt-5.5");
         assert_eq!(models[1].context_window, Some(400000));
         assert_eq!(models[1].max_output_tokens, Some(128000));
+    }
+
+    #[test]
+    fn config_summary_includes_telegram_state() {
+        let config = Config {
+            telegram: TelegramConfig {
+                enabled: true,
+                bot_token: "${TELEGRAM_BOT_TOKEN}".to_string(),
+                poll_timeout_secs: 45,
+            },
+            ..Config::default()
+        };
+
+        let summary = render_config_summary_lines(&config, Locale::EnUs).join("\n");
+
+        assert!(summary.contains("Telegram"));
+        assert!(summary.contains("enabled=true"));
+        assert!(summary.contains("poll_timeout_secs=45"));
+        assert!(summary.contains("${TE...KEN}"));
     }
 }
