@@ -34,6 +34,11 @@ use crate::{
 
 mod copilot;
 pub use copilot::{CopilotClient, exchange_copilot_session_token};
+mod codex_oauth;
+pub(crate) use codex_oauth::{
+    CodexOAuthClient, CodexOAuthTokens, codex_oauth_access_from_file, codex_oauth_auth_file,
+    codex_oauth_client_version, codex_oauth_default_base_url, write_codex_oauth_tokens,
+};
 
 mod io;
 use io::*;
@@ -915,7 +920,7 @@ impl ChatCompletionsAdapter for ActiveChatCompletionsAdapter {
 
 fn is_standard_openai_base_url(base_url: &str) -> bool {
     let normalized = base_url.trim_end_matches('/');
-    normalized.contains("api.openai.com") || normalized.contains("chatgpt.com/backend-api/codex")
+    normalized.contains("api.openai.com")
 }
 
 fn shared_request_rate_limiter(
@@ -1031,6 +1036,15 @@ pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn Llm + Send
             let resolved = resolve_env_reference(github_token);
             Ok(Box::new(CopilotClient::new(&resolved, model_config)))
         }
+        ProviderConfig::OpenaiCodexOauth {
+            auth_file,
+            base_url,
+        } => Ok(Box::new(CodexOAuthClient::new(
+            &model_config.provider,
+            auth_file.as_deref(),
+            base_url.as_deref(),
+            model_config,
+        ))),
     }
 }
 

@@ -54,6 +54,12 @@ pub enum ProviderConfig {
     GithubCopilot {
         github_token: String,
     },
+    OpenaiCodexOauth {
+        #[serde(default)]
+        auth_file: Option<String>,
+        #[serde(default)]
+        base_url: Option<String>,
+    },
     OpenaiCompatible {
         base_url: String,
         api_key: String,
@@ -275,6 +281,7 @@ impl Config {
                 ProviderConfig::GithubCopilot { github_token } => {
                     push_secret_env_ref(&mut vars, github_token);
                 }
+                ProviderConfig::OpenaiCodexOauth { .. } => {}
             }
         }
         push_secret_env_ref(&mut vars, &self.telegram.bot_token);

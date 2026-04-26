@@ -81,6 +81,15 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Accept `env:NAME` or `$NAME` references consistently.
   - [x] Resolve OpenAI and OpenAI-compatible API keys through the same resolver as Copilot.
 
+- [x] Support OpenAI Codex OAuth login
+  - [x] Add a first-class OpenAI Codex OAuth provider type.
+  - [x] Reuse the Codex browser callback OAuth flow and client id.
+  - [x] Keep device-code OAuth as a fallback for headless or explicitly enabled flows.
+  - [x] Persist rotating OAuth credentials in a private auth JSON file.
+  - [x] Refresh expired access tokens and attach ChatGPT account routing headers.
+  - [x] Use the ChatGPT Codex Responses backend instead of the public OpenAI API path.
+  - [x] Wire setup, model discovery, runtime LLM creation, and docs.
+
 - [x] Write config files with private permissions
   - [x] Set `0600` on Unix-like systems.
   - [x] Preserve safe behavior when rewriting existing config files.

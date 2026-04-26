@@ -1,4 +1,4 @@
-use miette::Result;
+use miette::{Result, miette};
 
 use crate::{
     config::{Config, ProviderConfig, resolve_env_reference},
@@ -35,6 +35,9 @@ pub async fn hindsight_llm_env_vars(config: &Config) -> Result<Vec<(String, Stri
             }
             Ok(vars)
         }
+        ProviderConfig::OpenaiCodexOauth { .. } => Err(miette!(
+            "OpenAI Codex OAuth uses the ChatGPT Codex Responses backend, which hindsight-embed does not support yet; set hindsight.model to a model backed by OpenAI API, OpenAI-compatible, or GitHub Copilot"
+        )),
         ProviderConfig::OpenaiCompatible { base_url, api_key } => Ok(vec![
             ("HINDSIGHT_API_LLM_PROVIDER".into(), "openai".into()),
             (

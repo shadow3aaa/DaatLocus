@@ -63,6 +63,11 @@ config:
   github_manual_token: "手动填写 GitHub Token（PAT）"
   github_env_token: "使用环境变量（GITHUB_TOKEN / GH_TOKEN）"
   github_token: "GitHub Token（ghp_...）"
+  codex_oauth_auth_method: "OpenAI Codex OAuth 认证方式"
+  codex_oauth_browser_login: "浏览器登录（推荐，本地回调）"
+  codex_oauth_device_login: "Device code 登录（备用/无头环境）"
+  codex_oauth_auth_file: "使用已有 Codex OAuth auth 文件"
+  codex_oauth_auth_file_path: "Codex OAuth auth 文件路径"
   discover_models: "获取模型列表"
   manual_model: "手动输入..."
   select_model: "选择模型"
@@ -113,6 +118,18 @@ github:
   access_denied: "用户取消了授权"
   auth_error: "GitHub 授权错误: %{error}"
   unknown_response: "未知的 token 响应: %{body}"
+
+codex_oauth:
+  request_browser_login: "正在启动本地 OpenAI Codex OAuth 回调服务..."
+  request_device_code: "正在向 OpenAI Codex OAuth 请求 device code..."
+  authorization: "OpenAI Codex OAuth 授权"
+  open_url: "打开: %{url}"
+  callback_waiting: "等待浏览器回调: %{url}"
+  enter_code: "输入验证码: %{code}"
+  code_warning: "Device code 属于敏感验证码，请勿分享给他人。"
+  waiting: "等待 Codex OAuth 授权%{dots}   "
+  success: "授权成功"
+  browser_failed: "浏览器授权失败: %{error}"
 
 daemon:
   stopped: "daemon 已停止"

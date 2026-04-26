@@ -162,6 +162,8 @@ poll_timeout_secs = 30
 Notes:
 
 - `hindsight` is now managed automatically by Daat Locus. You do not need to start Docker or run a separate service first.
+- OpenAI Codex OAuth is available through `cargo run -- config add-provider`; browser callback login is the default, with device-code login kept as a fallback. Rotating OAuth credentials are stored in a private auth JSON file, while `config.toml` keeps only the auth-file path. This provider uses the ChatGPT Codex Responses backend rather than a public OpenAI API key.
+- `hindsight-embed` does not support the ChatGPT Codex Responses backend yet. If your main model uses OpenAI Codex OAuth, set `hindsight.model` to a model backed by another provider.
 - If `telegram.enabled = true` but `bot_token` is still a placeholder, the Telegram transport is not enabled.
 - `hindsight.model = "xxx"` is optional. If unset, it falls back to `main_model`.
 - `judge.model = "xxx"` is optional. If unset, it also falls back to `main_model`.

@@ -157,6 +157,8 @@ poll_timeout_secs = 30
 说明：
 
 - `hindsight` 现在由 Daat Locus 自动托管，不需要你先手动起 Docker 或单独跑服务。
+- OpenAI Codex OAuth 可通过 `cargo run -- config add-provider` 配置；默认使用浏览器本地回调登录，device-code 登录保留为备用路径。轮换的 OAuth 凭据保存在私有 auth JSON 文件里，`config.toml` 只保存 auth 文件路径。该 provider 使用 ChatGPT Codex Responses backend，而不是公开 OpenAI API key 路径。
+- `hindsight-embed` 目前还不支持 ChatGPT Codex Responses backend。如果主模型使用 OpenAI Codex OAuth，请把 `hindsight.model` 设为另一个 provider 支持的模型。
 - `telegram.enabled = true` 但 `bot_token` 仍是占位符时，不会真正启用 Telegram transport。
 - `hindsight.model = "xxx"` 可选；为空时回退到 `main_model`。
 - `judge.model = "xxx"` 可选；为空时同样回退到 `main_model`。
