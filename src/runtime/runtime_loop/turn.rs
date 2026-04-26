@@ -56,6 +56,7 @@ async fn abort_runtime_turn_before_model(
     };
     finalize_claimed_runtime_events(context, claimed_event_ids, &output);
     finalize_claimed_runtime_app_notices(context, claimed_app_notices, &output).await;
+    context.claimed_event_ids.clear();
     context.claimed_app_notices.clear();
     record_workflow_run_evidence(context, &output).await;
     context.current_work_origin = None;
@@ -687,6 +688,7 @@ pub(crate) async fn execute_agent_loop_step(
     }
     finalize_claimed_runtime_events(context, &claimed_event_ids, &output);
     finalize_claimed_runtime_app_notices(context, &claimed_app_notice_entries, &output).await;
+    context.claimed_event_ids.clear();
     context.claimed_app_notices.clear();
     let history_messages = runtime_step.history_messages().to_vec();
     if !runtime_step.is_history_empty() {

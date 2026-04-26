@@ -38,6 +38,7 @@ pub(crate) async fn daat_locus_loop(
             .map(|started| started.elapsed() > stale_threshold)
             .unwrap_or(false);
         if is_stale {
+            recover_stale_runtime_turn_claims(context);
             tracing::warn!(
                 elapsed_secs = context
                     .runtime_turn_started_at
@@ -171,6 +172,73 @@ fn sync_driver_frontier_from_sources(context: &Context) {
             tracing::error!("failed to remove stale event driver {event_id}: {err:?}");
         }
     }
+}
+
+fn recover_stale_runtime_turn_claims(context: &mut Context) {
+    let mut claimed_event_ids = std::mem::take(&mut context.claimed_event_ids);
+    if claimed_event_ids.is_empty() {
+        claimed_event_ids = context
+            .events
+            .driver_event_statuses()
+            .into_iter()
+            .filter(|(_, status)| matches!(status, EventStatus::Claimed))
+            .map(|(event_id, _)| event_id.to_string())
+            .collect();
+    }
+    if !claimed_event_ids.is_empty() {
+        requeue_claimed_runtime_events(context, &claimed_event_ids);
+    }
+
+    let claimed_app_notices = std::mem::take(&mut context.claimed_app_notices);
+    let mut released_app_notices = Vec::new();
+    for notice in claimed_app_notices {
+        let work = PendingWork::AppNotice {
+            app: notice.app.clone(),
+            reason: notice.reason.clone(),
+        };
+        match context.pending_work.release_claimed(work.clone()) {
+            Ok(true) => {
+                released_app_notices.push(format!("{}:{}", notice.app, notice.reason));
+            }
+            Ok(false) => {
+                let current_reason = context
+                    .apps
+                    .notice_reason(&notice.app)
+                    .and_then(|reason| crate::context::normalize_app_notice_reason(&reason));
+                if current_reason.as_deref() == Some(notice.reason.as_str())
+                    && !context.app_notice_is_resolved(&notice)
+                {
+                    if let Err(err) = context.pending_work.requeue_front(work) {
+                        let app = &notice.app;
+                        tracing::error!(
+                            "failed to requeue stale runtime app notice driver for {app}: {err:?}"
+                        );
+                    } else {
+                        released_app_notices.push(format!("{}:{}", notice.app, notice.reason));
+                    }
+                }
+            }
+            Err(err) => {
+                let app = &notice.app;
+                tracing::error!(
+                    "failed to release stale runtime app notice driver for {app}: {err:?}"
+                );
+            }
+        }
+    }
+
+    if !claimed_event_ids.is_empty() || !released_app_notices.is_empty() {
+        tracing::warn!(
+            requeued_claimed_events = claimed_event_ids.len(),
+            event_ids = claimed_event_ids.join(","),
+            requeued_app_notices = released_app_notices.len(),
+            app_notices = released_app_notices.join(","),
+            "requeued claimed runtime inputs after stale turn reset"
+        );
+    }
+    context.install_live_progress(None);
+    context.current_work_origin = None;
+    context.workflow_step_started_bound_id = None;
 }
 
 fn enqueue_app_notice_work(context: &mut Context) {
