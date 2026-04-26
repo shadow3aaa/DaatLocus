@@ -308,7 +308,7 @@ impl DashboardCommand for ClearCommand {
     }
 
     fn description(&self) -> &'static str {
-        "clear runtime conversation history and current plan"
+        "clear runtime conversation history, current plan, and all events"
     }
 
     fn execute(
@@ -329,7 +329,7 @@ impl DashboardCommand for ClearCommand {
         {
             Ok(()) => DashboardCommandResult::ShowOverlay {
                 title: raw.trim().to_uppercase(),
-                text: "queued runtime conversation + plan clear".to_string(),
+                text: "queued runtime conversation + plan + event clear".to_string(),
             },
             Err(err) => DashboardCommandResult::ShowOverlay {
                 title: raw.trim().to_uppercase(),

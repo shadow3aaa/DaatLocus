@@ -172,6 +172,17 @@ impl TelegramTransportStateHandle {
         Ok(())
     }
 
+    pub fn clear_outbox(&self) -> Result<usize> {
+        let mut state = self.inner.state.lock();
+        let cleared = state.outbox.len();
+        if cleared == 0 {
+            return Ok(0);
+        }
+        state.outbox.clear();
+        persist_telegram_state_result(&self.inner, &state)?;
+        Ok(cleared)
+    }
+
     pub async fn wait_for_outbound(&self) {
         self.inner.outbound_notify.notified().await;
     }
@@ -469,5 +480,31 @@ mod tests {
                 assert!(message.settle_note_on_delivery.is_none());
             }
         }
+    }
+
+    #[test]
+    fn clear_outbox_removes_pending_messages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transport = TelegramTransportState {
+            inner: Arc::new(TelegramInner {
+                state: Mutex::new(TelegramState::default()),
+                outbound_notify: Notify::new(),
+                persistence_path: dir.path().join("telegram_state"),
+            }),
+        };
+        let handle = transport.handle();
+
+        handle
+            .enqueue_outgoing_message(
+                "1".to_string(),
+                "queued".to_string(),
+                Some("event-1".to_string()),
+                Some(EventStatus::Resolved),
+                None,
+            )
+            .expect("enqueue");
+
+        assert_eq!(handle.clear_outbox().expect("clear outbox"), 1);
+        assert!(handle.take_next_outbound().is_none());
     }
 }
