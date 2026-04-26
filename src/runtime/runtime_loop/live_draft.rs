@@ -33,7 +33,10 @@ pub(super) fn maybe_start_telegram_live_draft_session(
         return None;
     }
     let chat_id = payload.chat_id.parse::<i64>().ok()?;
-    let draft_id = Utc::now().timestamp_millis().unsigned_abs().max(1) as i64;
+    let event_id = event.event_id.to_string();
+    let (draft_id, previous_sent_text) = context
+        .get_or_create_telegram_live_draft(event_id.clone(), stable_live_draft_id(event.event_id));
+    let live_drafts = context.telegram_live_drafts.clone();
     let client = TelegramLiveDraftClient::new(context.config.telegram.clone());
     let (tx, mut rx) = mpsc::unbounded_channel::<LiveProgressEvent>();
     context.install_live_progress(Some(tx));
@@ -42,15 +45,18 @@ pub(super) fn maybe_start_telegram_live_draft_session(
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut state = TelegramLiveDraftState::working();
         let mut dirty = false;
-        let mut last_sent = String::new();
+        let mut last_sent = previous_sent_text.unwrap_or_default();
         let initial_draft_text = state.render_markdown_v2();
-        if let Err(err) = client
-            .send_message_draft(chat_id, draft_id, &initial_draft_text)
-            .await
-        {
-            tracing::warn!("telegram initial live draft send failed: {err:?}");
-        } else {
-            last_sent = initial_draft_text;
+        if should_send_initial_live_draft(&last_sent) {
+            if let Err(err) = client
+                .send_message_draft(chat_id, draft_id, &initial_draft_text)
+                .await
+            {
+                tracing::warn!("telegram initial live draft send failed: {err:?}");
+            } else {
+                record_live_draft_sent(&live_drafts, &event_id, &initial_draft_text);
+                last_sent = initial_draft_text;
+            }
         }
         loop {
             tokio::select! {
@@ -74,6 +80,7 @@ pub(super) fn maybe_start_telegram_live_draft_session(
                             {
                                 tracing::warn!("telegram live draft update failed: {err:?}");
                             } else {
+                                record_live_draft_sent(&live_drafts, &event_id, &draft_text);
                                 last_sent = draft_text;
                             }
                         }
@@ -90,10 +97,30 @@ pub(super) fn maybe_start_telegram_live_draft_session(
                     .await
             {
                 tracing::warn!("telegram final live draft flush failed: {err:?}");
+            } else if draft_text != last_sent {
+                record_live_draft_sent(&live_drafts, &event_id, &draft_text);
             }
         }
     });
     Some(TelegramLiveDraftSession { join })
+}
+
+fn stable_live_draft_id(event_id: uuid::Uuid) -> i64 {
+    ((event_id.as_u128() % i64::MAX as u128) + 1) as i64
+}
+
+fn should_send_initial_live_draft(last_sent: &str) -> bool {
+    last_sent.is_empty()
+}
+
+fn record_live_draft_sent(
+    live_drafts: &crate::context::TelegramLiveDraftRegistry,
+    event_id: &str,
+    text: &str,
+) {
+    if let Some(record) = live_drafts.lock().get_mut(event_id) {
+        record.last_sent_text = Some(text.to_string());
+    }
 }
 
 #[derive(Default)]
@@ -262,6 +289,24 @@ mod tests {
         });
 
         assert_eq!(state.render_markdown_v2(), "Hello\\.");
+    }
+
+    #[test]
+    fn live_draft_id_is_stable_for_event() {
+        let event_id = uuid::Uuid::parse_str("65d9e9f8-ae4f-455c-af4f-1cc6d7d0368c").unwrap();
+
+        assert_eq!(
+            stable_live_draft_id(event_id),
+            stable_live_draft_id(event_id)
+        );
+        assert!(stable_live_draft_id(event_id) > 0);
+    }
+
+    #[test]
+    fn live_draft_initial_working_is_sent_only_without_prior_text() {
+        assert!(should_send_initial_live_draft(""));
+        assert!(!should_send_initial_live_draft("Working\\.\\.\\."));
+        assert!(!should_send_initial_live_draft("· terminal\\_exec"));
     }
 
     #[test]

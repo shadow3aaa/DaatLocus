@@ -293,6 +293,22 @@ pub(super) fn finalize_claimed_runtime_events(
             "requeued claimed runtime events left unresolved at turn end",
         );
     }
+
+    clear_finished_telegram_live_drafts(context, event_ids);
+}
+
+fn clear_finished_telegram_live_drafts(context: &Context, event_ids: &[String]) {
+    for event_id in event_ids {
+        let Ok(event) = context.events.view(event_id) else {
+            continue;
+        };
+        if !matches!(event.payload, EventPayload::TelegramIncoming(_)) {
+            continue;
+        }
+        if !matches!(event.status, EventStatus::Pending | EventStatus::Claimed) {
+            context.clear_telegram_live_draft(event_id);
+        }
+    }
 }
 
 pub(super) async fn finalize_claimed_runtime_app_notices(
