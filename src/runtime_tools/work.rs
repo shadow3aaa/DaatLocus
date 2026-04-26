@@ -543,8 +543,13 @@ fn execute_activate_workflow_tool<'a>(
                 "activated": activated,
             }),
             ToolUiEvent::activate_workflow(workflow_id),
-        ))
+        )
+        .with_turn_boundary(activate_workflow_turn_boundary_reason()))
     })
+}
+
+fn activate_workflow_turn_boundary_reason() -> &'static str {
+    "workflow binding changed; re-render world state in a new turn before continuing"
 }
 
 fn summarize_deep_recall_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
@@ -809,6 +814,14 @@ mod tests {
         assert_eq!(
             focus_app_turn_boundary_reason(&crate::app::AppId::terminal()),
             "focused app changed to Terminal; re-render world state in a new turn"
+        );
+    }
+
+    #[test]
+    fn activate_workflow_declares_turn_boundary_reason() {
+        assert_eq!(
+            activate_workflow_turn_boundary_reason(),
+            "workflow binding changed; re-render world state in a new turn before continuing"
         );
     }
 }
