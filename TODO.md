@@ -45,7 +45,7 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Prevent terminal tools from inheriting provider secret environment variables.
   - [x] Add tests for protected runtime paths, source writes, and secret env stripping.
 
-- [ ] Consider optional strong sandbox backends for Linux and Windows
+- [x] Consider optional strong sandbox backends for Linux and Windows
   - [x] Keep strong sandboxing out of the default path; the default policy remains a lightweight self-protection guard.
   - [x] Scope the strong sandbox to filesystem permissions only; network/web restrictions are out of scope.
   - [x] Select Codex-style Linux bubblewrap as the primary filesystem backend direction.
@@ -57,7 +57,7 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Implement the optional Linux bubblewrap filesystem backend.
   - [x] Implement the optional Windows workspace app worker backend with restricted tokens and temporary ACL guards.
   - [x] Extend the optional Windows backend to Terminal pipes and process-tree cleanup.
-  - [ ] Add conformance tests for protected runtime paths when a backend is enabled.
+  - [x] Add conformance tests for protected runtime paths when a backend is enabled.
 
 - [x] Resolve symlinks and canonical paths for sandbox enforcement
   - [x] Canonicalize paths before read/write checks where possible.
