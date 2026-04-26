@@ -491,7 +491,7 @@ fn strip_protected_env_from_std_command(
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(not(test), target_os = "windows"))]
 fn filesystem_policy_requires_backend(policy: &FileSystemSandboxPolicy) -> bool {
     !(policy.full_disk_read
         && policy.full_disk_write

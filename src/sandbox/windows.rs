@@ -79,6 +79,7 @@ pub enum WindowsSandboxChild {
 }
 
 unsafe impl Send for WindowsSandboxChild {}
+unsafe impl Sync for WindowsSandboxChild {}
 
 pub struct WindowsSandboxAsyncChild {
     child: RestrictedWindowsChild,
@@ -88,6 +89,7 @@ pub struct WindowsSandboxAsyncChild {
 }
 
 unsafe impl Send for WindowsSandboxAsyncChild {}
+unsafe impl Sync for WindowsSandboxAsyncChild {}
 
 pub struct RestrictedWindowsChild {
     process: HANDLE,
@@ -101,6 +103,7 @@ pub struct RestrictedWindowsChild {
 }
 
 unsafe impl Send for RestrictedWindowsChild {}
+unsafe impl Sync for RestrictedWindowsChild {}
 
 struct LocalSid {
     ptr: PSID,
