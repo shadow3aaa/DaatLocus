@@ -48,7 +48,7 @@ pub const PLAN_UNIT_HOW: &str = "Use `update_plan` to maintain the plan. Each ca
 
 pub const WORKFLOW_UNIT_WHAT: &str = "A workflow is an evolvable task execution specification. Each workflow describes applicability, preconditions, reusable steps, done criteria, and stable recovery paths.";
 
-pub const WORKFLOW_UNIT_WHEN: &str = "At the start of each turn, bind a workflow before executing any task. Choose the best candidate from the snapshot and call `activate_workflow`; if none fits, call `create_workflow` to create a new workflow. Workflows apply to all task types, including one-off replies.";
+pub const WORKFLOW_UNIT_WHEN: &str = "When `<workflow>` shows `bound_workflow_id=<none>`, bind one workflow before executing the task. Choose the best candidate from the snapshot and call `activate_workflow`; if none fits, call `create_workflow` to create a new workflow. If a workflow is already bound, do not call `activate_workflow` again just to reaffirm it; continue executing under the current binding. Workflows apply to all task types, including one-off replies.";
 
 pub const WORKFLOW_UNIT_HOW: &str = "A workflow binding is runtime state for the current task and does not rewrite the workflow spec. You do not need to manually log daytime workflow outcomes; the runtime writes `WorkflowRunRecord` directly at work-completion boundaries for sleep-time patch or merge.";
 
