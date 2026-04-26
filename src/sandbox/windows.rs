@@ -20,13 +20,13 @@ use windows_sys::Win32::{
         WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::Authorization::{
-        ConvertStringSidToSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GetNamedSecurityInfoW,
-        REVOKE_ACCESS, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
-        TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+        ConvertStringSidToSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GetNamedSecurityInfoW, SET_ACCESS,
+        SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
     },
     Security::{
-        AdjustTokenPrivileges, CONTAINER_INHERIT_ACE, CopySid, CreateRestrictedToken,
-        CreateWellKnownSid, DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE, GetLengthSid,
+        ACL, ACL_SIZE_INFORMATION, AclSizeInformation, AdjustTokenPrivileges,
+        CONTAINER_INHERIT_ACE, CopySid, CreateRestrictedToken, CreateWellKnownSid,
+        DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE, GetAclInformation, GetLengthSid,
         GetTokenInformation, LUA_TOKEN, LookupPrivilegeValueW, OBJECT_INHERIT_ACE, PSID,
         SID_AND_ATTRIBUTES, SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_PRIVILEGES,
         TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE,
@@ -97,8 +97,7 @@ pub struct RestrictedWindowsChild {
     job: HANDLE,
     process_id: u32,
     exit_status: Option<ExitStatus>,
-    acl_guards: Vec<PathBuf>,
-    cap_sid: String,
+    acl_guards: Vec<AclGuard>,
     acl_cleaned: bool,
 }
 
@@ -112,6 +111,17 @@ struct LocalSid {
 struct LocalMem<T>(*mut T);
 
 struct OwnedHandle(HANDLE);
+
+struct RestrictedToken {
+    handle: OwnedHandle,
+    logon_sid: Vec<u8>,
+    everyone_sid: Vec<u8>,
+}
+
+struct AclGuard {
+    path: PathBuf,
+    original_dacl: Option<Vec<u8>>,
+}
 
 struct StartupHandles {
     stdin: HANDLE,
@@ -210,14 +220,15 @@ pub fn spawn_restricted(
         &program,
         args,
         options,
-        &cap_sid,
         cap_sid_ptr.as_ptr(),
-        token.raw(),
+        token.logon_sid.as_ptr().cast::<c_void>().cast_mut(),
+        token.everyone_sid.as_ptr().cast::<c_void>().cast_mut(),
+        token.handle.raw(),
         &mut acl_guards,
     ) {
         Ok(process) => process,
         Err(err) => {
-            revoke_acl_guards(&acl_guards, &cap_sid);
+            restore_acl_guards(&acl_guards);
             return Err(err);
         }
     };
@@ -240,14 +251,15 @@ pub fn spawn_restricted_async(
         &program,
         args,
         options,
-        &cap_sid,
         cap_sid_ptr.as_ptr(),
-        token.raw(),
+        token.logon_sid.as_ptr().cast::<c_void>().cast_mut(),
+        token.everyone_sid.as_ptr().cast::<c_void>().cast_mut(),
+        token.handle.raw(),
         &mut acl_guards,
     ) {
         Ok(process) => process,
         Err(err) => {
-            revoke_acl_guards(&acl_guards, &cap_sid);
+            restore_acl_guards(&acl_guards);
             return Err(err);
         }
     };
@@ -261,12 +273,20 @@ fn spawn_restricted_inner(
     program: &Path,
     args: Vec<String>,
     options: SandboxProcessOptions,
-    cap_sid: &str,
     psid_capability: PSID,
+    psid_logon: PSID,
+    psid_everyone: PSID,
     token: HANDLE,
-    acl_guards: &mut Vec<PathBuf>,
+    acl_guards: &mut Vec<AclGuard>,
 ) -> io::Result<RestrictedWindowsChild> {
-    apply_policy_acl_rules(policy, program, psid_capability, acl_guards)?;
+    apply_policy_acl_rules(
+        policy,
+        program,
+        psid_capability,
+        psid_logon,
+        psid_everyone,
+        acl_guards,
+    )?;
     let current_dir = options
         .current_dir
         .clone()
@@ -318,7 +338,6 @@ fn spawn_restricted_inner(
         process_id: unsafe { GetProcessId(process_info.hProcess) },
         exit_status: None,
         acl_guards: std::mem::take(acl_guards),
-        cap_sid: cap_sid.to_string(),
         acl_cleaned: false,
     })
 }
@@ -329,12 +348,20 @@ fn spawn_restricted_async_inner(
     program: &Path,
     args: Vec<String>,
     options: SandboxProcessOptions,
-    cap_sid: &str,
     psid_capability: PSID,
+    psid_logon: PSID,
+    psid_everyone: PSID,
     token: HANDLE,
-    acl_guards: &mut Vec<PathBuf>,
+    acl_guards: &mut Vec<AclGuard>,
 ) -> io::Result<WindowsSandboxAsyncChild> {
-    apply_policy_acl_rules(policy, program, psid_capability, acl_guards)?;
+    apply_policy_acl_rules(
+        policy,
+        program,
+        psid_capability,
+        psid_logon,
+        psid_everyone,
+        acl_guards,
+    )?;
     let current_dir = options
         .current_dir
         .clone()
@@ -386,7 +413,6 @@ fn spawn_restricted_async_inner(
         process_id: unsafe { GetProcessId(process_info.hProcess) },
         exit_status: None,
         acl_guards: std::mem::take(acl_guards),
-        cap_sid: cap_sid.to_string(),
         acl_cleaned: false,
     };
     let (stdin, stdout, stderr) = parent_pipes.into_async_files()?;
@@ -403,7 +429,9 @@ fn apply_policy_acl_rules(
     policy: &RuntimeSandboxPolicy,
     program: &Path,
     psid: PSID,
-    acl_guards: &mut Vec<PathBuf>,
+    psid_logon: PSID,
+    psid_everyone: PSID,
+    acl_guards: &mut Vec<AclGuard>,
 ) -> io::Result<()> {
     if let Some(parent) = program.parent() {
         add_program_read_ace(parent, psid, acl_guards)?;
@@ -430,13 +458,24 @@ fn apply_policy_acl_rules(
     for path in policy_paths_with_resolved(&policy.filesystem.deny_write_paths) {
         add_guarded_ace_recursive(&path, psid, WORKER_DENY_WRITE_MASK, DENY_ACCESS, acl_guards)?;
     }
+    // Read access can be satisfied through the broader restricted SIDs, so
+    // deny-read guards must cover them as well as the per-launch capability SID.
+    let deny_read_sids = [psid, psid_logon, psid_everyone];
     for path in policy_paths_with_resolved(&policy.filesystem.deny_read_paths) {
-        add_guarded_ace_recursive(&path, psid, WORKER_DENY_READ_MASK, DENY_ACCESS, acl_guards)?;
+        for deny_sid in deny_read_sids {
+            add_guarded_ace_recursive(
+                &path,
+                deny_sid,
+                WORKER_DENY_READ_MASK,
+                DENY_ACCESS,
+                acl_guards,
+            )?;
+        }
     }
     Ok(())
 }
 
-fn add_program_read_ace(path: &Path, psid: PSID, acl_guards: &mut Vec<PathBuf>) -> io::Result<()> {
+fn add_program_read_ace(path: &Path, psid: PSID, acl_guards: &mut Vec<AclGuard>) -> io::Result<()> {
     match add_guarded_ace(path, psid, WORKER_READ_ALLOW_MASK, SET_ACCESS, acl_guards) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
@@ -455,13 +494,13 @@ fn add_guarded_ace(
     psid: PSID,
     mask: u32,
     mode: i32,
-    acl_guards: &mut Vec<PathBuf>,
+    acl_guards: &mut Vec<AclGuard>,
 ) -> io::Result<()> {
     if !path.exists() {
         return Ok(());
     }
+    ensure_acl_guard(path, acl_guards)?;
     add_explicit_ace(path, psid, mask, mode)?;
-    acl_guards.push(path.to_path_buf());
     Ok(())
 }
 
@@ -470,25 +509,79 @@ fn add_guarded_ace_recursive(
     psid: PSID,
     mask: u32,
     mode: i32,
-    acl_guards: &mut Vec<PathBuf>,
+    acl_guards: &mut Vec<AclGuard>,
 ) -> io::Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    add_guarded_ace(path, psid, mask, mode, acl_guards)?;
-    if !path.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let child = entry.path();
-        if entry.file_type()?.is_dir() {
-            add_guarded_ace_recursive(&child, psid, mask, mode, acl_guards)?;
-        } else {
-            add_guarded_ace(&child, psid, mask, mode, acl_guards)?;
+    if path.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let child = entry.path();
+            if entry.file_type()?.is_dir() {
+                add_guarded_ace_recursive(&child, psid, mask, mode, acl_guards)?;
+            } else {
+                add_guarded_ace(&child, psid, mask, mode, acl_guards)?;
+            }
         }
     }
+    add_guarded_ace(path, psid, mask, mode, acl_guards)?;
     Ok(())
+}
+
+fn ensure_acl_guard(path: &Path, acl_guards: &mut Vec<AclGuard>) -> io::Result<()> {
+    if acl_guards.iter().any(|guard| guard.path == path) {
+        return Ok(());
+    }
+    let original_dacl = capture_dacl(path)?;
+    acl_guards.push(AclGuard {
+        path: path.to_path_buf(),
+        original_dacl,
+    });
+    Ok(())
+}
+
+fn capture_dacl(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    let path_wide = to_wide(path.as_os_str());
+    let mut security_descriptor: PSID = ptr::null_mut();
+    let mut dacl = ptr::null_mut();
+    let code = unsafe {
+        GetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            1,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut security_descriptor,
+        )
+    };
+    if code != ERROR_SUCCESS {
+        return Err(win32_error(
+            code,
+            format!("GetNamedSecurityInfoW failed for {}", path.display()),
+        ));
+    }
+    let _security_descriptor = LocalMem(security_descriptor);
+    if dacl.is_null() {
+        return Ok(None);
+    }
+    let mut info = ACL_SIZE_INFORMATION::default();
+    let ok = unsafe {
+        GetAclInformation(
+            dacl.cast::<ACL>(),
+            (&mut info as *mut ACL_SIZE_INFORMATION).cast::<c_void>(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    };
+    if ok == 0 {
+        return Err(last_os_error("GetAclInformation failed"));
+    }
+    let bytes =
+        unsafe { std::slice::from_raw_parts(dacl.cast::<u8>(), info.AclBytesInUse as usize) };
+    Ok(Some(bytes.to_vec()))
 }
 
 fn add_explicit_ace(path: &Path, psid: PSID, mask: u32, mode: i32) -> io::Result<()> {
@@ -544,51 +637,23 @@ fn add_explicit_ace(path: &Path, psid: PSID, mask: u32, mode: i32) -> io::Result
     Ok(())
 }
 
-fn revoke_acl_guards(paths: &[PathBuf], cap_sid: &str) {
-    let Ok(sid) = LocalSid::from_string(cap_sid) else {
-        return;
-    };
-    for path in paths {
-        let _ = revoke_ace(path, sid.as_ptr());
+fn restore_acl_guards(guards: &[AclGuard]) {
+    for guard in guards.iter().rev() {
+        let _ = restore_acl_guard(guard);
     }
 }
 
-fn revoke_ace(path: &Path, psid: PSID) -> io::Result<()> {
-    if !path.exists() {
+fn restore_acl_guard(guard: &AclGuard) -> io::Result<()> {
+    if !guard.path.exists() {
         return Ok(());
     }
-    let path_wide = to_wide(path.as_os_str());
-    let mut security_descriptor: PSID = ptr::null_mut();
-    let mut dacl = ptr::null_mut();
-    let code = unsafe {
-        GetNamedSecurityInfoW(
-            path_wide.as_ptr(),
-            1,
-            DACL_SECURITY_INFORMATION,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut dacl,
-            ptr::null_mut(),
-            &mut security_descriptor,
-        )
-    };
-    if code != ERROR_SUCCESS {
-        return Err(win32_error(
-            code,
-            format!("GetNamedSecurityInfoW failed for {}", path.display()),
-        ));
-    }
-    let _security_descriptor = LocalMem(security_descriptor);
-    let explicit = explicit_access(psid, 0, REVOKE_ACCESS, inheritance_for_path(path));
-    let mut new_dacl = ptr::null_mut();
-    let code = unsafe { SetEntriesInAclW(1, &explicit, dacl, &mut new_dacl) };
-    if code != ERROR_SUCCESS {
-        return Err(win32_error(
-            code,
-            format!("SetEntriesInAclW failed for {}", path.display()),
-        ));
-    }
-    let _new_dacl = LocalMem(new_dacl);
+    let path_wide = to_wide(guard.path.as_os_str());
+    let dacl = guard
+        .original_dacl
+        .as_ref()
+        .map_or(ptr::null_mut(), |bytes| {
+            bytes.as_ptr().cast::<ACL>().cast_mut()
+        });
     let code = unsafe {
         SetNamedSecurityInfoW(
             path_wide.as_ptr() as *mut u16,
@@ -596,14 +661,14 @@ fn revoke_ace(path: &Path, psid: PSID) -> io::Result<()> {
             DACL_SECURITY_INFORMATION,
             ptr::null_mut(),
             ptr::null_mut(),
-            new_dacl,
+            dacl,
             ptr::null_mut(),
         )
     };
     if code != ERROR_SUCCESS {
         return Err(win32_error(
             code,
-            format!("SetNamedSecurityInfoW failed for {}", path.display()),
+            format!("SetNamedSecurityInfoW failed for {}", guard.path.display()),
         ));
     }
     Ok(())
@@ -632,7 +697,7 @@ fn inheritance_for_path(path: &Path) -> u32 {
     }
 }
 
-fn create_restricted_token(psid_capability: &LocalSid) -> io::Result<OwnedHandle> {
+fn create_restricted_token(psid_capability: &LocalSid) -> io::Result<RestrictedToken> {
     let base = current_token_for_restriction()?;
     let mut logon_sid = logon_sid_bytes(base.raw())?;
     let psid_logon = logon_sid.as_mut_ptr().cast::<c_void>();
@@ -675,7 +740,11 @@ fn create_restricted_token(psid_capability: &LocalSid) -> io::Result<OwnedHandle
         &[psid_capability.as_ptr(), psid_logon, psid_everyone],
     )?;
     enable_single_privilege(token.raw(), "SeChangeNotifyPrivilege")?;
-    Ok(token)
+    Ok(RestrictedToken {
+        handle: token,
+        logon_sid,
+        everyone_sid,
+    })
 }
 
 fn current_token_for_restriction() -> io::Result<OwnedHandle> {
@@ -940,7 +1009,7 @@ impl RestrictedWindowsChild {
         if self.acl_cleaned {
             return;
         }
-        revoke_acl_guards(&self.acl_guards, &self.cap_sid);
+        restore_acl_guards(&self.acl_guards);
         self.acl_cleaned = true;
     }
 }
