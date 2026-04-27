@@ -8,58 +8,66 @@
 [![CI][ci-badge]][ci-url]
 [![License][license-badge]][license-url]
 
-A long-running local agent runtime with persistent memory, app-scoped tools,
-Telegram event handling, and sleep-time self-improvement.
+An agent runtime that truly has experience.
 
 </div>
 
 [readme-cn-badge]: https://img.shields.io/badge/README-简体中文-blue.svg?style=for-the-badge
-[readme-cn-url]: docs/README_zh-CN.md
+[readme-cn-url]: README_zh-CN.md
 [ci-badge]: https://img.shields.io/github/actions/workflow/status/shadow3aaa/DaatLocus/ci.yml?style=for-the-badge&label=CI
 [ci-url]: https://github.com/shadow3aaa/DaatLocus/actions/workflows/ci.yml
 [license-badge]: https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge
 [license-url]: LICENSE
 
-## What It Is
+## What Is This?
 
-Daat Locus is a daemon-first runtime for an agent that keeps working across
-turns. It is not designed as a one-shot chat wrapper where every assistant
-message is automatically sent to the outside world.
+Daat Locus is a long-running local self-governing Agent Runtime.
 
-External input enters the runtime as structured events, app notices,
-after-claim context, pre-turn context, and recalled memory. The model decides
-what to do, while real-world effects go through explicit tools such as terminal
-actions, browser actions, workflow binding, memory recall, or Telegram event
-completion.
+It is built for work that becomes better through history: maintaining the same
+project over time, repeatedly handling the same class of task, remembering your
+preferences and practical experience, and distilling them to improve later
+behavior.
 
 ## Core Ideas
 
-### Agent Apps
+## Apps For Agents
 
-Flat tool lists do not scale well once an agent has many capabilities. Daat
-Locus groups interactive capabilities into apps with state, lifecycle, usage
-guidance, and focus semantics.
+When humans use a computer, we rarely choose an action from a global list of
+everything the machine can do. We open a terminal, read the current output,
+enter a command, and wait for the result; or we open a browser, read the current
+page, click, navigate, and continue from the new page.
 
-The built-in apps are currently `Terminal` and `Browser`. Third-party workspace
-apps are also supported through source-first Lua app packages.
+Daat Locus gives agents a similar interaction model.
 
-### Sleep-Time Improvement
+Apps provide stateful operating surfaces for the runtime. Each App renders the
+current state the agent can see, explains when it should be used, explains how
+it should be operated, and exposes a local set of tools when focused.
 
-Daat Locus improves during idle time instead of forcing self-improvement into
-foreground task execution.
+Compared with a flat tool list, this gives the model three things:
 
-While awake, the runtime records code-detected runtime error cases and
-workflow-bound execution evidence. During sleep, independent pipelines can
-adjust global runtime contracts and workspace workflow specs.
+1. **Locality**: the agent only sees tools relevant to the current operating
+   surface.
+2. **State grounding**: actions are based on the state currently displayed by
+   the App, instead of choosing tools out of context.
+3. **Temporal continuity**: long-running surfaces such as Terminal and Browser
+   can be safely continued.
 
-## Features
+Apps are how Daat Locus turns "tools" into "software operating surfaces".
 
-- Foreground TUI plus background daemon runtime.
-- Managed `Hindsight` integration for long-term memory and experience recall.
-- Telegram as a transport and event source, not an app UI to navigate.
-- Workflow binding and sleep-time workflow evolution for repeated task classes.
-- App-scoped tools instead of one global, unstructured tool namespace.
-- Interactive setup for providers, models, Telegram, and runtime config.
+Therefore, Daat Locus does not need `SKILLS.md` to explain how a group of tools
+should be used. The App itself is self-describing.
+
+### Workflow Self-Improvement
+
+Daat Locus executes tasks with workflows as blueprints, then feeds execution
+experience back into workflows during an independent sleep phase.
+
+While awake, Daat Locus executes tasks and records practical experience. During
+sleep, it organizes that experience, fixes recurring problems, and improves the
+workflows that later tasks depend on.
+
+Sleep optimization also attempts to merge similar workflows to avoid unbounded
+growth.
 
 ## Quick Start
 
@@ -71,48 +79,14 @@ cd DaatLocus
 cargo run
 ```
 
-On first run, if `~/.daat-locus/config.toml` does not exist, Daat Locus starts
-the interactive setup wizard.
-
-## Common Commands
-
-```bash
-cargo run                       # start or attach to the daemon-backed TUI
-cargo run -- attach             # attach to an already-running daemon
-cargo run -- daemon status      # show daemon status
-cargo run -- daemon restart     # restart the background daemon
-cargo run -- config             # open the interactive config menu
-cargo run -- config show        # show config with secrets masked
-```
-
-## Configuration
-
-The main config file is `~/.daat-locus/config.toml`. The persona file is
-`~/.daat-locus/persona.md`.
-
-Prefer the interactive config commands for normal setup:
-
-```bash
-cargo run -- config add-provider
-cargo run -- config add-model
-cargo run -- config set-main-model
-cargo run -- config set-hindsight-model
-cargo run -- config set-telegram
-```
-
-See [Configuration](docs/configuration.md) for the config shape, provider notes,
-and a minimal TOML example.
+On first launch, Daat Locus opens an interactive setup flow.
 
 ## Documentation
 
-- [简体中文 README](docs/README_zh-CN.md)
-- [Configuration](docs/configuration.md)
-- [Model catalog](docs/model-catalog.md)
-- [Sandbox backend selection](docs/sandbox-backend-selection.md)
+- [简体中文 README](README_zh-CN.md)
+- [Architecture](docs/architecture.md)
 - [Builtin workflows](workflows/README.md)
 
 ## License
 
 Daat Locus is licensed under the [Apache License 2.0](LICENSE).
-
-Copyright 2026 shadow3 <shadow3aaaa@gmail.com>.
