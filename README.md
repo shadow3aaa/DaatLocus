@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="Daat Locus Logo" style="width:250px; height:auto;" />
+<img src="assets/logo.svg" alt="Daat Locus Logo" style="width:220px; height:auto;" />
 
 # Daat Locus
 
@@ -8,7 +8,8 @@
 [![CI][ci-badge]][ci-url]
 [![License][license-badge]][license-url]
 
-A long-running agent runtime with self-governance, persistent memory, app-scoped tools, and asynchronous self-improvement.
+A long-running local agent runtime with persistent memory, app-scoped tools,
+Telegram event handling, and sleep-time self-improvement.
 
 </div>
 
@@ -19,44 +20,46 @@ A long-running agent runtime with self-governance, persistent memory, app-scoped
 [license-badge]: https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge
 [license-url]: LICENSE
 
+## What It Is
+
+Daat Locus is a daemon-first runtime for an agent that keeps working across
+turns. It is not designed as a one-shot chat wrapper where every assistant
+message is automatically sent to the outside world.
+
+External input enters the runtime as structured events, app notices,
+after-claim context, pre-turn context, and recalled memory. The model decides
+what to do, while real-world effects go through explicit tools such as terminal
+actions, browser actions, workflow binding, memory recall, or Telegram event
+completion.
+
+## Core Ideas
+
+### Agent Apps
+
+Flat tool lists do not scale well once an agent has many capabilities. Daat
+Locus groups interactive capabilities into apps with state, lifecycle, usage
+guidance, and focus semantics.
+
+The built-in apps are currently `Terminal` and `Browser`. Third-party workspace
+apps are also supported through source-first Lua app packages.
+
+### Sleep-Time Improvement
+
+Daat Locus improves during idle time instead of forcing self-improvement into
+foreground task execution.
+
+While awake, the runtime records code-detected runtime error cases and
+workflow-bound execution evidence. During sleep, independent pipelines can
+adjust global runtime contracts and workspace workflow specs.
+
 ## Features
 
-- Long-term memory and experience accumulation powered by `Hindsight`
-- Sleep-driven self-improvement
-- App-oriented tool management instead of a flat tool list
-- Prompt compilation that adapts to model capabilities
-- Foreground TUI and background daemon runtime modes
-
-## Philosophy
-
-### Apps For Agents
-
-As agent tooling grows, simple flat tool calling stops scaling. Hundreds or thousands of tools scatter the agent's attention, and the agent eventually falls back to a few generic tools such as the terminal.
-
-Humans group mail lists, sending, and contacts into a mail app. We group friends, favorites, and feeds into messaging apps. Daat Locus applies the same idea to agents: agents need a native app ecosystem. Existing concepts such as MCP and workflows are adjacent, but they are not the same boundary.
-
-A real agent app should satisfy these properties:
-
-- Standardized: an app must follow a clear, fixed format that agents can manage, instead of loose scripts and scattered instructions.
-- Stateful: an app should have its own state and lifecycle, not just a pile of tool calls and text.
-- Interactive: when focused, an app should render structured state to the agent instead of forcing mechanical `list_xxx` exploration.
-- Foreground/background aware: an app should be able to exist in the background and affect the runtime, for example by sending notices.
-- Self-describing: an app should explain what it is for and how to use it, instead of pushing that burden into workflows or prompt fragments.
-
-Daat Locus therefore raises tool management to the app level and provides a runtime environment with native support for agent apps. The current built-in system apps are `Terminal` and `Browser`, and third-party workspace apps are also supported.
-
-### Sleep-Driven Asynchronous Self-Optimization
-
-Daat Locus uses an asynchronous sleep mechanism to improve agent behavior during idle time. The design is inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent) and [EvoMap](https://github.com/EvoMap/evolver).
-
-Daat Locus does not force self-improvement into the foreground runtime. Instead, self-improvement runs as a separate sleep phase.
-
-While awake, the agent binds a suitable workflow for multi-step tasks, or creates a new workflow when no reusable workflow exists. Code-detected runtime error cases and workflow run records are accumulated for sleep-time analysis.
-
-The sleep phase is currently split into two independent pipelines:
-
-- Runtime Error Correction Pipeline: fixes global runtime contract and tool protocol constraints based on code-detected runtime error cases
-- Workflow Improvement Pipeline: fixes workspace workflows based on workflow run records
+- Foreground TUI plus background daemon runtime.
+- Managed `Hindsight` integration for long-term memory and experience recall.
+- Telegram as a transport and event source, not an app UI to navigate.
+- Workflow binding and sleep-time workflow evolution for repeated task classes.
+- App-scoped tools instead of one global, unstructured tool namespace.
+- Interactive setup for providers, models, Telegram, and runtime config.
 
 ## Quick Start
 
@@ -68,102 +71,48 @@ cd DaatLocus
 cargo run
 ```
 
-On first run, if `~/.daat-locus/config.toml` does not exist, Daat Locus starts the interactive setup wizard.
+On first run, if `~/.daat-locus/config.toml` does not exist, Daat Locus starts
+the interactive setup wizard.
+
+## Common Commands
+
+```bash
+cargo run                       # start or attach to the daemon-backed TUI
+cargo run -- attach             # attach to an already-running daemon
+cargo run -- daemon status      # show daemon status
+cargo run -- daemon restart     # restart the background daemon
+cargo run -- config             # open the interactive config menu
+cargo run -- config show        # show config with secrets masked
+```
+
+## Configuration
+
+The main config file is `~/.daat-locus/config.toml`. The persona file is
+`~/.daat-locus/persona.md`.
+
+Prefer the interactive config commands for normal setup:
+
+```bash
+cargo run -- config add-provider
+cargo run -- config add-model
+cargo run -- config set-main-model
+cargo run -- config set-hindsight-model
+cargo run -- config set-telegram
+```
+
+See [Configuration](docs/configuration.md) for the config shape, provider notes,
+and a minimal TOML example.
+
+## Documentation
+
+- [简体中文 README](docs/README_zh-CN.md)
+- [Configuration](docs/configuration.md)
+- [Model catalog](docs/model-catalog.md)
+- [Sandbox backend selection](docs/sandbox-backend-selection.md)
+- [Builtin workflows](workflows/README.md)
 
 ## License
 
 Daat Locus is licensed under the [Apache License 2.0](LICENSE).
 
 Copyright 2026 shadow3 <shadow3aaaa@gmail.com>.
-
-## Runtime Model
-
-Daat Locus now defaults to a daemon model instead of a one-shot foreground process.
-
-- `cargo run`
-  Connects to an existing daemon first. If no daemon is running, it starts a background daemon and attaches the TUI.
-- `cargo run -- attach`
-  Attaches only to an already-running daemon.
-- `cargo run -- daemon serve`
-  Runs the daemon in the foreground, mainly for internal use and debugging.
-
-The background daemon owns runtime state, the HTTP control interface, TUI synchronization state, and the Telegram transport. The daemon currently listens on the fixed local port `127.0.0.1:53825` by default.
-
-## Configuration
-
-The main config file is:
-
-- `~/.daat-locus/config.toml`
-
-The persona config file is:
-
-- `~/.daat-locus/persona.md`
-
-Prefer the interactive config commands:
-
-```bash
-cargo run -- config
-cargo run -- config show
-cargo run -- config add-provider
-cargo run -- config add-model
-cargo run -- config set-main-model
-cargo run -- config set-hindsight-model
-```
-
-The core config structure is:
-
-- `[providers]`: provider credential registry
-- `[models]`: model definition registry
-- `locale`: UI localization language
-- `main_model`: main model reference
-- `[daemon]`: daemon port
-- `[judge]`: judge / pairwise evaluation config
-- `[hindsight]`: Daat Locus-managed hindsight-embed config
-- `[telegram]`: Telegram transport config
-
-Minimal runnable example:
-
-```toml
-locale = "en-US"
-main_model = "default"
-
-[providers.openai]
-type = "openai"
-api_key = "your-api-key"
-
-[models.default]
-provider = "openai"
-model_id = "gpt-4.1"
-temperature = 1.0
-request_timeout_secs = 300
-stream_idle_timeout_secs = 45
-context_window_tokens = 128000
-effective_context_window_percent = 95
-max_completion_tokens = 4000
-tool_output_max_tokens = 2000
-
-[daemon]
-port = 53825
-
-[hindsight]
-namespace = "default"
-bank_id = "daat-locus"
-request_timeout_secs = 180
-embed_version = ""
-profile = "daat-locus"
-port = 8888
-
-[telegram]
-enabled = true
-bot_token = "your-telegram-bot-token"
-poll_timeout_secs = 30
-```
-
-Notes:
-
-- `hindsight` is now managed automatically by Daat Locus. You do not need to start Docker or run a separate service first.
-- OpenAI Codex OAuth is available through `cargo run -- config add-provider`; browser callback login is the default, with device-code login kept as a fallback. Rotating OAuth credentials are stored in a private auth JSON file, while `config.toml` keeps only the auth-file path. This provider uses the ChatGPT Codex Responses backend rather than a public OpenAI API key.
-- `hindsight-embed` does not support the ChatGPT Codex Responses backend yet. If your main model uses OpenAI Codex OAuth, set `hindsight.model` to a model backed by another provider.
-- If `telegram.enabled = true` but `bot_token` is still a placeholder, the Telegram transport is not enabled.
-- `hindsight.model = "xxx"` is optional. If unset, it falls back to `main_model`.
-- `judge.model = "xxx"` is optional. If unset, it also falls back to `main_model`.
