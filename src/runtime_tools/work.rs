@@ -6,14 +6,14 @@ use crate::{
     context::Context,
     core::{
         ActivateWorkflowArgs, CreateWorkflowArgs, DeepRecallArgs, EventResolveArgs, FocusAppArgs,
-        NoticeResolvedArgs, PutAwayAppArgs, UpdatePlanArgs,
+        NoticeResolvedArgs, PutAwayAppArgs, ReadWorkflowArgs, UpdatePlanArgs, UpdateWorkflowArgs,
     },
     events::{EventDisposition, EventPayload, EventStatus},
     hindsight::HindsightReflectOptions,
     plan::{Plan, PlanStatus, PlanStep},
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     tool_ui::{PlanStepUiData, PlanStepUiStatus, ReplyDisposition, ToolCallUiEvent, ToolUiEvent},
-    workflow::{NewWorkflowSpec, WorkflowRunOutcome},
+    workflow::{NewWorkflowSpec, WorkflowRunOutcome, WorkflowSpec},
 };
 
 use super::{
@@ -103,6 +103,22 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             summarize_activate_workflow_tool,
             render_activate_workflow_call_ui,
             execute_activate_workflow_tool,
+        )),
+        Box::new(StaticRuntimeTool::new::<ReadWorkflowArgs>(
+            "read_workflow",
+            "Read the complete workflow spec for a workflow id, including origin and backing file path when it is a workspace workflow.",
+            None,
+            summarize_read_workflow_tool,
+            render_read_workflow_call_ui,
+            execute_read_workflow_tool,
+        )),
+        Box::new(StaticRuntimeTool::new::<UpdateWorkflowArgs>(
+            "update_workflow",
+            "Replace a workspace workflow spec with a complete cleaned version. Use this for user-requested workflow maintenance; builtin workflows are read-only.",
+            None,
+            summarize_update_workflow_tool,
+            render_update_workflow_call_ui,
+            execute_update_workflow_tool,
         )),
         Box::new(StaticRuntimeTool::new::<DeepRecallArgs>(
             "deep_recall",
@@ -566,6 +582,130 @@ fn execute_activate_workflow_tool<'a>(
 
 fn activate_workflow_turn_boundary_reason() -> &'static str {
     "workflow binding changed; re-render world state in a new turn before continuing"
+}
+
+fn summarize_read_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: ReadWorkflowArgs = parse_tool_args(call)?;
+    Ok(EpisodeActionRecord {
+        kind: "read_workflow".to_string(),
+        summary: format!("workflow_id={}", args.workflow_id),
+    })
+}
+
+fn render_read_workflow_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: ReadWorkflowArgs = parse_tool_args(call)?;
+    Ok(ToolCallUiEvent::app(
+        "read_workflow",
+        vec![format!("workflow_id={}", args.workflow_id)],
+    ))
+}
+
+fn execute_read_workflow_tool<'a>(
+    context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let args: ReadWorkflowArgs = parse_tool_args(call)?;
+        let workflow_id = require_field(args.workflow_id, "workflow_id")?;
+        let spec = context
+            .workflows
+            .get(&workflow_id)
+            .cloned()
+            .ok_or_else(|| miette::miette!("unknown workflow_id `{workflow_id}`"))?;
+        let origin = context.workflows.workflow_origin(&workflow_id);
+        let path = context
+            .workflows
+            .workflow_path(&workflow_id)
+            .map(|path| path.display().to_string());
+        let summary = format!("read workflow {}", spec.id);
+        Ok(ToolExecutionResult::new(
+            summary.clone(),
+            json!({
+                "workflow_id": spec.id,
+                "origin": origin,
+                "path": path,
+                "spec": spec,
+            }),
+            ToolUiEvent::app(
+                "Read Workflow",
+                vec![
+                    format!("workflow_id={workflow_id}"),
+                    format!(
+                        "origin={}",
+                        origin
+                            .map(|origin| format!("{origin:?}").to_ascii_lowercase())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    ),
+                ],
+            ),
+        ))
+    })
+}
+
+fn summarize_update_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+    let args: UpdateWorkflowArgs = parse_tool_args(call)?;
+    Ok(EpisodeActionRecord {
+        kind: "update_workflow".to_string(),
+        summary: format!(
+            "workflow_id={} steps={} reason={}",
+            args.workflow_id,
+            args.workflow_steps.len(),
+            args.reason.as_deref().unwrap_or("")
+        ),
+    })
+}
+
+fn render_update_workflow_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+    let args: UpdateWorkflowArgs = parse_tool_args(call)?;
+    Ok(ToolCallUiEvent::app(
+        "update_workflow",
+        vec![
+            format!("workflow_id={}", args.workflow_id),
+            format!("when_to_use={}", args.when_to_use.len()),
+            format!("workflow_steps={}", args.workflow_steps.len()),
+            format!("done_criteria={}", args.done_criteria.len()),
+        ],
+    ))
+}
+
+fn execute_update_workflow_tool<'a>(
+    context: &'a mut Context,
+    call: &'a AgentToolCall,
+) -> ToolFuture<'a> {
+    Box::pin(async move {
+        let args: UpdateWorkflowArgs = parse_tool_args(call)?;
+        let workflow_id = require_field(args.workflow_id, "workflow_id")?;
+        let updated = context
+            .workflows
+            .replace_workspace_workflow(
+                &workflow_id,
+                WorkflowSpec {
+                    id: workflow_id.clone(),
+                    when_to_use: args.when_to_use,
+                    preconditions: args.preconditions,
+                    workflow_steps: args.workflow_steps,
+                    done_criteria: args.done_criteria,
+                    recovery: args.recovery,
+                },
+            )
+            .await?;
+        let summary = format!("updated workflow {}", updated.id);
+        Ok(ToolExecutionResult::new(
+            summary.clone(),
+            json!({
+                "updated": updated,
+                "reason": trim_optional_field(args.reason),
+            }),
+            ToolUiEvent::app(
+                "Updated Workflow",
+                vec![
+                    format!("workflow_id={workflow_id}"),
+                    format!("summary={summary}"),
+                ],
+            ),
+        )
+        .with_turn_boundary("workflow spec updated; re-render world state in a new turn"))
+    })
 }
 
 fn summarize_deep_recall_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {

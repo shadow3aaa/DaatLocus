@@ -194,6 +194,12 @@ impl WorkflowStore {
         self.workflows.get(workflow_id).map(|stored| stored.origin)
     }
 
+    pub fn workflow_path(&self, workflow_id: &str) -> Option<&Path> {
+        self.workflows
+            .get(workflow_id)
+            .and_then(|stored| stored.path.as_deref())
+    }
+
     pub fn workspace_list(&self) -> Vec<WorkflowSpec> {
         self.workflows
             .values()
@@ -290,6 +296,62 @@ impl WorkflowStore {
         );
 
         stored.spec = stored.spec.clone().normalize()?;
+        if !workflow_content_equal(&before, &stored.spec) {
+            write_workflow_file(&path, &stored.spec).await?;
+        }
+
+        Ok(stored.spec.clone())
+    }
+
+    pub async fn replace_workspace_workflow(
+        &mut self,
+        workflow_id: &str,
+        replacement: WorkflowSpec,
+    ) -> Result<WorkflowSpec> {
+        let workflow_id = normalize_identifier(workflow_id);
+        if workflow_id.is_empty() {
+            return Err(miette!("replace_workspace_workflow requires non-empty id"));
+        }
+
+        let stored = self
+            .workflows
+            .get_mut(&workflow_id)
+            .ok_or_else(|| miette!("unknown workflow_id `{workflow_id}`"))?;
+        if stored.origin != WorkflowOrigin::Workspace {
+            return Err(miette!(
+                "builtin workflow `{workflow_id}` is read-only and cannot be updated"
+            ));
+        }
+        let path = stored
+            .path
+            .clone()
+            .ok_or_else(|| miette!("workspace workflow `{workflow_id}` is missing backing path"))?;
+
+        let replacement = replacement.normalize()?;
+        if replacement.id != workflow_id {
+            return Err(miette!(
+                "replacement workflow id `{}` does not match target workflow_id `{workflow_id}`",
+                replacement.id
+            ));
+        }
+        if replacement.when_to_use.is_empty() {
+            return Err(miette!(
+                "update_workflow requires at least one when_to_use item"
+            ));
+        }
+        if replacement.workflow_steps.is_empty() {
+            return Err(miette!(
+                "update_workflow requires at least one workflow_steps item"
+            ));
+        }
+        if replacement.done_criteria.is_empty() {
+            return Err(miette!(
+                "update_workflow requires at least one done_criteria item"
+            ));
+        }
+
+        let before = stored.spec.clone();
+        stored.spec = replacement;
         if !workflow_content_equal(&before, &stored.spec) {
             write_workflow_file(&path, &stored.spec).await?;
         }
@@ -914,6 +976,91 @@ mod tests {
             })
             .await
             .expect_err("builtin workflow patch should be rejected");
+
+        assert!(err.to_string().contains("read-only"));
+    }
+
+    #[tokio::test]
+    async fn replace_workspace_workflow_rewrites_complete_spec() {
+        let temp_dir = TempDir::new().expect("create workflow temp dir");
+        let primary = temp_dir.path().join("workflows");
+        let mut store = WorkflowStore::open_scoped(primary.clone()).await;
+        store
+            .create_workflow(NewWorkflowSpec {
+                id: "search-todays-news".to_string(),
+                when_to_use: vec!["search current news".to_string()],
+                preconditions: vec!["network is available".to_string()],
+                workflow_steps: vec![
+                    "search aggregator".to_string(),
+                    "repeat fallback searches".to_string(),
+                ],
+                done_criteria: vec!["sent news summary".to_string()],
+                recovery: vec!["keep searching".to_string()],
+            })
+            .await
+            .expect("create workflow");
+
+        let updated = store
+            .replace_workspace_workflow(
+                "search-todays-news",
+                WorkflowSpec {
+                    id: "search-todays-news".to_string(),
+                    when_to_use: vec!["user asks for today's news".to_string()],
+                    preconditions: vec!["date scope is known".to_string()],
+                    workflow_steps: vec![
+                        "choose approved news sources".to_string(),
+                        "verify publication dates".to_string(),
+                        "send concise summary".to_string(),
+                    ],
+                    done_criteria: vec!["summary cites sources".to_string()],
+                    recovery: vec!["return a limited summary if sources are sparse".to_string()],
+                },
+            )
+            .await
+            .expect("replace workflow");
+
+        assert_eq!(updated.workflow_steps.len(), 3);
+        assert!(
+            !updated
+                .workflow_steps
+                .iter()
+                .any(|step| step == "repeat fallback searches")
+        );
+
+        let reloaded = WorkflowStore::open_scoped(primary).await;
+        let loaded = reloaded
+            .get("search-todays-news")
+            .expect("reloaded updated workflow");
+        assert_eq!(
+            loaded.workflow_steps,
+            vec![
+                "choose approved news sources",
+                "verify publication dates",
+                "send concise summary"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_rejects_builtin_workflow() {
+        let temp_dir = TempDir::new().expect("create workflow temp dir");
+        let primary = temp_dir.path().join("workflows");
+        let mut store = WorkflowStore::open_scoped(primary).await;
+
+        let err = store
+            .replace_workspace_workflow(
+                "author-workspace-app",
+                WorkflowSpec {
+                    id: "author-workspace-app".to_string(),
+                    when_to_use: vec!["test".to_string()],
+                    preconditions: vec![],
+                    workflow_steps: vec!["step".to_string()],
+                    done_criteria: vec!["done".to_string()],
+                    recovery: vec![],
+                },
+            )
+            .await
+            .expect_err("builtin workflow update should be rejected");
 
         assert!(err.to_string().contains("read-only"));
     }
