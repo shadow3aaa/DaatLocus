@@ -66,6 +66,7 @@ struct HindsightHandoffTracker {
 struct HindsightHandoffState {
     pending: HashSet<Uuid>,
     submitted: Vec<Uuid>,
+    abandoned: HashSet<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -811,15 +812,22 @@ impl HindsightClient {
         let _guard = restart_support.restart_lock.lock().await;
         let server =
             HindsightManagedServer::new(self.config.clone(), restart_support.llm_env_vars.clone());
-        if server.check_health().await {
+        let err_text = err.to_string();
+        let force_restart = should_force_hindsight_restart(err_text.as_str());
+        if server.check_health().await && !force_restart {
             return Ok(false);
         }
         tracing::warn!(
-            "[hindsight] {} failed; daemon appears down, attempting restart\n{}",
+            "[hindsight] {} failed; attempting {}restart\n{}",
             action,
+            if force_restart { "forced " } else { "" },
             format_report(err)
         );
-        server.start().await?;
+        if force_restart {
+            server.force_restart().await?;
+        } else {
+            server.start().await?;
+        }
         Ok(true)
     }
 
@@ -888,6 +896,14 @@ impl HindsightRetainHandle {
                         break;
                     }
                     Err(err) => {
+                        if handoffs.is_abandoned(handoff_id) {
+                            tracing::warn!(
+                                "[hindsight] retain handoff abandoned after failure; stopping background retry\njob: {}\n{}",
+                                job_summary,
+                                format_report(&err)
+                            );
+                            break;
+                        }
                         outage_cycle += 1;
                         let delay = hindsight_retain_outage_backoff(outage_cycle);
                         tracing::error!(
@@ -897,7 +913,16 @@ impl HindsightRetainHandle {
                             job_summary,
                             format_report(&err)
                         );
-                        tokio::time::sleep(delay).await;
+                        if handoffs
+                            .wait_for_abandon_or_timeout(handoff_id, delay)
+                            .await
+                        {
+                            tracing::warn!(
+                                "[hindsight] retain handoff abandoned during outage backoff; stopping background retry\njob: {}",
+                                job_summary
+                            );
+                            break;
+                        }
                     }
                 }
             }
@@ -913,6 +938,10 @@ impl HindsightRetainHandle {
 
     pub async fn drain_submitted(&self) -> Vec<Uuid> {
         self.handoffs.drain_submitted().await
+    }
+
+    pub fn abandon_pending(&self) -> usize {
+        self.handoffs.abandon_pending()
     }
 
     pub async fn shutdown(&self) -> Vec<Uuid> {
@@ -939,6 +968,37 @@ impl HindsightHandoffTracker {
         }
         drop(state);
         self.notify.notify_waiters();
+    }
+
+    fn abandon_pending(&self) -> usize {
+        let mut state = self
+            .state
+            .lock()
+            .expect("hindsight handoff tracker poisoned");
+        let abandoned = std::mem::take(&mut state.pending);
+        let count = abandoned.len();
+        state.abandoned.extend(abandoned);
+        drop(state);
+        self.notify.notify_waiters();
+        count
+    }
+
+    fn is_abandoned(&self, id: Uuid) -> bool {
+        self.state
+            .lock()
+            .expect("hindsight handoff tracker poisoned")
+            .abandoned
+            .contains(&id)
+    }
+
+    async fn wait_for_abandon_or_timeout(&self, id: Uuid, delay: Duration) -> bool {
+        if self.is_abandoned(id) {
+            return true;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => self.is_abandoned(id),
+            _ = self.notify.notified() => self.is_abandoned(id),
+        }
     }
 
     async fn flush(&self) -> Vec<Uuid> {
@@ -1101,12 +1161,23 @@ fn should_attempt_hindsight_restart(text: &str) -> bool {
     text.contains("http 502")
         || text.contains("http 503")
         || text.contains("http 504")
+        || text.contains("timed out")
+        || text.contains("timeout")
         || text.contains("connection refused")
         || text.contains("error trying to connect")
         || text.contains("couldn't connect to server")
         || text.contains("connection reset")
         || text.contains("dns error")
         || text.contains("tcp connect error")
+}
+
+fn should_force_hindsight_restart(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("http 502")
+        || text.contains("http 503")
+        || text.contains("http 504")
+        || text.contains("timed out")
+        || text.contains("timeout")
 }
 
 fn hindsight_retain_backoff(attempt: usize) -> Duration {
@@ -1365,6 +1436,17 @@ mod tests {
         assert!(tracker.flush().await.is_empty());
     }
 
+    #[tokio::test]
+    async fn handoff_tracker_abandon_pending_unblocks_flush() {
+        let tracker = Arc::new(HindsightHandoffTracker::default());
+        let handoff_id = Uuid::new_v4();
+        tracker.register(handoff_id);
+
+        assert_eq!(tracker.abandon_pending(), 1);
+        assert!(tracker.is_abandoned(handoff_id));
+        assert!(tracker.flush().await.is_empty());
+    }
+
     #[test]
     fn restart_trigger_matches_transport_failures() {
         assert!(should_attempt_hindsight_restart(
@@ -1375,6 +1457,22 @@ mod tests {
         ));
         assert!(should_attempt_hindsight_restart(
             "probe hindsight openapi failed: couldn't connect to server"
+        ));
+        assert!(should_attempt_hindsight_restart(
+            "recall hindsight memories timed out after 8s"
+        ));
+    }
+
+    #[test]
+    fn force_restart_trigger_matches_wedged_worker_failures() {
+        assert!(should_force_hindsight_restart(
+            "retain hindsight memories failed with HTTP 502 Bad Gateway"
+        ));
+        assert!(should_force_hindsight_restart(
+            "recall hindsight memories timed out after 8s"
+        ));
+        assert!(!should_force_hindsight_restart(
+            "retain hindsight memories failed: connection refused"
         ));
     }
 

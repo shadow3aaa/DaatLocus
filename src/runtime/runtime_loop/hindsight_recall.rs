@@ -1,5 +1,7 @@
 use super::*;
 
+const HINDSIGHT_PREFLIGHT_RECALL_TIMEOUT_SECS: u64 = 8;
+
 pub(super) async fn build_hindsight_memory_context(
     context: &mut Context,
     claimed_inputs: &[ClaimedRuntimeInput],
@@ -15,8 +17,9 @@ pub(super) async fn build_hindsight_memory_context(
         ),
     );
 
-    let observations = hindsight
-        .recall(
+    let observations = tokio::time::timeout(
+        Duration::from_secs(HINDSIGHT_PREFLIGHT_RECALL_TIMEOUT_SECS),
+        hindsight.recall(
             &query,
             HindsightRecallOptions {
                 types: vec!["observation".to_string()],
@@ -28,23 +31,32 @@ pub(super) async fn build_hindsight_memory_context(
                 max_source_facts_tokens: 0,
                 ..Default::default()
             },
-        )
-        .await;
+        ),
+    )
+    .await;
     let observations = match observations {
-        Ok(response) => response
+        Ok(Ok(response)) => response
             .results
             .into_iter()
             .take(4)
             .map(Into::into)
             .collect::<Vec<_>>(),
-        Err(err) => {
+        Ok(Err(err)) => {
             tracing::warn!("hindsight observation recall failed: {err:?}");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(
+                "hindsight observation recall timed out after {}s",
+                HINDSIGHT_PREFLIGHT_RECALL_TIMEOUT_SECS
+            );
             Vec::new()
         }
     };
 
-    let raw_memories = hindsight
-        .recall(
+    let raw_memories = tokio::time::timeout(
+        Duration::from_secs(HINDSIGHT_PREFLIGHT_RECALL_TIMEOUT_SECS),
+        hindsight.recall(
             &query,
             HindsightRecallOptions {
                 types: vec!["world".to_string(), "experience".to_string()],
@@ -56,17 +68,25 @@ pub(super) async fn build_hindsight_memory_context(
                 max_source_facts_tokens: 1200,
                 ..Default::default()
             },
-        )
-        .await;
+        ),
+    )
+    .await;
     let raw_memories = match raw_memories {
-        Ok(response) => response
+        Ok(Ok(response)) => response
             .results
             .into_iter()
             .take(4)
             .map(Into::into)
             .collect::<Vec<_>>(),
-        Err(err) => {
+        Ok(Err(err)) => {
             tracing::warn!("hindsight raw memory recall failed: {err:?}");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(
+                "hindsight raw memory recall timed out after {}s",
+                HINDSIGHT_PREFLIGHT_RECALL_TIMEOUT_SECS
+            );
             Vec::new()
         }
     };
