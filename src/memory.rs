@@ -27,8 +27,10 @@ use crate::{
 
 const RUNTIME_HISTORY_SUMMARY_PREFIX: &str = "Earlier runtime history summary:";
 const MID_TURN_SUMMARY_PREFIX: &str = "Earlier tool/context progress summary:";
-const RUNTIME_CONVERSATION_FILE_NAME: &str = "runtime_conversation";
-const HINDSIGHT_QUEUE_FILE_NAME: &str = "hindsight_queue";
+const RUNTIME_CONVERSATION_FILE_NAME: &str = "runtime_conversation.json";
+const RUNTIME_CONVERSATION_LEGACY_FILE_NAME: &str = "runtime_conversation";
+const HINDSIGHT_QUEUE_FILE_NAME: &str = "hindsight_queue.json";
+const HINDSIGHT_QUEUE_LEGACY_FILE_NAME: &str = "hindsight_queue";
 const RUNTIME_HISTORY_TOOL_MESSAGE_MAX_TOKENS: usize = 600;
 const MID_TURN_COMPACTION_RETAINED_USER_MAX_TOKENS: usize = 20_000;
 const RUNTIME_COMPACTION_RECORD_LIMIT: usize = 32;
@@ -542,14 +544,32 @@ fn select_recent_user_agent_messages_for_compaction(
 impl RuntimeConversation {
     async fn new(bootstrap_focus: Option<String>, bootstrap_messages: Vec<HistoryMessage>) -> Self {
         let persistence = PersistenceStore::runtime().await;
-        persistence
-            .read_postcard_memory(RUNTIME_CONVERSATION_FILE_NAME, "runtime conversation")
+        if let Some(conversation) = persistence
+            .read_json_memory(RUNTIME_CONVERSATION_FILE_NAME, "runtime conversation")
             .await
-            .unwrap_or_else(|| Self {
-                last_focus: bootstrap_focus,
-                messages: bootstrap_messages,
-                compaction_records: VecDeque::new(),
-            })
+        {
+            return conversation;
+        }
+        if let Some(conversation) = persistence
+            .read_postcard_memory(
+                RUNTIME_CONVERSATION_LEGACY_FILE_NAME,
+                "legacy runtime conversation",
+            )
+            .await
+        {
+            if let Err(err) = persistence
+                .write_json_memory(RUNTIME_CONVERSATION_FILE_NAME, &conversation)
+                .await
+            {
+                tracing::error!("migrate legacy runtime conversation to json failed: {err}");
+            }
+            return conversation;
+        }
+        Self {
+            last_focus: bootstrap_focus,
+            messages: bootstrap_messages,
+            compaction_records: VecDeque::new(),
+        }
     }
 
     pub fn append_turn(
@@ -698,7 +718,7 @@ impl RuntimeConversation {
     async fn sync_to_disk(&self) {
         let persistence = PersistenceStore::runtime().await;
         if let Err(err) = persistence
-            .write_postcard_memory(RUNTIME_CONVERSATION_FILE_NAME, self)
+            .write_json_memory(RUNTIME_CONVERSATION_FILE_NAME, self)
             .await
         {
             tracing::error!("persist runtime conversation failed: {err}");
@@ -805,10 +825,26 @@ impl HindsightQueueItem {
 
 impl HindsightQueue {
     async fn new() -> Self {
-        PersistenceStore::runtime()
+        let persistence = PersistenceStore::runtime().await;
+        if let Some(queue) = persistence
+            .read_json_memory(HINDSIGHT_QUEUE_FILE_NAME, "hindsight queue")
             .await
-            .read_postcard_memory_or_default(HINDSIGHT_QUEUE_FILE_NAME, "hindsight queue")
+        {
+            return queue;
+        }
+        if let Some(queue) = persistence
+            .read_postcard_memory(HINDSIGHT_QUEUE_LEGACY_FILE_NAME, "legacy hindsight queue")
             .await
+        {
+            if let Err(err) = persistence
+                .write_json_memory(HINDSIGHT_QUEUE_FILE_NAME, &queue)
+                .await
+            {
+                tracing::error!("migrate legacy hindsight queue to json failed: {err}");
+            }
+            return queue;
+        }
+        Self::default()
     }
 
     fn reset_inflight_retain_state(&mut self) -> bool {
@@ -846,7 +882,7 @@ impl HindsightQueue {
     async fn sync_to_disk(&self) {
         let persistence = PersistenceStore::runtime().await;
         if let Err(err) = persistence
-            .write_postcard_memory(HINDSIGHT_QUEUE_FILE_NAME, self)
+            .write_json_memory(HINDSIGHT_QUEUE_FILE_NAME, self)
             .await
         {
             tracing::error!("persist hindsight queue failed: {err}");
@@ -1629,6 +1665,54 @@ mod tests {
             } => {
                 assert_eq!(content.as_deref(), Some("checking state"));
                 assert_eq!(reasoning_content.as_deref(), Some("provider reasoning"));
+            }
+            _ => panic!("expected assistant tool-call protocol"),
+        }
+    }
+
+    #[test]
+    fn memory_json_round_trips_tool_call_arguments() {
+        let tool_call = crate::reasoning::runtime::AgentToolCall {
+            id: "call_1".to_string(),
+            name: "terminal_exec".to_string(),
+            arguments: serde_json::json!({
+                "cmd": "printf hi",
+                "env": { "A": "B" },
+                "timeout_ms": 1000
+            }),
+        };
+        let conversation = RuntimeConversation {
+            last_focus: Some("json persistence".to_string()),
+            messages: vec![HistoryMessage {
+                message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                    Some("checking state".to_string()),
+                    Some("reasoning".to_string()),
+                    vec![tool_call.clone()],
+                ),
+                tool_ui_event: None,
+                tool_call_ui_events: Vec::new(),
+            }],
+            compaction_records: VecDeque::new(),
+        };
+        let bytes = serde_json::to_vec_pretty(&conversation).expect("serialize conversation");
+        let restored: RuntimeConversation =
+            serde_json::from_slice(&bytes).expect("deserialize conversation");
+
+        match &restored.messages[0].message {
+            AgentMessage::AssistantToolCallProtocol { calls, .. } => {
+                assert_eq!(calls[0].arguments, tool_call.arguments);
+            }
+            _ => panic!("expected assistant tool-call protocol"),
+        }
+
+        let mut queue = HindsightQueue::default();
+        queue.push_turn("json persistence".to_string(), restored.messages.clone());
+        let bytes = serde_json::to_vec_pretty(&queue).expect("serialize hindsight queue");
+        let restored_queue: HindsightQueue =
+            serde_json::from_slice(&bytes).expect("deserialize hindsight queue");
+        match &restored_queue.trail[0].messages[0].message {
+            AgentMessage::AssistantToolCallProtocol { calls, .. } => {
+                assert_eq!(calls[0].arguments, tool_call.arguments);
             }
             _ => panic!("expected assistant tool-call protocol"),
         }
