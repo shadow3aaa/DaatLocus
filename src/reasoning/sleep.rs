@@ -3,25 +3,20 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::{
     AgentLoopStepOutput, DaatLocusHomeOverride, build_eval_context_with_compiled,
     context::{ActiveWorkflowRunSession, Context, PendingWorkflowRunFlush},
-    hindsight::HindsightRecallOptions,
     reasoning::{
         compiled::{
             RUNTIME_SYSTEM_PROMPT_COMPILE_KEY, save_compiled_runtime_system_prompt_for_model,
         },
-        examples::ExampleField,
         frontier::{
-            WorkflowFrontierEntry, load_prompt_frontier, load_workflow_frontier,
-            mark_prompt_frontier_selected, mark_workflow_frontier_selected,
-            prompt_frontier_entry_from_candidate, prompt_frontier_lineage_stats,
-            retain_prompt_frontier, retain_workflow_frontier, save_prompt_frontier,
-            save_workflow_frontier, select_prompt_frontier_entry,
+            WorkflowFrontierEntry, load_workflow_frontier, mark_workflow_frontier_selected,
+            retain_workflow_frontier, save_workflow_frontier,
             select_workflow_merge_frontier_entries, select_workflow_patch_frontier_entries,
             workflow_frontier_lineage_stats, workflow_merge_frontier_entry_from_candidate,
             workflow_patch_frontier_entry_from_candidate,
         },
         programs::{
-            prompt_evolution_planner::{
-                PromptEvolutionPlannerOutput, PromptEvolutionPlannerProgram,
+            runtime_error_correction_planner::{
+                RuntimeErrorCorrectionPlannerOutput, RuntimeErrorCorrectionPlannerProgram,
             },
             workflow_candidate_rollout_evaluator::WorkflowCandidateRolloutEvaluatorOutput,
             workflow_candidate_rollout_evaluator::WorkflowCandidateRolloutEvaluatorProgram,
@@ -30,11 +25,8 @@ use crate::{
             },
             workflow_merge_planner::{WorkflowMergePlannerOutput, WorkflowMergePlannerProgram},
         },
-        runtime::PromptRequest,
-        turn_compile::{
-            current_runtime_system_prompt_artifact_from_store,
-            evaluate_runtime_prompt_candidate_rollout,
-        },
+        runtime_error::{RuntimeErrorCase, RuntimeErrorCaseBatch, compact_runtime_error_case_file},
+        turn_compile::current_runtime_system_prompt_artifact_from_store,
     },
     workflow::{
         NewWorkflowSpec, WorkflowPatch, WorkflowRunRecord, WorkflowSpec, WorkflowStore,
@@ -43,30 +35,20 @@ use crate::{
 };
 use async_trait::async_trait;
 use miette::{IntoDiagnostic, Result};
-use serde_json::json;
 use tracing::warn;
 
 use super::{
     episode::EpisodeActionRecord,
     evaluation_artifacts::{
-        EvaluationArtifactBootstrapDemo, EvaluationArtifactFailurePattern,
-        EvaluationArtifactInstructionHypothesis, EvaluationArtifactPromptReflection,
-        EvaluationArtifactRuntimeDemo, EvaluationArtifactRuntimePromptCandidate,
-        EvaluationArtifactRuntimePromptCandidateEvaluation, EvaluationArtifactStressCase,
-        EvaluationArtifactSuggestedFixKind, EvaluationArtifactTurnDemo,
+        EvaluationArtifactPromptReflection, EvaluationArtifactRuntimePromptCandidate,
+        EvaluationArtifactRuntimePromptCandidateEvaluation,
         EvaluationArtifactWorkflowCandidateEvaluation, EvaluationArtifactWorkflowMerge,
         EvaluationArtifactWorkflowPatch, EvaluationArtifactWorkflowReflection,
-        EvaluationArtifactsStore, PromptImprovementArtifacts, WorkflowImprovementArtifacts,
-    },
-    programs::evaluation_artifact_builder::{
-        EvaluationArtifactBuilderOutput, EvaluationArtifactBuilderProgram,
+        EvaluationArtifactsStore, RuntimeErrorCorrectionArtifacts, WorkflowImprovementArtifacts,
     },
     render::openai_tools::OpenAIToolRenderer,
     runtime::{execute_program_with_ir_report, resolve_program_tuning},
-    trace::{
-        ProgramTraceRecord, RuntimeTraceBatch, TraceOrigin, compact_runtime_trace_file,
-        load_runtime_trace_batch,
-    },
+    trace::TraceOrigin,
 };
 
 mod rollout;
@@ -82,26 +64,17 @@ use planner::{
     LlmSleepPlannerRuntime, SleepPlannerRuntime, WorkflowFrontierReplayInput,
     WorkflowMergePlanningInput, load_sleep_inputs,
 };
-use prompt_pipeline::run_prompt_improvement_pipeline;
+use prompt_pipeline::run_runtime_error_correction_pipeline;
 use workflow_pipeline::run_workflow_improvement_pipeline;
 #[derive(Clone, Default)]
-pub struct PromptImprovementSummary {
-    pub consumed_trace_events: usize,
-    pub failure_patterns: Vec<EvaluationArtifactFailurePattern>,
-    pub prompt_reflections: usize,
-    pub prompt_candidates: usize,
-    pub prompt_candidate_evaluations: usize,
-    pub prompt_frontier_entries: usize,
-    pub prompt_frontier_root_entries: usize,
-    pub prompt_frontier_branched_entries: usize,
-    pub prompt_frontier_max_generation: usize,
-    pub bootstrap_demos: usize,
-    pub stress_cases: usize,
-    pub instruction_hypotheses: usize,
-    pub runtime_demos: usize,
-    pub turn_demos: usize,
+pub struct RuntimeErrorCorrectionSummary {
+    pub consumed_error_cases: usize,
+    pub runtime_error_cases: usize,
+    pub reflections: usize,
+    pub candidates: usize,
+    pub candidate_evaluations: usize,
     pub applied_system_additions: usize,
-    pub compiled_prompt_updated: bool,
+    pub compiled_runtime_contract_updated: bool,
 }
 
 #[derive(Clone, Default)]
@@ -123,7 +96,7 @@ pub struct WorkflowImprovementSummary {
 
 #[derive(Clone, Default)]
 pub struct SleepSummary {
-    pub prompt_improvement: PromptImprovementSummary,
+    pub runtime_error_correction: RuntimeErrorCorrectionSummary,
     pub workflow_improvement: WorkflowImprovementSummary,
 }
 
@@ -131,23 +104,27 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
     let planner = LlmSleepPlannerRuntime;
     let store = EvaluationArtifactsStore::open().await?;
     let sleep_inputs = load_sleep_inputs().await?;
-    let prompt_improvement = if sleep_inputs.trace_batch.records.is_empty() {
-        tracing::info!("[sleep] no trace records, skipping prompt improvement pipeline");
-        PromptImprovementSummary::default()
+    let runtime_error_correction = if sleep_inputs.runtime_error_cases.cases.is_empty() {
+        tracing::info!(
+            "[sleep] no runtime error cases, skipping runtime error correction pipeline"
+        );
+        RuntimeErrorCorrectionSummary::default()
     } else {
-        match run_prompt_improvement_pipeline(
+        match run_runtime_error_correction_pipeline(
             context,
             &planner,
             &store,
-            &sleep_inputs.trace_batch.records,
-            sleep_inputs.trace_batch.records.len(),
+            &sleep_inputs.runtime_error_cases.cases,
+            sleep_inputs.runtime_error_cases.cases.len(),
         )
         .await
         {
             Ok(summary) => summary,
             Err(err) => {
-                warn!("prompt improvement pipeline failed, continuing with defaults: {err:?}");
-                PromptImprovementSummary::default()
+                warn!(
+                    "runtime error correction pipeline failed, continuing with defaults: {err:?}"
+                );
+                RuntimeErrorCorrectionSummary::default()
             }
         }
     };
@@ -159,23 +136,15 @@ pub async fn run_sleep(context: &mut Context) -> Result<SleepSummary> {
                 WorkflowImprovementSummary::default()
             }
         };
-    compact_runtime_trace_file(sleep_inputs.trace_batch.next_offset).await?;
+    compact_runtime_error_case_file(sleep_inputs.runtime_error_cases.next_offset).await?;
     Ok(SleepSummary {
-        prompt_improvement,
+        runtime_error_correction,
         workflow_improvement,
     })
 }
 
-struct DerivedEvaluationArtifacts {
-    bootstrap_demos: Vec<EvaluationArtifactBootstrapDemo>,
-    stress_cases: Vec<EvaluationArtifactStressCase>,
-    instruction_hypotheses: Vec<EvaluationArtifactInstructionHypothesis>,
-    runtime_demos: Vec<EvaluationArtifactRuntimeDemo>,
-    turn_demos: Vec<EvaluationArtifactTurnDemo>,
-}
-
 struct SleepInputs {
-    trace_batch: RuntimeTraceBatch,
+    runtime_error_cases: RuntimeErrorCaseBatch,
 }
 
 #[derive(Default)]
@@ -217,13 +186,13 @@ struct PromptPatchUpdate {
     compiled_prompt_updated: bool,
 }
 
-fn prompt_planning_result_from_output(
-    output: &PromptEvolutionPlannerOutput,
-    failure_patterns: &[EvaluationArtifactFailurePattern],
+fn runtime_error_correction_planning_result_from_output(
+    output: &RuntimeErrorCorrectionPlannerOutput,
+    runtime_error_cases: &[RuntimeErrorCase],
 ) -> PromptPlanningResult {
-    let pattern_trace_ids = failure_patterns
+    let source_case_ids = runtime_error_cases
         .iter()
-        .flat_map(|pattern| pattern.supporting_trace_ids.clone())
+        .map(|case| case.case_id.clone())
         .collect::<Vec<_>>();
     let reflections = output
         .reflections
@@ -232,9 +201,13 @@ fn prompt_planning_result_from_output(
             compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
             title: reflection.title.trim().to_string(),
             rationale: reflection.rationale.trim().to_string(),
-            missing_instructions: dedupe_vec(reflection.missing_instructions.clone()),
+            missing_instructions: dedupe_vec(reflection.missing_runtime_contracts.clone()),
             over_constraints: dedupe_vec(reflection.over_constraints.clone()),
-            source_trace_ids: pattern_trace_ids.clone(),
+            source_trace_ids: if reflection.source_case_ids.is_empty() {
+                source_case_ids.clone()
+            } else {
+                dedupe_vec(reflection.source_case_ids.clone())
+            },
             confidence: reflection.confidence,
         })
         .collect::<Vec<_>>();
@@ -245,7 +218,7 @@ fn prompt_planning_result_from_output(
             compile_key: RUNTIME_SYSTEM_PROMPT_COMPILE_KEY.to_string(),
             title: candidate.title.trim().to_string(),
             rationale: candidate.rationale.trim().to_string(),
-            prompt_patches: dedupe_vec(candidate.prompt_patches.clone()),
+            prompt_patches: dedupe_vec(candidate.runtime_contract_additions.clone()),
             source_demo_titles: Vec::new(),
             source_hypotheses: dedupe_vec(candidate.source_reflection_titles.clone()),
         })
@@ -263,7 +236,7 @@ fn prompt_planning_result_from_output(
                 accepted: evaluation.accepted,
                 selected: evaluation.selected,
                 regressions_detected: evaluation.regressions_detected,
-                source_trace_ids: pattern_trace_ids.clone(),
+                source_trace_ids: source_case_ids.clone(),
             },
         )
         .filter(|evaluation| !evaluation.candidate_title.is_empty())
@@ -432,24 +405,6 @@ fn group_run_records_by_workflow(
     grouped
 }
 
-async fn replay_prompt_frontier_entries(
-    context: &mut Context,
-    planner: &dyn SleepPlannerRuntime,
-    entries: &[crate::reasoning::frontier::PromptFrontierEntry],
-    failure_patterns: &[EvaluationArtifactFailurePattern],
-    turn_demos: &[EvaluationArtifactTurnDemo],
-) -> Result<Vec<crate::reasoning::frontier::PromptFrontierEntry>> {
-    let mut replayed = Vec::new();
-    for entry in entries {
-        let mut updated = entry.clone();
-        updated.evaluation = planner
-            .replay_prompt_candidate(context, &updated.candidate, failure_patterns, turn_demos)
-            .await?;
-        replayed.push(updated);
-    }
-    Ok(replayed)
-}
-
 async fn replay_workflow_frontier_entries(
     context: &mut Context,
     planner: &dyn SleepPlannerRuntime,
@@ -508,47 +463,6 @@ async fn replay_workflow_frontier_entries(
         replayed.push(updated);
     }
     Ok(replayed)
-}
-
-fn infer_prompt_lineage(
-    existing: &[crate::reasoning::frontier::PromptFrontierEntry],
-    candidate: &EvaluationArtifactRuntimePromptCandidate,
-) -> (Vec<String>, usize) {
-    let candidate_set = candidate
-        .prompt_patches
-        .iter()
-        .cloned()
-        .collect::<HashSet<_>>();
-    let mut overlaps = existing
-        .iter()
-        .filter_map(|entry| {
-            let entry_set = entry
-                .candidate
-                .prompt_patches
-                .iter()
-                .cloned()
-                .collect::<HashSet<_>>();
-            let intersection = candidate_set.intersection(&entry_set).count();
-            if intersection == 0 {
-                return None;
-            }
-            Some((entry.key.clone(), entry.generation, intersection))
-        })
-        .collect::<Vec<_>>();
-    overlaps.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| right.1.cmp(&left.1)));
-    let parent_keys = overlaps
-        .iter()
-        .take(2)
-        .map(|(key, _, _)| key.clone())
-        .collect::<Vec<_>>();
-    let generation = overlaps
-        .iter()
-        .take(2)
-        .map(|(_, generation, _)| *generation)
-        .max()
-        .unwrap_or(0)
-        + usize::from(!parent_keys.is_empty());
-    (parent_keys, generation)
 }
 
 fn infer_workflow_patch_lineage(
@@ -645,71 +559,6 @@ fn infer_workflow_merge_lineage(
     (parent_keys, generation)
 }
 
-fn select_prompt_rollout_demos(
-    demos: &[EvaluationArtifactTurnDemo],
-    max_demos: usize,
-) -> Vec<EvaluationArtifactTurnDemo> {
-    demos.iter().take(max_demos).cloned().collect()
-}
-
-fn aggregate_prompt_executable_rollout_evaluation(
-    mut base: EvaluationArtifactRuntimePromptCandidateEvaluation,
-    evaluations: &[crate::reasoning::evaluation_artifacts::EvaluationArtifactTurnDemoEvaluation],
-) -> EvaluationArtifactRuntimePromptCandidateEvaluation {
-    if evaluations.is_empty() {
-        return base;
-    }
-    let passed_count = evaluations
-        .iter()
-        .filter(|evaluation| evaluation.passed)
-        .count();
-    let improvement_count = evaluations
-        .iter()
-        .filter(|evaluation| evaluation.passed)
-        .count();
-    let regression_count = evaluations
-        .iter()
-        .filter(|evaluation| evaluation.regression_detected)
-        .count();
-    let score_sum = evaluations
-        .iter()
-        .map(|evaluation| {
-            let pass_score = if evaluation.passed { 1.0 } else { 0.0 };
-            let regression_penalty = if evaluation.regression_detected {
-                0.5
-            } else {
-                0.0
-            };
-            (pass_score + evaluation.confidence - regression_penalty).max(0.0)
-        })
-        .sum::<f64>();
-    base.score = score_sum / evaluations.len() as f64;
-    base.accepted = passed_count * 2 >= evaluations.len() && improvement_count >= regression_count;
-    base.regressions_detected = regression_count;
-    base.rationale = format!(
-        "rollout_passed={}/{}; improvements={} regressions={}; {}",
-        passed_count,
-        evaluations.len(),
-        improvement_count,
-        regression_count,
-        evaluations
-            .iter()
-            .take(3)
-            .enumerate()
-            .map(|(index, evaluation)| {
-                format!(
-                    "demo{}:{} {}",
-                    index + 1,
-                    evaluation.demo_title,
-                    evaluation.reason.trim()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" | ")
-    );
-    base
-}
-
 #[cfg(test)]
 fn selected_candidate_titles(
     evaluations: &[EvaluationArtifactWorkflowCandidateEvaluation],
@@ -787,41 +636,6 @@ async fn apply_selected_prompt_candidate(
         applied_system_additions,
         compiled_prompt_updated: true,
     })
-}
-
-async fn apply_selected_prompt_frontier_candidate(
-    context: &mut Context,
-    frontier: &mut [crate::reasoning::frontier::PromptFrontierEntry],
-    selected: Option<crate::reasoning::frontier::PromptFrontierEntry>,
-) -> Result<PromptPatchUpdate> {
-    let Some(selected_entry) = selected else {
-        return Ok(PromptPatchUpdate {
-            applied_system_additions: 0,
-            compiled_prompt_updated: false,
-        });
-    };
-    if !prompt_candidate_has_novel_content(
-        current_runtime_system_prompt_artifact_from_store(&context.compiled_prompts)
-            .system_additions
-            .as_slice(),
-        &selected_entry.candidate,
-    ) {
-        return Ok(PromptPatchUpdate {
-            applied_system_additions: 0,
-            compiled_prompt_updated: false,
-        });
-    }
-
-    let update = apply_selected_prompt_candidate(
-        context,
-        std::slice::from_ref(&selected_entry.candidate),
-        &mut [selected_entry.evaluation.clone()],
-    )
-    .await?;
-    if update.compiled_prompt_updated {
-        mark_prompt_frontier_selected(frontier, &selected_entry.key);
-    }
-    Ok(update)
 }
 
 #[cfg(test)]
@@ -988,34 +802,6 @@ mod tests {
         assert!(source_ids.is_empty());
         assert_eq!(workflows.workspace_list().len(), 1);
         assert!(isolated.join("hermes-agent-analysis.md").exists());
-    }
-
-    #[test]
-    fn prompt_rollout_demos_limit_and_preserve_order() {
-        let demos = (0..5)
-            .map(|index| EvaluationArtifactTurnDemo {
-                compile_key: "runtime_agent_system".to_string(),
-                title: format!("demo-{index}"),
-                scenario_summary: format!("summary-{index}"),
-                initial_inputs: vec![ExampleField {
-                    name: "incoming_text".to_string(),
-                    value: format!("message-{index}"),
-                }],
-                expected_behavior: "respond correctly".to_string(),
-                judge_focus: Vec::new(),
-                covered_tests: Vec::new(),
-                must_use_tools: false,
-                must_not_final_answer_patterns: Vec::new(),
-                must_end_with_terminal_answer: true,
-            })
-            .collect::<Vec<_>>();
-
-        let selected = select_prompt_rollout_demos(&demos, 3);
-        let titles = selected
-            .iter()
-            .map(|demo| demo.title.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(titles, vec!["demo-0", "demo-1", "demo-2"]);
     }
 
     #[test]

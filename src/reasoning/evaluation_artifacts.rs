@@ -5,19 +5,14 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::reasoning::examples::ExampleField;
+use crate::reasoning::{examples::ExampleField, runtime_error::RuntimeErrorCase};
 use crate::{
     daat_locus_paths::daat_locus_paths,
     persistence::{PersistenceFileMode, write_bytes_atomic},
 };
 
 const EVALUATIONS_DIR_NAME: &str = "evaluations";
-const FAILURE_PATTERNS_DIR: &str = "failure_patterns";
-const BOOTSTRAP_DEMOS_DIR: &str = "bootstrap_demos";
-const STRESS_CASES_DIR: &str = "stress_cases";
-const INSTRUCTION_HYPOTHESES_DIR: &str = "instruction_hypotheses";
-const RUNTIME_DEMOS_DIR: &str = "runtime_demos";
-const TURN_DEMOS_DIR: &str = "turn_demos";
+const RUNTIME_ERROR_CASES_DIR: &str = "runtime_error_cases";
 const PROMPT_REFLECTIONS_DIR: &str = "prompt_reflections";
 const RUNTIME_PROMPT_CANDIDATES_DIR: &str = "runtime_prompt_candidates";
 const RUNTIME_PROMPT_CANDIDATE_EVALUATIONS_DIR: &str = "runtime_prompt_candidate_evaluations";
@@ -27,78 +22,14 @@ const WORKFLOW_MERGES_DIR: &str = "workflow_merges";
 const WORKFLOW_CANDIDATE_EVALUATIONS_DIR: &str = "workflow_candidate_evaluations";
 const MAX_ARTIFACT_FILE_STEM_LEN: usize = 96;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum EvaluationArtifactSuggestedFixKind {
-    Demo,
-    Instruction,
-    StressCase,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EvaluationArtifactFailurePattern {
-    pub suite: String,
-    pub pattern_id: String,
-    pub description: String,
-    #[serde(default)]
-    pub supporting_trace_ids: Vec<String>,
-    pub frequency: usize,
-    pub severity: u8,
-    pub suggested_fix_kind: EvaluationArtifactSuggestedFixKind,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactBootstrapDemo {
-    pub suite: String,
-    pub title: String,
-    pub input_summary: String,
-    #[serde(default)]
-    pub inputs: Vec<ExampleField>,
-    pub expected_output: serde_json::Value,
-    #[serde(default)]
-    pub reference_case_names: Vec<String>,
-    #[serde(default)]
-    pub source_trace_ids: Vec<String>,
-    pub confidence: f32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactStressCase {
-    pub suite: String,
-    pub name: String,
-    pub input_ir: serde_json::Value,
-    #[serde(default)]
-    pub expected_constraints: Vec<String>,
-    #[serde(default)]
-    pub reference_case_names: Vec<String>,
-    pub source_pattern_id: String,
-    pub repeat: usize,
-    pub weight: usize,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EvaluationArtifactInstructionHypothesis {
-    pub suite: String,
-    pub text: String,
-    pub justification: String,
-    #[serde(default)]
-    pub source_pattern_ids: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactRuntimeDemo {
-    pub compile_key: String,
-    pub title: String,
-    pub scenario_summary: String,
-    #[serde(default)]
-    pub inputs: Vec<ExampleField>,
-    pub expected_behavior: String,
-    #[serde(default)]
-    pub judge_focus: Vec<String>,
-    #[serde(default)]
-    pub source_trace_ids: Vec<String>,
-    pub confidence: f32,
-}
+const LEGACY_RUNTIME_ERROR_CORRECTION_DIRS: &[&str] = &[
+    "failure_patterns",
+    "bootstrap_demos",
+    "stress_cases",
+    "instruction_hypotheses",
+    "runtime_demos",
+    "turn_demos",
+];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct EvaluationArtifactTurnDemo {
@@ -253,13 +184,8 @@ pub struct EvaluationArtifactWorkflowCandidateEvaluation {
     pub source_run_ids: Vec<String>,
 }
 
-pub struct PromptImprovementArtifacts<'a> {
-    pub failure_patterns: &'a [EvaluationArtifactFailurePattern],
-    pub bootstrap_demos: &'a [EvaluationArtifactBootstrapDemo],
-    pub stress_cases: &'a [EvaluationArtifactStressCase],
-    pub instruction_hypotheses: &'a [EvaluationArtifactInstructionHypothesis],
-    pub runtime_demos: &'a [EvaluationArtifactRuntimeDemo],
-    pub turn_demos: &'a [EvaluationArtifactTurnDemo],
+pub struct RuntimeErrorCorrectionArtifacts<'a> {
+    pub runtime_error_cases: &'a [RuntimeErrorCase],
     pub prompt_reflections: &'a [EvaluationArtifactPromptReflection],
     pub runtime_prompt_candidates: &'a [EvaluationArtifactRuntimePromptCandidate],
     pub runtime_prompt_candidate_evaluations:
@@ -288,12 +214,7 @@ impl EvaluationArtifactsStore {
             root = root.join(artifact_file_stem(scope));
         }
         ensure_dir(&root).await?;
-        ensure_dir(&root.join(FAILURE_PATTERNS_DIR)).await?;
-        ensure_dir(&root.join(BOOTSTRAP_DEMOS_DIR)).await?;
-        ensure_dir(&root.join(STRESS_CASES_DIR)).await?;
-        ensure_dir(&root.join(INSTRUCTION_HYPOTHESES_DIR)).await?;
-        ensure_dir(&root.join(RUNTIME_DEMOS_DIR)).await?;
-        ensure_dir(&root.join(TURN_DEMOS_DIR)).await?;
+        ensure_dir(&root.join(RUNTIME_ERROR_CASES_DIR)).await?;
         ensure_dir(&root.join(PROMPT_REFLECTIONS_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_CANDIDATES_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_CANDIDATE_EVALUATIONS_DIR)).await?;
@@ -304,88 +225,16 @@ impl EvaluationArtifactsStore {
         Ok(Self { root })
     }
 
-    pub async fn replace_failure_patterns(
+    pub async fn replace_runtime_error_cases(
         &self,
-        artifacts: &[EvaluationArtifactFailurePattern],
+        artifacts: &[RuntimeErrorCase],
     ) -> Result<Vec<PathBuf>> {
         let artifacts = artifacts
             .iter()
             .cloned()
-            .map(|artifact| (artifact.pattern_id.clone(), artifact))
+            .map(|artifact| (artifact.case_id.clone(), artifact))
             .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(FAILURE_PATTERNS_DIR), artifacts).await
-    }
-
-    pub async fn replace_bootstrap_demos(
-        &self,
-        artifacts: &[EvaluationArtifactBootstrapDemo],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                let slug = slugify(&artifact.title);
-                (format!("{}-{}", artifact.suite, slug), artifact)
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(BOOTSTRAP_DEMOS_DIR), artifacts).await
-    }
-
-    pub async fn replace_stress_cases(
-        &self,
-        artifacts: &[EvaluationArtifactStressCase],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| (format!("{}-{}", artifact.suite, artifact.name), artifact))
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(STRESS_CASES_DIR), artifacts).await
-    }
-
-    pub async fn replace_instruction_hypotheses(
-        &self,
-        artifacts: &[EvaluationArtifactInstructionHypothesis],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                let slug = slugify(&artifact.text);
-                (format!("{}-{}", artifact.suite, slug), artifact)
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(INSTRUCTION_HYPOTHESES_DIR), artifacts).await
-    }
-
-    pub async fn replace_runtime_demos(
-        &self,
-        artifacts: &[EvaluationArtifactRuntimeDemo],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                let slug = slugify(&artifact.title);
-                (format!("{}-{}", artifact.compile_key, slug), artifact)
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(RUNTIME_DEMOS_DIR), artifacts).await
-    }
-
-    pub async fn replace_turn_demos(
-        &self,
-        artifacts: &[EvaluationArtifactTurnDemo],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                let slug = slugify(&artifact.title);
-                (format!("{}-{}", artifact.compile_key, slug), artifact)
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(TURN_DEMOS_DIR), artifacts).await
+        replace_artifacts(&self.root.join(RUNTIME_ERROR_CASES_DIR), artifacts).await
     }
 
     pub async fn replace_runtime_prompt_candidates(
@@ -503,19 +352,15 @@ impl EvaluationArtifactsStore {
         .await
     }
 
-    pub async fn replace_prompt_improvement_artifacts(
+    pub async fn replace_runtime_error_correction_artifacts(
         &self,
-        artifacts: PromptImprovementArtifacts<'_>,
+        artifacts: RuntimeErrorCorrectionArtifacts<'_>,
     ) -> Result<()> {
-        self.replace_failure_patterns(artifacts.failure_patterns)
+        self.replace_runtime_error_cases(artifacts.runtime_error_cases)
             .await?;
-        self.replace_bootstrap_demos(artifacts.bootstrap_demos)
-            .await?;
-        self.replace_stress_cases(artifacts.stress_cases).await?;
-        self.replace_instruction_hypotheses(artifacts.instruction_hypotheses)
-            .await?;
-        self.replace_runtime_demos(artifacts.runtime_demos).await?;
-        self.replace_turn_demos(artifacts.turn_demos).await?;
+        for dir_name in LEGACY_RUNTIME_ERROR_CORRECTION_DIRS {
+            reset_artifact_dir(&self.root.join(dir_name)).await?;
+        }
         self.replace_prompt_reflections(artifacts.prompt_reflections)
             .await?;
         self.replace_runtime_prompt_candidates(artifacts.runtime_prompt_candidates)
@@ -553,6 +398,18 @@ async fn ensure_dir(path: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+async fn reset_artifact_dir(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path).await.map_err(|err| {
+            miette!(
+                "failed to reset evaluation artifacts dir {}: {err}",
+                path.display()
+            )
+        })?;
+    }
+    ensure_dir(path).await
 }
 
 async fn save_artifact<T>(dir: &Path, stem: &str, artifact: &T) -> Result<PathBuf>

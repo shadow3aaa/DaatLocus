@@ -298,20 +298,16 @@ pub(crate) async fn load_compiled_prompts_only(
 }
 
 pub(crate) fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> String {
-    let prompt = &summary.prompt_improvement;
+    let correction = &summary.runtime_error_correction;
     let workflow = &summary.workflow_improvement;
     format!(
-        "sleep completed: prompt traces={}, failure_patterns/reflections/candidates/evaluations/frontier={}/{}/{}/{}/{}, prompt lineage={}/{}/{}, prompt additions={}, workflow evidence/reflections/patch/merge/evaluations/frontier={}/{}/{}/{}/{}/{}, workflow lineage={}/{}/{}, applied patch/merge={}/{}, rollbacks={}",
-        prompt.consumed_trace_events,
-        prompt.failure_patterns.len(),
-        prompt.prompt_reflections,
-        prompt.prompt_candidates,
-        prompt.prompt_candidate_evaluations,
-        prompt.prompt_frontier_entries,
-        prompt.prompt_frontier_root_entries,
-        prompt.prompt_frontier_branched_entries,
-        prompt.prompt_frontier_max_generation,
-        prompt.applied_system_additions,
+        "sleep completed: runtime error cases consumed/cases/reflections/candidates/evaluations={}/{}/{}/{}/{}, runtime contract additions={}, workflow evidence/reflections/patch/merge/evaluations/frontier={}/{}/{}/{}/{}/{}, workflow lineage={}/{}/{}, applied patch/merge={}/{}, rollbacks={}",
+        correction.consumed_error_cases,
+        correction.runtime_error_cases,
+        correction.reflections,
+        correction.candidates,
+        correction.candidate_evaluations,
+        correction.applied_system_additions,
         workflow.evidence_run_records,
         workflow.workflow_reflections,
         workflow.patch_candidates,

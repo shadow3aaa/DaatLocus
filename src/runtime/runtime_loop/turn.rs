@@ -71,6 +71,7 @@ pub(crate) async fn execute_agent_loop_step(
     context: &mut Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
 ) -> AgentLoopStepExecution {
+    let runtime_turn_id = format!("runtime-turn-{}", uuid::Uuid::new_v4());
     let claimed_inputs = claim_pending_runtime_inputs(context, RUNTIME_EVENT_CLAIM_BATCH_SIZE);
     context.current_work_origin = runtime_work_origin(&claimed_inputs);
     context.workflow_step_started_bound_id = context.bound_workflow_id.clone();
@@ -347,6 +348,41 @@ pub(crate) async fn execute_agent_loop_step(
                 } else {
                     false
                 };
+                if is_overflow {
+                    record_runtime_error_case(
+                        context,
+                        RuntimeErrorRecordInput {
+                            turn_id: &runtime_turn_id,
+                            claimed_inputs: &claimed_inputs,
+                            claimed_event_ids: &claimed_event_ids,
+                            claimed_app_notices: &claimed_app_notice_entries,
+                            tools: &tools,
+                            snapshot_text: &snapshot_text,
+                            error_kind: RuntimeErrorKind::ContextOverflowAfterRecovery,
+                            severity: 3,
+                            detected_by: "runtime_model_request",
+                            expected_behavior: "Runtime context compaction should recover enough budget for the model request or terminate claimed inputs through the overflow fuse.",
+                            actual_behavior: "Model request still failed with context overflow after recovery attempts.",
+                            evidence: &err.to_string(),
+                            recoverability: if overflow_fuse_tripped {
+                                "terminated_by_overflow_fuse"
+                            } else {
+                                "requeued_for_retry"
+                            },
+                            retry_count: budget_recoveries,
+                            terminal_status: Some(if overflow_fuse_tripped {
+                                "fuse_tripped"
+                            } else {
+                                "not_terminal"
+                            }),
+                            assistant_text: None,
+                            tool_calls: &[],
+                            tool_results: &tool_results,
+                            actions: &actions,
+                        },
+                    )
+                    .await;
+                }
                 if !is_overflow && !overflow_fuse_tripped && !claimed_event_ids.is_empty() {
                     requeue_claimed_runtime_events(context, &claimed_event_ids);
                 }
@@ -513,6 +549,31 @@ pub(crate) async fn execute_agent_loop_step(
                     Ok(result) => result,
                     Err(err) => {
                         let error_text = err.to_string();
+                        record_runtime_error_case(
+                            context,
+                            RuntimeErrorRecordInput {
+                                turn_id: &runtime_turn_id,
+                                claimed_inputs: &claimed_inputs,
+                                claimed_event_ids: &claimed_event_ids,
+                                claimed_app_notices: &claimed_app_notice_entries,
+                                tools: &tools,
+                                snapshot_text: &snapshot_text,
+                                error_kind: classify_tool_runtime_error(&call.name, &error_text),
+                                severity: 2,
+                                detected_by: "runtime_tool_executor",
+                                expected_behavior: "Tool calls should use available tools with valid arguments and satisfy the tool-specific runtime contract.",
+                                actual_behavior: "The tool executor rejected the tool call.",
+                                evidence: &error_text,
+                                recoverability: "tool_error_returned_to_model",
+                                retry_count: 0,
+                                terminal_status: None,
+                                assistant_text: assistant_text.as_deref(),
+                                tool_calls: std::slice::from_ref(call),
+                                tool_results: &tool_results,
+                                actions: &actions,
+                            },
+                        )
+                        .await;
                         let ui_error_text = if call.name == "apply_patch" {
                             summarize_apply_patch_error(&error_text)
                         } else {
@@ -637,6 +698,33 @@ pub(crate) async fn execute_agent_loop_step(
             response.raw_stream_follow_up,
             &claimed_event_ids,
         ) {
+            if let Some(error_kind) = runtime_follow_up_error_kind(reason) {
+                record_runtime_error_case(
+                    context,
+                    RuntimeErrorRecordInput {
+                        turn_id: &runtime_turn_id,
+                        claimed_inputs: &claimed_inputs,
+                        claimed_event_ids: &claimed_event_ids,
+                        claimed_app_notices: &claimed_app_notice_entries,
+                        tools: &tools,
+                        snapshot_text: &snapshot_text,
+                        error_kind,
+                        severity: 2,
+                        detected_by: "runtime_follow_up_gate",
+                        expected_behavior: reason.message(),
+                        actual_behavior: "The model returned assistant text without the required completion tool.",
+                        evidence: &content,
+                        recoverability: "system_follow_up_message_inserted",
+                        retry_count: 0,
+                        terminal_status: None,
+                        assistant_text: Some(&content),
+                        tool_calls: &[],
+                        tool_results: &tool_results,
+                        actions: &actions,
+                    },
+                )
+                .await;
+            }
             runtime_step.push_agent_message(AgentMessage::system(reason.message().to_string()));
             continue 'agent_loop;
         }
@@ -696,6 +784,241 @@ pub(crate) async fn execute_agent_loop_step(
         output,
         history_messages,
     }
+}
+
+struct RuntimeErrorRecordInput<'a> {
+    turn_id: &'a str,
+    claimed_inputs: &'a [ClaimedRuntimeInput],
+    claimed_event_ids: &'a [String],
+    claimed_app_notices: &'a [AppNoticeKey],
+    tools: &'a [crate::reasoning::runtime::AgentToolSpec],
+    snapshot_text: &'a str,
+    error_kind: RuntimeErrorKind,
+    severity: u8,
+    detected_by: &'a str,
+    expected_behavior: &'a str,
+    actual_behavior: &'a str,
+    evidence: &'a str,
+    recoverability: &'a str,
+    retry_count: usize,
+    terminal_status: Option<&'a str>,
+    assistant_text: Option<&'a str>,
+    tool_calls: &'a [crate::reasoning::runtime::AgentToolCall],
+    tool_results: &'a [String],
+    actions: &'a [EpisodeActionRecord],
+}
+
+async fn record_runtime_error_case(context: &Context, input: RuntimeErrorRecordInput<'_>) {
+    let case = RuntimeErrorCase::new(RuntimeErrorCaseParts {
+        turn_id: input.turn_id.to_string(),
+        error_kind: input.error_kind,
+        severity: input.severity,
+        detected_by: input.detected_by.to_string(),
+        task: RuntimeErrorTaskContext {
+            origin: context.current_work_origin.clone(),
+            event_sources: runtime_error_event_sources(input.claimed_inputs),
+            user_request_summary: runtime_error_user_request_summary(input.claimed_inputs),
+            claimed_event_ids: input.claimed_event_ids.to_vec(),
+            claimed_app_notices: input
+                .claimed_app_notices
+                .iter()
+                .map(|notice| format!("{}:{}", notice.app, notice.reason))
+                .collect(),
+            bound_workflow_id: context.bound_workflow_id.clone(),
+            workflow_origin: context
+                .bound_workflow_id
+                .as_deref()
+                .and_then(|workflow_id| context.workflows.workflow_origin(workflow_id))
+                .map(|origin| format!("{origin:?}").to_ascii_lowercase()),
+        },
+        runtime: RuntimeErrorRuntimeContext {
+            phase: context
+                .active_runtime_phase
+                .map(|phase| phase.label().to_string()),
+            available_tool_names: input.tools.iter().map(|tool| tool.name.clone()).collect(),
+            focused_app: context.apps.focused().map(|app| app.to_string()),
+            plan_summary: context
+                .plan
+                .steps()
+                .iter()
+                .take(8)
+                .map(|step| {
+                    format!(
+                        "{:?}: {}",
+                        step.status,
+                        compact_runtime_error_text(&step.step, 96)
+                    )
+                })
+                .collect(),
+            compact_snapshot_summary: Some(compact_runtime_error_text(input.snapshot_text, 1600)),
+        },
+        action: RuntimeErrorActionContext {
+            assistant_text_summary: input
+                .assistant_text
+                .map(|text| compact_runtime_error_text(text, 600)),
+            tool_call_summaries: input
+                .tool_calls
+                .iter()
+                .map(|call| {
+                    format!(
+                        "{} {}",
+                        call.name,
+                        compact_runtime_error_text(&call.arguments.to_string(), 320)
+                    )
+                })
+                .collect(),
+            tool_result_summaries: input
+                .tool_results
+                .iter()
+                .map(|result| compact_runtime_error_text(result, 320))
+                .collect(),
+            previous_action_window: input
+                .actions
+                .iter()
+                .rev()
+                .take(6)
+                .map(|action| {
+                    format!(
+                        "{}: {}",
+                        action.kind,
+                        compact_runtime_error_text(&action.summary, 160)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect(),
+        },
+        observation: RuntimeErrorObservation {
+            expected_behavior: input.expected_behavior.to_string(),
+            actual_behavior: input.actual_behavior.to_string(),
+            evidence: compact_runtime_error_text(input.evidence, 1200),
+            recoverability: input.recoverability.to_string(),
+            retry_count: input.retry_count,
+            terminal_status: input.terminal_status.map(ToString::to_string),
+        },
+        contract_refs: runtime_error_contract_refs(input.error_kind),
+    });
+    append_runtime_error_case(case).await;
+}
+
+fn runtime_follow_up_error_kind(reason: RuntimeFollowUpReason) -> Option<RuntimeErrorKind> {
+    match reason {
+        RuntimeFollowUpReason::ClaimedEventNeedsExplicitResolution => {
+            Some(RuntimeErrorKind::MissingFinishAndSend)
+        }
+        RuntimeFollowUpReason::ClaimedAppNoticeNeedsExplicitResolution => {
+            Some(RuntimeErrorKind::MissingNoticeResolved)
+        }
+        RuntimeFollowUpReason::RawStreamRequestedFollowUp => None,
+    }
+}
+
+fn classify_tool_runtime_error(tool_name: &str, error_text: &str) -> RuntimeErrorKind {
+    let lower = error_text.to_ascii_lowercase();
+    if tool_name == "update_plan"
+        || lower.contains("update_plan must contain")
+        || lower.contains("update_plan cannot contain")
+    {
+        return RuntimeErrorKind::PlanContractViolation;
+    }
+    if tool_name == "finish_and_send" && lower.contains("no claimed event") {
+        return RuntimeErrorKind::EventIdMissingOrStale;
+    }
+    if tool_name.starts_with("browser_") && lower.contains("stale") {
+        return RuntimeErrorKind::StaleBrowserRef;
+    }
+    if tool_name.starts_with("terminal_")
+        && (lower.contains("session") || lower.contains("stdin"))
+        && (lower.contains("missing") || lower.contains("not found") || lower.contains("invalid"))
+    {
+        return RuntimeErrorKind::WrongTerminalSessionContinuation;
+    }
+    if lower.contains("invalid arguments")
+        || lower.contains("missing field")
+        || lower.contains("invalid type")
+        || lower.contains("requires a non-empty reply_message")
+    {
+        return RuntimeErrorKind::InvalidToolArgs;
+    }
+    RuntimeErrorKind::ToolSchemaError
+}
+
+fn runtime_error_contract_refs(kind: RuntimeErrorKind) -> Vec<String> {
+    match kind {
+        RuntimeErrorKind::MissingFinishAndSend
+        | RuntimeErrorKind::EventIdMissingOrStale
+        | RuntimeErrorKind::TransportCompletionViolation => {
+            vec!["event completion contract".to_string()]
+        }
+        RuntimeErrorKind::MissingNoticeResolved | RuntimeErrorKind::ClaimedInputLeftUnresolved => {
+            vec!["app notice completion contract".to_string()]
+        }
+        RuntimeErrorKind::InvalidToolArgs | RuntimeErrorKind::ToolSchemaError => {
+            vec!["tool argument contract".to_string()]
+        }
+        RuntimeErrorKind::StaleBrowserRef => vec!["browser reference freshness".to_string()],
+        RuntimeErrorKind::WrongTerminalSessionContinuation => {
+            vec!["terminal session continuation".to_string()]
+        }
+        RuntimeErrorKind::PlanContractViolation => vec!["plan contract".to_string()],
+        RuntimeErrorKind::RepeatedIdenticalToolError => vec!["tool retry contract".to_string()],
+        RuntimeErrorKind::ContextOverflowAfterRecovery => {
+            vec!["context overflow recovery".to_string()]
+        }
+    }
+}
+
+fn runtime_error_event_sources(inputs: &[ClaimedRuntimeInput]) -> Vec<String> {
+    let mut sources = inputs
+        .iter()
+        .filter_map(|input| match input {
+            ClaimedRuntimeInput::Event(event) => Some(event.source.to_string()),
+            ClaimedRuntimeInput::AppNotice { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    sources.sort();
+    sources.dedup();
+    sources
+}
+
+fn runtime_error_user_request_summary(inputs: &[ClaimedRuntimeInput]) -> Option<String> {
+    let summaries = inputs
+        .iter()
+        .map(|input| match input {
+            ClaimedRuntimeInput::Event(event) => match &event.payload {
+                EventPayload::TelegramIncoming(payload) => compact_runtime_error_text(
+                    &format!(
+                        "telegram from {}: {}",
+                        payload.sender, payload.incoming_text
+                    ),
+                    240,
+                ),
+                EventPayload::TerminalIncoming(payload) => compact_runtime_error_text(
+                    &format!("terminal {}: {}", payload.origin, payload.incoming_text),
+                    240,
+                ),
+            },
+            ClaimedRuntimeInput::AppNotice { app, reason } => {
+                compact_runtime_error_text(&format!("app notice {app}: {reason}"), 240)
+            }
+        })
+        .collect::<Vec<_>>();
+    if summaries.is_empty() {
+        None
+    } else {
+        Some(summaries.join(" | "))
+    }
+}
+
+fn compact_runtime_error_text(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = compact.chars();
+    let mut value = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        value.push_str("...");
+    }
+    value
 }
 
 fn append_committed_activity_cells(

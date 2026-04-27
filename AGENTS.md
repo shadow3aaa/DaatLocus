@@ -184,27 +184,65 @@ Memory serves thread continuity and long-term experience accumulation. It does n
 
 Daat Locus has an explicit self-improvement loop:
 
-- runtime trace
+- runtime error cases
 - sleep
-- turn compile
-- compiled prompt additions
+- runtime error correction compile
+- compiled runtime contract additions
 
-This means runtime design is not disposable. Any agent-facing interface that systematically induces bad behavior will pollute traces and workflow run evidence, and then affect later compilation.
+This means runtime design is not disposable. Any agent-facing interface that systematically induces bad behavior will pollute error cases and workflow run evidence, and then affect later compilation.
 
 Agent-facing interfaces should therefore be stable, explicit, and reviewable. Do not rely on vague conventions.
 
 Sleep internals must be separated into two independent pipelines:
 
-- `Prompt Improvement Pipeline`
+- `Runtime Error Correction Pipeline`
 - `Workflow Improvement Pipeline`
 
 They may run in parallel during the same sleep cycle, but neither pipeline may depend on the other as input.
 
-The `Prompt Improvement Pipeline` is responsible for:
+The `Runtime Error Correction Pipeline` is responsible for:
 
-- fixing system prompt and behavior constraints based only on runtime traces
-- directly producing prompt patches and compile artifacts
-- keeping failure patterns, bootstrap demos, stress cases, and similar objects as internal trace analysis artifacts only; they must not become an independent evidence layer
+- fixing global runtime contract and tool protocol errors based only on code-detected daytime runtime error cases
+- directly producing small compiled runtime contract additions
+- clarifying existing invariants when the model violates them, such as event completion, app notice completion, tool argument shape, plan contract, terminal session continuation, browser reference freshness, and retry/overflow recovery
+
+The `Runtime Error Correction Pipeline` must not:
+
+- consume raw complete message streams as its primary input
+- consume sleep-internal program traces as daytime evidence
+- consume workflow run records directly
+- infer successful task patterns from positive examples
+- generate task procedures, workflow steps, style preferences, or domain tactics
+- decide whether an arbitrary failure belongs to workflow optimization or prompt correction through semantic guessing
+
+Its input unit should be a `RuntimeErrorCase`: one code-detected runtime or protocol error plus the minimum diagnostic context needed to correct the global contract. If one turn contains multiple errors, split them into multiple cases that share the same turn id.
+
+A `RuntimeErrorCase` may include:
+
+- `case_id`, `turn_id`, `occurred_at_ms`
+- `error_kind`, `severity`, and `detected_by`
+- task context: origin, event source, user request summary, claimed ids, bound workflow id, workflow origin
+- runtime context: phase, available tool names, focused app, plan summary, compact snapshot summary
+- action context: assistant text summary, tool call summaries, tool result summaries, and a short previous-action window
+- error observation: expected behavior, actual behavior, evidence, recoverability, retry counts, and terminal status
+- relevant existing runtime contract references or hashes
+
+Allowed `error_kind` values should be an explicit code-owned whitelist. Examples include:
+
+- `missing_finish_and_send`
+- `missing_notice_resolved`
+- `invalid_tool_args`
+- `tool_schema_error`
+- `stale_browser_ref`
+- `wrong_terminal_session_continuation`
+- `plan_contract_violation`
+- `event_id_missing_or_stale`
+- `repeated_identical_tool_error`
+- `context_overflow_after_recovery`
+- `claimed_input_left_unresolved`
+- `transport_completion_violation`
+
+Do not feed ordinary task quality problems into runtime error correction, such as slow news search, weak source choice, incomplete summaries, missed code-review findings, or unclear task steps. Those may be workflow or task-quality issues, but code cannot reliably assign them to prompt correction.
 
 The `Workflow Improvement Pipeline` is responsible for:
 
@@ -220,11 +258,11 @@ Builtin workflows belong to the base capability layer:
 Explicitly forbidden:
 
 - driving workflow patches directly from runtime reviews, error demos, or failure patterns
-- using workflow merge or patch results as evidence for prompt compile
+- using workflow merge or patch results as evidence for runtime error correction compile
 
 Keep these two object classes separate:
 
-- Prompt compile changes how the model should think and decide.
+- Runtime error correction compile changes global tool/protocol constraints.
 - Workflow evolution changes the normal process for a class of tasks.
 
 ## Current App Semantics

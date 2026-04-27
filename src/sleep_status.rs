@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     daat_locus_paths::daat_locus_paths,
     persistence::{PersistenceFileMode, read_json_or_default, write_bytes_atomic},
-    reasoning::{sleep::SleepSummary, trace::unread_runtime_trace_count},
+    reasoning::{runtime_error::unread_runtime_error_case_count, sleep::SleepSummary},
     workflow::workflow_run_record_count,
 };
 
@@ -21,25 +21,16 @@ pub struct SleepStatusSnapshot {
     pub last_result: Option<String>,
     pub last_started_at_ms: Option<i64>,
     pub last_completed_at_ms: Option<i64>,
-    pub unread_trace_backlog: usize,
+    pub unread_runtime_error_backlog: usize,
     pub workflow_evidence_records: usize,
     pub total_runs: usize,
-    pub total_prompt_consumed_trace_events: usize,
-    pub total_failure_patterns: usize,
-    pub total_prompt_reflections: usize,
-    pub total_prompt_candidates: usize,
-    pub total_prompt_candidate_evaluations: usize,
-    pub total_prompt_frontier_entries: usize,
-    pub latest_prompt_frontier_root_entries: usize,
-    pub latest_prompt_frontier_branched_entries: usize,
-    pub latest_prompt_frontier_max_generation: usize,
-    pub total_bootstrap_demos: usize,
-    pub total_stress_cases: usize,
-    pub total_instruction_hypotheses: usize,
-    pub total_runtime_demos: usize,
-    pub total_turn_demos: usize,
-    pub total_prompt_system_additions: usize,
-    pub total_compiled_prompt_updates: usize,
+    pub total_runtime_error_cases_consumed: usize,
+    pub total_runtime_error_cases: usize,
+    pub total_runtime_error_reflections: usize,
+    pub total_runtime_contract_candidates: usize,
+    pub total_runtime_contract_candidate_evaluations: usize,
+    pub total_runtime_contract_system_additions: usize,
+    pub total_runtime_contract_updates: usize,
     pub total_workflow_evidence_run_records: usize,
     pub total_workflow_reflections: usize,
     pub total_workflow_patch_candidates: usize,
@@ -70,25 +61,17 @@ impl SleepStatusSnapshot {
     }
 
     pub fn apply_summary(&mut self, summary: &SleepSummary) {
-        let prompt = &summary.prompt_improvement;
+        let correction = &summary.runtime_error_correction;
         let workflow = &summary.workflow_improvement;
         self.total_runs += 1;
-        self.total_prompt_consumed_trace_events += prompt.consumed_trace_events;
-        self.total_failure_patterns += prompt.failure_patterns.len();
-        self.total_prompt_reflections += prompt.prompt_reflections;
-        self.total_prompt_candidates += prompt.prompt_candidates;
-        self.total_prompt_candidate_evaluations += prompt.prompt_candidate_evaluations;
-        self.total_prompt_frontier_entries += prompt.prompt_frontier_entries;
-        self.latest_prompt_frontier_root_entries = prompt.prompt_frontier_root_entries;
-        self.latest_prompt_frontier_branched_entries = prompt.prompt_frontier_branched_entries;
-        self.latest_prompt_frontier_max_generation = prompt.prompt_frontier_max_generation;
-        self.total_bootstrap_demos += prompt.bootstrap_demos;
-        self.total_stress_cases += prompt.stress_cases;
-        self.total_instruction_hypotheses += prompt.instruction_hypotheses;
-        self.total_runtime_demos += prompt.runtime_demos;
-        self.total_turn_demos += prompt.turn_demos;
-        self.total_prompt_system_additions += prompt.applied_system_additions;
-        self.total_compiled_prompt_updates += usize::from(prompt.compiled_prompt_updated);
+        self.total_runtime_error_cases_consumed += correction.consumed_error_cases;
+        self.total_runtime_error_cases += correction.runtime_error_cases;
+        self.total_runtime_error_reflections += correction.reflections;
+        self.total_runtime_contract_candidates += correction.candidates;
+        self.total_runtime_contract_candidate_evaluations += correction.candidate_evaluations;
+        self.total_runtime_contract_system_additions += correction.applied_system_additions;
+        self.total_runtime_contract_updates +=
+            usize::from(correction.compiled_runtime_contract_updated);
         self.total_workflow_evidence_run_records += workflow.evidence_run_records;
         self.total_workflow_reflections += workflow.workflow_reflections;
         self.total_workflow_patch_candidates += workflow.patch_candidates;
@@ -112,22 +95,13 @@ struct PersistedSleepStatusSnapshot {
     last_started_at_ms: Option<i64>,
     last_completed_at_ms: Option<i64>,
     total_runs: usize,
-    total_prompt_consumed_trace_events: usize,
-    total_failure_patterns: usize,
-    total_prompt_reflections: usize,
-    total_prompt_candidates: usize,
-    total_prompt_candidate_evaluations: usize,
-    total_prompt_frontier_entries: usize,
-    latest_prompt_frontier_root_entries: usize,
-    latest_prompt_frontier_branched_entries: usize,
-    latest_prompt_frontier_max_generation: usize,
-    total_bootstrap_demos: usize,
-    total_stress_cases: usize,
-    total_instruction_hypotheses: usize,
-    total_runtime_demos: usize,
-    total_turn_demos: usize,
-    total_prompt_system_additions: usize,
-    total_compiled_prompt_updates: usize,
+    total_runtime_error_cases_consumed: usize,
+    total_runtime_error_cases: usize,
+    total_runtime_error_reflections: usize,
+    total_runtime_contract_candidates: usize,
+    total_runtime_contract_candidate_evaluations: usize,
+    total_runtime_contract_system_additions: usize,
+    total_runtime_contract_updates: usize,
     total_workflow_evidence_run_records: usize,
     total_workflow_reflections: usize,
     total_workflow_patch_candidates: usize,
@@ -151,25 +125,17 @@ impl From<PersistedSleepStatusSnapshot> for SleepStatusSnapshot {
             last_result: value.last_result,
             last_started_at_ms: value.last_started_at_ms,
             last_completed_at_ms: value.last_completed_at_ms,
-            unread_trace_backlog: 0,
+            unread_runtime_error_backlog: 0,
             workflow_evidence_records: 0,
             total_runs: value.total_runs,
-            total_prompt_consumed_trace_events: value.total_prompt_consumed_trace_events,
-            total_failure_patterns: value.total_failure_patterns,
-            total_prompt_reflections: value.total_prompt_reflections,
-            total_prompt_candidates: value.total_prompt_candidates,
-            total_prompt_candidate_evaluations: value.total_prompt_candidate_evaluations,
-            total_prompt_frontier_entries: value.total_prompt_frontier_entries,
-            latest_prompt_frontier_root_entries: value.latest_prompt_frontier_root_entries,
-            latest_prompt_frontier_branched_entries: value.latest_prompt_frontier_branched_entries,
-            latest_prompt_frontier_max_generation: value.latest_prompt_frontier_max_generation,
-            total_bootstrap_demos: value.total_bootstrap_demos,
-            total_stress_cases: value.total_stress_cases,
-            total_instruction_hypotheses: value.total_instruction_hypotheses,
-            total_runtime_demos: value.total_runtime_demos,
-            total_turn_demos: value.total_turn_demos,
-            total_prompt_system_additions: value.total_prompt_system_additions,
-            total_compiled_prompt_updates: value.total_compiled_prompt_updates,
+            total_runtime_error_cases_consumed: value.total_runtime_error_cases_consumed,
+            total_runtime_error_cases: value.total_runtime_error_cases,
+            total_runtime_error_reflections: value.total_runtime_error_reflections,
+            total_runtime_contract_candidates: value.total_runtime_contract_candidates,
+            total_runtime_contract_candidate_evaluations: value
+                .total_runtime_contract_candidate_evaluations,
+            total_runtime_contract_system_additions: value.total_runtime_contract_system_additions,
+            total_runtime_contract_updates: value.total_runtime_contract_updates,
             total_workflow_evidence_run_records: value.total_workflow_evidence_run_records,
             total_workflow_reflections: value.total_workflow_reflections,
             total_workflow_patch_candidates: value.total_workflow_patch_candidates,
@@ -195,22 +161,14 @@ impl From<&SleepStatusSnapshot> for PersistedSleepStatusSnapshot {
             last_started_at_ms: value.last_started_at_ms,
             last_completed_at_ms: value.last_completed_at_ms,
             total_runs: value.total_runs,
-            total_prompt_consumed_trace_events: value.total_prompt_consumed_trace_events,
-            total_failure_patterns: value.total_failure_patterns,
-            total_prompt_reflections: value.total_prompt_reflections,
-            total_prompt_candidates: value.total_prompt_candidates,
-            total_prompt_candidate_evaluations: value.total_prompt_candidate_evaluations,
-            total_prompt_frontier_entries: value.total_prompt_frontier_entries,
-            latest_prompt_frontier_root_entries: value.latest_prompt_frontier_root_entries,
-            latest_prompt_frontier_branched_entries: value.latest_prompt_frontier_branched_entries,
-            latest_prompt_frontier_max_generation: value.latest_prompt_frontier_max_generation,
-            total_bootstrap_demos: value.total_bootstrap_demos,
-            total_stress_cases: value.total_stress_cases,
-            total_instruction_hypotheses: value.total_instruction_hypotheses,
-            total_runtime_demos: value.total_runtime_demos,
-            total_turn_demos: value.total_turn_demos,
-            total_prompt_system_additions: value.total_prompt_system_additions,
-            total_compiled_prompt_updates: value.total_compiled_prompt_updates,
+            total_runtime_error_cases_consumed: value.total_runtime_error_cases_consumed,
+            total_runtime_error_cases: value.total_runtime_error_cases,
+            total_runtime_error_reflections: value.total_runtime_error_reflections,
+            total_runtime_contract_candidates: value.total_runtime_contract_candidates,
+            total_runtime_contract_candidate_evaluations: value
+                .total_runtime_contract_candidate_evaluations,
+            total_runtime_contract_system_additions: value.total_runtime_contract_system_additions,
+            total_runtime_contract_updates: value.total_runtime_contract_updates,
             total_workflow_evidence_run_records: value.total_workflow_evidence_run_records,
             total_workflow_reflections: value.total_workflow_reflections,
             total_workflow_patch_candidates: value.total_workflow_patch_candidates,
@@ -252,8 +210,8 @@ pub async fn persist_sleep_status_snapshot(status: &SleepStatusSnapshot) -> Resu
 }
 
 pub async fn refresh_sleep_status_queues(status: &mut SleepStatusSnapshot) {
-    if let Ok(backlog) = unread_runtime_trace_count().await {
-        status.unread_trace_backlog = backlog;
+    if let Ok(backlog) = unread_runtime_error_case_count().await {
+        status.unread_runtime_error_backlog = backlog;
     }
     if let Ok(records) = workflow_run_record_count().await {
         status.workflow_evidence_records = records;
@@ -262,7 +220,7 @@ pub async fn refresh_sleep_status_queues(status: &mut SleepStatusSnapshot) {
 
 #[cfg(test)]
 mod tests {
-    use crate::reasoning::sleep::{PromptImprovementSummary, WorkflowImprovementSummary};
+    use crate::reasoning::sleep::{RuntimeErrorCorrectionSummary, WorkflowImprovementSummary};
 
     use super::*;
 
@@ -270,14 +228,14 @@ mod tests {
     fn apply_summary_accumulates_totals_and_tracks_latest_frontiers() {
         let mut status = SleepStatusSnapshot::default();
         let summary = SleepSummary {
-            prompt_improvement: PromptImprovementSummary {
-                consumed_trace_events: 3,
-                prompt_reflections: 2,
-                prompt_frontier_root_entries: 1,
-                prompt_frontier_branched_entries: 4,
-                prompt_frontier_max_generation: 5,
-                compiled_prompt_updated: true,
-                ..PromptImprovementSummary::default()
+            runtime_error_correction: RuntimeErrorCorrectionSummary {
+                consumed_error_cases: 3,
+                runtime_error_cases: 2,
+                reflections: 2,
+                candidates: 1,
+                candidate_evaluations: 1,
+                applied_system_additions: 1,
+                compiled_runtime_contract_updated: true,
             },
             workflow_improvement: WorkflowImprovementSummary {
                 evidence_run_records: 7,
@@ -293,12 +251,13 @@ mod tests {
         status.apply_summary(&summary);
 
         assert_eq!(status.total_runs, 2);
-        assert_eq!(status.total_prompt_consumed_trace_events, 6);
-        assert_eq!(status.total_prompt_reflections, 4);
-        assert_eq!(status.total_compiled_prompt_updates, 2);
-        assert_eq!(status.latest_prompt_frontier_root_entries, 1);
-        assert_eq!(status.latest_prompt_frontier_branched_entries, 4);
-        assert_eq!(status.latest_prompt_frontier_max_generation, 5);
+        assert_eq!(status.total_runtime_error_cases_consumed, 6);
+        assert_eq!(status.total_runtime_error_cases, 4);
+        assert_eq!(status.total_runtime_error_reflections, 4);
+        assert_eq!(status.total_runtime_contract_candidates, 2);
+        assert_eq!(status.total_runtime_contract_candidate_evaluations, 2);
+        assert_eq!(status.total_runtime_contract_system_additions, 2);
+        assert_eq!(status.total_runtime_contract_updates, 2);
         assert_eq!(status.total_workflow_evidence_run_records, 14);
         assert_eq!(status.total_workflow_patch_applied, 2);
         assert_eq!(status.latest_workflow_frontier_root_entries, 8);

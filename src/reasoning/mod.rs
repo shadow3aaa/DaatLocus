@@ -3,6 +3,7 @@ pub mod datasets;
 pub mod episode;
 pub mod evaluation_artifacts;
 pub mod examples;
+#[allow(dead_code)]
 pub mod frontier;
 pub mod ir;
 pub mod optimizer;
@@ -16,7 +17,10 @@ pub mod prompt_text;
 pub mod prompts;
 pub mod render;
 pub mod runtime;
+pub mod runtime_error;
 pub mod signature;
 pub mod sleep;
+#[allow(dead_code)]
 pub mod trace;
+#[allow(dead_code)]
 pub mod turn_compile;

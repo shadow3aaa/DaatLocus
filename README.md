@@ -51,11 +51,11 @@ Daat Locus uses an asynchronous sleep mechanism to improve agent behavior during
 
 Daat Locus does not force self-improvement into the foreground runtime. Instead, self-improvement runs as a separate sleep phase.
 
-While awake, the agent binds a suitable workflow for multi-step tasks, or creates a new workflow when no reusable process exists. Runtime traces and workflow run records are accumulated for sleep-time analysis.
+While awake, the agent binds a suitable workflow for multi-step tasks, or creates a new workflow when no reusable workflow exists. Code-detected runtime error cases and workflow run records are accumulated for sleep-time analysis.
 
 The sleep phase is currently split into two independent pipelines:
 
-- Prompt Improvement Pipeline: fixes system prompt and behavior constraints based on runtime traces
+- Runtime Error Correction Pipeline: fixes global runtime contract and tool protocol constraints based on code-detected runtime error cases
 - Workflow Improvement Pipeline: fixes workspace workflows based on workflow run records
 
 ## Quick Start
