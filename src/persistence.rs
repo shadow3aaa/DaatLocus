@@ -47,13 +47,6 @@ impl PersistenceStore {
         self.paths.memory_file(file_name)
     }
 
-    pub async fn read_postcard_memory_or_default<T>(&self, file_name: &str, label: &str) -> T
-    where
-        T: DeserializeOwned + Default,
-    {
-        read_postcard_or_default(&self.memory_file(file_name), label).await
-    }
-
     pub async fn read_postcard_state_or_default<T>(&self, file_name: &str, label: &str) -> T
     where
         T: DeserializeOwned + Default,
@@ -82,6 +75,13 @@ impl PersistenceStore {
         read_json_or_default(&self.config_file(file_name), label).await
     }
 
+    pub async fn read_json_memory<T>(&self, file_name: &str, label: &str) -> Option<T>
+    where
+        T: DeserializeOwned,
+    {
+        read_json_optional(&self.memory_file(file_name), label).await
+    }
+
     pub fn read_json_file_sync<T>(&self, path: &Path, label: &str) -> Option<T>
     where
         T: DeserializeOwned,
@@ -99,6 +99,20 @@ impl PersistenceStore {
             PersistenceFileMode::Default,
         )
         .await
+    }
+
+    pub async fn write_json_memory<T>(&self, file_name: &str, value: &T) -> Result<()>
+    where
+        T: Serialize + ?Sized,
+    {
+        let bytes = serde_json::to_vec_pretty(value).into_diagnostic()?;
+        write_bytes_atomic(
+            self.memory_file(file_name),
+            bytes,
+            PersistenceFileMode::Default,
+        )
+        .await
+        .into_diagnostic()
     }
 
     pub fn write_json_file_sync<T>(&self, path: &Path, value: &T) -> Result<()>

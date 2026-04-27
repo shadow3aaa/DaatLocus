@@ -75,7 +75,9 @@ async fn clear_memory_state(home: &Path) -> Result<()> {
     clear_hindsight_bank(&config).await?;
     let paths = DaatLocusPaths::from_root(home.to_path_buf());
     clear_files(&[
+        paths.memory_file("runtime_conversation.json"),
         paths.memory_file("runtime_conversation"),
+        paths.memory_file("hindsight_queue.json"),
         paths.memory_file("hindsight_queue"),
         paths.memory_file("plan"),
         paths.journal_file("reasoning_traces.jsonl"),
