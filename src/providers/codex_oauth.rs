@@ -940,17 +940,25 @@ fn apply_chat_response_format(payload: &mut Value, request: &Value) {
             });
         }
         Some("json_object") => {
-            payload["text"] = json!({
-                "format": {
-                    "type": "json_schema",
-                    "name": "hindsight_proxy_response",
-                    "strict": false,
-                    "schema": open_object_schema(),
-                }
-            });
+            append_json_object_mode_instruction(payload);
         }
         _ => {}
     }
+}
+
+fn append_json_object_mode_instruction(payload: &mut Value) {
+    const INSTRUCTION: &str = "The caller requested Chat Completions JSON object mode. Return exactly one valid JSON object. Do not include markdown fences, prose, or any text outside the JSON object.";
+
+    let existing = payload
+        .get("instructions")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let instructions = if existing.trim().is_empty() {
+        INSTRUCTION.to_string()
+    } else {
+        format!("{existing}\n\n{INSTRUCTION}")
+    };
+    payload["instructions"] = Value::String(instructions);
 }
 
 fn open_object_schema() -> Value {
@@ -1623,6 +1631,37 @@ mod tests {
         assert_eq!(payload["text"]["format"]["type"], "json_schema");
         assert_eq!(payload["text"]["format"]["name"], "memory_result");
         assert_eq!(payload["text"]["format"]["schema"]["required"][0], "ok");
+    }
+
+    #[test]
+    fn compatible_chat_json_object_uses_prompt_instruction_not_schema_format() {
+        let client = test_client();
+        let request = json!({
+            "model": "ignored-by-codex-target",
+            "messages": [
+                {"role": "system", "content": "base instructions"},
+                {"role": "user", "content": "return json"}
+            ],
+            "response_format": {
+                "type": "json_object"
+            }
+        });
+
+        let payload = build_compatible_chat_responses_payload(&client, &request).unwrap();
+
+        assert!(payload.get("text").is_none());
+        assert!(
+            payload["instructions"]
+                .as_str()
+                .unwrap()
+                .starts_with("base instructions\n\n")
+        );
+        assert!(
+            payload["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Return exactly one valid JSON object")
+        );
     }
 
     #[test]
