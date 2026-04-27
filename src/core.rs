@@ -140,6 +140,23 @@ pub struct ActivateWorkflowArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ReadWorkflowArgs {
+    pub workflow_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct UpdateWorkflowArgs {
+    pub workflow_id: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    pub when_to_use: Vec<String>,
+    pub preconditions: Vec<String>,
+    pub workflow_steps: Vec<String>,
+    pub done_criteria: Vec<String>,
+    pub recovery: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct DeepRecallArgs {
     /// Natural-language question sent to the long-term memory backend for deeper recall/reflection.
     pub query: String,

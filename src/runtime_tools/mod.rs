@@ -597,6 +597,24 @@ pub fn render_telegram_tool_result_status(
                 )
             ),
         )),
+        "read_workflow" => Some(telegram_status(
+            glyph::WORKFLOW,
+            format!(
+                "Workflow Read: {}",
+                compact_telegram_status_detail(
+                    call_arg_string(call, "workflow_id").unwrap_or_else(|| "unknown".to_string())
+                )
+            ),
+        )),
+        "update_workflow" => Some(telegram_status(
+            glyph::WORKFLOW,
+            format!(
+                "Workflow Updated: {}",
+                compact_telegram_status_detail(
+                    call_arg_string(call, "workflow_id").unwrap_or_else(|| "unknown".to_string())
+                )
+            ),
+        )),
         "focus_app" => Some(telegram_status(
             glyph::APP_ATTENTION,
             format!(
@@ -633,6 +651,8 @@ fn telegram_tool_failure_status(tool_name: &str) -> Option<TelegramLiveStatus> {
         | "browser_close_page" => Some(telegram_status(glyph::ERROR, "Browser Action Failed")),
         "create_workflow" => Some(telegram_status(glyph::ERROR, "Workflow Creation Failed")),
         "activate_workflow" => Some(telegram_status(glyph::ERROR, "Workflow Activation Failed")),
+        "read_workflow" => Some(telegram_status(glyph::ERROR, "Workflow Read Failed")),
+        "update_workflow" => Some(telegram_status(glyph::ERROR, "Workflow Update Failed")),
         "focus_app" => Some(telegram_status(glyph::ERROR, "App Focus Failed")),
         _ => Some(telegram_status(glyph::ERROR, "App Failed")),
     }
