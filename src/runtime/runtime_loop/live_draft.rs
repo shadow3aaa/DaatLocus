@@ -129,7 +129,6 @@ fn apply_live_progress_event(
     match event {
         LiveProgressEvent::GenerationStarted => {
             state.apply(LiveProgressEvent::GenerationStarted);
-            *dirty = false;
         }
         event => {
             if state.apply(event) {
@@ -297,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn live_draft_generation_started_cancels_unflushed_dirty_state() {
+    fn live_draft_generation_started_keeps_unflushed_status_dirty() {
         let mut state = TelegramLiveDraftState::working();
         let mut dirty = false;
 
@@ -313,11 +312,27 @@ mod tests {
 
         apply_live_progress_event(&mut state, &mut dirty, LiveProgressEvent::GenerationStarted);
 
-        assert!(!dirty);
+        assert!(dirty);
         assert_eq!(
             state.render_markdown_v2(),
             "⌘ Workflow Active: repo\\-analysis"
         );
+    }
+
+    #[test]
+    fn live_draft_fast_tool_status_survives_next_model_request() {
+        let mut state = TelegramLiveDraftState::from_previous_sent("⌘ Workflow Active: simple");
+        let mut dirty = false;
+
+        apply_live_progress_event(
+            &mut state,
+            &mut dirty,
+            LiveProgressEvent::TelegramStatus(status(crate::tool_ui::glyph::PLAN, "Plan Updated")),
+        );
+        apply_live_progress_event(&mut state, &mut dirty, LiveProgressEvent::GenerationStarted);
+
+        assert!(dirty);
+        assert_eq!(state.render_markdown_v2(), "∷ Plan Updated");
     }
 
     #[test]
