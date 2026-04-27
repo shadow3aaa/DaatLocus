@@ -30,7 +30,7 @@ use crate::{
     },
     workflow::{
         NewWorkflowSpec, WorkflowPatch, WorkflowRunRecord, WorkflowSpec, WorkflowStore,
-        load_workflow_run_batch,
+        compact_workflow_run_record_file, load_workflow_run_batch,
     },
 };
 use async_trait::async_trait;

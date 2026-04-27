@@ -139,6 +139,8 @@ pub enum WorkflowRunOutcome {
 
 pub struct WorkflowRunBatch {
     pub records: Vec<WorkflowRunRecord>,
+    pub unread_record_count: usize,
+    pub next_offset: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -458,35 +460,36 @@ fn load_builtin_workflows() -> BTreeMap<String, StoredWorkflow> {
 pub async fn load_workflow_run_batch() -> Result<WorkflowRunBatch> {
     let workflow_run_records_io_guard = workflow_run_records_io_lock().lock().await;
     let path = workflow_run_records_file_path().await;
-    let file = match OpenOptions::new().read(true).open(&path).await {
-        Ok(file) => file,
+    let bytes = match fs::read(&path).await {
+        Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             drop(workflow_run_records_io_guard);
             return Ok(WorkflowRunBatch {
                 records: Vec::new(),
+                unread_record_count: 0,
+                next_offset: 0,
             });
         }
         Err(err) => {
             drop(workflow_run_records_io_guard);
             return Err(miette!(
-                "failed to open workflow run records {}: {err}",
+                "failed to read workflow run records {}: {err}",
                 path.display()
             ));
         }
     };
-    let mut lines = BufReader::new(file).lines();
+
+    let mut offset = 0u64;
     let mut records = Vec::new();
-    while let Some(line) = lines.next_line().await.map_err(|err| {
-        miette!(
-            "failed to read workflow run records {}: {err}",
-            path.display()
-        )
-    })? {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+    for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
+        offset += chunk.len() as u64;
+        let line = std::str::from_utf8(chunk)
+            .map(str::trim)
+            .unwrap_or_default();
+        if line.is_empty() {
             continue;
         }
-        let record: WorkflowRunRecord = serde_json::from_str(trimmed).map_err(|err| {
+        let record: WorkflowRunRecord = serde_json::from_str(line).map_err(|err| {
             miette!(
                 "failed to parse workflow run record from {}: {err}",
                 path.display()
@@ -494,8 +497,13 @@ pub async fn load_workflow_run_batch() -> Result<WorkflowRunBatch> {
         })?;
         records.push(record);
     }
+    let unread_record_count = records.len();
     drop(workflow_run_records_io_guard);
-    Ok(WorkflowRunBatch { records })
+    Ok(WorkflowRunBatch {
+        records,
+        unread_record_count,
+        next_offset: offset,
+    })
 }
 
 pub async fn workflow_run_record_count() -> Result<usize> {
@@ -594,6 +602,40 @@ pub async fn append_workflow_run_records(records: &[WorkflowRunRecord]) -> Resul
     }
     drop(workflow_run_records_io_guard);
     Ok(appended)
+}
+
+pub async fn compact_workflow_run_record_file(consumed_offset: u64) -> Result<()> {
+    let workflow_run_records_io_guard = workflow_run_records_io_lock().lock().await;
+    let path = workflow_run_records_file_path().await;
+    let bytes = match fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            drop(workflow_run_records_io_guard);
+            return Ok(());
+        }
+        Err(err) => {
+            drop(workflow_run_records_io_guard);
+            return Err(miette!(
+                "failed to read workflow run records {} for compaction: {err}",
+                path.display()
+            ));
+        }
+    };
+    let keep_from = (consumed_offset as usize).min(bytes.len());
+    write_bytes_atomic(
+        path.clone(),
+        bytes[keep_from..].to_vec(),
+        PersistenceFileMode::Default,
+    )
+    .await
+    .map_err(|err| {
+        miette!(
+            "failed to rewrite workflow run records {} during compaction: {err}",
+            path.display()
+        )
+    })?;
+    drop(workflow_run_records_io_guard);
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -957,6 +999,9 @@ mod tests {
             failure_types: vec!["tool_failure".to_string()],
             final_summary: "completed".to_string(),
         };
+        let mut later_record = record.clone();
+        later_record.run_id = "workflow-run:run-2".to_string();
+        later_record.origin = "event:later".to_string();
 
         append_workflow_run_records(&[record.clone(), record.clone()])
             .await
@@ -967,6 +1012,18 @@ mod tests {
         let count = workflow_run_record_count()
             .await
             .expect("count workflow run records");
+        append_workflow_run_records(&[later_record.clone()])
+            .await
+            .expect("append later workflow run record");
+        compact_workflow_run_record_file(batch.next_offset)
+            .await
+            .expect("compact consumed workflow run records");
+        let remaining_batch = load_workflow_run_batch()
+            .await
+            .expect("load remaining workflow run records");
+        let remaining_count = workflow_run_record_count()
+            .await
+            .expect("count remaining workflow run records");
 
         match previous_home {
             Some(previous_home) => unsafe {
@@ -978,8 +1035,13 @@ mod tests {
         }
 
         assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.unread_record_count, 1);
+        assert!(batch.next_offset > 0);
         assert_eq!(count, 1);
         assert_eq!(batch.records[0].run_id, record.run_id);
         assert_eq!(batch.records[0].workflow_id, record.workflow_id);
+        assert_eq!(remaining_count, 1);
+        assert_eq!(remaining_batch.records.len(), 1);
+        assert_eq!(remaining_batch.records[0].run_id, later_record.run_id);
     }
 }

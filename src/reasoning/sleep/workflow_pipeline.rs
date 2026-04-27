@@ -16,9 +16,10 @@ pub(super) async fn run_workflow_improvement_pipeline(
             workflow_candidate_evaluations: &workflow_optimization.candidate_evaluations,
         })
         .await?;
+    compact_workflow_run_record_file(run_batch.next_offset).await?;
 
     Ok(WorkflowImprovementSummary {
-        evidence_run_records: run_batch.records.len(),
+        evidence_run_records: run_batch.unread_record_count,
         workflow_reflections: workflow_optimization.reflections.len(),
         patch_candidates: workflow_optimization.patches.len(),
         merge_candidates: workflow_optimization.merges.len(),
