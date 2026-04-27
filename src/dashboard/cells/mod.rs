@@ -90,7 +90,7 @@ pub enum DashboardActivityEvent {
 pub fn render_activity_from_messages(messages: Vec<HistoryMessage>) -> Vec<ActivityCell> {
     let cells = messages
         .into_iter()
-        .filter(|message| !message.is_system())
+        .filter(|message| !message.is_system() && !is_runtime_context_history_message(message))
         .rev()
         .take(12)
         .collect::<Vec<_>>()
@@ -315,6 +315,14 @@ fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<ActivityCe
     }
 }
 
+fn is_runtime_context_history_message(message: &HistoryMessage) -> bool {
+    let Some(content) = message.text_content() else {
+        return false;
+    };
+    let content = content.trim_start();
+    content.starts_with("<preturn_context") || content.starts_with("<afterclaim_context")
+}
+
 fn first_line_or_fallback<'a>(content: &'a str, fallback: &'a str) -> &'a str {
     content
         .lines()
@@ -440,4 +448,30 @@ fn current_time_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_feed_hides_runtime_context_messages_before_limit() {
+        let mut messages = vec![HistoryMessage::user("real user message")];
+        for _ in 0..20 {
+            messages.push(HistoryMessage::user(
+                "<preturn_context>\n<recall_memories>...</recall_memories>\n</preturn_context>",
+            ));
+        }
+        messages.push(HistoryMessage::user(
+            "<afterclaim_context>\n<claimed_input>...</claimed_input>\n</afterclaim_context>",
+        ));
+
+        let cells = render_activity_from_messages(messages);
+
+        assert_eq!(cells.len(), 1);
+        match &cells[0] {
+            ActivityCell::User(cell) => assert_eq!(cell.title, "real user message"),
+            _ => panic!("expected user activity cell"),
+        }
+    }
 }
