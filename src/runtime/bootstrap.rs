@@ -272,6 +272,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         telegram_live_drafts: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         claimed_event_ids: Vec::new(),
         claimed_app_notices: Vec::new(),
+        afterclaim_context_fingerprint: None,
         idle_since: None,
         last_idle_sleep_at: None,
     }

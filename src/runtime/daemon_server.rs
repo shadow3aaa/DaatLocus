@@ -19,11 +19,11 @@ use crate::{
     memory::Memory,
     pending_work::PendingWorkQueue,
     plan::Plan,
+    preturn_state::PreTurnState,
     providers::build_llm,
     reasoning::runtime::PromptMemoryContext,
-    runtime_context::build_runtime_snapshot_text,
+    runtime_context::build_preturn_context_text,
     sleep_status::load_sleep_status_snapshot,
-    snapshot::Snapshot,
     telegram_acl::TelegramAclHandle,
     telegram_transport::TelegramTransport,
     telegram_transport::state::TelegramTransportState,
@@ -204,6 +204,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         telegram_live_drafts: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         claimed_event_ids: Vec::new(),
         claimed_app_notices: Vec::new(),
+        afterclaim_context_fingerprint: None,
         idle_since: None,
         last_idle_sleep_at: None,
     };
@@ -211,8 +212,9 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     let mut sleep_status = load_sleep_status_snapshot().await;
 
     // Replace the placeholder dashboard state with real state after context is built.
-    let startup_snapshot = Snapshot::new(&mut context).await;
-    let startup_snapshot_output = build_runtime_snapshot_text(&context, &startup_snapshot);
+    let startup_preturn_state = PreTurnState::new(&mut context).await;
+    let startup_preturn_context_output =
+        build_preturn_context_text(&context, &startup_preturn_state);
     let app_renders = context.apps.state_renders();
     tx.send_modify(|state| {
         *state = DashboardState {
@@ -221,7 +223,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             sleep_status_output: render_sleep_status_output_for_dashboard(&context, &sleep_status),
             inspect_telegram_output: render_telegram_status_for_dashboard(&context),
             system_prompt_output: render_system_prompt_output_for_dashboard(&context),
-            snapshot_output: startup_snapshot_output,
+            preturn_context_output: startup_preturn_context_output,
             app_status_outputs: render_app_status_outputs_for_dashboard(&context),
             pending_access_requests: context.telegram_acl.pending_requests(),
             activity_cells: render_activity_for_dashboard(&context),

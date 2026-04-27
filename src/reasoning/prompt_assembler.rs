@@ -1,12 +1,14 @@
-use crate::{context::Context, snapshot::Snapshot};
+use crate::{context::Context, preturn_state::PreTurnState};
 
 use super::{
     prompt_doc::{PromptBlock, PromptDocument, PromptNode, PromptUnitDoc},
     prompt_parts::{
-        AppSnapshotPart, AppsSystemPart, CompiledAdditionsSystemPart, EventSystemPart,
-        EventsSnapshotPart, MemoriesSnapshotPart, MemoriesSystemPart, PersonaSystemPart,
-        PlanSnapshotPart, PlanSystemPart, SensorySnapshotPart, SnapshotPart, SystemPromptPart,
-        WorkflowSnapshotPart, WorkflowSystemPart, WorkspaceSystemPart,
+        AfterClaimContextInput, AfterClaimContextPart, AfterClaimInputPart,
+        AfterClaimWorkflowRoutingPart, AppsSystemPart, CompiledAdditionsSystemPart,
+        EventSystemPart, MemoriesSystemPart, PersonaSystemPart, PlanSystemPart,
+        PreTurnAppSurfacePart, PreTurnContextPart, PreTurnMemoriesPart, PreTurnPlanPart,
+        PreTurnSensoryPart, PreTurnWorkflowStatePart, SystemPromptPart, WorkflowSystemPart,
+        WorkspaceSystemPart,
     },
     prompts::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
@@ -21,8 +23,12 @@ pub struct SystemPromptAssembler {
     parts: Vec<Box<dyn SystemPromptPart>>,
 }
 
-pub struct SnapshotAssembler {
-    parts: Vec<Box<dyn SnapshotPart>>,
+pub struct PreTurnContextAssembler {
+    parts: Vec<Box<dyn PreTurnContextPart>>,
+}
+
+pub struct AfterClaimContextAssembler {
+    parts: Vec<Box<dyn AfterClaimContextPart>>,
 }
 
 impl SystemPromptAssembler {
@@ -53,27 +59,48 @@ impl SystemPromptAssembler {
     }
 }
 
-impl SnapshotAssembler {
-    pub fn new(parts: Vec<Box<dyn SnapshotPart>>) -> Self {
+impl PreTurnContextAssembler {
+    pub fn new(parts: Vec<Box<dyn PreTurnContextPart>>) -> Self {
         Self { parts }
     }
 
     pub fn default_runtime() -> Self {
         Self::new(vec![
-            Box::new(MemoriesSnapshotPart),
-            Box::new(SensorySnapshotPart),
-            Box::new(PlanSnapshotPart),
-            Box::new(WorkflowSnapshotPart),
-            Box::new(EventsSnapshotPart),
-            Box::new(AppSnapshotPart),
+            Box::new(PreTurnMemoriesPart),
+            Box::new(PreTurnSensoryPart),
+            Box::new(PreTurnPlanPart),
+            Box::new(PreTurnWorkflowStatePart),
+            Box::new(PreTurnAppSurfacePart),
         ])
     }
 
-    pub fn assemble(&self, ctx: &Context, snapshot: &Snapshot) -> PromptDocument {
+    pub fn assemble(&self, ctx: &Context, state: &PreTurnState) -> PromptDocument {
         PromptDocument::new(
             self.parts
                 .iter()
-                .filter_map(|part| part.build(ctx, snapshot))
+                .filter_map(|part| part.build(ctx, state))
+                .collect(),
+        )
+    }
+}
+
+impl AfterClaimContextAssembler {
+    pub fn new(parts: Vec<Box<dyn AfterClaimContextPart>>) -> Self {
+        Self { parts }
+    }
+
+    pub fn default_runtime() -> Self {
+        Self::new(vec![
+            Box::new(AfterClaimInputPart),
+            Box::new(AfterClaimWorkflowRoutingPart),
+        ])
+    }
+
+    pub fn assemble(&self, ctx: &Context, input: &AfterClaimContextInput) -> PromptDocument {
+        PromptDocument::new(
+            self.parts
+                .iter()
+                .filter_map(|part| part.build(ctx, input))
                 .collect(),
         )
     }

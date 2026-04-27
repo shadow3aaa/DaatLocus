@@ -53,7 +53,7 @@ pub struct RuntimeTurnDraft {
 
 pub struct RuntimeRequestEnvelope {
     system_messages: Vec<String>,
-    user_message: String,
+    user_message: Option<String>,
 }
 
 pub struct RuntimeStepConversation {
@@ -347,10 +347,10 @@ impl RuntimeTurnDraft {
 }
 
 impl RuntimeRequestEnvelope {
-    pub fn from_world_snapshot(system_messages: Vec<String>, snapshot_text: &str) -> Self {
+    pub fn from_system_messages(system_messages: Vec<String>) -> Self {
         Self {
             system_messages,
-            user_message: format!("<world_snapshot>\n{snapshot_text}\n</world_snapshot>"),
+            user_message: None,
         }
     }
 
@@ -361,7 +361,7 @@ impl RuntimeRequestEnvelope {
     ) -> usize {
         let envelope_breakdown = estimate_runtime_request_envelope(
             &self.system_messages,
-            &self.user_message,
+            self.user_message.as_deref().unwrap_or_default(),
             tools,
             limits,
         );
@@ -381,7 +381,9 @@ impl RuntimeRequestEnvelope {
                 .into_iter()
                 .map(|message| message.message),
         );
-        messages.push(AgentMessage::user(self.user_message));
+        if let Some(user_message) = self.user_message {
+            messages.push(AgentMessage::user(user_message));
+        }
         messages
     }
 }
@@ -1621,7 +1623,7 @@ mod tests {
         let messages = vec![
             AgentMessage::system("system"),
             AgentMessage::user("claimed input"),
-            AgentMessage::user("<world_snapshot>snapshot</world_snapshot>"),
+            AgentMessage::user("<preturn_context>context</preturn_context>"),
             AgentMessage::assistant("assistant detail"),
             AgentMessage::tool("call-1", "shell", "tool output"),
         ];

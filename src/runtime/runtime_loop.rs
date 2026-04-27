@@ -27,8 +27,10 @@ use crate::{
     },
     memory::RuntimeTurnDraft,
     pending_work::PendingWork,
+    preturn_state::PreTurnState,
     reasoning::{
         episode::EpisodeActionRecord,
+        prompt_parts::AfterClaimContextInput,
         runtime::{
             AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage,
             PromptMemoryCitation, PromptMemoryContext,
@@ -41,9 +43,10 @@ use crate::{
         sleep::run_sleep,
     },
     runtime_context::{
-        MID_TURN_COMPACTION_MAX_RECOVERIES, build_runtime_request_envelope,
-        build_runtime_snapshot_text, execute_pre_turn_runtime_compaction,
-        maybe_compact_runtime_messages, runtime_request_budget_limits,
+        MID_TURN_COMPACTION_MAX_RECOVERIES, build_afterclaim_context_text,
+        build_preturn_context_text, build_runtime_request_envelope,
+        execute_pre_turn_runtime_compaction, maybe_compact_runtime_messages,
+        runtime_request_budget_limits,
     },
     runtime_tools::{
         ToolExecutionResult, build_runtime_tool_specs, execute_agent_tool_call,
@@ -53,7 +56,6 @@ use crate::{
     sleep_status::{
         SleepStatusSnapshot, persist_sleep_status_snapshot, refresh_sleep_status_queues,
     },
-    snapshot::Snapshot,
     telegram_transport::TelegramLiveDraftClient,
     tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
     workflow::{WorkflowRunRecord, append_workflow_run_records},

@@ -67,6 +67,63 @@ async fn abort_runtime_turn_before_model(
     }
 }
 
+fn maybe_build_afterclaim_context_message(
+    context: &mut Context,
+    input: &AfterClaimContextInput,
+    fingerprint: Option<&str>,
+    force_reinject: bool,
+) -> Option<HistoryMessage> {
+    if input.is_empty() {
+        return None;
+    }
+
+    let fingerprint = fingerprint.unwrap_or("unfingerprinted");
+    let already_injected = context.afterclaim_context_fingerprint.as_deref() == Some(fingerprint);
+    if already_injected && !force_reinject {
+        return None;
+    }
+
+    let text = build_afterclaim_context_text(context, input);
+    if text.trim().is_empty() {
+        return None;
+    }
+    context.afterclaim_context_fingerprint = Some(fingerprint.to_string());
+    Some(HistoryMessage::user(text))
+}
+
+fn history_has_complete_afterclaim_context(messages: &[HistoryMessage]) -> bool {
+    messages
+        .iter()
+        .filter_map(HistoryMessage::text_content)
+        .any(is_complete_afterclaim_context_text)
+}
+
+fn is_complete_afterclaim_context_text(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("<afterclaim_context") && text.contains("</afterclaim_context>")
+}
+
+fn runtime_context_compacted_output(reason: impl Into<String>) -> AgentLoopStepOutput {
+    let reason = reason.into();
+    AgentLoopStepOutput {
+        observation: reason.clone(),
+        description: "Runtime context was compacted; the current turn ends so claimed work can be re-claimed with freshly injected context."
+            .to_string(),
+        current_doing: "waiting for next tool decision".to_string(),
+        actions: vec![EpisodeActionRecord {
+            kind: "runtime_context_compacted".to_string(),
+            summary: reason,
+        }],
+    }
+}
+
+fn output_is_runtime_context_compaction_boundary(output: &AgentLoopStepOutput) -> bool {
+    output
+        .actions
+        .iter()
+        .any(|action| action.kind == "runtime_context_compacted")
+}
+
 pub(crate) async fn execute_agent_loop_step(
     context: &mut Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
@@ -151,10 +208,7 @@ pub(crate) async fn execute_agent_loop_step(
         }
     };
     context.prompt_memory = prompt_memory;
-    let claimed_input_messages = claimed_inputs
-        .iter()
-        .map(|input| prompt_message_for_claimed_input(context, input))
-        .collect::<Vec<_>>();
+    let afterclaim_context_input = afterclaim_context_input_for_claimed_inputs(&claimed_inputs);
     let claimed_event_views = claimed_inputs
         .iter()
         .filter_map(|input| match input {
@@ -163,72 +217,78 @@ pub(crate) async fn execute_agent_loop_step(
         })
         .collect::<Vec<_>>();
     let live_draft_session = maybe_start_telegram_live_draft_session(context, &claimed_event_views);
-    enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightSnapshot);
-    let snapshot_started_at = std::time::Instant::now();
+    enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightPreTurnContext);
+    let preturn_started_at = std::time::Instant::now();
     tracing::info!(
         "runtime preflight stage started: {}",
-        RuntimeTurnPhase::PreflightSnapshot.label()
+        RuntimeTurnPhase::PreflightPreTurnContext.label()
     );
-    let snapshot = match tokio::time::timeout(
-        preflight_timeout,
-        Snapshot::new_with_claimed_events(context, &claimed_event_views),
-    )
-    .await
-    {
-        Ok(snapshot) => {
-            tracing::info!(
-                elapsed_ms = snapshot_started_at.elapsed().as_millis(),
-                "runtime preflight stage completed: {}",
-                RuntimeTurnPhase::PreflightSnapshot.label()
-            );
-            snapshot
-        }
-        Err(_) => {
-            let err = miette!(
-                "runtime preflight stage `{}` timed out after {}s",
-                RuntimeTurnPhase::PreflightSnapshot.label(),
-                preflight_timeout.as_secs()
-            );
-            set_runtime_status(
-                tx,
-                RuntimeStatusLevel::Error,
-                format!(
-                    "runtime turn preflight timeout: {}",
-                    RuntimeTurnPhase::PreflightSnapshot.label()
-                ),
-            );
-            tracing::error!(
-                elapsed_ms = snapshot_started_at.elapsed().as_millis(),
-                timeout_secs = preflight_timeout.as_secs(),
-                "runtime preflight stage timed out: {}",
-                RuntimeTurnPhase::PreflightSnapshot.label()
-            );
-            return abort_runtime_turn_before_model(
-                context,
-                RuntimeTurnAbort {
-                    live_draft_session,
-                    claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
-                    claimed_event_ids: &claimed_event_ids,
-                    claimed_app_notices: &claimed_app_notice_entries,
-                    observation: format!("runtime preflight failed: {err}"),
-                    description: "Failed to build runtime snapshot.".to_string(),
-                },
-            )
-            .await;
-        }
+    let preturn_state =
+        match tokio::time::timeout(preflight_timeout, PreTurnState::new(context)).await {
+            Ok(preturn_state) => {
+                tracing::info!(
+                    elapsed_ms = preturn_started_at.elapsed().as_millis(),
+                    "runtime preflight stage completed: {}",
+                    RuntimeTurnPhase::PreflightPreTurnContext.label()
+                );
+                preturn_state
+            }
+            Err(_) => {
+                let err = miette!(
+                    "runtime preflight stage `{}` timed out after {}s",
+                    RuntimeTurnPhase::PreflightPreTurnContext.label(),
+                    preflight_timeout.as_secs()
+                );
+                set_runtime_status(
+                    tx,
+                    RuntimeStatusLevel::Error,
+                    format!(
+                        "runtime turn preflight timeout: {}",
+                        RuntimeTurnPhase::PreflightPreTurnContext.label()
+                    ),
+                );
+                tracing::error!(
+                    elapsed_ms = preturn_started_at.elapsed().as_millis(),
+                    timeout_secs = preflight_timeout.as_secs(),
+                    "runtime preflight stage timed out: {}",
+                    RuntimeTurnPhase::PreflightPreTurnContext.label()
+                );
+                return abort_runtime_turn_before_model(
+                    context,
+                    RuntimeTurnAbort {
+                        live_draft_session,
+                        claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
+                        claimed_event_ids: &claimed_event_ids,
+                        claimed_app_notices: &claimed_app_notice_entries,
+                        observation: format!("runtime preflight failed: {err}"),
+                        description: "Failed to build preturn context.".to_string(),
+                    },
+                )
+                .await;
+            }
+        };
+    let preturn_context_text = build_preturn_context_text(context, &preturn_state);
+    let runtime_context_text = if afterclaim_context_input.is_empty() {
+        preturn_context_text.clone()
+    } else {
+        format!(
+            "{}\n\n{}",
+            build_afterclaim_context_text(context, &afterclaim_context_input),
+            preturn_context_text
+        )
     };
-    let snapshot_text = build_runtime_snapshot_text(context, &snapshot);
     if let Some(tx) = tx {
         tx.send_modify(|state| {
-            state.snapshot_output = snapshot_text.clone();
+            state.preturn_context_output = preturn_context_text.clone();
         });
     }
-    let request_envelope = build_runtime_request_envelope(context, &snapshot_text);
+    let request_envelope = build_runtime_request_envelope(context);
     let initial_tools = build_runtime_tool_specs(context);
     let runtime_conversation_budget = request_envelope
         .conversation_budget_tokens(&initial_tools, runtime_request_budget_limits(context));
     let runtime_conversation_summary_budget =
         RUNTIME_HISTORY_SUMMARY_MAX_TOKENS.min(runtime_conversation_budget);
+    let mut pre_turn_compacted = false;
     if let Some(plan) = context.memory.plan_runtime_conversation_compaction(
         runtime_conversation_budget,
         RUNTIME_HISTORY_MIN_MESSAGES,
@@ -292,16 +352,32 @@ pub(crate) async fn execute_agent_loop_step(
             .memory
             .apply_runtime_conversation_compaction(plan, summary)
             .await;
+        pre_turn_compacted = true;
     }
     let mut conversation_slice = context.memory.runtime_conversation_slice(
         runtime_conversation_budget,
         RUNTIME_HISTORY_MIN_MESSAGES,
         runtime_conversation_summary_budget,
     );
-    conversation_slice.extend(claimed_input_messages.iter().cloned());
+    let mut injected_context_messages = Vec::new();
+    if let Some(message) = maybe_build_afterclaim_context_message(
+        context,
+        &afterclaim_context_input,
+        claimed_input_fingerprint.as_deref(),
+        pre_turn_compacted && !history_has_complete_afterclaim_context(&conversation_slice),
+    ) {
+        injected_context_messages.push(message);
+    }
+    if !preturn_context_text.trim().is_empty() {
+        injected_context_messages.push(HistoryMessage::user(preturn_context_text.clone()));
+    }
+    conversation_slice.extend(injected_context_messages.iter().cloned());
     let mut runtime_step = context
         .memory
         .begin_runtime_step_from_parts(request_envelope, conversation_slice);
+    for message in injected_context_messages {
+        runtime_step.push_history_message(message);
+    }
     let mut tool_results = Vec::new();
     let mut actions = Vec::new();
     let mut budget_recoveries = 0usize;
@@ -310,6 +386,9 @@ pub(crate) async fn execute_agent_loop_step(
         let tools = build_runtime_tool_specs(context);
         if maybe_compact_runtime_messages(context, &mut runtime_step, &tools, false).await {
             set_runtime_status(tx, RuntimeStatusLevel::Info, "Compacting runtime context");
+            break 'agent_loop runtime_context_compacted_output(
+                "runtime context compacted before model request; starting a new turn",
+            );
         }
         let request = AgentTurnRequest {
             messages: runtime_step.clone_agent_messages(),
@@ -334,7 +413,10 @@ pub(crate) async fn execute_agent_loop_step(
                             MID_TURN_COMPACTION_MAX_RECOVERIES
                         ),
                     );
-                    continue 'agent_loop;
+                    break 'agent_loop runtime_context_compacted_output(format!(
+                        "runtime context compacted after context overflow recovery ({budget_recoveries}/{}); starting a new turn",
+                        MID_TURN_COMPACTION_MAX_RECOVERIES
+                    ));
                 }
                 let is_overflow = is_context_budget_exceeded(&err);
                 let overflow_fuse_tripped = if is_overflow {
@@ -357,7 +439,7 @@ pub(crate) async fn execute_agent_loop_step(
                             claimed_event_ids: &claimed_event_ids,
                             claimed_app_notices: &claimed_app_notice_entries,
                             tools: &tools,
-                            snapshot_text: &snapshot_text,
+                            context_text: &runtime_context_text,
                             error_kind: RuntimeErrorKind::ContextOverflowAfterRecovery,
                             severity: 3,
                             detected_by: "runtime_model_request",
@@ -557,7 +639,7 @@ pub(crate) async fn execute_agent_loop_step(
                                 claimed_event_ids: &claimed_event_ids,
                                 claimed_app_notices: &claimed_app_notice_entries,
                                 tools: &tools,
-                                snapshot_text: &snapshot_text,
+                                context_text: &runtime_context_text,
                                 error_kind: classify_tool_runtime_error(&call.name, &error_text),
                                 severity: 2,
                                 detected_by: "runtime_tool_executor",
@@ -707,7 +789,7 @@ pub(crate) async fn execute_agent_loop_step(
                         claimed_event_ids: &claimed_event_ids,
                         claimed_app_notices: &claimed_app_notice_entries,
                         tools: &tools,
-                        snapshot_text: &snapshot_text,
+                        context_text: &runtime_context_text,
                         error_kind,
                         severity: 2,
                         detected_by: "runtime_follow_up_gate",
@@ -769,8 +851,18 @@ pub(crate) async fn execute_agent_loop_step(
     if let Some(fingerprint) = claimed_input_fingerprint.as_deref() {
         context.clear_runtime_overflow_failure(fingerprint);
     }
+    let claimed_events_finished =
+        claimed_event_ids.is_empty() || claimed_events_are_terminal(context, &claimed_event_ids);
+    let claimed_app_notices_finished =
+        claimed_app_notice_entries.is_empty() || context.claimed_app_notices_are_resolved();
     finalize_claimed_runtime_events(context, &claimed_event_ids, &output);
     finalize_claimed_runtime_app_notices(context, &claimed_app_notice_entries, &output).await;
+    if (!claimed_event_ids.is_empty() || !claimed_app_notice_entries.is_empty())
+        && (claimed_events_finished && claimed_app_notices_finished
+            || output_is_runtime_context_compaction_boundary(&output))
+    {
+        context.afterclaim_context_fingerprint = None;
+    }
     context.claimed_event_ids.clear();
     context.claimed_app_notices.clear();
     let history_messages = runtime_step.history_messages().to_vec();
@@ -792,7 +884,7 @@ struct RuntimeErrorRecordInput<'a> {
     claimed_event_ids: &'a [String],
     claimed_app_notices: &'a [AppNoticeKey],
     tools: &'a [crate::reasoning::runtime::AgentToolSpec],
-    snapshot_text: &'a str,
+    context_text: &'a str,
     error_kind: RuntimeErrorKind,
     severity: u8,
     detected_by: &'a str,
@@ -850,7 +942,7 @@ async fn record_runtime_error_case(context: &Context, input: RuntimeErrorRecordI
                     )
                 })
                 .collect(),
-            compact_snapshot_summary: Some(compact_runtime_error_text(input.snapshot_text, 1600)),
+            compact_context_summary: Some(compact_runtime_error_text(input.context_text, 1600)),
         },
         action: RuntimeErrorActionContext {
             assistant_text_summary: input
@@ -1035,5 +1127,26 @@ fn append_committed_activity_cells(
                 DashboardActivityEvent::AppendCommittedCells { cells },
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn afterclaim_context_completion_detection_requires_matching_close_tag() {
+        assert!(is_complete_afterclaim_context_text(
+            "<afterclaim_context>\nclaimed\n</afterclaim_context>"
+        ));
+        assert!(!is_complete_afterclaim_context_text(
+            "<afterclaim_context>\nclaimed"
+        ));
+    }
+
+    #[test]
+    fn runtime_compaction_boundary_output_is_detected() {
+        let output = runtime_context_compacted_output("compacted");
+        assert!(output_is_runtime_context_compaction_boundary(&output));
     }
 }

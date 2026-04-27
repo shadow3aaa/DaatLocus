@@ -90,7 +90,7 @@ fn workflow_tool_action_count(output: &AgentLoopStepOutput) -> usize {
         .filter(|action| {
             !matches!(
                 action.kind.as_str(),
-                "assistant_message" | "empty_tool_calls"
+                "assistant_message" | "empty_tool_calls" | "runtime_context_compacted"
             )
         })
         .count()
@@ -185,5 +185,33 @@ pub(super) async fn record_workflow_run_evidence(
         .collect::<Vec<_>>();
     if let Err(err) = append_workflow_run_records(&records).await {
         tracing::error!("failed to append workflow run records at runtime boundary: {err:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn action(kind: &str) -> EpisodeActionRecord {
+        EpisodeActionRecord {
+            kind: kind.to_string(),
+            summary: String::new(),
+        }
+    }
+
+    #[test]
+    fn workflow_tool_action_count_ignores_runtime_compaction_boundaries() {
+        let output = AgentLoopStepOutput {
+            observation: String::new(),
+            description: String::new(),
+            current_doing: String::new(),
+            actions: vec![
+                action("runtime_context_compacted"),
+                action("assistant_message"),
+                action("terminal_exec"),
+            ],
+        };
+
+        assert_eq!(workflow_tool_action_count(&output), 1);
     }
 }

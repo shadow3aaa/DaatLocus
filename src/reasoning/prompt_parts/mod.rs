@@ -1,7 +1,9 @@
 use crate::{
+    app::AppId,
     context::Context,
+    events::{EventPayload, EventView},
+    preturn_state::PreTurnState,
     reasoning::runtime::{PromptMemoryCitation, PromptMemoryFact},
-    snapshot::Snapshot,
 };
 
 use super::{
@@ -22,9 +24,26 @@ pub trait SystemPromptPart: Send + Sync {
     fn build(&self, ctx: &Context) -> Option<PromptUnitDoc>;
 }
 
-pub trait SnapshotPart: Send + Sync {
+pub trait PreTurnContextPart: Send + Sync {
     fn key(&self) -> &'static str;
-    fn build(&self, ctx: &Context, snapshot: &Snapshot) -> Option<PromptNode>;
+    fn build(&self, ctx: &Context, state: &PreTurnState) -> Option<PromptNode>;
+}
+
+pub trait AfterClaimContextPart: Send + Sync {
+    fn key(&self) -> &'static str;
+    fn build(&self, ctx: &Context, input: &AfterClaimContextInput) -> Option<PromptNode>;
+}
+
+#[derive(Clone, Default)]
+pub struct AfterClaimContextInput {
+    pub events: Vec<EventView>,
+    pub app_notices: Vec<(AppId, String)>,
+}
+
+impl AfterClaimContextInput {
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.app_notices.is_empty()
+    }
 }
 
 pub struct EventSystemPart;
@@ -36,12 +55,13 @@ pub struct WorkflowSystemPart;
 pub struct PersonaSystemPart;
 pub struct CompiledAdditionsSystemPart;
 
-pub struct MemoriesSnapshotPart;
-pub struct SensorySnapshotPart;
-pub struct PlanSnapshotPart;
-pub struct WorkflowSnapshotPart;
-pub struct EventsSnapshotPart;
-pub struct AppSnapshotPart;
+pub struct PreTurnMemoriesPart;
+pub struct PreTurnSensoryPart;
+pub struct PreTurnPlanPart;
+pub struct PreTurnWorkflowStatePart;
+pub struct PreTurnAppSurfacePart;
+pub struct AfterClaimInputPart;
+pub struct AfterClaimWorkflowRoutingPart;
 
 impl SystemPromptPart for EventSystemPart {
     fn key(&self) -> &'static str {
@@ -193,12 +213,12 @@ impl SystemPromptPart for CompiledAdditionsSystemPart {
     }
 }
 
-impl SnapshotPart for MemoriesSnapshotPart {
+impl PreTurnContextPart for PreTurnMemoriesPart {
     fn key(&self) -> &'static str {
         "recall_memories"
     }
 
-    fn build(&self, ctx: &Context, _snapshot: &Snapshot) -> Option<PromptNode> {
+    fn build(&self, ctx: &Context, _state: &PreTurnState) -> Option<PromptNode> {
         if ctx.prompt_memory.is_empty() {
             return None;
         }
@@ -233,13 +253,13 @@ impl SnapshotPart for MemoriesSnapshotPart {
     }
 }
 
-impl SnapshotPart for SensorySnapshotPart {
+impl PreTurnContextPart for PreTurnSensoryPart {
     fn key(&self) -> &'static str {
         "sensory"
     }
 
-    fn build(&self, _ctx: &Context, snapshot: &Snapshot) -> Option<PromptNode> {
-        let text = snapshot.sensory_runtime_text();
+    fn build(&self, _ctx: &Context, state: &PreTurnState) -> Option<PromptNode> {
+        let text = state.sensory_runtime_text();
         if text.trim().is_empty() {
             return None;
         }
@@ -250,13 +270,13 @@ impl SnapshotPart for SensorySnapshotPart {
     }
 }
 
-impl SnapshotPart for PlanSnapshotPart {
+impl PreTurnContextPart for PreTurnPlanPart {
     fn key(&self) -> &'static str {
         "plan"
     }
 
-    fn build(&self, _ctx: &Context, snapshot: &Snapshot) -> Option<PromptNode> {
-        let text = snapshot.plan_runtime_text();
+    fn build(&self, _ctx: &Context, state: &PreTurnState) -> Option<PromptNode> {
+        let text = state.plan_runtime_text();
         if text.trim().is_empty() {
             return None;
         }
@@ -267,12 +287,12 @@ impl SnapshotPart for PlanSnapshotPart {
     }
 }
 
-impl SnapshotPart for WorkflowSnapshotPart {
+impl PreTurnContextPart for PreTurnWorkflowStatePart {
     fn key(&self) -> &'static str {
-        "workflow"
+        "workflow_state"
     }
 
-    fn build(&self, ctx: &Context, _snapshot: &Snapshot) -> Option<PromptNode> {
+    fn build(&self, ctx: &Context, _state: &PreTurnState) -> Option<PromptNode> {
         let mut blocks = Vec::new();
 
         if let Some(bound_workflow) = ctx.bound_workflow() {
@@ -315,65 +335,25 @@ impl SnapshotPart for WorkflowSnapshotPart {
                 ));
             }
         } else {
-            blocks.push(PromptBlock::Paragraph(
-                "[Current phase: workflow selection] bound_workflow_id=<none>. Before executing any task, call `activate_workflow` to choose the best candidate workflow, or call `create_workflow` to create a new workflow. Only those two tools are currently available."
-                    .to_string(),
-            ));
-        }
-
-        let summaries = ctx.workflows.summaries(8);
-        if !summaries.is_empty() {
-            blocks.push(PromptBlock::BulletList(
-                summaries
-                    .into_iter()
-                    .map(|summary| {
-                        let prefix = match summary.origin {
-                            crate::workflow::WorkflowOrigin::Builtin => "[builtin] ",
-                            crate::workflow::WorkflowOrigin::Workspace => "[workspace] ",
-                        };
-                        if summary.when_to_use_summary.is_empty() {
-                            format!("{prefix}{}", summary.id)
-                        } else {
-                            format!(
-                                "{prefix}{} | when={}",
-                                summary.id, summary.when_to_use_summary
-                            )
-                        }
-                    })
-                    .collect(),
-            ));
+            blocks.push(PromptBlock::KeyValueList(vec![(
+                "bound_workflow_id".to_string(),
+                "<none>".to_string(),
+            )]));
         }
 
         Some(PromptNode::State(PromptStateDoc::new(self.key(), blocks)))
     }
 }
 
-impl SnapshotPart for EventsSnapshotPart {
-    fn key(&self) -> &'static str {
-        "events"
-    }
-
-    fn build(&self, _ctx: &Context, snapshot: &Snapshot) -> Option<PromptNode> {
-        let text = snapshot.events_runtime_text();
-        if text.trim().is_empty() {
-            return None;
-        }
-        Some(PromptNode::State(PromptStateDoc::new(
-            self.key(),
-            vec![PromptBlock::Paragraph(text)],
-        )))
-    }
-}
-
-impl SnapshotPart for AppSnapshotPart {
+impl PreTurnContextPart for PreTurnAppSurfacePart {
     fn key(&self) -> &'static str {
         "app"
     }
 
-    fn build(&self, ctx: &Context, snapshot: &Snapshot) -> Option<PromptNode> {
+    fn build(&self, ctx: &Context, state: &PreTurnState) -> Option<PromptNode> {
         let mut children = Vec::new();
 
-        let focused = snapshot.focused_app_runtime_text();
+        let focused = state.focused_app_runtime_text();
         let mut other_app_children = Vec::new();
 
         let app_usages = build_runtime_app_usages(ctx);
@@ -408,7 +388,7 @@ impl SnapshotPart for AppSnapshotPart {
         }
 
         let mut focused_app_children = Vec::new();
-        let app_entries = snapshot.app_state_entries();
+        let app_entries = state.app_state_entries();
         if !app_entries.is_empty() {
             let mut blocks = Vec::new();
             for entry in app_entries {
@@ -448,6 +428,154 @@ impl SnapshotPart for AppSnapshotPart {
 
         Some(PromptNode::Group(PromptGroupDoc::new(self.key(), children)))
     }
+}
+
+impl AfterClaimContextPart for AfterClaimInputPart {
+    fn key(&self) -> &'static str {
+        "claimed_input"
+    }
+
+    fn build(&self, _ctx: &Context, input: &AfterClaimContextInput) -> Option<PromptNode> {
+        if input.is_empty() {
+            return None;
+        }
+
+        let mut children = Vec::new();
+        if !input.events.is_empty() {
+            children.push(PromptNode::State(PromptStateDoc::new(
+                "events",
+                vec![PromptBlock::Paragraph(render_afterclaim_events(
+                    &input.events,
+                ))],
+            )));
+        }
+        if !input.app_notices.is_empty() {
+            children.push(PromptNode::State(PromptStateDoc::new(
+                "app_notices",
+                vec![PromptBlock::BulletList(
+                    input
+                        .app_notices
+                        .iter()
+                        .map(|(app, reason)| {
+                            format!("app={app} reason={}", summarize_context_text(reason, 160))
+                        })
+                        .collect(),
+                )],
+            )));
+        }
+
+        Some(PromptNode::Group(PromptGroupDoc::new(self.key(), children)))
+    }
+}
+
+impl AfterClaimContextPart for AfterClaimWorkflowRoutingPart {
+    fn key(&self) -> &'static str {
+        "workflow_routing"
+    }
+
+    fn build(&self, ctx: &Context, _input: &AfterClaimContextInput) -> Option<PromptNode> {
+        let mut blocks = Vec::new();
+        if ctx.bound_workflow_id.is_none() {
+            blocks.push(PromptBlock::Paragraph(
+                "Before executing claimed work, call `activate_workflow` to choose the best candidate workflow, or call `create_workflow` if none fits. Only workflow binding tools are available until a workflow is bound."
+                    .to_string(),
+            ));
+        } else if let Some(workflow_id) = ctx.bound_workflow_id.as_deref() {
+            blocks.push(PromptBlock::KeyValueList(vec![(
+                "current_bound_workflow_id".to_string(),
+                workflow_id.to_string(),
+            )]));
+        }
+
+        let summaries = ctx.workflows.summaries(8);
+        if !summaries.is_empty() {
+            blocks.push(PromptBlock::BulletList(
+                summaries
+                    .into_iter()
+                    .map(|summary| {
+                        let prefix = match summary.origin {
+                            crate::workflow::WorkflowOrigin::Builtin => "[builtin] ",
+                            crate::workflow::WorkflowOrigin::Workspace => "[workspace] ",
+                        };
+                        if summary.when_to_use_summary.is_empty() {
+                            format!("{prefix}{}", summary.id)
+                        } else {
+                            format!(
+                                "{prefix}{} | when={}",
+                                summary.id, summary.when_to_use_summary
+                            )
+                        }
+                    })
+                    .collect(),
+            ));
+        }
+
+        if blocks.is_empty() {
+            None
+        } else {
+            Some(PromptNode::State(PromptStateDoc::new(self.key(), blocks)))
+        }
+    }
+}
+
+fn render_afterclaim_events(events: &[EventView]) -> String {
+    let mut lines = Vec::new();
+    if events
+        .iter()
+        .any(|event| matches!(event.status, crate::events::EventStatus::Claimed))
+    {
+        lines.push(
+            "Delivery reminder: assistant text is not automatically sent to the user; use `finish_and_send` with `reply_message` for final delivery."
+                .to_string(),
+        );
+        lines.push(String::new());
+    }
+    for (index, event) in events.iter().enumerate() {
+        if index > 0 {
+            lines.push(String::new());
+        }
+        match &event.payload {
+            EventPayload::TelegramIncoming(payload) => {
+                lines.push(format!(
+                    "- {}. [telegram / {} / arrived_at_ms={}] {} @ {} (chat_id={}): {}",
+                    event.event_id,
+                    event.status,
+                    event.arrived_at_ms,
+                    payload.sender,
+                    payload.chat_title,
+                    payload.chat_id,
+                    summarize_context_text(&payload.incoming_text, 240)
+                ));
+            }
+            EventPayload::TerminalIncoming(payload) => {
+                lines.push(format!(
+                    "- {}. [terminal / {} / arrived_at_ms={}] {}: {}",
+                    event.event_id,
+                    event.status,
+                    event.arrived_at_ms,
+                    payload.origin,
+                    summarize_context_text(&payload.incoming_text, 240)
+                ));
+            }
+        }
+        if let Some(error) = event.last_error.as_deref() {
+            lines.push(format!(
+                "  last_error={}",
+                summarize_context_text(error, 160)
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn summarize_context_text(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let char_count = compact.chars().count();
+    if char_count <= max_chars {
+        return compact;
+    }
+    let head = compact.chars().take(max_chars).collect::<String>();
+    format!("{head}...")
 }
 
 fn render_prompt_memory_facts(facts: &[PromptMemoryFact]) -> Vec<PromptBlock> {

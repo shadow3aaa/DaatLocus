@@ -204,34 +204,6 @@ impl EventStore {
         Ok(Some(view))
     }
 
-    pub fn attention_events(&self) -> Vec<EventView> {
-        let inner = self.inner.lock();
-        let mut views = inner
-            .state
-            .order
-            .iter()
-            .rev()
-            .filter_map(|event_id| {
-                let event = inner.state.events.get(event_id)?;
-                event.status.requires_attention().then(|| EventView {
-                    event_id: *event_id,
-                    source: event.source,
-                    status: event.status,
-                    arrived_at_ms: event.arrived_at_ms,
-                    payload: event.payload.clone(),
-                    last_error: event.last_error.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
-        views.sort_by(|left, right| {
-            right
-                .arrived_at_ms
-                .cmp(&left.arrived_at_ms)
-                .then_with(|| left.event_id.cmp(&right.event_id))
-        });
-        views
-    }
-
     pub fn driver_event_statuses(&self) -> Vec<(Uuid, EventStatus)> {
         let inner = self.inner.lock();
         inner
@@ -359,12 +331,6 @@ impl EventStore {
         event.last_updated_at_ms = Utc::now().timestamp_millis();
         persist_locked(&inner)?;
         Ok(result)
-    }
-}
-
-impl EventStatus {
-    pub fn requires_attention(self) -> bool {
-        matches!(self, Self::Pending)
     }
 }
 

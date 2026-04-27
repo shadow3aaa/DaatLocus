@@ -2,12 +2,12 @@
 
 This document defines the agent-facing boundaries that match the current Daat Locus implementation.
 
-The goal is not to write abstract slogans. The goal is to give future changes to `app`, `events`, `runtime_tools`, `snapshot`, `telegram_transport`, `workflow`, `memory`, `sleep`, and related modules a set of design constraints that match how the code actually works.
+The goal is not to write abstract slogans. The goal is to give future changes to `app`, `events`, `runtime_tools`, `runtime_context`, `preturn_state`, `telegram_transport`, `workflow`, `memory`, `sleep`, and related modules a set of design constraints that match how the code actually works.
 
 ## Project Reality
 
 - Daat Locus is a long-running, tool-driven agent.
-- Its main loop is not a chat app where a user sends one message and the model sends one answer. It is a runtime where world state enters a snapshot, the model decides what to do, and tools mutate the world.
+- Its main loop is not a chat app where a user sends one message and the model sends one answer. It is a runtime where structured context is injected, the model decides what to do, and tools mutate the world.
 - External input enters the current turn primarily through `Event`, `PendingWork`, background app notices, and automatic memory recall.
 - Plain assistant text is normally an explanation or intermediate record inside the runtime. It is not automatically sent to Telegram or any other external system.
 - Real-world changes must happen through explicit tool calls.
@@ -39,19 +39,16 @@ A runtime turn usually contains these layers:
 
 1. System prompt contract
 2. Memory and history messages
-3. Current world snapshot `world_snapshot`
-4. Model text output or tool calls
-5. Tool results written back into history
-6. Another tool cycle when needed
+3. One-shot `afterclaim_context` for newly claimed work
+4. Repeated `preturn_context` for current execution state
+5. Model text output or tool calls
+6. Tool results written back into history
+7. Another tool cycle when needed
 
-The current snapshot covers at least:
+Runtime context is split by lifetime:
 
-- sensory: time and machine state
-- plan: the current step-by-step plan
-- workflows: the currently bound workflow and candidate workflow summaries
-- events: pending events
-- apps: the current foreground app and app-structured state
-- memories: automatically recalled long-term memories
+- `afterclaim_context`: claimed event/app-notice input and workflow routing candidates
+- `preturn_context`: memory recall, sensory state, plan, bound workflow state, and app surface state
 
 Therefore, when adding an agent-facing interface, first decide which layer it belongs to. Do not directly pile it into some app state.
 
@@ -161,7 +158,7 @@ Rules:
 - `WorkflowRunRecord` is recorded by code. The model must not manually write a daytime outcome log.
 - The main workflow evolution actions are `patch` and `merge`.
 - v1 does not introduce `deprecate`.
-- v1 does not require semantic search. Candidate workflows are shown directly in the snapshot.
+- v1 does not require semantic search. Candidate workflows are shown directly in `afterclaim_context`.
 - Workflow evolution must depend only on workflow-bound execution evidence. It must not depend on error demos, failure patterns, or prompt evaluation artifacts.
 
 Do not use workflow as:
@@ -222,7 +219,7 @@ A `RuntimeErrorCase` may include:
 - `case_id`, `turn_id`, `occurred_at_ms`
 - `error_kind`, `severity`, and `detected_by`
 - task context: origin, event source, user request summary, claimed ids, bound workflow id, workflow origin
-- runtime context: phase, available tool names, focused app, plan summary, compact snapshot summary
+- runtime context: phase, available tool names, focused app, plan summary, compact context summary
 - action context: assistant text summary, tool call summaries, tool result summaries, and a short previous-action window
 - error observation: expected behavior, actual behavior, evidence, recoverability, retry counts, and terminal status
 - relevant existing runtime contract references or hashes
@@ -529,11 +526,11 @@ Workflow's responsibility is to provide reusable execution specifications across
 
 Current rules:
 
-- The workflow list appears directly in the snapshot as summaries.
+- The workflow list appears directly in `afterclaim_context` as summaries.
 - The currently bound workflow is exposed to the model in fuller form.
 - v1 only needs `create_workflow` and `activate_workflow`, or an equivalent bind tool.
 - `create_workflow` may only create workspace workflows. It must not overwrite builtin workflows.
-- Do not introduce `select_workflow` semantic search. Candidate workflows should be displayed directly in the snapshot.
+- Do not introduce `select_workflow` semantic search. Candidate workflows should be displayed directly in `afterclaim_context`.
 - Do not introduce explicit `log_workflow_outcome`. Daytime evidence should be written automatically by code into `WorkflowRunRecord`.
 - Whether to bind a workflow is driven by task complexity and reusability, not by `focus_app`.
 
@@ -548,7 +545,7 @@ Code is responsible for:
 - writing `WorkflowRunRecord` directly at the work-completion boundary
 - claiming, releasing, and requeueing pending work
 - maintaining the outbox
-- loading snapshots
+- loading structured runtime context
 - controlling tool scope
 - recording traces
 - running prompt compile and workflow evolution separately
@@ -580,27 +577,118 @@ The model is responsible for:
 
 If a new interface mainly makes the model perform mechanical lookup, it is probably designed incorrectly.
 
-## Snapshot Rules
+## Runtime Context Rules
 
-Snapshots should provide enough information for judgment. They should not force the model into mechanical exploration.
+The old unified `snapshot` concept is too broad. Do not treat it as the long-term context model.
 
-Allowed snapshot contents:
+Future context assembly should split the old snapshot responsibilities into two structured injection hooks:
 
-- current foreground app
-- structured app state
-- currently bound workflow
-- workflow summaries
-- event summaries
-- plan
-- memory excerpts
-- machine state
+- `AfterClaim Context`
+- `PreTurn Context`
 
-Disallowed snapshot contents:
+This does not mean deleting structured rendering. The structured unit rendering model must remain. Keep using document/part/block-style assembly such as `PromptDocument`, `PromptNode`, `PromptGroupDoc`, `PromptStateDoc`, `PromptUnitDoc`, `PromptBlock`, and `LlmPromptRenderer`. The goal is to replace one monolithic snapshot assembler with separate structured context assemblers, not to return to ad hoc string concatenation.
 
-- hidden multistep choreographies
-- long-term selected cursors
-- locating information that should be provided explicitly as tool parameters
-- long, uncompressed, low-value raw logs
+### AfterClaim Context
+
+`AfterClaim Context` is injected after runtime work has been claimed.
+
+It contains one-shot context for the currently claimed work:
+
+- claimed event input
+- claimed app notice input
+- event/app notice source metadata needed to handle the claimed work
+- workflow catalog / routing candidates needed to choose or create a workflow for this claimed work
+
+It is not a per-turn status dump.
+
+Rules:
+
+- Inject it when new work is claimed.
+- Runtime history compaction is a turn boundary. If compaction happens while claimed work is still in progress, release/reclaim the work and inject `AfterClaim Context` in the new turn instead of trying to restore it inside the old turn.
+- Do not repeat it every turn unless compaction made reinjection necessary.
+- Event input belongs here, not in a generic world snapshot.
+- Workflow list / candidate routing belongs here, not in per-turn execution state.
+- It should enter runtime history as structured context so later tool calls and assistant messages can build on a stable prefix.
+
+### PreTurn Context
+
+`PreTurn Context` is injected before each model turn, using the same broad trigger point that the old snapshot used.
+
+It contains current execution state that may change after tools run:
+
+- memory recall for the turn
+- sensory state such as current time and machine status
+- current plan state
+- current app surface state, focused app state, and background app hints
+- current bound workflow execution context, including workflow id, origin, and concise execution excerpt
+
+Rules:
+
+- Inject it before every model turn.
+- Preserve turn boundaries for operations that change the next context view, such as `activate_workflow`, `focus_app`, `put_away_app`, `update_workflow`, and workspace app dynamic tools that return a turn boundary.
+- Treat runtime history compaction as the same kind of boundary: compact, end the current turn, and build a fresh `PreTurn Context` for the next turn.
+- It should enter runtime history as structured context, rather than being appended as a transient final user message outside history.
+- Keep it concise and structurally compressible; do not persist full raw app screens, huge memory excerpts, or repeated low-value status dumps.
+
+### Capability Docs
+
+Do not mix capability manuals into state when a stable instruction layer is better.
+
+Examples:
+
+- event completion rules belong in system/tool contract or a small event contract block
+- app usage and `how_to_use` are capability docs, not app state
+- workflow routing rules belong in workflow contract / AfterClaim routing context
+
+### Workflow Context Split
+
+Workflow context has three distinct roles:
+
+- `WorkflowRouting`: workflow catalog and choose/create guidance for the currently claimed work; belongs in `AfterClaim Context`
+- `WorkflowState`: the currently bound workflow execution context; belongs in `PreTurn Context`
+- `WorkflowHistoryMetadata`: which workflow a past task used; belongs in turn metadata/history, not in the workflow catalog
+
+Do not make the model infer past task workflow ownership from adjacent tool logs if code can record it directly.
+
+### Historical Metadata
+
+When context needs to support future edits to past task workflows, preserve a small structured turn metadata record rather than saving full snapshots.
+
+Turn metadata should be able to record facts such as:
+
+- turn id
+- claimed event or app notice ids
+- user request summary
+- bound workflow id and origin
+- workflow run id when available
+- focused app
+- final disposition or outcome
+- completed event ids
+- concise tool summary
+
+This metadata should enter runtime history and be compressible. It is separate from sleep-only `WorkflowRunRecord` evidence, which may be consumed by sleep and must not be the only source of daytime historical workflow attribution.
+
+### Legacy Snapshot Mapping
+
+When refactoring old snapshot parts, use this mapping:
+
+- old `recall_memories` -> `PreTurn.Recall`
+- old `sensory` -> `PreTurn.Environment`
+- old `plan` -> `PreTurn.TaskState`
+- old focused app state and background hints -> `PreTurn.AppSurface`
+- old app usage / how-to-use -> `CapabilityDocs.App`
+- old claimed events -> `AfterClaim.ClaimedInput`
+- old event queue summary -> `AfterClaim.EventQueueContext`
+- old delivery reminder -> `EventContract`
+- old workflow list and selection hint -> `AfterClaim.WorkflowRouting`
+- old bound workflow id, origin, steps, done criteria, and recovery -> `PreTurn.WorkflowState`
+
+Avoid these designs:
+
+- persisting the full old snapshot on every turn
+- using one context blob to carry state, routing, manuals, memory recall, and history metadata
+- repeatedly injecting event input or workflow catalog every turn when no compaction occurred
+- dropping structured rendering in favor of hand-built strings
 
 ## Anti-Patterns
 

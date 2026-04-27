@@ -20,14 +20,14 @@ use crate::{
     memory::Memory,
     pending_work::PendingWorkQueue,
     plan::Plan,
+    preturn_state::PreTurnState,
     reasoning::runtime::PromptMemoryContext,
     reasoning::{
         compiled::CompiledPromptStore,
-        prompt_assembler::{SnapshotAssembler, SystemPromptAssembler},
+        prompt_assembler::{PreTurnContextAssembler, SystemPromptAssembler},
         prompt_doc::PromptDocument,
     },
     sandbox::RuntimeSandboxPolicy,
-    snapshot::Snapshot,
     telegram_acl::TelegramAclHandle,
     telegram_transport::state::TelegramTransportStateHandle,
     workflow::{WorkflowRunOutcome, WorkflowSpec, WorkflowStore},
@@ -37,7 +37,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTurnPhase {
     PreflightMemory,
-    PreflightSnapshot,
+    PreflightPreTurnContext,
     PreflightCompaction,
     ModelRequest,
     ToolExecution,
@@ -47,7 +47,7 @@ impl RuntimeTurnPhase {
     pub fn label(self) -> &'static str {
         match self {
             Self::PreflightMemory => "preflight: hindsight memory",
-            Self::PreflightSnapshot => "preflight: snapshot",
+            Self::PreflightPreTurnContext => "preflight: preturn context",
             Self::PreflightCompaction => "preflight: compaction",
             Self::ModelRequest => "model request",
             Self::ToolExecution => "tool execution",
@@ -90,6 +90,7 @@ pub struct Context {
     pub telegram_live_drafts: TelegramLiveDraftRegistry,
     pub claimed_event_ids: Vec<String>,
     pub claimed_app_notices: Vec<AppNoticeKey>,
+    pub afterclaim_context_fingerprint: Option<String>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
 }
@@ -162,8 +163,8 @@ impl Context {
         SystemPromptAssembler::default_runtime().assemble(self)
     }
 
-    pub fn runtime_snapshot_doc(&self, snapshot: &Snapshot) -> PromptDocument {
-        SnapshotAssembler::default_runtime().assemble(self, snapshot)
+    pub fn preturn_context_doc(&self, state: &PreTurnState) -> PromptDocument {
+        PreTurnContextAssembler::default_runtime().assemble(self, state)
     }
 
     pub fn bound_workflow(&self) -> Option<&WorkflowSpec> {

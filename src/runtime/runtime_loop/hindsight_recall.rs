@@ -204,6 +204,7 @@ fn format_runtime_message_for_hindsight(
     let content = message.text_content()?.trim();
     if content.is_empty()
         || is_runtime_summary_message_for_hindsight(content)
+        || is_runtime_context_message_for_hindsight(content)
         || content.starts_with("assistant tool-call protocol:")
     {
         return None;
@@ -226,6 +227,10 @@ fn format_runtime_message_for_hindsight(
 fn is_runtime_summary_message_for_hindsight(content: &str) -> bool {
     content.starts_with("Earlier runtime history summary:")
         || content.starts_with("Earlier tool/context progress summary:")
+}
+
+fn is_runtime_context_message_for_hindsight(content: &str) -> bool {
+    content.starts_with("<afterclaim_context") || content.starts_with("<preturn_context")
 }
 
 fn truncate_hindsight_query_preserving_latest_input(

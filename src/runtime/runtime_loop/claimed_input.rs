@@ -323,6 +323,10 @@ pub(super) async fn finalize_claimed_runtime_app_notices(
     let mut released = Vec::new();
     let mut resolved = Vec::new();
     let mut suppressed = Vec::new();
+    let runtime_context_compacted = output
+        .actions
+        .iter()
+        .any(|action| action.kind == "runtime_context_compacted");
     for notice in notices {
         let app = &notice.app;
         if let Err(err) = context.apps.refresh_notice_for(app).await {
@@ -349,6 +353,19 @@ pub(super) async fn finalize_claimed_runtime_app_notices(
 
         match current_reason {
             Some(current_reason) if current_reason == notice.reason => {
+                if runtime_context_compacted {
+                    match context.pending_work.release_claimed(work) {
+                        Ok(true) => released.push(app.to_string()),
+                        Ok(false) => {}
+                        Err(err) => {
+                            tracing::error!(
+                                "failed to release claimed app notice driver for {app}: {err:?}"
+                            );
+                        }
+                    }
+                    continue;
+                }
+
                 let attempts = context.record_unresolved_app_notice_turn(notice);
                 if attempts >= APP_NOTICE_UNRESOLVED_SUPPRESSION_THRESHOLD {
                     context.suppress_app_notice(
@@ -500,34 +517,19 @@ pub(super) fn claimed_event_statuses_are_terminal(statuses: &[EventStatus]) -> b
     summarize_claimed_event_statuses(statuses).all_terminal
 }
 
-pub(super) fn prompt_message_for_claimed_input(
-    _context: &Context,
-    input: &ClaimedRuntimeInput,
-) -> HistoryMessage {
-    match input {
-        ClaimedRuntimeInput::Event(event) => match &event.payload {
-            EventPayload::TelegramIncoming(payload) => HistoryMessage::user(format!(
-                "<world_event source=\"telegram\" event_id=\"{}\" status=\"{}\">\nfrom: {}\nchat_title: {}\nchat_id: {}\nincoming_text: {}\n</world_event>",
-                event.event_id,
-                event.status,
-                payload.sender,
-                payload.chat_title,
-                payload.chat_id,
-                payload.incoming_text.trim(),
-            )),
-            EventPayload::TerminalIncoming(payload) => HistoryMessage::user(format!(
-                "<world_event source=\"terminal\" event_id=\"{}\" status=\"{}\">\norigin: {}\nincoming_text: {}\n</world_event>",
-                event.event_id,
-                event.status,
-                payload.origin,
-                payload.incoming_text.trim(),
-            )),
-        },
-        ClaimedRuntimeInput::AppNotice { app, reason } => HistoryMessage::user(format!(
-            "<app_notice app=\"{}\">\nreason: {}\nresolution: call `notice_resolved` with this app and reason when handled\n</app_notice>",
-            app, reason,
-        )),
+pub(super) fn afterclaim_context_input_for_claimed_inputs(
+    inputs: &[ClaimedRuntimeInput],
+) -> AfterClaimContextInput {
+    let mut context = AfterClaimContextInput::default();
+    for input in inputs {
+        match input {
+            ClaimedRuntimeInput::Event(event) => context.events.push(event.clone()),
+            ClaimedRuntimeInput::AppNotice { app, reason } => {
+                context.app_notices.push((app.clone(), reason.clone()));
+            }
+        }
     }
+    context
 }
 
 pub(super) enum RuntimeFollowUpDecision {

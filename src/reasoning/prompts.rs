@@ -6,7 +6,7 @@ use crate::{
 use super::prompt_text::{PromptTextBuilder, render_bullet_list};
 
 pub const EVENT_UNIT_WHAT: &str = r#"External inputs primarily enter the current turn through events. In an event-driven turn, plain assistant text is not automatically sent to the external user.
-`<world_snapshot> ... </world_snapshot>` is not a user conversation message; it is injected context describing the current world state. Structured events or app notices claimed by the current turn may also appear as prior `user` messages in the thread context; they are still pending world inputs, not ordinary chat."#;
+`<afterclaim_context> ... </afterclaim_context>` and `<preturn_context> ... </preturn_context>` are structured runtime context messages, not ordinary user chat. Claimed events or app notices inside them are pending world inputs that require explicit tool handling."#;
 
 pub const EVENT_UNIT_HOW: &str = r#"The world only changes when you explicitly call tools. Any event completion that must deliver a final answer to the user, whether `resolved` or `failed`, must call `finish_and_send` with a `reply_message`.
 Any claimed app notice that has been handled must be explicitly completed with `notice_resolved`; assistant text alone does not resolve an app notice.
@@ -19,7 +19,7 @@ For event-driven turns:
 - If work still needs to continue, keep calling tools.
 - Do not treat assistant text itself as a send action; final delivery must happen through the tool.
 For user-facing replies, use the configured locale by default unless the user's message strongly indicates another language.
-Read the current snapshot carefully, analyze the situation, act first, and then provide the conclusion."#;
+Read the current structured context carefully, analyze the situation, act first, and then provide the conclusion."#;
 
 pub const APPS_UNIT_WHAT: &str = "An App is an encapsulated capability surface. Each App provides a distinct functional surface.";
 
@@ -32,7 +32,7 @@ pub const WORKSPACE_UNIT_WHEN: &str = "When you need to perform file operations 
 pub const WORKSPACE_UNIT_WHY: &str =
     "A fixed workspace gives you a stable owned area for tasks that require file operations.";
 
-pub const WORKSPACE_UNIT_HOW: &str = "When using relative paths, do not include the workspace directory name again. The snapshot already gives the absolute workspace path; relative paths are relative to that directory.";
+pub const WORKSPACE_UNIT_HOW: &str = "When using relative paths, do not include the workspace directory name again. The workspace unit already gives the absolute workspace path; relative paths are relative to that directory.";
 
 pub const MEMORIES_UNIT_WHAT: &str = "Automatic memory recall, rendered under `<recall_memories>`, prioritizes long-term consolidated knowledge such as observations and may include raw memories and citations when useful. `deep_recall` explicitly triggers a deeper recall pass.";
 
@@ -48,9 +48,9 @@ pub const PLAN_UNIT_HOW: &str = "Use `update_plan` to maintain the plan. Each ca
 
 pub const WORKFLOW_UNIT_WHAT: &str = "A workflow is an evolvable task execution specification. Each workflow describes applicability, preconditions, reusable steps, done criteria, and stable recovery paths.";
 
-pub const WORKFLOW_UNIT_WHEN: &str = "When `<workflow>` shows `bound_workflow_id=<none>`, bind one workflow before executing the task. Choose the best candidate from the snapshot and call `activate_workflow`; if none fits, call `create_workflow` to create a new workflow. If a workflow is already bound, do not call `activate_workflow` again just to reaffirm it; continue executing under the current binding. Workflows apply to all task types, including one-off replies.";
+pub const WORKFLOW_UNIT_WHEN: &str = "When `<workflow>` shows `bound_workflow_id=<none>`, bind one workflow before executing the task. Choose the best candidate from `<workflow_routing>` in `<afterclaim_context>` and call `activate_workflow`; if none fits, call `create_workflow` to create a new workflow. If the user asks to modify the workflow for a past, existing, or previously discussed task class, treat it as workflow maintenance even when the wording is an ordinary instruction and does not explicitly mention workflows. If a workflow is already bound, do not call `activate_workflow` again just to reaffirm it; continue executing under the current binding. Workflows apply to all task types, including one-off replies.";
 
-pub const WORKFLOW_UNIT_HOW: &str = "A workflow binding is runtime state for the current task and does not rewrite the workflow spec. You do not need to manually log daytime workflow outcomes; the runtime writes `WorkflowRunRecord` directly at work-completion boundaries for sleep-time patch or merge.";
+pub const WORKFLOW_UNIT_HOW: &str = "A workflow binding is runtime state for the current task and does not rewrite the workflow spec. You do not need to manually log daytime workflow outcomes; the runtime writes `WorkflowRunRecord` directly at work-completion boundaries for sleep-time patch or merge. When the user asks or contextually implies that an existing reusable process should change, bind the workflow-editing meta workflow, then use `read_workflow` and `update_workflow`; do not execute or activate the workflow being edited as the current task workflow.";
 
 pub const HISTORY_COMPACTION_PROMPT: &str = r#"You are performing a context checkpoint compaction task.
 Generate a handoff summary for another model that will continue this same thread.

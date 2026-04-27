@@ -49,7 +49,8 @@ pub struct RuntimeErrorRuntimeContext {
     pub available_tool_names: Vec<String>,
     pub focused_app: Option<String>,
     pub plan_summary: Vec<String>,
-    pub compact_snapshot_summary: Option<String>,
+    #[serde(default, alias = "compact_snapshot_summary")]
+    pub compact_context_summary: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

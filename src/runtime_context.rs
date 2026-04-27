@@ -13,7 +13,10 @@ use crate::{
         RuntimeStepConversation,
     },
     persistence::append_bytes_durable,
+    preturn_state::PreTurnState,
     reasoning::{
+        prompt_assembler::AfterClaimContextAssembler,
+        prompt_parts::AfterClaimContextInput,
         prompt_renderer::LlmPromptRenderer,
         prompts::{HISTORY_COMPACTION_PROMPT, HISTORY_COMPACTION_SUMMARY_PREFIX},
         runtime::{
@@ -72,22 +75,23 @@ struct RuntimeCompactionTelemetryEvent {
     error: Option<String>,
 }
 
-pub fn build_runtime_request_envelope(
-    context: &Context,
-    snapshot_text: &str,
-) -> RuntimeRequestEnvelope {
+pub fn build_runtime_request_envelope(context: &Context) -> RuntimeRequestEnvelope {
     let system_messages =
         LlmPromptRenderer::render_system_messages(&context.runtime_system_prompt_doc());
-    RuntimeRequestEnvelope::from_world_snapshot(system_messages, snapshot_text)
+    RuntimeRequestEnvelope::from_system_messages(system_messages)
 }
 
-pub fn build_runtime_snapshot_text(
-    context: &Context,
-    snapshot: &crate::snapshot::Snapshot,
-) -> String {
+pub fn build_preturn_context_text(context: &Context, state: &PreTurnState) -> String {
     LlmPromptRenderer::render_document_with_root(
-        &context.runtime_snapshot_doc(snapshot),
-        Some("runtime_snapshot"),
+        &context.preturn_context_doc(state),
+        Some("preturn_context"),
+    )
+}
+
+pub fn build_afterclaim_context_text(context: &Context, input: &AfterClaimContextInput) -> String {
+    LlmPromptRenderer::render_document_with_root(
+        &AfterClaimContextAssembler::default_runtime().assemble(context, input),
+        Some("afterclaim_context"),
     )
 }
 

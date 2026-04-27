@@ -40,7 +40,7 @@ pub struct DashboardState {
     pub sleep_status_output: String,
     pub inspect_telegram_output: String,
     pub system_prompt_output: String,
-    pub snapshot_output: String,
+    pub preturn_context_output: String,
     pub app_status_outputs: Vec<(String, String)>,
     #[serde(default)]
     pub pending_access_requests: Vec<PendingAccessRequest>,
@@ -204,7 +204,7 @@ struct ClearCommand;
 struct DebugCommand;
 struct DebugPersonaSubcommand;
 struct DebugSystemPromptSubcommand;
-struct DebugSnapshotSubcommand;
+struct DebugContextSubcommand;
 struct AppStatusCommand;
 struct StatusCommand;
 struct SleepCommand;
@@ -220,7 +220,7 @@ static CLEAR_COMMAND: ClearCommand = ClearCommand;
 static DEBUG_COMMAND: DebugCommand = DebugCommand;
 static DEBUG_PERSONA_SUBCOMMAND: DebugPersonaSubcommand = DebugPersonaSubcommand;
 static DEBUG_SYSTEM_PROMPT_SUBCOMMAND: DebugSystemPromptSubcommand = DebugSystemPromptSubcommand;
-static DEBUG_SNAPSHOT_SUBCOMMAND: DebugSnapshotSubcommand = DebugSnapshotSubcommand;
+static DEBUG_CONTEXT_SUBCOMMAND: DebugContextSubcommand = DebugContextSubcommand;
 static APP_STATUS_COMMAND: AppStatusCommand = AppStatusCommand;
 static STATUS_COMMAND: StatusCommand = StatusCommand;
 static SLEEP_COMMAND: SleepCommand = SleepCommand;
@@ -240,7 +240,7 @@ static TELEGRAM_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
 static DEBUG_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
     &DEBUG_PERSONA_SUBCOMMAND,
     &DEBUG_SYSTEM_PROMPT_SUBCOMMAND,
-    &DEBUG_SNAPSHOT_SUBCOMMAND,
+    &DEBUG_CONTEXT_SUBCOMMAND,
 ];
 
 static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 7] = [
@@ -361,7 +361,7 @@ impl DashboardCommand for DebugCommand {
         let Some(subcommand_name) = parts.get(1).copied() else {
             return DashboardCommandResult::ShowOverlay {
                 title: self.overlay_title(raw),
-                text: "available:\n  debug persona\n  debug system-prompt\n  debug snapshot"
+                text: "available:\n  debug persona\n  debug system-prompt\n  debug context"
                     .to_string(),
             };
         };
@@ -434,13 +434,17 @@ impl DashboardSubcommand for DebugSystemPromptSubcommand {
     }
 }
 
-impl DashboardSubcommand for DebugSnapshotSubcommand {
+impl DashboardSubcommand for DebugContextSubcommand {
     fn usage(&self) -> &'static str {
-        "snapshot"
+        "context"
     }
 
     fn description(&self) -> &'static str {
-        "show latest runtime snapshot"
+        "show latest pre-turn runtime context"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["preturn-context", "preturn_context"]
     }
 
     fn execute(
@@ -451,7 +455,7 @@ impl DashboardSubcommand for DebugSnapshotSubcommand {
     ) -> DashboardCommandResult {
         DashboardCommandResult::ShowOverlay {
             title: raw.trim().to_uppercase(),
-            text: fallback_output(&context.state.snapshot_output),
+            text: fallback_output(&context.state.preturn_context_output),
         }
     }
 }
