@@ -249,6 +249,14 @@ impl Memory {
         }
     }
 
+    pub async fn discard_hindsight_handoff_backlog(&mut self) -> usize {
+        let discarded = self.hindsight_queue.discard_unsubmitted();
+        if discarded > 0 {
+            self.hindsight_queue.sync_to_disk().await;
+        }
+        discarded
+    }
+
     pub async fn clear_runtime_conversation(&mut self) -> MemoryRetainPlan {
         let retain_plan = self.runtime_conversation.take_for_hindsight().map_or(
             MemoryRetainPlan {
@@ -935,6 +943,12 @@ impl HindsightQueue {
             changed = true;
         }
         changed
+    }
+
+    fn discard_unsubmitted(&mut self) -> usize {
+        let before = self.trail.len();
+        self.trail.retain(|item| item.submitted);
+        before.saturating_sub(self.trail.len())
     }
 }
 
@@ -1747,6 +1761,28 @@ mod tests {
         assert!(queue.mark_handoffs_submitted(&[handoff_id]));
         assert_eq!(queue.handoff_backlog_count(), 0);
         assert!(queue.trail.is_empty());
+    }
+
+    #[test]
+    fn hindsight_queue_discards_only_unsubmitted_handoffs() {
+        let mut queue = HindsightQueue::default();
+        queue.push_turn(
+            "pending handoff".to_string(),
+            vec![HistoryMessage::user("not yet submitted")],
+        );
+        queue.push_turn(
+            "submitted handoff".to_string(),
+            vec![HistoryMessage::user("already submitted")],
+        );
+
+        let jobs = queue.collect_pending_retain_jobs();
+        assert_eq!(jobs.len(), 2);
+        assert!(queue.mark_handoffs_submitted(&[jobs[1].handoff_id]));
+
+        assert_eq!(queue.discard_unsubmitted(), 1);
+        assert_eq!(queue.trail.len(), 1);
+        assert_eq!(queue.trail[0].current_doing, "submitted handoff");
+        assert!(queue.trail[0].submitted);
     }
 
     #[test]

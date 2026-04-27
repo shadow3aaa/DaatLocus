@@ -114,12 +114,12 @@ pub(crate) async fn connect_bootstrapped_hindsight(
     let llm_env_vars = llm_proxy.env_vars();
     let server = HindsightManagedServer::new(hindsight_config.clone(), llm_env_vars.clone());
     if ensure_fresh {
-        if server.check_health().await {
-            // Daemon is running but may have stale config — restart to reload profile.
-            emit_startup_progress(
-                "[hindsight] daemon already running, restarting to apply config...",
-            );
-            server.stop().await?;
+        // Daemon health is not a reliable signal when the worker is wedged by
+        // retained async jobs. Stop best-effort regardless, then start with the
+        // current profile and LLM proxy.
+        emit_startup_progress("[hindsight] force restarting daemon to apply config...");
+        if let Err(err) = server.force_stop().await {
+            tracing::warn!("[hindsight] force stop before startup failed: {err:?}");
         }
         emit_startup_progress(
             "[hindsight] starting daemon (first run may take a few minutes to download embedding models)...",

@@ -18,13 +18,21 @@ use axum::{
 };
 use miette::{Result, miette};
 use serde_json::{Value, json};
-use tokio::{net::TcpListener, sync::oneshot};
+use tokio::{
+    net::TcpListener,
+    sync::{Semaphore, oneshot},
+    time::Duration,
+};
 use uuid::Uuid;
 
 use crate::{
     config::{Config, ModelConfig, ProviderConfig, resolve_env_reference},
     providers::{CodexOAuthClient, CopilotClient, OpenAIClient},
 };
+
+const HINDSIGHT_PROXY_MAX_IN_FLIGHT: usize = 2;
+const HINDSIGHT_PROXY_QUEUE_TIMEOUT_SECS: u64 = 2;
+const HINDSIGHT_PROXY_REQUEST_TIMEOUT_SECS: u64 = 90;
 
 #[derive(Clone)]
 pub(crate) struct HindsightLlmProxy {
@@ -53,6 +61,7 @@ struct ProxyState {
     api_key: Arc<str>,
     model_id: Arc<str>,
     target: Arc<HindsightLlmProxyTarget>,
+    limiter: Arc<Semaphore>,
 }
 
 enum HindsightLlmProxyTarget {
@@ -80,6 +89,7 @@ impl HindsightLlmProxy {
             api_key: Arc::from(api_key.as_str()),
             model_id: Arc::from(model.model_id.as_str()),
             target: Arc::new(target),
+            limiter: Arc::new(Semaphore::new(HINDSIGHT_PROXY_MAX_IN_FLIGHT)),
         };
         let router = Router::new()
             .route("/v1/chat/completions", post(handle_chat_completions))
@@ -197,12 +207,45 @@ async fn handle_chat_completions(
         );
     }
 
-    match state.target.chat_completion(payload).await {
-        Ok(value) => (StatusCode::OK, Json(value)).into_response(),
-        Err(err) => {
+    let _permit = match tokio::time::timeout(
+        Duration::from_secs(HINDSIGHT_PROXY_QUEUE_TIMEOUT_SECS),
+        state.limiter.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) => {
+            return proxy_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "proxy_closed",
+                "hindsight LLM proxy is shutting down",
+            );
+        }
+        Err(_) => {
+            return proxy_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "proxy_overloaded",
+                "hindsight LLM proxy is busy; retry later",
+            );
+        }
+    };
+
+    match tokio::time::timeout(
+        Duration::from_secs(HINDSIGHT_PROXY_REQUEST_TIMEOUT_SECS),
+        state.target.chat_completion(payload),
+    )
+    .await
+    {
+        Ok(Ok(value)) => (StatusCode::OK, Json(value)).into_response(),
+        Ok(Err(err)) => {
             tracing::warn!("[hindsight:llm-proxy] chat completion failed: {err:?}");
             proxy_error(StatusCode::BAD_GATEWAY, "upstream_error", &err.to_string())
         }
+        Err(_) => proxy_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "upstream_timeout",
+            "hindsight LLM proxy upstream request timed out",
+        ),
     }
 }
 

@@ -38,6 +38,7 @@ use crate::{
 const HEALTH_POLL_INTERVAL_MS: u64 = 1_000;
 const HEALTH_READY_TIMEOUT_MS: u64 = 60_000;
 const COMMAND_TIMEOUT_SECS: u64 = 60;
+const DAEMON_STOP_TIMEOUT_SECS: u64 = 20;
 /// `daemon start` blocks until the daemon is fully ready, which on first run
 /// requires downloading HuggingFace embedding models (~100 MB). Allow 10 min.
 const DAEMON_START_TIMEOUT_SECS: u64 = 600;
@@ -104,8 +105,24 @@ impl HindsightManagedServer {
         );
         let invoker = self.ensure_uv_invoker().await?;
         self.configure_profile(&invoker).await?;
-        self.start_daemon(&invoker).await?;
-        self.wait_for_ready().await?;
+        if let Err(err) = self.start_daemon(&invoker).await {
+            tracing::warn!(
+                "[hindsight:managed] daemon start failed; attempting best-effort stop: {err:?}"
+            );
+            let _ = self
+                .stop_with_invoker(&invoker, "daemon.stop_after_start_failure")
+                .await;
+            return Err(err);
+        }
+        if let Err(err) = self.wait_for_ready().await {
+            tracing::warn!(
+                "[hindsight:managed] daemon did not become ready; attempting best-effort stop: {err:?}"
+            );
+            let _ = self
+                .stop_with_invoker(&invoker, "daemon.stop_after_ready_timeout")
+                .await;
+            return Err(err);
+        }
         tracing::info!("[hindsight:managed] daemon ready at {}", self.base_url());
         Ok(())
     }
@@ -120,9 +137,24 @@ impl HindsightManagedServer {
             self.config.profile,
         );
         let invoker = self.ensure_uv_invoker().await?;
-        let mut cmd = invoker.embed_command(&self.package_spec());
-        cmd.args(self.daemon_profile_args()).arg("stop");
-        self.run_command(cmd, "daemon.stop").await
+        self.stop_with_invoker(&invoker, "daemon.stop").await
+    }
+
+    /// Stop the daemon even when its health endpoint is unhealthy or wedged.
+    pub async fn force_stop(&self) -> Result<()> {
+        tracing::info!(
+            "[hindsight:managed] force stopping daemon (profile={})",
+            self.config.profile,
+        );
+        let invoker = self.ensure_uv_invoker().await?;
+        self.stop_with_invoker(&invoker, "daemon.force_stop").await
+    }
+
+    pub async fn force_restart(&self) -> Result<()> {
+        if let Err(err) = self.force_stop().await {
+            tracing::warn!("[hindsight:managed] force stop failed before restart: {err:?}");
+        }
+        self.start().await
     }
 
     /// One-shot health probe (used to detect already-running daemon).
@@ -202,11 +234,19 @@ impl HindsightManagedServer {
             .await
     }
 
+    async fn stop_with_invoker(&self, invoker: &UvInvoker, label: &str) -> Result<()> {
+        let mut cmd = invoker.embed_command(&self.package_spec());
+        cmd.args(self.daemon_profile_args()).arg("stop");
+        self.run_command_with_timeout(cmd, label, DAEMON_STOP_TIMEOUT_SECS)
+            .await
+    }
+
     fn profile_env_vars(&self) -> Vec<(String, String)> {
         let mut vars = Vec::new();
         // Use a daat-locus-specific pg0 instance so the database does not
         // collide with other apps that also use hindsight-embed.
-        // Data lands at ~/.pg0/instances/daat-locus/data/
+        // hindsight-embed's pg0 wrapper stores this as
+        // ~/.pg0/instances/hindsight-embed-daat-locus/data/.
         vars.push((
             "HINDSIGHT_API_DATABASE_URL".into(),
             "pg0://daat-locus".into(),
@@ -240,9 +280,10 @@ impl HindsightManagedServer {
         label: &str,
         timeout_secs: u64,
     ) -> Result<()> {
-        // kill_on_drop(false): `daemon start` spawns a background OS process and
-        // exits 0 — we must not kill the Command handle after it returns.
-        cmd.kill_on_drop(false);
+        // If a wrapper command wedges, dropping the timed-out child should not
+        // leave the wrapper running forever. A normally completed `daemon start`
+        // has already detached the managed daemon before this matters.
+        cmd.kill_on_drop(true);
         let result = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output()).await;
         match result {
             Err(_) => Err(miette!(
