@@ -7,6 +7,12 @@ fn enter_runtime_phase(
     phase: RuntimeTurnPhase,
 ) {
     context.set_runtime_phase(Some(phase));
+    if let Some(tx) = tx {
+        tx.send_modify(|state| {
+            state.status_output =
+                crate::dashboard::render::render_status_command_output_for_dashboard(context, &[]);
+        });
+    }
     set_runtime_status(
         tx,
         RuntimeStatusLevel::Info,

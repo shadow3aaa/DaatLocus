@@ -113,25 +113,17 @@ pub(crate) async fn connect_bootstrapped_hindsight(
     emit_startup_progress("[hindsight] local LLM proxy ready");
     let llm_env_vars = llm_proxy.env_vars();
     let server = HindsightManagedServer::new(hindsight_config.clone(), llm_env_vars.clone());
-    if ensure_fresh {
+    if ensure_fresh && !server.check_health().await {
         // Daemon health is not a reliable signal when the worker is wedged by
-        // retained async jobs. Stop best-effort regardless, then start with the
-        // current profile and LLM proxy.
-        emit_startup_progress("[hindsight] force restarting daemon to apply config...");
+        // retained async jobs. Stop best-effort before a fresh start so stale
+        // wrapper processes do not keep the port or pg0 instance half-owned.
+        emit_startup_progress("[hindsight] force stopping unhealthy daemon before start...");
         if let Err(err) = server.force_stop().await {
             tracing::warn!("[hindsight] force stop before startup failed: {err:?}");
         }
-        emit_startup_progress(
-            "[hindsight] starting daemon (first run may take a few minutes to download embedding models)...",
-        );
-        let profile = hindsight_config.profile.clone();
-        let log_tail = tokio::spawn(async move { tail_hindsight_log(&profile).await });
-        let result = server.start().await;
-        log_tail.abort();
-        result?;
-        emit_startup_progress("[hindsight] daemon ready");
-    } else if server.check_health().await {
-        emit_startup_progress("[hindsight] daemon already running, reusing");
+    }
+    if server.check_health().await {
+        emit_startup_progress("[hindsight] daemon already healthy, reusing");
     } else {
         emit_startup_progress(
             "[hindsight] starting daemon (first run may take a few minutes to download embedding models)...",
