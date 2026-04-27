@@ -960,6 +960,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn workflow_rollout_uses_empty_isolated_store_even_when_target_exists() {
+        let temp_dir = TempDir::new().expect("create temporary workflow dir");
+        let primary = temp_dir.path().join("primary");
+        let isolated = temp_dir.path().join("isolated");
+
+        let mut workflows = WorkflowStore::open_scoped(primary).await;
+        let existing = workflows
+            .create_workflow(NewWorkflowSpec {
+                id: "hermes-agent-analysis".to_string(),
+                when_to_use: vec!["analyze agent repos".to_string()],
+                preconditions: Vec::new(),
+                workflow_steps: vec!["inspect repo".to_string()],
+                done_criteria: vec!["summary is produced".to_string()],
+                recovery: Vec::new(),
+            })
+            .await
+            .expect("create existing workflow");
+
+        let (installed, source_ids) =
+            install_rollout_workflows(&mut workflows, isolated.clone(), &existing, None)
+                .await
+                .expect("install isolated rollout workflow");
+
+        assert_eq!(installed.id, existing.id);
+        assert!(source_ids.is_empty());
+        assert_eq!(workflows.workspace_list().len(), 1);
+        assert!(isolated.join("hermes-agent-analysis.md").exists());
+    }
+
     #[test]
     fn prompt_rollout_demos_limit_and_preserve_order() {
         let demos = (0..5)

@@ -563,12 +563,13 @@ pub(super) async fn execute_workflow_candidate_rollout(
         build_eval_context_with_compiled(context.config.clone(), context.compiled_prompts.clone())
             .await;
 
-    let target_spec = create_isolated_workflow(&mut isolated.workflows, target_workflow).await?;
-    let mut source_ids = Vec::<String>::new();
-    if let Some(source) = source_workflow {
-        let source_spec = create_isolated_workflow(&mut isolated.workflows, source).await?;
-        source_ids.push(source_spec.id.clone());
-    }
+    let (target_spec, source_ids) = install_rollout_workflows(
+        &mut isolated.workflows,
+        rollout_home.join("workflows"),
+        target_workflow,
+        source_workflow,
+    )
+    .await?;
 
     let (rolled_out_target, summary) = if let Some(patch) = entry.patch.as_ref() {
         let updated = isolated
@@ -627,6 +628,24 @@ pub(super) async fn execute_workflow_candidate_rollout(
         target_workflow: rolled_out_target,
         summary,
     })
+}
+
+pub(super) async fn install_rollout_workflows(
+    workflows: &mut WorkflowStore,
+    workflow_dir: std::path::PathBuf,
+    target_workflow: &WorkflowSpec,
+    source_workflow: Option<&WorkflowSpec>,
+) -> Result<(WorkflowSpec, Vec<String>)> {
+    *workflows = WorkflowStore::open_scoped(workflow_dir).await;
+
+    let target_spec = create_isolated_workflow(workflows, target_workflow).await?;
+    let mut source_ids = Vec::<String>::new();
+    if let Some(source) = source_workflow {
+        let source_spec = create_isolated_workflow(workflows, source).await?;
+        source_ids.push(source_spec.id.clone());
+    }
+
+    Ok((target_spec, source_ids))
 }
 
 async fn create_isolated_workflow(
