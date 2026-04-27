@@ -11,7 +11,7 @@ use crate::{
         truncate_text_to_token_budget,
     },
     dashboard::render::{
-        AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD,
+        AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, FORCE_SLEEP_ERROR_BACKLOG_THRESHOLD,
         render_dashboard_footer_context, sync_dashboard_state,
     },
     dashboard::{
@@ -32,6 +32,11 @@ use crate::{
         runtime::{
             AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage,
             PromptMemoryCitation, PromptMemoryContext,
+        },
+        runtime_error::{
+            RuntimeErrorActionContext, RuntimeErrorCase, RuntimeErrorCaseParts, RuntimeErrorKind,
+            RuntimeErrorObservation, RuntimeErrorRuntimeContext, RuntimeErrorTaskContext,
+            append_runtime_error_case,
         },
         sleep::run_sleep,
     },

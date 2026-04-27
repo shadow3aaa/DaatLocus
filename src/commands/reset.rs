@@ -60,7 +60,7 @@ pub async fn run_memory_reset() -> Result<()> {
         home.display()
     );
     println!("[memory-reset] cleared: runtime_conversation, hindsight_queue");
-    println!("[memory-reset] cleared: reasoning_traces.jsonl");
+    println!("[memory-reset] cleared: runtime_error_cases.jsonl, reasoning_traces.jsonl");
     println!("[memory-reset] cleared: hindsight bank, observations");
     println!("[memory-reset] cleared: current plan");
     println!("[memory-reset] preserved: config/, state/, artifacts/, logs/");
@@ -80,6 +80,7 @@ async fn clear_memory_state(home: &Path) -> Result<()> {
         paths.memory_file("hindsight_queue.json"),
         paths.memory_file("hindsight_queue"),
         paths.memory_file("plan"),
+        paths.journal_file("runtime_error_cases.jsonl"),
         paths.journal_file("reasoning_traces.jsonl"),
     ])
     .await?;
@@ -161,7 +162,7 @@ pub async fn run_reset_all() -> Result<()> {
         println!("[reset] cleared state: {}", state_cleared.join(", "));
     }
     println!(
-        "[reset] cleared memory: runtime_conversation, hindsight_queue, reasoning_traces.jsonl, hindsight bank, observations"
+        "[reset] cleared memory: runtime_conversation, hindsight_queue, runtime_error_cases.jsonl, reasoning_traces.jsonl, hindsight bank, observations"
     );
     if artifact_cleared.is_empty() {
         println!("[reset] cleared compile artifacts: none");

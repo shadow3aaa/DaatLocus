@@ -22,13 +22,13 @@ pub(super) async fn maybe_start_forced_sleep(
     if *sleep_running {
         return None;
     }
-    let trace_backlog = sleep_status.unread_trace_backlog;
-    if trace_backlog < FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD {
+    let error_backlog = sleep_status.unread_runtime_error_backlog;
+    if error_backlog < FORCE_SLEEP_ERROR_BACKLOG_THRESHOLD {
         return None;
     }
     let status = format!(
-        "backlog too high (traces={}): background sleep started",
-        trace_backlog
+        "backlog too high (runtime_errors={}): background sleep started",
+        error_backlog
     );
     start_background_sleep(
         context,
@@ -41,8 +41,8 @@ pub(super) async fn maybe_start_forced_sleep(
     )
     .await;
     Some(format!(
-        "backlog too high (traces={}): background sleep started",
-        trace_backlog
+        "backlog too high (runtime_errors={}): background sleep started",
+        error_backlog
     ))
 }
 

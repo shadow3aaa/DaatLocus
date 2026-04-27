@@ -21,10 +21,10 @@ pub(super) struct WorkflowFrontierReplayInput<'a> {
 
 #[async_trait]
 pub(super) trait SleepPlannerRuntime: Send + Sync {
-    async fn plan_prompt_improvement(
+    async fn plan_runtime_error_correction(
         &self,
         context: &mut Context,
-        failure_patterns: &[EvaluationArtifactFailurePattern],
+        runtime_error_cases: &[RuntimeErrorCase],
     ) -> Result<PromptPlanningResult>;
 
     async fn plan_workflow_improvement(
@@ -40,14 +40,6 @@ pub(super) trait SleepPlannerRuntime: Send + Sync {
         input: WorkflowMergePlanningInput<'_>,
     ) -> Result<WorkflowMergePlanningResult>;
 
-    async fn replay_prompt_candidate(
-        &self,
-        context: &mut Context,
-        candidate: &EvaluationArtifactRuntimePromptCandidate,
-        failure_patterns: &[EvaluationArtifactFailurePattern],
-        turn_demos: &[EvaluationArtifactTurnDemo],
-    ) -> Result<EvaluationArtifactRuntimePromptCandidateEvaluation>;
-
     async fn replay_workflow_frontier_entry(
         &self,
         context: &mut Context,
@@ -57,23 +49,22 @@ pub(super) trait SleepPlannerRuntime: Send + Sync {
 
 pub(super) struct LlmSleepPlannerRuntime;
 
-async fn load_runtime_trace_records() -> Result<RuntimeTraceBatch> {
-    load_runtime_trace_batch().await
-}
-
 pub(super) async fn load_sleep_inputs() -> Result<SleepInputs> {
-    let trace_batch = load_runtime_trace_records().await?;
-    Ok(SleepInputs { trace_batch })
+    let runtime_error_cases =
+        crate::reasoning::runtime_error::load_runtime_error_case_batch().await?;
+    Ok(SleepInputs {
+        runtime_error_cases,
+    })
 }
 
 #[async_trait]
 impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
-    async fn plan_prompt_improvement(
+    async fn plan_runtime_error_correction(
         &self,
         context: &mut Context,
-        failure_patterns: &[EvaluationArtifactFailurePattern],
+        runtime_error_cases: &[RuntimeErrorCase],
     ) -> Result<PromptPlanningResult> {
-        if failure_patterns.is_empty() {
+        if runtime_error_cases.is_empty() {
             return Ok(PromptPlanningResult {
                 reflections: Vec::new(),
                 candidates: Vec::new(),
@@ -82,28 +73,28 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
         }
 
         let renderer = OpenAIToolRenderer;
-        let program = PromptEvolutionPlannerProgram;
+        let program = RuntimeErrorCorrectionPlannerProgram;
         let tuning = resolve_program_tuning(context, &program).await;
         let current_additions = context
             .compiled_prompts
             .runtime_system_additions()
             .join("\n");
-        let failure_patterns_json =
-            serde_json::to_string_pretty(failure_patterns).into_diagnostic()?;
+        let runtime_error_cases_json =
+            serde_json::to_string_pretty(runtime_error_cases).into_diagnostic()?;
         let outcome = execute_program_with_ir_report(
             context.judge_llm.as_ref(),
             context,
             &renderer,
             &program,
-            program.dataset_ir(current_additions, failure_patterns_json),
+            program.dataset_ir(current_additions, runtime_error_cases_json),
             &tuning,
             TraceOrigin::Sleep,
         )
         .await?;
 
-        Ok(prompt_planning_result_from_output(
+        Ok(runtime_error_correction_planning_result_from_output(
             &outcome.output,
-            failure_patterns,
+            runtime_error_cases,
         ))
     }
 
@@ -185,39 +176,6 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
             target_evidence,
             source_evidence,
             &outcome.output,
-        ))
-    }
-
-    async fn replay_prompt_candidate(
-        &self,
-        context: &mut Context,
-        candidate: &EvaluationArtifactRuntimePromptCandidate,
-        failure_patterns: &[EvaluationArtifactFailurePattern],
-        turn_demos: &[EvaluationArtifactTurnDemo],
-    ) -> Result<EvaluationArtifactRuntimePromptCandidateEvaluation> {
-        let rollout_demos = select_prompt_rollout_demos(turn_demos, 8);
-        let evaluations = evaluate_runtime_prompt_candidate_rollout(
-            context.config.clone(),
-            context.compiled_prompts.clone(),
-            candidate,
-            &rollout_demos,
-        )
-        .await?;
-        Ok(aggregate_prompt_executable_rollout_evaluation(
-            EvaluationArtifactRuntimePromptCandidateEvaluation {
-                compile_key: candidate.compile_key.clone(),
-                candidate_title: candidate.title.clone(),
-                rationale: String::new(),
-                score: 0.0,
-                accepted: false,
-                selected: false,
-                regressions_detected: 0,
-                source_trace_ids: failure_patterns
-                    .iter()
-                    .flat_map(|pattern| pattern.supporting_trace_ids.clone())
-                    .collect(),
-            },
-            &evaluations,
         ))
     }
 

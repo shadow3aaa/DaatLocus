@@ -9,7 +9,7 @@ use super::{DashboardState, render_activity_from_messages};
 /// Sleep-related constants used in dashboard rendering.
 pub const AUTO_SLEEP_IDLE_THRESHOLD: Duration = Duration::from_secs(300);
 pub const AUTO_SLEEP_MIN_INTERVAL: Duration = Duration::from_secs(300);
-pub const FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD: usize = 128;
+pub const FORCE_SLEEP_ERROR_BACKLOG_THRESHOLD: usize = 128;
 
 pub fn sync_dashboard_state(
     context: &Context,
@@ -204,8 +204,8 @@ pub fn render_sleep_status_output_for_dashboard(
 
     let queue_lines = [
         format!(
-            "• Prompt trace queue: {}",
-            sleep_status.unread_trace_backlog
+            "• Runtime error queue: {}",
+            sleep_status.unread_runtime_error_backlog
         ),
         format!(
             "• Workflow evidence records: {}",
@@ -214,67 +214,43 @@ pub fn render_sleep_status_output_for_dashboard(
     ];
     sections.push(format!("Queues\n{}", queue_lines.join("\n")));
 
-    let prompt_lines = vec![
+    let runtime_error_lines = [
         format!("• Total runs: {}", sleep_status.total_runs),
         format!(
-            "• Total consumed trace events: {}",
-            sleep_status.total_prompt_consumed_trace_events
+            "• Total consumed error cases: {}",
+            sleep_status.total_runtime_error_cases_consumed
         ),
         format!(
-            "• Total failure patterns: {}",
-            sleep_status.total_failure_patterns
+            "• Total runtime error cases: {}",
+            sleep_status.total_runtime_error_cases
         ),
         format!(
-            "• Total prompt reflections: {}",
-            sleep_status.total_prompt_reflections
+            "• Total runtime error reflections: {}",
+            sleep_status.total_runtime_error_reflections
         ),
         format!(
-            "• Total prompt candidates: {}",
-            sleep_status.total_prompt_candidates
+            "• Total runtime contract candidates: {}",
+            sleep_status.total_runtime_contract_candidates
         ),
         format!(
-            "• Total prompt candidate evaluations: {}",
-            sleep_status.total_prompt_candidate_evaluations
+            "• Total runtime contract candidate evaluations: {}",
+            sleep_status.total_runtime_contract_candidate_evaluations
         ),
         format!(
-            "• Total prompt frontier entries: {}",
-            sleep_status.total_prompt_frontier_entries
+            "• Total runtime contract additions: {}",
+            sleep_status.total_runtime_contract_system_additions
         ),
         format!(
-            "• Latest prompt frontier roots/branched/max_generation: {}/{}/{}",
-            sleep_status.latest_prompt_frontier_root_entries,
-            sleep_status.latest_prompt_frontier_branched_entries,
-            sleep_status.latest_prompt_frontier_max_generation
-        ),
-        format!(
-            "• Total bootstrap demos: {}",
-            sleep_status.total_bootstrap_demos
-        ),
-        format!("• Total stress cases: {}", sleep_status.total_stress_cases),
-        format!(
-            "• Total instruction hypotheses: {}",
-            sleep_status.total_instruction_hypotheses
-        ),
-        format!(
-            "• Total runtime demos: {}",
-            sleep_status.total_runtime_demos
-        ),
-        format!("• Total turn demos: {}", sleep_status.total_turn_demos),
-        format!(
-            "• Total applied system additions: {}",
-            sleep_status.total_prompt_system_additions
-        ),
-        format!(
-            "• Total compiled prompt updates: {}",
-            sleep_status.total_compiled_prompt_updates
+            "• Total runtime contract updates: {}",
+            sleep_status.total_runtime_contract_updates
         ),
     ];
     sections.push(format!(
-        "Prompt Improvement Totals\n{}",
-        prompt_lines.join("\n")
+        "Runtime Error Correction Totals\n{}",
+        runtime_error_lines.join("\n")
     ));
 
-    let workflow_lines = vec![
+    let workflow_lines = [
         format!(
             "• Total workflow evidence run records: {}",
             sleep_status.total_workflow_evidence_run_records
@@ -329,12 +305,12 @@ pub fn render_sleep_status_output_for_dashboard(
 
     let mut trigger_lines = vec![
         format!(
-            "• Force backlog threshold: {} traces",
-            FORCE_SLEEP_TRACE_BACKLOG_THRESHOLD
+            "• Force backlog threshold: {} runtime errors",
+            FORCE_SLEEP_ERROR_BACKLOG_THRESHOLD
         ),
         format!(
-            "• Current prompt trace queue: {}",
-            sleep_status.unread_trace_backlog
+            "• Current runtime error queue: {}",
+            sleep_status.unread_runtime_error_backlog
         ),
         format!(
             "• Auto sleep after idle: {}",
