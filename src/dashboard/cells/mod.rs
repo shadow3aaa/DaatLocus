@@ -308,8 +308,8 @@ fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<ActivityCe
             .into_iter()
             .collect(),
         AgentMessage::User { content } => vec![ActivityCell::User(user_cell(
-            first_line_or_fallback(content, "user"),
-            remaining_lines_with_limit(content, 8),
+            first_line_or_fallback(content.as_text(), "user"),
+            remaining_lines_with_limit(content.as_text(), 8),
         ))],
         AgentMessage::System { .. } => Vec::new(),
     }

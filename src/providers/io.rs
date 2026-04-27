@@ -113,9 +113,31 @@ pub(super) fn summarize_prompt_request(
 
 fn agent_message_char_count(message: &AgentMessage) -> usize {
     match message {
-        AgentMessage::System { content }
-        | AgentMessage::User { content }
-        | AgentMessage::Assistant { content } => content.chars().count(),
+        AgentMessage::System { content } | AgentMessage::Assistant { content } => {
+            content.chars().count()
+        }
+        AgentMessage::User { content } => {
+            content.as_text().chars().count()
+                + content
+                    .parts()
+                    .iter()
+                    .map(|part| match part {
+                        AgentContentPart::Text { text } => text.chars().count(),
+                        AgentContentPart::Image {
+                            path,
+                            media_type,
+                            description,
+                        } => {
+                            path.chars().count()
+                                + media_type.chars().count()
+                                + description
+                                    .as_deref()
+                                    .map(|text| text.chars().count())
+                                    .unwrap_or(0)
+                        }
+                    })
+                    .sum::<usize>()
+        }
         AgentMessage::AssistantToolCallProtocol {
             content,
             reasoning_content,

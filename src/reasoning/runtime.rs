@@ -1,5 +1,7 @@
 use miette::{Result, miette};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeStruct,
+};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -87,6 +89,110 @@ pub struct AgentToolCall {
     pub arguments: Value,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentContent {
+    text: String,
+    parts: Vec<AgentContentPart>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentContentPart {
+    Text {
+        text: String,
+    },
+    Image {
+        path: String,
+        media_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AgentContentWire {
+    Text(String),
+    Rich {
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        parts: Vec<AgentContentPart>,
+    },
+}
+
+impl AgentContent {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            parts: Vec::new(),
+        }
+    }
+
+    pub fn multimodal(text: impl Into<String>, parts: Vec<AgentContentPart>) -> Self {
+        Self {
+            text: text.into(),
+            parts,
+        }
+    }
+
+    pub fn as_text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn parts(&self) -> &[AgentContentPart] {
+        &self.parts
+    }
+
+    pub fn is_plain_text(&self) -> bool {
+        self.parts.is_empty()
+    }
+
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.text = text.into();
+        self
+    }
+}
+
+impl From<String> for AgentContent {
+    fn from(value: String) -> Self {
+        Self::text(value)
+    }
+}
+
+impl From<&str> for AgentContent {
+    fn from(value: &str) -> Self {
+        Self::text(value)
+    }
+}
+
+impl Serialize for AgentContent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.parts.is_empty() {
+            return serializer.serialize_str(&self.text);
+        }
+        let mut state = serializer.serialize_struct("AgentContent", 2)?;
+        state.serialize_field("text", &self.text)?;
+        state.serialize_field("parts", &self.parts)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentContent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match AgentContentWire::deserialize(deserializer)? {
+            AgentContentWire::Text(text) => Ok(Self::text(text)),
+            AgentContentWire::Rich { text, parts } => Ok(Self::multimodal(text, parts)),
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind")]
 pub enum AgentMessage {
@@ -94,7 +200,7 @@ pub enum AgentMessage {
         content: String,
     },
     User {
-        content: String,
+        content: AgentContent,
     },
     Assistant {
         content: String,
@@ -264,9 +370,10 @@ impl HistoryMessage {
 
     pub fn text_content(&self) -> Option<&str> {
         match &self.message {
-            AgentMessage::System { content }
-            | AgentMessage::User { content }
-            | AgentMessage::Assistant { content } => Some(content.as_str()),
+            AgentMessage::System { content } | AgentMessage::Assistant { content } => {
+                Some(content.as_str())
+            }
+            AgentMessage::User { content } => Some(content.as_text()),
             AgentMessage::AssistantToolCallProtocol { content, .. } => content.as_deref(),
             AgentMessage::Tool { content, .. } => Some(content.as_str()),
         }
@@ -331,6 +438,12 @@ impl AgentMessage {
     }
 
     pub fn user(content: impl Into<String>) -> Self {
+        Self::User {
+            content: AgentContent::text(content),
+        }
+    }
+
+    pub fn user_content(content: impl Into<AgentContent>) -> Self {
         Self::User {
             content: content.into(),
         }
@@ -679,4 +792,71 @@ where
         program_name,
         last_error.unwrap_or_else(|| "unknown error".to_string())
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_content_keeps_plain_text_wire_shape() {
+        let content = AgentContent::text("hello");
+
+        assert_eq!(serde_json::to_value(&content).unwrap(), json!("hello"));
+
+        let message = AgentMessage::user("hello");
+        assert_eq!(
+            serde_json::to_value(&message).unwrap(),
+            json!({
+                "kind": "User",
+                "content": "hello"
+            })
+        );
+
+        let decoded: AgentMessage = serde_json::from_value(json!({
+            "kind": "User",
+            "content": "hello"
+        }))
+        .unwrap();
+        match decoded {
+            AgentMessage::User { content } => {
+                assert_eq!(content.as_text(), "hello");
+                assert!(content.parts().is_empty());
+            }
+            _ => panic!("expected user message"),
+        }
+    }
+
+    #[test]
+    fn agent_content_decodes_rich_user_content() {
+        let decoded: AgentMessage = serde_json::from_value(json!({
+            "kind": "User",
+            "content": {
+                "text": "look at this",
+                "parts": [{
+                    "type": "image",
+                    "path": "/tmp/demo.png",
+                    "media_type": "image/png",
+                    "description": "demo image"
+                }]
+            }
+        }))
+        .unwrap();
+
+        match decoded {
+            AgentMessage::User { content } => {
+                assert_eq!(content.as_text(), "look at this");
+                assert_eq!(content.parts().len(), 1);
+                assert_eq!(
+                    content.parts()[0],
+                    AgentContentPart::Image {
+                        path: "/tmp/demo.png".to_string(),
+                        media_type: "image/png".to_string(),
+                        description: Some("demo image".to_string()),
+                    }
+                );
+            }
+            _ => panic!("expected user message"),
+        }
+    }
 }

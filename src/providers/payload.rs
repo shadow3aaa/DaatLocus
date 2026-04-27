@@ -1,3 +1,5 @@
+use base64::Engine;
+
 use super::*;
 
 pub(super) fn build_agent_turn_payload_common(
@@ -118,7 +120,7 @@ pub(super) fn agent_message_to_openai_message(
         }),
         AgentMessage::User { content } => json!({
             "role": "user",
-            "content": content,
+            "content": openai_user_content(content),
         }),
         AgentMessage::Assistant { content } => json!({
             "role": "assistant",
@@ -230,4 +232,94 @@ pub(super) fn agent_turn_request_to_openai_messages(
 
 pub(super) fn flatten_tool_result_as_assistant_text(name: &str, content: &str) -> String {
     format!("historical tool result ({name}):\n{content}")
+}
+
+pub(super) fn image_part_data_url(part: &AgentContentPart) -> Option<String> {
+    let AgentContentPart::Image {
+        path, media_type, ..
+    } = part
+    else {
+        return None;
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!("failed to read multimodal image attachment {path}: {err}");
+            return None;
+        }
+    };
+    let media_type = normalize_image_part_media_type(path, media_type)?;
+    Some(format!(
+        "data:{media_type};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+fn normalize_image_part_media_type(path: &str, media_type: &str) -> Option<String> {
+    let media_type = media_type.trim();
+    if media_type.starts_with("image/") {
+        return Some(media_type.to_string());
+    }
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => Some("image/png".to_string()),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg".to_string()),
+        Some("webp") => Some("image/webp".to_string()),
+        Some("gif") => Some("image/gif".to_string()),
+        _ => {
+            warn!(
+                "failed to infer image MIME type for multimodal attachment {path}: media_type={media_type}"
+            );
+            None
+        }
+    }
+}
+
+fn openai_user_content(content: AgentContent) -> serde_json::Value {
+    if content.is_plain_text() {
+        return json!(content.as_text());
+    }
+
+    let mut parts = Vec::new();
+    if !content.as_text().trim().is_empty() {
+        parts.push(json!({
+            "type": "text",
+            "text": content.as_text(),
+        }));
+    }
+    for part in content.parts() {
+        match part {
+            AgentContentPart::Text { text } => {
+                parts.push(json!({
+                    "type": "text",
+                    "text": text,
+                }));
+            }
+            AgentContentPart::Image {
+                path, description, ..
+            } => {
+                let Some(url) = image_part_data_url(part) else {
+                    parts.push(json!({
+                        "type": "text",
+                        "text": format!(
+                            "[image attachment unavailable: {}]",
+                            description.as_deref().unwrap_or(path)
+                        ),
+                    }));
+                    continue;
+                };
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": url,
+                    },
+                }));
+            }
+        }
+    }
+    parts.into()
 }

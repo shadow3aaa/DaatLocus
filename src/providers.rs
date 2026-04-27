@@ -25,9 +25,9 @@ use crate::{
     },
     core::{Llm, TokenUsage, TokenUsageInfo},
     reasoning::runtime::{
-        AgentMessage, AgentToolCall, AgentToolInputSpec, AgentTurnItem, AgentTurnRequest,
-        AgentTurnStreamResult, PromptRequest, assistant_tool_call_protocol_char_count,
-        summarize_assistant_tool_call_protocol,
+        AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
+        AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, PromptRequest,
+        assistant_tool_call_protocol_char_count, summarize_assistant_tool_call_protocol,
     },
     schema_utils::normalize_provider_function_schema,
 };
@@ -1141,6 +1141,36 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1]["role"], "tool");
         assert_eq!(messages[1]["tool_call_id"], "call_123");
+    }
+
+    #[test]
+    fn compatible_agent_messages_serialize_multimodal_user_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("sample.png");
+        std::fs::write(&image_path, b"png-bytes").unwrap();
+
+        let message = agent_message_to_openai_message(
+            AgentMessage::user_content(AgentContent::multimodal(
+                "describe this",
+                vec![AgentContentPart::Image {
+                    path: image_path.display().to_string(),
+                    media_type: "application/octet-stream".to_string(),
+                    description: Some("sample".to_string()),
+                }],
+            )),
+            false,
+        );
+
+        assert_eq!(message["role"], "user");
+        assert_eq!(message["content"][0]["type"], "text");
+        assert_eq!(message["content"][0]["text"], "describe this");
+        assert_eq!(message["content"][1]["type"], "image_url");
+        assert!(
+            message["content"][1]["image_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
     }
 
     #[test]

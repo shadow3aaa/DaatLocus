@@ -498,7 +498,7 @@ fn agent_message_to_history_message_for_compaction(
             AgentMessage::system(summarize_runtime_inline_text(content)),
         )),
         AgentMessage::User { content } => Some(history_message_for_compaction(AgentMessage::user(
-            summarize_runtime_inline_text(content),
+            summarize_runtime_inline_text(content.as_text()),
         ))),
         AgentMessage::Assistant { content } => Some(history_message_for_compaction(
             AgentMessage::assistant(summarize_runtime_inline_text(content)),

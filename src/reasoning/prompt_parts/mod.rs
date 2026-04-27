@@ -536,14 +536,20 @@ fn render_afterclaim_events(events: &[EventView]) -> String {
         }
         match &event.payload {
             EventPayload::TelegramIncoming(payload) => {
+                let attachment_summary = if payload.attachments.is_empty() {
+                    String::new()
+                } else {
+                    format!(" attachments={}", payload.attachments.len())
+                };
                 lines.push(format!(
-                    "- {}. [telegram / {} / arrived_at_ms={}] {} @ {} (chat_id={}): {}",
+                    "- {}. [telegram / {} / arrived_at_ms={}] {} @ {} (chat_id={}){}: {}",
                     event.event_id,
                     event.status,
                     event.arrived_at_ms,
                     payload.sender,
                     payload.chat_title,
                     payload.chat_id,
+                    attachment_summary,
                     summarize_context_text(&payload.incoming_text, 240)
                 ));
             }

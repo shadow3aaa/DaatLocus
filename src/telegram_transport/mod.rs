@@ -1,19 +1,23 @@
 pub mod state;
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use miette::{Result, bail, miette};
-use reqwest::Client;
+use reqwest::{Client, header::CONTENT_TYPE};
 use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 
 use crate::telegram_transport::state::{TelegramTransportStateHandle, split_telegram_message_text};
 use crate::{
     config::TelegramConfig,
+    daat_locus_paths::daat_locus_paths_sync,
     dashboard::{
         DashboardControlCommand, DashboardState, execute_control_command, remote_dashboard_commands,
     },
-    events::{EventStatus, EventStore, TelegramIncomingEvent},
+    events::{
+        EventStatus, EventStore, TelegramIncomingAttachment, TelegramIncomingAttachmentKind,
+        TelegramIncomingEvent,
+    },
     pending_work::{PendingWork, PendingWorkQueue},
     telegram_acl::{AccessDecision, TelegramAclHandle},
 };
@@ -185,6 +189,9 @@ impl TelegramTransport {
                     tracing::error!("update approved telegram chat metadata failed: {err:?}");
                 }
                 let chat_id = message.chat.id.to_string();
+                let attachments = self
+                    .download_incoming_attachments(update.update_id, &message)
+                    .await;
                 match self
                     .events
                     .register_telegram_incoming(TelegramIncomingEvent {
@@ -196,6 +203,7 @@ impl TelegramTransport {
                         telegram_update_id: update.update_id,
                         telegram_message_id: message.message_id,
                         telegram_message_date: message.date,
+                        attachments,
                     }) {
                     Ok(event_id) => {
                         if let Err(err) = self.pending_work.enqueue(PendingWork::Event { event_id })
@@ -324,6 +332,128 @@ impl TelegramTransport {
                     .unwrap_or_else(|| "unknown api error".to_string())
             );
         }
+    }
+
+    async fn download_incoming_attachments(
+        &self,
+        update_id: i64,
+        message: &TelegramIncomingMessage,
+    ) -> Vec<TelegramIncomingAttachment> {
+        let Some(photo) = message.largest_photo() else {
+            return Vec::new();
+        };
+        match self
+            .download_photo_attachment(update_id, message.message_id, photo)
+            .await
+        {
+            Ok(attachment) => vec![attachment],
+            Err(err) => {
+                tracing::warn!("failed to download telegram photo attachment: {err:?}");
+                Vec::new()
+            }
+        }
+    }
+
+    async fn download_photo_attachment(
+        &self,
+        update_id: i64,
+        message_id: Option<i64>,
+        photo: &TelegramPhotoSize,
+    ) -> Result<TelegramIncomingAttachment> {
+        let file = self.get_file(&photo.file_id).await?;
+        let (bytes, media_type) = self.download_file_bytes(&file.file_path).await?;
+        let media_type = normalize_photo_media_type(media_type.as_deref(), &file.file_path);
+        let extension = extension_for_file(&file.file_path, &media_type);
+        let file_unique_id = if file.file_unique_id.trim().is_empty() {
+            photo.file_unique_id.clone()
+        } else {
+            file.file_unique_id
+        };
+        let message_id = message_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let file_name = format!(
+            "update-{update_id}-message-{message_id}-{}.{}",
+            sanitize_file_component(&file_unique_id),
+            extension
+        );
+        let dir = daat_locus_paths_sync()
+            .state_dir()
+            .join("telegram_attachments");
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|err| miette!("create telegram attachment directory failed: {err}"))?;
+        let path = dir.join(file_name);
+        tokio::fs::write(&path, bytes)
+            .await
+            .map_err(|err| miette!("write telegram attachment failed: {err}"))?;
+        Ok(TelegramIncomingAttachment {
+            kind: TelegramIncomingAttachmentKind::Image,
+            file_id: photo.file_id.clone(),
+            file_unique_id,
+            media_type,
+            local_path: path.display().to_string(),
+            description: Some(format!("telegram photo {}x{}", photo.width, photo.height)),
+        })
+    }
+
+    async fn get_file(&self, file_id: &str) -> Result<TelegramFile> {
+        let response = self
+            .client
+            .post(self.endpoint("getFile"))
+            .json(&serde_json::json!({ "file_id": file_id }))
+            .send()
+            .await
+            .map_err(|err| miette!("telegram getFile request failed: {}", err.without_url()))?
+            .error_for_status()
+            .map_err(|err| miette!("telegram getFile http error: {}", err.without_url()))?;
+        let payload: TelegramApiResponse<TelegramFile> = response
+            .json()
+            .await
+            .map_err(|err| miette!("telegram getFile json decode failed: {err}"))?;
+        if payload.ok {
+            Ok(payload.result)
+        } else {
+            bail!(
+                "telegram getFile failed: {}",
+                payload
+                    .description
+                    .unwrap_or_else(|| "unknown api error".to_string())
+            );
+        }
+    }
+
+    async fn download_file_bytes(&self, file_path: &str) -> Result<(Vec<u8>, Option<String>)> {
+        let response = self
+            .client
+            .get(format!(
+                "https://api.telegram.org/file/bot{}/{}",
+                self.config.bot_token, file_path
+            ))
+            .send()
+            .await
+            .map_err(|err| {
+                miette!(
+                    "telegram file download request failed: {}",
+                    err.without_url()
+                )
+            })?
+            .error_for_status()
+            .map_err(|err| miette!("telegram file download http error: {}", err.without_url()))?;
+        let media_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|err| miette!("telegram file download read failed: {err}"))?
+            .to_vec();
+        Ok((bytes, media_type))
     }
 
     async fn send_message(&self, chat_id: i64, text: &str) -> Result<()> {
@@ -459,6 +589,32 @@ struct TelegramIncomingMessage {
     entities: Option<Vec<TelegramMessageEntity>>,
     caption: Option<String>,
     caption_entities: Option<Vec<TelegramMessageEntity>>,
+    photo: Option<Vec<TelegramPhotoSize>>,
+}
+
+impl TelegramIncomingMessage {
+    fn largest_photo(&self) -> Option<&TelegramPhotoSize> {
+        self.photo.as_ref()?.iter().max_by_key(|photo| {
+            photo
+                .file_size
+                .unwrap_or_else(|| i64::from(photo.width) * i64::from(photo.height))
+        })
+    }
+}
+
+#[derive(Clone, Deserialize)]
+struct TelegramPhotoSize {
+    file_id: String,
+    file_unique_id: String,
+    width: i32,
+    height: i32,
+    file_size: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct TelegramFile {
+    file_unique_id: String,
+    file_path: String,
 }
 
 #[derive(Deserialize)]
@@ -497,6 +653,7 @@ fn extract_message_text(message: &TelegramIncomingMessage) -> String {
         .text
         .as_deref()
         .or(message.caption.as_deref())
+        .or_else(|| message.photo.as_ref().map(|_| "[telegram photo]"))
         .unwrap_or("[unsupported non-text message]")
         .to_string()
 }
@@ -547,6 +704,71 @@ fn truncate_reason(text: &str) -> String {
     }
 }
 
+fn sanitize_file_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "file".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn normalize_photo_media_type(download_media_type: Option<&str>, file_path: &str) -> String {
+    if let Some(media_type) = download_media_type
+        .map(str::trim)
+        .filter(|value| value.starts_with("image/"))
+    {
+        return media_type.to_string();
+    }
+    infer_image_media_type(file_path)
+}
+
+fn infer_image_media_type(file_path: &str) -> String {
+    match Path::new(file_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png".to_string(),
+        Some("webp") => "image/webp".to_string(),
+        Some("gif") => "image/gif".to_string(),
+        _ => "image/jpeg".to_string(),
+    }
+}
+
+fn extension_for_file(file_path: &str, media_type: &str) -> String {
+    if let Some(extension) = Path::new(file_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::trim)
+        .filter(|extension| {
+            !extension.is_empty()
+                && extension
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        })
+    {
+        return extension.to_ascii_lowercase();
+    }
+    match media_type {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "jpg",
+    }
+    .to_string()
+}
+
 fn extract_telegram_command(
     message: &TelegramIncomingMessage,
     bot_username: Option<&str>,
@@ -595,4 +817,85 @@ fn normalize_telegram_command(
     } else {
         format!("{command_name} {args}")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn private_chat() -> TelegramChat {
+        TelegramChat {
+            id: 42,
+            kind: "private".to_string(),
+            title: None,
+            first_name: Some("Ada".to_string()),
+            last_name: None,
+            username: None,
+        }
+    }
+
+    fn message_with_photo(caption: Option<&str>) -> TelegramIncomingMessage {
+        TelegramIncomingMessage {
+            message_id: Some(7),
+            date: Some(123),
+            chat: private_chat(),
+            from: None,
+            text: None,
+            entities: None,
+            caption: caption.map(ToString::to_string),
+            caption_entities: None,
+            photo: Some(vec![
+                TelegramPhotoSize {
+                    file_id: "small-id".to_string(),
+                    file_unique_id: "small-unique".to_string(),
+                    width: 64,
+                    height: 64,
+                    file_size: Some(1_000),
+                },
+                TelegramPhotoSize {
+                    file_id: "large-id".to_string(),
+                    file_unique_id: "large-unique".to_string(),
+                    width: 512,
+                    height: 512,
+                    file_size: Some(10_000),
+                },
+            ]),
+        }
+    }
+
+    #[test]
+    fn photo_only_messages_have_text_placeholder() {
+        let message = message_with_photo(None);
+
+        assert_eq!(extract_message_text(&message), "[telegram photo]");
+    }
+
+    #[test]
+    fn photo_caption_is_used_as_message_text() {
+        let message = message_with_photo(Some("please inspect this"));
+
+        assert_eq!(extract_message_text(&message), "please inspect this");
+    }
+
+    #[test]
+    fn largest_photo_prefers_telegram_file_size() {
+        let message = message_with_photo(None);
+
+        assert_eq!(message.largest_photo().unwrap().file_id, "large-id");
+    }
+
+    #[test]
+    fn attachment_file_helpers_are_stable() {
+        assert_eq!(sanitize_file_component("abc/def?.png"), "abc-def--png");
+        assert_eq!(infer_image_media_type("photos/demo.webp"), "image/webp");
+        assert_eq!(
+            normalize_photo_media_type(Some("application/octet-stream"), "photos/demo.jpg"),
+            "image/jpeg"
+        );
+        assert_eq!(
+            normalize_photo_media_type(Some("image/png"), "photos/demo.jpg"),
+            "image/png"
+        );
+        assert_eq!(extension_for_file("photos/demo", "image/png"), "png");
+    }
 }

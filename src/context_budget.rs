@@ -362,7 +362,8 @@ fn estimate_history_message_tokens(message: &HistoryMessage) -> usize {
 fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
     match message {
         AgentMessage::System { content } => message_token_cost("system", content),
-        AgentMessage::User { content } => message_token_cost("user", content),
+        AgentMessage::User { content } => message_token_cost("user", content.as_text())
+            .saturating_add(content.parts().len() * 1024),
         AgentMessage::Assistant { content } => message_token_cost("assistant", content),
         AgentMessage::AssistantToolCallProtocol {
             content,

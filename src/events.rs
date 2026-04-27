@@ -77,6 +77,25 @@ pub struct TelegramIncomingEvent {
     pub telegram_update_id: i64,
     pub telegram_message_id: Option<i64>,
     pub telegram_message_date: Option<i64>,
+    #[serde(default)]
+    pub attachments: Vec<TelegramIncomingAttachment>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TelegramIncomingAttachment {
+    pub kind: TelegramIncomingAttachmentKind,
+    pub file_id: String,
+    pub file_unique_id: String,
+    pub media_type: String,
+    pub local_path: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramIncomingAttachmentKind {
+    Image,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -138,6 +157,9 @@ impl EventStore {
                 existing_payload.telegram_message_date = existing_payload
                     .telegram_message_date
                     .or(event.telegram_message_date);
+                if !event.attachments.is_empty() {
+                    existing_payload.attachments = event.attachments;
+                }
                 existing.last_updated_at_ms = now;
             }
             persist_locked(&inner)?;
@@ -442,6 +464,14 @@ mod tests {
                     telegram_update_id: 42,
                     telegram_message_id: Some(100),
                     telegram_message_date: Some(200),
+                    attachments: vec![TelegramIncomingAttachment {
+                        kind: TelegramIncomingAttachmentKind::Image,
+                        file_id: "file-1".to_string(),
+                        file_unique_id: "unique-1".to_string(),
+                        media_type: "image/png".to_string(),
+                        local_path: "/tmp/telegram-image.png".to_string(),
+                        description: Some("telegram photo 512x512".to_string()),
+                    }],
                 }),
                 last_error: Some("queued for delivery".to_string()),
             },
@@ -479,6 +509,12 @@ mod tests {
                 assert_eq!(payload.chat_kind, "private");
                 assert_eq!(payload.telegram_message_id, Some(100));
                 assert_eq!(payload.telegram_message_date, Some(200));
+                assert_eq!(payload.attachments.len(), 1);
+                assert_eq!(payload.attachments[0].media_type, "image/png");
+                assert_eq!(
+                    payload.attachments[0].description.as_deref(),
+                    Some("telegram photo 512x512")
+                );
             }
             EventPayload::TerminalIncoming(_) => panic!("expected telegram payload"),
         }

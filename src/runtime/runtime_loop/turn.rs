@@ -88,7 +88,39 @@ fn maybe_build_afterclaim_context_message(
         return None;
     }
     context.afterclaim_context_fingerprint = Some(fingerprint.to_string());
-    Some(HistoryMessage::user(text))
+    Some(HistoryMessage {
+        message: AgentMessage::user_content(afterclaim_agent_content(text, input)),
+        tool_ui_event: None,
+        tool_call_ui_events: Vec::new(),
+    })
+}
+
+fn afterclaim_agent_content(text: String, input: &AfterClaimContextInput) -> AgentContent {
+    let parts = input
+        .events
+        .iter()
+        .flat_map(|event| match &event.payload {
+            EventPayload::TelegramIncoming(payload) => payload
+                .attachments
+                .iter()
+                .map(|attachment| match attachment.kind {
+                    crate::events::TelegramIncomingAttachmentKind::Image => {
+                        AgentContentPart::Image {
+                            path: attachment.local_path.clone(),
+                            media_type: attachment.media_type.clone(),
+                            description: attachment.description.clone(),
+                        }
+                    }
+                })
+                .collect::<Vec<_>>(),
+            EventPayload::TerminalIncoming(_) => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        AgentContent::text(text)
+    } else {
+        AgentContent::multimodal(text, parts)
+    }
 }
 
 fn history_has_complete_afterclaim_context(messages: &[HistoryMessage]) -> bool {
@@ -1142,6 +1174,52 @@ mod tests {
         assert!(!is_complete_afterclaim_context_text(
             "<afterclaim_context>\nclaimed"
         ));
+    }
+
+    #[test]
+    fn afterclaim_agent_content_carries_telegram_image_parts() {
+        let input = AfterClaimContextInput {
+            events: vec![crate::events::EventView {
+                event_id: uuid::Uuid::nil(),
+                source: crate::events::EventSource::Telegram,
+                status: crate::events::EventStatus::Claimed,
+                arrived_at_ms: 1,
+                payload: crate::events::EventPayload::TelegramIncoming(
+                    crate::events::TelegramIncomingEvent {
+                        chat_id: "chat-1".to_string(),
+                        chat_kind: "private".to_string(),
+                        chat_title: "Alice".to_string(),
+                        sender: "alice".to_string(),
+                        incoming_text: "inspect this".to_string(),
+                        telegram_update_id: 10,
+                        telegram_message_id: Some(20),
+                        telegram_message_date: Some(30),
+                        attachments: vec![crate::events::TelegramIncomingAttachment {
+                            kind: crate::events::TelegramIncomingAttachmentKind::Image,
+                            file_id: "file-1".to_string(),
+                            file_unique_id: "unique-1".to_string(),
+                            media_type: "image/png".to_string(),
+                            local_path: "/tmp/image.png".to_string(),
+                            description: Some("telegram photo 512x512".to_string()),
+                        }],
+                    },
+                ),
+                last_error: None,
+            }],
+            app_notices: Vec::new(),
+        };
+
+        let content = afterclaim_agent_content("claimed input".to_string(), &input);
+
+        assert_eq!(content.as_text(), "claimed input");
+        assert_eq!(
+            content.parts(),
+            &[AgentContentPart::Image {
+                path: "/tmp/image.png".to_string(),
+                media_type: "image/png".to_string(),
+                description: Some("telegram photo 512x512".to_string()),
+            }]
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::{
     daat_locus_paths::daat_locus_paths,
     dashboard::DashboardState,
     reasoning::runtime::{
-        AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult,
+        AgentContentPart, AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult,
         render_assistant_tool_call_protocol_dump,
     },
 };
@@ -213,11 +213,29 @@ fn render_agent_message_dump(message: &AgentMessage) -> Vec<String> {
             ]
         }
         AgentMessage::User { content } => {
-            vec![
+            let mut lines = vec![
                 "role=user".to_string(),
                 "content:".to_string(),
-                content.clone(),
-            ]
+                content.as_text().to_string(),
+            ];
+            for (index, part) in content.parts().iter().enumerate() {
+                match part {
+                    AgentContentPart::Text { text } => {
+                        lines.push(format!("part[{index}]=text chars={}", text.chars().count()));
+                    }
+                    AgentContentPart::Image {
+                        path,
+                        media_type,
+                        description,
+                    } => {
+                        lines.push(format!(
+                            "part[{index}]=image media_type={media_type} path={path} description={}",
+                            description.as_deref().unwrap_or("")
+                        ));
+                    }
+                }
+            }
+            lines
         }
         AgentMessage::Assistant { content } => {
             vec![

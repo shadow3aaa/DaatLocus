@@ -466,6 +466,7 @@ async fn run_turn_demo(context: &mut Context, spec: &TurnCompileSpec) -> Result<
             telegram_update_id: synthetic_update_id,
             telegram_message_id: Some(synthetic_update_id),
             telegram_message_date: None,
+            attachments: Vec::new(),
         })?;
     context
         .pending_work

@@ -32,8 +32,8 @@ use crate::{
         episode::EpisodeActionRecord,
         prompt_parts::AfterClaimContextInput,
         runtime::{
-            AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage,
-            PromptMemoryCitation, PromptMemoryContext,
+            AgentContent, AgentContentPart, AgentMessage, AgentTurnItem, AgentTurnRequest,
+            AgentTurnStreamResult, HistoryMessage, PromptMemoryCitation, PromptMemoryContext,
         },
         runtime_error::{
             RuntimeErrorActionContext, RuntimeErrorCase, RuntimeErrorCaseParts, RuntimeErrorKind,
@@ -251,6 +251,7 @@ mod tests {
                     telegram_update_id: 1,
                     telegram_message_id: None,
                     telegram_message_date: None,
+                    attachments: Vec::new(),
                 }),
                 last_error: None,
             }),
@@ -268,6 +269,7 @@ mod tests {
                     telegram_update_id: 2,
                     telegram_message_id: None,
                     telegram_message_date: None,
+                    attachments: Vec::new(),
                 }),
                 last_error: None,
             }),

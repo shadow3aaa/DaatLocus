@@ -527,7 +527,11 @@ fn select_recent_user_agent_messages_for_compaction(
     let history_messages = messages
         .iter()
         .filter_map(|message| match message {
-            AgentMessage::User { content } => Some(HistoryMessage::user(content.clone())),
+            AgentMessage::User { content } => Some(HistoryMessage {
+                message: AgentMessage::user_content(content.clone()),
+                tool_ui_event: None,
+                tool_call_ui_events: Vec::new(),
+            }),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -537,7 +541,7 @@ fn select_recent_user_agent_messages_for_compaction(
     )
     .into_iter()
     .filter_map(|message| match message.message {
-        AgentMessage::User { content } => Some(AgentMessage::user(content)),
+        AgentMessage::User { content } => Some(AgentMessage::user_content(content)),
         _ => None,
     })
     .collect()
@@ -940,7 +944,10 @@ fn history_message_token_cost(message: &HistoryMessage) -> usize {
             approx_token_count("system") + approx_token_count(content) + 4
         }
         AgentMessage::User { content } => {
-            approx_token_count("user") + approx_token_count(content) + 4
+            approx_token_count("user")
+                + approx_token_count(content.as_text())
+                + content.parts().len() * 1024
+                + 4
         }
         AgentMessage::Assistant { content } => {
             approx_token_count("assistant") + approx_token_count(content) + 4
@@ -1043,7 +1050,7 @@ fn trim_history_message_content(mut message: HistoryMessage) -> HistoryMessage {
     let trimmed = history_message_content(&message).trim().to_string();
     message.message = match message.message {
         AgentMessage::System { .. } => AgentMessage::system(trimmed),
-        AgentMessage::User { .. } => AgentMessage::user(trimmed),
+        AgentMessage::User { content } => AgentMessage::user_content(content.with_text(trimmed)),
         AgentMessage::Assistant { .. } => AgentMessage::assistant(trimmed),
         AgentMessage::AssistantToolCallProtocol {
             reasoning_content,

@@ -24,8 +24,8 @@ use crate::{
     core::{Llm, TokenUsage, TokenUsageInfo},
     persistence::{PersistenceFileMode, PersistenceStore, write_bytes_atomic},
     reasoning::runtime::{
-        AgentMessage, AgentToolCall, AgentToolInputSpec, AgentTurnItem, AgentTurnRequest,
-        AgentTurnStreamResult, HistoryMessage, PromptRequest,
+        AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
+        AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage, PromptRequest,
     },
     schema_utils::normalize_provider_function_schema,
 };
@@ -1016,9 +1016,7 @@ fn agent_messages_to_responses_parts(messages: Vec<AgentMessage>) -> (String, Ve
     for message in messages {
         match message {
             AgentMessage::System { content } => instructions.push(content),
-            AgentMessage::User { content } => {
-                input.push(responses_message("user", "input_text", content))
-            }
+            AgentMessage::User { content } => input.push(responses_user_message(content)),
             AgentMessage::Assistant { content } => {
                 input.push(responses_message("assistant", "output_text", content));
             }
@@ -1069,6 +1067,53 @@ fn responses_message(role: &str, content_type: &str, text: String) -> Value {
             "type": content_type,
             "text": text,
         }],
+    })
+}
+
+fn responses_user_message(content: AgentContent) -> Value {
+    if content.is_plain_text() {
+        return responses_message("user", "input_text", content.as_text().to_string());
+    }
+
+    let mut parts = Vec::new();
+    if !content.as_text().trim().is_empty() {
+        parts.push(json!({
+            "type": "input_text",
+            "text": content.as_text(),
+        }));
+    }
+    for part in content.parts() {
+        match part {
+            AgentContentPart::Text { text } => {
+                parts.push(json!({
+                    "type": "input_text",
+                    "text": text,
+                }));
+            }
+            AgentContentPart::Image {
+                path, description, ..
+            } => {
+                let Some(url) = super::payload::image_part_data_url(part) else {
+                    parts.push(json!({
+                        "type": "input_text",
+                        "text": format!(
+                            "[image attachment unavailable: {}]",
+                            description.as_deref().unwrap_or(path)
+                        ),
+                    }));
+                    continue;
+                };
+                parts.push(json!({
+                    "type": "input_image",
+                    "image_url": url,
+                }));
+            }
+        }
+    }
+    json!({
+        "type": "message",
+        "role": "user",
+        "content": parts,
     })
 }
 
@@ -1766,6 +1811,38 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("syntax=unified_diff")
+        );
+    }
+
+    #[test]
+    fn agent_payload_serializes_multimodal_user_content() {
+        let client = test_client();
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("sample.png");
+        std::fs::write(&image_path, b"png-bytes").unwrap();
+        let request = AgentTurnRequest {
+            messages: vec![AgentMessage::user_content(AgentContent::multimodal(
+                "describe this",
+                vec![AgentContentPart::Image {
+                    path: image_path.display().to_string(),
+                    media_type: "application/octet-stream".to_string(),
+                    description: Some("sample".to_string()),
+                }],
+            ))],
+            tools: vec![],
+        };
+
+        let payload = build_agent_responses_payload(&client, request);
+
+        assert_eq!(payload["input"][0]["role"], "user");
+        assert_eq!(payload["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(payload["input"][0]["content"][0]["text"], "describe this");
+        assert_eq!(payload["input"][0]["content"][1]["type"], "input_image");
+        assert!(
+            payload["input"][0]["content"][1]["image_url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
         );
     }
 
