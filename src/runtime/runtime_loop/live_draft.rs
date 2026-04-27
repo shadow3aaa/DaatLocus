@@ -198,8 +198,10 @@ impl TelegramLiveDraftState {
 
     fn apply_status(&mut self, status: TelegramLiveStatus) -> bool {
         if is_sticky_workflow_status(&status) {
+            let removed_created_status = self.consume_workflow_created_statuses();
             let changed = self.sticky_workflow_status.as_ref() != Some(&status)
-                || self.previous_markdown_v2.is_some();
+                || self.previous_markdown_v2.is_some()
+                || removed_created_status;
             self.sticky_workflow_status = Some(status);
             self.trim_recent_statuses();
             return changed;
@@ -213,6 +215,13 @@ impl TelegramLiveDraftState {
         self.recent_statuses.push(status);
         self.trim_recent_statuses();
         true
+    }
+
+    fn consume_workflow_created_statuses(&mut self) -> bool {
+        let original_len = self.recent_statuses.len();
+        self.recent_statuses
+            .retain(|status| !is_workflow_created_status(status));
+        self.recent_statuses.len() != original_len
     }
 
     fn trim_recent_statuses(&mut self) {
@@ -248,6 +257,10 @@ impl TelegramLiveDraftState {
 
 fn is_sticky_workflow_status(status: &TelegramLiveStatus) -> bool {
     status.icon == crate::tool_ui::glyph::WORKFLOW && status.text.starts_with("Workflow Active:")
+}
+
+fn is_workflow_created_status(status: &TelegramLiveStatus) -> bool {
+    status.icon == crate::tool_ui::glyph::WORKFLOW && status.text.starts_with("Workflow Created:")
 }
 
 fn render_statuses_markdown_v2(statuses: &[&TelegramLiveStatus]) -> String {
@@ -503,6 +516,28 @@ mod tests {
         assert_eq!(
             state.render_markdown_v2(),
             "⌘ Workflow Active: repo\\-analysis\n• Step 2\n• Step 3\n• Step 4\n• Step 5"
+        );
+    }
+
+    #[test]
+    fn live_draft_consumes_created_workflow_when_workflow_becomes_active() {
+        let mut state = TelegramLiveDraftState::working();
+        state.apply(LiveProgressEvent::TelegramStatus(status(
+            crate::tool_ui::glyph::WORKFLOW,
+            "Workflow Created: repo-analysis",
+        )));
+        state.apply(LiveProgressEvent::TelegramStatus(status(
+            crate::tool_ui::glyph::PLAN,
+            "Plan Updated",
+        )));
+        state.apply(LiveProgressEvent::TelegramStatus(status(
+            crate::tool_ui::glyph::WORKFLOW,
+            "Workflow Active: repo-analysis",
+        )));
+
+        assert_eq!(
+            state.render_markdown_v2(),
+            "⌘ Workflow Active: repo\\-analysis\n∷ Plan Updated"
         );
     }
 
