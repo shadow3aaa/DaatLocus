@@ -2,6 +2,7 @@ use super::*;
 use crate::live_progress::{LiveProgressEvent, TelegramLiveStatus};
 
 const TELEGRAM_MESSAGE_LIMIT: usize = 4096;
+const MAX_LIVE_DRAFT_STATUSES: usize = 5;
 const MARKDOWN_V2_ELLIPSIS: &str = "\\.\\.\\.";
 
 pub(super) struct TelegramLiveDraftSession {
@@ -141,7 +142,7 @@ fn apply_live_progress_event(
 #[derive(Default)]
 struct TelegramLiveDraftState {
     previous_markdown_v2: Option<String>,
-    status: Option<TelegramLiveStatus>,
+    statuses: Vec<TelegramLiveStatus>,
 }
 
 impl TelegramLiveDraftState {
@@ -173,23 +174,38 @@ impl TelegramLiveDraftState {
                     text: text.to_string(),
                 };
                 let changed =
-                    self.status.as_ref() != Some(&status) || self.previous_markdown_v2.is_some();
-                self.status = Some(status);
+                    self.statuses.last() != Some(&status) || self.previous_markdown_v2.is_some();
+                if !changed {
+                    return false;
+                }
+                self.statuses.push(status);
+                if self.statuses.len() > MAX_LIVE_DRAFT_STATUSES {
+                    let remove_count = self.statuses.len() - MAX_LIVE_DRAFT_STATUSES;
+                    self.statuses.drain(0..remove_count);
+                }
                 self.previous_markdown_v2 = None;
-                changed
+                true
             }
         }
     }
 
     fn render_markdown_v2(&self) -> String {
-        if let Some(status) = &self.status {
-            return truncate_markdown_v2(render_status_markdown_v2(status));
+        if !self.statuses.is_empty() {
+            return truncate_markdown_v2(render_statuses_markdown_v2(&self.statuses));
         }
         if let Some(previous) = &self.previous_markdown_v2 {
             return truncate_markdown_v2(previous.clone());
         }
         "Working\\.\\.\\.".to_string()
     }
+}
+
+fn render_statuses_markdown_v2(statuses: &[TelegramLiveStatus]) -> String {
+    statuses
+        .iter()
+        .map(render_status_markdown_v2)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn render_status_markdown_v2(status: &TelegramLiveStatus) -> String {
@@ -349,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn live_draft_replaces_previous_status() {
+    fn live_draft_keeps_recent_statuses() {
         let mut state = TelegramLiveDraftState::working();
         state.apply(LiveProgressEvent::TelegramStatus(status(
             crate::tool_ui::glyph::PLAN,
@@ -360,7 +376,26 @@ mod tests {
             "Recalled 1 Memory",
         )));
 
-        assert_eq!(state.render_markdown_v2(), "⟲ Recalled 1 Memory");
+        assert_eq!(
+            state.render_markdown_v2(),
+            "∷ Plan Updated\n⟲ Recalled 1 Memory"
+        );
+    }
+
+    #[test]
+    fn live_draft_keeps_only_last_five_statuses() {
+        let mut state = TelegramLiveDraftState::working();
+        for index in 1..=6 {
+            state.apply(LiveProgressEvent::TelegramStatus(status(
+                crate::tool_ui::glyph::EXEC,
+                &format!("Step {index}"),
+            )));
+        }
+
+        assert_eq!(
+            state.render_markdown_v2(),
+            "• Step 2\n• Step 3\n• Step 4\n• Step 5\n• Step 6"
+        );
     }
 
     #[test]
