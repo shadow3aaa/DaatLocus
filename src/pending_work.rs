@@ -283,6 +283,53 @@ mod tests {
     }
 
     #[test]
+    fn persisted_pending_work_queue_postcard_round_trips() {
+        let event_id = Uuid::parse_str("33333333-3333-4333-8333-333333333333").expect("event uuid");
+        let state = PersistedPendingWorkQueue {
+            queue: VecDeque::from([
+                PendingWorkEntry {
+                    work: PendingWork::Event { event_id },
+                    state: PendingWorkEntryState::Pending,
+                },
+                PendingWorkEntry {
+                    work: PendingWork::AppNotice {
+                        app: AppId::terminal(),
+                        reason: "terminal changed".to_string(),
+                    },
+                    state: PendingWorkEntryState::Claimed,
+                },
+            ]),
+        };
+
+        let bytes = postcard::to_allocvec(&state).expect("encode pending work");
+        let restored: PersistedPendingWorkQueue =
+            postcard::from_bytes(&bytes).expect("decode pending work");
+
+        assert_eq!(restored.queue.len(), 2);
+        match &restored.queue[0].work {
+            PendingWork::Event {
+                event_id: restored_event_id,
+            } => assert_eq!(*restored_event_id, event_id),
+            other => panic!("expected event work, got {other:?}"),
+        }
+        assert!(matches!(
+            restored.queue[0].state,
+            PendingWorkEntryState::Pending
+        ));
+        match &restored.queue[1].work {
+            PendingWork::AppNotice { app, reason } => {
+                assert_eq!(*app, AppId::terminal());
+                assert_eq!(reason, "terminal changed");
+            }
+            other => panic!("expected app notice work, got {other:?}"),
+        }
+        assert!(matches!(
+            restored.queue[1].state,
+            PendingWorkEntryState::Claimed
+        ));
+    }
+
+    #[test]
     fn claim_batch_prioritizes_events_over_app_notices() {
         let queue = test_queue();
         let event_id = Uuid::new_v4();

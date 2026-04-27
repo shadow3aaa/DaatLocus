@@ -408,6 +408,61 @@ mod tests {
     use tokio::sync::Notify;
 
     #[test]
+    fn persisted_telegram_state_postcard_round_trips() {
+        let mut chats = std::collections::HashMap::new();
+        chats.insert(
+            "chat-1".to_string(),
+            PersistedTelegramChat {
+                id: "chat-1".to_string(),
+                title: "Alice".to_string(),
+            },
+        );
+        chats.insert(
+            "chat-2".to_string(),
+            PersistedTelegramChat {
+                id: "chat-2".to_string(),
+                title: "Ops".to_string(),
+            },
+        );
+        let mut outbox = std::collections::VecDeque::new();
+        outbox.push_back(PendingOutboundMessage {
+            local_message_id: "local-1".to_string(),
+            chat_id: "chat-1".to_string(),
+            text: "reply text".to_string(),
+            related_event_id: Some("event-1".to_string()),
+            settle_status_on_delivery: Some(EventStatus::Resolved),
+            settle_note_on_delivery: Some("delivered".to_string()),
+        });
+        let state = PersistedTelegramState {
+            order: vec!["chat-2".to_string(), "chat-1".to_string()],
+            chats,
+            outbox,
+        };
+
+        let bytes = postcard::to_allocvec(&state).expect("encode telegram state");
+        let restored: PersistedTelegramState =
+            postcard::from_bytes(&bytes).expect("decode telegram state");
+
+        assert_eq!(restored.order, vec!["chat-2", "chat-1"]);
+        let chat = restored.chats.get("chat-1").expect("chat");
+        assert_eq!(chat.id, "chat-1");
+        assert_eq!(chat.title, "Alice");
+        let outbound = restored.outbox.front().expect("outbound");
+        assert_eq!(outbound.local_message_id, "local-1");
+        assert_eq!(outbound.chat_id, "chat-1");
+        assert_eq!(outbound.text, "reply text");
+        assert_eq!(outbound.related_event_id.as_deref(), Some("event-1"));
+        assert_eq!(
+            outbound.settle_status_on_delivery,
+            Some(EventStatus::Resolved)
+        );
+        assert_eq!(
+            outbound.settle_note_on_delivery.as_deref(),
+            Some("delivered")
+        );
+    }
+
+    #[test]
     fn short_telegram_message_is_not_chunked() {
         let chunks = split_telegram_message_text("hello");
         assert_eq!(chunks, vec!["hello".to_string()]);

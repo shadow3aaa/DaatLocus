@@ -454,6 +454,82 @@ mod tests {
     }
 
     #[test]
+    fn persisted_event_store_postcard_round_trips() {
+        let telegram_id =
+            Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("telegram uuid");
+        let terminal_id =
+            Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("terminal uuid");
+        let mut events = HashMap::new();
+        events.insert(
+            telegram_id,
+            Event {
+                source: EventSource::Telegram,
+                status: EventStatus::AwaitingDelivery,
+                arrived_at_ms: 10,
+                last_updated_at_ms: 20,
+                payload: EventPayload::TelegramIncoming(TelegramIncomingEvent {
+                    chat_id: "chat-1".to_string(),
+                    chat_kind: "private".to_string(),
+                    chat_title: "Alice".to_string(),
+                    sender: "alice".to_string(),
+                    incoming_text: "ping".to_string(),
+                    telegram_update_id: 42,
+                    telegram_message_id: Some(100),
+                    telegram_message_date: Some(200),
+                }),
+                last_error: Some("queued for delivery".to_string()),
+            },
+        );
+        events.insert(
+            terminal_id,
+            Event {
+                source: EventSource::Terminal,
+                status: EventStatus::Failed,
+                arrived_at_ms: 30,
+                last_updated_at_ms: 40,
+                payload: EventPayload::TerminalIncoming(TerminalIncomingEvent {
+                    origin: "dashboard".to_string(),
+                    incoming_text: "local command".to_string(),
+                }),
+                last_error: Some("failed locally".to_string()),
+            },
+        );
+        let state = PersistedEventStore {
+            order: vec![telegram_id, terminal_id],
+            events,
+        };
+
+        let bytes = postcard::to_allocvec(&state).expect("encode events");
+        let restored: PersistedEventStore = postcard::from_bytes(&bytes).expect("decode events");
+
+        assert_eq!(restored.order, vec![telegram_id, terminal_id]);
+        let telegram = restored.events.get(&telegram_id).expect("telegram event");
+        assert_eq!(telegram.source, EventSource::Telegram);
+        assert_eq!(telegram.status, EventStatus::AwaitingDelivery);
+        assert_eq!(telegram.last_error.as_deref(), Some("queued for delivery"));
+        match &telegram.payload {
+            EventPayload::TelegramIncoming(payload) => {
+                assert_eq!(payload.chat_id, "chat-1");
+                assert_eq!(payload.chat_kind, "private");
+                assert_eq!(payload.telegram_message_id, Some(100));
+                assert_eq!(payload.telegram_message_date, Some(200));
+            }
+            EventPayload::TerminalIncoming(_) => panic!("expected telegram payload"),
+        }
+        let terminal = restored.events.get(&terminal_id).expect("terminal event");
+        assert_eq!(terminal.source, EventSource::Terminal);
+        assert_eq!(terminal.status, EventStatus::Failed);
+        assert_eq!(terminal.last_error.as_deref(), Some("failed locally"));
+        match &terminal.payload {
+            EventPayload::TerminalIncoming(payload) => {
+                assert_eq!(payload.origin, "dashboard");
+                assert_eq!(payload.incoming_text, "local command");
+            }
+            EventPayload::TelegramIncoming(_) => panic!("expected terminal payload"),
+        }
+    }
+
+    #[test]
     fn register_terminal_incoming_creates_terminal_event() {
         let store = test_store();
         let event_id = store

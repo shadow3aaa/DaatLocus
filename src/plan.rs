@@ -112,6 +112,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn plan_postcard_round_trips_persisted_state() {
+        let plan = Plan {
+            steps: vec![
+                PlanStep {
+                    step: "inspect persisted state".to_string(),
+                    status: PlanStatus::Completed,
+                    created_at_ms: 10,
+                    last_updated_at_ms: 20,
+                },
+                PlanStep {
+                    step: "add serialization coverage".to_string(),
+                    status: PlanStatus::InProgress,
+                    created_at_ms: 30,
+                    last_updated_at_ms: 40,
+                },
+            ],
+        };
+
+        let bytes = postcard::to_allocvec(&plan).expect("encode plan");
+        let restored: Plan = postcard::from_bytes(&bytes).expect("decode plan");
+
+        assert_eq!(restored.steps.len(), 2);
+        assert_eq!(restored.steps[0].step, "inspect persisted state");
+        assert_eq!(restored.steps[0].status, PlanStatus::Completed);
+        assert_eq!(restored.steps[0].created_at_ms, 10);
+        assert_eq!(restored.steps[0].last_updated_at_ms, 20);
+        assert_eq!(restored.steps[1].step, "add serialization coverage");
+        assert_eq!(restored.steps[1].status, PlanStatus::InProgress);
+        assert_eq!(restored.steps[1].created_at_ms, 30);
+        assert_eq!(restored.steps[1].last_updated_at_ms, 40);
+    }
+
+    #[test]
     fn replace_clears_plan_when_all_steps_are_completed() {
         let mut plan = Plan::default();
         let _ = plan.replace(vec![PlanStep {
