@@ -39,6 +39,11 @@ The embedded `hindsight-embed` must be self-contained. It must not call `uv`,
 current host platform. `tar.gz`, `tgz`, and `zip` remain supported import
 formats for manual or externally built artifacts.
 
+The default PyInstaller environment pins `hindsight-embed` and
+`hindsight-api-slim[embedded-db]` instead of the full `hindsight-api` meta
+package. That keeps release sidecars cross-platform and avoids bundling local ML
+dependencies that are not needed by Daat Locus.
+
 ## Maintainer Commands
 
 Build the current host platform sidecar with PyInstaller:
