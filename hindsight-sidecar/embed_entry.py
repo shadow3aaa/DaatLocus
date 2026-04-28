@@ -3,6 +3,27 @@ from pathlib import Path
 
 from hindsight_embed.daemon_embed_manager import DaemonEmbedManager
 
+if sys.platform == "win32":
+    import msvcrt
+    import hindsight_embed.profile_manager as profile_manager
+
+    def _with_lock_cursor_at_start(file_obj, lock_mode):
+        pos = file_obj.tell()
+        file_obj.seek(0)
+        try:
+            msvcrt.locking(file_obj.fileno(), lock_mode, 1)
+        finally:
+            file_obj.seek(pos)
+
+    def _lock_file(file_obj):
+        _with_lock_cursor_at_start(file_obj, msvcrt.LK_LOCK)
+
+    def _unlock_file(file_obj):
+        _with_lock_cursor_at_start(file_obj, msvcrt.LK_UNLCK)
+
+    profile_manager.lock_file = _lock_file
+    profile_manager.unlock_file = _unlock_file
+
 
 def _find_bundled_api_command(self):
     exe_name = "hindsight-api.exe" if sys.platform == "win32" else "hindsight-api"
