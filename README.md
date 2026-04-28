@@ -5,6 +5,7 @@
 # Daat Locus
 
 [![简体中文][readme-cn-badge]][readme-cn-url]
+[![Crates.io][crates-badge]][crates-url]
 [![CI][ci-badge]][ci-url]
 [![License][license-badge]][license-url]
 
@@ -14,6 +15,8 @@ An agent runtime that truly has experience.
 
 [readme-cn-badge]: https://img.shields.io/badge/README-简体中文-blue.svg?style=for-the-badge
 [readme-cn-url]: README_zh-CN.md
+[crates-badge]: https://img.shields.io/crates/v/daat-locus?style=for-the-badge
+[crates-url]: https://crates.io/crates/daat-locus
 [ci-badge]: https://img.shields.io/github/actions/workflow/status/shadow3aaa/DaatLocus/ci.yml?style=for-the-badge&label=CI
 [ci-url]: https://github.com/shadow3aaa/DaatLocus/actions/workflows/ci.yml
 [license-badge]: https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=for-the-badge
@@ -71,15 +74,37 @@ growth.
 
 ## Quick Start
 
-Daat Locus currently runs from source:
+The recommended install path is `cargo-binstall`, which installs the prebuilt
+GitHub Release binary for your platform. Release binaries include the bundled
+Hindsight sidecar, so normal installs do not need Python, `uv`, PyInstaller, or
+runtime package downloads.
+
+```bash
+cargo install cargo-binstall
+cargo binstall daat-locus
+```
+
+You can also download the matching archive directly from
+[GitHub Releases][releases-url], extract it, and place `daat-locus` on your
+`PATH`.
+
+On first launch, Daat Locus opens an interactive setup flow.
+
+### Source Builds
+
+`cargo install daat-locus` is available from crates.io, but it builds from
+source and does not include the prebuilt Hindsight sidecar. For a fully bundled
+developer build, clone the repository and build the host sidecar before running
+the binary:
 
 ```bash
 git clone https://github.com/shadow3aaa/DaatLocus
 cd DaatLocus
-cargo run
+cargo xtask build-hindsight-sidecar
+DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1 cargo run --locked
 ```
 
-On first launch, Daat Locus opens an interactive setup flow.
+[releases-url]: https://github.com/shadow3aaa/DaatLocus/releases
 
 ## Documentation
 

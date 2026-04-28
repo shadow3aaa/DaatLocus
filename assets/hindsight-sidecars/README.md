@@ -40,9 +40,10 @@ current host platform. `tar.gz`, `tgz`, and `zip` remain supported import
 formats for manual or externally built artifacts.
 
 The default PyInstaller environment pins `hindsight-embed` and
-`hindsight-api-slim[embedded-db]` instead of the full `hindsight-api` meta
-package. That keeps release sidecars cross-platform and avoids bundling local ML
-dependencies that are not needed by Daat Locus.
+`hindsight-api-slim[embedded-db,local-ml]` instead of the full `hindsight-api`
+meta package. Release sidecars include the embedded database plus local
+embedding/reranking dependencies, while still avoiding unrelated Hindsight
+extras.
 
 ## Maintainer Commands
 
