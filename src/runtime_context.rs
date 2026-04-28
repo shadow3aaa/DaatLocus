@@ -117,12 +117,11 @@ pub async fn execute_pre_turn_runtime_compaction(
         plan.source_messages(),
         plan.summary_max_tokens(),
     )?;
-    let retained_user_message_count = plan.retained_user_messages().len();
     execute_runtime_compaction(
         context,
         RuntimeCompactionRequest {
             source_messages: plan.source_messages(),
-            retained_user_message_count,
+            retained_user_message_count: 0,
             max_tokens: plan.summary_max_tokens(),
             phase: RuntimeCompactionPhase::PreTurn,
             reason: RuntimeCompactionReason::BudgetThreshold,
@@ -612,20 +611,15 @@ async fn build_mid_turn_compaction_outcome(
     } else {
         RuntimeCompactionReason::BudgetThreshold
     };
-    let retained_user_message_count = messages
-        .iter()
-        .filter(|message| matches!(message, AgentMessage::User { .. }))
-        .count();
     execute_runtime_compaction(
         context,
         RuntimeCompactionRequest {
             source_messages: &compacted_messages,
-            retained_user_message_count,
+            retained_user_message_count: 0,
             max_tokens,
             phase: RuntimeCompactionPhase::MidTurn,
             reason,
-            reinjection_strategy:
-                RuntimeCompactionReinjectionStrategy::PreserveSystemAndRecentUsers,
+            reinjection_strategy: RuntimeCompactionReinjectionStrategy::PreserveSystemOnly,
             fallback_summary,
         },
     )

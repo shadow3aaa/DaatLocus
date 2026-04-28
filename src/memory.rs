@@ -32,8 +32,6 @@ const RUNTIME_CONVERSATION_LEGACY_FILE_NAME: &str = "runtime_conversation";
 const HINDSIGHT_QUEUE_FILE_NAME: &str = "hindsight_queue.json";
 const HINDSIGHT_QUEUE_LEGACY_FILE_NAME: &str = "hindsight_queue";
 const RUNTIME_HISTORY_TOOL_MESSAGE_MAX_TOKENS: usize = 600;
-const RUNTIME_COMPACTION_RETAINED_USER_MAX_TOKENS: usize = 20_000;
-const MID_TURN_COMPACTION_RETAINED_USER_MAX_TOKENS: usize = 20_000;
 const RUNTIME_COMPACTION_RECORD_LIMIT: usize = 32;
 
 pub struct Memory {
@@ -64,7 +62,6 @@ pub struct RuntimeStepConversation {
 
 pub struct RuntimeConversationCompactionPlan {
     source_messages: Vec<HistoryMessage>,
-    retained_user_messages: Vec<HistoryMessage>,
     summary_max_tokens: usize,
 }
 
@@ -92,6 +89,7 @@ pub enum RuntimeCompactionReason {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeCompactionReinjectionStrategy {
     RebuildRuntimeEnvelope,
+    PreserveSystemOnly,
     PreserveSystemAndRecentUsers,
 }
 
@@ -505,10 +503,6 @@ impl RuntimeConversationCompactionPlan {
         &self.source_messages
     }
 
-    pub fn retained_user_messages(&self) -> &[HistoryMessage] {
-        &self.retained_user_messages
-    }
-
     pub fn summary_max_tokens(&self) -> usize {
         self.summary_max_tokens
     }
@@ -523,37 +517,8 @@ fn rebuild_compacted_agent_messages(
         .filter(|message| matches!(message, AgentMessage::System { .. }))
         .cloned()
         .collect::<Vec<_>>();
-    rebuilt.extend(select_recent_user_agent_messages_for_compaction(
-        source_messages,
-    ));
     rebuilt.push(AgentMessage::assistant(summary));
     rebuilt
-}
-
-fn select_recent_user_agent_messages_for_compaction(
-    messages: &[AgentMessage],
-) -> Vec<AgentMessage> {
-    let history_messages = messages
-        .iter()
-        .filter_map(|message| match message {
-            AgentMessage::User { content } => Some(HistoryMessage {
-                message: AgentMessage::user_content(content.clone()),
-                tool_ui_event: None,
-                tool_call_ui_events: Vec::new(),
-            }),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    select_recent_user_messages_for_compaction(
-        &history_messages,
-        MID_TURN_COMPACTION_RETAINED_USER_MAX_TOKENS,
-    )
-    .into_iter()
-    .filter_map(|message| match message.message {
-        AgentMessage::User { content } => Some(AgentMessage::user_content(content)),
-        _ => None,
-    })
-    .collect()
 }
 
 impl RuntimeConversation {
@@ -648,12 +613,7 @@ impl RuntimeConversation {
         if summary_max_tokens == 0 {
             return Vec::new();
         }
-        let retained_user_messages = select_recent_user_messages_for_compaction(
-            &all_messages,
-            retained_user_token_budget(max_tokens, summary_max_tokens),
-        );
         let mut messages = Vec::new();
-        messages.extend(retained_user_messages);
         if let Some(summary) =
             build_runtime_prompt_history_summary(&all_messages, summary_max_tokens)
         {
@@ -680,13 +640,8 @@ impl RuntimeConversation {
         if summary_max_tokens == 0 {
             return None;
         }
-        let retained_user_messages = select_recent_user_messages_for_compaction(
-            &all_messages,
-            retained_user_token_budget(max_tokens, summary_max_tokens),
-        );
         Some(RuntimeConversationCompactionPlan {
             source_messages: all_messages,
-            retained_user_messages,
             summary_max_tokens,
         })
     }
@@ -713,7 +668,6 @@ impl RuntimeConversation {
         };
 
         self.messages.clear();
-        self.messages.extend(plan.retained_user_messages);
         self.messages.push(summary);
         self.messages = normalize_runtime_prompt_messages(std::mem::take(&mut self.messages));
         if let Some(record) = record {
@@ -998,76 +952,6 @@ fn history_message_token_cost(message: &HistoryMessage) -> usize {
                 + 8
         }
     }
-}
-
-fn select_recent_user_messages_for_compaction(
-    messages: &[HistoryMessage],
-    max_tokens: usize,
-) -> Vec<HistoryMessage> {
-    if max_tokens == 0 {
-        return Vec::new();
-    }
-
-    let user_messages = messages
-        .iter()
-        .filter(|message| message.is_user() && !is_runtime_summary_message(message))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let mut selected = Vec::new();
-    let mut remaining = max_tokens;
-    for message in user_messages.into_iter().rev() {
-        if remaining == 0 {
-            break;
-        }
-        let cost = history_message_token_cost(&message);
-        if cost <= remaining {
-            remaining = remaining.saturating_sub(cost);
-            selected.push(message);
-            continue;
-        }
-
-        if let Some(truncated_message) =
-            truncate_user_message_to_history_budget(&message, remaining)
-        {
-            selected.push(truncated_message);
-        }
-        break;
-    }
-    selected.reverse();
-    selected
-}
-
-fn truncate_user_message_to_history_budget(
-    message: &HistoryMessage,
-    max_tokens: usize,
-) -> Option<HistoryMessage> {
-    let overhead = approx_token_count(message.role_name()) + 4;
-    let mut content_budget = max_tokens.checked_sub(overhead)?;
-    for _ in 0..4 {
-        let truncated = truncate_text_to_token_budget_with_notice(
-            history_message_content(message).trim(),
-            content_budget,
-            "... [user message too long; runtime history truncated]",
-        );
-        if truncated.trim().is_empty() {
-            return None;
-        }
-        let candidate = HistoryMessage::user(truncated);
-        let cost = history_message_token_cost(&candidate);
-        if cost <= max_tokens {
-            return Some(candidate);
-        }
-        let over_budget = cost.saturating_sub(max_tokens);
-        content_budget = content_budget.checked_sub(over_budget.max(1))?;
-    }
-    None
-}
-
-fn retained_user_token_budget(max_tokens: usize, summary_max_tokens: usize) -> usize {
-    max_tokens
-        .saturating_sub(summary_max_tokens)
-        .min(RUNTIME_COMPACTION_RETAINED_USER_MAX_TOKENS)
 }
 
 fn history_messages_total_token_cost(messages: &[HistoryMessage]) -> usize {
@@ -1393,11 +1277,7 @@ fn build_hindsight_retain_transcript(messages: &[HistoryMessage]) -> Vec<serde_j
                     }));
                 }
             }
-            AgentMessage::Tool {
-                tool_call_id,
-                name: _,
-                ..
-            } => {
+            AgentMessage::Tool { tool_call_id, .. } => {
                 if skipped_tool_call_ids.contains(tool_call_id) {
                     continue;
                 }
@@ -1578,7 +1458,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_conversation_compaction_rebuilds_history_without_assistant_or_tool_tail() {
+    fn runtime_conversation_compaction_rebuilds_history_as_summary_only() {
         let mut conversation = RuntimeConversation {
             last_focus: Some("test".to_string()),
             messages: vec![
@@ -1613,12 +1493,6 @@ mod tests {
                 /*max_tokens*/ 20, /*min_messages*/ 0, /*summary_max_tokens*/ 8,
             )
             .expect("expected compaction plan");
-        assert!(!plan.retained_user_messages.is_empty());
-        assert!(
-            plan.retained_user_messages
-                .iter()
-                .all(HistoryMessage::is_user)
-        );
 
         let applied = conversation.apply_compaction(
             plan,
@@ -1633,19 +1507,14 @@ mod tests {
                     source_item_count: 2,
                     source_message_count: 6,
                     trimmed_item_count: 0,
-                    retained_user_message_count: 2,
+                    retained_user_message_count: 0,
                     used_fallback_summary: false,
                     summary: "summary".to_string(),
                 },
             }),
         );
         assert!(applied);
-        assert!(!conversation.messages.is_empty());
-        assert!(
-            conversation.messages[..conversation.messages.len() - 1]
-                .iter()
-                .all(HistoryMessage::is_user)
-        );
+        assert_eq!(conversation.messages.len(), 1);
         assert!(
             conversation
                 .messages
@@ -1662,38 +1531,7 @@ mod tests {
     }
 
     #[test]
-    fn select_recent_user_messages_for_compaction_truncates_overlong_user_message() {
-        let messages = vec![HistoryMessage::user("word ".repeat(200))];
-        let selected = select_recent_user_messages_for_compaction(&messages, 160);
-        assert_eq!(selected.len(), 1);
-        assert!(history_message_content(&selected[0]).contains("runtime history truncated"));
-    }
-
-    #[test]
-    fn runtime_conversation_compaction_caps_retained_user_history() {
-        let messages = (0..300)
-            .map(|index| HistoryMessage::user(format!("message {index}: {}", "word ".repeat(500))))
-            .collect::<Vec<_>>();
-        let conversation = RuntimeConversation {
-            last_focus: Some("test".to_string()),
-            messages,
-            compaction_records: VecDeque::new(),
-        };
-
-        let plan = conversation
-            .plan_compaction(
-                /*max_tokens*/ 100_000, /*min_messages*/ 0,
-                /*summary_max_tokens*/ 800,
-            )
-            .expect("expected compaction plan");
-        let retained_tokens = history_messages_total_token_cost(&plan.retained_user_messages);
-
-        assert!(retained_tokens <= RUNTIME_COMPACTION_RETAINED_USER_MAX_TOKENS);
-        assert!(plan.retained_user_messages.len() < plan.source_messages.len());
-    }
-
-    #[test]
-    fn rebuild_compacted_agent_messages_drops_assistant_and_tool_history() {
+    fn rebuild_compacted_agent_messages_drops_runtime_user_context_and_tool_history() {
         let messages = vec![
             AgentMessage::system("system"),
             AgentMessage::user("claimed input"),
@@ -1703,15 +1541,15 @@ mod tests {
         ];
 
         let rebuilt = rebuild_compacted_agent_messages(&messages, "summary".to_string());
-        assert_eq!(rebuilt.len(), 4);
+        assert_eq!(rebuilt.len(), 2);
         assert!(matches!(rebuilt[0], AgentMessage::System { .. }));
-        assert!(matches!(rebuilt[1], AgentMessage::User { .. }));
-        assert!(matches!(rebuilt[2], AgentMessage::User { .. }));
-        assert!(matches!(rebuilt[3], AgentMessage::Assistant { .. }));
+        assert!(matches!(rebuilt[1], AgentMessage::Assistant { .. }));
         assert!(rebuilt.iter().all(|message| {
             !matches!(
                 message,
-                AgentMessage::Tool { .. } | AgentMessage::AssistantToolCallProtocol { .. }
+                AgentMessage::User { .. }
+                    | AgentMessage::Tool { .. }
+                    | AgentMessage::AssistantToolCallProtocol { .. }
             )
         }));
     }
