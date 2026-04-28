@@ -54,6 +54,7 @@ fn write_builtin_workflow_bindings(manifest_dir: &Path) {
 fn write_embedded_hindsight_sidecar_bindings(manifest_dir: &Path) {
     println!("cargo:rerun-if-env-changed=DAAT_LOCUS_HINDSIGHT_SIDECAR");
     println!("cargo:rerun-if-env-changed=DAAT_LOCUS_HINDSIGHT_SIDECAR_ENTRY");
+    println!("cargo:rerun-if-env-changed=DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR");
     println!("cargo:rerun-if-env-changed=DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR");
     let target = env::var("TARGET").expect("target triple");
     let default_dir = manifest_dir.join("assets").join("hindsight-sidecars");
@@ -62,6 +63,8 @@ fn write_embedded_hindsight_sidecar_bindings(manifest_dir: &Path) {
     println!("cargo:rerun-if-changed={}", manifest_path.display());
     let explicit_path = env::var_os("DAAT_LOCUS_HINDSIGHT_SIDECAR").map(PathBuf::from);
     let explicit_entry = env::var("DAAT_LOCUS_HINDSIGHT_SIDECAR_ENTRY").ok();
+    let discover_local_sidecar = env_flag_enabled("DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR")
+        || env_flag_enabled("DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR");
     let sidecar = explicit_path
         .clone()
         .map(|path| SidecarArchiveSelection {
@@ -71,8 +74,16 @@ fn write_embedded_hindsight_sidecar_bindings(manifest_dir: &Path) {
             entry: explicit_entry.clone(),
             source: SidecarArchiveSource::ExplicitEnv,
         })
-        .or_else(|| manifest_sidecar_archive(&manifest_path, &default_dir, &target))
-        .or_else(|| conventional_sidecar_archive(&default_dir, &target));
+        .or_else(|| {
+            discover_local_sidecar
+                .then(|| manifest_sidecar_archive(&manifest_path, &default_dir, &target))
+                .flatten()
+        })
+        .or_else(|| {
+            discover_local_sidecar
+                .then(|| conventional_sidecar_archive(&default_dir, &target))
+                .flatten()
+        });
 
     let out_path =
         PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("embedded_hindsight_sidecar.rs");
@@ -147,7 +158,7 @@ fn write_embedded_hindsight_sidecar_bindings(manifest_dir: &Path) {
         _ => {
             if env_flag_enabled("DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR") {
                 panic!(
-                    "missing Hindsight sidecar for target '{}'; run `cargo xtask build-hindsight-sidecar` for the current platform, import a CI-built archive with `cargo xtask import-hindsight-sidecar`, or set DAAT_LOCUS_HINDSIGHT_SIDECAR",
+                    "missing Hindsight sidecar for target '{}'; run `cargo xtask build-hindsight-sidecar` for the current platform, import a CI-built archive with `cargo xtask import-hindsight-sidecar`, set DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1 to use local assets, or set DAAT_LOCUS_HINDSIGHT_SIDECAR",
                     target
                 );
             }

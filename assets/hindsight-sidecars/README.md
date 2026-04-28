@@ -1,27 +1,34 @@
 # Hindsight Sidecar Build Assets
 
 Daat Locus no longer starts Hindsight through `uvx` or runtime package
-downloads. Release builds generate a platform sidecar in this directory, embed
-it into the final Daat Locus binary, and publish only that final binary archive.
-The generated sidecar archives are local/CI staging artifacts and are ignored by
-git.
+downloads. The sidecar is built as a self-contained archive and published to a
+dedicated GitHub Release. Daat Locus downloads the matching archive on first
+use, verifies it, extracts it once into `~/.daat-locus/cache/hindsight-sidecars`,
+and then runs the cached executable directly.
 
-`build.rs` resolves sidecars in this order:
+The generated sidecar archives in this directory are local/CI staging artifacts
+and are ignored by git.
+
+By default, normal `cargo build`, `cargo install`, and release binary builds do
+not embed sidecars. `build.rs` only embeds a sidecar when one of these explicit
+inputs is set:
 
 1. `DAAT_LOCUS_HINDSIGHT_SIDECAR=/path/to/archive`
-2. `assets/hindsight-sidecars/manifest.toml`
-3. `assets/hindsight-sidecars/<target>.tar.zst`
-4. `assets/hindsight-sidecars/<target>.tzst`
-5. `assets/hindsight-sidecars/<target>.tar.gz`
-6. `assets/hindsight-sidecars/<target>.tgz`
-7. `assets/hindsight-sidecars/<target>.zip`
+2. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
+   `assets/hindsight-sidecars/manifest.toml`
+3. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
+   `assets/hindsight-sidecars/<target>.tar.zst`
+4. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
+   `assets/hindsight-sidecars/<target>.tzst`
+5. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
+   `assets/hindsight-sidecars/<target>.tar.gz`
+6. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
+   `assets/hindsight-sidecars/<target>.tgz`
+7. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
+   `assets/hindsight-sidecars/<target>.zip`
 
-The archive is embedded into the Daat Locus binary at build time and extracted
-once into `~/.daat-locus/cache/hindsight-sidecars`.
-
-Plain source builds can still compile without a sidecar unless
-`DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1` is set. Release installs should use
-the published binary archives, for example through `cargo-binstall`.
+`DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1` still fails the build when no embeddable
+sidecar is available.
 
 Required archive layout:
 
@@ -68,11 +75,9 @@ cargo xtask import-hindsight-sidecar \
   --archive /path/to/x86_64-unknown-linux-gnu.tar.zst
 ```
 
-The `Release Binaries` GitHub Actions workflow builds sidecars on Linux, macOS,
-and Windows runners, compiles release binaries with
-`DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1`, and packages the final binaries as
-`dist/daat-locus-<version>-<target>.tar.zst` for release upload and
-`cargo-binstall`.
+The `Release Binaries` GitHub Actions workflow only compiles and packages Daat
+Locus binaries as `dist/daat-locus-<version>-<target>.tar.zst` for release
+upload and `cargo-binstall`. Those binaries use runtime sidecar downloads.
 
 The `Hindsight Sidecars` workflow builds the same sidecar archives without
 embedding them into Daat Locus. It uploads the archives plus a generated
@@ -96,11 +101,12 @@ Smoke-test the current host archive by extracting it and running
 cargo xtask smoke-hindsight-sidecar
 ```
 
-Release builds can set `DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1` to fail fast
-when no sidecar is available for the target.
+Fully embedded local builds can set `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1`.
+Release builds can additionally set `DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1` to
+fail fast when no sidecar is available for the target.
 
-After building a release binary that has embedded the sidecar, package it for
-GitHub Releases and `cargo-binstall`:
+After building a release binary, package it for GitHub Releases and
+`cargo-binstall`:
 
 ```bash
 cargo xtask package-release-binary
