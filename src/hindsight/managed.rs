@@ -142,8 +142,15 @@ impl EmbeddedHindsightSidecar {
     }
 
     fn command(&self) -> Command {
-        Command::new(&self.executable)
+        let mut command = Command::new(&self.executable);
+        configure_sidecar_process_env(&mut command);
+        command
     }
+}
+
+fn configure_sidecar_process_env(command: &mut Command) {
+    command.env("PYTHONUTF8", "1");
+    command.env("PYTHONIOENCODING", "utf-8");
 }
 
 async fn sidecar_install_is_valid(root: &Path, expected: &SidecarInstallMetadata) -> bool {
