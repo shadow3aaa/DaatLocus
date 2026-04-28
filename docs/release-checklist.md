@@ -29,10 +29,16 @@ Use this checklist before tagging a Daat Locus release.
 - Confirm config files are written with private permissions on Unix-like
   systems.
 
-## Supply Chain
+## Release Packaging
 
-- Confirm vendored Hindsight sidecar archives are present for every release
-  target and pass `cargo xtask verify-hindsight-sidecars`.
+- Run the `Release Binaries` workflow for the release tag and confirm Linux,
+  macOS, and Windows artifacts are uploaded to the GitHub Release.
+- Confirm each release binary was built after
+  `cargo xtask build-hindsight-sidecar`,
+  `cargo xtask verify-hindsight-sidecars`, and
+  `cargo xtask smoke-hindsight-sidecar` passed for that runner.
+- Confirm `cargo-binstall` resolves the release asset and does not fall back to
+  source compilation.
 - Confirm browser runtime download behavior is expected for the release.
 - Record any unpinned or latest-version download behavior in release notes.
 - Review dependency updates for license or attribution changes.

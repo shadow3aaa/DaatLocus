@@ -1,2 +1,9 @@
 /target
+/dist
 /.githooks
+/assets/hindsight-sidecars/*.tar.zst
+/assets/hindsight-sidecars/*.tzst
+/assets/hindsight-sidecars/*.tar.gz
+/assets/hindsight-sidecars/*.tgz
+/assets/hindsight-sidecars/*.zip
+/assets/hindsight-sidecars/manifest.toml

@@ -1,0 +1,118 @@
+name: Release Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to upload to, for example v0.1.0. Leave empty to only upload workflow artifacts.
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-binaries-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build release binary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Cache Cargo build outputs
+        uses: Swatinem/rust-cache@v2
+
+      - name: Resolve host target
+        id: host
+        shell: bash
+        run: |
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+
+      - name: Clear local sidecar assets
+        shell: bash
+        run: |
+          for path in assets/hindsight-sidecars/*; do
+            [ "$(basename "$path")" = README.md ] && continue
+            [ -f "$path" ] && rm -f "$path"
+          done
+
+      - name: Build Hindsight sidecar
+        run: cargo xtask build-hindsight-sidecar
+
+      - name: Verify Hindsight sidecar
+        run: cargo xtask verify-hindsight-sidecars
+
+      - name: Smoke-test Hindsight sidecar
+        run: cargo xtask smoke-hindsight-sidecar --target ${{ steps.host.outputs.target }}
+
+      - name: Build release binary
+        env:
+          DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR: "1"
+        run: cargo build --release --locked
+
+      - name: Package release binary
+        shell: bash
+        run: cargo xtask package-release-binary --target "${{ steps.host.outputs.target }}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daat-locus-${{ steps.host.outputs.target }}
+          if-no-files-found: error
+          path: dist/daat-locus-*.tar.zst
+
+  publish:
+    name: Upload release assets
+    needs: build
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          tag=""
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="${{ github.event.inputs.tag }}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: daat-locus-*
+          path: dist-artifacts
+          merge-multiple: true
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          files: dist-artifacts/*.tar.zst
