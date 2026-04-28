@@ -97,9 +97,9 @@ model backed by another provider.
 
 ## Hindsight
 
-Daat Locus manages `hindsight-embed` automatically from an embedded sidecar
-bundled into the binary. Runtime startup does not use `uvx`, pip, or package
-downloads.
+Daat Locus manages `hindsight-embed` automatically from a pinned sidecar
+release. Runtime startup downloads the matching archive when it is not already
+cached locally, then runs the cached executable directly.
 
 `hindsight.model = "model-key"` is optional. If unset, Hindsight falls back to
 `main_model`.

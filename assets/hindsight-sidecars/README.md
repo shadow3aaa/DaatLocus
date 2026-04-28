@@ -1,6 +1,6 @@
 # Hindsight Sidecar Build Assets
 
-Daat Locus no longer starts Hindsight through `uvx` or runtime package
+Daat Locus no longer starts Hindsight through `uvx` or runtime Python package
 downloads. The sidecar is built as a self-contained archive and published to a
 dedicated GitHub Release. Daat Locus downloads the matching archive on first
 use, verifies it, extracts it once into `~/.daat-locus/cache/hindsight-sidecars`,
@@ -9,26 +9,9 @@ and then runs the cached executable directly.
 The generated sidecar archives in this directory are local/CI staging artifacts
 and are ignored by git.
 
-By default, normal `cargo build`, `cargo install`, and release binary builds do
-not embed sidecars. `build.rs` only embeds a sidecar when one of these explicit
-inputs is set:
-
-1. `DAAT_LOCUS_HINDSIGHT_SIDECAR=/path/to/archive`
-2. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
-   `assets/hindsight-sidecars/manifest.toml`
-3. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
-   `assets/hindsight-sidecars/<target>.tar.zst`
-4. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
-   `assets/hindsight-sidecars/<target>.tzst`
-5. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
-   `assets/hindsight-sidecars/<target>.tar.gz`
-6. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
-   `assets/hindsight-sidecars/<target>.tgz`
-7. `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1` with
-   `assets/hindsight-sidecars/<target>.zip`
-
-`DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1` still fails the build when no embeddable
-sidecar is available.
+Normal `cargo build`, `cargo install`, and release binary builds do not embed
+sidecars. Runtime installation is always driven by the pinned sidecar release
+manifest in `src/hindsight/managed.rs`.
 
 Required archive layout:
 
@@ -39,12 +22,11 @@ bin/
 
 On Windows the executable must be `bin/hindsight-embed.exe`.
 
-The embedded `hindsight-embed` must be self-contained. It must not call `uv`,
+The packaged `hindsight-embed` must be self-contained. It must not call `uv`,
 `uvx`, pip, Poetry, or any other runtime package installer.
 
 `cargo xtask build-hindsight-sidecar` writes a `tar.zst` archive for the
-current host platform. `tar.gz`, `tgz`, and `zip` remain supported import
-formats for manual or externally built artifacts.
+current host platform.
 
 The default PyInstaller environment pins `hindsight-embed` and
 `hindsight-api-slim[embedded-db,local-ml]` instead of the full `hindsight-api`
@@ -65,14 +47,6 @@ or:
 
 ```bash
 cargo xtask build-hindsight-sidecar --entry-script path/to/entry.py
-```
-
-Import a CI-built archive for another platform:
-
-```bash
-cargo xtask import-hindsight-sidecar \
-  --target x86_64-unknown-linux-gnu \
-  --archive /path/to/x86_64-unknown-linux-gnu.tar.zst
 ```
 
 The `Release Binaries` GitHub Actions workflow only compiles and packages Daat
@@ -100,10 +74,6 @@ Smoke-test the current host archive by extracting it and running
 ```bash
 cargo xtask smoke-hindsight-sidecar
 ```
-
-Fully embedded local builds can set `DAAT_LOCUS_EMBED_HINDSIGHT_SIDECAR=1`.
-Release builds can additionally set `DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1` to
-fail fast when no sidecar is available for the target.
 
 After building a release binary, package it for GitHub Releases and
 `cargo-binstall`:

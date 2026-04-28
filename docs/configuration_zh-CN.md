@@ -88,7 +88,7 @@ OpenAI Codex OAuth 使用 ChatGPT Codex Responses backend，而不是公开 Open
 
 ## Hindsight
 
-Daat Locus 会从二进制内嵌的 sidecar 自动托管 `hindsight-embed`。运行时启动不再使用 `uvx`、pip 或临时包下载。
+Daat Locus 会从固定的 sidecar release 自动托管 `hindsight-embed`。运行时启动时如果本地尚未缓存匹配归档，就下载、校验并解压后直接运行缓存的可执行文件。
 
 `hindsight.model = "model-key"` 是可选项。为空时，Hindsight 回退到 `main_model`。
 

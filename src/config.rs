@@ -409,9 +409,6 @@ pub struct HindsightConfig {
     pub namespace: String,
     pub bank_id: String,
     pub request_timeout_secs: u64,
-    /// Deprecated compatibility field. Hindsight now runs from the embedded
-    /// sidecar bundled into the Daat Locus binary, not from uvx.
-    pub embed_version: String,
     /// Profile name used by hindsight-embed. Defaults to "daat-locus".
     pub profile: String,
     /// Port the managed daemon listens on.
@@ -427,7 +424,6 @@ impl Default for HindsightConfig {
             namespace: "default".to_string(),
             bank_id: "daat-locus".to_string(),
             request_timeout_secs: 180,
-            embed_version: String::new(),
             profile: "daat-locus".to_string(),
             port: 8888,
             model: None,

@@ -44,7 +44,6 @@ fn run() -> Result<()> {
     let command = args.remove(0);
     match command.as_str() {
         "build-hindsight-sidecar" => build_hindsight_sidecar(parse_build_args(&args)?)?,
-        "import-hindsight-sidecar" => import_hindsight_sidecar(parse_import_args(&args)?)?,
         "verify-hindsight-sidecars" => verify_hindsight_sidecars()?,
         "smoke-hindsight-sidecar" => smoke_hindsight_sidecar(parse_target_arg(&args)?)?,
         "package-release-binary" => package_release_binary(parse_package_release_args(&args)?)?,
@@ -60,14 +59,12 @@ fn print_help() {
         "\
 Usage:
   cargo xtask build-hindsight-sidecar [--spec PATH | --entry-script PATH] [--target TARGET]
-  cargo xtask import-hindsight-sidecar --target TARGET --archive PATH [--entry PATH]
   cargo xtask verify-hindsight-sidecars
   cargo xtask smoke-hindsight-sidecar [--target TARGET]
   cargo xtask package-release-binary [--target TARGET] [--release-dir PATH] [--out-dir PATH]
 
 Commands:
   build-hindsight-sidecar    Build the current host sidecar with PyInstaller and update assets.
-  import-hindsight-sidecar   Import a CI-built sidecar archive into assets.
   verify-hindsight-sidecars  Verify manifest checksums and archive layouts.
   smoke-hindsight-sidecar    Extract and run the current-host sidecar entry.
   package-release-binary     Package target/release/daat-locus as a cargo-binstall archive.
@@ -161,15 +158,6 @@ impl PyInstallerCommand {
 }
 
 #[derive(Debug)]
-struct ImportArgs {
-    target: String,
-    archive: PathBuf,
-    entry: Option<String>,
-    built_with: String,
-    hindsight_version: Option<String>,
-}
-
-#[derive(Debug)]
 struct PackageReleaseArgs {
     target: String,
     release_dir: Option<PathBuf>,
@@ -253,49 +241,6 @@ fn parse_build_args(raw: &[String]) -> Result<BuildArgs> {
     })
 }
 
-fn parse_import_args(raw: &[String]) -> Result<ImportArgs> {
-    let mut target = None;
-    let mut archive = None;
-    let mut entry = None;
-    let mut built_with = "pyinstaller".to_string();
-    let mut hindsight_version = None;
-
-    let mut index = 0;
-    while index < raw.len() {
-        match raw[index].as_str() {
-            "--target" => {
-                target = Some(next_value(raw, &mut index, "--target")?);
-            }
-            "--archive" => {
-                archive = Some(PathBuf::from(next_value(raw, &mut index, "--archive")?));
-            }
-            "--entry" => {
-                entry = Some(next_value(raw, &mut index, "--entry")?);
-            }
-            "--built-with" => {
-                built_with = next_value(raw, &mut index, "--built-with")?;
-            }
-            "--hindsight-version" => {
-                hindsight_version = Some(next_value(raw, &mut index, "--hindsight-version")?);
-            }
-            "-h" | "--help" => {
-                print_help();
-                std::process::exit(0);
-            }
-            other => return Err(format!("unknown import-hindsight-sidecar flag `{other}`").into()),
-        }
-        index += 1;
-    }
-
-    Ok(ImportArgs {
-        target: target.ok_or("--target is required")?,
-        archive: archive.ok_or("--archive is required")?,
-        entry,
-        built_with,
-        hindsight_version,
-    })
-}
-
 fn parse_target_arg(raw: &[String]) -> Result<String> {
     let mut target = None;
     let mut index = 0;
@@ -359,7 +304,7 @@ fn build_hindsight_sidecar(args: BuildArgs) -> Result<()> {
     let host = rustc_host_target()?;
     if args.target != host {
         return Err(format!(
-            "PyInstaller cannot cross-build sidecars: requested target `{}`, host is `{host}`. Use CI on the target platform, then `cargo xtask import-hindsight-sidecar`.",
+            "PyInstaller cannot cross-build sidecars: requested target `{}`, host is `{host}`. Use CI on the target platform.",
             args.target
         )
         .into());
@@ -470,48 +415,6 @@ fn run_pyinstaller(
     if !status.success() {
         return Err(format!("PyInstaller failed with status {status}").into());
     }
-    Ok(())
-}
-
-fn import_hindsight_sidecar(args: ImportArgs) -> Result<()> {
-    if !args.archive.is_file() {
-        return Err(format!("archive does not exist: {}", args.archive.display()).into());
-    }
-
-    let archive_kind = archive_kind_from_path(&args.archive).ok_or_else(|| {
-        format!(
-            "unsupported sidecar archive extension: {}",
-            args.archive.display()
-        )
-    })?;
-    let entry = args
-        .entry
-        .unwrap_or_else(|| default_sidecar_entry(&args.target));
-    ensure_safe_relative_path("sidecar entry", &entry)?;
-    verify_archive_contains_entry(&args.archive, archive_kind, &entry)?;
-
-    let assets_dir = assets_dir();
-    fs::create_dir_all(&assets_dir)?;
-    let archive_name = format!("{}.{}", args.target, archive_kind.extension());
-    let dest = assets_dir.join(&archive_name);
-    copy_file_if_different(&args.archive, &dest)?;
-    let sha256 = sha256_file(&dest)?;
-
-    upsert_manifest_entry(SidecarManifestEntry {
-        target: args.target.clone(),
-        archive: archive_name,
-        archive_kind: archive_kind.as_str().to_string(),
-        sha256,
-        entry,
-        built_with: args.built_with,
-        hindsight_version: args.hindsight_version,
-    })?;
-
-    println!(
-        "imported Hindsight sidecar for {} into {}",
-        args.target,
-        dest.display()
-    );
     Ok(())
 }
 
@@ -626,7 +529,7 @@ fn package_release_binary(args: PackageReleaseArgs) -> Result<()> {
     let binary_path = release_dir.join(&binary_name);
     if !binary_path.is_file() {
         return Err(format!(
-            "release binary does not exist: {}. Run `DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1 cargo build --release --locked` first.",
+            "release binary does not exist: {}. Run `cargo build --release --locked` first.",
             binary_path.display()
         )
         .into());
@@ -738,19 +641,6 @@ fn archive_kind_from_manifest(entry: &SidecarManifestEntry) -> Result<ArchiveKin
             entry.target
         )
         .into()),
-    }
-}
-
-fn archive_kind_from_path(path: &Path) -> Option<ArchiveKind> {
-    let file_name = path.file_name()?.to_str()?;
-    if file_name.ends_with(".tar.zst") || file_name.ends_with(".tzst") {
-        Some(ArchiveKind::TarZst)
-    } else if file_name.ends_with(".tar.gz") || file_name.ends_with(".tgz") {
-        Some(ArchiveKind::TarGz)
-    } else if file_name.ends_with(".zip") {
-        Some(ArchiveKind::Zip)
-    } else {
-        None
     }
 }
 
@@ -982,16 +872,6 @@ fn copy_dir_contents(from: &Path, to: &Path) -> Result<()> {
             fs::set_permissions(&dest, fs::metadata(&source)?.permissions())?;
         }
     }
-    Ok(())
-}
-
-fn copy_file_if_different(from: &Path, to: &Path) -> Result<()> {
-    if let (Ok(from_canon), Ok(to_canon)) = (from.canonicalize(), to.canonicalize())
-        && from_canon == to_canon
-    {
-        return Ok(());
-    }
-    fs::copy(from, to)?;
     Ok(())
 }
 

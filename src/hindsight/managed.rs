@@ -6,10 +6,8 @@
 //!
 //! Sidecar contract:
 //!
-//! - Preferred input: a pinned Daat Locus GitHub Release sidecar manifest
-//!   downloaded on first use.
-//! - Optional build input: `DAAT_LOCUS_HINDSIGHT_SIDECAR=/path/to/<target>.tar.zst`
-//!   for fully embedded builds.
+//! - Input: a pinned Daat Locus GitHub Release sidecar manifest downloaded on
+//!   first use.
 //! - Archive layout: `bin/hindsight-embed[.exe]` plus all runtime files it
 //!   needs, including Python/runtime/native/model assets.
 //! - The packaged `hindsight-embed` must not call uv/uvx/pip/network package
@@ -18,7 +16,7 @@
 use std::{
     fs,
     fs::File,
-    io::{Cursor, Read, Seek},
+    io::{Read, Seek},
     path::{Component, Path, PathBuf},
     time::Duration,
 };
@@ -33,10 +31,6 @@ use tokio::process::Command;
 
 use crate::{config::HindsightConfig, daat_locus_paths::daat_locus_paths};
 
-mod embedded_sidecar {
-    include!(concat!(env!("OUT_DIR"), "/embedded_hindsight_sidecar.rs"));
-}
-
 // ── Tuning ────────────────────────────────────────────────────────────────────
 
 const HEALTH_POLL_INTERVAL_MS: u64 = 1_000;
@@ -45,6 +39,7 @@ const COMMAND_TIMEOUT_SECS: u64 = 60;
 const DAEMON_STOP_TIMEOUT_SECS: u64 = 20;
 const DAEMON_START_TIMEOUT_SECS: u64 = 660;
 const SIDECAR_METADATA_FILE: &str = "daat-locus-sidecar.json";
+const SIDECAR_TARGET: &str = env!("DAAT_LOCUS_BUILD_TARGET");
 const SIDECAR_DOWNLOAD_RELEASE_TAG: &str = "hindsight-sidecars-v0.5.5-1";
 const SIDECAR_DOWNLOAD_MANIFEST_URL: &str = "https://github.com/shadow3aaa/DaatLocus/releases/download/hindsight-sidecars-v0.5.5-1/manifest.toml";
 const SIDECAR_DOWNLOAD_USER_AGENT: &str = concat!("daat-locus/", env!("CARGO_PKG_VERSION"));
@@ -65,7 +60,7 @@ enum SidecarArchiveKind {
 }
 
 impl SidecarArchiveKind {
-    fn from_generated(value: &str) -> Result<Self> {
+    fn from_manifest(value: &str) -> Result<Self> {
         match value {
             "tar.zst" => Ok(Self::TarZst),
             "tar.gz" => Ok(Self::TarGz),
@@ -122,40 +117,10 @@ struct HindsightSidecar {
 impl HindsightSidecar {
     async fn ensure_installed() -> Result<Self> {
         let cache_root = sidecar_cache_root().await;
-        let Some(bytes) = embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_BYTES else {
-            if let Some(sidecar) = Self::find_cached_downloaded(&cache_root).await? {
-                return Ok(sidecar);
-            }
-            return Self::ensure_downloaded(&cache_root).await;
-        };
-        let archive_kind = SidecarArchiveKind::from_generated(
-            embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_ARCHIVE_KIND,
-        )?;
-        let expected_sha256 = embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_SHA256;
-        verify_sha256("embedded Hindsight sidecar", bytes, expected_sha256)?;
-
-        let short_sha = expected_sha256
-            .get(..16)
-            .unwrap_or(expected_sha256)
-            .to_string();
-        let install_root = cache_root.join(format!(
-            "{}-{short_sha}",
-            embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET
-        ));
-        let metadata = SidecarInstallMetadata {
-            target: embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET.to_string(),
-            archive_kind,
-            archive_sha256: expected_sha256.to_string(),
-            entry: embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_ENTRY.to_string(),
-            download_release: None,
-        };
-
-        if sidecar_install_is_valid(&install_root, &metadata).await {
-            return Self::from_root(install_root, &metadata.entry);
+        if let Some(sidecar) = Self::find_cached_downloaded(&cache_root).await? {
+            return Ok(sidecar);
         }
-
-        install_embedded_sidecar(bytes, archive_kind, &metadata, &install_root).await?;
-        Self::from_root(install_root, &metadata.entry)
+        Self::ensure_downloaded(&cache_root).await
     }
 
     async fn find_cached_downloaded(cache_root: &Path) -> Result<Option<Self>> {
@@ -201,7 +166,7 @@ impl HindsightSidecar {
                     continue;
                 }
             };
-            if metadata.target != embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET
+            if metadata.target != SIDECAR_TARGET
                 || metadata.download_release.as_deref() != Some(SIDECAR_DOWNLOAD_RELEASE_TAG)
             {
                 continue;
@@ -228,7 +193,7 @@ impl HindsightSidecar {
     async fn ensure_downloaded(cache_root: &Path) -> Result<Self> {
         tracing::info!(
             "[hindsight:managed] no cached sidecar for {}; downloading manifest {}",
-            embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET,
+            SIDECAR_TARGET,
             SIDECAR_DOWNLOAD_MANIFEST_URL
         );
         let client = reqwest::Client::builder()
@@ -245,11 +210,8 @@ impl HindsightSidecar {
             .text()
             .await
             .map_err(|err| miette!("read Hindsight sidecar manifest: {err}"))?;
-        let entry = select_sidecar_download_entry(
-            &manifest_text,
-            embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET,
-        )?;
-        let archive_kind = SidecarArchiveKind::from_generated(&entry.archive_kind)?;
+        let entry = select_sidecar_download_entry(&manifest_text, SIDECAR_TARGET)?;
+        let archive_kind = SidecarArchiveKind::from_manifest(&entry.archive_kind)?;
         ensure_safe_relative_archive_path(Path::new(&entry.archive))?;
         ensure_safe_relative_archive_path(Path::new(&entry.entry))?;
         validate_sha256_hex(&entry.sha256)?;
@@ -368,7 +330,7 @@ async fn download_sidecar_archive(
     let short_sha = entry.sha256.get(..16).unwrap_or(&entry.sha256).to_string();
     let archive_path = cache_root.join(format!(
         "download-{}-{short_sha}.{extension}",
-        embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET
+        SIDECAR_TARGET
     ));
     let tmp_path = archive_path.with_extension(format!("tmp-{}", std::process::id()));
     if tmp_path.exists() {
@@ -461,22 +423,6 @@ async fn sidecar_install_is_valid(root: &Path, expected: &SidecarInstallMetadata
     metadata == *expected && root.join(Path::new(&expected.entry)).is_file()
 }
 
-async fn install_embedded_sidecar(
-    bytes: &[u8],
-    archive_kind: SidecarArchiveKind,
-    metadata: &SidecarInstallMetadata,
-    install_root: &Path,
-) -> Result<()> {
-    tracing::info!(
-        "[hindsight:managed] installing embedded sidecar into {}",
-        install_root.display()
-    );
-    install_sidecar_archive(metadata, install_root, |tmp_root| {
-        unpack_sidecar_archive(bytes, archive_kind, tmp_root)
-    })
-    .await
-}
-
 async fn install_downloaded_sidecar(
     archive_path: &Path,
     archive_kind: SidecarArchiveKind,
@@ -549,18 +495,6 @@ where
             )
         })?;
     Ok(())
-}
-
-fn unpack_sidecar_archive(
-    bytes: &[u8],
-    archive_kind: SidecarArchiveKind,
-    target_dir: &Path,
-) -> Result<()> {
-    match archive_kind {
-        SidecarArchiveKind::TarZst => unpack_tar_zst(bytes, target_dir),
-        SidecarArchiveKind::TarGz => unpack_tar_gz(bytes, target_dir),
-        SidecarArchiveKind::Zip => unpack_zip(Cursor::new(bytes), target_dir),
-    }
 }
 
 fn unpack_sidecar_archive_from_file(
@@ -931,23 +865,6 @@ impl HindsightManagedServer {
     }
 }
 
-fn verify_sha256(label: &str, bytes: &[u8], expected: &str) -> Result<()> {
-    let actual = sha256_hex(bytes);
-    if actual.eq_ignore_ascii_case(expected) {
-        Ok(())
-    } else {
-        Err(miette!(
-            "{label} checksum mismatch: expected {expected}, got {actual}"
-        ))
-    }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
-
 fn truncate_error(text: &str) -> String {
     const MAX_CHARS: usize = 2_000;
     let trimmed = text.trim();
@@ -991,16 +908,6 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == "HINDSIGHT_API_LLM_API_KEY" && value == "secret-value")
         );
-    }
-
-    #[test]
-    fn verify_sha256_rejects_mismatched_archive() {
-        let expected = sha256_hex(b"expected");
-        verify_sha256("test", b"expected", &expected).expect("matching hash");
-
-        let err =
-            verify_sha256("test", b"tampered", &expected).expect_err("mismatched hash should fail");
-        assert!(err.to_string().contains("checksum mismatch"));
     }
 
     #[test]
@@ -1090,15 +997,13 @@ url = "https://example.invalid/two.tar.zst"
         }
 
         let tempdir = tempfile::tempdir().expect("tempdir");
-        unpack_sidecar_archive(&archive_bytes, SidecarArchiveKind::TarGz, tempdir.path())
+        let archive_path = tempdir.path().join("sidecar.tar.gz");
+        let extract_dir = tempdir.path().join("extract");
+        std::fs::write(&archive_path, archive_bytes).expect("write archive");
+        std::fs::create_dir_all(&extract_dir).expect("create extract dir");
+        unpack_sidecar_archive_from_file(&archive_path, SidecarArchiveKind::TarGz, &extract_dir)
             .expect("extract sidecar");
-        assert!(
-            tempdir
-                .path()
-                .join("bin")
-                .join(HINDSIGHT_EMBED_EXE)
-                .is_file()
-        );
+        assert!(extract_dir.join("bin").join(HINDSIGHT_EMBED_EXE).is_file());
     }
 
     #[test]
@@ -1121,14 +1026,12 @@ url = "https://example.invalid/two.tar.zst"
         }
 
         let tempdir = tempfile::tempdir().expect("tempdir");
-        unpack_sidecar_archive(&archive_bytes, SidecarArchiveKind::TarZst, tempdir.path())
+        let archive_path = tempdir.path().join("sidecar.tar.zst");
+        let extract_dir = tempdir.path().join("extract");
+        std::fs::write(&archive_path, archive_bytes).expect("write archive");
+        std::fs::create_dir_all(&extract_dir).expect("create extract dir");
+        unpack_sidecar_archive_from_file(&archive_path, SidecarArchiveKind::TarZst, &extract_dir)
             .expect("extract sidecar");
-        assert!(
-            tempdir
-                .path()
-                .join("bin")
-                .join(HINDSIGHT_EMBED_EXE)
-                .is_file()
-        );
+        assert!(extract_dir.join("bin").join(HINDSIGHT_EMBED_EXE).is_file());
     }
 }
