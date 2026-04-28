@@ -38,7 +38,7 @@ const HEALTH_POLL_INTERVAL_MS: u64 = 1_000;
 const HEALTH_READY_TIMEOUT_MS: u64 = 60_000;
 const COMMAND_TIMEOUT_SECS: u64 = 60;
 const DAEMON_STOP_TIMEOUT_SECS: u64 = 20;
-const DAEMON_START_TIMEOUT_SECS: u64 = 180;
+const DAEMON_START_TIMEOUT_SECS: u64 = 660;
 const SIDECAR_METADATA_FILE: &str = "daat-locus-sidecar.json";
 
 #[cfg(all(test, windows))]
@@ -620,12 +620,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn truncate_error(text: &str) -> String {
-    const MAX: usize = 2_000;
+    const MAX_CHARS: usize = 2_000;
     let trimmed = text.trim();
-    if trimmed.len() <= MAX {
+    if trimmed.chars().count() <= MAX_CHARS {
         trimmed.to_string()
     } else {
-        format!("{}…", &trimmed[..MAX])
+        format!("{}…", trimmed.chars().take(MAX_CHARS).collect::<String>())
     }
 }
 
@@ -672,6 +672,14 @@ mod tests {
         let err =
             verify_sha256("test", b"tampered", &expected).expect_err("mismatched hash should fail");
         assert!(err.to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn truncate_error_handles_multibyte_characters() {
+        let text = format!("{}{}", "a".repeat(1_999), "─error");
+        let truncated = truncate_error(&text);
+        assert!(truncated.ends_with('…'));
+        assert!(truncated.contains('─'));
     }
 
     #[test]
