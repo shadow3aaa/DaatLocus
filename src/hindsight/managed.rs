@@ -1,29 +1,34 @@
 //! Managed Hindsight daemon lifecycle.
 //!
 //! Daat Locus does not resolve Python packages at runtime. The Hindsight
-//! runtime must be supplied as an embedded sidecar archive during the Daat
-//! Locus build, then extracted once into the local cache and executed directly.
+//! runtime is supplied as a self-contained sidecar archive, then extracted once
+//! into the local cache and executed directly.
 //!
 //! Sidecar contract:
 //!
-//! - Build input: `DAAT_LOCUS_HINDSIGHT_SIDECAR=/path/to/<target>.tar.zst`
-//!   or `assets/hindsight-sidecars/<target>.tar.zst`
+//! - Preferred input: a pinned Daat Locus GitHub Release sidecar manifest
+//!   downloaded on first use.
+//! - Optional build input: `DAAT_LOCUS_HINDSIGHT_SIDECAR=/path/to/<target>.tar.zst`
+//!   for fully embedded builds.
 //! - Archive layout: `bin/hindsight-embed[.exe]` plus all runtime files it
 //!   needs, including Python/runtime/native/model assets.
-//! - The embedded `hindsight-embed` must not call uv/uvx/pip/network package
+//! - The packaged `hindsight-embed` must not call uv/uvx/pip/network package
 //!   installers. It owns profile create/delete/start/stop semantics locally.
 
 use std::{
     fs,
-    io::Cursor,
+    fs::File,
+    io::{Cursor, Read, Seek},
     path::{Component, Path, PathBuf},
     time::Duration,
 };
 
 use flate2::read::GzDecoder;
+use futures_util::StreamExt;
 use miette::{Context as _, IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::{config::HindsightConfig, daat_locus_paths::daat_locus_paths};
@@ -40,13 +45,16 @@ const COMMAND_TIMEOUT_SECS: u64 = 60;
 const DAEMON_STOP_TIMEOUT_SECS: u64 = 20;
 const DAEMON_START_TIMEOUT_SECS: u64 = 660;
 const SIDECAR_METADATA_FILE: &str = "daat-locus-sidecar.json";
+const SIDECAR_DOWNLOAD_RELEASE_TAG: &str = "hindsight-sidecars-v0.5.5-1";
+const SIDECAR_DOWNLOAD_MANIFEST_URL: &str = "https://github.com/shadow3aaa/DaatLocus/releases/download/hindsight-sidecars-v0.5.5-1/manifest.toml";
+const SIDECAR_DOWNLOAD_USER_AGENT: &str = concat!("daat-locus/", env!("CARGO_PKG_VERSION"));
 
 #[cfg(all(test, windows))]
 const HINDSIGHT_EMBED_EXE: &str = "hindsight-embed.exe";
 #[cfg(all(test, not(windows)))]
 const HINDSIGHT_EMBED_EXE: &str = "hindsight-embed";
 
-// ── Embedded sidecar ──────────────────────────────────────────────────────────
+// ── Managed sidecar ───────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -62,11 +70,9 @@ impl SidecarArchiveKind {
             "tar.zst" => Ok(Self::TarZst),
             "tar.gz" => Ok(Self::TarGz),
             "zip" => Ok(Self::Zip),
-            "" => Err(miette!(
-                "embedded Hindsight sidecar archive kind is missing"
-            )),
+            "" => Err(miette!("Hindsight sidecar archive kind is missing")),
             other => Err(miette!(
-                "embedded Hindsight sidecar archive kind '{other}' is not supported"
+                "Hindsight sidecar archive kind '{other}' is not supported"
             )),
         }
     }
@@ -78,22 +84,49 @@ struct SidecarInstallMetadata {
     archive_kind: SidecarArchiveKind,
     archive_sha256: String,
     entry: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    download_release: Option<String>,
 }
 
-struct EmbeddedHindsightSidecar {
+#[derive(Debug, Deserialize)]
+struct SidecarDownloadManifest {
+    #[allow(dead_code)]
+    schema_version: Option<u32>,
+    #[allow(dead_code)]
+    release: Option<String>,
+    #[allow(dead_code)]
+    hindsight_version: Option<String>,
+    #[serde(default)]
+    sidecar: Vec<SidecarDownloadEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct SidecarDownloadEntry {
+    target: String,
+    archive: String,
+    archive_kind: String,
+    sha256: String,
+    entry: String,
+    url: String,
+    #[allow(dead_code)]
+    built_with: Option<String>,
+    #[allow(dead_code)]
+    hindsight_version: Option<String>,
+}
+
+struct HindsightSidecar {
     root: PathBuf,
     executable: PathBuf,
 }
 
-impl EmbeddedHindsightSidecar {
+impl HindsightSidecar {
     async fn ensure_installed() -> Result<Self> {
+        let cache_root = sidecar_cache_root().await;
         let Some(bytes) = embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_BYTES else {
-            return Err(miette!(
-                "this Daat Locus binary was built without an embedded Hindsight sidecar for target '{}'; \
-                 build with DAAT_LOCUS_HINDSIGHT_SIDECAR or provide assets/hindsight-sidecars/{}.tar.zst",
-                embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET,
-                embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET,
-            ));
+            if let Some(sidecar) = Self::find_cached_downloaded(&cache_root).await? {
+                return Ok(sidecar);
+            }
+            return Self::ensure_downloaded(&cache_root).await;
         };
         let archive_kind = SidecarArchiveKind::from_generated(
             embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_ARCHIVE_KIND,
@@ -101,10 +134,6 @@ impl EmbeddedHindsightSidecar {
         let expected_sha256 = embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_SHA256;
         verify_sha256("embedded Hindsight sidecar", bytes, expected_sha256)?;
 
-        let cache_root = daat_locus_paths()
-            .await
-            .cache_dir()
-            .join("hindsight-sidecars");
         let short_sha = expected_sha256
             .get(..16)
             .unwrap_or(expected_sha256)
@@ -118,6 +147,7 @@ impl EmbeddedHindsightSidecar {
             archive_kind,
             archive_sha256: expected_sha256.to_string(),
             entry: embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_ENTRY.to_string(),
+            download_release: None,
         };
 
         if sidecar_install_is_valid(&install_root, &metadata).await {
@@ -128,13 +158,131 @@ impl EmbeddedHindsightSidecar {
         Self::from_root(install_root, &metadata.entry)
     }
 
+    async fn find_cached_downloaded(cache_root: &Path) -> Result<Option<Self>> {
+        let mut entries = match tokio::fs::read_dir(cache_root).await {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(miette!(
+                    "read Hindsight sidecar cache {}: {err}",
+                    cache_root.display()
+                ));
+            }
+        };
+
+        let mut candidates = Vec::new();
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .into_diagnostic()
+            .wrap_err_with(|| format!("scan sidecar cache {}", cache_root.display()))?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .into_diagnostic()
+                .wrap_err("read sidecar cache entry type")?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let root = entry.path();
+            let metadata_path = root.join(SIDECAR_METADATA_FILE);
+            let bytes = match tokio::fs::read(&metadata_path).await {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            let metadata = match serde_json::from_slice::<SidecarInstallMetadata>(&bytes) {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    tracing::warn!(
+                        "[hindsight:managed] ignoring invalid sidecar metadata {}: {err}",
+                        metadata_path.display()
+                    );
+                    continue;
+                }
+            };
+            if metadata.target != embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET
+                || metadata.download_release.as_deref() != Some(SIDECAR_DOWNLOAD_RELEASE_TAG)
+            {
+                continue;
+            }
+            if ensure_safe_relative_archive_path(Path::new(&metadata.entry)).is_err()
+                || !root.join(Path::new(&metadata.entry)).is_file()
+            {
+                continue;
+            }
+            candidates.push((root, metadata.entry));
+        }
+
+        candidates.sort_by(|left, right| left.0.cmp(&right.0));
+        let Some((root, entry)) = candidates.pop() else {
+            return Ok(None);
+        };
+        tracing::info!(
+            "[hindsight:managed] using cached downloaded sidecar at {}",
+            root.display()
+        );
+        Ok(Some(Self::from_root(root, &entry)?))
+    }
+
+    async fn ensure_downloaded(cache_root: &Path) -> Result<Self> {
+        tracing::info!(
+            "[hindsight:managed] no cached sidecar for {}; downloading manifest {}",
+            embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET,
+            SIDECAR_DOWNLOAD_MANIFEST_URL
+        );
+        let client = reqwest::Client::builder()
+            .user_agent(SIDECAR_DOWNLOAD_USER_AGENT)
+            .build()
+            .map_err(|err| miette!("build Hindsight sidecar download client: {err}"))?;
+        let manifest_text = client
+            .get(SIDECAR_DOWNLOAD_MANIFEST_URL)
+            .send()
+            .await
+            .map_err(|err| miette!("download Hindsight sidecar manifest: {err}"))?
+            .error_for_status()
+            .map_err(|err| miette!("download Hindsight sidecar manifest: {err}"))?
+            .text()
+            .await
+            .map_err(|err| miette!("read Hindsight sidecar manifest: {err}"))?;
+        let entry = select_sidecar_download_entry(
+            &manifest_text,
+            embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET,
+        )?;
+        let archive_kind = SidecarArchiveKind::from_generated(&entry.archive_kind)?;
+        ensure_safe_relative_archive_path(Path::new(&entry.archive))?;
+        ensure_safe_relative_archive_path(Path::new(&entry.entry))?;
+        validate_sha256_hex(&entry.sha256)?;
+
+        let short_sha = entry.sha256.get(..16).unwrap_or(&entry.sha256).to_string();
+        let install_root = cache_root.join(format!("{}-{short_sha}", entry.target));
+        let metadata = SidecarInstallMetadata {
+            target: entry.target.clone(),
+            archive_kind,
+            archive_sha256: entry.sha256.clone(),
+            entry: entry.entry.clone(),
+            download_release: Some(SIDECAR_DOWNLOAD_RELEASE_TAG.to_string()),
+        };
+
+        if sidecar_install_is_valid(&install_root, &metadata).await {
+            return Self::from_root(install_root, &metadata.entry);
+        }
+
+        let archive_path = download_sidecar_archive(&client, &entry, cache_root).await?;
+        let install_result =
+            install_downloaded_sidecar(&archive_path, archive_kind, &metadata, &install_root).await;
+        let _ = tokio::fs::remove_file(&archive_path).await;
+        install_result?;
+        Self::from_root(install_root, &metadata.entry)
+    }
+
     fn from_root(root: PathBuf, entry: &str) -> Result<Self> {
         let entry_path = Path::new(entry);
         ensure_safe_relative_archive_path(entry_path)?;
         let executable = root.join(entry_path);
         if !executable.is_file() {
             return Err(miette!(
-                "embedded Hindsight sidecar is missing executable {}",
+                "Hindsight sidecar is missing executable {}",
                 executable.display()
             ));
         }
@@ -151,6 +299,147 @@ impl EmbeddedHindsightSidecar {
 fn configure_sidecar_process_env(command: &mut Command) {
     command.env("PYTHONUTF8", "1");
     command.env("PYTHONIOENCODING", "utf-8");
+}
+
+async fn sidecar_cache_root() -> PathBuf {
+    daat_locus_paths()
+        .await
+        .cache_dir()
+        .join("hindsight-sidecars")
+}
+
+fn select_sidecar_download_entry(
+    manifest_text: &str,
+    target: &str,
+) -> Result<SidecarDownloadEntry> {
+    let manifest: SidecarDownloadManifest = toml::from_str(manifest_text)
+        .into_diagnostic()
+        .wrap_err("parse Hindsight sidecar download manifest")?;
+    let mut matches = manifest
+        .sidecar
+        .into_iter()
+        .filter(|entry| entry.target == target)
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(miette!(
+            "Hindsight sidecar download manifest has duplicate entries for target '{target}'"
+        ));
+    }
+    let entry = matches.pop().ok_or_else(|| {
+        miette!("Hindsight sidecar download manifest has no entry for target '{target}'")
+    })?;
+    if entry.url.trim().is_empty() {
+        return Err(miette!(
+            "Hindsight sidecar download manifest entry for target '{target}' has an empty URL"
+        ));
+    }
+    Ok(entry)
+}
+
+fn validate_sha256_hex(value: &str) -> Result<()> {
+    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(miette!(
+            "Hindsight sidecar sha256 is not a 64-character hex hash"
+        ))
+    }
+}
+
+async fn download_sidecar_archive(
+    client: &reqwest::Client,
+    entry: &SidecarDownloadEntry,
+    cache_root: &Path,
+) -> Result<PathBuf> {
+    tokio::fs::create_dir_all(cache_root)
+        .await
+        .into_diagnostic()
+        .wrap_err_with(|| format!("create sidecar cache dir {}", cache_root.display()))?;
+    let extension = match entry.archive_kind.as_str() {
+        "tar.zst" => "tar.zst",
+        "tar.gz" => "tar.gz",
+        "zip" => "zip",
+        other => {
+            return Err(miette!(
+                "Hindsight sidecar archive kind '{other}' is not supported"
+            ));
+        }
+    };
+    let short_sha = entry.sha256.get(..16).unwrap_or(&entry.sha256).to_string();
+    let archive_path = cache_root.join(format!(
+        "download-{}-{short_sha}.{extension}",
+        embedded_sidecar::EMBEDDED_HINDSIGHT_SIDECAR_TARGET
+    ));
+    let tmp_path = archive_path.with_extension(format!("tmp-{}", std::process::id()));
+    if tmp_path.exists() {
+        tokio::fs::remove_file(&tmp_path)
+            .await
+            .into_diagnostic()
+            .wrap_err_with(|| format!("remove stale sidecar archive {}", tmp_path.display()))?;
+    }
+
+    tracing::info!(
+        "[hindsight:managed] downloading sidecar archive from {}",
+        entry.url
+    );
+    let response = client
+        .get(&entry.url)
+        .send()
+        .await
+        .map_err(|err| miette!("download Hindsight sidecar archive: {err}"))?
+        .error_for_status()
+        .map_err(|err| miette!("download Hindsight sidecar archive: {err}"))?;
+    let mut stream = response.bytes_stream();
+    let mut file = tokio::fs::File::create(&tmp_path)
+        .await
+        .into_diagnostic()
+        .wrap_err_with(|| format!("create sidecar archive {}", tmp_path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut downloaded = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| miette!("read Hindsight sidecar archive stream: {err}"))?;
+        hasher.update(&chunk);
+        file.write_all(&chunk)
+            .await
+            .into_diagnostic()
+            .wrap_err_with(|| format!("write sidecar archive {}", tmp_path.display()))?;
+        downloaded += chunk.len() as u64;
+    }
+    file.flush()
+        .await
+        .into_diagnostic()
+        .wrap_err_with(|| format!("flush sidecar archive {}", tmp_path.display()))?;
+    drop(file);
+
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(&entry.sha256) {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(miette!(
+            "downloaded Hindsight sidecar checksum mismatch: expected {}, got {actual}",
+            entry.sha256
+        ));
+    }
+    if archive_path.exists() {
+        tokio::fs::remove_file(&archive_path)
+            .await
+            .into_diagnostic()
+            .wrap_err_with(|| format!("replace sidecar archive {}", archive_path.display()))?;
+    }
+    tokio::fs::rename(&tmp_path, &archive_path)
+        .await
+        .into_diagnostic()
+        .wrap_err_with(|| {
+            format!(
+                "move sidecar archive {} to {}",
+                tmp_path.display(),
+                archive_path.display()
+            )
+        })?;
+    tracing::info!(
+        "[hindsight:managed] downloaded sidecar archive ({} bytes)",
+        downloaded
+    );
+    Ok(archive_path)
 }
 
 async fn sidecar_install_is_valid(root: &Path, expected: &SidecarInstallMetadata) -> bool {
@@ -173,7 +462,7 @@ async fn sidecar_install_is_valid(root: &Path, expected: &SidecarInstallMetadata
 }
 
 async fn install_embedded_sidecar(
-    bytes: &'static [u8],
+    bytes: &[u8],
     archive_kind: SidecarArchiveKind,
     metadata: &SidecarInstallMetadata,
     install_root: &Path,
@@ -182,6 +471,36 @@ async fn install_embedded_sidecar(
         "[hindsight:managed] installing embedded sidecar into {}",
         install_root.display()
     );
+    install_sidecar_archive(metadata, install_root, |tmp_root| {
+        unpack_sidecar_archive(bytes, archive_kind, tmp_root)
+    })
+    .await
+}
+
+async fn install_downloaded_sidecar(
+    archive_path: &Path,
+    archive_kind: SidecarArchiveKind,
+    metadata: &SidecarInstallMetadata,
+    install_root: &Path,
+) -> Result<()> {
+    tracing::info!(
+        "[hindsight:managed] installing downloaded sidecar into {}",
+        install_root.display()
+    );
+    install_sidecar_archive(metadata, install_root, |tmp_root| {
+        unpack_sidecar_archive_from_file(archive_path, archive_kind, tmp_root)
+    })
+    .await
+}
+
+async fn install_sidecar_archive<F>(
+    metadata: &SidecarInstallMetadata,
+    install_root: &Path,
+    extract: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
     if let Some(parent) = install_root.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -200,7 +519,7 @@ async fn install_embedded_sidecar(
         .into_diagnostic()
         .wrap_err_with(|| format!("create sidecar temp dir {}", tmp_root.display()))?;
 
-    if let Err(err) = unpack_sidecar_archive(bytes, archive_kind, &tmp_root) {
+    if let Err(err) = extract(&tmp_root) {
         let _ = tokio::fs::remove_dir_all(&tmp_root).await;
         return Err(err);
     }
@@ -233,26 +552,41 @@ async fn install_embedded_sidecar(
 }
 
 fn unpack_sidecar_archive(
-    bytes: &'static [u8],
+    bytes: &[u8],
     archive_kind: SidecarArchiveKind,
     target_dir: &Path,
 ) -> Result<()> {
     match archive_kind {
         SidecarArchiveKind::TarZst => unpack_tar_zst(bytes, target_dir),
         SidecarArchiveKind::TarGz => unpack_tar_gz(bytes, target_dir),
-        SidecarArchiveKind::Zip => unpack_zip(bytes, target_dir),
+        SidecarArchiveKind::Zip => unpack_zip(Cursor::new(bytes), target_dir),
     }
 }
 
-fn unpack_tar_zst(bytes: &'static [u8], target_dir: &Path) -> Result<()> {
-    let decoder = zstd::stream::read::Decoder::new(Cursor::new(bytes))
+fn unpack_sidecar_archive_from_file(
+    archive_path: &Path,
+    archive_kind: SidecarArchiveKind,
+    target_dir: &Path,
+) -> Result<()> {
+    let file = File::open(archive_path)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("open sidecar archive {}", archive_path.display()))?;
+    match archive_kind {
+        SidecarArchiveKind::TarZst => unpack_tar_zst(file, target_dir),
+        SidecarArchiveKind::TarGz => unpack_tar_gz(file, target_dir),
+        SidecarArchiveKind::Zip => unpack_zip(file, target_dir),
+    }
+}
+
+fn unpack_tar_zst<R: Read>(reader: R, target_dir: &Path) -> Result<()> {
+    let decoder = zstd::stream::read::Decoder::new(reader)
         .into_diagnostic()
         .wrap_err("read sidecar tar.zst archive")?;
     unpack_tar(decoder, target_dir)
 }
 
-fn unpack_tar_gz(bytes: &'static [u8], target_dir: &Path) -> Result<()> {
-    let decoder = GzDecoder::new(Cursor::new(bytes));
+fn unpack_tar_gz<R: Read>(reader: R, target_dir: &Path) -> Result<()> {
+    let decoder = GzDecoder::new(reader);
     unpack_tar(decoder, target_dir)
 }
 
@@ -284,8 +618,7 @@ fn unpack_tar<R: std::io::Read>(reader: R, target_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn unpack_zip(bytes: &'static [u8], target_dir: &Path) -> Result<()> {
-    let reader = Cursor::new(bytes);
+fn unpack_zip<R: Read + Seek>(reader: R, target_dir: &Path) -> Result<()> {
     let mut archive = zip::ZipArchive::new(reader)
         .into_diagnostic()
         .wrap_err("read sidecar zip archive")?;
@@ -366,14 +699,14 @@ impl HindsightManagedServer {
         }
     }
 
-    /// Start the daemon: extract embedded sidecar → configure profile → start → wait.
+    /// Start the daemon: prepare sidecar → configure profile → start → wait.
     pub async fn start(&self) -> Result<()> {
         tracing::info!(
-            "[hindsight:managed] starting daemon from embedded sidecar (profile={}, port={})",
+            "[hindsight:managed] starting daemon from managed sidecar (profile={}, port={})",
             self.config.profile,
             self.config.port,
         );
-        let sidecar = EmbeddedHindsightSidecar::ensure_installed().await?;
+        let sidecar = HindsightSidecar::ensure_installed().await?;
         self.configure_profile(&sidecar).await?;
         if let Err(err) = self.start_daemon(&sidecar).await {
             tracing::warn!(
@@ -406,7 +739,7 @@ impl HindsightManagedServer {
             "[hindsight:managed] stopping daemon (profile={})",
             self.config.profile,
         );
-        let sidecar = EmbeddedHindsightSidecar::ensure_installed().await?;
+        let sidecar = HindsightSidecar::ensure_installed().await?;
         self.stop_with_sidecar(&sidecar, "daemon.stop").await
     }
 
@@ -416,7 +749,7 @@ impl HindsightManagedServer {
             "[hindsight:managed] force stopping daemon (profile={})",
             self.config.profile,
         );
-        let sidecar = EmbeddedHindsightSidecar::ensure_installed().await?;
+        let sidecar = HindsightSidecar::ensure_installed().await?;
         self.stop_with_sidecar(&sidecar, "daemon.force_stop").await
     }
 
@@ -453,7 +786,7 @@ impl HindsightManagedServer {
         ]
     }
 
-    async fn configure_profile(&self, sidecar: &EmbeddedHindsightSidecar) -> Result<()> {
+    async fn configure_profile(&self, sidecar: &HindsightSidecar) -> Result<()> {
         tracing::info!(
             sidecar_root = %sidecar.root.display(),
             "[hindsight:managed] configuring profile '{}'",
@@ -474,7 +807,7 @@ impl HindsightManagedServer {
         self.run_command(cmd, "profile.create").await
     }
 
-    async fn delete_profile_if_exists(&self, sidecar: &EmbeddedHindsightSidecar) -> Result<()> {
+    async fn delete_profile_if_exists(&self, sidecar: &HindsightSidecar) -> Result<()> {
         let mut cmd = sidecar.command();
         cmd.args(["profile", "delete", &self.config.profile]);
         match self.run_command(cmd, "profile.delete").await {
@@ -484,7 +817,7 @@ impl HindsightManagedServer {
         }
     }
 
-    async fn start_daemon(&self, sidecar: &EmbeddedHindsightSidecar) -> Result<()> {
+    async fn start_daemon(&self, sidecar: &HindsightSidecar) -> Result<()> {
         tracing::info!("[hindsight:managed] starting daemon process");
         let mut cmd = sidecar.command();
         cmd.args(self.daemon_profile_args()).arg("start");
@@ -495,11 +828,7 @@ impl HindsightManagedServer {
             .await
     }
 
-    async fn stop_with_sidecar(
-        &self,
-        sidecar: &EmbeddedHindsightSidecar,
-        label: &str,
-    ) -> Result<()> {
+    async fn stop_with_sidecar(&self, sidecar: &HindsightSidecar, label: &str) -> Result<()> {
         let mut cmd = sidecar.command();
         cmd.args(self.daemon_profile_args()).arg("stop");
         self.run_command_with_timeout(cmd, label, DAEMON_STOP_TIMEOUT_SECS)
@@ -693,6 +1022,56 @@ mod tests {
     }
 
     #[test]
+    fn selects_download_manifest_entry_for_target() {
+        let manifest = r#"
+schema_version = 1
+release = "hindsight-sidecars-v0.5.5-1"
+hindsight_version = "0.5.5"
+
+[[sidecar]]
+target = "x86_64-unknown-linux-gnu"
+archive = "x86_64-unknown-linux-gnu.tar.zst"
+archive_kind = "tar.zst"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+entry = "bin/hindsight-embed"
+url = "https://github.com/shadow3aaa/DaatLocus/releases/download/hindsight-sidecars-v0.5.5-1/x86_64-unknown-linux-gnu.tar.zst"
+"#;
+
+        let entry = select_sidecar_download_entry(manifest, "x86_64-unknown-linux-gnu")
+            .expect("manifest entry");
+
+        assert_eq!(entry.archive_kind, "tar.zst");
+        assert_eq!(entry.entry, "bin/hindsight-embed");
+        validate_sha256_hex(&entry.sha256).expect("valid sha256");
+    }
+
+    #[test]
+    fn rejects_duplicate_download_manifest_entries() {
+        let manifest = r#"
+[[sidecar]]
+target = "x86_64-unknown-linux-gnu"
+archive = "one.tar.zst"
+archive_kind = "tar.zst"
+sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+entry = "bin/hindsight-embed"
+url = "https://example.invalid/one.tar.zst"
+
+[[sidecar]]
+target = "x86_64-unknown-linux-gnu"
+archive = "two.tar.zst"
+archive_kind = "tar.zst"
+sha256 = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+entry = "bin/hindsight-embed"
+url = "https://example.invalid/two.tar.zst"
+"#;
+
+        let err = select_sidecar_download_entry(manifest, "x86_64-unknown-linux-gnu")
+            .expect_err("duplicate target should fail");
+
+        assert!(err.to_string().contains("duplicate entries"));
+    }
+
+    #[test]
     fn tar_gz_sidecar_archive_extracts_executable_layout() {
         let mut archive_bytes = Vec::new();
         {
@@ -710,9 +1089,8 @@ mod tests {
             builder.finish().unwrap();
         }
 
-        let archive_bytes: &'static [u8] = Box::leak(archive_bytes.into_boxed_slice());
         let tempdir = tempfile::tempdir().expect("tempdir");
-        unpack_sidecar_archive(archive_bytes, SidecarArchiveKind::TarGz, tempdir.path())
+        unpack_sidecar_archive(&archive_bytes, SidecarArchiveKind::TarGz, tempdir.path())
             .expect("extract sidecar");
         assert!(
             tempdir
@@ -742,9 +1120,8 @@ mod tests {
             encoder.finish().unwrap();
         }
 
-        let archive_bytes: &'static [u8] = Box::leak(archive_bytes.into_boxed_slice());
         let tempdir = tempfile::tempdir().expect("tempdir");
-        unpack_sidecar_archive(archive_bytes, SidecarArchiveKind::TarZst, tempdir.path())
+        unpack_sidecar_archive(&archive_bytes, SidecarArchiveKind::TarZst, tempdir.path())
             .expect("extract sidecar");
         assert!(
             tempdir

@@ -75,9 +75,10 @@ growth.
 ## Quick Start
 
 The recommended install path is `cargo-binstall`, which installs the prebuilt
-GitHub Release binary for your platform. Release binaries include the bundled
-Hindsight sidecar, so normal installs do not need Python, `uv`, PyInstaller, or
-runtime package downloads.
+GitHub Release binary for your platform. On first launch, Daat Locus downloads
+the matching self-contained Hindsight sidecar from the project sidecar release,
+then caches it locally. Normal installs do not need Python, `uv`, or
+PyInstaller.
 
 ```bash
 cargo install cargo-binstall
@@ -92,16 +93,14 @@ On first launch, Daat Locus opens an interactive setup flow.
 
 ### Source Builds
 
-`cargo install daat-locus` is available from crates.io, but it builds from
-source and does not include the prebuilt Hindsight sidecar. For a fully bundled
-developer build, clone the repository and build the host sidecar before running
-the binary:
+`cargo install daat-locus` is available from crates.io. Like the prebuilt
+release binary, source builds download the matching Hindsight sidecar on first
+launch when it is not already cached.
 
 ```bash
 git clone https://github.com/shadow3aaa/DaatLocus
 cd DaatLocus
-cargo xtask build-hindsight-sidecar
-DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1 cargo run --locked
+cargo run --locked
 ```
 
 [releases-url]: https://github.com/shadow3aaa/DaatLocus/releases

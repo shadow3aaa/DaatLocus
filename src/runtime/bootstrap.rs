@@ -125,7 +125,7 @@ pub(crate) async fn connect_bootstrapped_hindsight(
     if server.check_health().await {
         emit_startup_progress("[hindsight] daemon already healthy, reusing");
     } else {
-        emit_startup_progress("[hindsight] extracting bundled sidecar and starting daemon...");
+        emit_startup_progress("[hindsight] preparing sidecar and starting daemon...");
         let profile = hindsight_config.profile.clone();
         let log_tail = tokio::spawn(async move { tail_hindsight_log(&profile).await });
         let result = server.start().await;

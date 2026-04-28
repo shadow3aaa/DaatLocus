@@ -39,9 +39,6 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
       - name: Cache Cargo build outputs
         uses: Swatinem/rust-cache@v2
 
@@ -52,26 +49,7 @@ jobs:
           target="$(rustc -vV | sed -n 's/^host: //p')"
           echo "target=$target" >> "$GITHUB_OUTPUT"
 
-      - name: Clear local sidecar assets
-        shell: bash
-        run: |
-          for path in assets/hindsight-sidecars/*; do
-            [ "$(basename "$path")" = README.md ] && continue
-            [ -f "$path" ] && rm -f "$path"
-          done
-
-      - name: Build Hindsight sidecar
-        run: cargo xtask build-hindsight-sidecar
-
-      - name: Verify Hindsight sidecar
-        run: cargo xtask verify-hindsight-sidecars
-
-      - name: Smoke-test Hindsight sidecar
-        run: cargo xtask smoke-hindsight-sidecar --target ${{ steps.host.outputs.target }}
-
       - name: Build release binary
-        env:
-          DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR: "1"
         run: cargo build --release --locked
 
       - name: Package release binary
