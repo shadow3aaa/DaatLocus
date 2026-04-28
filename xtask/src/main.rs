@@ -17,6 +17,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const SIDECAR_MANIFEST: &str = "manifest.toml";
 const DEFAULT_DIST_NAME: &str = "hindsight-embed";
+const DEFAULT_RELEASE_OUT_DIR: &str = "dist";
 
 fn main() -> ExitCode {
     match run() {
@@ -41,6 +42,7 @@ fn run() -> Result<()> {
         "import-hindsight-sidecar" => import_hindsight_sidecar(parse_import_args(&args)?)?,
         "verify-hindsight-sidecars" => verify_hindsight_sidecars()?,
         "smoke-hindsight-sidecar" => smoke_hindsight_sidecar(parse_target_arg(&args)?)?,
+        "package-release-binary" => package_release_binary(parse_package_release_args(&args)?)?,
         other => {
             return Err(format!("unknown xtask command `{other}`").into());
         }
@@ -56,12 +58,14 @@ Usage:
   cargo xtask import-hindsight-sidecar --target TARGET --archive PATH [--entry PATH]
   cargo xtask verify-hindsight-sidecars
   cargo xtask smoke-hindsight-sidecar [--target TARGET]
+  cargo xtask package-release-binary [--target TARGET] [--release-dir PATH] [--out-dir PATH]
 
 Commands:
   build-hindsight-sidecar    Build the current host sidecar with PyInstaller and update assets.
   import-hindsight-sidecar   Import a CI-built sidecar archive into assets.
   verify-hindsight-sidecars  Verify manifest checksums and archive layouts.
   smoke-hindsight-sidecar    Extract and run the current-host sidecar entry.
+  package-release-binary     Package target/release/daat-locus as a cargo-binstall archive.
 "
     );
 }
@@ -158,6 +162,24 @@ struct ImportArgs {
     entry: Option<String>,
     built_with: String,
     hindsight_version: Option<String>,
+}
+
+#[derive(Debug)]
+struct PackageReleaseArgs {
+    target: String,
+    release_dir: Option<PathBuf>,
+    out_dir: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct RootManifest {
+    package: RootPackage,
+}
+
+#[derive(Debug, Deserialize)]
+struct RootPackage {
+    name: String,
+    version: String,
 }
 
 fn parse_build_args(raw: &[String]) -> Result<BuildArgs> {
@@ -286,6 +308,39 @@ fn parse_target_arg(raw: &[String]) -> Result<String> {
         index += 1;
     }
     target.map_or_else(rustc_host_target, Ok)
+}
+
+fn parse_package_release_args(raw: &[String]) -> Result<PackageReleaseArgs> {
+    let mut target = None;
+    let mut release_dir = None;
+    let mut out_dir = None;
+
+    let mut index = 0;
+    while index < raw.len() {
+        match raw[index].as_str() {
+            "--target" => {
+                target = Some(next_value(raw, &mut index, "--target")?);
+            }
+            "--release-dir" => {
+                release_dir = Some(PathBuf::from(next_value(raw, &mut index, "--release-dir")?));
+            }
+            "--out-dir" => {
+                out_dir = Some(PathBuf::from(next_value(raw, &mut index, "--out-dir")?));
+            }
+            "-h" | "--help" => {
+                print_help();
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown package-release-binary flag `{other}`").into()),
+        }
+        index += 1;
+    }
+
+    Ok(PackageReleaseArgs {
+        target: target.unwrap_or(rustc_host_target()?),
+        release_dir,
+        out_dir: out_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_RELEASE_OUT_DIR)),
+    })
 }
 
 fn next_value(raw: &[String], index: &mut usize, flag: &str) -> Result<String> {
@@ -551,6 +606,63 @@ fn smoke_hindsight_sidecar(target: String) -> Result<()> {
 
     println!(
         "smoke-tested Hindsight sidecar for {target} using {}",
+        archive_path.display()
+    );
+    Ok(())
+}
+
+fn package_release_binary(args: PackageReleaseArgs) -> Result<()> {
+    let package = load_root_package()?;
+    let release_dir = match args.release_dir {
+        Some(path) => repo_relative_path(path),
+        None => default_release_dir(&args.target)?,
+    };
+    let binary_name = release_binary_name(&package.name, &args.target);
+    let binary_path = release_dir.join(&binary_name);
+    if !binary_path.is_file() {
+        return Err(format!(
+            "release binary does not exist: {}. Run `DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1 cargo build --release --locked` first.",
+            binary_path.display()
+        )
+        .into());
+    }
+
+    let package_dir_name = release_package_dir_name(&package.name, &package.version, &args.target);
+    let work_root = repo_root()
+        .join("target")
+        .join("xtask")
+        .join("release-package")
+        .join(&args.target);
+    let stage_root = work_root.join("stage");
+    let package_dir = stage_root.join(&package_dir_name);
+    reset_dir(&work_root)?;
+    fs::create_dir_all(&package_dir)?;
+
+    let staged_binary = package_dir.join(&binary_name);
+    fs::copy(&binary_path, &staged_binary)?;
+    fs::set_permissions(&staged_binary, fs::metadata(&binary_path)?.permissions())?;
+
+    let out_dir = repo_relative_path(args.out_dir);
+    fs::create_dir_all(&out_dir)?;
+    let archive_name = release_archive_name(&package.name, &package.version, &args.target);
+    let archive_path = out_dir.join(&archive_name);
+    if archive_path.exists() {
+        fs::remove_file(&archive_path)?;
+    }
+    archive_stage(&stage_root, &archive_path, ArchiveKind::TarZst)?;
+
+    let archive_entry = format!("{package_dir_name}/{binary_name}");
+    if !tar_zst_contains_entry(&archive_path, &archive_entry)? {
+        return Err(format!(
+            "release archive {} does not contain required entry `{archive_entry}`",
+            archive_path.display()
+        )
+        .into());
+    }
+
+    println!(
+        "packaged release binary for {} at {}",
+        args.target,
         archive_path.display()
     );
     Ok(())
@@ -977,6 +1089,49 @@ fn command_exists(command: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+fn load_root_package() -> Result<RootPackage> {
+    let manifest_path = repo_root().join("Cargo.toml");
+    let text = fs::read_to_string(&manifest_path)?;
+    let manifest: RootManifest = toml::from_str(&text)?;
+    Ok(manifest.package)
+}
+
+fn default_release_dir(target: &str) -> Result<PathBuf> {
+    let target_dir = repo_root().join("target");
+    if target == rustc_host_target()? {
+        Ok(target_dir.join("release"))
+    } else {
+        Ok(target_dir.join(target).join("release"))
+    }
+}
+
+fn release_binary_name(name: &str, target: &str) -> String {
+    if is_windows_target(target) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+fn release_package_dir_name(name: &str, version: &str, target: &str) -> String {
+    format!("{name}-{version}-{target}")
+}
+
+fn release_archive_name(name: &str, version: &str, target: &str) -> String {
+    format!(
+        "{}.tar.zst",
+        release_package_dir_name(name, version, target)
+    )
+}
+
+fn repo_relative_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        repo_root().join(path)
+    }
 }
 
 #[cfg(unix)]

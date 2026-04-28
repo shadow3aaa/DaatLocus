@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["shadow3 <shadow3aaaa@gmail.com>"]
+repository = "https://github.com/shadow3aaa/DaatLocus"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.zst"
+pkg-fmt = "tzstd"
+bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+disabled-strategies = ["quick-install", "compile"]
 
 [workspace]
 members = [".", "xtask"]
