@@ -64,7 +64,6 @@ strong_filesystem = "off"
 namespace = "default"
 bank_id = "daat-locus"
 request_timeout_secs = 180
-embed_version = ""
 profile = "daat-locus"
 port = 8888
 
@@ -89,7 +88,7 @@ OpenAI Codex OAuth 使用 ChatGPT Codex Responses backend，而不是公开 Open
 
 ## Hindsight
 
-Daat Locus 会自动托管 `hindsight-embed`。不需要在启动前手动起 Docker 或单独跑服务。
+Daat Locus 会从二进制内嵌的 sidecar 自动托管 `hindsight-embed`。运行时启动不再使用 `uvx`、pip 或临时包下载。
 
 `hindsight.model = "model-key"` 是可选项。为空时，Hindsight 回退到 `main_model`。
 
