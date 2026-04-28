@@ -1,0 +1,62 @@
+name: Hindsight Sidecars
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hindsight-sidecars-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Hindsight sidecar (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Cache Cargo build outputs
+        uses: Swatinem/rust-cache@v2
+
+      - name: Resolve host target
+        id: host
+        shell: bash
+        run: echo "target=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_OUTPUT"
+
+      - name: Clear vendored sidecar assets
+        shell: bash
+        run: |
+          find assets/hindsight-sidecars -maxdepth 1 -type f \
+            ! -name README.md \
+            -delete
+
+      - name: Build sidecar
+        run: cargo xtask build-hindsight-sidecar
+
+      - name: Upload sidecar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hindsight-sidecar-${{ steps.host.outputs.target }}
+          if-no-files-found: error
+          path: |
+            assets/hindsight-sidecars/${{ steps.host.outputs.target }}.tar.zst
+            assets/hindsight-sidecars/manifest.toml

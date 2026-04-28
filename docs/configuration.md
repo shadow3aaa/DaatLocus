@@ -68,7 +68,6 @@ strong_filesystem = "off"
 namespace = "default"
 bank_id = "daat-locus"
 request_timeout_secs = 180
-embed_version = ""
 profile = "daat-locus"
 port = 8888
 
@@ -98,8 +97,9 @@ model backed by another provider.
 
 ## Hindsight
 
-Daat Locus manages `hindsight-embed` automatically. You do not need to start
-Docker or run a separate service before launching Daat Locus.
+Daat Locus manages `hindsight-embed` automatically from an embedded sidecar
+bundled into the binary. Runtime startup does not use `uvx`, pip, or package
+downloads.
 
 `hindsight.model = "model-key"` is optional. If unset, Hindsight falls back to
 `main_model`.

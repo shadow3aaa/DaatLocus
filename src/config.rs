@@ -409,8 +409,8 @@ pub struct HindsightConfig {
     pub namespace: String,
     pub bank_id: String,
     pub request_timeout_secs: u64,
-    /// Pinned version passed to `uvx hindsight-embed@<version>`.
-    /// Empty string means "latest".
+    /// Deprecated compatibility field. Hindsight now runs from the embedded
+    /// sidecar bundled into the Daat Locus binary, not from uvx.
     pub embed_version: String,
     /// Profile name used by hindsight-embed. Defaults to "daat-locus".
     pub profile: String,

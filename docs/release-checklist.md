@@ -31,7 +31,8 @@ Use this checklist before tagging a Daat Locus release.
 
 ## Supply Chain
 
-- Confirm managed `uv` download behavior is expected for the release.
+- Confirm vendored Hindsight sidecar archives are present for every release
+  target and pass `cargo xtask verify-hindsight-sidecars`.
 - Confirm browser runtime download behavior is expected for the release.
 - Record any unpinned or latest-version download behavior in release notes.
 - Review dependency updates for license or attribution changes.
