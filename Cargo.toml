@@ -81,3 +81,9 @@ features = [
     "Win32_System_SystemServices",
     "Win32_System_Threading",
 ]
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 's'
+strip = true
