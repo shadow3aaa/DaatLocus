@@ -1,0 +1,159 @@
+name: Hindsight Sidecars
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: GitHub Release tag for sidecar assets.
+        required: true
+        default: hindsight-sidecars-v0.5.5-1
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hindsight-sidecars-${{ github.event.inputs.release_tag }}
+  cancel-in-progress: false
+
+env:
+  HINDSIGHT_PACKAGE_VERSION: "0.5.5"
+
+jobs:
+  build:
+    name: Build Hindsight sidecar (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Cache Cargo build outputs
+        uses: Swatinem/rust-cache@v2
+
+      - name: Resolve host target
+        id: host
+        shell: bash
+        run: |
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+
+      - name: Clear local sidecar assets
+        shell: bash
+        run: |
+          for path in assets/hindsight-sidecars/*; do
+            [ "$(basename "$path")" = README.md ] && continue
+            [ -f "$path" ] && rm -f "$path"
+          done
+
+      - name: Build Hindsight sidecar
+        run: cargo xtask build-hindsight-sidecar
+
+      - name: Verify Hindsight sidecar
+        run: cargo xtask verify-hindsight-sidecars
+
+      - name: Smoke-test Hindsight sidecar
+        run: cargo xtask smoke-hindsight-sidecar --target ${{ steps.host.outputs.target }}
+
+      - name: Upload sidecar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hindsight-sidecar-${{ steps.host.outputs.target }}
+          if-no-files-found: error
+          path: assets/hindsight-sidecars/${{ steps.host.outputs.target }}.tar.zst
+
+  publish:
+    name: Publish sidecar release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download sidecar artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hindsight-sidecar-*
+          path: sidecars
+          merge-multiple: true
+
+      - name: Generate sidecar download manifest
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(sidecars/*.tar.zst)
+          if [ "${#archives[@]}" -eq 0 ]; then
+            echo "no sidecar archives were downloaded" >&2
+            exit 1
+          fi
+
+          manifest="sidecars/manifest.toml"
+          {
+            echo 'schema_version = 1'
+            echo "release = \"$RELEASE_TAG\""
+            echo "hindsight_version = \"$HINDSIGHT_PACKAGE_VERSION\""
+          } > "$manifest"
+
+          printf '%s\n' "${archives[@]}" | sort | while read -r archive; do
+            name="$(basename "$archive")"
+            target="${name%.tar.zst}"
+            sha256="$(sha256sum "$archive" | awk '{print $1}')"
+            if [[ "$target" == *windows* ]]; then
+              entry="bin/hindsight-embed.exe"
+            else
+              entry="bin/hindsight-embed"
+            fi
+            url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${name}"
+
+            {
+              echo
+              echo '[[sidecar]]'
+              echo "target = \"$target\""
+              echo "archive = \"$name\""
+              echo 'archive_kind = "tar.zst"'
+              echo "sha256 = \"$sha256\""
+              echo "entry = \"$entry\""
+              echo "url = \"$url\""
+              echo 'built_with = "pyinstaller"'
+              echo "hindsight_version = \"$HINDSIGHT_PACKAGE_VERSION\""
+            } >> "$manifest"
+          done
+
+          cat "$manifest"
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          notes="Standalone Hindsight sidecar archives for Daat Locus runtime downloads."
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" sidecars/*.tar.zst sidecars/manifest.toml \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$RELEASE_TAG" sidecars/*.tar.zst sidecars/manifest.toml \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Hindsight Sidecars ${RELEASE_TAG}" \
+              --notes "$notes" \
+              --latest=false
+          fi
