@@ -19,9 +19,10 @@ const SIDECAR_MANIFEST: &str = "manifest.toml";
 const DEFAULT_DIST_NAME: &str = "hindsight-embed";
 const DEFAULT_RELEASE_OUT_DIR: &str = "dist";
 const HINDSIGHT_PYTHON: &str = "3.12";
-const HINDSIGHT_EMBED_PACKAGE: &str = "hindsight-embed==0.5.4";
-const HINDSIGHT_API_PACKAGE: &str = "hindsight-api-slim[embedded-db,local-ml]==0.5.4";
-const HINDSIGHT_PACKAGE_VERSION: &str = "0.5.4";
+const HINDSIGHT_TORCH_BACKEND: &str = "cpu";
+const HINDSIGHT_EMBED_PACKAGE: &str = "hindsight-embed==0.5.5";
+const HINDSIGHT_API_PACKAGE: &str = "hindsight-api-slim[embedded-db,local-ml]==0.5.5";
+const HINDSIGHT_PACKAGE_VERSION: &str = "0.5.5";
 
 fn main() -> ExitCode {
     match run() {
@@ -1071,6 +1072,8 @@ fn default_pyinstaller_command() -> PyInstallerCommand {
             args: vec![
                 OsString::from("--python"),
                 OsString::from(HINDSIGHT_PYTHON),
+                OsString::from("--torch-backend"),
+                OsString::from(HINDSIGHT_TORCH_BACKEND),
                 OsString::from("--from"),
                 OsString::from("pyinstaller"),
                 OsString::from("--with"),
@@ -1089,6 +1092,8 @@ fn default_pyinstaller_command() -> PyInstallerCommand {
                 OsString::from("run"),
                 OsString::from("--python"),
                 OsString::from(HINDSIGHT_PYTHON),
+                OsString::from("--torch-backend"),
+                OsString::from(HINDSIGHT_TORCH_BACKEND),
                 OsString::from("--from"),
                 OsString::from("pyinstaller"),
                 OsString::from("--with"),
