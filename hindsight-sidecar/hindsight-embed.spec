@@ -1,16 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 block_cipher = None
 spec_dir = SPECPATH
 hiddenimports = collect_submodules("tiktoken_ext")
+hiddenimports += collect_submodules("sentence_transformers")
+datas = (
+    copy_metadata("fastmcp", recursive=True)
+    + copy_metadata("sentence-transformers", recursive=True)
+    + collect_data_files("magika", includes=["config/**", "models/**"])
+    + collect_data_files("pg0", includes=["bin/*"])
+    + collect_data_files("hindsight_api", includes=["alembic/**"], include_py_files=True)
+)
 
 embed = Analysis(
     [spec_dir + "/embed_entry.py"],
     pathex=[spec_dir],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -44,7 +52,7 @@ api = Analysis(
     [spec_dir + "/api_entry.py"],
     pathex=[spec_dir],
     binaries=[],
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
