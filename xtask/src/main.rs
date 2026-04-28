@@ -18,6 +18,10 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const SIDECAR_MANIFEST: &str = "manifest.toml";
 const DEFAULT_DIST_NAME: &str = "hindsight-embed";
 const DEFAULT_RELEASE_OUT_DIR: &str = "dist";
+const HINDSIGHT_PYTHON: &str = "3.12";
+const HINDSIGHT_EMBED_PACKAGE: &str = "hindsight-embed==0.5.4";
+const HINDSIGHT_API_PACKAGE: &str = "hindsight-api==0.5.4";
+const HINDSIGHT_PACKAGE_VERSION: &str = "0.5.4";
 
 fn main() -> ExitCode {
     match run() {
@@ -192,7 +196,7 @@ fn parse_build_args(raw: &[String]) -> Result<BuildArgs> {
     let mut spec = default_spec.exists().then_some(default_spec);
     let mut entry_script = None;
     let mut name = DEFAULT_DIST_NAME.to_string();
-    let mut hindsight_version = None;
+    let mut hindsight_version = Some(HINDSIGHT_PACKAGE_VERSION.to_string());
 
     let mut index = 0;
     while index < raw.len() {
@@ -1059,19 +1063,18 @@ fn rustc_host_target() -> Result<String> {
 }
 
 fn default_pyinstaller_command() -> PyInstallerCommand {
-    if command_exists("pyinstaller") {
-        return PyInstallerCommand::explicit("pyinstaller");
-    }
     if command_exists("uvx") {
         return PyInstallerCommand {
             program: OsString::from("uvx"),
             args: vec![
+                OsString::from("--python"),
+                OsString::from(HINDSIGHT_PYTHON),
                 OsString::from("--from"),
                 OsString::from("pyinstaller"),
                 OsString::from("--with"),
-                OsString::from("hindsight-embed"),
+                OsString::from(HINDSIGHT_EMBED_PACKAGE),
                 OsString::from("--with"),
-                OsString::from("hindsight-api"),
+                OsString::from(HINDSIGHT_API_PACKAGE),
                 OsString::from("pyinstaller"),
             ],
         };
@@ -1082,15 +1085,20 @@ fn default_pyinstaller_command() -> PyInstallerCommand {
             args: vec![
                 OsString::from("tool"),
                 OsString::from("run"),
+                OsString::from("--python"),
+                OsString::from(HINDSIGHT_PYTHON),
                 OsString::from("--from"),
                 OsString::from("pyinstaller"),
                 OsString::from("--with"),
-                OsString::from("hindsight-embed"),
+                OsString::from(HINDSIGHT_EMBED_PACKAGE),
                 OsString::from("--with"),
-                OsString::from("hindsight-api"),
+                OsString::from(HINDSIGHT_API_PACKAGE),
                 OsString::from("pyinstaller"),
             ],
         };
+    }
+    if command_exists("pyinstaller") {
+        return PyInstallerCommand::explicit("pyinstaller");
     }
     PyInstallerCommand::explicit("pyinstaller")
 }
