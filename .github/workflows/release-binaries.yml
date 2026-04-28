@@ -25,10 +25,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Hindsight sidecars currently build on Windows, but profile create/delete
+        # fails during smoke testing with a Windows file-lock PermissionError.
+        # Re-enable windows-latest after upstream Hindsight profile management
+        # passes `cargo xtask smoke-hindsight-sidecar` on Windows.
         os:
           - ubuntu-latest
           - macos-latest
-          - windows-latest
 
     steps:
       - name: Check out repository

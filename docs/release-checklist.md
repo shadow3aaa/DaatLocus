@@ -31,8 +31,11 @@ Use this checklist before tagging a Daat Locus release.
 
 ## Release Packaging
 
-- Run the `Release Binaries` workflow for the release tag and confirm Linux,
-  macOS, and Windows artifacts are uploaded to the GitHub Release.
+- Run the `Release Binaries` workflow for the release tag and confirm Linux and
+  macOS artifacts are uploaded to the GitHub Release.
+- Do not publish Windows artifacts until `cargo xtask smoke-hindsight-sidecar`
+  passes on a Windows runner; current Hindsight profile create/delete fails
+  there with a file-lock `PermissionError`.
 - Confirm each release binary was built after
   `cargo xtask build-hindsight-sidecar`,
   `cargo xtask verify-hindsight-sidecars`, and

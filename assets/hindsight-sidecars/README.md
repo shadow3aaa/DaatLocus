@@ -66,11 +66,16 @@ cargo xtask import-hindsight-sidecar \
   --archive /path/to/x86_64-unknown-linux-gnu.tar.zst
 ```
 
-The `Release Binaries` GitHub Actions workflow builds sidecars on Linux, macOS,
-and Windows runners, compiles release binaries with
+The `Release Binaries` GitHub Actions workflow builds sidecars on Linux and
+macOS runners, compiles release binaries with
 `DAAT_LOCUS_REQUIRE_HINDSIGHT_SIDECAR=1`, and packages the final binaries as
 `dist/daat-locus-<version>-<target>.tar.zst` for release upload and
 `cargo-binstall`.
+
+Windows release artifacts are intentionally disabled for now. The Windows
+sidecar archive builds and verifies, but current Hindsight profile
+create/delete fails during smoke testing with a Windows file-lock
+`PermissionError`.
 
 Verify generated archives and manifest checksums:
 
