@@ -885,14 +885,17 @@ fn add_zip_entries(writer: &mut ZipWriter<fs::File>, base: &Path, dir: &Path) ->
 }
 
 fn zip_options_for_path(path: &Path) -> Result<SimpleFileOptions> {
-    let mut options =
-        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        options = options.unix_permissions(fs::metadata(path)?.permissions().mode());
+        Ok(options.unix_permissions(fs::metadata(path)?.permissions().mode()))
     }
-    Ok(options)
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(options)
+    }
 }
 
 fn verify_archive_contains_entry(
@@ -1073,22 +1076,77 @@ fn default_pyinstaller_command() -> PyInstallerCommand {
             ],
         };
     }
+    if command_exists("uv") {
+        return PyInstallerCommand {
+            program: OsString::from("uv"),
+            args: vec![
+                OsString::from("tool"),
+                OsString::from("run"),
+                OsString::from("--from"),
+                OsString::from("pyinstaller"),
+                OsString::from("--with"),
+                OsString::from("hindsight-embed"),
+                OsString::from("--with"),
+                OsString::from("hindsight-api"),
+                OsString::from("pyinstaller"),
+            ],
+        };
+    }
     PyInstallerCommand::explicit("pyinstaller")
 }
 
 fn command_exists(command: &str) -> bool {
     let command_path = Path::new(command);
     if command_path.components().count() > 1 {
-        return command_path.is_file();
+        return executable_candidate_exists(command_path);
     }
     env::var_os("PATH")
         .map(|path| {
             env::split_paths(&path).any(|dir| {
                 let candidate = dir.join(command);
-                candidate.is_file() && is_executable(&candidate)
+                executable_candidate_exists(&candidate)
             })
         })
         .unwrap_or(false)
+}
+
+fn executable_candidate_exists(path: &Path) -> bool {
+    if path.is_file() && is_executable(path) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        if path.extension().is_some() {
+            return false;
+        }
+        return windows_path_extensions().into_iter().any(|extension| {
+            let candidate = path.with_extension(extension);
+            candidate.is_file() && is_executable(&candidate)
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn windows_path_extensions() -> Vec<String> {
+    env::var_os("PATHEXT")
+        .map(|value| {
+            env::split_paths(&value)
+                .filter_map(|path| path.as_os_str().to_str().map(str::to_string))
+                .map(|extension| extension.trim_start_matches('.').to_string())
+                .filter(|extension| !extension.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| {
+            ["COM", "EXE", "BAT", "CMD"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        })
 }
 
 fn load_root_package() -> Result<RootPackage> {
