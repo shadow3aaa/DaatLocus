@@ -20,7 +20,7 @@ const DEFAULT_DIST_NAME: &str = "hindsight-embed";
 const DEFAULT_RELEASE_OUT_DIR: &str = "dist";
 const HINDSIGHT_PYTHON: &str = "3.12";
 const HINDSIGHT_EMBED_PACKAGE: &str = "hindsight-embed==0.5.4";
-const HINDSIGHT_API_PACKAGE: &str = "hindsight-api==0.5.4";
+const HINDSIGHT_API_PACKAGE: &str = "hindsight-api-slim[embedded-db]==0.5.4";
 const HINDSIGHT_PACKAGE_VERSION: &str = "0.5.4";
 
 fn main() -> ExitCode {
