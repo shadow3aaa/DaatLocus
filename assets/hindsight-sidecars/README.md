@@ -43,7 +43,8 @@ The default PyInstaller environment pins `hindsight-embed` and
 `hindsight-api-slim[embedded-db,local-ml]` instead of the full `hindsight-api`
 meta package. Release sidecars include the embedded database plus local
 embedding/reranking dependencies, while still avoiding unrelated Hindsight
-extras.
+extras. The uv PyTorch backend is pinned to CPU so Windows and Linux CI do not
+resolve GPU-specific Torch distributions.
 
 ## Maintainer Commands
 
@@ -73,10 +74,8 @@ and Windows runners, compiles release binaries with
 `dist/daat-locus-<version>-<target>.tar.zst` for release upload and
 `cargo-binstall`.
 
-The Windows PyInstaller entry patches Hindsight 0.5.4 profile metadata locking
-before importing the CLI. Upstream locks one byte with `msvcrt.locking`, writes
-JSON, then unlocks at the post-write file cursor, which unlocks the wrong byte
-and raises `PermissionError`.
+Hindsight 0.5.5 includes the Windows profile metadata locking fix that earlier
+local builds patched in the PyInstaller entrypoint.
 
 Verify generated archives and manifest checksums:
 
