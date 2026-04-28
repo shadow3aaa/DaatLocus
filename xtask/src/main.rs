@@ -683,6 +683,8 @@ fn run_sidecar_command<const N: usize>(
         command.env("HOME", home);
         command.env("USERPROFILE", home);
     }
+    command.env("PYTHONUTF8", "1");
+    command.env("PYTHONIOENCODING", "utf-8");
     let status = command.status()?;
     if status.success() {
         Ok(())
