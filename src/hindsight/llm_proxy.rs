@@ -30,8 +30,10 @@ use crate::{
     providers::{CodexOAuthClient, CopilotClient, OpenAIClient},
 };
 
-const HINDSIGHT_PROXY_MAX_IN_FLIGHT: usize = 2;
-const HINDSIGHT_PROXY_QUEUE_TIMEOUT_SECS: u64 = 2;
+// Hindsight retain/consolidation calls are background memory writes. Keep them
+// serialized and let them wait instead of amplifying short local 429 retries.
+const HINDSIGHT_PROXY_MAX_IN_FLIGHT: usize = 1;
+const HINDSIGHT_PROXY_QUEUE_TIMEOUT_SECS: u64 = 300;
 const HINDSIGHT_PROXY_REQUEST_TIMEOUT_SECS: u64 = 90;
 
 #[derive(Clone)]
