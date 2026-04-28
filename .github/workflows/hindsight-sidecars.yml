@@ -40,14 +40,17 @@ jobs:
       - name: Resolve host target
         id: host
         shell: bash
-        run: echo "target=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_OUTPUT"
+        run: |
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
 
       - name: Clear vendored sidecar assets
         shell: bash
         run: |
-          find assets/hindsight-sidecars -maxdepth 1 -type f \
-            ! -name README.md \
-            -delete
+          for path in assets/hindsight-sidecars/*; do
+            [ "$(basename "$path")" = README.md ] && continue
+            [ -f "$path" ] && rm -f "$path"
+          done
 
       - name: Build sidecar
         run: cargo xtask build-hindsight-sidecar
