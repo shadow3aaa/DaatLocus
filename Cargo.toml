@@ -1,6 +1,6 @@
 [package]
 name = "daat-locus"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A long-running local agent runtime with memory, workflows, apps, and sleep-time self-improvement."
 license = "Apache-2.0"
