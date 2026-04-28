@@ -775,10 +775,9 @@ fn extract_telegram_command(
 ) -> Option<String> {
     let (text, entities) = if let Some(text) = message.text.as_deref() {
         (text, message.entities.as_deref()?)
-    } else if let Some(caption) = message.caption.as_deref() {
-        (caption, message.caption_entities.as_deref()?)
     } else {
-        return None;
+        let caption = message.caption.as_deref()?;
+        (caption, message.caption_entities.as_deref()?)
     };
     let entity = entities.first()?;
     if entity.kind != "bot_command" || entity.offset != 0 || entity.length == 0 {
