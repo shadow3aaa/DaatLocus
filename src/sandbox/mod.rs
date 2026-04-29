@@ -600,6 +600,26 @@ pub(super) fn path_is_denied(path: &Path, denied_roots: &[PathBuf]) -> bool {
 }
 
 impl FileSystemSandboxPolicy {
+    pub fn unrestricted() -> Self {
+        Self {
+            full_disk_read: true,
+            full_disk_write: true,
+            readable_roots: Vec::new(),
+            writable_roots: Vec::new(),
+            deny_read_paths: Vec::new(),
+            deny_write_paths: Vec::new(),
+        }
+    }
+
+    pub fn is_unrestricted(&self) -> bool {
+        self.full_disk_read
+            && self.full_disk_write
+            && self.readable_roots.is_empty()
+            && self.writable_roots.is_empty()
+            && self.deny_read_paths.is_empty()
+            && self.deny_write_paths.is_empty()
+    }
+
     pub fn protected_paths(&self) -> Vec<PathBuf> {
         let mut paths = self
             .deny_read_paths
@@ -642,6 +662,20 @@ impl FileSystemSandboxPolicy {
 }
 
 impl RuntimeSandboxPolicy {
+    pub fn disabled() -> Self {
+        Self {
+            filesystem: FileSystemSandboxPolicy::unrestricted(),
+            protected_env_vars: Vec::new(),
+            strong_filesystem: StrongFilesystemSandboxMode::Off,
+        }
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.filesystem.is_unrestricted()
+            && self.protected_env_vars.is_empty()
+            && self.strong_filesystem == StrongFilesystemSandboxMode::Off
+    }
+
     #[cfg(test)]
     pub fn protect_daat_locus_runtime(daat_locus_home: &Path) -> Self {
         Self::protect_daat_locus_runtime_with_options(daat_locus_home, None, Vec::<String>::new())
@@ -715,6 +749,9 @@ impl RuntimeSandboxPolicy {
     }
 
     pub fn is_env_var_protected(&self, name: &str) -> bool {
+        if self.is_disabled() {
+            return false;
+        }
         Self::is_env_var_protected_by_list(name, &self.protected_env_vars)
     }
 
@@ -775,6 +812,13 @@ impl RuntimeSandboxPolicy {
     }
 
     pub fn shell_spawn_spec(&self, program: &str, args: Vec<String>) -> Result<SandboxSpawnSpec> {
+        if self.is_disabled() {
+            return Ok(SandboxSpawnSpec {
+                program: PathBuf::from(program),
+                args,
+            });
+        }
+
         #[cfg(target_os = "macos")]
         {
             macos::wrap_shell_command(self, program, args)
@@ -930,6 +974,24 @@ mod tests {
 
         assert_eq!(spec.program, Path::new("/bin/echo"));
         assert_eq!(spec.args, vec!["ok"]);
+    }
+
+    #[test]
+    fn disabled_runtime_policy_removes_all_sandbox_restrictions() {
+        let policy = RuntimeSandboxPolicy::disabled();
+
+        assert!(policy.is_disabled());
+        assert_eq!(policy.strong_filesystem, StrongFilesystemSandboxMode::Off);
+        assert!(policy.protected_env_vars().is_empty());
+        assert!(policy.protected_paths().is_empty());
+        assert!(policy.is_path_readable(Path::new("/home/user/.daat-locus/config.toml")));
+        assert!(policy.is_path_writable(Path::new("/repo/src/main.rs")));
+        assert!(!policy.is_env_var_protected("OPENAI_API_KEY"));
+
+        let shell_spec = policy
+            .shell_spawn_spec("/bin/sh", vec!["-lc".to_string(), "echo ok".to_string()])
+            .expect("shell spawn spec");
+        assert_eq!(shell_spec.program, Path::new("/bin/sh"));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

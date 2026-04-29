@@ -48,6 +48,7 @@ pub struct WorkspaceAppRegistry {
     state_root: PathBuf,
     protected_env_vars: Vec<String>,
     strong_filesystem: StrongFilesystemSandboxMode,
+    sandbox_disabled: bool,
     records: BTreeMap<String, WorkspaceAppRecord>,
     dirty_apps: BTreeSet<String>,
     full_rescan_needed: bool,
@@ -188,6 +189,7 @@ pub fn bootstrap_workspace_apps(
         &state_root,
         sandbox_policy.protected_env_vars(),
         sandbox_policy.strong_filesystem,
+        sandbox_policy.is_disabled(),
     )
 }
 
@@ -202,6 +204,7 @@ fn bootstrap_workspace_apps_with_state_root(
         state_root,
         protected_env_vars,
         StrongFilesystemSandboxMode::Off,
+        false,
     )
 }
 
@@ -210,6 +213,7 @@ fn bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
     state_root: &Path,
     protected_env_vars: &[String],
     strong_filesystem: StrongFilesystemSandboxMode,
+    sandbox_disabled: bool,
 ) -> WorkspaceAppBootstrap {
     let apps_root = workspace_apps_dir(workspace_root);
     let registry = WorkspaceAppRegistry {
@@ -217,6 +221,7 @@ fn bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
         state_root: state_root.to_path_buf(),
         protected_env_vars: protected_env_vars.to_vec(),
         strong_filesystem,
+        sandbox_disabled,
         ..WorkspaceAppRegistry::default()
     };
     let mut report = WorkspaceAppBootstrap {
@@ -267,6 +272,7 @@ fn bootstrap_workspace_apps_with_state_root_and_strong_filesystem(
             &folder_name,
             protected_env_vars,
             strong_filesystem,
+            sandbox_disabled,
         ) {
             Ok(app) => {
                 let app_id = app.id();
@@ -394,6 +400,7 @@ impl WorkspaceAppRegistry {
             folder_name,
             &self.protected_env_vars,
             self.strong_filesystem,
+            self.sandbox_disabled,
         ) {
             Ok(app) => {
                 let app_id = app.id();
@@ -970,6 +977,7 @@ impl WorkspaceApp {
         folder_name: &str,
         protected_env_vars: &[String],
         strong_filesystem: StrongFilesystemSandboxMode,
+        sandbox_disabled: bool,
     ) -> Result<Self> {
         let id = AppId::from_workspace_folder(folder_name.to_string())?;
         let manifest = load_manifest(app_dir)?;
@@ -997,6 +1005,7 @@ impl WorkspaceApp {
             entry_relative_path.clone(),
             protected_env_vars.to_vec(),
             strong_filesystem,
+            sandbox_disabled,
         )?;
         let render = match worker.request(WorkerRequestOp::RenderState)? {
             WorkerResponsePayload::RenderState(render) => render,
@@ -1407,6 +1416,7 @@ return app
             "stateful",
             &[],
             StrongFilesystemSandboxMode::Off,
+            false,
         )
         .expect("load stateful app");
 
@@ -1456,6 +1466,7 @@ return app
             "cold-init",
             &[],
             StrongFilesystemSandboxMode::Off,
+            false,
         )
         .expect("load cold-init app");
 
@@ -1555,6 +1566,7 @@ return app
             "configured-timeout",
             &[],
             StrongFilesystemSandboxMode::Off,
+            false,
         )
         .expect("load configured-timeout app");
 
@@ -1633,6 +1645,7 @@ return app
             "timeout-app",
             &[],
             StrongFilesystemSandboxMode::Off,
+            false,
         )
         .expect("load timeout app");
 

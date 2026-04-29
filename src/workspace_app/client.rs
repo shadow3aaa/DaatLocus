@@ -40,6 +40,7 @@ pub(super) struct WorkspaceAppWorkerClient {
     cold_start_timeout: Duration,
     protected_env_vars: Vec<String>,
     strong_filesystem: StrongFilesystemSandboxMode,
+    sandbox_disabled: bool,
     next_request_id: u64,
     handle: Option<WorkspaceAppWorkerHandle>,
     reader: Option<BufReader<TcpStream>>,
@@ -62,6 +63,7 @@ impl WorkspaceAppWorkerClient {
         entry_relative_path: String,
         protected_env_vars: Vec<String>,
         strong_filesystem: StrongFilesystemSandboxMode,
+        sandbox_disabled: bool,
     ) -> Result<Self> {
         let mut client = Self {
             app_id,
@@ -72,6 +74,7 @@ impl WorkspaceAppWorkerClient {
             cold_start_timeout: WORKSPACE_APP_COLD_START_TIMEOUT,
             protected_env_vars,
             strong_filesystem,
+            sandbox_disabled,
             next_request_id: 1,
             handle: None,
             reader: None,
@@ -225,6 +228,7 @@ impl WorkspaceAppWorkerClient {
             &self.app_id,
             &self.protected_env_vars,
             self.strong_filesystem,
+            self.sandbox_disabled,
         )?;
 
         let stream = match accept_worker_connection(&listener, &mut handle, &self.app_id) {
@@ -441,11 +445,16 @@ fn spawn_worker_handle(
     app_id: &AppId,
     protected_env_vars: &[String],
     strong_filesystem: StrongFilesystemSandboxMode,
+    sandbox_disabled: bool,
 ) -> Result<WorkspaceAppWorkerHandle> {
     let executable = std::env::current_exe()
         .map_err(|err| miette!("failed to locate current executable for app worker: {err}"))?;
-    let worker_policy =
-        workspace_app_worker_sandbox_policy(&args, protected_env_vars, strong_filesystem);
+    let worker_policy = workspace_app_worker_sandbox_policy(
+        &args,
+        protected_env_vars,
+        strong_filesystem,
+        sandbox_disabled,
+    );
     let spawn_args = workspace_worker_command_args(&args);
     let child = SandboxChild::spawn_strong(
         &worker_policy,
@@ -489,7 +498,12 @@ fn workspace_app_worker_sandbox_policy(
     args: &WorkspaceAppWorkerArgs,
     protected_env_vars: &[String],
     strong_filesystem: StrongFilesystemSandboxMode,
+    sandbox_disabled: bool,
 ) -> RuntimeSandboxPolicy {
+    if sandbox_disabled {
+        return RuntimeSandboxPolicy::disabled();
+    }
+
     let deny_read_paths = protected_runtime_read_paths_for_worker(&args.state_dir);
     let mut protected_env_vars = protected_env_vars.to_vec();
     protected_env_vars.push(DAEMONIZE_ENV.to_string());
@@ -540,6 +554,7 @@ fn spawn_worker_handle(
     app_id: &AppId,
     _protected_env_vars: &[String],
     _strong_filesystem: StrongFilesystemSandboxMode,
+    _sandbox_disabled: bool,
 ) -> Result<WorkspaceAppWorkerHandle> {
     let app_id_for_log = app_id.clone();
     let handle = std::thread::Builder::new()
@@ -578,6 +593,7 @@ mod tests {
             &args,
             &["APP_SECRET".to_string()],
             StrongFilesystemSandboxMode::Required,
+            false,
         );
 
         assert_eq!(
@@ -590,6 +606,31 @@ mod tests {
         assert!(!policy.is_path_readable(&root.join("config/config.toml")));
         assert!(policy.is_env_var_protected("APP_SECRET"));
         assert!(policy.is_env_var_protected(DAEMONIZE_ENV));
+    }
+
+    #[test]
+    fn worker_sandbox_policy_can_be_disabled() {
+        let root = PathBuf::from("/home/user/.daat-locus");
+        let args = WorkspaceAppWorkerArgs {
+            app_id: "sample".to_string(),
+            app_dir: PathBuf::from("/home/user/daat-locus-workspace/apps/sample"),
+            state_dir: root.join("state/apps/sample"),
+            entry: "runtime/app.lua".to_string(),
+            connect_addr: "127.0.0.1:12345".to_string(),
+            token: "token".to_string(),
+        };
+
+        let policy = workspace_app_worker_sandbox_policy(
+            &args,
+            &["APP_SECRET".to_string()],
+            StrongFilesystemSandboxMode::Required,
+            true,
+        );
+
+        assert!(policy.is_disabled());
+        assert!(policy.is_path_writable(&args.app_dir.join("app.toml")));
+        assert!(policy.is_path_readable(&root.join("config/config.toml")));
+        assert!(!policy.is_env_var_protected("APP_SECRET"));
     }
 
     #[test]

@@ -29,7 +29,7 @@ cargo run -- config set-telegram
 - `main_model`：主运行时使用的 model key。
 - `[daemon]`：daemon 端口。
 - `[judge]`：judge / pairwise 评估配置。
-- `[sandbox]`：可选强文件系统沙箱模式。
+- `[sandbox]`：运行时沙箱控制。
 - `[hindsight]`：由 Daat Locus 托管的 `hindsight-embed` 配置。
 - `[telegram]`：Telegram transport 配置。
 
@@ -58,6 +58,7 @@ tool_output_max_tokens = 2000
 port = 53825
 
 [sandbox]
+enabled = true
 strong_filesystem = "off"
 
 [hindsight]
@@ -104,7 +105,10 @@ Telegram 是 transport 和 event source。它在这里配置，但不是 agent a
 
 ## Sandbox
 
-`sandbox.strong_filesystem` 控制可选强文件系统沙箱：
+`sandbox.enabled = false` 会完全关闭运行时沙箱。这会移除轻量路径保护，
+不再从子进程环境中剥离受保护的环境变量，并忽略 `sandbox.strong_filesystem`。
+
+当 `sandbox.enabled = true` 时，`sandbox.strong_filesystem` 控制可选强文件系统沙箱：
 
 - `"off"`：默认，仅使用轻量保护。
 - `"auto"`：可用时使用支持的强沙箱 backend。

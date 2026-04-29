@@ -33,7 +33,7 @@ variables with `$NAME`, `${NAME}`, or `env:NAME`.
 - `main_model`: model key used by the main runtime.
 - `[daemon]`: daemon port.
 - `[judge]`: judge / pairwise evaluation config.
-- `[sandbox]`: optional strong filesystem sandbox mode.
+- `[sandbox]`: runtime sandbox controls.
 - `[hindsight]`: Daat Locus-managed `hindsight-embed` config.
 - `[telegram]`: Telegram transport config.
 
@@ -62,6 +62,7 @@ tool_output_max_tokens = 2000
 port = 53825
 
 [sandbox]
+enabled = true
 strong_filesystem = "off"
 
 [hindsight]
@@ -119,7 +120,12 @@ it is not modeled as an agent app.
 
 ## Sandbox
 
-`sandbox.strong_filesystem` controls the optional strong filesystem sandbox:
+`sandbox.enabled = false` disables the runtime sandbox entirely. This removes
+the lightweight path guard, stops stripping protected environment variables from
+child processes, and ignores `sandbox.strong_filesystem`.
+
+When `sandbox.enabled = true`, `sandbox.strong_filesystem` controls the optional
+strong filesystem sandbox:
 
 - `"off"`: default lightweight guard only.
 - `"auto"`: use a supported strong backend when available.

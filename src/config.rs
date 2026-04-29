@@ -392,12 +392,14 @@ impl Default for DaemonConfig {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxConfig {
+    pub enabled: bool,
     pub strong_filesystem: StrongFilesystemSandboxMode,
 }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             strong_filesystem: StrongFilesystemSandboxMode::Off,
         }
     }
@@ -652,6 +654,7 @@ model_id = "gpt-4.1"
         )
         .expect("parse config");
 
+        assert!(config.sandbox.enabled);
         assert_eq!(
             config.sandbox.strong_filesystem,
             StrongFilesystemSandboxMode::Off
@@ -681,6 +684,33 @@ strong_filesystem = "required"
         assert_eq!(
             config.sandbox.strong_filesystem,
             StrongFilesystemSandboxMode::Required
+        );
+    }
+
+    #[test]
+    fn sandbox_config_parses_enabled_flag() {
+        let config: Config = toml::from_str(
+            r#"
+main_model = "default"
+
+[providers.openai]
+type = "openai"
+api_key = "test"
+
+[models.default]
+provider = "openai"
+model_id = "gpt-4.1"
+
+[sandbox]
+enabled = false
+"#,
+        )
+        .expect("parse config");
+
+        assert!(!config.sandbox.enabled);
+        assert_eq!(
+            config.sandbox.strong_filesystem,
+            StrongFilesystemSandboxMode::Off
         );
     }
 

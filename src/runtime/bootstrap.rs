@@ -149,6 +149,10 @@ pub(crate) async fn connect_bootstrapped_hindsight(
 pub(crate) async fn sandbox_policy_for_runtime(
     config: &crate::config::Config,
 ) -> RuntimeSandboxPolicy {
+    if !config.sandbox.enabled {
+        return RuntimeSandboxPolicy::disabled();
+    }
+
     let daat_locus_home = daat_locus_paths().await.root().to_path_buf();
     RuntimeSandboxPolicy::protect_daat_locus_runtime_with_strong_filesystem(
         &daat_locus_home,
