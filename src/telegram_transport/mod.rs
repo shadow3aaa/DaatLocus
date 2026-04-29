@@ -463,7 +463,8 @@ impl TelegramTransport {
             .post(url)
             .json(&serde_json::json!({
                 "chat_id": chat_id,
-                "text": text,
+                "text": render_markdown_as_telegram_html(text),
+                "parse_mode": "HTML",
             }))
             .send()
             .await
@@ -769,6 +770,145 @@ fn extension_for_file(file_path: &str, media_type: &str) -> String {
     .to_string()
 }
 
+fn render_markdown_as_telegram_html(text: &str) -> String {
+    let mut rendered = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("```") {
+        render_inline_markdown_as_telegram_html(&remaining[..start], &mut rendered);
+        remaining = &remaining[start + 3..];
+        let (language, code_start) = parse_fenced_code_language(remaining);
+        if let Some(end) = remaining[code_start..].find("```") {
+            let code = &remaining[code_start..code_start + end];
+            push_telegram_pre(&mut rendered, language, code);
+            remaining = &remaining[code_start + end + 3..];
+        } else {
+            rendered.push_str("```");
+            escape_telegram_html_into(remaining, &mut rendered);
+            return rendered;
+        }
+    }
+
+    render_inline_markdown_as_telegram_html(remaining, &mut rendered);
+    rendered
+}
+
+fn parse_fenced_code_language(text: &str) -> (Option<&str>, usize) {
+    let first_line_end = text.find('\n');
+    let Some(first_line_end) = first_line_end else {
+        return (None, 0);
+    };
+    let first_line = &text[..first_line_end];
+    if first_line.trim().is_empty() {
+        return (None, first_line_end + 1);
+    }
+    if first_line
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '+' || ch == '#')
+    {
+        (Some(first_line.trim()), first_line_end + 1)
+    } else {
+        (None, 0)
+    }
+}
+
+fn push_telegram_pre(rendered: &mut String, language: Option<&str>, code: &str) {
+    if let Some(language) = language.filter(|language| !language.is_empty()) {
+        rendered.push_str("<pre><code class=\"language-");
+        escape_telegram_html_into(language, rendered);
+        rendered.push_str("\">");
+        escape_telegram_html_into(code, rendered);
+        rendered.push_str("</code></pre>");
+    } else {
+        rendered.push_str("<pre>");
+        escape_telegram_html_into(code, rendered);
+        rendered.push_str("</pre>");
+    }
+}
+
+fn render_inline_markdown_as_telegram_html(text: &str, rendered: &mut String) {
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(code) = rest.strip_prefix('`') {
+            if let Some(end) = code.find('`') {
+                rendered.push_str("<code>");
+                escape_telegram_html_into(&code[..end], rendered);
+                rendered.push_str("</code>");
+                rest = &code[end + 1..];
+                continue;
+            }
+        }
+        if let Some(bold) = rest.strip_prefix("**") {
+            if let Some(end) = bold.find("**") {
+                rendered.push_str("<b>");
+                render_inline_markdown_as_telegram_html(&bold[..end], rendered);
+                rendered.push_str("</b>");
+                rest = &bold[end + 2..];
+                continue;
+            }
+        }
+        if let Some(strong) = rest.strip_prefix("__") {
+            if let Some(end) = strong.find("__") {
+                rendered.push_str("<b>");
+                render_inline_markdown_as_telegram_html(&strong[..end], rendered);
+                rendered.push_str("</b>");
+                rest = &strong[end + 2..];
+                continue;
+            }
+        }
+        if let Some(strike) = rest.strip_prefix("~~") {
+            if let Some(end) = strike.find("~~") {
+                rendered.push_str("<s>");
+                render_inline_markdown_as_telegram_html(&strike[..end], rendered);
+                rendered.push_str("</s>");
+                rest = &strike[end + 2..];
+                continue;
+            }
+        }
+        if let Some(italic) = rest.strip_prefix('*') {
+            if !italic.starts_with('*')
+                && let Some(end) = italic.find('*')
+            {
+                rendered.push_str("<i>");
+                render_inline_markdown_as_telegram_html(&italic[..end], rendered);
+                rendered.push_str("</i>");
+                rest = &italic[end + 1..];
+                continue;
+            }
+        }
+        if let Some(italic) = rest.strip_prefix('_') {
+            if !italic.starts_with('_')
+                && let Some(end) = italic.find('_')
+            {
+                rendered.push_str("<i>");
+                render_inline_markdown_as_telegram_html(&italic[..end], rendered);
+                rendered.push_str("</i>");
+                rest = &italic[end + 1..];
+                continue;
+            }
+        }
+
+        let ch = rest.chars().next().expect("non-empty rest has char");
+        escape_telegram_html_char_into(ch, rendered);
+        rest = &rest[ch.len_utf8()..];
+    }
+}
+
+fn escape_telegram_html_into(text: &str, rendered: &mut String) {
+    for ch in text.chars() {
+        escape_telegram_html_char_into(ch, rendered);
+    }
+}
+
+fn escape_telegram_html_char_into(ch: char, rendered: &mut String) {
+    match ch {
+        '&' => rendered.push_str("&amp;"),
+        '<' => rendered.push_str("&lt;"),
+        '>' => rendered.push_str("&gt;"),
+        _ => rendered.push(ch),
+    }
+}
+
 fn extract_telegram_command(
     message: &TelegramIncomingMessage,
     bot_username: Option<&str>,
@@ -881,6 +1021,42 @@ mod tests {
         let message = message_with_photo(None);
 
         assert_eq!(message.largest_photo().unwrap().file_id, "large-id");
+    }
+
+    #[test]
+    fn agent_markdown_is_rendered_as_telegram_html() {
+        assert_eq!(
+            render_markdown_as_telegram_html(
+                "**done** and *soon* with `x < y` plus ~~old~~ & plain <tag>"
+            ),
+            "<b>done</b> and <i>soon</i> with <code>x &lt; y</code> plus <s>old</s> &amp; plain &lt;tag&gt;"
+        );
+    }
+
+    #[test]
+    fn fenced_code_blocks_are_rendered_as_telegram_pre() {
+        assert_eq!(
+            render_markdown_as_telegram_html(
+                "before\n```rust\nfn main() {\n    a < b;\n}\n```\nafter"
+            ),
+            "before\n<pre><code class=\"language-rust\">fn main() {\n    a &lt; b;\n}\n</code></pre>\nafter"
+        );
+    }
+
+    #[test]
+    fn unmatched_markdown_is_left_readable_and_safe() {
+        assert_eq!(
+            render_markdown_as_telegram_html("**open and `unterminated <code>"),
+            "**open and `unterminated &lt;code&gt;"
+        );
+    }
+
+    #[test]
+    fn nested_inline_markdown_is_supported() {
+        assert_eq!(
+            render_markdown_as_telegram_html("**bold `code` _italic_**"),
+            "<b>bold <code>code</code> <i>italic</i></b>"
+        );
     }
 
     #[test]
