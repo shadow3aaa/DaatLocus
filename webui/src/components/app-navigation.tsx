@@ -20,20 +20,20 @@ type NavigationItem = {
 };
 
 const navigationItems: NavigationItem[] = [
-  { label: "登录", href: "#login", active: true },
-  { label: "状态", href: "#status", disabled: true },
-  { label: "任务", href: "#tasks", disabled: true },
-  { label: "日志", href: "#logs", disabled: true },
+  { label: "Login", href: "#login", active: true },
+  { label: "Status", href: "#status", disabled: true },
+  { label: "Tasks", href: "#tasks", disabled: true },
+  { label: "Logs", href: "#logs", disabled: true },
 ];
 
 function authStatusLabel(authStatus: AuthStatus) {
   switch (authStatus) {
     case "authenticated":
-      return "Token 已验证";
+      return "Token verified";
     case "saved":
-      return "本地有 token";
+      return "Saved token";
     case "anonymous":
-      return "未登录";
+      return "Signed out";
   }
 }
 

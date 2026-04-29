@@ -35,18 +35,18 @@ export async function verifyDaemonToken(token: string): Promise<DaemonAuthResult
     }
 
     if (response.status === 401) {
-      return { ok: false, message: "Token 验证失败：daemon 返回 401 Unauthorized。" };
+      return { ok: false, message: "Token verification failed: daemon returned 401 Unauthorized." };
     }
 
     return {
       ok: false,
-      message: `Token 验证失败：daemon 返回 ${response.status}${response.statusText ? ` ${response.statusText}` : ""}。`,
+      message: `Token verification failed: daemon returned ${response.status}${response.statusText ? ` ${response.statusText}` : ""}.`,
     };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     return {
       ok: false,
-      message: `无法连接 daemon API：${reason}`,
+      message: `Unable to reach the daemon API: ${reason}`,
     };
   }
 }

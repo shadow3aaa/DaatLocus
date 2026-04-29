@@ -26,20 +26,20 @@ export function LoginPage({
 
     if (!trimmedToken) {
       setLoginState("error");
-      setMessage("请输入 daemon token。");
+      setMessage("Enter the daemon token.");
       onAuthStatusChange("anonymous");
       return;
     }
 
     setLoginState("checking");
-    setMessage("正在验证 token……");
+    setMessage("Verifying token…");
 
     const result = await verifyDaemonToken(trimmedToken);
     if (result.ok) {
       storeDaemonToken(trimmedToken);
       setToken(trimmedToken);
       setLoginState("authenticated");
-      setMessage("Token 已验证。后续页面会复用这个 token。");
+      setMessage("Token verified. Future pages will reuse this token.");
       onAuthStatusChange("authenticated");
       return;
     }
@@ -57,7 +57,7 @@ export function LoginPage({
       id="login"
       className="mx-auto grid min-h-[calc(100vh-4rem)] w-full max-w-4xl items-center gap-8 px-6 py-10 md:grid-cols-[1fr_1.4fr]"
     >
-      <h1 className="text-5xl font-semibold tracking-tight md:text-6xl">登陆</h1>
+      <h1 className="text-5xl font-semibold tracking-tight md:text-6xl">Login</h1>
 
       <form className="flex w-full flex-col gap-3 sm:flex-row" onSubmit={handleSubmit}>
         <Input
@@ -73,7 +73,7 @@ export function LoginPage({
               onAuthStatusChange(event.target.value.trim() ? "saved" : "anonymous");
             }
           }}
-          placeholder="输入 token"
+          placeholder="Token"
           type="password"
           autoComplete="current-password"
           spellCheck={false}
@@ -82,7 +82,7 @@ export function LoginPage({
         />
 
         <Button className="h-11 px-8" type="submit" disabled={isChecking}>
-          {isChecking ? "验证中…" : "登陆"}
+          {isChecking ? "Verifying…" : "Login"}
         </Button>
 
         <span className="sr-only" aria-live="polite">
