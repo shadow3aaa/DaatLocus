@@ -48,6 +48,9 @@ enum DaatLocusCommand {
         #[command(subcommand)]
         target: Option<ConfigTarget>,
     },
+    /// Print the JSON Schema for config.toml.
+    #[command(name = "config-schema")]
+    ConfigSchema,
     /// Internal workspace app worker process.
     #[command(name = "workspace-app-worker", hide = true)]
     WorkspaceAppWorker {
@@ -181,6 +184,10 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
         Some(DaatLocusCommand::Config { target }) => {
             return run_config_command(target.as_ref()).await;
         }
+        Some(DaatLocusCommand::ConfigSchema) => {
+            print_config_schema()?;
+            return Ok(());
+        }
         Some(DaatLocusCommand::Daemon {
             target: DaemonTarget::Status,
         }) => {
@@ -282,6 +289,15 @@ async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
         Some(ConfigTarget::SetHindsightModel) => config_wizard::run_set_hindsight_model().await,
         Some(ConfigTarget::SetTelegram) => config_wizard::run_set_telegram().await,
     }
+}
+
+fn print_config_schema() -> Result<()> {
+    let schema = schemars::schema_for!(crate::config::Config);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&schema).map_err(|e| miette!(e))?
+    );
+    Ok(())
 }
 
 async fn run_daemon_status_command() -> Result<()> {

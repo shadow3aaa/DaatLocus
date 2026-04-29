@@ -7,6 +7,7 @@ use std::{
 };
 
 use miette::{Result, miette};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -123,7 +124,7 @@ enum SandboxChildStderrInner {
     File(tokio::fs::File),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StrongFilesystemSandboxMode {
     #[default]

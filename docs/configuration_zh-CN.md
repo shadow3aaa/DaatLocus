@@ -17,9 +17,16 @@ cargo run -- config add-model
 cargo run -- config set-main-model
 cargo run -- config set-hindsight-model
 cargo run -- config set-telegram
+cargo run -- config-schema
 ```
 
 `config show` 会脱敏 secret。Provider 凭据也可以用 `$NAME`、`${NAME}` 或 `env:NAME` 引用环境变量。
+
+`config.toml` 的 JSON Schema 已提交在 `schemas/config.schema.json`。编辑器可以通过 GitHub raw 引用，例如：
+
+```toml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/shadow3aaa/DaatLocus/main/schemas/config.schema.json
+```
 
 ## 核心结构
 
@@ -47,6 +54,7 @@ api_key = "your-api-key"
 provider = "openai"
 model_id = "gpt-4.1"
 temperature = 1.0
+thinking_budget = "medium"
 request_timeout_secs = 300
 stream_idle_timeout_secs = 45
 context_window_tokens = 128000
@@ -84,6 +92,8 @@ poll_timeout_secs = 30
 - `openai-codex-oauth`：ChatGPT Codex OAuth provider。
 
 OpenAI Codex OAuth 使用 ChatGPT Codex Responses backend，而不是公开 OpenAI API key 路径。默认登录方式是浏览器本地回调，device-code 登录保留为 fallback。轮换 OAuth 凭据保存在私有 auth JSON 文件里，`config.toml` 只保存 auth 文件路径。
+
+模型的 `thinking_budget` 是 provider 无关的可选枚举：`none`、`minimal`、`low`、`medium`、`high` 或 `max`。Daat Locus 会把它降级/映射到各 provider 支持的请求形态。对 OpenAI Codex OAuth，`max` 会作为 Codex 的 `xhigh` reasoning effort 发送。若 provider 拒绝 thinking 控制，运行时会不带该参数重试。
 
 `hindsight-embed` 目前还不支持 ChatGPT Codex Responses backend。如果主模型使用 OpenAI Codex OAuth，请把 `hindsight.model` 设为另一个 provider 支持的模型。
 

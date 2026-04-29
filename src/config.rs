@@ -1,6 +1,7 @@
 use std::{collections::HashMap, path::Path};
 
 use miette::Diagnostic;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -43,7 +44,7 @@ pub fn redact_secret_text(text: &str, secret: &str) -> String {
 // Provider credentials
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ProviderConfig {
     Openai {
@@ -70,7 +71,58 @@ pub enum ProviderConfig {
 // Model capabilities
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingBudget {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+impl ThinkingBudget {
+    pub fn as_chat_reasoning_effort(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Minimal => Some("minimal"),
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+            Self::Max => Some("max"),
+        }
+    }
+
+    pub fn as_codex_reasoning_effort(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "xhigh",
+        }
+    }
+
+    pub fn deepseek_thinking_type(self) -> &'static str {
+        match self {
+            Self::None => "disabled",
+            _ => "enabled",
+        }
+    }
+
+    pub fn deepseek_reasoning_effort(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Max => Some("max"),
+            // DeepSeek currently accepts high/max. Treat generic non-max budgets as high.
+            _ => Some("high"),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ModelConfig {
     /// Key reference into Config.providers.
@@ -78,7 +130,7 @@ pub struct ModelConfig {
     /// Model identifier sent to the provider API.
     pub model_id: String,
     pub temperature: f64,
-    pub thinking_budget: Option<String>,
+    pub thinking_budget: Option<ThinkingBudget>,
     pub rpm: Option<u32>,
     pub request_timeout_secs: u64,
     pub stream_idle_timeout_secs: u64,
@@ -110,13 +162,8 @@ impl Default for ModelConfig {
 }
 
 impl ModelConfig {
-    pub fn thinking_budget(&self) -> Option<String> {
-        let budget = self.thinking_budget.as_deref()?.trim();
-        if budget.is_empty() {
-            None
-        } else {
-            Some(budget.to_string())
-        }
+    pub fn thinking_budget(&self) -> Option<ThinkingBudget> {
+        self.thinking_budget
     }
 
     pub fn rpm(&self) -> Option<usize> {
@@ -168,7 +215,7 @@ impl ModelConfig {
 // Judge configuration
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct JudgeConfig {
     pub enabled: bool,
@@ -193,7 +240,7 @@ impl Default for JudgeConfig {
 // Top-level config
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct Config {
     pub locale: Locale,
@@ -377,7 +424,7 @@ fn is_valid_env_ref_name(name: &str) -> bool {
 // Other sub-configs
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct DaemonConfig {
     pub port: u16,
@@ -389,7 +436,7 @@ impl Default for DaemonConfig {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct SandboxConfig {
     pub enabled: bool,
@@ -405,7 +452,7 @@ impl Default for SandboxConfig {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct HindsightConfig {
     pub namespace: String,
@@ -433,7 +480,7 @@ impl Default for HindsightConfig {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct TelegramConfig {
     pub enabled: bool,
@@ -522,7 +569,9 @@ pub async fn load_config() -> Result<Config, ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ProviderConfig, normalize_provider_base_url, resolve_env_reference};
+    use super::{
+        Config, ProviderConfig, ThinkingBudget, normalize_provider_base_url, resolve_env_reference,
+    };
     use crate::sandbox::StrongFilesystemSandboxMode;
 
     struct EnvOverride {
@@ -712,6 +761,51 @@ enabled = false
             config.sandbox.strong_filesystem,
             StrongFilesystemSandboxMode::Off
         );
+    }
+
+    #[test]
+    fn thinking_budget_parses_as_fixed_enum() {
+        let config: Config = toml::from_str(
+            r#"
+main_model = "default"
+
+[providers.openai]
+type = "openai"
+api_key = "test"
+
+[models.default]
+provider = "openai"
+model_id = "gpt-4.1"
+thinking_budget = "max"
+"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(
+            config.models["default"].thinking_budget(),
+            Some(ThinkingBudget::Max)
+        );
+    }
+
+    #[test]
+    fn thinking_budget_rejects_unknown_values() {
+        let result = toml::from_str::<Config>(
+            r#"
+main_model = "default"
+
+[providers.openai]
+type = "openai"
+api_key = "test"
+
+[models.default]
+provider = "openai"
+model_id = "gpt-4.1"
+thinking_budget = "xhigh"
+"#,
+        );
+
+        let err = result.err().expect("unknown thinking_budget must fail");
+        assert!(err.to_string().contains("unknown variant"));
     }
 
     #[cfg(unix)]

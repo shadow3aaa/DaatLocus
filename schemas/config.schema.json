@@ -1,0 +1,408 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "type": "object",
+  "properties": {
+    "daemon": {
+      "$ref": "#/$defs/DaemonConfig",
+      "default": {
+        "port": 53825
+      }
+    },
+    "hindsight": {
+      "$ref": "#/$defs/HindsightConfig",
+      "default": {
+        "bank_id": "daat-locus",
+        "model": null,
+        "namespace": "default",
+        "port": 8888,
+        "profile": "daat-locus",
+        "request_timeout_secs": 180
+      }
+    },
+    "judge": {
+      "$ref": "#/$defs/JudgeConfig",
+      "default": {
+        "enabled": true,
+        "max_pairwise_candidates": 4,
+        "max_pairwise_cases": 4,
+        "model": null
+      }
+    },
+    "locale": {
+      "$ref": "#/$defs/Locale",
+      "default": "en-US"
+    },
+    "main_model": {
+      "description": "Main model name; key reference into models.",
+      "type": "string",
+      "default": "default"
+    },
+    "models": {
+      "description": "Model definition registry keyed by user-defined names.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ModelConfig"
+      },
+      "default": {
+        "default": {
+          "auto_compact_token_limit": 100000,
+          "context_window_tokens": 128000,
+          "effective_context_window_percent": 95,
+          "max_completion_tokens": 4000,
+          "model_id": "gpt-4.1",
+          "provider": "openai",
+          "request_timeout_secs": 300,
+          "rpm": null,
+          "stream_idle_timeout_secs": 45,
+          "temperature": 1.0,
+          "thinking_budget": null,
+          "tool_output_max_tokens": 2000
+        }
+      }
+    },
+    "providers": {
+      "description": "Provider credential registry keyed by user-defined names.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ProviderConfig"
+      },
+      "default": {
+        "openai": {
+          "api_key": "your-api-key",
+          "base_url": null,
+          "type": "openai"
+        }
+      }
+    },
+    "sandbox": {
+      "$ref": "#/$defs/SandboxConfig",
+      "default": {
+        "enabled": true,
+        "strong_filesystem": "off"
+      }
+    },
+    "telegram": {
+      "$ref": "#/$defs/TelegramConfig",
+      "default": {
+        "bot_token": "your-telegram-bot-token",
+        "enabled": true,
+        "poll_timeout_secs": 30
+      }
+    }
+  },
+  "$defs": {
+    "DaemonConfig": {
+      "type": "object",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "default": 53825,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      }
+    },
+    "HindsightConfig": {
+      "type": "object",
+      "properties": {
+        "bank_id": {
+          "type": "string",
+          "default": "daat-locus"
+        },
+        "model": {
+          "description": "Model used for hindsight LLM operations (reflect/retain).\nNone = use main_model.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "namespace": {
+          "type": "string",
+          "default": "default"
+        },
+        "port": {
+          "description": "Port the managed daemon listens on.",
+          "type": "integer",
+          "format": "uint16",
+          "default": 8888,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "profile": {
+          "description": "Profile name used by hindsight-embed. Defaults to \"daat-locus\".",
+          "type": "string",
+          "default": "daat-locus"
+        },
+        "request_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 180,
+          "minimum": 0
+        }
+      }
+    },
+    "JudgeConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "max_pairwise_candidates": {
+          "type": "integer",
+          "format": "uint",
+          "default": 4,
+          "minimum": 0
+        },
+        "max_pairwise_cases": {
+          "type": "integer",
+          "format": "uint",
+          "default": 4,
+          "minimum": 0
+        },
+        "model": {
+          "description": "None = use main_model.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "Locale": {
+      "type": "string",
+      "enum": [
+        "en-US",
+        "zh-CN"
+      ]
+    },
+    "ModelConfig": {
+      "type": "object",
+      "properties": {
+        "auto_compact_token_limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        },
+        "context_window_tokens": {
+          "type": "integer",
+          "format": "uint",
+          "default": 128000,
+          "minimum": 0
+        },
+        "effective_context_window_percent": {
+          "type": "integer",
+          "format": "int64",
+          "default": 95
+        },
+        "max_completion_tokens": {
+          "type": "integer",
+          "format": "uint",
+          "default": 4000,
+          "minimum": 0
+        },
+        "model_id": {
+          "description": "Model identifier sent to the provider API.",
+          "type": "string",
+          "default": "gpt-4.1"
+        },
+        "provider": {
+          "description": "Key reference into Config.providers.",
+          "type": "string",
+          "default": "openai"
+        },
+        "request_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        },
+        "rpm": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "stream_idle_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 45,
+          "minimum": 0
+        },
+        "temperature": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        },
+        "thinking_budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ThinkingBudget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tool_output_max_tokens": {
+          "type": "integer",
+          "format": "uint",
+          "default": 2000,
+          "minimum": 0
+        }
+      }
+    },
+    "ProviderConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "api_key": {
+              "type": "string"
+            },
+            "base_url": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "openai"
+            }
+          },
+          "required": [
+            "type",
+            "api_key"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "github_token": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "github-copilot"
+            }
+          },
+          "required": [
+            "type",
+            "github_token"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "auth_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "base_url": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "openai-codex-oauth"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "api_key": {
+              "type": "string"
+            },
+            "base_url": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "openai-compatible"
+            }
+          },
+          "required": [
+            "type",
+            "base_url",
+            "api_key"
+          ]
+        }
+      ]
+    },
+    "SandboxConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "strong_filesystem": {
+          "$ref": "#/$defs/StrongFilesystemSandboxMode",
+          "default": "off"
+        }
+      }
+    },
+    "StrongFilesystemSandboxMode": {
+      "type": "string",
+      "enum": [
+        "off",
+        "auto",
+        "required"
+      ]
+    },
+    "TelegramConfig": {
+      "type": "object",
+      "properties": {
+        "bot_token": {
+          "type": "string",
+          "default": "your-telegram-bot-token"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "poll_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      }
+    },
+    "ThinkingBudget": {
+      "type": "string",
+      "enum": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "max"
+      ]
+    }
+  }
+}

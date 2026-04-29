@@ -15,7 +15,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    config::{ModelConfig, redact_secret_text},
+    config::{ModelConfig, ThinkingBudget, redact_secret_text},
     context::Context,
     context_budget::{
         ContextBudgetExceededError, RequestBudgetLimits, estimate_agent_turn_request,
@@ -63,7 +63,7 @@ struct CodexResponsesClient {
     base_url: String,
     extra_headers: reqwest::header::HeaderMap,
     model: String,
-    thinking_budget: Option<String>,
+    thinking_budget: Option<ThinkingBudget>,
     rpm: Option<usize>,
     stream_idle_timeout: Duration,
     context_window_tokens: usize,
@@ -822,8 +822,8 @@ fn base_responses_payload(
             "x-codex-installation-id": client.installation_id,
         },
     });
-    if let Some(effort) = client.thinking_budget.as_deref() {
-        payload["reasoning"] = json!({ "effort": effort });
+    if let Some(budget) = client.thinking_budget {
+        payload["reasoning"] = json!({ "effort": budget.as_codex_reasoning_effort() });
     }
     payload
 }
@@ -1534,7 +1534,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ModelConfig;
+    use crate::config::{ModelConfig, ThinkingBudget};
 
     fn jwt(payload: serde_json::Value) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
@@ -1607,6 +1607,23 @@ mod tests {
                 ..ModelConfig::default()
             },
         )
+    }
+
+    #[test]
+    fn codex_thinking_budget_max_maps_to_xhigh() {
+        let client = CodexResponsesClient::new(
+            CODEX_RESPONSES_BASE_URL,
+            &ModelConfig {
+                model_id: "gpt-5.4".to_string(),
+                provider: "codex-oauth".to_string(),
+                thinking_budget: Some(ThinkingBudget::Max),
+                ..ModelConfig::default()
+            },
+        );
+
+        let payload = base_responses_payload(&client, "instructions".to_string(), vec![], vec![]);
+
+        assert_eq!(payload["reasoning"]["effort"], "xhigh");
     }
 
     #[test]

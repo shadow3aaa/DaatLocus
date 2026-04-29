@@ -63,7 +63,7 @@ pub(super) fn build_agent_turn_payload_common(
     apply_provider_thinking_config(
         &mut payload,
         client,
-        client.thinking_budget.as_deref(),
+        client.thinking_budget,
         client.adapter_state_guard().thinking_budget_mode,
     );
     payload

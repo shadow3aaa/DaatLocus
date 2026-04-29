@@ -20,10 +20,18 @@ cargo run -- config add-model
 cargo run -- config set-main-model
 cargo run -- config set-hindsight-model
 cargo run -- config set-telegram
+cargo run -- config-schema
 ```
 
 `config show` masks secrets. Provider credentials may also reference environment
 variables with `$NAME`, `${NAME}`, or `env:NAME`.
+
+The JSON Schema for `config.toml` is committed at `schemas/config.schema.json`.
+Editors can reference it through GitHub raw, for example:
+
+```toml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/shadow3aaa/DaatLocus/main/schemas/config.schema.json
+```
 
 ## Core Shape
 
@@ -51,6 +59,7 @@ api_key = "your-api-key"
 provider = "openai"
 model_id = "gpt-4.1"
 temperature = 1.0
+thinking_budget = "medium"
 request_timeout_secs = 300
 stream_idle_timeout_secs = 45
 context_window_tokens = 128000
@@ -91,6 +100,12 @@ OpenAI Codex OAuth uses the ChatGPT Codex Responses backend rather than a
 public OpenAI API key. Browser callback login is the default flow; device-code
 login remains available as a fallback. Rotating OAuth credentials are stored in
 a private auth JSON file, while `config.toml` keeps only the auth-file path.
+
+Model `thinking_budget` is a provider-agnostic optional enum: `none`,
+`minimal`, `low`, `medium`, `high`, or `max`. Daat Locus lowers it to each
+provider's supported request shape. For OpenAI Codex OAuth, `max` is sent as
+Codex's `xhigh` reasoning effort. Providers that reject thinking controls are
+retried without them.
 
 `hindsight-embed` currently does not support the ChatGPT Codex Responses
 backend. If the main model uses OpenAI Codex OAuth, set `hindsight.model` to a

@@ -16,7 +16,8 @@ use tracing::warn;
 
 use crate::{
     config::{
-        Config, ModelConfig, ProviderConfig, normalize_provider_base_url, resolve_env_reference,
+        Config, ModelConfig, ProviderConfig, ThinkingBudget, normalize_provider_base_url,
+        resolve_env_reference,
     },
     context::Context,
     context_budget::{
@@ -56,7 +57,7 @@ pub struct OpenAIClient {
     extra_headers: reqwest::header::HeaderMap,
     model: String,
     temperature: f64,
-    thinking_budget: Option<String>,
+    thinking_budget: Option<ThinkingBudget>,
     rpm: Option<usize>,
     stream_idle_timeout: Duration,
     context_window_tokens: usize,
@@ -862,7 +863,7 @@ impl ChatCompletionsAdapter for StandardChatCompletionsAdapter {
         apply_provider_thinking_config(
             &mut payload,
             client,
-            client.thinking_budget.as_deref(),
+            client.thinking_budget,
             client.adapter_state_guard().thinking_budget_mode,
         );
         payload
@@ -918,7 +919,7 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
         apply_provider_thinking_config(
             &mut payload,
             client,
-            client.thinking_budget.as_deref(),
+            client.thinking_budget,
             self.state.thinking_budget_mode,
         );
         payload
@@ -1276,7 +1277,7 @@ mod tests {
     #[test]
     fn thinking_budget_is_injected_as_reasoning_effort_by_default() {
         let model_config = ModelConfig {
-            thinking_budget: Some("medium".to_string()),
+            thinking_budget: Some(ThinkingBudget::Medium),
             ..Default::default()
         };
         let client = OpenAIClient::from_parts("test-key", "https://api.openai.com", &model_config);
@@ -1298,7 +1299,7 @@ mod tests {
     fn deepseek_thinking_budget_uses_thinking_and_reasoning_effort_parameters() {
         let model_config = ModelConfig {
             model_id: "deepseek-reasoner".to_string(),
-            thinking_budget: Some("medium".to_string()),
+            thinking_budget: Some(ThinkingBudget::Medium),
             max_completion_tokens: 393_216,
             ..Default::default()
         };
@@ -1329,7 +1330,7 @@ mod tests {
         });
         apply_optional_thinking_budget(
             &mut payload,
-            Some("high"),
+            Some(ThinkingBudget::High),
             ThinkingBudgetMode::NestedReasoningObject,
         );
 
