@@ -7,5 +7,7 @@
 /assets/hindsight-sidecars/*.tgz
 /assets/hindsight-sidecars/*.zip
 /assets/hindsight-sidecars/manifest.toml
-# Yarn local install state
-/webui/.yarn/install-state.gz
+
+# WebUI local Yarn state and build output
+/webui/.yarn/
+/webui/dist/
