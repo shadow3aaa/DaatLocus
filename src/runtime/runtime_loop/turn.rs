@@ -79,11 +79,21 @@ fn maybe_build_afterclaim_context_message(
     fingerprint: Option<&str>,
     force_reinject: bool,
 ) -> Option<HistoryMessage> {
+    let fingerprint = fingerprint.unwrap_or("unfingerprinted");
+    let message = preview_afterclaim_context_message(context, input, fingerprint, force_reinject)?;
+    context.afterclaim_context_fingerprint = Some(fingerprint.to_string());
+    Some(message)
+}
+
+fn preview_afterclaim_context_message(
+    context: &Context,
+    input: &AfterClaimContextInput,
+    fingerprint: &str,
+    force_reinject: bool,
+) -> Option<HistoryMessage> {
     if input.is_empty() {
         return None;
     }
-
-    let fingerprint = fingerprint.unwrap_or("unfingerprinted");
     let already_injected = context.afterclaim_context_fingerprint.as_deref() == Some(fingerprint);
     if already_injected && !force_reinject {
         return None;
@@ -93,7 +103,6 @@ fn maybe_build_afterclaim_context_message(
     if text.trim().is_empty() {
         return None;
     }
-    context.afterclaim_context_fingerprint = Some(fingerprint.to_string());
     Some(HistoryMessage {
         message: AgentMessage::user_content(afterclaim_agent_content(text, input)),
         tool_ui_event: None,
@@ -322,16 +331,37 @@ pub(crate) async fn execute_agent_loop_step(
     }
     let request_envelope = build_runtime_request_envelope(context);
     let initial_tools = build_runtime_tool_specs(context);
-    let runtime_conversation_budget = request_envelope
-        .conversation_budget_tokens(&initial_tools, runtime_request_budget_limits(context));
+    let request_budget_limits = runtime_request_budget_limits(context);
+    let runtime_conversation_budget =
+        request_envelope.conversation_budget_tokens(&initial_tools, request_budget_limits);
+    let mut initial_injected_context_messages = Vec::new();
+    if let Some(message) = preview_afterclaim_context_message(
+        context,
+        &afterclaim_context_input,
+        claimed_input_fingerprint
+            .as_deref()
+            .unwrap_or("unfingerprinted"),
+        false,
+    ) {
+        initial_injected_context_messages.push(message);
+    }
+    if !preturn_context_text.trim().is_empty() {
+        initial_injected_context_messages.push(HistoryMessage::user(preturn_context_text.clone()));
+    }
     let runtime_conversation_summary_budget =
         RUNTIME_HISTORY_SUMMARY_MAX_TOKENS.min(runtime_conversation_budget);
     let mut pre_turn_compacted = false;
-    if let Some(plan) = context.memory.plan_runtime_conversation_compaction(
-        runtime_conversation_budget,
-        RUNTIME_HISTORY_MIN_MESSAGES,
-        runtime_conversation_summary_budget,
-    ) {
+    if let Some(plan) = context
+        .memory
+        .plan_runtime_conversation_compaction_for_request(
+            &request_envelope,
+            &initial_injected_context_messages,
+            &initial_tools,
+            request_budget_limits,
+            RUNTIME_HISTORY_MIN_MESSAGES,
+            runtime_conversation_summary_budget,
+        )
+    {
         enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightCompaction);
         let compaction_started_at = std::time::Instant::now();
         tracing::info!(

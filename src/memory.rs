@@ -12,9 +12,9 @@ use uuid::Uuid;
 
 use crate::{
     context_budget::{
-        RequestBudgetLimits, approx_token_count, estimate_agent_turn_request,
-        estimate_runtime_request_envelope, truncate_text_to_token_budget,
-        truncate_text_to_token_budget_with_notice,
+        RequestBudgetBreakdown, RequestBudgetLimits, approx_token_count,
+        estimate_agent_turn_request, estimate_runtime_request_envelope,
+        truncate_text_to_token_budget, truncate_text_to_token_budget_with_notice,
     },
     hindsight::{HINDSIGHT_RUNTIME_DOCUMENT_ID, HindsightRetainItem, HindsightRetainJob},
     persistence::PersistenceStore,
@@ -191,14 +191,23 @@ impl Memory {
             .await
     }
 
-    pub fn plan_runtime_conversation_compaction(
+    pub fn plan_runtime_conversation_compaction_for_request(
         &self,
-        max_tokens: usize,
+        envelope: &RuntimeRequestEnvelope,
+        injected_messages: &[HistoryMessage],
+        tools: &[AgentToolSpec],
+        limits: RequestBudgetLimits,
         min_messages: usize,
         summary_max_tokens: usize,
     ) -> Option<RuntimeConversationCompactionPlan> {
-        self.runtime_conversation
-            .plan_compaction(max_tokens, min_messages, summary_max_tokens)
+        self.runtime_conversation.plan_compaction_for_request(
+            envelope,
+            injected_messages,
+            tools,
+            limits,
+            min_messages,
+            summary_max_tokens,
+        )
     }
 
     pub async fn apply_runtime_conversation_compaction(
@@ -366,15 +375,45 @@ impl RuntimeRequestEnvelope {
         tools: &[AgentToolSpec],
         limits: RequestBudgetLimits,
     ) -> usize {
-        let envelope_breakdown = estimate_runtime_request_envelope(
+        let envelope_breakdown = self.request_envelope_budget_breakdown(tools, limits);
+        envelope_breakdown
+            .input_budget_tokens()
+            .saturating_sub(envelope_breakdown.total_input_tokens)
+    }
+
+    fn request_envelope_budget_breakdown(
+        &self,
+        tools: &[AgentToolSpec],
+        limits: RequestBudgetLimits,
+    ) -> RequestBudgetBreakdown {
+        estimate_runtime_request_envelope(
             &self.system_messages,
             self.user_message.as_deref().unwrap_or_default(),
             tools,
             limits,
+        )
+    }
+
+    fn agent_messages_with_history(
+        &self,
+        conversation_messages: &[HistoryMessage],
+    ) -> Vec<AgentMessage> {
+        let mut messages = self
+            .system_messages
+            .iter()
+            .cloned()
+            .map(AgentMessage::system)
+            .collect::<Vec<_>>();
+        messages.extend(
+            conversation_messages
+                .iter()
+                .cloned()
+                .map(|message| message.message),
         );
-        envelope_breakdown
-            .input_budget_tokens()
-            .saturating_sub(envelope_breakdown.total_input_tokens)
+        if let Some(user_message) = self.user_message.clone() {
+            messages.push(AgentMessage::user(user_message));
+        }
+        messages
     }
 
     fn into_agent_messages(self, conversation_messages: Vec<HistoryMessage>) -> Vec<AgentMessage> {
@@ -637,11 +676,41 @@ impl RuntimeConversation {
         }
 
         let summary_max_tokens = summary_max_tokens.min(max_tokens);
+        Self::compaction_plan_from_messages(all_messages, summary_max_tokens)
+    }
+
+    fn plan_compaction_for_request(
+        &self,
+        envelope: &RuntimeRequestEnvelope,
+        injected_messages: &[HistoryMessage],
+        tools: &[AgentToolSpec],
+        limits: RequestBudgetLimits,
+        _min_messages: usize,
+        summary_max_tokens: usize,
+    ) -> Option<RuntimeConversationCompactionPlan> {
+        let all_messages = self.messages();
+        let mut request_messages = all_messages.clone();
+        request_messages.extend(injected_messages.iter().cloned());
+        let agent_messages = envelope.agent_messages_with_history(&request_messages);
+        let breakdown = estimate_agent_turn_request(&agent_messages, tools, limits);
+        if !breakdown.above_auto_compact_threshold() {
+            return None;
+        }
+        let summary_max_tokens = summary_max_tokens
+            .min(breakdown.input_budget_tokens())
+            .min(breakdown.auto_compact_input_threshold_tokens());
+        Self::compaction_plan_from_messages(all_messages, summary_max_tokens)
+    }
+
+    fn compaction_plan_from_messages(
+        source_messages: Vec<HistoryMessage>,
+        summary_max_tokens: usize,
+    ) -> Option<RuntimeConversationCompactionPlan> {
         if summary_max_tokens == 0 {
             return None;
         }
         Some(RuntimeConversationCompactionPlan {
-            source_messages: all_messages,
+            source_messages,
             summary_max_tokens,
         })
     }
@@ -1456,6 +1525,36 @@ fn format_tool_call_ui_event_for_memory(event: &crate::tool_ui::ToolCallUiEvent)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_level_pre_turn_compaction_accounts_for_injected_context() {
+        let conversation = RuntimeConversation {
+            last_focus: Some("test".to_string()),
+            messages: vec![HistoryMessage::assistant("runtime history".repeat(12))],
+            compaction_records: VecDeque::new(),
+        };
+        let envelope = RuntimeRequestEnvelope::from_system_messages(vec!["system".repeat(8)]);
+        let injected_messages = vec![HistoryMessage::user(
+            "<preturn_context>".to_string() + &"x".repeat(180),
+        )];
+        let tools = Vec::<AgentToolSpec>::new();
+        let limits = RequestBudgetLimits {
+            context_window_tokens: 1_000,
+            auto_compact_threshold_tokens: 100,
+            reserved_output_tokens: 100,
+        };
+
+        assert!(
+            conversation
+                .plan_compaction(envelope.conversation_budget_tokens(&tools, limits), 0, 80,)
+                .is_none()
+        );
+        assert!(
+            conversation
+                .plan_compaction_for_request(&envelope, &injected_messages, &tools, limits, 0, 80,)
+                .is_some()
+        );
+    }
 
     #[test]
     fn runtime_conversation_compaction_rebuilds_history_as_summary_only() {
