@@ -33,8 +33,14 @@ use crate::{config::HindsightConfig, daat_locus_paths::daat_locus_paths};
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 
+#[cfg(not(test))]
 const HEALTH_POLL_INTERVAL_MS: u64 = 1_000;
+#[cfg(test)]
+const HEALTH_POLL_INTERVAL_MS: u64 = 20;
+#[cfg(not(test))]
 const HEALTH_READY_TIMEOUT_MS: u64 = 60_000;
+#[cfg(test)]
+const HEALTH_READY_TIMEOUT_MS: u64 = 300;
 const COMMAND_TIMEOUT_SECS: u64 = 60;
 const DAEMON_STOP_TIMEOUT_SECS: u64 = 20;
 const DAEMON_START_TIMEOUT_SECS: u64 = 660;
@@ -641,27 +647,57 @@ impl HindsightManagedServer {
             self.config.port,
         );
         let sidecar = HindsightSidecar::ensure_installed().await?;
-        self.configure_profile(&sidecar).await?;
-        if let Err(err) = self.start_daemon(&sidecar).await {
+        self.start_with_sidecar(&sidecar).await
+    }
+
+    async fn start_with_sidecar(&self, sidecar: &HindsightSidecar) -> Result<()> {
+        self.configure_profile(sidecar).await?;
+        if let Err(err) = self.start_daemon(sidecar).await {
             tracing::warn!(
-                "[hindsight:managed] daemon start failed; attempting best-effort stop: {err:?}"
+                "[hindsight:managed] daemon.start failed; checking health before stopping: {err:?}"
             );
-            let _ = self
-                .stop_with_sidecar(&sidecar, "daemon.stop_after_start_failure")
+            return self
+                .recover_ready_daemon_after_start_error(sidecar, err)
                 .await;
-            return Err(err);
         }
         if let Err(err) = self.wait_for_ready().await {
             tracing::warn!(
                 "[hindsight:managed] daemon did not become ready; attempting best-effort stop: {err:?}"
             );
             let _ = self
-                .stop_with_sidecar(&sidecar, "daemon.stop_after_ready_timeout")
+                .stop_with_sidecar(sidecar, "daemon.stop_after_ready_timeout")
                 .await;
             return Err(err);
         }
         tracing::info!("[hindsight:managed] daemon ready at {}", self.base_url());
         Ok(())
+    }
+
+    async fn recover_ready_daemon_after_start_error(
+        &self,
+        sidecar: &HindsightSidecar,
+        start_err: miette::Report,
+    ) -> Result<()> {
+        match self.wait_for_ready().await {
+            Ok(()) => {
+                tracing::warn!(
+                    "[hindsight:managed] daemon.start reported failure but daemon is healthy; keeping it alive: {start_err:?}"
+                );
+                tracing::info!("[hindsight:managed] daemon ready at {}", self.base_url());
+                Ok(())
+            }
+            Err(ready_err) => {
+                tracing::warn!(
+                    "[hindsight:managed] daemon.start failed and health check did not recover; attempting best-effort stop: start={start_err:?}; ready={ready_err:?}"
+                );
+                let _ = self
+                    .stop_with_sidecar(sidecar, "daemon.stop_after_start_failure")
+                    .await;
+                Err(miette!(
+                    "[hindsight:managed] daemon.start failed and health check did not recover: {start_err}; readiness: {ready_err}"
+                ))
+            }
+        }
     }
 
     /// Stop the daemon gracefully.
@@ -908,6 +944,157 @@ mod tests {
                 .iter()
                 .any(|(key, value)| key == "HINDSIGHT_API_LLM_API_KEY" && value == "secret-value")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_keeps_ready_daemon_when_start_command_reports_failure() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let stop_marker = tempdir.path().join("stop.marker");
+        let sidecar = write_fake_start_failing_sidecar(tempdir.path(), &stop_marker);
+        let (port, shutdown) = spawn_test_health_server().await;
+        let server = HindsightManagedServer::new(
+            HindsightConfig {
+                profile: format!("test-{port}"),
+                port,
+                ..HindsightConfig::default()
+            },
+            Vec::new(),
+        );
+
+        server
+            .start_with_sidecar(&sidecar)
+            .await
+            .expect("healthy daemon should survive a wrapper start error");
+
+        let _ = shutdown.send(());
+        assert!(
+            !stop_marker.exists(),
+            "ready daemon should not be stopped after wrapper start failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_stops_daemon_when_start_fails_and_health_never_recovers() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let stop_marker = tempdir.path().join("stop.marker");
+        let sidecar = write_fake_start_failing_sidecar(tempdir.path(), &stop_marker);
+        let port = unused_local_port().await;
+        let server = HindsightManagedServer::new(
+            HindsightConfig {
+                profile: format!("test-{port}"),
+                port,
+                ..HindsightConfig::default()
+            },
+            Vec::new(),
+        );
+
+        let err = server
+            .start_with_sidecar(&sidecar)
+            .await
+            .expect_err("unhealthy daemon should still fail startup");
+
+        assert!(err.to_string().contains("health check did not recover"));
+        assert!(
+            stop_marker.exists(),
+            "unhealthy daemon should still get a best-effort stop"
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_start_failing_sidecar(root: &Path, stop_marker: &Path) -> HindsightSidecar {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create fake sidecar bin dir");
+        let executable = bin_dir.join(HINDSIGHT_EMBED_EXE);
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$1" = "profile" ]; then
+  if [ "$2" = "delete" ]; then
+    echo "profile does not exist" >&2
+    exit 1
+  fi
+  if [ "$2" = "create" ]; then
+    exit 0
+  fi
+fi
+if [ "$1" = "daemon" ]; then
+  if [ "$4" = "start" ]; then
+    echo "daemon wrapper failed after daemon health became available" >&2
+    exit 1
+  fi
+  if [ "$4" = "stop" ]; then
+    touch {stop_marker}
+    exit 0
+  fi
+fi
+echo "unexpected fake sidecar args: $*" >&2
+exit 2
+"#,
+            stop_marker = shell_quote_path(stop_marker),
+        );
+        std::fs::write(&executable, script).expect("write fake sidecar executable");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("fake sidecar metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("make fake sidecar executable");
+        HindsightSidecar {
+            root: root.to_path_buf(),
+            executable,
+        }
+    }
+
+    #[cfg(unix)]
+    fn shell_quote_path(path: &Path) -> String {
+        format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+    }
+
+    #[cfg(unix)]
+    async fn spawn_test_health_server() -> (u16, tokio::sync::oneshot::Sender<()>) {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+            sync::oneshot,
+        };
+
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind health server");
+        let port = listener.local_addr().expect("health server addr").port();
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        let Ok((mut stream, _)) = accepted else {
+                            break;
+                        };
+                        tokio::spawn(async move {
+                            let mut buffer = [0u8; 1024];
+                            let _ = stream.read(&mut buffer).await;
+                            let _ = stream
+                                .write_all(
+                                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nOK",
+                                )
+                                .await;
+                        });
+                    }
+                }
+            }
+        });
+        (port, shutdown_tx)
+    }
+
+    #[cfg(unix)]
+    async fn unused_local_port() -> u16 {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind unused port");
+        listener.local_addr().expect("unused port addr").port()
     }
 
     #[test]
