@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { MenuIcon } from "lucide-react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -22,15 +23,14 @@ type NavigationItem = {
 
 const navigationItems: NavigationItem[] = [
   {
-    label: "Locus",
-    href: "#status",
-    description: "Agent presence and runtime state",
+    label: "Agent",
+    href: "#agent",
+    description: "Agent presence and interaction surface",
   },
   {
-    label: "Chat",
-    href: "#chat",
-    description: "Conversation surface",
-    disabled: true,
+    label: "Status",
+    href: "#status",
+    description: "Runtime metrics and optimization state",
   },
   {
     label: "Settings",
@@ -39,8 +39,8 @@ const navigationItems: NavigationItem[] = [
     disabled: true,
   },
   {
-    label: "Log",
-    href: "#log",
+    label: "Logs",
+    href: "#logs",
     description: "Recent runtime activity",
     disabled: true,
   },
@@ -51,6 +51,21 @@ export function AppNavigation({
 }: {
   isAuthenticated: boolean;
 }) {
+  const [activeHash, setActiveHash] = useState(() =>
+    typeof window === "undefined" ? "#agent" : window.location.hash || "#agent",
+  );
+
+  useEffect(() => {
+    function updateActiveHash() {
+      setActiveHash(window.location.hash || "#agent");
+    }
+
+    updateActiveHash();
+    window.addEventListener("hashchange", updateActiveHash);
+
+    return () => window.removeEventListener("hashchange", updateActiveHash);
+  }, []);
+
   return (
     <Sheet>
       <SheetTrigger asChild>
@@ -93,9 +108,11 @@ export function AppNavigation({
 
           <nav className="grid gap-1 px-3" aria-label="Primary navigation">
             {navigationItems.map((item) => {
-              const isLocus = item.label === "Locus";
-              const isActive = isLocus && isAuthenticated;
-              const isDisabled = item.disabled || (isLocus && !isAuthenticated);
+              const isRuntimePage =
+                item.href === "#agent" || item.href === "#status";
+              const isActive = activeHash === item.href && isAuthenticated;
+              const isDisabled =
+                item.disabled || (isRuntimePage && !isAuthenticated);
               const itemClassName = cn(
                 buttonVariants({ variant: "ghost" }),
                 "h-auto w-full justify-start rounded-xl px-3 py-3 text-left",

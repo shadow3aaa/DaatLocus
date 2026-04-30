@@ -183,10 +183,13 @@ export function StatusPage() {
 
   return (
     <section
-      id="status"
+      aria-label="Agent and runtime status"
       className="h-screen w-full snap-y snap-mandatory overflow-y-auto overscroll-contain scroll-smooth"
     >
-      <div className="flex min-h-full snap-start items-center justify-center px-6 py-10">
+      <div
+        id="agent"
+        className="flex min-h-full snap-start items-center justify-center px-6 py-10"
+      >
         <div className="flex flex-col items-center justify-center gap-5 text-center">
           <AgentStatusAnimation
             status={agentStatus.animationStatus}
@@ -217,6 +220,7 @@ export function StatusPage() {
         </div>
       </div>
       <div
+        id="status"
         className="min-h-full w-full snap-start px-6 py-10 md:py-12"
       >
         <div className="flex w-full flex-wrap items-start gap-4">
