@@ -10,7 +10,11 @@ import {
 
 type LoginState = "idle" | "checking" | "authenticated" | "error";
 
-export function LoginPage() {
+export function LoginPage({
+  onAuthenticated,
+}: {
+  onAuthenticated: () => void;
+}) {
   const [token, setToken] = useState(() => getStoredDaemonToken());
   const [loginState, setLoginState] = useState<LoginState>("idle");
   const [message, setMessage] = useState("");
@@ -34,6 +38,7 @@ export function LoginPage() {
       setToken(trimmedToken);
       setLoginState("authenticated");
       setMessage("Token verified. Future pages will reuse this token.");
+      onAuthenticated();
       return;
     }
 
@@ -51,35 +56,45 @@ export function LoginPage() {
     >
       <h1 className="text-5xl font-semibold tracking-tight md:text-6xl">Login</h1>
 
-      <form className="flex w-full flex-col gap-3 sm:flex-row" onSubmit={handleSubmit}>
-        <Input
-          aria-label="Daemon token"
-          aria-invalid={isError}
-          className="h-11 flex-1"
-          value={token}
-          onChange={(event) => {
-            setToken(event.target.value);
-            setMessage("");
-            if (loginState !== "checking") {
-              setLoginState("idle");
-            }
-          }}
-          placeholder="Token"
-          type="password"
-          autoComplete="current-password"
-          spellCheck={false}
-          disabled={isChecking}
-          required
-        />
+      <div className="flex w-full flex-col gap-3">
+        <form className="flex w-full flex-col gap-3 sm:flex-row" onSubmit={handleSubmit}>
+          <Input
+            aria-label="Daemon token"
+            aria-invalid={isError}
+            className="h-11 flex-1"
+            value={token}
+            onChange={(event) => {
+              setToken(event.target.value);
+              setMessage("");
+              if (loginState !== "checking") {
+                setLoginState("idle");
+              }
+            }}
+            placeholder="Token"
+            type="password"
+            autoComplete="current-password"
+            spellCheck={false}
+            disabled={isChecking}
+            required
+          />
 
-        <Button className="h-11 px-8" type="submit" disabled={isChecking}>
-          {isChecking ? "Verifying…" : "Login"}
-        </Button>
+          <Button className="h-11 px-8" type="submit" disabled={isChecking}>
+            {isChecking ? "Verifying…" : "Login"}
+          </Button>
+        </form>
 
-        <span className="sr-only" aria-live="polite">
-          {message}
-        </span>
-      </form>
+        {message ? (
+          <p
+            className={`text-sm ${
+              isError ? "text-destructive" : "text-muted-foreground"
+            }`}
+            role={isError ? "alert" : "status"}
+            aria-live="polite"
+          >
+            {message}
+          </p>
+        ) : null}
+      </div>
     </section>
   );
 }
