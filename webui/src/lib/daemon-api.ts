@@ -68,6 +68,21 @@ export type DashboardWorkflowOptimizationSnapshot = {
   total_workflow_optimization_rounds: number;
 };
 
+export type DashboardRuntimeOptimizationSnapshot = {
+  running: boolean;
+  current_trigger: string | null;
+  last_result: string | null;
+  last_completed_at_ms: number | null;
+  unread_runtime_error_backlog: number;
+  total_runtime_error_cases_consumed: number;
+  total_runtime_error_cases: number;
+  total_runtime_error_reflections: number;
+  total_runtime_contract_candidates: number;
+  total_runtime_contract_candidate_evaluations: number;
+  total_runtime_contract_system_additions: number;
+  total_runtime_contract_updates: number;
+};
+
 export type DashboardSnapshot = {
   focused_app: string | null;
   status_output: string;
@@ -87,6 +102,7 @@ export type DashboardSnapshot = {
   current_plan_step: DashboardPlanStep | null;
   token_usage?: DashboardTokenUsageSnapshot;
   workflow_optimization?: DashboardWorkflowOptimizationSnapshot;
+  runtime_optimization?: DashboardRuntimeOptimizationSnapshot;
   footer_context: string;
   footer_estimated_input_tokens: number | null;
 };

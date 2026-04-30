@@ -73,6 +73,22 @@ pub struct DashboardWorkflowOptimizationSnapshot {
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
+pub struct DashboardRuntimeOptimizationSnapshot {
+    pub running: bool,
+    pub current_trigger: Option<String>,
+    pub last_result: Option<String>,
+    pub last_completed_at_ms: Option<i64>,
+    pub unread_runtime_error_backlog: usize,
+    pub total_runtime_error_cases_consumed: usize,
+    pub total_runtime_error_cases: usize,
+    pub total_runtime_error_reflections: usize,
+    pub total_runtime_contract_candidates: usize,
+    pub total_runtime_contract_candidate_evaluations: usize,
+    pub total_runtime_contract_system_additions: usize,
+    pub total_runtime_contract_updates: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardState {
     pub focused_app: Option<AppId>,
     pub status_output: String,
@@ -93,6 +109,8 @@ pub struct DashboardState {
     pub token_usage: DashboardTokenUsageSnapshot,
     #[serde(default)]
     pub workflow_optimization: DashboardWorkflowOptimizationSnapshot,
+    #[serde(default)]
+    pub runtime_optimization: DashboardRuntimeOptimizationSnapshot,
     pub footer_context: String,
     pub footer_estimated_input_tokens: Option<usize>,
 }

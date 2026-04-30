@@ -12,8 +12,9 @@ use crate::{
 };
 
 use super::{
-    DashboardPlanStep, DashboardState, DashboardTokenUsageSnapshot,
-    DashboardWorkflowOptimizationSnapshot, render_activity_from_messages,
+    DashboardPlanStep, DashboardRuntimeOptimizationSnapshot, DashboardState,
+    DashboardTokenUsageSnapshot, DashboardWorkflowOptimizationSnapshot,
+    render_activity_from_messages,
 };
 
 /// Sleep-related constants used in dashboard rendering.
@@ -42,6 +43,7 @@ pub fn sync_dashboard_state(
             render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
         state.current_plan_step = current_plan_step_for_dashboard(context);
         state.token_usage = token_usage_snapshot_for_dashboard(context);
+        state.runtime_optimization = runtime_optimization_snapshot_for_dashboard(sleep_status);
         state.workflow_optimization = workflow_optimization_snapshot_for_dashboard(sleep_status);
     });
 }
@@ -96,6 +98,27 @@ fn visible_token_usage(info: Option<TokenUsageInfo>) -> Option<TokenUsageInfo> {
             || !info.last_token_usage.is_zero()
             || !info.daily_token_usage.is_empty()
     })
+}
+
+pub fn runtime_optimization_snapshot_for_dashboard(
+    sleep_status: &SleepStatusSnapshot,
+) -> DashboardRuntimeOptimizationSnapshot {
+    DashboardRuntimeOptimizationSnapshot {
+        running: sleep_status.running,
+        current_trigger: sleep_status.current_trigger.map(str::to_string),
+        last_result: sleep_status.last_result.clone(),
+        last_completed_at_ms: sleep_status.last_completed_at_ms,
+        unread_runtime_error_backlog: sleep_status.unread_runtime_error_backlog,
+        total_runtime_error_cases_consumed: sleep_status.total_runtime_error_cases_consumed,
+        total_runtime_error_cases: sleep_status.total_runtime_error_cases,
+        total_runtime_error_reflections: sleep_status.total_runtime_error_reflections,
+        total_runtime_contract_candidates: sleep_status.total_runtime_contract_candidates,
+        total_runtime_contract_candidate_evaluations: sleep_status
+            .total_runtime_contract_candidate_evaluations,
+        total_runtime_contract_system_additions: sleep_status
+            .total_runtime_contract_system_additions,
+        total_runtime_contract_updates: sleep_status.total_runtime_contract_updates,
+    }
 }
 
 pub fn workflow_optimization_snapshot_for_dashboard(

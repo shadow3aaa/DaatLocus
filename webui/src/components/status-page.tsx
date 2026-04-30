@@ -61,6 +61,40 @@ const WORKFLOW_OPTIMIZATION_CHART_CONFIG = {
     color: "var(--muted)",
   },
 } satisfies ChartConfig;
+const RUNTIME_OPTIMIZATION_CHART_CONFIG = {
+  queued: {
+    label: "Queued",
+    color: "var(--chart-1)",
+  },
+  consumed: {
+    label: "Consumed",
+    color: "var(--chart-2)",
+  },
+  cases: {
+    label: "Cases",
+    color: "var(--chart-3)",
+  },
+  reflections: {
+    label: "Reflections",
+    color: "var(--chart-4)",
+  },
+  candidates: {
+    label: "Candidates",
+    color: "var(--chart-5)",
+  },
+  evaluations: {
+    label: "Evaluations",
+    color: "var(--chart-1)",
+  },
+  applied: {
+    label: "Applied",
+    color: "var(--chart-2)",
+  },
+  empty: {
+    label: "No data",
+    color: "var(--muted)",
+  },
+} satisfies ChartConfig;
 
 type AgentStatusView = {
   animationStatus: AgentAnimationStatus;
@@ -188,6 +222,7 @@ export function StatusPage() {
         <div className="flex w-full flex-wrap items-start gap-4">
           <DailyTokenUsageCard snapshot={snapshot} />
           <WorkflowOptimizationCard snapshot={snapshot} />
+          <RuntimeOptimizationCard snapshot={snapshot} />
         </div>
       </div>
     </section>
@@ -332,6 +367,73 @@ function WorkflowOptimizationCard({
   );
 }
 
+function RuntimeOptimizationCard({
+  snapshot,
+}: {
+  snapshot: DashboardSnapshot | null;
+}) {
+  const progressData = useMemo(
+    () => runtimeOptimizationProgressData(snapshot),
+    [snapshot],
+  );
+  const chartData = useMemo(
+    () => runtimeOptimizationDonutData(progressData),
+    [progressData],
+  );
+  const total = progressData.reduce((sum, item) => sum + item.value, 0);
+
+  return (
+    <Card className="w-full overflow-visible sm:w-72">
+      <CardHeader>
+        <CardTitle>Runtime Optimization</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="relative mx-auto h-48 w-full max-w-48">
+          <ChartContainer
+            config={RUNTIME_OPTIMIZATION_CHART_CONFIG}
+            className="h-full w-full overflow-visible [&_.recharts-wrapper]:overflow-visible"
+          >
+            <PieChart accessibilityLayer>
+              <ChartTooltip
+                cursor={false}
+                wrapperStyle={{ zIndex: 50 }}
+                content={<RuntimeOptimizationTooltip />}
+              />
+              <Pie
+                data={chartData}
+                dataKey="chartValue"
+                nameKey="label"
+                innerRadius={44}
+                outerRadius={66}
+                paddingAngle={2}
+                strokeWidth={0}
+                isAnimationActive={false}
+              >
+                {chartData.map((item) => (
+                  <Cell
+                    key={item.key}
+                    fill={`var(--color-${item.colorKey})`}
+                  />
+                ))}
+              </Pie>
+            </PieChart>
+          </ChartContainer>
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="text-center">
+              <div className="font-mono text-2xl font-medium tabular-nums text-foreground">
+                {formatCompactNumber(total)}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {total > 0 ? "Events" : "No data"}
+              </div>
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 type DailyTokenUsageChartDatum = {
   date: string;
   label: string;
@@ -367,6 +469,22 @@ type WorkflowOptimizationDonutDatum = WorkflowOptimizationChartDatum & {
 
 type WorkflowOptimizationTooltipPayloadItem = {
   payload?: WorkflowOptimizationDonutDatum;
+};
+
+type RuntimeOptimizationChartDatum = {
+  key: string;
+  label: string;
+  value: number;
+  colorKey: keyof typeof RUNTIME_OPTIMIZATION_CHART_CONFIG;
+  detail: string;
+};
+
+type RuntimeOptimizationDonutDatum = RuntimeOptimizationChartDatum & {
+  chartValue: number;
+};
+
+type RuntimeOptimizationTooltipPayloadItem = {
+  payload?: RuntimeOptimizationDonutDatum;
 };
 
 function dailyTokenUsageChartData(
@@ -604,6 +722,103 @@ function workflowOptimizationDonutData(
   ];
 }
 
+function runtimeOptimizationProgressData(
+  snapshot: DashboardSnapshot | null,
+): RuntimeOptimizationChartDatum[] {
+  const runtime = snapshot?.runtime_optimization;
+  const appliedAdditions = Math.max(
+    0,
+    runtime?.total_runtime_contract_system_additions ?? 0,
+  );
+  const compiledUpdates = Math.max(
+    0,
+    runtime?.total_runtime_contract_updates ?? 0,
+  );
+
+  return [
+    {
+      key: "queued",
+      label: "Queued",
+      value: Math.max(0, runtime?.unread_runtime_error_backlog ?? 0),
+      colorKey: "queued",
+      detail: "Runtime error cases waiting for sleep-time review",
+    },
+    {
+      key: "consumed",
+      label: "Consumed",
+      value: Math.max(0, runtime?.total_runtime_error_cases_consumed ?? 0),
+      colorKey: "consumed",
+      detail: "Runtime error cases consumed by optimization",
+    },
+    {
+      key: "cases",
+      label: "Cases",
+      value: Math.max(0, runtime?.total_runtime_error_cases ?? 0),
+      colorKey: "cases",
+      detail: "Runtime error cases analyzed",
+    },
+    {
+      key: "reflections",
+      label: "Reflect",
+      value: Math.max(0, runtime?.total_runtime_error_reflections ?? 0),
+      colorKey: "reflections",
+      detail: "Generated runtime error reflections",
+    },
+    {
+      key: "candidates",
+      label: "Candidates",
+      value: Math.max(0, runtime?.total_runtime_contract_candidates ?? 0),
+      colorKey: "candidates",
+      detail: "Runtime contract correction candidates",
+    },
+    {
+      key: "evaluations",
+      label: "Evaluate",
+      value: Math.max(
+        0,
+        runtime?.total_runtime_contract_candidate_evaluations ?? 0,
+      ),
+      colorKey: "evaluations",
+      detail: "Runtime contract candidate evaluations",
+    },
+    {
+      key: "applied",
+      label: "Applied",
+      value: appliedAdditions + compiledUpdates,
+      colorKey: "applied",
+      detail: `${formatCompactNumber(appliedAdditions)} additions · ${formatCompactNumber(
+        compiledUpdates,
+      )} updates`,
+    },
+  ];
+}
+
+function runtimeOptimizationDonutData(
+  progressData: RuntimeOptimizationChartDatum[],
+): RuntimeOptimizationDonutDatum[] {
+  const activeData = progressData
+    .filter((item) => item.value > 0)
+    .map((item) => ({
+      ...item,
+      chartValue: item.value,
+    }));
+
+  if (activeData.length > 0) {
+    return activeData;
+  }
+
+  return [
+    {
+      key: "empty",
+      label: "No data",
+      value: 0,
+      chartValue: 1,
+      colorKey: "empty",
+      detail: "No runtime optimization activity yet",
+    },
+  ];
+}
+
 function TokenUsageTooltip({
   active,
   payload,
@@ -712,6 +927,39 @@ function WorkflowOptimizationTooltip({
 }: {
   active?: boolean;
   payload?: WorkflowOptimizationTooltipPayloadItem[];
+}) {
+  if (!active) {
+    return null;
+  }
+
+  const datum = payload?.[0]?.payload;
+  if (!datum) {
+    return null;
+  }
+
+  return (
+    <div className="grid min-w-56 gap-1.5 rounded-lg border bg-background px-3 py-2.5 text-xs shadow-xl">
+      <div className="flex items-center gap-2 font-medium text-foreground">
+        <span
+          className="size-2 shrink-0 rounded-[2px]"
+          style={{ backgroundColor: `var(--color-${datum.colorKey})` }}
+        />
+        <span>{datum.label}</span>
+        <span className="ml-auto font-mono tabular-nums">
+          {formatCompactNumber(datum.value)}
+        </span>
+      </div>
+      <div className="text-muted-foreground">{datum.detail}</div>
+    </div>
+  );
+}
+
+function RuntimeOptimizationTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: RuntimeOptimizationTooltipPayloadItem[];
 }) {
   if (!active) {
     return null;
