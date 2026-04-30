@@ -36,11 +36,15 @@ const expressionMotionByStatus: Record<AgentAnimationStatus, string> = {
   error: "scale-[1.025]",
 };
 
-const idleMouthPath =
-  "M 22 106 C 32 126 46 139 66 139 C 86 139 100 126 110 106";
-const workingMouthPath =
-  "M 36 121 C 48 121 54 121 66 121 C 78 121 84 121 96 121";
-const expressionTransitionDurationMs = 420;
+const idleMouthPoints = [
+  22, 106, 32, 126, 46, 139, 66, 139, 86, 139, 100, 126, 110, 106,
+] as const;
+const workingMouthPoints = [
+  36, 121, 48, 121, 54, 121, 66, 121, 78, 121, 84, 121, 96, 121,
+] as const;
+const idleMouthPath = getMouthPath(0);
+const workingMouthPath = getMouthPath(1);
+const expressionTransitionDurationMs = 620;
 const expressionTransitionDuration = `${expressionTransitionDurationMs}ms`;
 const expressionTransitionKeyTimes = "0;0.52;1";
 const expressionTransitionKeySplines = "0.2 0 0 1;0.2 0 0 1";
@@ -86,11 +90,32 @@ type ExpressionVisualKind = keyof typeof mouthPathByVisualKind;
 type ExpressionTransition = {
   from: ExpressionVisualKind;
   id: number;
+  progress: number;
   to: ExpressionVisualKind;
 };
 
 function isWorkingStatus(status: AgentAnimationStatus) {
   return status === "thinking" || status === "running" || status === "tooling";
+}
+
+function lerp(from: number, to: number, progress: number) {
+  return from + (to - from) * progress;
+}
+
+function easeOutCubic(progress: number) {
+  return 1 - Math.pow(1 - progress, 3);
+}
+
+function formatSvgNumber(value: number) {
+  return Number(value.toFixed(3)).toString();
+}
+
+function getMouthPath(progress: number) {
+  const points = idleMouthPoints.map((idlePoint, index) =>
+    formatSvgNumber(lerp(idlePoint, workingMouthPoints[index], progress)),
+  );
+
+  return `M ${points[0]} ${points[1]} C ${points[2]} ${points[3]} ${points[4]} ${points[5]} ${points[6]} ${points[7]} C ${points[8]} ${points[9]} ${points[10]} ${points[11]} ${points[12]} ${points[13]}`;
 }
 
 export function AgentStatusAnimation({
@@ -107,7 +132,16 @@ export function AgentStatusAnimation({
   const shouldBreathe = status === "idle" && !prefersReducedMotion;
   const shouldAnimateWorking =
     isWorking && !prefersReducedMotion && expressionTransition === null;
-  const mouthPath = mouthPathByVisualKind[visualKind];
+  const mouthPath =
+    expressionTransition === null
+      ? mouthPathByVisualKind[visualKind]
+      : getMouthPath(
+          lerp(
+            expressionTransition.from === "working" ? 1 : 0,
+            expressionTransition.to === "working" ? 1 : 0,
+            expressionTransition.progress,
+          ),
+        );
 
   return (
     <div
@@ -341,22 +375,7 @@ export function AgentStatusAnimation({
           strokeLinecap="round"
           strokeLinejoin="round"
           strokeWidth="14"
-        >
-          {expressionTransition && (
-            <animate
-              key={`mouth-transition-${expressionTransition.id}`}
-              attributeName="d"
-              begin="0s"
-              calcMode="spline"
-              dur={expressionTransitionDuration}
-              fill="freeze"
-              from={mouthPathByVisualKind[expressionTransition.from]}
-              keySplines="0.2 0 0 1"
-              keyTimes="0;1"
-              to={mouthPathByVisualKind[expressionTransition.to]}
-            />
-          )}
-        </path>
+        />
       </svg>
     </div>
   );
@@ -390,18 +409,39 @@ function useExpressionTransition(
     const nextTransition = {
       from: previousVisualKind,
       id: (transitionIdRef.current += 1),
+      progress: 0,
       to: visualKind,
     };
 
     setTransition(nextTransition);
 
-    const timeout = window.setTimeout(() => {
+    const startTime = performance.now();
+    let animationFrameId = 0;
+
+    const animateTransition = (currentTime: number) => {
+      const elapsed = currentTime - startTime;
+      const rawProgress = Math.min(elapsed / expressionTransitionDurationMs, 1);
+      const progress = easeOutCubic(rawProgress);
+
+      setTransition((currentTransition) =>
+        currentTransition?.id === nextTransition.id
+          ? { ...currentTransition, progress }
+          : currentTransition,
+      );
+
+      if (rawProgress < 1) {
+        animationFrameId = requestAnimationFrame(animateTransition);
+        return;
+      }
+
       setTransition((currentTransition) =>
         currentTransition?.id === nextTransition.id ? null : currentTransition,
       );
-    }, expressionTransitionDurationMs);
+    };
 
-    return () => window.clearTimeout(timeout);
+    animationFrameId = requestAnimationFrame(animateTransition);
+
+    return () => cancelAnimationFrame(animationFrameId);
   }, [prefersReducedMotion, visualKind]);
 
   return transition;
