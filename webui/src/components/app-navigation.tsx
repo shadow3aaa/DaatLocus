@@ -1,4 +1,3 @@
-import logoUrl from "@/assets/logo.svg";
 import {
   NavigationMenu,
   NavigationMenuItem,
@@ -26,11 +25,9 @@ export function AppNavigation() {
   return (
     <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
       <div className="flex h-16 w-full items-center justify-between gap-4 px-4">
-        <img
-          src={logoUrl}
-          alt="Daat Locus"
-          className="h-10 w-10 shrink-0 object-contain"
-        />
+        <span className="shrink-0 text-base font-semibold tracking-tight">
+          Daat Locus
+        </span>
 
         <NavigationMenu className="hidden md:flex">
           <NavigationMenuList>
