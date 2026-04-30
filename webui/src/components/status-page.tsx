@@ -155,7 +155,7 @@ export function StatusPage() {
       <div
         className="min-h-full w-full snap-start px-6 py-10 md:py-12"
       >
-        <div className="w-full columns-1 gap-4 sm:columns-2 xl:columns-3">
+        <div className="grid w-full grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <DailyTokenUsageCard snapshot={snapshot} />
         </div>
       </div>
@@ -179,7 +179,7 @@ function DailyTokenUsageCard({
       <CardContent className="px-0">
         <ChartContainer
           config={TOKEN_USAGE_CHART_CONFIG}
-          className="h-64 w-full"
+          className="h-64 w-full overflow-visible [&_.recharts-wrapper]:overflow-visible"
         >
           <BarChart
             accessibilityLayer
@@ -203,7 +203,9 @@ function DailyTokenUsageCard({
               tickFormatter={formatPercentAxisTick}
             />
             <ChartTooltip
+              allowEscapeViewBox={{ y: true }}
               cursor={{ fill: "var(--muted)" }}
+              wrapperStyle={{ zIndex: 50 }}
               content={<TokenUsageTooltip />}
             />
             <Bar
