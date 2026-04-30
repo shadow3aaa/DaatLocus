@@ -20,7 +20,7 @@ import {
 
 const DASHBOARD_STREAM_RECONNECT_MS = 1500;
 const SUMMARY_TYPE_INTERVAL_MS = 28;
-const TOKEN_USAGE_LOOKBACK_DAYS = 7;
+const TOKEN_USAGE_MAX_VISIBLE_DAYS = 7;
 const TOKEN_USAGE_CHART_CONFIG = {
   cached: {
     label: "Cached",
@@ -262,7 +262,7 @@ function dailyTokenUsageChartData(
     mergeDailyTokenUsage(usageByDate, source);
   }
 
-  const dates = recentTokenUsageDates(usageByDate, snapshot !== null);
+  const dates = recentTokenUsageDates(usageByDate);
   const maxTotal = Math.max(
     1,
     ...dates.map((date) => usageByDate.get(date)?.total ?? 0),
@@ -350,25 +350,11 @@ function mergeDailyTokenUsage(
 
 function recentTokenUsageDates(
   usageByDate: Map<string, DailyTokenUsageAccumulator>,
-  shouldFillEmptyDays: boolean,
 ) {
-  if (!usageByDate.size && !shouldFillEmptyDays) {
-    return [];
-  }
-
-  const latestDate =
-    Array.from(usageByDate.keys())
-      .filter(isDateKey)
-      .sort()
-      .at(-1) ?? localDateKey(new Date());
-  const latestDateValue = parseDateKey(latestDate) ?? new Date();
-  const dates: string[] = [];
-
-  for (let index = TOKEN_USAGE_LOOKBACK_DAYS - 1; index >= 0; index -= 1) {
-    dates.push(localDateKey(addDays(latestDateValue, -index)));
-  }
-
-  return dates;
+  return Array.from(usageByDate.keys())
+    .filter(isDateKey)
+    .sort()
+    .slice(-TOKEN_USAGE_MAX_VISIBLE_DAYS);
 }
 
 function createDailyTokenUsageAccumulator(): DailyTokenUsageAccumulator {
@@ -539,20 +525,6 @@ function parseDateKey(value: string) {
   }
 
   return new Date(Number(year), Number(month) - 1, Number(day));
-}
-
-function addDays(date: Date, days: number) {
-  const nextDate = new Date(date);
-  nextDate.setDate(nextDate.getDate() + days);
-  return nextDate;
-}
-
-function localDateKey(date: Date) {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-
-  return `${year}-${month}-${day}`;
 }
 
 function formatCompactNumber(value: number) {
