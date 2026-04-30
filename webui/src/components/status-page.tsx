@@ -155,7 +155,7 @@ export function StatusPage() {
       <div
         className="min-h-full w-full snap-start px-6 py-10 md:py-12"
       >
-        <div className="w-full">
+        <div className="w-full columns-1 gap-4 sm:columns-2 xl:columns-3">
           <DailyTokenUsageCard snapshot={snapshot} />
         </div>
       </div>
@@ -172,7 +172,7 @@ function DailyTokenUsageCard({
   const hasUsage = chartData.some((day) => day.total > 0);
 
   return (
-    <Card className="mb-4 overflow-visible bg-transparent py-0 ring-0">
+    <Card className="mb-4 break-inside-avoid overflow-visible bg-transparent py-0 ring-0">
       <CardContent className="px-0">
         <ChartContainer
           config={TOKEN_USAGE_CHART_CONFIG}
