@@ -5,12 +5,6 @@ import {
   type AgentAnimationStatus,
 } from "@/components/agent-status-animation";
 import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
   fetchDashboardSnapshot,
   type DashboardSnapshot,
 } from "@/lib/daemon-api";
@@ -74,30 +68,19 @@ export function StatusPage() {
   return (
     <section
       id="status"
-      className="mx-auto w-full max-w-7xl px-6 py-10"
+      className="flex min-h-[calc(100vh-5rem)] w-full items-center justify-center px-6 py-10"
     >
-      <h1 className="text-4xl font-semibold tracking-tight md:text-6xl">
-        Status
-      </h1>
-
-      <div className="mt-10 grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-        <Card className="md:col-span-1">
-          <CardHeader>
-            <CardTitle>当前 Agent 状态</CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col items-center gap-6 pb-4">
-            <AgentStatusAnimation
-              status={agentStatus.animationStatus}
-              className="w-56 md:w-60"
-            />
-            <p
-              aria-live="polite"
-              className="text-2xl font-semibold tracking-tight"
-            >
-              {agentStatus.label}
-            </p>
-          </CardContent>
-        </Card>
+      <div className="flex flex-col items-center justify-center gap-5 text-center">
+        <AgentStatusAnimation
+          status={agentStatus.animationStatus}
+          className="w-64 md:w-80"
+        />
+        <p
+          aria-live="polite"
+          className="text-2xl font-semibold tracking-tight"
+        >
+          {agentStatus.label}
+        </p>
       </div>
     </section>
   );

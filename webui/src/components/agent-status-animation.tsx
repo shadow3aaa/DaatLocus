@@ -54,8 +54,8 @@ export function AgentStatusAnimation({
   return (
     <div
       className={cn(
-        "relative flex aspect-square w-full max-w-60 items-center justify-center rounded-[2rem] bg-muted/50 p-5 ring-1 ring-border",
-        "after:absolute after:inset-6 after:rounded-full after:bg-primary/5 after:blur-xl after:content-['']",
+        "relative flex aspect-square w-64 items-center justify-center",
+        "after:absolute after:inset-8 after:rounded-full after:bg-primary/5 after:blur-2xl after:content-['']",
         className,
       )}
     >
