@@ -83,6 +83,15 @@ export type DashboardRuntimeOptimizationSnapshot = {
   total_runtime_contract_updates: number;
 };
 
+export type DashboardPendingAccessRequest = {
+  chat_id: number;
+  title: string;
+  sender: string;
+  last_message_preview: string;
+  first_seen_at_ms: number;
+  last_seen_at_ms: number;
+};
+
 export type DashboardSnapshot = {
   focused_app: string | null;
   status_output: string;
@@ -91,7 +100,7 @@ export type DashboardSnapshot = {
   system_prompt_output: string;
   preturn_context_output: string;
   app_status_outputs: Array<[string, string]>;
-  pending_access_requests: unknown[];
+  pending_access_requests: DashboardPendingAccessRequest[];
   activity_cells: unknown[];
   live_activity_cells: Array<{
     key: string;
@@ -121,6 +130,10 @@ type DashboardSnapshotSubscriptionOptions = {
 
 export type DashboardSnapshotSubscription = {
   close: () => void;
+};
+
+type DashboardCommandResponse = {
+  output: string;
 };
 
 export class DaemonApiError extends Error {
@@ -167,6 +180,34 @@ export async function fetchDashboardSnapshot({
   });
 
   return parseJsonResponse<DashboardSnapshot>(response, "Dashboard snapshot");
+}
+
+export async function runDashboardCommand(
+  command: string,
+  { signal, token = getStoredDaemonToken() }: FetchOptions = {},
+): Promise<string> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for dashboard command.");
+  }
+
+  const response = await fetch("/commands/run", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ command }),
+    signal,
+  });
+
+  const result = await parseJsonResponse<DashboardCommandResponse>(
+    response,
+    "Dashboard command",
+  );
+  return result.output;
 }
 
 export function subscribeDashboardSnapshots({

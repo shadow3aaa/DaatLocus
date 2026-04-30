@@ -4,7 +4,10 @@ import {
   AgentStatusAnimation,
   type AgentAnimationStatus,
 } from "@/components/agent-status-animation";
+import { CheckIcon, XIcon } from "lucide-react";
 import { Bar, BarChart, Cell, Pie, PieChart, XAxis, YAxis } from "recharts";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   ChartContainer,
@@ -12,7 +15,9 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import {
+  runDashboardCommand,
   subscribeDashboardSnapshots,
+  type DashboardPendingAccessRequest,
   type DashboardSnapshot,
   type TokenUsage,
   type TokenUsageInfo,
@@ -234,11 +239,106 @@ export function StatusPage() {
       className="min-h-screen w-full px-6 pb-10 pt-20 md:pb-12 md:pt-24"
     >
       <div className="flex w-full flex-wrap items-start gap-4">
+        <TelegramApprovalCard snapshot={snapshot} />
         <DailyTokenUsageCard snapshot={snapshot} />
         <WorkflowOptimizationCard snapshot={snapshot} />
         <RuntimeOptimizationCard snapshot={snapshot} />
       </div>
     </section>
+  );
+}
+
+function TelegramApprovalCard({
+  snapshot,
+}: {
+  snapshot: DashboardSnapshot | null;
+}) {
+  const requests = snapshot?.pending_access_requests ?? [];
+  const [busyChatId, setBusyChatId] = useState<number | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  async function handleRequestAction(
+    request: DashboardPendingAccessRequest,
+    action: "approve" | "reject",
+  ) {
+    setBusyChatId(request.chat_id);
+    setActionError(null);
+
+    try {
+      await runDashboardCommand(`/telegram ${action} ${request.chat_id}`);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyChatId(null);
+    }
+  }
+
+  return (
+    <Card className="w-full sm:w-96">
+      <CardHeader>
+        <CardTitle>Telegram Approval</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {requests.length > 0 ? (
+          <div className="space-y-3">
+            {requests.map((request) => {
+              const isBusy = busyChatId === request.chat_id;
+              const label = telegramApprovalDisplayName(request);
+
+              return (
+                <div
+                  key={request.chat_id}
+                  className="flex items-center gap-3 rounded-xl border bg-muted/20 p-3"
+                >
+                  <Avatar className="size-10 border border-border bg-background">
+                    <AvatarFallback className="text-sm font-medium">
+                      {telegramApprovalInitials(label)}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-medium">{label}</div>
+                    <div className="truncate font-mono text-xs text-muted-foreground">
+                      {request.chat_id}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="icon-sm"
+                      aria-label={`Approve ${label}`}
+                      disabled={busyChatId !== null}
+                      onClick={() => handleRequestAction(request, "approve")}
+                      className="text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600"
+                    >
+                      <CheckIcon className="size-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="icon-sm"
+                      aria-label={`Reject ${label}`}
+                      disabled={busyChatId !== null}
+                      onClick={() => handleRequestAction(request, "reject")}
+                    >
+                      <XIcon className="size-4" />
+                    </Button>
+                  </div>
+                  {isBusy ? <span className="sr-only">Processing</span> : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            No pending Telegram approvals.
+          </p>
+        )}
+        {actionError ? (
+          <p className="mt-3 text-xs text-destructive">{actionError}</p>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1034,6 +1134,15 @@ function formatCompactNumber(value: number) {
     maximumFractionDigits: value >= 1000 ? 1 : 0,
     notation: "compact",
   }).format(value);
+}
+
+function telegramApprovalDisplayName(request: DashboardPendingAccessRequest) {
+  return request.sender || request.title || "Unknown";
+}
+
+function telegramApprovalInitials(value: string) {
+  const characters = Array.from(value.trim());
+  return characters.slice(0, 2).join("").toUpperCase() || "TG";
 }
 
 function useTypewriterText(text: string) {
