@@ -211,7 +211,7 @@ function DailyTokenUsageCard({
           <BarChart
             accessibilityLayer
             data={chartData}
-            margin={{ top: 18, right: 16, left: 0, bottom: 0 }}
+            margin={{ top: 18, right: 16, left: -8, bottom: 0 }}
             barCategoryGap="34%"
           >
             <XAxis
@@ -222,7 +222,7 @@ function DailyTokenUsageCard({
               interval={0}
             />
             <YAxis
-              width={52}
+              width={44}
               tickLine={false}
               axisLine={false}
               domain={[0, 1]}
@@ -285,7 +285,7 @@ function WorkflowOptimizationCard({
             accessibilityLayer
             data={progressData}
             layout="vertical"
-            margin={{ top: 8, right: 36, left: 8, bottom: 0 }}
+            margin={{ top: 8, right: 36, left: 0, bottom: 0 }}
             barCategoryGap={12}
           >
             <XAxis
@@ -296,10 +296,8 @@ function WorkflowOptimizationCard({
             <YAxis
               dataKey="label"
               type="category"
-              width={92}
-              tickLine={false}
-              axisLine={false}
-              tickMargin={8}
+              width={0}
+              hide
             />
             <ChartTooltip
               allowEscapeViewBox={{ y: true }}
