@@ -544,6 +544,24 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@lottiefiles/dotlottie-react@npm:^0.19.0":
+  version: 0.19.0
+  resolution: "@lottiefiles/dotlottie-react@npm:0.19.0"
+  dependencies:
+    "@lottiefiles/dotlottie-web": "npm:0.71.0"
+  peerDependencies:
+    react: ^17 || ^18 || ^19
+  checksum: 10c0/643fb07d4a82a934554d4309f37b9fe6288e93a30642a80450462de9702444c531623ef8726ddb8df732947720ecaa87c2ff0e4f8a4cfcf7ab3989edaacf6914
+  languageName: node
+  linkType: hard
+
+"@lottiefiles/dotlottie-web@npm:0.71.0":
+  version: 0.71.0
+  resolution: "@lottiefiles/dotlottie-web@npm:0.71.0"
+  checksum: 10c0/925893f6ccd709cc2d4d6f49ea9390399063d808abca73b74047b3ea347f23b25db1d174c4602289b066d644bbc6419fcfd088b5c2b7b26f9812244107c4598d
+  languageName: node
+  linkType: hard
+
 "@modelcontextprotocol/sdk@npm:^1.26.0":
   version: 1.29.0
   resolution: "@modelcontextprotocol/sdk@npm:1.29.0"
@@ -2805,6 +2823,7 @@ __metadata:
   resolution: "daat-locus-webui@workspace:."
   dependencies:
     "@fontsource-variable/geist": "npm:^5.2.8"
+    "@lottiefiles/dotlottie-react": "npm:^0.19.0"
     "@tailwindcss/vite": "npm:^4.2.4"
     "@types/node": "npm:^25.6.0"
     "@types/react": "npm:^19.2.14"

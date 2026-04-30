@@ -1,3 +1,4 @@
+import { DotLottieReact } from "@lottiefiles/dotlottie-react";
 import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
@@ -15,171 +16,61 @@ type AgentStatusAnimationProps = {
   className?: string;
 };
 
-type MatrixDot = {
-  columnIndex: number;
-  rowIndex: number;
+const placeholderAnimation = `${import.meta.env.BASE_URL}lottie/agent-placeholder.json`;
+
+const animationByStatus: Record<AgentAnimationStatus, string> = {
+  idle: placeholderAnimation,
+  thinking: placeholderAnimation,
+  running: placeholderAnimation,
+  tooling: placeholderAnimation,
+  waiting: placeholderAnimation,
+  error: placeholderAnimation,
 };
 
-const expressionLabelByStatus: Record<AgentAnimationStatus, string> = {
-  idle: "Idle dot-matrix expression",
-  thinking: "Thinking dot-matrix expression",
-  running: "Running dot-matrix expression",
-  tooling: "Tooling dot-matrix expression",
-  waiting: "Waiting dot-matrix expression",
-  error: "Error dot-matrix expression",
+const animationToneByStatus: Record<AgentAnimationStatus, string> = {
+  idle: "opacity-90",
+  thinking: "scale-[1.02]",
+  running: "scale-105",
+  tooling: "scale-105",
+  waiting: "opacity-80 grayscale",
+  error: "scale-105 saturate-150",
 };
 
-const matrixCellSize = 6;
-const activeBlockSize = 4.7;
-const inactiveBlockSize = 2.1;
-const matrixColumnCount = 22;
-const matrixRowCount = 30;
-const faceViewBoxWidth = matrixColumnCount * matrixCellSize;
-const faceViewBoxHeight = matrixRowCount * matrixCellSize;
-const inactiveDots = Array.from(
-  { length: matrixColumnCount * matrixRowCount },
-  (_, index) => ({
-    columnIndex: index % matrixColumnCount,
-    rowIndex: Math.floor(index / matrixColumnCount),
-  }),
-);
-
-function createRectangleDots({
-  columnStart,
-  rowStart,
-  columnCount,
-  rowCount,
-}: {
-  columnStart: number;
-  rowStart: number;
-  columnCount: number;
-  rowCount: number;
-}): MatrixDot[] {
-  return Array.from({ length: columnCount * rowCount }, (_, index) => ({
-    columnIndex: columnStart + (index % columnCount),
-    rowIndex: rowStart + Math.floor(index / columnCount),
-  }));
-}
-
-function createDotsFromRows(
-  rows: {
-    rowIndex: number;
-    columnIndexes: number[];
-  }[],
-): MatrixDot[] {
-  return rows.flatMap(({ rowIndex, columnIndexes }) =>
-    columnIndexes.map((columnIndex) => ({
-      columnIndex,
-      rowIndex,
-    })),
-  );
-}
-
-const eyeDots: MatrixDot[] = [
-  ...createRectangleDots({
-    columnStart: 6,
-    rowStart: 5,
-    columnCount: 3,
-    rowCount: 7,
-  }),
-  ...createRectangleDots({
-    columnStart: 13,
-    rowStart: 5,
-    columnCount: 3,
-    rowCount: 7,
-  }),
-];
-
-const mouthDots: MatrixDot[] = createDotsFromRows([
-  { rowIndex: 17, columnIndexes: [3, 4, 5, 16, 17, 18] },
-  { rowIndex: 18, columnIndexes: [3, 4, 5, 6, 15, 16, 17, 18] },
-  { rowIndex: 19, columnIndexes: [4, 5, 6, 7, 14, 15, 16, 17] },
-  { rowIndex: 20, columnIndexes: [5, 6, 7, 8, 13, 14, 15, 16] },
-  { rowIndex: 21, columnIndexes: [7, 8, 9, 12, 13, 14] },
-  { rowIndex: 22, columnIndexes: [8, 9, 10, 11, 12, 13] },
-  { rowIndex: 23, columnIndexes: [9, 10, 11, 12] },
-]);
-
-const activeDots: MatrixDot[] = [...eyeDots, ...mouthDots];
-
-function getBlockOrigin({
-  blockSize,
-  columnIndex,
-  rowIndex,
-}: MatrixDot & {
-  blockSize: number;
-}) {
-  const cellOffset = (matrixCellSize - blockSize) / 2;
-
-  return {
-    x: columnIndex * matrixCellSize + cellOffset,
-    y: rowIndex * matrixCellSize + cellOffset,
-  };
-}
+const animationSpeedByStatus: Record<AgentAnimationStatus, number> = {
+  idle: 0.75,
+  thinking: 0.95,
+  running: 1.3,
+  tooling: 1.45,
+  waiting: 0.55,
+  error: 1.1,
+};
 
 export function AgentStatusAnimation({
   status,
   className,
 }: AgentStatusAnimationProps) {
   const prefersReducedMotion = usePrefersReducedMotion();
-  const shouldBreathe = status === "idle" && !prefersReducedMotion;
 
   return (
     <div
-      data-status={status}
       className={cn(
-        "relative flex aspect-[11/15] w-64 items-center justify-center overflow-hidden",
-        "rounded-[2rem] border border-border/50 bg-card/70 p-5 shadow-sm",
-        "transition-colors duration-500",
-        "after:absolute after:inset-x-8 after:bottom-2 after:h-10 after:rounded-full after:bg-primary/10 after:blur-2xl after:content-['']",
-        shouldBreathe && "motion-safe:animate-pulse",
+        "relative flex aspect-square w-64 items-center justify-center",
+        "after:absolute after:inset-8 after:rounded-full after:bg-primary/5 after:blur-2xl after:content-['']",
         className,
       )}
     >
-      <svg
-        aria-label={expressionLabelByStatus[status]}
-        className="relative z-10 h-full w-full"
-        role="img"
-        viewBox={`0 0 ${faceViewBoxWidth} ${faceViewBoxHeight}`}
-      >
-        {inactiveDots.map(({ columnIndex, rowIndex }) => {
-          const { x, y } = getBlockOrigin({
-            blockSize: inactiveBlockSize,
-            columnIndex,
-            rowIndex,
-          });
-
-          return (
-            <rect
-              key={`${rowIndex}-${columnIndex}`}
-              fill="black"
-              height={inactiveBlockSize}
-              opacity={0.08}
-              width={inactiveBlockSize}
-              x={x}
-              y={y}
-            />
-          );
-        })}
-        {activeDots.map(({ columnIndex, rowIndex }) => {
-          const { x, y } = getBlockOrigin({
-            blockSize: activeBlockSize,
-            columnIndex,
-            rowIndex,
-          });
-
-          return (
-            <rect
-              key={`active-${rowIndex}-${columnIndex}`}
-              fill="black"
-              height={activeBlockSize}
-              width={activeBlockSize}
-              x={x}
-              y={y}
-            />
-          );
-        })}
-      </svg>
+      <DotLottieReact
+        aria-label="Agent status animation"
+        autoplay={!prefersReducedMotion}
+        className={cn(
+          "relative z-10 h-full w-full transition duration-500",
+          "motion-safe:animate-in motion-safe:fade-in motion-safe:zoom-in-95",
+          animationToneByStatus[status],
+        )}
+        loop={!prefersReducedMotion}
+        speed={animationSpeedByStatus[status]}
+        src={animationByStatus[status]}
+      />
     </div>
   );
 }
