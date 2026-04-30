@@ -11,7 +11,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{
-        State, WebSocketUpgrade,
+        Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION},
@@ -168,6 +168,11 @@ pub struct CommandRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommandResponse {
     pub output: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DashboardStreamQuery {
+    token: Option<String>,
 }
 
 #[derive(Debug)]
@@ -391,8 +396,20 @@ async fn stream_handler(
     ws: WebSocketUpgrade,
     State(state): State<ServerState>,
     headers: HeaderMap,
+    Query(query): Query<DashboardStreamQuery>,
 ) -> impl IntoResponse {
-    if !state.auth_registry.authorize_headers(&headers).await {
+    let authorized = if let Some(token) = query
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        state.auth_registry.authorize_token(token).await
+    } else {
+        state.auth_registry.authorize_headers(&headers).await
+    };
+
+    if !authorized {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     ws.on_upgrade(move |socket| dashboard_ws(socket, state))
@@ -474,16 +491,17 @@ async fn dashboard_ws(mut socket: WebSocket, state: ServerState) {
         .connected_clients
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut rx = state.dashboard_rx.clone();
-    while rx.changed().await.is_ok() {
-        let snapshot = rx.borrow().clone();
-        match serde_json::to_string(&snapshot) {
-            Ok(payload) => {
-                if socket.send(Message::Text(payload.into())).await.is_err() {
-                    break;
-                }
-            }
-            Err(err) => {
-                tracing::error!("encode dashboard ws snapshot failed: {err}");
+    let initial_snapshot = rx.borrow_and_update().clone();
+    if send_dashboard_ws_snapshot(&mut socket, &initial_snapshot)
+        .await
+        .is_ok()
+    {
+        while rx.changed().await.is_ok() {
+            let snapshot = rx.borrow().clone();
+            if send_dashboard_ws_snapshot(&mut socket, &snapshot)
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -491,6 +509,20 @@ async fn dashboard_ws(mut socket: WebSocket, state: ServerState) {
     state
         .connected_clients
         .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+async fn send_dashboard_ws_snapshot(
+    socket: &mut WebSocket,
+    snapshot: &DashboardState,
+) -> std::result::Result<(), ()> {
+    let payload = serde_json::to_string(snapshot).map_err(|err| {
+        tracing::error!("encode dashboard ws snapshot failed: {err}");
+    })?;
+
+    socket
+        .send(Message::Text(payload.into()))
+        .await
+        .map_err(|_| ())
 }
 
 #[derive(Clone)]

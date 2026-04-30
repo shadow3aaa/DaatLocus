@@ -5,11 +5,11 @@ import {
   type AgentAnimationStatus,
 } from "@/components/agent-status-animation";
 import {
-  fetchDashboardSnapshot,
+  subscribeDashboardSnapshots,
   type DashboardSnapshot,
 } from "@/lib/daemon-api";
 
-const DASHBOARD_SNAPSHOT_POLL_MS = 2500;
+const DASHBOARD_STREAM_RECONNECT_MS = 1500;
 const SUMMARY_TYPE_INTERVAL_MS = 28;
 
 type AgentStatusView = {
@@ -23,36 +23,69 @@ export function StatusPage() {
   const [loadError, setLoadError] = useState<Error | null>(null);
 
   useEffect(() => {
-    const controller = new AbortController();
+    let isActive = true;
+    let reconnectTimeout: number | undefined;
+    let subscription: ReturnType<typeof subscribeDashboardSnapshots> | null = null;
 
-    async function loadSnapshot() {
+    function connect() {
       try {
-        const nextSnapshot = await fetchDashboardSnapshot({
-          signal: controller.signal,
-        });
+        subscription = subscribeDashboardSnapshots({
+          onSnapshot: (nextSnapshot) => {
+            if (!isActive) {
+              return;
+            }
 
-        setSnapshot(nextSnapshot);
-        setLoadError(null);
+            setSnapshot(nextSnapshot);
+            setLoadError(null);
+            setIsLoading(false);
+          },
+          onError: (error) => {
+            if (!isActive) {
+              return;
+            }
+
+            setLoadError(error);
+            setIsLoading(false);
+          },
+          onClose: (event) => {
+            if (!isActive) {
+              return;
+            }
+
+            subscription = null;
+            if (event.code !== 1000) {
+              setLoadError(
+                new Error(
+                  `Dashboard stream closed unexpectedly (${event.code || "unknown"}).`,
+                ),
+              );
+              setIsLoading(false);
+              reconnectTimeout = window.setTimeout(
+                connect,
+                DASHBOARD_STREAM_RECONNECT_MS,
+              );
+            }
+          },
+        });
       } catch (error) {
-        if (!controller.signal.aborted) {
-          setLoadError(error instanceof Error ? error : new Error(String(error)));
+        if (!isActive) {
+          return;
         }
-      } finally {
-        if (!controller.signal.aborted) {
-          setIsLoading(false);
-        }
+
+        setLoadError(error instanceof Error ? error : new Error(String(error)));
+        setIsLoading(false);
+        reconnectTimeout = window.setTimeout(connect, DASHBOARD_STREAM_RECONNECT_MS);
       }
     }
 
-    void loadSnapshot();
-    const intervalId = window.setInterval(
-      () => void loadSnapshot(),
-      DASHBOARD_SNAPSHOT_POLL_MS,
-    );
+    connect();
 
     return () => {
-      controller.abort();
-      window.clearInterval(intervalId);
+      isActive = false;
+      if (reconnectTimeout !== undefined) {
+        window.clearTimeout(reconnectTimeout);
+      }
+      subscription?.close();
     };
   }, []);
 

@@ -111,7 +111,11 @@ impl DaemonTokenRegistryHandle {
             return false;
         };
 
-        match self.authorize_token(token).await {
+        self.authorize_token(token).await
+    }
+
+    pub async fn authorize_token(&self, token: &str) -> bool {
+        match self.authorize_token_record(token).await {
             Ok(authorized) => authorized,
             Err(err) => {
                 tracing::warn!("daemon token authorization failed: {err}");
@@ -120,7 +124,7 @@ impl DaemonTokenRegistryHandle {
         }
     }
 
-    async fn authorize_token(&self, token: &str) -> Result<bool> {
+    async fn authorize_token_record(&self, token: &str) -> Result<bool> {
         let _guard = self.write_lock.lock().await;
         let mut registry = read_registry(&self.path).await?;
         let token_hash = hash_token(token);

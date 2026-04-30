@@ -46,6 +46,17 @@ type FetchOptions = {
   token?: string;
 };
 
+type DashboardSnapshotSubscriptionOptions = {
+  token?: string;
+  onSnapshot: (snapshot: DashboardSnapshot) => void;
+  onError?: (error: Error) => void;
+  onClose?: (event: CloseEvent) => void;
+};
+
+export type DashboardSnapshotSubscription = {
+  close: () => void;
+};
+
 export class DaemonApiError extends Error {
   status?: number;
 
@@ -90,6 +101,59 @@ export async function fetchDashboardSnapshot({
   });
 
   return parseJsonResponse<DashboardSnapshot>(response, "Dashboard snapshot");
+}
+
+export function subscribeDashboardSnapshots({
+  token = getStoredDaemonToken(),
+  onSnapshot,
+  onError,
+  onClose,
+}: DashboardSnapshotSubscriptionOptions): DashboardSnapshotSubscription {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for dashboard stream.");
+  }
+
+  const socket = new WebSocket(dashboardStreamUrl(daemonToken));
+
+  socket.addEventListener("message", (event) => {
+    if (typeof event.data !== "string") {
+      onError?.(new DaemonApiError("Dashboard stream returned a non-text message."));
+      return;
+    }
+
+    try {
+      onSnapshot(JSON.parse(event.data) as DashboardSnapshot);
+    } catch (error) {
+      onError?.(
+        new DaemonApiError(
+          `Unable to decode dashboard stream message: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        ),
+      );
+    }
+  });
+
+  socket.addEventListener("error", () => {
+    onError?.(new DaemonApiError("Dashboard stream connection failed."));
+  });
+
+  socket.addEventListener("close", (event) => {
+    onClose?.(event);
+  });
+
+  return {
+    close: () => socket.close(1000, "dashboard stream subscription closed"),
+  };
+}
+
+function dashboardStreamUrl(token: string) {
+  const url = new URL("/dashboard/stream", window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("token", token);
+  return url.toString();
 }
 
 async function parseJsonResponse<T>(
