@@ -285,7 +285,7 @@ function WorkflowOptimizationCard({
             accessibilityLayer
             data={progressData}
             layout="vertical"
-            margin={{ top: 8, right: 36, left: 0, bottom: 0 }}
+            margin={{ top: 8, right: 36, left: 8, bottom: 0 }}
             barCategoryGap={12}
           >
             <XAxis
@@ -296,7 +296,7 @@ function WorkflowOptimizationCard({
             <YAxis
               dataKey="label"
               type="category"
-              width={76}
+              width={92}
               tickLine={false}
               axisLine={false}
               tickMargin={8}
