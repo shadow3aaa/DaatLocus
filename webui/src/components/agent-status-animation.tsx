@@ -148,11 +148,7 @@ export function AgentStatusAnimation({
       data-animation-kind={isWorking ? "working" : status}
       data-status={status}
       className={cn(
-        "relative flex aspect-[11/15] w-64 items-center justify-center overflow-hidden",
-        "rounded-[2rem] border border-border/50 bg-card/70 p-5 shadow-sm",
-        "transition-colors duration-500",
-        "after:absolute after:inset-x-8 after:bottom-2 after:h-10 after:rounded-full after:bg-primary/10 after:blur-2xl after:content-['']",
-        isWorking && "border-primary/25 bg-primary/[0.03] shadow-primary/10",
+        "relative flex aspect-[11/15] w-64 items-center justify-center p-5",
         shouldBreathe && "motion-safe:animate-pulse",
         className,
       )}
