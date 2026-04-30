@@ -184,7 +184,7 @@ export function StatusPage() {
   return (
     <section
       id="status"
-      className="h-[calc(100vh-4rem)] w-full snap-y snap-mandatory overflow-y-auto overscroll-contain scroll-smooth"
+      className="h-screen w-full snap-y snap-mandatory overflow-y-auto overscroll-contain scroll-smooth"
     >
       <div className="flex min-h-full snap-start items-center justify-center px-6 py-10">
         <div className="flex flex-col items-center justify-center gap-5 text-center">

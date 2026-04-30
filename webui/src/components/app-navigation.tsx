@@ -1,23 +1,49 @@
+import { MenuIcon } from "lucide-react";
+
+import { Button, buttonVariants } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 import {
-  NavigationMenu,
-  NavigationMenuItem,
-  NavigationMenuLink,
-  NavigationMenuList,
-  navigationMenuTriggerStyle,
-} from "@/components/ui/navigation-menu";
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+  SheetTrigger,
+} from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 
 type NavigationItem = {
   label: string;
   href: string;
+  description: string;
   disabled?: boolean;
 };
 
 const navigationItems: NavigationItem[] = [
-  { label: "Chat", href: "#chat", disabled: true },
-  { label: "Status", href: "#status" },
-  { label: "Settings", href: "#settings", disabled: true },
-  { label: "Log", href: "#log", disabled: true },
+  {
+    label: "Locus",
+    href: "#status",
+    description: "Agent presence and runtime state",
+  },
+  {
+    label: "Chat",
+    href: "#chat",
+    description: "Conversation surface",
+    disabled: true,
+  },
+  {
+    label: "Settings",
+    href: "#settings",
+    description: "Daemon and WebUI preferences",
+    disabled: true,
+  },
+  {
+    label: "Log",
+    href: "#log",
+    description: "Recent runtime activity",
+    disabled: true,
+  },
 ];
 
 export function AppNavigation({
@@ -26,40 +52,104 @@ export function AppNavigation({
   isAuthenticated: boolean;
 }) {
   return (
-    <header className="sticky top-0 z-10 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
-      <div className="flex h-16 w-full items-center justify-between gap-4 px-4">
-        <span className="shrink-0 text-base font-semibold tracking-tight">
-          Daat Locus
-        </span>
+    <Sheet>
+      <SheetTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon-lg"
+          aria-label="Open navigation"
+          className="fixed top-4 left-4 z-50 rounded-full border-border/60 bg-background/70 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55 md:top-6 md:left-6"
+        >
+          <MenuIcon className="size-4" />
+        </Button>
+      </SheetTrigger>
 
-        <NavigationMenu className="hidden md:flex">
-          <NavigationMenuList>
+      <SheetContent
+        side="left"
+        className="w-[min(20rem,calc(100vw-2rem))] border-border/60 bg-background/95 p-0 backdrop-blur supports-[backdrop-filter]:bg-background/85"
+      >
+        <div className="flex h-full flex-col">
+          <SheetHeader className="px-6 pt-6 pb-0 text-left">
+            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "size-1.5 rounded-full",
+                  isAuthenticated ? "bg-emerald-500" : "bg-muted-foreground/50",
+                )}
+              />
+              {isAuthenticated ? "Daemon connected" : "Token required"}
+            </div>
+            <SheetTitle className="text-xl tracking-tight">
+              Daat Locus
+            </SheetTitle>
+            <SheetDescription>
+              Local agent runtime navigation.
+            </SheetDescription>
+          </SheetHeader>
+
+          <Separator className="my-5" />
+
+          <nav className="grid gap-1 px-3" aria-label="Primary navigation">
             {navigationItems.map((item) => {
-              const isStatus = item.label === "Status";
-              const isActive = isStatus && isAuthenticated;
-              const isDisabled = item.disabled || (isStatus && !isAuthenticated);
-
-              return (
-                <NavigationMenuItem key={item.label}>
-                  <NavigationMenuLink
-                    href={isDisabled ? undefined : item.href}
-                    active={isActive}
-                    aria-disabled={isDisabled}
+              const isLocus = item.label === "Locus";
+              const isActive = isLocus && isAuthenticated;
+              const isDisabled = item.disabled || (isLocus && !isAuthenticated);
+              const itemClassName = cn(
+                buttonVariants({ variant: "ghost" }),
+                "h-auto w-full justify-start rounded-xl px-3 py-3 text-left",
+                isActive && "bg-muted text-foreground",
+                isDisabled && "pointer-events-none opacity-45",
+              );
+              const content = (
+                <>
+                  <span
+                    aria-hidden="true"
                     className={cn(
-                      navigationMenuTriggerStyle(),
-                      isActive && "bg-accent text-accent-foreground",
-                      isDisabled && "pointer-events-none opacity-50",
+                      "mt-1 size-2 rounded-full border border-border",
+                      isActive && "border-foreground bg-foreground",
                     )}
+                  />
+                  <span className="grid gap-0.5">
+                    <span className="text-sm font-medium leading-none">
+                      {item.label}
+                    </span>
+                    <span className="text-xs font-normal text-muted-foreground">
+                      {item.description}
+                    </span>
+                  </span>
+                </>
+              );
+
+              return isDisabled ? (
+                <span
+                  key={item.label}
+                  aria-disabled="true"
+                  className={itemClassName}
+                >
+                  {content}
+                </span>
+              ) : (
+                <SheetClose key={item.label} asChild>
+                  <a
+                    href={item.href}
+                    aria-current={isActive ? "page" : undefined}
+                    className={itemClassName}
                   >
-                    {item.label}
-                  </NavigationMenuLink>
-                </NavigationMenuItem>
+                    {content}
+                  </a>
+                </SheetClose>
               );
             })}
-          </NavigationMenuList>
-        </NavigationMenu>
+          </nav>
 
-      </div>
-    </header>
+          <div className="mt-auto px-6 py-5 text-xs leading-5 text-muted-foreground">
+            A quiet shell for checking where the runtime is and what it is
+            doing.
+          </div>
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }

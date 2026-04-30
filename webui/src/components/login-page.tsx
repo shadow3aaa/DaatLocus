@@ -52,7 +52,7 @@ export function LoginPage({
   return (
     <section
       id="login"
-      className="mx-auto grid min-h-[calc(100vh-4rem)] w-full max-w-4xl items-center gap-8 px-6 py-10 md:grid-cols-[1fr_1.4fr]"
+      className="mx-auto grid min-h-screen w-full max-w-4xl items-center gap-8 px-6 py-10 md:grid-cols-[1fr_1.4fr]"
     >
       <h1 className="text-5xl font-semibold tracking-tight md:text-6xl">Login</h1>
 
