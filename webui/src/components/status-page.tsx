@@ -5,15 +5,7 @@ import {
   type AgentAnimationStatus,
 } from "@/components/agent-status-animation";
 import { Bar, BarChart, Cell, LabelList, XAxis, YAxis } from "recharts";
-import { Badge } from "@/components/ui/badge";
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   ChartContainer,
   ChartTooltip,
@@ -63,10 +55,6 @@ const WORKFLOW_OPTIMIZATION_CHART_CONFIG = {
   applied: {
     label: "Applied",
     color: "var(--chart-1)",
-  },
-  frontier: {
-    label: "Frontier",
-    color: "var(--chart-2)",
   },
 } satisfies ChartConfig;
 
@@ -278,30 +266,15 @@ function WorkflowOptimizationCard({
 }: {
   snapshot: DashboardSnapshot | null;
 }) {
-  const workflow = snapshot?.workflow_optimization;
   const progressData = useMemo(
     () => workflowOptimizationProgressData(snapshot),
     [snapshot],
   );
-  const frontierData = useMemo(
-    () => workflowOptimizationFrontierData(snapshot),
-    [snapshot],
-  );
-  const totals = workflowOptimizationTotals(snapshot);
-  const hasWorkflowData =
-    progressData.some((item) => item.value > 0) ||
-    frontierData.some((item) => item.value > 0);
 
   return (
     <Card className="overflow-visible">
       <CardHeader>
         <CardTitle>Workflow Optimization</CardTitle>
-        <CardDescription>Sleep-time workflow improvement status</CardDescription>
-        <CardAction>
-          <Badge variant={workflow?.running ? "default" : "outline"}>
-            {workflow?.running ? "Running" : "Idle"}
-          </Badge>
-        </CardAction>
       </CardHeader>
       <CardContent>
         <ChartContainer
@@ -354,40 +327,6 @@ function WorkflowOptimizationCard({
             </Bar>
           </BarChart>
         </ChartContainer>
-        <div className="mt-3 grid grid-cols-3 gap-2">
-          {frontierData.map((item) => (
-            <div
-              key={item.key}
-              className="rounded-lg border bg-muted/30 px-2.5 py-2"
-            >
-              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                {item.label}
-              </div>
-              <div className="mt-1 font-mono text-sm font-semibold tabular-nums text-foreground">
-                {formatCompactNumber(item.value)}
-              </div>
-            </div>
-          ))}
-        </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <WorkflowOptimizationMetric
-            label="Rounds"
-            value={totals.rounds}
-          />
-          <WorkflowOptimizationMetric
-            label="Applied"
-            value={totals.applied}
-          />
-          <WorkflowOptimizationMetric
-            label="Rollbacks"
-            value={totals.rollbacks}
-          />
-        </div>
-        {hasWorkflowData ? null : (
-          <p className="mt-2 text-xs text-muted-foreground">
-            No workflow optimization data recorded yet.
-          </p>
-        )}
       </CardContent>
     </Card>
   );
@@ -635,48 +574,6 @@ function workflowOptimizationProgressData(
   ];
 }
 
-function workflowOptimizationFrontierData(
-  snapshot: DashboardSnapshot | null,
-): WorkflowOptimizationChartDatum[] {
-  const workflow = snapshot?.workflow_optimization;
-
-  return [
-    {
-      key: "roots",
-      label: "Roots",
-      value: Math.max(0, workflow?.latest_workflow_frontier_root_entries ?? 0),
-      colorKey: "frontier",
-      detail: "Latest root frontier entries",
-    },
-    {
-      key: "Branches",
-      label: "Branches",
-      value: Math.max(0, workflow?.latest_workflow_frontier_branched_entries ?? 0),
-      colorKey: "frontier",
-      detail: "Latest branched frontier entries",
-    },
-    {
-      key: "generation",
-      label: "Max Gen",
-      value: Math.max(0, workflow?.latest_workflow_frontier_max_generation ?? 0),
-      colorKey: "frontier",
-      detail: "Latest frontier max generation",
-    },
-  ];
-}
-
-function workflowOptimizationTotals(snapshot: DashboardSnapshot | null) {
-  const workflow = snapshot?.workflow_optimization;
-
-  return {
-    applied:
-      Math.max(0, workflow?.total_workflow_patch_applied ?? 0) +
-      Math.max(0, workflow?.total_workflow_merge_applied ?? 0),
-    rollbacks: Math.max(0, workflow?.total_workflow_update_rollbacks ?? 0),
-    rounds: Math.max(0, workflow?.total_workflow_optimization_rounds ?? 0),
-  };
-}
-
 function TokenUsageTooltip({
   active,
   payload,
@@ -809,24 +706,6 @@ function WorkflowOptimizationTooltip({
       </div>
       <div className="text-muted-foreground">{datum.detail}</div>
     </div>
-  );
-}
-
-function WorkflowOptimizationMetric({
-  label,
-  value,
-}: {
-  label: string;
-  value: number;
-}) {
-  return (
-    <Badge
-      variant="secondary"
-      className="gap-1.5"
-    >
-      <span>{label}</span>
-      <span className="font-mono tabular-nums">{formatCompactNumber(value)}</span>
-    </Badge>
   );
 }
 
