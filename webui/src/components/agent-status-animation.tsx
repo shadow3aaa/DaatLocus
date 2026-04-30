@@ -1,4 +1,3 @@
-import { DotLottieReact } from "@lottiefiles/dotlottie-react";
 import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
@@ -16,61 +15,97 @@ type AgentStatusAnimationProps = {
   className?: string;
 };
 
-const placeholderAnimation = `${import.meta.env.BASE_URL}lottie/agent-placeholder.json`;
+const idleExpression = [
+  ".................",
+  "..........##.....",
+  "............##...",
+  "..####.......##..",
+  "..............#..",
+  "..####.......##..",
+  "............##...",
+  "..........##.....",
+  ".................",
+] as const;
 
-const animationByStatus: Record<AgentAnimationStatus, string> = {
-  idle: placeholderAnimation,
-  thinking: placeholderAnimation,
-  running: placeholderAnimation,
-  tooling: placeholderAnimation,
-  waiting: placeholderAnimation,
-  error: placeholderAnimation,
+const expressionByStatus: Record<AgentAnimationStatus, readonly string[]> = {
+  idle: idleExpression,
+  thinking: idleExpression,
+  running: idleExpression,
+  tooling: idleExpression,
+  waiting: idleExpression,
+  error: idleExpression,
 };
 
-const animationToneByStatus: Record<AgentAnimationStatus, string> = {
-  idle: "opacity-90",
-  thinking: "scale-[1.02]",
-  running: "scale-105",
-  tooling: "scale-105",
-  waiting: "opacity-80 grayscale",
-  error: "scale-105 saturate-150",
+const expressionToneByStatus: Record<AgentAnimationStatus, string> = {
+  idle: "text-foreground",
+  thinking: "text-primary",
+  running: "text-primary",
+  tooling: "text-primary",
+  waiting: "text-muted-foreground",
+  error: "text-destructive",
 };
 
-const animationSpeedByStatus: Record<AgentAnimationStatus, number> = {
-  idle: 0.75,
-  thinking: 0.95,
-  running: 1.3,
-  tooling: 1.45,
-  waiting: 0.55,
-  error: 1.1,
+const expressionLabelByStatus: Record<AgentAnimationStatus, string> = {
+  idle: "Idle dot-matrix expression",
+  thinking: "Thinking dot-matrix expression",
+  running: "Running dot-matrix expression",
+  tooling: "Tooling dot-matrix expression",
+  waiting: "Waiting dot-matrix expression",
+  error: "Error dot-matrix expression",
 };
+
+const matrixCellSize = 12;
+const activeDotRadius = 3.7;
+const inactiveDotRadius = 2.2;
+const matrixColumnCount = idleExpression[0].length;
+const matrixRowCount = idleExpression.length;
 
 export function AgentStatusAnimation({
   status,
   className,
 }: AgentStatusAnimationProps) {
   const prefersReducedMotion = usePrefersReducedMotion();
+  const expression = expressionByStatus[status];
+  const shouldBreathe = status === "idle" && !prefersReducedMotion;
 
   return (
     <div
+      data-status={status}
       className={cn(
-        "relative flex aspect-square w-64 items-center justify-center",
-        "after:absolute after:inset-8 after:rounded-full after:bg-primary/5 after:blur-2xl after:content-['']",
+        "relative flex aspect-[17/9] w-64 items-center justify-center overflow-hidden",
+        "rounded-[2rem] border border-border/50 bg-card/70 p-5 shadow-sm",
+        "transition-colors duration-500",
+        "after:absolute after:inset-x-8 after:bottom-2 after:h-10 after:rounded-full after:bg-primary/10 after:blur-2xl after:content-['']",
+        expressionToneByStatus[status],
+        shouldBreathe && "motion-safe:animate-pulse",
         className,
       )}
     >
-      <DotLottieReact
-        aria-label="Agent status animation"
-        autoplay={!prefersReducedMotion}
-        className={cn(
-          "relative z-10 h-full w-full transition duration-500",
-          "motion-safe:animate-in motion-safe:fade-in motion-safe:zoom-in-95",
-          animationToneByStatus[status],
+      <svg
+        aria-label={expressionLabelByStatus[status]}
+        className="relative z-10 h-full w-full"
+        role="img"
+        viewBox={`0 0 ${matrixColumnCount * matrixCellSize} ${
+          matrixRowCount * matrixCellSize
+        }`}
+      >
+        {expression.map((row, rowIndex) =>
+          Array.from(row).map((cell, columnIndex) => {
+            const isActive = cell === "#";
+
+            return (
+              <circle
+                key={`${rowIndex}-${columnIndex}`}
+                cx={columnIndex * matrixCellSize + matrixCellSize / 2}
+                cy={rowIndex * matrixCellSize + matrixCellSize / 2}
+                fill="currentColor"
+                opacity={isActive ? 1 : 0.1}
+                r={isActive ? activeDotRadius : inactiveDotRadius}
+              />
+            );
+          }),
         )}
-        loop={!prefersReducedMotion}
-        speed={animationSpeedByStatus[status]}
-        src={animationByStatus[status]}
-      />
+      </svg>
     </div>
   );
 }

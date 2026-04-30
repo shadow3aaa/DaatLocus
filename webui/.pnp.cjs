@@ -29,7 +29,6 @@ const RAW_RUNTIME_STATE =
         "packageLocation": "./",\
         "packageDependencies": [\
           ["@fontsource-variable/geist", "npm:5.2.8"],\
-          ["@lottiefiles/dotlottie-react", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:0.19.0"],\
           ["@tailwindcss/vite", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:4.2.4"],\
           ["@types/node", "npm:25.6.0"],\
           ["@types/react", "npm:19.2.14"],\
@@ -790,38 +789,6 @@ const RAW_RUNTIME_STATE =
           ["@jridgewell/resolve-uri", "npm:3.1.2"],\
           ["@jridgewell/sourcemap-codec", "npm:1.5.5"],\
           ["@jridgewell/trace-mapping", "npm:0.3.31"]\
-        ],\
-        "linkType": "HARD"\
-      }]\
-    ]],\
-    ["@lottiefiles/dotlottie-react", [\
-      ["npm:0.19.0", {\
-        "packageLocation": "../../../.yarn/berry/cache/@lottiefiles-dotlottie-react-npm-0.19.0-efb4fdc398-10c0.zip/node_modules/@lottiefiles/dotlottie-react/",\
-        "packageDependencies": [\
-          ["@lottiefiles/dotlottie-react", "npm:0.19.0"]\
-        ],\
-        "linkType": "SOFT"\
-      }],\
-      ["virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:0.19.0", {\
-        "packageLocation": "./.yarn/__virtual__/@lottiefiles-dotlottie-react-virtual-2b5dd9ce7c/4/.yarn/berry/cache/@lottiefiles-dotlottie-react-npm-0.19.0-efb4fdc398-10c0.zip/node_modules/@lottiefiles/dotlottie-react/",\
-        "packageDependencies": [\
-          ["@lottiefiles/dotlottie-react", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:0.19.0"],\
-          ["@lottiefiles/dotlottie-web", "npm:0.71.0"],\
-          ["@types/react", "npm:19.2.14"],\
-          ["react", "npm:19.2.5"]\
-        ],\
-        "packagePeers": [\
-          "@types/react",\
-          "react"\
-        ],\
-        "linkType": "HARD"\
-      }]\
-    ]],\
-    ["@lottiefiles/dotlottie-web", [\
-      ["npm:0.71.0", {\
-        "packageLocation": "../../../.yarn/berry/cache/@lottiefiles-dotlottie-web-npm-0.71.0-8c7e1ee412-10c0.zip/node_modules/@lottiefiles/dotlottie-web/",\
-        "packageDependencies": [\
-          ["@lottiefiles/dotlottie-web", "npm:0.71.0"]\
         ],\
         "linkType": "HARD"\
       }]\
@@ -3758,7 +3725,6 @@ const RAW_RUNTIME_STATE =
         "packageLocation": "./",\
         "packageDependencies": [\
           ["@fontsource-variable/geist", "npm:5.2.8"],\
-          ["@lottiefiles/dotlottie-react", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:0.19.0"],\
           ["@tailwindcss/vite", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:4.2.4"],\
           ["@types/node", "npm:25.6.0"],\
           ["@types/react", "npm:19.2.14"],\
