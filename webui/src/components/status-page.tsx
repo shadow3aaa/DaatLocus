@@ -4,8 +4,16 @@ import {
   AgentStatusAnimation,
   type AgentAnimationStatus,
 } from "@/components/agent-status-animation";
-import { Bar, BarChart, XAxis, YAxis } from "recharts";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Bar, BarChart, Cell, LabelList, XAxis, YAxis } from "recharts";
+import { Badge } from "@/components/ui/badge";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import {
   ChartContainer,
   ChartTooltip,
@@ -28,6 +36,36 @@ const TOKEN_USAGE_CHART_CONFIG = {
   },
   uncached: {
     label: "Usage",
+    color: "var(--chart-2)",
+  },
+} satisfies ChartConfig;
+const WORKFLOW_OPTIMIZATION_CHART_CONFIG = {
+  queued: {
+    label: "Queued",
+    color: "var(--chart-1)",
+  },
+  evidence: {
+    label: "Evidence",
+    color: "var(--chart-2)",
+  },
+  reflections: {
+    label: "Reflections",
+    color: "var(--chart-3)",
+  },
+  candidates: {
+    label: "Candidates",
+    color: "var(--chart-4)",
+  },
+  evaluations: {
+    label: "Evaluations",
+    color: "var(--chart-5)",
+  },
+  applied: {
+    label: "Applied",
+    color: "var(--chart-1)",
+  },
+  frontier: {
+    label: "Frontier",
     color: "var(--chart-2)",
   },
 } satisfies ChartConfig;
@@ -157,6 +195,7 @@ export function StatusPage() {
       >
         <div className="grid w-full grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <DailyTokenUsageCard snapshot={snapshot} />
+          <WorkflowOptimizationCard snapshot={snapshot} />
         </div>
       </div>
     </section>
@@ -234,6 +273,126 @@ function DailyTokenUsageCard({
   );
 }
 
+function WorkflowOptimizationCard({
+  snapshot,
+}: {
+  snapshot: DashboardSnapshot | null;
+}) {
+  const workflow = snapshot?.workflow_optimization;
+  const progressData = useMemo(
+    () => workflowOptimizationProgressData(snapshot),
+    [snapshot],
+  );
+  const frontierData = useMemo(
+    () => workflowOptimizationFrontierData(snapshot),
+    [snapshot],
+  );
+  const totals = workflowOptimizationTotals(snapshot);
+  const hasWorkflowData =
+    progressData.some((item) => item.value > 0) ||
+    frontierData.some((item) => item.value > 0);
+
+  return (
+    <Card className="mb-4 break-inside-avoid overflow-visible bg-transparent py-0 ring-0">
+      <CardHeader className="px-0 pb-2">
+        <CardTitle>Workflow Optimization</CardTitle>
+        <CardDescription>Sleep-time workflow improvement status</CardDescription>
+        <CardAction>
+          <Badge variant={workflow?.running ? "default" : "outline"}>
+            {workflow?.running ? "Running" : "Idle"}
+          </Badge>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="px-0">
+        <ChartContainer
+          config={WORKFLOW_OPTIMIZATION_CHART_CONFIG}
+          className="h-64 w-full overflow-visible [&_.recharts-wrapper]:overflow-visible"
+        >
+          <BarChart
+            accessibilityLayer
+            data={progressData}
+            layout="vertical"
+            margin={{ top: 8, right: 36, left: 0, bottom: 0 }}
+            barCategoryGap={12}
+          >
+            <XAxis
+              type="number"
+              hide
+              domain={[0, "dataMax"]}
+            />
+            <YAxis
+              dataKey="label"
+              type="category"
+              width={76}
+              tickLine={false}
+              axisLine={false}
+              tickMargin={8}
+            />
+            <ChartTooltip
+              allowEscapeViewBox={{ y: true }}
+              cursor={{ fill: "var(--muted)" }}
+              wrapperStyle={{ zIndex: 50 }}
+              content={<WorkflowOptimizationTooltip />}
+            />
+            <Bar
+              dataKey="value"
+              radius={[0, 4, 4, 0]}
+              isAnimationActive={false}
+            >
+              {progressData.map((item) => (
+                <Cell
+                  key={item.key}
+                  fill={`var(--color-${item.colorKey})`}
+                />
+              ))}
+              <LabelList
+                dataKey="value"
+                position="right"
+                formatter={(value) => formatCompactNumber(Number(value ?? 0))}
+                className="fill-foreground font-mono text-[10px] font-medium"
+              />
+            </Bar>
+          </BarChart>
+        </ChartContainer>
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          {frontierData.map((item) => (
+            <div
+              key={item.key}
+              className="rounded-lg border bg-muted/30 px-2.5 py-2"
+            >
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                {item.label}
+              </div>
+              <div className="mt-1 font-mono text-sm font-semibold tabular-nums text-foreground">
+                {formatCompactNumber(item.value)}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <WorkflowOptimizationMetric
+            label="Rounds"
+            value={totals.rounds}
+          />
+          <WorkflowOptimizationMetric
+            label="Applied"
+            value={totals.applied}
+          />
+          <WorkflowOptimizationMetric
+            label="Rollbacks"
+            value={totals.rollbacks}
+          />
+        </div>
+        {hasWorkflowData ? null : (
+          <p className="mt-2 text-xs text-muted-foreground">
+            No workflow optimization data recorded yet.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 type DailyTokenUsageChartDatum = {
   date: string;
   label: string;
@@ -253,6 +412,18 @@ type DailyTokenUsageModelBreakdown = {
 
 type TokenUsageTooltipPayloadItem = {
   payload?: DailyTokenUsageChartDatum;
+};
+
+type WorkflowOptimizationChartDatum = {
+  key: string;
+  label: string;
+  value: number;
+  colorKey: keyof typeof WORKFLOW_OPTIMIZATION_CHART_CONFIG;
+  detail: string;
+};
+
+type WorkflowOptimizationTooltipPayloadItem = {
+  payload?: WorkflowOptimizationChartDatum;
 };
 
 function dailyTokenUsageChartData(
@@ -399,6 +570,113 @@ function addTokenUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
   };
 }
 
+function workflowOptimizationProgressData(
+  snapshot: DashboardSnapshot | null,
+): WorkflowOptimizationChartDatum[] {
+  const workflow = snapshot?.workflow_optimization;
+  const patchCandidates = Math.max(
+    0,
+    workflow?.total_workflow_patch_candidates ?? 0,
+  );
+  const mergeCandidates = Math.max(
+    0,
+    workflow?.total_workflow_merge_candidates ?? 0,
+  );
+  const patchApplied = Math.max(0, workflow?.total_workflow_patch_applied ?? 0);
+  const mergeApplied = Math.max(0, workflow?.total_workflow_merge_applied ?? 0);
+
+  return [
+    {
+      key: "queued",
+      label: "Queued",
+      value: Math.max(0, workflow?.workflow_evidence_records ?? 0),
+      colorKey: "queued",
+      detail: "Workflow evidence waiting for sleep-time review",
+    },
+    {
+      key: "evidence",
+      label: "Evidence",
+      value: Math.max(0, workflow?.total_workflow_evidence_run_records ?? 0),
+      colorKey: "evidence",
+      detail: "Workflow run records consumed by optimization",
+    },
+    {
+      key: "reflections",
+      label: "Reflect",
+      value: Math.max(0, workflow?.total_workflow_reflections ?? 0),
+      colorKey: "reflections",
+      detail: "Generated workflow reflections",
+    },
+    {
+      key: "candidates",
+      label: "Candidates",
+      value: patchCandidates + mergeCandidates,
+      colorKey: "candidates",
+      detail: `${formatCompactNumber(patchCandidates)} patches · ${formatCompactNumber(
+        mergeCandidates,
+      )} merges`,
+    },
+    {
+      key: "evaluations",
+      label: "Evaluate",
+      value: Math.max(0, workflow?.total_workflow_candidate_evaluations ?? 0),
+      colorKey: "evaluations",
+      detail: "Workflow patch/merge candidate evaluations",
+    },
+    {
+      key: "applied",
+      label: "Applied",
+      value: patchApplied + mergeApplied,
+      colorKey: "applied",
+      detail: `${formatCompactNumber(patchApplied)} patches · ${formatCompactNumber(
+        mergeApplied,
+      )} merges`,
+    },
+  ];
+}
+
+function workflowOptimizationFrontierData(
+  snapshot: DashboardSnapshot | null,
+): WorkflowOptimizationChartDatum[] {
+  const workflow = snapshot?.workflow_optimization;
+
+  return [
+    {
+      key: "roots",
+      label: "Roots",
+      value: Math.max(0, workflow?.latest_workflow_frontier_root_entries ?? 0),
+      colorKey: "frontier",
+      detail: "Latest root frontier entries",
+    },
+    {
+      key: "Branches",
+      label: "Branches",
+      value: Math.max(0, workflow?.latest_workflow_frontier_branched_entries ?? 0),
+      colorKey: "frontier",
+      detail: "Latest branched frontier entries",
+    },
+    {
+      key: "generation",
+      label: "Max Gen",
+      value: Math.max(0, workflow?.latest_workflow_frontier_max_generation ?? 0),
+      colorKey: "frontier",
+      detail: "Latest frontier max generation",
+    },
+  ];
+}
+
+function workflowOptimizationTotals(snapshot: DashboardSnapshot | null) {
+  const workflow = snapshot?.workflow_optimization;
+
+  return {
+    applied:
+      Math.max(0, workflow?.total_workflow_patch_applied ?? 0) +
+      Math.max(0, workflow?.total_workflow_merge_applied ?? 0),
+    rollbacks: Math.max(0, workflow?.total_workflow_update_rollbacks ?? 0),
+    rounds: Math.max(0, workflow?.total_workflow_optimization_rounds ?? 0),
+  };
+}
+
 function TokenUsageTooltip({
   active,
   payload,
@@ -498,6 +776,57 @@ function TokenUsageTooltipRow({
         {formatCompactNumber(value)}
       </span>
     </div>
+  );
+}
+
+function WorkflowOptimizationTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: WorkflowOptimizationTooltipPayloadItem[];
+}) {
+  if (!active) {
+    return null;
+  }
+
+  const datum = payload?.[0]?.payload;
+  if (!datum) {
+    return null;
+  }
+
+  return (
+    <div className="grid min-w-56 gap-1.5 rounded-lg border bg-background px-3 py-2.5 text-xs shadow-xl">
+      <div className="flex items-center gap-2 font-medium text-foreground">
+        <span
+          className="size-2 shrink-0 rounded-[2px]"
+          style={{ backgroundColor: `var(--color-${datum.colorKey})` }}
+        />
+        <span>{datum.label}</span>
+        <span className="ml-auto font-mono tabular-nums">
+          {formatCompactNumber(datum.value)}
+        </span>
+      </div>
+      <div className="text-muted-foreground">{datum.detail}</div>
+    </div>
+  );
+}
+
+function WorkflowOptimizationMetric({
+  label,
+  value,
+}: {
+  label: string;
+  value: number;
+}) {
+  return (
+    <Badge
+      variant="secondary"
+      className="gap-1.5"
+    >
+      <span>{label}</span>
+      <span className="font-mono tabular-nums">{formatCompactNumber(value)}</span>
+    </Badge>
   );
 }
 

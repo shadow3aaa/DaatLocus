@@ -47,6 +47,27 @@ export type DashboardTokenUsageSnapshot = {
   judge_model?: string | null;
 };
 
+export type DashboardWorkflowOptimizationSnapshot = {
+  running: boolean;
+  current_trigger: string | null;
+  last_result: string | null;
+  last_completed_at_ms: number | null;
+  workflow_evidence_records: number;
+  total_workflow_evidence_run_records: number;
+  total_workflow_reflections: number;
+  total_workflow_patch_candidates: number;
+  total_workflow_merge_candidates: number;
+  total_workflow_candidate_evaluations: number;
+  total_workflow_frontier_entries: number;
+  latest_workflow_frontier_root_entries: number;
+  latest_workflow_frontier_branched_entries: number;
+  latest_workflow_frontier_max_generation: number;
+  total_workflow_patch_applied: number;
+  total_workflow_merge_applied: number;
+  total_workflow_update_rollbacks: number;
+  total_workflow_optimization_rounds: number;
+};
+
 export type DashboardSnapshot = {
   focused_app: string | null;
   status_output: string;
@@ -65,6 +86,7 @@ export type DashboardSnapshot = {
   runtime_status: string | null;
   current_plan_step: DashboardPlanStep | null;
   token_usage?: DashboardTokenUsageSnapshot;
+  workflow_optimization?: DashboardWorkflowOptimizationSnapshot;
   footer_context: string;
   footer_estimated_input_tokens: number | null;
 };

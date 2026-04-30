@@ -51,6 +51,28 @@ pub struct DashboardTokenUsageSnapshot {
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
+pub struct DashboardWorkflowOptimizationSnapshot {
+    pub running: bool,
+    pub current_trigger: Option<String>,
+    pub last_result: Option<String>,
+    pub last_completed_at_ms: Option<i64>,
+    pub workflow_evidence_records: usize,
+    pub total_workflow_evidence_run_records: usize,
+    pub total_workflow_reflections: usize,
+    pub total_workflow_patch_candidates: usize,
+    pub total_workflow_merge_candidates: usize,
+    pub total_workflow_candidate_evaluations: usize,
+    pub total_workflow_frontier_entries: usize,
+    pub latest_workflow_frontier_root_entries: usize,
+    pub latest_workflow_frontier_branched_entries: usize,
+    pub latest_workflow_frontier_max_generation: usize,
+    pub total_workflow_patch_applied: usize,
+    pub total_workflow_merge_applied: usize,
+    pub total_workflow_update_rollbacks: usize,
+    pub total_workflow_optimization_rounds: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardState {
     pub focused_app: Option<AppId>,
     pub status_output: String,
@@ -69,6 +91,8 @@ pub struct DashboardState {
     pub current_plan_step: Option<DashboardPlanStep>,
     #[serde(default)]
     pub token_usage: DashboardTokenUsageSnapshot,
+    #[serde(default)]
+    pub workflow_optimization: DashboardWorkflowOptimizationSnapshot,
     pub footer_context: String,
     pub footer_estimated_input_tokens: Option<usize>,
 }

@@ -12,7 +12,8 @@ use crate::{
 };
 
 use super::{
-    DashboardPlanStep, DashboardState, DashboardTokenUsageSnapshot, render_activity_from_messages,
+    DashboardPlanStep, DashboardState, DashboardTokenUsageSnapshot,
+    DashboardWorkflowOptimizationSnapshot, render_activity_from_messages,
 };
 
 /// Sleep-related constants used in dashboard rendering.
@@ -41,6 +42,7 @@ pub fn sync_dashboard_state(
             render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
         state.current_plan_step = current_plan_step_for_dashboard(context);
         state.token_usage = token_usage_snapshot_for_dashboard(context);
+        state.workflow_optimization = workflow_optimization_snapshot_for_dashboard(sleep_status);
     });
 }
 
@@ -94,6 +96,33 @@ fn visible_token_usage(info: Option<TokenUsageInfo>) -> Option<TokenUsageInfo> {
             || !info.last_token_usage.is_zero()
             || !info.daily_token_usage.is_empty()
     })
+}
+
+pub fn workflow_optimization_snapshot_for_dashboard(
+    sleep_status: &SleepStatusSnapshot,
+) -> DashboardWorkflowOptimizationSnapshot {
+    DashboardWorkflowOptimizationSnapshot {
+        running: sleep_status.running,
+        current_trigger: sleep_status.current_trigger.map(str::to_string),
+        last_result: sleep_status.last_result.clone(),
+        last_completed_at_ms: sleep_status.last_completed_at_ms,
+        workflow_evidence_records: sleep_status.workflow_evidence_records,
+        total_workflow_evidence_run_records: sleep_status.total_workflow_evidence_run_records,
+        total_workflow_reflections: sleep_status.total_workflow_reflections,
+        total_workflow_patch_candidates: sleep_status.total_workflow_patch_candidates,
+        total_workflow_merge_candidates: sleep_status.total_workflow_merge_candidates,
+        total_workflow_candidate_evaluations: sleep_status.total_workflow_candidate_evaluations,
+        total_workflow_frontier_entries: sleep_status.total_workflow_frontier_entries,
+        latest_workflow_frontier_root_entries: sleep_status.latest_workflow_frontier_root_entries,
+        latest_workflow_frontier_branched_entries: sleep_status
+            .latest_workflow_frontier_branched_entries,
+        latest_workflow_frontier_max_generation: sleep_status
+            .latest_workflow_frontier_max_generation,
+        total_workflow_patch_applied: sleep_status.total_workflow_patch_applied,
+        total_workflow_merge_applied: sleep_status.total_workflow_merge_applied,
+        total_workflow_update_rollbacks: sleep_status.total_workflow_update_rollbacks,
+        total_workflow_optimization_rounds: sleep_status.total_workflow_optimization_rounds,
+    }
 }
 
 pub fn render_dashboard_footer_context(

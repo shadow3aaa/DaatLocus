@@ -13,7 +13,7 @@ use crate::{
         render_app_status_outputs_for_dashboard, render_dashboard_footer_context,
         render_sleep_status_output_for_dashboard, render_status_command_output_for_dashboard,
         render_system_prompt_output_for_dashboard, render_telegram_status_for_dashboard,
-        token_usage_snapshot_for_dashboard,
+        token_usage_snapshot_for_dashboard, workflow_optimization_snapshot_for_dashboard,
     },
     dashboard::{DashboardControlCommand, DashboardState},
     events::EventStore,
@@ -236,6 +236,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             runtime_status: None,
             current_plan_step: current_plan_step_for_dashboard(&context),
             token_usage: token_usage_snapshot_for_dashboard(&context),
+            workflow_optimization: workflow_optimization_snapshot_for_dashboard(&sleep_status),
             footer_context: render_dashboard_footer_context(&context, None),
             footer_estimated_input_tokens: None,
         };
