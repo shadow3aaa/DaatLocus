@@ -61,51 +61,44 @@ function createRectangleDots({
   }));
 }
 
+function createDotsFromRows(
+  rows: {
+    rowIndex: number;
+    columnIndexes: number[];
+  }[],
+): MatrixDot[] {
+  return rows.flatMap(({ rowIndex, columnIndexes }) =>
+    columnIndexes.map((columnIndex) => ({
+      columnIndex,
+      rowIndex,
+    })),
+  );
+}
+
 const eyeDots: MatrixDot[] = [
   ...createRectangleDots({
     columnStart: 6,
-    rowStart: 4,
+    rowStart: 5,
     columnCount: 3,
-    rowCount: 9,
+    rowCount: 7,
   }),
   ...createRectangleDots({
     columnStart: 13,
-    rowStart: 4,
+    rowStart: 5,
     columnCount: 3,
-    rowCount: 9,
+    rowCount: 7,
   }),
 ];
 
-const mouthDots: MatrixDot[] = [
-  { columnIndex: 3, rowIndex: 17 },
-  { columnIndex: 18, rowIndex: 17 },
-  { columnIndex: 3, rowIndex: 18 },
-  { columnIndex: 4, rowIndex: 18 },
-  { columnIndex: 17, rowIndex: 18 },
-  { columnIndex: 18, rowIndex: 18 },
-  { columnIndex: 4, rowIndex: 19 },
-  { columnIndex: 5, rowIndex: 19 },
-  { columnIndex: 16, rowIndex: 19 },
-  { columnIndex: 17, rowIndex: 19 },
-  { columnIndex: 5, rowIndex: 20 },
-  { columnIndex: 6, rowIndex: 20 },
-  { columnIndex: 15, rowIndex: 20 },
-  { columnIndex: 16, rowIndex: 20 },
-  { columnIndex: 6, rowIndex: 21 },
-  { columnIndex: 7, rowIndex: 21 },
-  { columnIndex: 14, rowIndex: 21 },
-  { columnIndex: 15, rowIndex: 21 },
-  { columnIndex: 7, rowIndex: 22 },
-  { columnIndex: 8, rowIndex: 22 },
-  { columnIndex: 9, rowIndex: 22 },
-  { columnIndex: 12, rowIndex: 22 },
-  { columnIndex: 13, rowIndex: 22 },
-  { columnIndex: 14, rowIndex: 22 },
-  { columnIndex: 9, rowIndex: 23 },
-  { columnIndex: 10, rowIndex: 23 },
-  { columnIndex: 11, rowIndex: 23 },
-  { columnIndex: 12, rowIndex: 23 },
-];
+const mouthDots: MatrixDot[] = createDotsFromRows([
+  { rowIndex: 17, columnIndexes: [3, 4, 5, 16, 17, 18] },
+  { rowIndex: 18, columnIndexes: [3, 4, 5, 6, 15, 16, 17, 18] },
+  { rowIndex: 19, columnIndexes: [4, 5, 6, 7, 14, 15, 16, 17] },
+  { rowIndex: 20, columnIndexes: [5, 6, 7, 8, 13, 14, 15, 16] },
+  { rowIndex: 21, columnIndexes: [7, 8, 9, 12, 13, 14] },
+  { rowIndex: 22, columnIndexes: [8, 9, 10, 11, 12, 13] },
+  { rowIndex: 23, columnIndexes: [9, 10, 11, 12] },
+]);
 
 const activeDots: MatrixDot[] = [...eyeDots, ...mouthDots];
 
