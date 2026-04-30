@@ -51,8 +51,8 @@ function AuthenticatedHome({ onLogout }: { onLogout: () => void }) {
         <CardHeader>
           <CardTitle>Daemon token verified</CardTitle>
           <CardDescription>
-            You are signed in. The upcoming Status, Tasks, and Logs pages can
-            now reuse the saved daemon token.
+            You are signed in. The Chat, Status, Settings, and Log pages can now
+            reuse the saved daemon token.
           </CardDescription>
         </CardHeader>
         <CardContent>

@@ -10,15 +10,14 @@ import { cn } from "@/lib/utils";
 type NavigationItem = {
   label: string;
   href: string;
-  active?: boolean;
   disabled?: boolean;
 };
 
 const navigationItems: NavigationItem[] = [
-  { label: "Login", href: "#login" },
+  { label: "Chat", href: "#chat", disabled: true },
   { label: "Status", href: "#status" },
-  { label: "Tasks", href: "#tasks", disabled: true },
-  { label: "Logs", href: "#logs", disabled: true },
+  { label: "Settings", href: "#settings", disabled: true },
+  { label: "Log", href: "#log", disabled: true },
 ];
 
 export function AppNavigation({
@@ -35,37 +34,28 @@ export function AppNavigation({
 
         <NavigationMenu className="hidden md:flex">
           <NavigationMenuList>
-            {navigationItems.map((item) => (
-              <NavigationMenuItem key={item.label}>
-                <NavigationMenuLink
-                  href={
-                    item.disabled || (item.label === "Login" && isAuthenticated)
-                      ? undefined
-                      : item.href
-                  }
-                  active={
-                    item.active ||
-                    (item.label === "Login" && !isAuthenticated) ||
-                    (item.label === "Status" && isAuthenticated)
-                  }
-                  aria-disabled={
-                    item.disabled || (item.label === "Login" && isAuthenticated)
-                  }
-                  className={cn(
-                    navigationMenuTriggerStyle(),
-                    (item.active ||
-                      (item.label === "Login" && !isAuthenticated) ||
-                      (item.label === "Status" && isAuthenticated)) &&
-                      "bg-accent text-accent-foreground",
-                    (item.disabled ||
-                      (item.label === "Login" && isAuthenticated)) &&
-                      "pointer-events-none opacity-50",
-                  )}
-                >
-                  {item.label}
-                </NavigationMenuLink>
-              </NavigationMenuItem>
-            ))}
+            {navigationItems.map((item) => {
+              const isStatus = item.label === "Status";
+              const isActive = isStatus && isAuthenticated;
+              const isDisabled = item.disabled || (isStatus && !isAuthenticated);
+
+              return (
+                <NavigationMenuItem key={item.label}>
+                  <NavigationMenuLink
+                    href={isDisabled ? undefined : item.href}
+                    active={isActive}
+                    aria-disabled={isDisabled}
+                    className={cn(
+                      navigationMenuTriggerStyle(),
+                      isActive && "bg-accent text-accent-foreground",
+                      isDisabled && "pointer-events-none opacity-50",
+                    )}
+                  >
+                    {item.label}
+                  </NavigationMenuLink>
+                </NavigationMenuItem>
+              );
+            })}
           </NavigationMenuList>
         </NavigationMenu>
 
