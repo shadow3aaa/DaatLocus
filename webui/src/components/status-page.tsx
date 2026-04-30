@@ -181,7 +181,7 @@ export function StatusPage() {
       <div
         className="min-h-full w-full snap-start px-6 py-10 md:py-12"
       >
-        <div className="grid w-full grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="grid w-full grid-cols-1 items-start gap-4 sm:grid-cols-2 xl:grid-cols-3">
           <DailyTokenUsageCard snapshot={snapshot} />
           <WorkflowOptimizationCard snapshot={snapshot} />
         </div>
@@ -211,7 +211,7 @@ function DailyTokenUsageCard({
           <BarChart
             accessibilityLayer
             data={chartData}
-            margin={{ top: 8, right: 16, left: -8, bottom: 0 }}
+            margin={{ top: 18, right: 16, left: 0, bottom: 0 }}
             barCategoryGap="34%"
           >
             <XAxis
@@ -222,7 +222,7 @@ function DailyTokenUsageCard({
               interval={0}
             />
             <YAxis
-              width={44}
+              width={52}
               tickLine={false}
               axisLine={false}
               domain={[0, 1]}
