@@ -24,11 +24,11 @@ const TOKEN_USAGE_LOOKBACK_DAYS = 7;
 const TOKEN_USAGE_CHART_CONFIG = {
   cached: {
     label: "Cached",
-    color: "#dc2626",
+    color: "var(--chart-1)",
   },
   uncached: {
     label: "Usage",
-    color: "#ec4899",
+    color: "var(--chart-2)",
   },
 } satisfies ChartConfig;
 
@@ -192,8 +192,7 @@ function DailyTokenUsageCard({
               tickLine={false}
               axisLine={false}
               tickMargin={10}
-              interval="preserveStartEnd"
-              minTickGap={28}
+              interval={0}
             />
             <YAxis
               width={44}
@@ -269,13 +268,14 @@ function dailyTokenUsageChartData(
     ...dates.map((date) => usageByDate.get(date)?.total ?? 0),
   );
 
-  return dates.map((date) => {
+  return dates.map((date, index) => {
     const accumulator =
       usageByDate.get(date) ?? createDailyTokenUsageAccumulator();
 
     return {
       date,
-      label: formatDateLabel(date),
+      label:
+        index === 0 || index === dates.length - 1 ? formatDateLabel(date) : "",
       cached: accumulator.cached,
       cachedRatio: accumulator.cached / maxTotal,
       uncached: accumulator.uncached,
