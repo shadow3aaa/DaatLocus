@@ -1082,14 +1082,19 @@ function deriveAgentStatus({
     return { animationStatus: "waiting", label: "状态不可用" };
   }
 
-  if (!snapshot?.runtime_status) {
+  if (!snapshot) {
     return { animationStatus: "idle", label: "空闲" };
   }
 
-  const runtimeStatus = snapshot.runtime_status.toLowerCase();
+  const runtimeStatus = snapshot.runtime_status?.toLowerCase() ?? "";
   const dashboardText = [snapshot.runtime_status, snapshot.status_output]
     .join(" ")
     .toLowerCase();
+  const hasRunningTurn = /\bruntime turn:\s*running\b/.test(dashboardText);
+
+  if (!runtimeStatus && !hasRunningTurn) {
+    return { animationStatus: "idle", label: "空闲" };
+  }
 
   if (/\b(error|failed|failure|panic)\b/.test(dashboardText)) {
     return { animationStatus: "error", label: "异常" };

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -118,7 +118,7 @@ function getMouthPath(progress: number) {
   return `M ${points[0]} ${points[1]} C ${points[2]} ${points[3]} ${points[4]} ${points[5]} ${points[6]} ${points[7]} C ${points[8]} ${points[9]} ${points[10]} ${points[11]} ${points[12]} ${points[13]}`;
 }
 
-export function AgentStatusAnimation({
+export const AgentStatusAnimation = memo(function AgentStatusAnimation({
   status,
   className,
 }: AgentStatusAnimationProps) {
@@ -373,7 +373,7 @@ export function AgentStatusAnimation({
       </svg>
     </div>
   );
-}
+});
 
 function useExpressionTransition(
   visualKind: ExpressionVisualKind,
