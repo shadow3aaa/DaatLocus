@@ -12,7 +12,15 @@ import {
   type AgentAnimationStatus,
 } from "@/components/agent-status-animation";
 import { CheckIcon, GripVerticalIcon, XIcon } from "lucide-react";
-import { Bar, BarChart, Cell, Pie, PieChart, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  Cell,
+  Pie,
+  PieChart,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,6 +38,7 @@ import {
 import {
   runDashboardCommand,
   subscribeDashboardSnapshots,
+  type DashboardContextCompositionSegment,
   type DashboardPendingAccessRequest,
   type DashboardSnapshot,
   type TokenUsage,
@@ -41,6 +50,7 @@ const DASHBOARD_STREAM_RECONNECT_MS = 1500;
 const SUMMARY_TYPE_INTERVAL_MS = 28;
 const TOKEN_USAGE_MAX_VISIBLE_DAYS = 7;
 const STATUS_CARD_ORDER_STORAGE_KEY = "daat-locus.status.card-order";
+const CONTEXT_COMPOSITION_MAX_VISIBLE_SEGMENTS = 8;
 const TOKEN_USAGE_CHART_CONFIG = {
   cached: {
     label: "Cached",
@@ -49,6 +59,28 @@ const TOKEN_USAGE_CHART_CONFIG = {
   uncached: {
     label: "Usage",
     color: "var(--chart-2)",
+  },
+} satisfies ChartConfig;
+const CONTEXT_COMPOSITION_CHART_CONFIG = {
+  tokens: {
+    label: "Tokens",
+    color: "var(--chart-1)",
+  },
+  stable: {
+    label: "Stable prefix",
+    color: "var(--chart-1)",
+  },
+  changed: {
+    label: "Changed prefix",
+    color: "var(--chart-4)",
+  },
+  new: {
+    label: "New suffix",
+    color: "var(--chart-2)",
+  },
+  unknown: {
+    label: "First request / no previous snapshot",
+    color: "var(--muted)",
   },
 } satisfies ChartConfig;
 const WORKFLOW_OPTIMIZATION_CHART_CONFIG = {
@@ -119,6 +151,7 @@ const RUNTIME_OPTIMIZATION_CHART_CONFIG = {
 const DEFAULT_STATUS_CARD_ORDER = [
   "telegram-approval",
   "runtime-optimization",
+  "context-composition",
   "daily-token-usage",
   "workflow-optimization",
 ] as const;
@@ -154,6 +187,10 @@ const STATUS_CARD_DEFINITIONS: Record<StatusCardId, StatusCardDefinition> = {
   "runtime-optimization": {
     label: "Runtime Optimization",
     render: (props) => <RuntimeOptimizationCard {...props} />,
+  },
+  "context-composition": {
+    label: "Model Context Composition",
+    render: (props) => <ModelContextCompositionCard {...props} />,
   },
   "daily-token-usage": {
     label: "Token Usage",
@@ -656,6 +693,234 @@ function DailyTokenUsageCard({
   );
 }
 
+function ModelContextCompositionCard({
+  snapshot,
+  dragHandle,
+}: {
+  snapshot: DashboardSnapshot | null;
+  dragHandle: ReactNode;
+}) {
+  const composition = snapshot?.context_composition;
+  const compositionData = useMemo(
+    () => contextCompositionCardData(snapshot),
+    [snapshot],
+  );
+
+  return (
+    <Card className="w-full overflow-visible">
+      <CardHeader>
+        <CardTitle>Model Context Composition</CardTitle>
+        <CardAction>{dragHandle}</CardAction>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {composition ? (
+          <>
+            <div className="grid grid-cols-3 gap-2">
+              <ContextCompositionMetric
+                label="Total"
+                value={formatCompactNumber(composition.total_estimated_tokens)}
+                detail="est. tokens"
+              />
+              <ContextCompositionMetric
+                label="New suffix"
+                value={formatPercent(compositionData.newSuffixRatio)}
+                detail={formatCompactNumber(composition.new_suffix_tokens)}
+              />
+              <ContextCompositionMetric
+                label="Stable prefix"
+                value={formatPercent(compositionData.stablePrefixRatio)}
+                detail={formatCompactNumber(composition.stable_prefix_tokens)}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                <span>Prefix reuse vs changed/new request tail</span>
+                <span className="font-mono tabular-nums">
+                  {composition.previous_request_hash ? "vs previous" : "first snapshot"}
+                </span>
+              </div>
+              <ChartContainer
+                config={CONTEXT_COMPOSITION_CHART_CONFIG}
+                className="h-12 w-full overflow-visible [&_.recharts-wrapper]:overflow-visible"
+              >
+                <BarChart
+                  accessibilityLayer
+                  data={compositionData.prefixSummaryData}
+                  layout="vertical"
+                  margin={{ top: 8, right: 0, left: 0, bottom: 8 }}
+                  stackOffset="expand"
+                >
+                  <XAxis
+                    type="number"
+                    hide
+                    domain={[0, 1]}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="label"
+                    hide
+                  />
+                  <ChartTooltip
+                    cursor={{ fill: "transparent" }}
+                    wrapperStyle={{ zIndex: 50 }}
+                    content={<ContextPrefixTooltip />}
+                  />
+                  <Bar
+                    dataKey="stable"
+                    stackId="prefix"
+                    fill="var(--color-stable)"
+                    isAnimationActive={false}
+                    radius={[4, 0, 0, 4]}
+                  />
+                  <Bar
+                    dataKey="changed"
+                    stackId="prefix"
+                    fill="var(--color-changed)"
+                    isAnimationActive={false}
+                    radius={[0, 0, 0, 0]}
+                  />
+                  <Bar
+                    dataKey="new"
+                    stackId="prefix"
+                    fill="var(--color-new)"
+                    isAnimationActive={false}
+                    radius={[0, 4, 4, 0]}
+                  />
+                  <Bar
+                    dataKey="unknown"
+                    stackId="prefix"
+                    fill="var(--color-unknown)"
+                    isAnimationActive={false}
+                    radius={[0, 4, 4, 0]}
+                  />
+                </BarChart>
+              </ChartContainer>
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                {compositionData.prefixLegend.map((bar) => (
+                  <div
+                    key={bar.key}
+                    className="flex min-w-0 items-center gap-1.5 text-muted-foreground"
+                  >
+                    <span
+                      className="size-2 shrink-0 rounded-[2px]"
+                      style={{
+                        backgroundColor: `var(--color-${bar.colorKey})`,
+                      }}
+                    />
+                    <span className="truncate">{bar.shortLabel}</span>
+                    <span className="ml-auto font-mono tabular-nums text-foreground">
+                      {formatPercent(bar.ratio)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <ChartContainer
+              config={CONTEXT_COMPOSITION_CHART_CONFIG}
+              className="h-64 w-full overflow-visible [&_.recharts-wrapper]:overflow-visible"
+            >
+              <BarChart
+                accessibilityLayer
+                data={compositionData.segmentChartData}
+                layout="vertical"
+                margin={{ top: 8, right: 12, left: 8, bottom: 0 }}
+                barCategoryGap="24%"
+              >
+                <XAxis
+                  type="number"
+                  hide
+                  domain={[0, compositionData.maxSegmentTokens]}
+                />
+                <YAxis
+                  type="category"
+                  dataKey="shortLabel"
+                  width={118}
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={8}
+                />
+                <ChartTooltip
+                  cursor={{ fill: "var(--muted)" }}
+                  wrapperStyle={{ zIndex: 50 }}
+                  content={<ContextCompositionTooltip />}
+                />
+                <Bar
+                  dataKey="tokens"
+                  fill="var(--color-tokens)"
+                  radius={[0, 4, 4, 0]}
+                  isAnimationActive={false}
+                />
+              </BarChart>
+            </ChartContainer>
+
+            <div className="grid gap-2 text-xs text-muted-foreground">
+              <ContextCompositionDetailRow
+                label="Messages / tools"
+                value={`${composition.message_count} / ${composition.tool_count}`}
+              />
+              <ContextCompositionDetailRow
+                label="Tool schema"
+                value={`${formatCompactNumber(composition.tools_schema_tokens)} tokens`}
+              />
+              <ContextCompositionDetailRow
+                label="Bytes"
+                value={formatCompactNumber(composition.total_bytes)}
+              />
+              <ContextCompositionDetailRow
+                label="Model"
+                value={composition.model ?? "unknown"}
+              />
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Waiting for the next model request to capture context composition.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ContextCompositionMetric({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <div className="rounded-xl border bg-muted/20 p-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-1 font-mono text-lg font-medium tabular-nums text-foreground">
+        {value}
+      </div>
+      <div className="truncate text-xs text-muted-foreground">{detail}</div>
+    </div>
+  );
+}
+
+function ContextCompositionDetailRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="min-w-0 flex-1">{label}</span>
+      <span className="truncate font-mono font-medium tabular-nums text-foreground">
+        {value}
+      </span>
+    </div>
+  );
+}
+
 function WorkflowOptimizationCard({
   snapshot,
   dragHandle,
@@ -798,11 +1063,18 @@ function RuntimeOptimizationCard({
 
 function statusCardColumns(order: StatusCardId[]) {
   const normalizedOrder = normalizeStatusCardOrder(order);
+  const firstColumnLength = Math.ceil(normalizedOrder.length / 3);
+  const secondColumnLength = Math.ceil(
+    (normalizedOrder.length - firstColumnLength) / 2,
+  );
 
   return [
-    normalizedOrder.slice(0, 2),
-    normalizedOrder.slice(2, 3),
-    normalizedOrder.slice(3),
+    normalizedOrder.slice(0, firstColumnLength),
+    normalizedOrder.slice(
+      firstColumnLength,
+      firstColumnLength + secondColumnLength,
+    ),
+    normalizedOrder.slice(firstColumnLength + secondColumnLength),
   ];
 }
 
@@ -932,6 +1204,52 @@ type DailyTokenUsageModelBreakdown = {
 
 type TokenUsageTooltipPayloadItem = {
   payload?: DailyTokenUsageChartDatum;
+};
+
+type ContextCompositionSegmentChartDatum = {
+  key: string;
+  label: string;
+  shortLabel: string;
+  source: string;
+  tokens: number;
+  bytes: number;
+  percent: number;
+  cacheRole: string;
+};
+
+type ContextCompositionPrefixBar = {
+  key: string;
+  label: string;
+  shortLabel: string;
+  tokens: number;
+  ratio: number;
+  colorKey: keyof typeof CONTEXT_COMPOSITION_CHART_CONFIG;
+};
+
+type ContextCompositionPrefixSummaryDatum = {
+  label: string;
+  stable: number;
+  changed: number;
+  new: number;
+  unknown: number;
+  bars: ContextCompositionPrefixBar[];
+};
+
+type ContextCompositionCardData = {
+  segmentChartData: ContextCompositionSegmentChartDatum[];
+  maxSegmentTokens: number;
+  stablePrefixRatio: number;
+  newSuffixRatio: number;
+  prefixSummaryData: ContextCompositionPrefixSummaryDatum[];
+  prefixLegend: ContextCompositionPrefixBar[];
+};
+
+type ContextCompositionTooltipPayloadItem = {
+  payload?: ContextCompositionSegmentChartDatum;
+};
+
+type ContextPrefixTooltipPayloadItem = {
+  payload?: ContextCompositionPrefixSummaryDatum;
 };
 
 type WorkflowOptimizationChartDatum = {
@@ -1108,6 +1426,138 @@ function addTokenUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
       left.reasoning_output_tokens + right.reasoning_output_tokens,
     total_tokens: left.total_tokens + right.total_tokens,
   };
+}
+
+function contextCompositionCardData(
+  snapshot: DashboardSnapshot | null,
+): ContextCompositionCardData {
+  const composition = snapshot?.context_composition;
+  const totalTokens = Math.max(0, composition?.total_estimated_tokens ?? 0);
+  const stablePrefixTokens = Math.max(
+    0,
+    composition?.stable_prefix_tokens ?? 0,
+  );
+  const changedPrefixTokens = Math.max(
+    0,
+    composition?.changed_prefix_tokens ?? 0,
+  );
+  const newSuffixTokens = Math.max(0, composition?.new_suffix_tokens ?? 0);
+  const knownPrefixTokens =
+    stablePrefixTokens + changedPrefixTokens + newSuffixTokens;
+  const unknownTokens =
+    composition && knownPrefixTokens === 0 ? Math.max(1, totalTokens) : 0;
+  const prefixTotal = Math.max(1, knownPrefixTokens || unknownTokens);
+  const prefixLegend: ContextCompositionPrefixBar[] = [
+    {
+      key: "stable",
+      label: "Stable prefix",
+      shortLabel: "Stable",
+      tokens: stablePrefixTokens,
+      ratio: stablePrefixTokens / prefixTotal,
+      colorKey: "stable",
+    },
+    {
+      key: "changed",
+      label: "Changed prefix",
+      shortLabel: "Changed",
+      tokens: changedPrefixTokens,
+      ratio: changedPrefixTokens / prefixTotal,
+      colorKey: "changed",
+    },
+    {
+      key: "new",
+      label: "New suffix",
+      shortLabel: "New",
+      tokens: newSuffixTokens,
+      ratio: newSuffixTokens / prefixTotal,
+      colorKey: "new",
+    },
+  ];
+  const prefixSummaryData: ContextCompositionPrefixSummaryDatum[] = [
+    {
+      label: "Prefix",
+      stable: stablePrefixTokens,
+      changed: changedPrefixTokens,
+      new: newSuffixTokens,
+      unknown: unknownTokens,
+      bars:
+        unknownTokens > 0
+          ? [
+              {
+                key: "unknown",
+                label: "No previous snapshot",
+                shortLabel: "No previous",
+                tokens: unknownTokens,
+                ratio: 1,
+                colorKey: "unknown",
+              },
+            ]
+          : prefixLegend,
+    },
+  ];
+  const segmentChartData = contextCompositionSegmentChartData(
+    composition?.segments ?? [],
+  );
+  const maxSegmentTokens = Math.max(
+    1,
+    ...segmentChartData.map((segment) => segment.tokens),
+  );
+
+  return {
+    segmentChartData,
+    maxSegmentTokens,
+    stablePrefixRatio:
+      totalTokens > 0 ? Math.min(1, stablePrefixTokens / totalTokens) : 0,
+    newSuffixRatio:
+      totalTokens > 0 ? Math.min(1, newSuffixTokens / totalTokens) : 0,
+    prefixSummaryData,
+    prefixLegend,
+  };
+}
+
+function contextCompositionSegmentChartData(
+  segments: DashboardContextCompositionSegment[],
+): ContextCompositionSegmentChartDatum[] {
+  const grouped = new Map<string, ContextCompositionSegmentChartDatum>();
+
+  for (const segment of segments) {
+    const key = segment.name || segment.label || segment.source || "unknown";
+    const current =
+      grouped.get(key) ??
+      ({
+        key,
+        label: segment.label || key,
+        shortLabel: shortContextCompositionLabel(segment.label || key),
+        source: segment.source,
+        tokens: 0,
+        bytes: 0,
+        percent: 0,
+        cacheRole: segment.cache_role,
+      } satisfies ContextCompositionSegmentChartDatum);
+
+    current.tokens += Math.max(0, segment.tokens);
+    current.bytes += Math.max(0, segment.bytes);
+    current.percent += Math.max(0, segment.percent);
+    grouped.set(key, current);
+  }
+
+  return Array.from(grouped.values())
+    .sort((left, right) => right.tokens - left.tokens)
+    .slice(0, CONTEXT_COMPOSITION_MAX_VISIBLE_SEGMENTS);
+}
+
+function shortContextCompositionLabel(label: string) {
+  return label
+    .replace(/^Assistant tool-call protocol$/, "Tool-call protocol")
+    .replace(/^System messages$/, "System")
+    .replace(/^Conversation history$/, "History")
+    .replace(/^Summarized history$/, "Summary")
+    .replace(/^Afterclaim context$/, "Afterclaim")
+    .replace(/^Preturn context$/, "Preturn")
+    .replace(/^Memory recall$/, "Memory")
+    .replace(/^Assistant messages$/, "Assistant")
+    .replace(/^Tool outputs$/, "Tool outputs")
+    .replace(/^Tools schema$/, "Tools");
 }
 
 function workflowOptimizationProgressData(
@@ -1400,6 +1850,118 @@ function TokenUsageTooltipRow({
   );
 }
 
+function ContextCompositionTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: ContextCompositionTooltipPayloadItem[];
+}) {
+  if (!active) {
+    return null;
+  }
+
+  const datum = payload?.[0]?.payload;
+  if (!datum) {
+    return null;
+  }
+
+  return (
+    <div className="grid min-w-64 gap-1.5 rounded-lg border bg-background px-3 py-2.5 text-xs shadow-xl">
+      <div className="flex items-center gap-2 font-medium text-foreground">
+        <span
+          className="size-2 shrink-0 rounded-[2px]"
+          style={{ backgroundColor: "var(--color-tokens)" }}
+        />
+        <span className="min-w-0 flex-1 truncate">{datum.label}</span>
+        <span className="font-mono tabular-nums">
+          {formatCompactNumber(datum.tokens)}
+        </span>
+      </div>
+      <div className="grid gap-1 text-muted-foreground">
+        <ContextCompositionTooltipRow
+          label="Share"
+          value={formatPercent(datum.percent / 100)}
+        />
+        <ContextCompositionTooltipRow
+          label="Bytes"
+          value={formatCompactNumber(datum.bytes)}
+        />
+        <ContextCompositionTooltipRow
+          label="Source"
+          value={datum.source}
+        />
+        <ContextCompositionTooltipRow
+          label="Cache role"
+          value={datum.cacheRole}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ContextPrefixTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: ContextPrefixTooltipPayloadItem[];
+}) {
+  if (!active) {
+    return null;
+  }
+
+  const datum = payload?.[0]?.payload;
+  if (!datum) {
+    return null;
+  }
+
+  return (
+    <div className="grid min-w-64 gap-1.5 rounded-lg border bg-background px-3 py-2.5 text-xs shadow-xl">
+      <div className="font-medium text-foreground">
+        Cache-affecting prefix comparison
+      </div>
+      <div className="grid gap-1 text-muted-foreground">
+        {datum.bars.map((bar) => (
+          <div
+            key={bar.key}
+            className="flex min-w-0 items-center gap-2"
+          >
+            <span
+              className="size-2 shrink-0 rounded-[2px]"
+              style={{ backgroundColor: `var(--color-${bar.colorKey})` }}
+            />
+            <span className="min-w-0 flex-1 truncate">{bar.label}</span>
+            <span className="font-mono font-medium tabular-nums text-foreground">
+              {formatCompactNumber(bar.tokens)}
+            </span>
+            <span className="font-mono tabular-nums">
+              {formatPercent(bar.ratio)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ContextCompositionTooltipRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="min-w-0 flex-1">{label}</span>
+      <span className="truncate font-mono font-medium tabular-nums text-foreground">
+        {value}
+      </span>
+    </div>
+  );
+}
+
 function WorkflowOptimizationTooltip({
   active,
   payload,
@@ -1478,6 +2040,14 @@ function formatDateLabel(date: string) {
 
 function formatPercentAxisTick(value: number) {
   return `${Math.round(value * 100)}%`;
+}
+
+function formatPercent(value: number) {
+  if (!Number.isFinite(value)) {
+    return "0%";
+  }
+
+  return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
 }
 
 function isDateKey(value: string) {

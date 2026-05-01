@@ -88,6 +88,44 @@ pub struct DashboardRuntimeOptimizationSnapshot {
     pub total_runtime_contract_updates: usize,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DashboardContextCompositionSegment {
+    pub name: String,
+    pub label: String,
+    pub source: String,
+    pub tokens: usize,
+    pub bytes: usize,
+    pub percent: f64,
+    pub hash: String,
+    pub cache_role: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DashboardContextCompositionPrefixUnit {
+    pub hash: String,
+    pub tokens: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct DashboardContextCompositionSnapshot {
+    pub captured_at_ms: Option<i64>,
+    pub model: Option<String>,
+    pub total_estimated_tokens: usize,
+    pub total_bytes: usize,
+    pub message_count: usize,
+    pub tool_count: usize,
+    pub tools_schema_tokens: usize,
+    pub stable_prefix_tokens: usize,
+    pub new_suffix_tokens: usize,
+    pub changed_prefix_tokens: usize,
+    pub previous_common_prefix_tokens: usize,
+    pub previous_request_hash: Option<String>,
+    pub current_request_hash: Option<String>,
+    pub segments: Vec<DashboardContextCompositionSegment>,
+    #[serde(default)]
+    pub prefix_units: Vec<DashboardContextCompositionPrefixUnit>,
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardState {
     pub focused_app: Option<AppId>,
@@ -111,6 +149,8 @@ pub struct DashboardState {
     pub workflow_optimization: DashboardWorkflowOptimizationSnapshot,
     #[serde(default)]
     pub runtime_optimization: DashboardRuntimeOptimizationSnapshot,
+    #[serde(default)]
+    pub context_composition: Option<DashboardContextCompositionSnapshot>,
     pub footer_context: String,
     pub footer_estimated_input_tokens: Option<usize>,
 }

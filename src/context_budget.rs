@@ -359,7 +359,7 @@ fn estimate_history_message_tokens(message: &HistoryMessage) -> usize {
     estimate_agent_message_tokens(&message.message)
 }
 
-fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
+pub(crate) fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
     match message {
         AgentMessage::System { content } => message_token_cost("system", content),
         AgentMessage::User { content } => message_token_cost("user", content.as_text())
@@ -397,7 +397,7 @@ fn estimate_agent_message_tokens(message: &AgentMessage) -> usize {
     }
 }
 
-fn estimate_tool_spec_tokens(tool: &AgentToolSpec) -> usize {
+pub(crate) fn estimate_tool_spec_tokens(tool: &AgentToolSpec) -> usize {
     let input_tokens = match &tool.input_spec {
         AgentToolInputSpec::JsonSchema { schema } => estimate_json_value_tokens(schema),
         AgentToolInputSpec::FreeformGrammar {

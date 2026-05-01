@@ -199,6 +199,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         sandbox_policy,
         dashboard_tx: Some(tx.clone()),
         daemon_control_tx: daemon_control_tx.clone(),
+        latest_context_composition: None,
         active_runtime_turn: false,
         active_runtime_phase: None,
         runtime_turn_started_at: None,
@@ -239,6 +240,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             token_usage: token_usage_snapshot_for_dashboard(&context),
             runtime_optimization: runtime_optimization_snapshot_for_dashboard(&sleep_status),
             workflow_optimization: workflow_optimization_snapshot_for_dashboard(&sleep_status),
+            context_composition: None,
             footer_context: render_dashboard_footer_context(&context, None),
             footer_estimated_input_tokens: None,
         };

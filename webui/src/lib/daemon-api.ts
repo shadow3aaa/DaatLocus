@@ -83,6 +83,40 @@ export type DashboardRuntimeOptimizationSnapshot = {
   total_runtime_contract_updates: number;
 };
 
+export type DashboardContextCompositionSegment = {
+  name: string;
+  label: string;
+  source: string;
+  tokens: number;
+  bytes: number;
+  percent: number;
+  hash: string;
+  cache_role: string;
+};
+
+export type DashboardContextCompositionPrefixUnit = {
+  hash: string;
+  tokens: number;
+};
+
+export type DashboardContextCompositionSnapshot = {
+  captured_at_ms: number | null;
+  model: string | null;
+  total_estimated_tokens: number;
+  total_bytes: number;
+  message_count: number;
+  tool_count: number;
+  tools_schema_tokens: number;
+  stable_prefix_tokens: number;
+  new_suffix_tokens: number;
+  changed_prefix_tokens: number;
+  previous_common_prefix_tokens: number;
+  previous_request_hash: string | null;
+  current_request_hash: string | null;
+  segments: DashboardContextCompositionSegment[];
+  prefix_units: DashboardContextCompositionPrefixUnit[];
+};
+
 export type DashboardPendingAccessRequest = {
   chat_id: number;
   title: string;
@@ -112,6 +146,7 @@ export type DashboardSnapshot = {
   token_usage?: DashboardTokenUsageSnapshot;
   workflow_optimization?: DashboardWorkflowOptimizationSnapshot;
   runtime_optimization?: DashboardRuntimeOptimizationSnapshot;
+  context_composition?: DashboardContextCompositionSnapshot | null;
   footer_context: string;
   footer_estimated_input_tokens: number | null;
 };

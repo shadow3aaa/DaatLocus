@@ -12,8 +12,8 @@ use crate::{
 };
 
 use super::{
-    DashboardPlanStep, DashboardRuntimeOptimizationSnapshot, DashboardState,
-    DashboardTokenUsageSnapshot, DashboardWorkflowOptimizationSnapshot,
+    DashboardContextCompositionSnapshot, DashboardPlanStep, DashboardRuntimeOptimizationSnapshot,
+    DashboardState, DashboardTokenUsageSnapshot, DashboardWorkflowOptimizationSnapshot,
     render_activity_from_messages,
 };
 
@@ -45,6 +45,7 @@ pub fn sync_dashboard_state(
         state.token_usage = token_usage_snapshot_for_dashboard(context);
         state.runtime_optimization = runtime_optimization_snapshot_for_dashboard(sleep_status);
         state.workflow_optimization = workflow_optimization_snapshot_for_dashboard(sleep_status);
+        state.context_composition = context_composition_snapshot_for_dashboard(context);
     });
 }
 
@@ -98,6 +99,12 @@ fn visible_token_usage(info: Option<TokenUsageInfo>) -> Option<TokenUsageInfo> {
             || !info.last_token_usage.is_zero()
             || !info.daily_token_usage.is_empty()
     })
+}
+
+pub fn context_composition_snapshot_for_dashboard(
+    context: &Context,
+) -> Option<DashboardContextCompositionSnapshot> {
+    context.latest_context_composition.clone()
 }
 
 pub fn runtime_optimization_snapshot_for_dashboard(

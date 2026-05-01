@@ -82,6 +82,7 @@ pub struct Context {
     pub sandbox_policy: RuntimeSandboxPolicy,
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
     pub daemon_control_tx: tokio::sync::mpsc::UnboundedSender<DaemonControlCommand>,
+    pub latest_context_composition: Option<crate::dashboard::DashboardContextCompositionSnapshot>,
     pub active_runtime_turn: bool,
     pub active_runtime_phase: Option<RuntimeTurnPhase>,
     pub runtime_turn_started_at: Option<Instant>,
