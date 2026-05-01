@@ -4,7 +4,8 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 
-const daemonTarget = process.env.DAAT_LOCUS_DAEMON_URL ?? "http://127.0.0.1:53825";
+const devServerHost = process.env.DAAT_LOCUS_WEBUI_HOST ?? "0.0.0.0";
+const daemonTarget = process.env.DAAT_LOCUS_DAEMON_URL ?? "http://0.0.0.0:53825";
 
 export default defineConfig({
   base: "./",
@@ -15,6 +16,7 @@ export default defineConfig({
     },
   },
   server: {
+    host: devServerHost,
     proxy: {
       "/status": {
         target: daemonTarget,
