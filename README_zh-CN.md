@@ -86,9 +86,8 @@ cargo run --locked
 ```
 
 `cargo build` 和 `cargo run` 会通过 `build.rs` 构建 WebUI，并默认把生成的
-资源嵌入 daemon。需要发布打包使用的
-`cargo build -p daat-locus --release --locked` 包装时，再使用
-`cargo xtask build`。
+资源嵌入 daemon。需要本地 release 风格二进制时，直接运行
+`cargo build -p daat-locus --release --locked`。
 
 [releases-url]: https://github.com/shadow3aaa/DaatLocus/releases
 

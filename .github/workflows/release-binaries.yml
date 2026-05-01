@@ -58,7 +58,7 @@ jobs:
           echo "target=$target" >> "$GITHUB_OUTPUT"
 
       - name: Build release binary
-        run: cargo xtask build
+        run: cargo build -p daat-locus --release --locked
 
       - name: Package release binary
         shell: bash

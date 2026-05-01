@@ -105,9 +105,8 @@ cargo run --locked
 ```
 
 `cargo build` and `cargo run` build the WebUI through `build.rs` and embed the
-generated assets into the daemon by default. Use `cargo xtask build` when you
-need the release-style `cargo build -p daat-locus --release --locked` wrapper
-used by release packaging.
+generated assets into the daemon by default. For a release-style local binary,
+run `cargo build -p daat-locus --release --locked` directly.
 
 [releases-url]: https://github.com/shadow3aaa/DaatLocus/releases
 

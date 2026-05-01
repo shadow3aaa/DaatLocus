@@ -43,7 +43,6 @@ fn run() -> Result<()> {
 
     let command = args.remove(0);
     match command.as_str() {
-        "build" => build_product(parse_product_build_args(&args)?)?,
         "build-hindsight-sidecar" => build_hindsight_sidecar(parse_build_args(&args)?)?,
         "verify-hindsight-sidecars" => verify_hindsight_sidecars()?,
         "smoke-hindsight-sidecar" => smoke_hindsight_sidecar(parse_target_arg(&args)?)?,
@@ -59,14 +58,12 @@ fn print_help() {
     println!(
         "\
 Usage:
-  cargo xtask build [--target TARGET] [--no-locked]
   cargo xtask build-hindsight-sidecar [--spec PATH | --entry-script PATH] [--target TARGET]
   cargo xtask verify-hindsight-sidecars
   cargo xtask smoke-hindsight-sidecar [--target TARGET]
   cargo xtask package-release-binary [--target TARGET] [--release-dir PATH] [--out-dir PATH]
 
 Commands:
-  build                      Build the full release binary with embedded WebUI assets.
   build-hindsight-sidecar    Build the current host sidecar with PyInstaller and update assets.
   verify-hindsight-sidecars  Verify manifest checksums and archive layouts.
   smoke-hindsight-sidecar    Extract and run the current-host sidecar entry.
@@ -161,12 +158,6 @@ impl PyInstallerCommand {
 }
 
 #[derive(Debug)]
-struct ProductBuildArgs {
-    target: Option<String>,
-    locked: bool,
-}
-
-#[derive(Debug)]
 struct PackageReleaseArgs {
     target: String,
     release_dir: Option<PathBuf>,
@@ -182,31 +173,6 @@ struct RootManifest {
 struct RootPackage {
     name: String,
     version: String,
-}
-
-fn parse_product_build_args(raw: &[String]) -> Result<ProductBuildArgs> {
-    let mut target = None;
-    let mut locked = true;
-
-    let mut index = 0;
-    while index < raw.len() {
-        match raw[index].as_str() {
-            "--target" => {
-                target = Some(next_value(raw, &mut index, "--target")?);
-            }
-            "--no-locked" => {
-                locked = false;
-            }
-            "-h" | "--help" => {
-                print_help();
-                std::process::exit(0);
-            }
-            other => return Err(format!("unknown build flag `{other}`").into()),
-        }
-        index += 1;
-    }
-
-    Ok(ProductBuildArgs { target, locked })
 }
 
 fn parse_build_args(raw: &[String]) -> Result<BuildArgs> {
@@ -332,42 +298,6 @@ fn next_value(raw: &[String], index: &mut usize, flag: &str) -> Result<String> {
     raw.get(*index)
         .cloned()
         .ok_or_else(|| format!("{flag} requires a value").into())
-}
-
-fn build_product(args: ProductBuildArgs) -> Result<()> {
-    build_release_binary(args)?;
-    Ok(())
-}
-
-fn build_release_binary(args: ProductBuildArgs) -> Result<()> {
-    let mut command = Command::new("cargo");
-    command
-        .arg("build")
-        .arg("-p")
-        .arg("daat-locus")
-        .arg("--release");
-
-    if args.locked {
-        command.arg("--locked");
-    }
-    if let Some(target) = args.target {
-        command.arg("--target").arg(target);
-    }
-
-    command.current_dir(repo_root());
-    run_command(&mut command, "release build")?;
-    Ok(())
-}
-
-fn run_command(command: &mut Command, label: &str) -> Result<()> {
-    let status = command
-        .status()
-        .map_err(|err| format!("failed to spawn {label}: {err}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{label} failed with status {status}").into())
-    }
 }
 
 fn build_hindsight_sidecar(args: BuildArgs) -> Result<()> {
@@ -599,7 +529,7 @@ fn package_release_binary(args: PackageReleaseArgs) -> Result<()> {
     let binary_path = release_dir.join(&binary_name);
     if !binary_path.is_file() {
         return Err(format!(
-            "release binary does not exist: {}. Run `cargo xtask build` first for an embedded-WebUI release binary.",
+            "release binary does not exist: {}. Run `cargo build -p daat-locus --release --locked` first for an embedded-WebUI release binary.",
             binary_path.display()
         )
         .into());
