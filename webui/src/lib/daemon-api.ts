@@ -116,6 +116,33 @@ export type DashboardSnapshot = {
   footer_estimated_input_tokens: number | null;
 };
 
+export type LogSource = {
+  id: string;
+  label: string;
+  description: string;
+  category: string;
+  format: "text" | "jsonl" | string;
+  path: string;
+  exists: boolean;
+  size_bytes: number;
+  modified_at_ms: number | null;
+  sensitive: boolean;
+};
+
+export type LogSourcesResponse = {
+  sources: LogSource[];
+};
+
+export type LogReadResponse = {
+  source: LogSource;
+  lines: string[];
+  next_cursor: number;
+  file_size_bytes: number;
+  truncated_start: boolean;
+  has_more: boolean;
+  reset: boolean;
+};
+
 type FetchOptions = {
   signal?: AbortSignal;
   token?: string;
@@ -208,6 +235,68 @@ export async function runDashboardCommand(
     "Dashboard command",
   );
   return result.output;
+}
+
+export async function fetchLogSources({
+  signal,
+  token = getStoredDaemonToken(),
+}: FetchOptions = {}): Promise<LogSource[]> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for log sources.");
+  }
+
+  const response = await fetch("/logs/sources", {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  const result = await parseJsonResponse<LogSourcesResponse>(
+    response,
+    "Log sources",
+  );
+  return result.sources;
+}
+
+export async function readLogSource({
+  source,
+  cursor,
+  limit = 500,
+  signal,
+  token = getStoredDaemonToken(),
+}: FetchOptions & {
+  source: string;
+  cursor?: number;
+  limit?: number;
+}): Promise<LogReadResponse> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for log read.");
+  }
+
+  const url = new URL("/logs/read", window.location.href);
+  url.searchParams.set("source", source);
+  url.searchParams.set("limit", String(limit));
+  if (cursor !== undefined) {
+    url.searchParams.set("cursor", String(cursor));
+  }
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  return parseJsonResponse<LogReadResponse>(response, "Log read");
 }
 
 export function subscribeDashboardSnapshots({

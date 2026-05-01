@@ -30,6 +30,7 @@ const RAW_RUNTIME_STATE =
         "packageDependencies": [\
           ["@fontsource-variable/geist", "npm:5.2.8"],\
           ["@tailwindcss/vite", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:4.2.4"],\
+          ["@tanstack/react-virtual", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:3.13.24"],\
           ["@types/node", "npm:25.6.0"],\
           ["@types/react", "npm:19.2.14"],\
           ["@types/react-dom", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:19.2.3"],\
@@ -3146,6 +3147,42 @@ const RAW_RUNTIME_STATE =
         "linkType": "HARD"\
       }]\
     ]],\
+    ["@tanstack/react-virtual", [\
+      ["npm:3.13.24", {\
+        "packageLocation": "../../../.yarn/berry/cache/@tanstack-react-virtual-npm-3.13.24-debd58499b-10c0.zip/node_modules/@tanstack/react-virtual/",\
+        "packageDependencies": [\
+          ["@tanstack/react-virtual", "npm:3.13.24"]\
+        ],\
+        "linkType": "SOFT"\
+      }],\
+      ["virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:3.13.24", {\
+        "packageLocation": "./.yarn/__virtual__/@tanstack-react-virtual-virtual-ae9f53ac03/4/.yarn/berry/cache/@tanstack-react-virtual-npm-3.13.24-debd58499b-10c0.zip/node_modules/@tanstack/react-virtual/",\
+        "packageDependencies": [\
+          ["@tanstack/react-virtual", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:3.13.24"],\
+          ["@tanstack/virtual-core", "npm:3.14.0"],\
+          ["@types/react", "npm:19.2.14"],\
+          ["@types/react-dom", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:19.2.3"],\
+          ["react", "npm:19.2.5"],\
+          ["react-dom", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:19.2.5"]\
+        ],\
+        "packagePeers": [\
+          "@types/react-dom",\
+          "@types/react",\
+          "react-dom",\
+          "react"\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
+    ["@tanstack/virtual-core", [\
+      ["npm:3.14.0", {\
+        "packageLocation": "../../../.yarn/berry/cache/@tanstack-virtual-core-npm-3.14.0-86f9875478-10c0.zip/node_modules/@tanstack/virtual-core/",\
+        "packageDependencies": [\
+          ["@tanstack/virtual-core", "npm:3.14.0"]\
+        ],\
+        "linkType": "HARD"\
+      }]\
+    ]],\
     ["@ts-morph/common", [\
       ["npm:0.27.0", {\
         "packageLocation": "../../../.yarn/berry/cache/@ts-morph-common-npm-0.27.0-1881357cf0-10c0.zip/node_modules/@ts-morph/common/",\
@@ -3991,6 +4028,7 @@ const RAW_RUNTIME_STATE =
         "packageDependencies": [\
           ["@fontsource-variable/geist", "npm:5.2.8"],\
           ["@tailwindcss/vite", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:4.2.4"],\
+          ["@tanstack/react-virtual", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:3.13.24"],\
           ["@types/node", "npm:25.6.0"],\
           ["@types/react", "npm:19.2.14"],\
           ["@types/react-dom", "virtual:98c24ed4fa5faf87dfa3bc3fdd0bad920a27ba79bf33f4c306cb75110162a87555014e63d266f24b949dae1f1167a816b898ff7684f9e7787d804730ee3c1ba5#npm:19.2.3"],\

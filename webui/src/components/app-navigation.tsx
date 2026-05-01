@@ -34,7 +34,6 @@ const navigationItems: NavigationItem[] = [
   {
     label: "Logs",
     href: "#logs",
-    disabled: true,
   },
 ];
 
@@ -82,7 +81,9 @@ export function AppNavigation({
         <nav className="grid gap-1" aria-label="Primary navigation">
           {navigationItems.map((item) => {
             const isRuntimePage =
-              item.href === "#agent" || item.href === "#status";
+              item.href === "#agent" ||
+              item.href === "#status" ||
+              item.href === "#logs";
             const isActive = activeHash === item.href && isAuthenticated;
             const isDisabled =
               item.disabled || (isRuntimePage && !isAuthenticated);

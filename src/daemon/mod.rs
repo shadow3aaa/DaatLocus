@@ -41,6 +41,7 @@ use crate::{
 };
 
 mod auth;
+mod logs;
 
 pub use auth::{
     CreatedDaemonToken, DaemonAuthToken, DaemonTokenListEntry, DaemonTokenRegistryHandle,
@@ -344,6 +345,8 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/status", get(status_handler))
         .route("/dashboard/snapshot", get(snapshot_handler))
         .route("/dashboard/stream", get(stream_handler))
+        .route("/logs/sources", get(logs::sources_handler))
+        .route("/logs/read", get(logs::read_handler))
         .route("/commands/run", post(command_handler))
         .route("/daemon/shutdown", post(shutdown_handler))
         .route("/daemon/restart", post(restart_handler))
