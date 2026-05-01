@@ -1,14 +1,27 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type DragEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 
 import {
   AgentStatusAnimation,
   type AgentAnimationStatus,
 } from "@/components/agent-status-animation";
-import { CheckIcon, XIcon } from "lucide-react";
+import { CheckIcon, GripVerticalIcon, XIcon } from "lucide-react";
 import { Bar, BarChart, Cell, Pie, PieChart, XAxis, YAxis } from "recharts";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import {
   ChartContainer,
   ChartTooltip,
@@ -22,10 +35,12 @@ import {
   type TokenUsage,
   type TokenUsageInfo,
 } from "@/lib/daemon-api";
+import { cn } from "@/lib/utils";
 
 const DASHBOARD_STREAM_RECONNECT_MS = 1500;
 const SUMMARY_TYPE_INTERVAL_MS = 28;
 const TOKEN_USAGE_MAX_VISIBLE_DAYS = 7;
+const STATUS_CARD_ORDER_STORAGE_KEY = "daat-locus.status.card-order";
 const TOKEN_USAGE_CHART_CONFIG = {
   cached: {
     label: "Cached",
@@ -101,9 +116,53 @@ const RUNTIME_OPTIMIZATION_CHART_CONFIG = {
   },
 } satisfies ChartConfig;
 
+const DEFAULT_STATUS_CARD_ORDER = [
+  "telegram-approval",
+  "runtime-optimization",
+  "daily-token-usage",
+  "workflow-optimization",
+] as const;
+
 type AgentStatusView = {
   animationStatus: AgentAnimationStatus;
   label: string;
+};
+
+type StatusCardId = (typeof DEFAULT_STATUS_CARD_ORDER)[number];
+type StatusCardPlacement = "before" | "after";
+
+type StatusCardDropIntent = {
+  targetId: StatusCardId;
+  placement: StatusCardPlacement;
+};
+
+type StatusCardContentProps = {
+  snapshot: DashboardSnapshot | null;
+  dragHandle: ReactNode;
+};
+
+type StatusCardDefinition = {
+  label: string;
+  render: (props: StatusCardContentProps) => ReactNode;
+};
+
+const STATUS_CARD_DEFINITIONS: Record<StatusCardId, StatusCardDefinition> = {
+  "telegram-approval": {
+    label: "Telegram Approval",
+    render: (props) => <TelegramApprovalCard {...props} />,
+  },
+  "runtime-optimization": {
+    label: "Runtime Optimization",
+    render: (props) => <RuntimeOptimizationCard {...props} />,
+  },
+  "daily-token-usage": {
+    label: "Token Usage",
+    render: (props) => <DailyTokenUsageCard {...props} />,
+  },
+  "workflow-optimization": {
+    label: "Workflow Optimization",
+    render: (props) => <WorkflowOptimizationCard {...props} />,
+  },
 };
 
 function useDashboardSnapshot() {
@@ -231,6 +290,107 @@ export function AgentPage() {
 
 export function StatusPage() {
   const { snapshot } = useDashboardSnapshot();
+  const [cardOrder, setCardOrder] = useState<StatusCardId[]>(
+    readStoredStatusCardOrder,
+  );
+  const [draggedCardId, setDraggedCardId] = useState<StatusCardId | null>(null);
+  const [dropIntent, setDropIntent] = useState<StatusCardDropIntent | null>(
+    null,
+  );
+  const cardColumns = useMemo(() => statusCardColumns(cardOrder), [cardOrder]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        STATUS_CARD_ORDER_STORAGE_KEY,
+        JSON.stringify(cardOrder),
+      );
+    } catch {
+      // Ignore storage failures, e.g. private mode or disabled storage.
+    }
+  }, [cardOrder]);
+
+  function handleDragStart(
+    event: DragEvent<HTMLButtonElement>,
+    cardId: StatusCardId,
+  ) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", cardId);
+    setDraggedCardId(cardId);
+  }
+
+  function handleDragOver(
+    event: DragEvent<HTMLDivElement>,
+    targetId: StatusCardId,
+  ) {
+    if (!draggedCardId || draggedCardId === targetId) {
+      setDropIntent(null);
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDropIntent({
+      targetId,
+      placement: dropPlacementFromEvent(event),
+    });
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLDivElement>) {
+    if (
+      event.relatedTarget instanceof Node &&
+      event.currentTarget.contains(event.relatedTarget)
+    ) {
+      return;
+    }
+
+    setDropIntent(null);
+  }
+
+  function handleDrop(
+    event: DragEvent<HTMLDivElement>,
+    targetId: StatusCardId,
+  ) {
+    event.preventDefault();
+    const sourceId =
+      statusCardIdFromValue(event.dataTransfer.getData("text/plain")) ??
+      draggedCardId;
+
+    if (sourceId && sourceId !== targetId) {
+      const placement =
+        dropIntent?.targetId === targetId
+          ? dropIntent.placement
+          : dropPlacementFromEvent(event);
+      setCardOrder((current) =>
+        reorderStatusCards(current, sourceId, targetId, placement),
+      );
+    }
+
+    setDraggedCardId(null);
+    setDropIntent(null);
+  }
+
+  function handleDragEnd() {
+    setDraggedCardId(null);
+    setDropIntent(null);
+  }
+
+  function handleKeyboardMove(
+    event: KeyboardEvent<HTMLButtonElement>,
+    cardId: StatusCardId,
+  ) {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowLeft") {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowRight") {
+        return;
+      }
+      event.preventDefault();
+      setCardOrder((current) => moveStatusCardByDelta(current, cardId, 1));
+      return;
+    }
+
+    event.preventDefault();
+    setCardOrder((current) => moveStatusCardByDelta(current, cardId, -1));
+  }
 
   return (
     <section
@@ -239,25 +399,98 @@ export function StatusPage() {
       className="min-h-screen w-full px-6 pb-10 pt-20 md:pb-12 md:pt-24"
     >
       <div className="grid w-full grid-cols-1 items-start gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        <div className="flex min-w-0 flex-col gap-4">
-          <TelegramApprovalCard snapshot={snapshot} />
-          <RuntimeOptimizationCard snapshot={snapshot} />
-        </div>
-        <div className="flex min-w-0 flex-col gap-4">
-          <DailyTokenUsageCard snapshot={snapshot} />
-        </div>
-        <div className="flex min-w-0 flex-col gap-4 sm:col-span-2 xl:col-span-1">
-          <WorkflowOptimizationCard snapshot={snapshot} />
-        </div>
+        {cardColumns.map((column, columnIndex) => (
+          <div
+            key={columnIndex}
+            className={cn(
+              "flex min-w-0 flex-col gap-4",
+              columnIndex === 2 && "sm:col-span-2 xl:col-span-1",
+            )}
+          >
+            {column.map((cardId) => {
+              const definition = STATUS_CARD_DEFINITIONS[cardId];
+              return (
+                <div
+                  key={cardId}
+                  onDragOver={(event) => handleDragOver(event, cardId)}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(event) => handleDrop(event, cardId)}
+                  className={cn(
+                    "relative rounded-xl transition-opacity",
+                    draggedCardId === cardId && "opacity-45",
+                    dropIntent?.targetId === cardId &&
+                      dropIntent.placement === "before" &&
+                      "before:absolute before:-top-2 before:left-2 before:right-2 before:z-10 before:h-1 before:rounded-full before:bg-primary",
+                    dropIntent?.targetId === cardId &&
+                      dropIntent.placement === "after" &&
+                      "after:absolute after:-bottom-2 after:left-2 after:right-2 after:z-10 after:h-1 after:rounded-full after:bg-primary",
+                  )}
+                >
+                  {definition.render({
+                    snapshot,
+                    dragHandle: (
+                      <StatusCardDragHandle
+                        cardId={cardId}
+                        label={definition.label}
+                        onDragStart={handleDragStart}
+                        onDragEnd={handleDragEnd}
+                        onKeyboardMove={handleKeyboardMove}
+                      />
+                    ),
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        ))}
       </div>
     </section>
   );
 }
 
+function StatusCardDragHandle({
+  cardId,
+  label,
+  onDragStart,
+  onDragEnd,
+  onKeyboardMove,
+}: {
+  cardId: StatusCardId;
+  label: string;
+  onDragStart: (
+    event: DragEvent<HTMLButtonElement>,
+    cardId: StatusCardId,
+  ) => void;
+  onDragEnd: () => void;
+  onKeyboardMove: (
+    event: KeyboardEvent<HTMLButtonElement>,
+    cardId: StatusCardId,
+  ) => void;
+}) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon-sm"
+      draggable
+      aria-label={`Reorder ${label} card`}
+      title={`Drag to reorder ${label}`}
+      onDragStart={(event) => onDragStart(event, cardId)}
+      onDragEnd={onDragEnd}
+      onKeyDown={(event) => onKeyboardMove(event, cardId)}
+      className="cursor-grab text-muted-foreground hover:text-foreground active:cursor-grabbing"
+    >
+      <GripVerticalIcon className="size-4" />
+    </Button>
+  );
+}
+
 function TelegramApprovalCard({
   snapshot,
+  dragHandle,
 }: {
   snapshot: DashboardSnapshot | null;
+  dragHandle: ReactNode;
 }) {
   const requests = snapshot?.pending_access_requests ?? [];
   const [busyChatId, setBusyChatId] = useState<number | null>(null);
@@ -283,6 +516,7 @@ function TelegramApprovalCard({
     <Card className="w-full">
       <CardHeader>
         <CardTitle>Telegram Approval</CardTitle>
+        <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
         {requests.length > 0 ? (
@@ -350,8 +584,10 @@ function TelegramApprovalCard({
 
 function DailyTokenUsageCard({
   snapshot,
+  dragHandle,
 }: {
   snapshot: DashboardSnapshot | null;
+  dragHandle: ReactNode;
 }) {
   const chartData = useMemo(() => dailyTokenUsageChartData(snapshot), [snapshot]);
   const hasUsage = chartData.some((day) => day.total > 0);
@@ -360,6 +596,7 @@ function DailyTokenUsageCard({
     <Card className="w-full overflow-visible">
       <CardHeader>
         <CardTitle>Token Usage</CardTitle>
+        <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
         <ChartContainer
@@ -421,8 +658,10 @@ function DailyTokenUsageCard({
 
 function WorkflowOptimizationCard({
   snapshot,
+  dragHandle,
 }: {
   snapshot: DashboardSnapshot | null;
+  dragHandle: ReactNode;
 }) {
   const progressData = useMemo(
     () => workflowOptimizationProgressData(snapshot),
@@ -438,6 +677,7 @@ function WorkflowOptimizationCard({
     <Card className="w-full overflow-visible">
       <CardHeader>
         <CardTitle>Workflow Optimization</CardTitle>
+        <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
         <div className="relative mx-auto h-48 w-full max-w-48">
@@ -488,8 +728,10 @@ function WorkflowOptimizationCard({
 
 function RuntimeOptimizationCard({
   snapshot,
+  dragHandle,
 }: {
   snapshot: DashboardSnapshot | null;
+  dragHandle: ReactNode;
 }) {
   const progressData = useMemo(
     () => runtimeOptimizationProgressData(snapshot),
@@ -505,6 +747,7 @@ function RuntimeOptimizationCard({
     <Card className="w-full overflow-visible">
       <CardHeader>
         <CardTitle>Runtime Optimization</CardTitle>
+        <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
         <div className="relative mx-auto h-48 w-full max-w-48">
@@ -551,6 +794,123 @@ function RuntimeOptimizationCard({
       </CardContent>
     </Card>
   );
+}
+
+function statusCardColumns(order: StatusCardId[]) {
+  const normalizedOrder = normalizeStatusCardOrder(order);
+
+  return [
+    normalizedOrder.slice(0, 2),
+    normalizedOrder.slice(2, 3),
+    normalizedOrder.slice(3),
+  ];
+}
+
+function moveStatusCardByDelta(
+  order: StatusCardId[],
+  cardId: StatusCardId,
+  delta: number,
+) {
+  const normalizedOrder = normalizeStatusCardOrder(order);
+  const currentIndex = normalizedOrder.indexOf(cardId);
+  if (currentIndex === -1) {
+    return normalizedOrder;
+  }
+
+  const nextIndex = Math.max(
+    0,
+    Math.min(normalizedOrder.length - 1, currentIndex + delta),
+  );
+  if (nextIndex === currentIndex) {
+    return normalizedOrder;
+  }
+
+  const nextOrder = [...normalizedOrder];
+  const [movedCard] = nextOrder.splice(currentIndex, 1);
+  nextOrder.splice(nextIndex, 0, movedCard);
+  return nextOrder;
+}
+
+function reorderStatusCards(
+  order: StatusCardId[],
+  sourceId: StatusCardId,
+  targetId: StatusCardId,
+  placement: StatusCardPlacement,
+) {
+  if (sourceId === targetId) {
+    return normalizeStatusCardOrder(order);
+  }
+
+  const withoutSource = normalizeStatusCardOrder(order).filter(
+    (cardId) => cardId !== sourceId,
+  );
+  const targetIndex = withoutSource.indexOf(targetId);
+  if (targetIndex === -1) {
+    return withoutSource;
+  }
+
+  const insertIndex = placement === "after" ? targetIndex + 1 : targetIndex;
+  const nextOrder = [...withoutSource];
+  nextOrder.splice(insertIndex, 0, sourceId);
+  return normalizeStatusCardOrder(nextOrder);
+}
+
+function dropPlacementFromEvent(
+  event: DragEvent<HTMLElement>,
+): StatusCardPlacement {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const midpoint = bounds.top + bounds.height / 2;
+  return event.clientY > midpoint ? "after" : "before";
+}
+
+function readStoredStatusCardOrder(): StatusCardId[] {
+  if (typeof window === "undefined") {
+    return [...DEFAULT_STATUS_CARD_ORDER];
+  }
+
+  try {
+    const storedOrder = window.localStorage.getItem(
+      STATUS_CARD_ORDER_STORAGE_KEY,
+    );
+    if (!storedOrder) {
+      return [...DEFAULT_STATUS_CARD_ORDER];
+    }
+
+    const parsed: unknown = JSON.parse(storedOrder);
+    if (!Array.isArray(parsed)) {
+      return [...DEFAULT_STATUS_CARD_ORDER];
+    }
+
+    return normalizeStatusCardOrder(parsed);
+  } catch {
+    return [...DEFAULT_STATUS_CARD_ORDER];
+  }
+}
+
+function normalizeStatusCardOrder(order: readonly unknown[]): StatusCardId[] {
+  const nextOrder: StatusCardId[] = [];
+
+  for (const value of order) {
+    const cardId = statusCardIdFromValue(value);
+    if (cardId && !nextOrder.includes(cardId)) {
+      nextOrder.push(cardId);
+    }
+  }
+
+  for (const cardId of DEFAULT_STATUS_CARD_ORDER) {
+    if (!nextOrder.includes(cardId)) {
+      nextOrder.push(cardId);
+    }
+  }
+
+  return nextOrder;
+}
+
+function statusCardIdFromValue(value: unknown): StatusCardId | null {
+  return typeof value === "string" &&
+    DEFAULT_STATUS_CARD_ORDER.includes(value as StatusCardId)
+    ? (value as StatusCardId)
+    : null;
 }
 
 type DailyTokenUsageChartDatum = {
