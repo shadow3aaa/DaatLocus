@@ -21,6 +21,25 @@ import { cn } from "@/lib/utils";
 const LOG_READ_LIMIT = 1_000;
 const FOLLOW_POLL_MS = 1_500;
 const MAX_RENDERED_LINES = 5_000;
+const LEVEL_FILTER_STORAGE_KEY = "daat-locus.logs.level-filter";
+
+const LOG_LEVEL_FILTERS = [
+  { value: "trace", label: "TRACE" },
+  { value: "debug", label: "DEBUG" },
+  { value: "info", label: "INFO" },
+  { value: "warn", label: "WARNING" },
+  { value: "error", label: "ERROR" },
+] as const;
+
+type LogLevelFilter = (typeof LOG_LEVEL_FILTERS)[number]["value"];
+
+const LOG_LEVEL_RANK: Record<LogLevelFilter, number> = {
+  trace: 0,
+  debug: 1,
+  info: 2,
+  warn: 3,
+  error: 4,
+};
 
 type LogLine = {
   id: string;
@@ -48,9 +67,13 @@ export function LogsPage() {
   const [lines, setLines] = useState<LogLine[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
   const [query, setQuery] = useState("");
+  const [levelFilter, setLevelFilter] = useState<LogLevelFilter>(
+    readStoredLevelFilter,
+  );
   const [isSourceMenuOpen, setIsSourceMenuOpen] = useState(false);
+  const [isLevelMenuOpen, setIsLevelMenuOpen] = useState(false);
   const viewportRef = useRef<HTMLDivElement | null>(null);
-  const sourceMenuRef = useRef<HTMLDivElement | null>(null);
+  const menuBarRef = useRef<HTMLDivElement | null>(null);
 
   const selectedSource =
     sources.find((source) => source.id === selectedSourceId) ?? null;
@@ -62,24 +85,23 @@ export function LogsPage() {
 
   const filteredEntries = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) {
-      return entries;
-    }
 
     return entries.filter((entry) =>
-      [
-        entry.raw,
-        entry.timestamp,
-        entry.level,
-        entry.target,
-        entry.message,
-      ]
-        .filter(Boolean)
-        .join("\n")
-        .toLowerCase()
-        .includes(normalizedQuery),
+      entryMatchesLevelFilter(entry, levelFilter) &&
+      (!normalizedQuery ||
+        [
+          entry.raw,
+          entry.timestamp,
+          displayLevel(entry.level),
+          entry.target,
+          entry.message,
+        ]
+          .filter(Boolean)
+          .join("\n")
+          .toLowerCase()
+          .includes(normalizedQuery)),
     );
-  }, [entries, query]);
+  }, [entries, levelFilter, query]);
 
   const virtualizer = useVirtualizer({
     count: filteredEntries.length,
@@ -129,6 +151,7 @@ export function LogsPage() {
     setCursor(null);
     setReadError(null);
     setIsSourceMenuOpen(false);
+    setIsLevelMenuOpen(false);
     if (!selectedSourceId) {
       return;
     }
@@ -162,22 +185,24 @@ export function LogsPage() {
   }, [filteredEntries.length, query, virtualizer]);
 
   useEffect(() => {
-    if (!isSourceMenuOpen) {
+    if (!isSourceMenuOpen && !isLevelMenuOpen) {
       return;
     }
 
     function closeOnOutsidePointer(event: MouseEvent) {
       if (
-        sourceMenuRef.current &&
-        !sourceMenuRef.current.contains(event.target as Node)
+        menuBarRef.current &&
+        !menuBarRef.current.contains(event.target as Node)
       ) {
         setIsSourceMenuOpen(false);
+        setIsLevelMenuOpen(false);
       }
     }
 
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
         setIsSourceMenuOpen(false);
+        setIsLevelMenuOpen(false);
       }
     }
 
@@ -188,7 +213,15 @@ export function LogsPage() {
       document.removeEventListener("mousedown", closeOnOutsidePointer);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [isSourceMenuOpen]);
+  }, [isLevelMenuOpen, isSourceMenuOpen]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LEVEL_FILTER_STORAGE_KEY, levelFilter);
+    } catch {
+      // Ignore localStorage failures, e.g. private mode or disabled storage.
+    }
+  }, [levelFilter]);
 
   async function loadInitialLog(sourceId: string, signal?: AbortSignal) {
     setReadLoadState("loading");
@@ -258,6 +291,7 @@ export function LogsPage() {
     selectedSource,
     entriesCount: entries.length,
     filteredCount: filteredEntries.length,
+    levelFilter,
     query,
   });
 
@@ -268,75 +302,138 @@ export function LogsPage() {
       className="h-screen overflow-hidden bg-background pt-20"
     >
       <div
-        ref={sourceMenuRef}
-        className="fixed top-4 left-16 z-50 md:top-6 md:left-20"
+        ref={menuBarRef}
+        className="fixed top-4 left-16 z-50 flex items-start gap-2 md:top-6 md:left-20"
       >
-        <Button
-          type="button"
-          variant="outline"
-          aria-haspopup="menu"
-          aria-expanded={isSourceMenuOpen}
-          disabled={sourceLoadState === "loading" && sources.length === 0}
-          onClick={() => setIsSourceMenuOpen((open) => !open)}
-          className="max-w-[48vw] rounded-full border-border/60 bg-background/70 px-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
-        >
-          <span className="truncate">
-            {selectedSource?.label ??
-              (sourceLoadState === "loading" ? "Loading logs" : "Logs")}
-          </span>
-          <ChevronDownIcon
-            className={cn(
-              "size-4 transition-transform",
-              isSourceMenuOpen && "rotate-180",
-            )}
-          />
-        </Button>
-
-        {isSourceMenuOpen ? (
-          <div
-            role="menu"
-            className="absolute top-full left-0 mt-2 max-h-[min(24rem,70vh)] w-72 max-w-[calc(100vw-2rem)] overflow-auto rounded-xl border border-border/70 bg-popover p-1 text-popover-foreground shadow-xl"
+        <div className="relative">
+          <Button
+            type="button"
+            variant="outline"
+            aria-haspopup="menu"
+            aria-expanded={isSourceMenuOpen}
+            disabled={sourceLoadState === "loading" && sources.length === 0}
+            onClick={() => {
+              setIsSourceMenuOpen((open) => !open);
+              setIsLevelMenuOpen(false);
+            }}
+            className="max-w-[36vw] rounded-full border-border/60 bg-background/70 px-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
           >
-            {sourceLoadState === "error" ? (
-              <div className="px-3 py-2 text-sm text-destructive">
-                {sourceError ?? "Unable to load log sources."}
-              </div>
-            ) : null}
+            <span className="truncate">
+              {selectedSource?.label ??
+                (sourceLoadState === "loading" ? "Loading logs" : "Logs")}
+            </span>
+            <ChevronDownIcon
+              className={cn(
+                "size-4 transition-transform",
+                isSourceMenuOpen && "rotate-180",
+              )}
+            />
+          </Button>
 
-            {sources.map((source) => (
-              <button
-                key={source.id}
-                type="button"
-                role="menuitemradio"
-                aria-checked={source.id === selectedSourceId}
-                onClick={() => {
-                  setSelectedSourceId(source.id);
-                  setIsSourceMenuOpen(false);
-                }}
-                className={cn(
-                  "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm transition hover:bg-muted",
-                  source.id === selectedSourceId && "bg-muted",
-                )}
-              >
-                <span className="min-w-0">
-                  <span className="block truncate font-medium">
-                    {source.label}
-                  </span>
-                  <span className="block truncate text-xs text-muted-foreground">
-                    {source.category} · {source.format}
-                  </span>
-                </span>
-                <span
-                  aria-label={source.exists ? "available" : "missing"}
+          {isSourceMenuOpen ? (
+            <div
+              role="menu"
+              className="absolute top-full left-0 mt-2 max-h-[min(24rem,70vh)] w-72 max-w-[calc(100vw-2rem)] overflow-auto rounded-xl border border-border/70 bg-popover p-1 text-popover-foreground shadow-xl"
+            >
+              {sourceLoadState === "error" ? (
+                <div className="px-3 py-2 text-sm text-destructive">
+                  {sourceError ?? "Unable to load log sources."}
+                </div>
+              ) : null}
+
+              {sources.map((source) => (
+                <button
+                  key={source.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={source.id === selectedSourceId}
+                  onClick={() => {
+                    setSelectedSourceId(source.id);
+                    setIsSourceMenuOpen(false);
+                  }}
                   className={cn(
-                    "size-2 shrink-0 rounded-full",
-                    source.exists ? "bg-emerald-500" : "bg-muted-foreground/35",
+                    "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm transition hover:bg-muted",
+                    source.id === selectedSourceId && "bg-muted",
                   )}
-                />
-              </button>
-            ))}
-          </div>
-        ) : null}
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium">
+                      {source.label}
+                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {source.category} · {source.format}
+                    </span>
+                  </span>
+                  <span
+                    aria-label={source.exists ? "available" : "missing"}
+                    className={cn(
+                      "size-2 shrink-0 rounded-full",
+                      source.exists
+                        ? "bg-emerald-500"
+                        : "bg-muted-foreground/35",
+                    )}
+                  />
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="relative">
+          <Button
+            type="button"
+            variant="outline"
+            aria-haspopup="menu"
+            aria-expanded={isLevelMenuOpen}
+            onClick={() => {
+              setIsLevelMenuOpen((open) => !open);
+              setIsSourceMenuOpen(false);
+            }}
+            className="rounded-full border-border/60 bg-background/70 px-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
+          >
+            <span>{displayLevel(levelFilter)}</span>
+            <ChevronDownIcon
+              className={cn(
+                "size-4 transition-transform",
+                isLevelMenuOpen && "rotate-180",
+              )}
+            />
+          </Button>
+
+          {isLevelMenuOpen ? (
+            <div
+              role="menu"
+              className="absolute top-full left-0 mt-2 w-40 rounded-xl border border-border/70 bg-popover p-1 text-popover-foreground shadow-xl"
+            >
+              {LOG_LEVEL_FILTERS.map((level) => (
+                <button
+                  key={level.value}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={level.value === levelFilter}
+                  onClick={() => {
+                    setLevelFilter(level.value);
+                    setIsLevelMenuOpen(false);
+                  }}
+                  className={cn(
+                    "flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-medium transition hover:bg-muted",
+                    level.value === levelFilter && "bg-muted",
+                  )}
+                >
+                  {level.label}
+                  <span
+                    className={cn(
+                      "size-2 rounded-full",
+                      level.value === levelFilter
+                        ? "bg-primary"
+                        : "bg-muted-foreground/30",
+                    )}
+                  />
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <div className="fixed top-4 right-4 z-50 md:top-6 md:right-6">
@@ -402,7 +499,7 @@ function LogEntryRow({ entry, query }: { entry: LogEntry; query: string }) {
             levelClassName(entry.level),
           )}
         >
-          {entry.level ?? "log"}
+          {displayLevel(entry.level)}
         </span>
       </div>
       <div className="min-w-0 truncate text-xs text-muted-foreground md:pt-1">
@@ -431,6 +528,7 @@ function emptyStateMessage({
   selectedSource,
   entriesCount,
   filteredCount,
+  levelFilter,
   query,
 }: {
   sourceLoadState: LoadState;
@@ -440,6 +538,7 @@ function emptyStateMessage({
   selectedSource: LogSource | null;
   entriesCount: number;
   filteredCount: number;
+  levelFilter: LogLevelFilter;
   query: string;
 }) {
   if (sourceLoadState === "error" && !selectedSource) {
@@ -458,6 +557,9 @@ function emptyStateMessage({
   }
   if (entriesCount === 0) {
     return "No log entries.";
+  }
+  if (!query.trim() && filteredCount === 0) {
+    return `No ${displayLevel(levelFilter)} or higher log entries.`;
   }
   if (query.trim() && filteredCount === 0) {
     return "No matching log entries.";
@@ -663,6 +765,74 @@ function normalizeLevel(level: string | null | undefined): string | null {
     return normalized;
   }
   return normalized;
+}
+
+function displayLevel(level: string | null | undefined) {
+  switch (normalizeLevel(level)) {
+    case "trace":
+      return "TRACE";
+    case "debug":
+      return "DEBUG";
+    case "info":
+      return "INFO";
+    case "warn":
+      return "WARNING";
+    case "error":
+      return "ERROR";
+    default:
+      return level?.trim() ? level.trim().toUpperCase() : "log";
+  }
+}
+
+function entryMatchesLevelFilter(
+  entry: LogEntry,
+  levelFilter: LogLevelFilter,
+) {
+  const entryRank = logLevelRank(entry.level);
+  if (entryRank === null) {
+    return false;
+  }
+  return entryRank >= LOG_LEVEL_RANK[levelFilter];
+}
+
+function readStoredLevelFilter(): LogLevelFilter {
+  if (typeof window === "undefined") {
+    return "warn";
+  }
+
+  try {
+    return (
+      logLevelFilterFromValue(
+        window.localStorage.getItem(LEVEL_FILTER_STORAGE_KEY),
+      ) ?? "warn"
+    );
+  } catch {
+    return "warn";
+  }
+}
+
+function logLevelRank(level: string | null | undefined) {
+  const normalizedLevel = logLevelFilterFromValue(level);
+  return normalizedLevel ? LOG_LEVEL_RANK[normalizedLevel] : null;
+}
+
+function logLevelFilterFromValue(
+  value: string | null | undefined,
+): LogLevelFilter | null {
+  switch (normalizeLevel(value)) {
+    case "trace":
+      return "trace";
+    case "debug":
+      return "debug";
+    case "info":
+      return "info";
+    case "warn":
+      return "warn";
+    case "error":
+      return "error";
+    default:
+      return null;
+  }
 }
 
 function levelClassName(level: string | null) {
