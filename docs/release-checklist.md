@@ -36,9 +36,6 @@ Use this checklist before tagging a Daat Locus release.
   `embedded-webui` feature.
   - Pass additional `cargo build` arguments after `--`, for example
     `cargo xtask build -- --timings`.
-  - Use `cargo xtask run` for local embedded-WebUI daemon smoke runs. Pass
-    additional `cargo run` arguments after `--`, for example
-    `cargo xtask run -- --release -- --help`.
 - Run the `Release Binaries` workflow for the release tag and confirm Linux,
   macOS, and Windows artifacts are uploaded to the GitHub Release.
 - Confirm release binaries embed the WebUI assets but do not embed Hindsight

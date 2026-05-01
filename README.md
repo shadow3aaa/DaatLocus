@@ -111,13 +111,6 @@ Pass extra `cargo build` arguments after `--`, for example:
 cargo xtask build -- --timings
 ```
 
-Use `cargo xtask run` to build the WebUI and run the daemon with embedded WebUI
-assets. Pass extra `cargo run` arguments after `--`, for example:
-
-```bash
-cargo xtask run -- --release -- --help
-```
-
 [releases-url]: https://github.com/shadow3aaa/DaatLocus/releases
 
 ## Documentation

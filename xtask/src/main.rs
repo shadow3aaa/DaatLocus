@@ -45,7 +45,6 @@ fn run() -> Result<()> {
     let command = args.remove(0);
     match command.as_str() {
         "build" => build_product(parse_product_build_args(&args)?)?,
-        "run" => run_product(parse_product_run_args(&args)?)?,
         "build-hindsight-sidecar" => build_hindsight_sidecar(parse_build_args(&args)?)?,
         "verify-hindsight-sidecars" => verify_hindsight_sidecars()?,
         "smoke-hindsight-sidecar" => smoke_hindsight_sidecar(parse_target_arg(&args)?)?,
@@ -62,7 +61,6 @@ fn print_help() {
         "\
 Usage:
   cargo xtask build [--target TARGET] [--no-locked] [-- CARGO_BUILD_ARGS...]
-  cargo xtask run [--target TARGET] [--no-locked] [-- CARGO_RUN_ARGS...]
   cargo xtask build-hindsight-sidecar [--spec PATH | --entry-script PATH] [--target TARGET]
   cargo xtask verify-hindsight-sidecars
   cargo xtask smoke-hindsight-sidecar [--target TARGET]
@@ -71,8 +69,6 @@ Usage:
 Commands:
   build                      Build the full release binary with embedded WebUI assets.
                              Arguments after `--` are forwarded to cargo build.
-  run                        Run the daemon with embedded WebUI assets.
-                             Arguments after `--` are forwarded to cargo run.
   build-hindsight-sidecar    Build the current host sidecar with PyInstaller and update assets.
   verify-hindsight-sidecars  Verify manifest checksums and archive layouts.
   smoke-hindsight-sidecar    Extract and run the current-host sidecar entry.
@@ -174,13 +170,6 @@ struct ProductBuildArgs {
 }
 
 #[derive(Debug)]
-struct ProductRunArgs {
-    target: Option<String>,
-    locked: bool,
-    cargo_run_args: Vec<String>,
-}
-
-#[derive(Debug)]
 struct PackageReleaseArgs {
     target: String,
     release_dir: Option<PathBuf>,
@@ -234,45 +223,6 @@ fn parse_product_build_args(raw: &[String]) -> Result<ProductBuildArgs> {
         target,
         locked,
         cargo_build_args,
-    })
-}
-
-fn parse_product_run_args(raw: &[String]) -> Result<ProductRunArgs> {
-    let mut target = None;
-    let mut locked = true;
-    let mut cargo_run_args = Vec::new();
-
-    let mut index = 0;
-    while index < raw.len() {
-        match raw[index].as_str() {
-            "--" => {
-                cargo_run_args.extend_from_slice(&raw[index + 1..]);
-                break;
-            }
-            "--target" => {
-                target = Some(next_value(raw, &mut index, "--target")?);
-            }
-            "--no-locked" => {
-                locked = false;
-            }
-            "-h" | "--help" => {
-                print_help();
-                std::process::exit(0);
-            }
-            other => {
-                return Err(format!(
-                    "unknown run flag `{other}`. Pass cargo run arguments after `--`."
-                )
-                .into());
-            }
-        }
-        index += 1;
-    }
-
-    Ok(ProductRunArgs {
-        target,
-        locked,
-        cargo_run_args,
     })
 }
 
@@ -407,12 +357,6 @@ fn build_product(args: ProductBuildArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_product(args: ProductRunArgs) -> Result<()> {
-    build_webui()?;
-    run_binary_with_embedded_webui(args)?;
-    Ok(())
-}
-
 fn build_webui() -> Result<()> {
     let webui_dir = repo_root().join("webui");
     let package_json = webui_dir.join("package.json");
@@ -473,28 +417,6 @@ fn build_release_binary_with_embedded_webui(args: ProductBuildArgs) -> Result<()
 
     command.current_dir(repo_root());
     run_command(&mut command, "release build with embedded WebUI")?;
-    Ok(())
-}
-
-fn run_binary_with_embedded_webui(args: ProductRunArgs) -> Result<()> {
-    let mut command = Command::new("cargo");
-    command
-        .arg("run")
-        .arg("-p")
-        .arg("daat-locus")
-        .arg("--features")
-        .arg(EMBEDDED_WEBUI_FEATURE);
-
-    if args.locked {
-        command.arg("--locked");
-    }
-    if let Some(target) = args.target {
-        command.arg("--target").arg(target);
-    }
-    command.args(args.cargo_run_args);
-
-    command.current_dir(repo_root());
-    run_command(&mut command, "cargo run with embedded WebUI")?;
     Ok(())
 }
 
@@ -1392,49 +1314,6 @@ mod tests {
     fn rejects_unknown_product_build_flags_before_separator() {
         let err = parse_product_build_args(&strings(&["--timings"]))
             .expect_err("unknown build flags should fail before `--`");
-
-        assert!(
-            err.to_string().contains("after `--`"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn parses_product_run_passthrough_after_separator() {
-        let args = parse_product_run_args(&strings(&[
-            "--target",
-            "x86_64-unknown-linux-gnu",
-            "--no-locked",
-            "--",
-            "--release",
-            "--",
-            "--help",
-        ]))
-        .expect("run args should parse");
-
-        assert_eq!(args.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
-        assert!(!args.locked);
-        assert_eq!(args.cargo_run_args, strings(&["--release", "--", "--help"]));
-    }
-
-    #[test]
-    fn keeps_run_like_flags_after_separator_as_passthrough() {
-        let args =
-            parse_product_run_args(&strings(&["--", "--target", "x86_64-unknown-linux-gnu"]))
-                .expect("run args should parse");
-
-        assert_eq!(args.target, None);
-        assert!(args.locked);
-        assert_eq!(
-            args.cargo_run_args,
-            strings(&["--target", "x86_64-unknown-linux-gnu"])
-        );
-    }
-
-    #[test]
-    fn rejects_unknown_product_run_flags_before_separator() {
-        let err = parse_product_run_args(&strings(&["--release"]))
-            .expect_err("unknown run flags should fail before `--`");
 
         assert!(
             err.to_string().contains("after `--`"),

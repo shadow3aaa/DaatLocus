@@ -92,13 +92,6 @@ cargo run --locked
 cargo xtask build -- --timings
 ```
 
-需要构建 WebUI 后直接运行带内置 WebUI 的 daemon 时，使用
-`cargo xtask run`。额外的 `cargo run` 参数也可放在 `--` 之后透传，例如：
-
-```bash
-cargo xtask run -- --release -- --help
-```
-
 [releases-url]: https://github.com/shadow3aaa/DaatLocus/releases
 
 ## 文档
