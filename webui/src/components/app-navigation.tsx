@@ -29,7 +29,6 @@ const navigationItems: NavigationItem[] = [
   {
     label: "Settings",
     href: "#settings",
-    disabled: true,
   },
   {
     label: "Logs",
@@ -83,6 +82,7 @@ export function AppNavigation({
             const isRuntimePage =
               item.href === "#agent" ||
               item.href === "#status" ||
+              item.href === "#settings" ||
               item.href === "#logs";
             const isActive = activeHash === item.href && isAuthenticated;
             const isDisabled =

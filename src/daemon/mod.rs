@@ -30,13 +30,14 @@ use tokio::{
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::{
-    config::load_config,
+    config::{Config, ModelConfig, ProviderConfig, ThinkingBudget, load_config},
     daat_locus_paths::daat_locus_paths,
     dashboard::{
         DashboardCommandRunner, DashboardControlCommand, DashboardState, execute_remote_command,
     },
     events::EventStore,
     pending_work::PendingWorkQueue,
+    sandbox::StrongFilesystemSandboxMode,
     telegram_acl::TelegramAclHandle,
 };
 
@@ -169,6 +170,112 @@ pub struct CommandRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommandResponse {
     pub output: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsSummaryResponse {
+    pub loaded_at_ms: i64,
+    pub home_path: String,
+    pub config_path: String,
+    pub locale: String,
+    pub locale_label: String,
+    pub main_model: String,
+    pub judge_model: String,
+    pub hindsight_model: String,
+    pub providers: Vec<SettingsProviderSummary>,
+    pub models: Vec<SettingsModelSummary>,
+    pub daemon: SettingsDaemonSummary,
+    pub judge: SettingsJudgeSummary,
+    pub sandbox: SettingsSandboxSummary,
+    pub hindsight: SettingsHindsightSummary,
+    pub telegram: SettingsTelegramSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsProviderSummary {
+    pub name: String,
+    pub provider_type: &'static str,
+    pub base_url: Option<String>,
+    pub credential: SettingsCredentialSummary,
+    pub auth_file: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsCredentialSummary {
+    pub status: SettingsCredentialStatus,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SettingsCredentialStatus {
+    Configured,
+    EnvConfigured,
+    EnvMissing,
+    Missing,
+    Placeholder,
+    OauthFile,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsModelSummary {
+    pub name: String,
+    pub provider: String,
+    pub model_id: String,
+    pub is_main: bool,
+    pub is_judge: bool,
+    pub is_hindsight: bool,
+    pub temperature: f64,
+    pub thinking_budget: Option<&'static str>,
+    pub rpm: Option<u32>,
+    pub request_timeout_secs: u64,
+    pub stream_idle_timeout_secs: u64,
+    pub context_window_tokens: usize,
+    pub effective_context_window_percent: i64,
+    pub effective_context_window_tokens: usize,
+    pub auto_compact_token_limit: usize,
+    pub max_completion_tokens: usize,
+    pub tool_output_max_tokens: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsDaemonSummary {
+    pub configured_port: u16,
+    pub serving_port: u16,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsJudgeSummary {
+    pub enabled: bool,
+    pub model: Option<String>,
+    pub effective_model: String,
+    pub max_pairwise_candidates: usize,
+    pub max_pairwise_cases: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsSandboxSummary {
+    pub enabled: bool,
+    pub strong_filesystem: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsHindsightSummary {
+    pub namespace: String,
+    pub bank_id: String,
+    pub request_timeout_secs: u64,
+    pub profile: String,
+    pub port: u16,
+    pub model: Option<String>,
+    pub effective_model: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsTelegramSummary {
+    pub enabled: bool,
+    pub credential: SettingsCredentialSummary,
+    pub has_real_credentials: bool,
+    pub poll_timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -345,6 +452,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/status", get(status_handler))
         .route("/dashboard/snapshot", get(snapshot_handler))
         .route("/dashboard/stream", get(stream_handler))
+        .route("/settings/summary", get(settings_summary_handler))
         .route("/logs/sources", get(logs::sources_handler))
         .route("/logs/read", get(logs::read_handler))
         .route("/commands/run", post(command_handler))
@@ -393,6 +501,31 @@ async fn snapshot_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(state.dashboard_rx.borrow().clone()).into_response()
+}
+
+async fn settings_summary_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let paths = daat_locus_paths().await;
+    match load_config().await {
+        Ok(config) => Json(settings_summary_response(
+            &config,
+            paths.root().display().to_string(),
+            paths.config_file("config.toml").display().to_string(),
+            state.port,
+        ))
+        .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to load config summary: {error}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn stream_handler(
@@ -487,6 +620,250 @@ fn runtime_not_ready_response(state: DaemonLifecycleState) -> axum::response::Re
         format!("daemon is {state}; runtime commands are accepted only when ready"),
     )
         .into_response()
+}
+
+fn settings_summary_response(
+    config: &Config,
+    home_path: String,
+    config_path: String,
+    serving_port: u16,
+) -> SettingsSummaryResponse {
+    let judge_effective_model = config
+        .judge
+        .model
+        .clone()
+        .unwrap_or_else(|| config.main_model.clone());
+    let hindsight_effective_model = config
+        .hindsight
+        .model
+        .clone()
+        .unwrap_or_else(|| config.main_model.clone());
+
+    let mut providers = config
+        .providers
+        .iter()
+        .map(|(name, provider)| settings_provider_summary(name, provider))
+        .collect::<Vec<_>>();
+    providers.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut models = config
+        .models
+        .iter()
+        .map(|(name, model)| {
+            settings_model_summary(
+                name,
+                model,
+                &config.main_model,
+                &judge_effective_model,
+                &hindsight_effective_model,
+            )
+        })
+        .collect::<Vec<_>>();
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+
+    SettingsSummaryResponse {
+        loaded_at_ms: chrono::Utc::now().timestamp_millis(),
+        home_path,
+        config_path,
+        locale: config.locale.as_str().to_string(),
+        locale_label: config.locale.display_name().to_string(),
+        main_model: config.main_model.clone(),
+        judge_model: judge_effective_model.clone(),
+        hindsight_model: hindsight_effective_model.clone(),
+        providers,
+        models,
+        daemon: SettingsDaemonSummary {
+            configured_port: config.daemon.port,
+            serving_port,
+        },
+        judge: SettingsJudgeSummary {
+            enabled: config.judge.enabled,
+            model: config.judge.model.clone(),
+            effective_model: judge_effective_model,
+            max_pairwise_candidates: config.judge.max_pairwise_candidates,
+            max_pairwise_cases: config.judge.max_pairwise_cases,
+        },
+        sandbox: SettingsSandboxSummary {
+            enabled: config.sandbox.enabled,
+            strong_filesystem: strong_filesystem_mode_label(config.sandbox.strong_filesystem),
+        },
+        hindsight: SettingsHindsightSummary {
+            namespace: config.hindsight.namespace.clone(),
+            bank_id: config.hindsight.bank_id.clone(),
+            request_timeout_secs: config.hindsight.request_timeout_secs,
+            profile: config.hindsight.profile.clone(),
+            port: config.hindsight.port,
+            model: config.hindsight.model.clone(),
+            effective_model: hindsight_effective_model,
+        },
+        telegram: SettingsTelegramSummary {
+            enabled: config.telegram.enabled,
+            credential: credential_summary(
+                &config.telegram.bot_token,
+                Some("your-telegram-bot-token"),
+            ),
+            has_real_credentials: config.telegram.has_real_credentials(),
+            poll_timeout_secs: config.telegram.poll_timeout_secs,
+        },
+    }
+}
+
+fn settings_provider_summary(name: &str, provider: &ProviderConfig) -> SettingsProviderSummary {
+    match provider {
+        ProviderConfig::Openai { api_key, base_url } => SettingsProviderSummary {
+            name: name.to_string(),
+            provider_type: "openai",
+            base_url: Some(
+                base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+            ),
+            credential: credential_summary(api_key, Some("your-api-key")),
+            auth_file: None,
+        },
+        ProviderConfig::GithubCopilot { github_token } => SettingsProviderSummary {
+            name: name.to_string(),
+            provider_type: "github-copilot",
+            base_url: None,
+            credential: credential_summary(github_token, None),
+            auth_file: None,
+        },
+        ProviderConfig::OpenaiCodexOauth {
+            auth_file,
+            base_url,
+        } => SettingsProviderSummary {
+            name: name.to_string(),
+            provider_type: "openai-codex-oauth",
+            base_url: Some(
+                base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string()),
+            ),
+            credential: SettingsCredentialSummary {
+                status: SettingsCredentialStatus::OauthFile,
+                source: auth_file.clone(),
+            },
+            auth_file: auth_file.clone(),
+        },
+        ProviderConfig::OpenaiCompatible { base_url, api_key } => SettingsProviderSummary {
+            name: name.to_string(),
+            provider_type: "openai-compatible",
+            base_url: Some(base_url.clone()),
+            credential: credential_summary(api_key, Some("your-api-key")),
+            auth_file: None,
+        },
+    }
+}
+
+fn settings_model_summary(
+    name: &str,
+    model: &ModelConfig,
+    main_model: &str,
+    judge_model: &str,
+    hindsight_model: &str,
+) -> SettingsModelSummary {
+    SettingsModelSummary {
+        name: name.to_string(),
+        provider: model.provider.clone(),
+        model_id: model.model_id.clone(),
+        is_main: name == main_model,
+        is_judge: name == judge_model,
+        is_hindsight: name == hindsight_model,
+        temperature: model.temperature,
+        thinking_budget: model.thinking_budget().map(thinking_budget_label),
+        rpm: model.rpm,
+        request_timeout_secs: model.request_timeout_secs(),
+        stream_idle_timeout_secs: model.stream_idle_timeout_secs(),
+        context_window_tokens: model.context_window_tokens(),
+        effective_context_window_percent: model.effective_context_window_percent(),
+        effective_context_window_tokens: model.effective_context_window_tokens(),
+        auto_compact_token_limit: model.auto_compact_token_limit(),
+        max_completion_tokens: model.max_completion_tokens(),
+        tool_output_max_tokens: model.tool_output_max_tokens,
+    }
+}
+
+fn credential_summary(value: &str, placeholder: Option<&str>) -> SettingsCredentialSummary {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return SettingsCredentialSummary {
+            status: SettingsCredentialStatus::Missing,
+            source: None,
+        };
+    }
+
+    if let Some(env_name) = env_reference_name(trimmed) {
+        let is_configured = std::env::var(&env_name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty());
+        return SettingsCredentialSummary {
+            status: if is_configured {
+                SettingsCredentialStatus::EnvConfigured
+            } else {
+                SettingsCredentialStatus::EnvMissing
+            },
+            source: Some(env_name),
+        };
+    }
+
+    if placeholder.is_some_and(|placeholder| trimmed == placeholder) {
+        return SettingsCredentialSummary {
+            status: SettingsCredentialStatus::Placeholder,
+            source: None,
+        };
+    }
+
+    SettingsCredentialSummary {
+        status: SettingsCredentialStatus::Configured,
+        source: None,
+    }
+}
+
+fn env_reference_name(value: &str) -> Option<String> {
+    let name = if let Some(inner) = value
+        .strip_prefix("${")
+        .and_then(|inner| inner.strip_suffix('}'))
+    {
+        inner
+    } else if let Some(inner) = value.strip_prefix("env:") {
+        inner
+    } else {
+        value.strip_prefix('$')?
+    };
+    let name = name.trim();
+    if is_valid_env_reference_name(name) {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_valid_env_reference_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn thinking_budget_label(value: ThinkingBudget) -> &'static str {
+    match value {
+        ThinkingBudget::None => "none",
+        ThinkingBudget::Minimal => "minimal",
+        ThinkingBudget::Low => "low",
+        ThinkingBudget::Medium => "medium",
+        ThinkingBudget::High => "high",
+        ThinkingBudget::Max => "max",
+    }
+}
+
+fn strong_filesystem_mode_label(value: StrongFilesystemSandboxMode) -> &'static str {
+    match value {
+        StrongFilesystemSandboxMode::Off => "off",
+        StrongFilesystemSandboxMode::Auto => "auto",
+        StrongFilesystemSandboxMode::Required => "required",
+    }
 }
 
 async fn dashboard_ws(mut socket: WebSocket, state: ServerState) {

@@ -3,10 +3,11 @@ import { useEffect, useState } from "react";
 import { AppNavigation } from "@/components/app-navigation";
 import { LoginPage } from "@/components/login-page";
 import { LogsPage } from "@/components/logs-page";
+import { SettingsPage } from "@/components/settings-page";
 import { AgentPage, StatusPage } from "@/components/status-page";
 import { getStoredDaemonToken } from "@/lib/daemon-auth";
 
-type AppPage = "agent" | "status" | "logs";
+type AppPage = "agent" | "status" | "settings" | "logs";
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(() =>
@@ -41,6 +42,8 @@ function renderAuthenticatedPage(activePage: AppPage) {
   switch (activePage) {
     case "status":
       return <StatusPage />;
+    case "settings":
+      return <SettingsPage />;
     case "logs":
       return <LogsPage />;
     case "agent":
@@ -59,6 +62,9 @@ function getCurrentPage(): AppPage {
   }
   if (window.location.hash === "#logs") {
     return "logs";
+  }
+  if (window.location.hash === "#settings") {
+    return "settings";
   }
   return "agent";
 }

@@ -140,6 +140,90 @@ export type LogReadResponse = {
   reset: boolean;
 };
 
+export type SettingsCredentialStatus =
+  | "configured"
+  | "env_configured"
+  | "env_missing"
+  | "missing"
+  | "placeholder"
+  | "oauth_file";
+
+export type SettingsCredentialSummary = {
+  status: SettingsCredentialStatus;
+  source: string | null;
+};
+
+export type SettingsProviderSummary = {
+  name: string;
+  provider_type: string;
+  base_url: string | null;
+  credential: SettingsCredentialSummary;
+  auth_file: string | null;
+};
+
+export type SettingsModelSummary = {
+  name: string;
+  provider: string;
+  model_id: string;
+  is_main: boolean;
+  is_judge: boolean;
+  is_hindsight: boolean;
+  temperature: number;
+  thinking_budget: string | null;
+  rpm: number | null;
+  request_timeout_secs: number;
+  stream_idle_timeout_secs: number;
+  context_window_tokens: number;
+  effective_context_window_percent: number;
+  effective_context_window_tokens: number;
+  auto_compact_token_limit: number;
+  max_completion_tokens: number;
+  tool_output_max_tokens: number;
+};
+
+export type SettingsSummary = {
+  loaded_at_ms: number;
+  home_path: string;
+  config_path: string;
+  locale: string;
+  locale_label: string;
+  main_model: string;
+  judge_model: string;
+  hindsight_model: string;
+  providers: SettingsProviderSummary[];
+  models: SettingsModelSummary[];
+  daemon: {
+    configured_port: number;
+    serving_port: number;
+  };
+  judge: {
+    enabled: boolean;
+    model: string | null;
+    effective_model: string;
+    max_pairwise_candidates: number;
+    max_pairwise_cases: number;
+  };
+  sandbox: {
+    enabled: boolean;
+    strong_filesystem: string;
+  };
+  hindsight: {
+    namespace: string;
+    bank_id: string;
+    request_timeout_secs: number;
+    profile: string;
+    port: number;
+    model: string | null;
+    effective_model: string;
+  };
+  telegram: {
+    enabled: boolean;
+    credential: SettingsCredentialSummary;
+    has_real_credentials: boolean;
+    poll_timeout_secs: number;
+  };
+};
+
 type FetchOptions = {
   signal?: AbortSignal;
   token?: string;
@@ -204,6 +288,28 @@ export async function fetchDashboardSnapshot({
   });
 
   return parseJsonResponse<DashboardSnapshot>(response, "Dashboard snapshot");
+}
+
+export async function fetchSettingsSummary({
+  signal,
+  token = getStoredDaemonToken(),
+}: FetchOptions = {}): Promise<SettingsSummary> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for settings summary.");
+  }
+
+  const response = await fetch("/settings/summary", {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  return parseJsonResponse<SettingsSummary>(response, "Settings summary");
 }
 
 export async function runDashboardCommand(

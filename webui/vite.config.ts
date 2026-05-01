@@ -25,6 +25,10 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
+      "/settings": {
+        target: daemonTarget,
+        changeOrigin: true,
+      },
       "/logs": {
         target: daemonTarget,
         changeOrigin: true,
