@@ -89,9 +89,9 @@ export function SettingsPage() {
     <section
       id="settings"
       aria-label="Settings"
-      className="min-h-screen w-full px-6 pb-10 pt-20 md:pb-12 md:pt-24"
+      className="min-h-screen w-full px-4 pb-10 pt-20 md:px-6 md:pb-12 md:pt-24"
     >
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
+      <div className="flex w-full flex-col gap-4">
         <div className="flex flex-col gap-4 rounded-2xl border border-border/60 bg-card/70 p-5 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-card/60 md:flex-row md:items-end md:justify-between">
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
