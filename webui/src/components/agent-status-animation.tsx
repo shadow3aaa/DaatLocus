@@ -85,7 +85,7 @@ const rightWorkingEyeFrames = {
   y: "31;31;31;31;43;43;31",
 } as const;
 const idleLookDistance = 8;
-const idleLookIntervalMs = 3_000;
+const idleLookIntervalMs = 5_000;
 const idleLookMoveDurationMs = 420;
 const idleLookSideHoldMs = 320;
 
