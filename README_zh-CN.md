@@ -76,7 +76,8 @@ cargo binstall daat-locus
 ### 源码构建
 
 `cargo install daat-locus` 会从 crates.io 源码编译。和预编译发布二进制一样，
-源码构建在本地没有缓存时也会在第一次启动时下载匹配的 Hindsight sidecar。
+源码构建在本地没有缓存时也会在第一次启动时下载匹配的 Hindsight sidecar。源码
+构建需要 Node.js，并可使用 Corepack 或 Yarn，因为 `build.rs` 会构建并嵌入 WebUI。
 
 ```bash
 git clone https://github.com/shadow3aaa/DaatLocus
@@ -84,8 +85,10 @@ cd DaatLocus
 cargo run --locked
 ```
 
-`cargo build` 和 `cargo run` 只构建 Rust 核心。需要带内置 WebUI 的完整
-发布式二进制时，使用 `cargo xtask build`。
+`cargo build` 和 `cargo run` 会通过 `build.rs` 构建 WebUI，并默认把生成的
+资源嵌入 daemon。需要发布打包使用的
+`cargo build -p daat-locus --release --locked` 包装时，再使用
+`cargo xtask build`。
 
 [releases-url]: https://github.com/shadow3aaa/DaatLocus/releases
 

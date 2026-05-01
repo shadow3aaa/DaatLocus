@@ -23,7 +23,6 @@ const HINDSIGHT_TORCH_BACKEND: &str = "cpu";
 const HINDSIGHT_EMBED_PACKAGE: &str = "hindsight-embed==0.5.5";
 const HINDSIGHT_API_PACKAGE: &str = "hindsight-api-slim[embedded-db,local-ml]==0.5.5";
 const HINDSIGHT_PACKAGE_VERSION: &str = "0.5.5";
-const EMBEDDED_WEBUI_FEATURE: &str = "embedded-webui";
 
 fn main() -> ExitCode {
     match run() {
@@ -336,60 +335,17 @@ fn next_value(raw: &[String], index: &mut usize, flag: &str) -> Result<String> {
 }
 
 fn build_product(args: ProductBuildArgs) -> Result<()> {
-    build_webui()?;
-    build_release_binary_with_embedded_webui(args)?;
+    build_release_binary(args)?;
     Ok(())
 }
 
-fn build_webui() -> Result<()> {
-    let webui_dir = repo_root().join("webui");
-    let package_json = webui_dir.join("package.json");
-    if !package_json.is_file() {
-        return Err(format!("WebUI package.json not found: {}", package_json.display()).into());
-    }
-
-    let mut install_command = webui_package_manager_command();
-    install_command
-        .arg("install")
-        .arg("--immutable")
-        .current_dir(&webui_dir);
-    run_command(&mut install_command, "WebUI dependency install")?;
-
-    let mut build_command = webui_package_manager_command();
-    build_command.arg("build").current_dir(&webui_dir);
-    run_command(&mut build_command, "WebUI build")?;
-
-    let index_html = webui_dir.join("dist").join("index.html");
-    if !index_html.is_file() {
-        return Err(format!(
-            "WebUI build did not produce required entry {}",
-            index_html.display()
-        )
-        .into());
-    }
-
-    println!("built WebUI assets at {}", webui_dir.join("dist").display());
-    Ok(())
-}
-
-fn webui_package_manager_command() -> Command {
-    if command_exists("corepack") {
-        let mut command = Command::new("corepack");
-        command.arg("yarn");
-        return command;
-    }
-    Command::new("yarn")
-}
-
-fn build_release_binary_with_embedded_webui(args: ProductBuildArgs) -> Result<()> {
+fn build_release_binary(args: ProductBuildArgs) -> Result<()> {
     let mut command = Command::new("cargo");
     command
         .arg("build")
         .arg("-p")
         .arg("daat-locus")
-        .arg("--release")
-        .arg("--features")
-        .arg(EMBEDDED_WEBUI_FEATURE);
+        .arg("--release");
 
     if args.locked {
         command.arg("--locked");
@@ -399,7 +355,7 @@ fn build_release_binary_with_embedded_webui(args: ProductBuildArgs) -> Result<()
     }
 
     command.current_dir(repo_root());
-    run_command(&mut command, "release build with embedded WebUI")?;
+    run_command(&mut command, "release build")?;
     Ok(())
 }
 

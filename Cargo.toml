@@ -22,8 +22,16 @@ include = [
     "/hindsight-sidecar/**",
     "/locales/**",
     "/src/**",
+    "/webui/.yarnrc.yml",
+    "/webui/components.json",
+    "/webui/index.html",
+    "/webui/package.json",
+    "/webui/src/**",
+    "/webui/tailwind.config.cjs",
+    "/webui/tsconfig.json",
+    "/webui/vite.config.ts",
+    "/webui/yarn.lock",
     "/workflows/**",
-    "/xtask/**",
 ]
 
 [package.metadata.binstall]
@@ -37,10 +45,6 @@ members = [".", "xtask"]
 default-members = ["."]
 resolver = "3"
 
-[features]
-default = []
-embedded-webui = ["dep:include_dir"]
-
 [dependencies]
 async-trait = "0.1.89"
 axum = { version = "0.8.4", features = ["ws"] }
@@ -50,7 +54,7 @@ clap = { version = "4.5.38", features = ["derive"] }
 crossterm = "0.29.0"
 diffy = "0.4.2"
 futures-util = "0.3.31"
-include_dir = { version = "0.7.4", optional = true }
+include_dir = "0.7.4"
 libc = "0.2"
 md-5 = "0.10.6"
 miette = { version = "7.6.0", features = ["fancy"] }

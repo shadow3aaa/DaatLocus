@@ -44,7 +44,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: "dist",
+    outDir: process.env.DAAT_LOCUS_WEBUI_OUT_DIR ?? "dist",
     emptyOutDir: true,
   },
 });

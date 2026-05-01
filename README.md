@@ -95,7 +95,8 @@ On first launch, Daat Locus opens an interactive setup flow.
 
 `cargo install daat-locus` is available from crates.io. Like the prebuilt
 release binary, source builds download the matching Hindsight sidecar on first
-launch when it is not already cached.
+launch when it is not already cached. Source builds require Node.js with
+Corepack or Yarn available because `build.rs` builds and embeds the WebUI.
 
 ```bash
 git clone https://github.com/shadow3aaa/DaatLocus
@@ -103,8 +104,10 @@ cd DaatLocus
 cargo run --locked
 ```
 
-`cargo build` and `cargo run` build the Rust core only. Use `cargo xtask build`
-for a full release-style binary with the WebUI assets embedded into the daemon.
+`cargo build` and `cargo run` build the WebUI through `build.rs` and embed the
+generated assets into the daemon by default. Use `cargo xtask build` when you
+need the release-style `cargo build -p daat-locus --release --locked` wrapper
+used by release packaging.
 
 [releases-url]: https://github.com/shadow3aaa/DaatLocus/releases
 
