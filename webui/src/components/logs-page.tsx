@@ -450,7 +450,7 @@ export function LogsPage() {
 
       <div ref={viewportRef} className="h-full overflow-auto px-3 pb-6 md:px-6">
         <div
-          className="relative mx-auto w-full max-w-7xl"
+          className="relative w-full"
           style={{
             height:
               filteredEntries.length > 0
