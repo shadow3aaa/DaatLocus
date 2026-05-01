@@ -382,25 +382,32 @@ function AgentChatBubbles({
       aria-label="Agent chat preview"
       aria-hidden={!isFocused}
       className={cn(
-        "absolute left-1/2 z-0 flex w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 flex-col gap-3 rounded-[2rem] border border-border/60 bg-background/70 p-4 text-left shadow-2xl shadow-background/40 backdrop-blur-xl transition-all duration-300 ease-out",
+        "absolute inset-0 z-0 w-full text-left transition-[filter,opacity] duration-300 ease-out",
         isFocused
-          ? "bottom-[calc(50%+8rem)] top-6 translate-y-0 overflow-y-auto opacity-100"
-          : "pointer-events-none bottom-auto top-[calc(50%+8rem)] max-h-28 translate-y-8 overflow-hidden opacity-35 blur-[1px]",
+          ? "pointer-events-auto overflow-y-auto px-4 pb-[calc(50vh+9rem)] pt-6 opacity-100 [scrollbar-gutter:stable] md:px-8"
+          : "pointer-events-none overflow-hidden px-4 pb-24 pt-[calc(50vh+8rem)] opacity-35 blur-[1px] md:px-8",
       )}
     >
-      {bubbles.length > 0 ? (
-        bubbles.map((bubble) => (
-          <AgentChatBubbleItem
-            key={bubble.id}
-            bubble={bubble}
-            isFocused={isFocused}
-          />
-        ))
-      ) : (
-        <div className="rounded-3xl border border-dashed border-border/70 bg-muted/30 px-4 py-3 text-center text-xs text-muted-foreground">
-          聚焦底部输入框后，这里会显示与 agent 的消息流预览。
-        </div>
-      )}
+      <div
+        className={cn(
+          "flex min-h-full w-full flex-col gap-3 transition-transform duration-300 ease-out",
+          isFocused ? "justify-end" : "justify-start translate-y-8",
+        )}
+      >
+        {bubbles.length > 0 ? (
+          bubbles.map((bubble) => (
+            <AgentChatBubbleItem
+              key={bubble.id}
+              bubble={bubble}
+              isFocused={isFocused}
+            />
+          ))
+        ) : (
+          <p className="mx-auto max-w-[min(32rem,calc(100vw-3rem))] px-4 py-3 text-center text-xs text-muted-foreground/70">
+            聚焦底部输入框后，消息气泡会在整个屏幕上围绕 agent 浮动。
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -431,7 +438,7 @@ function AgentChatBubbleItem({
     >
       <div
         className={cn(
-          "max-w-[85%] rounded-[1.35rem] px-4 py-3 text-sm leading-5 shadow-sm",
+          "max-w-[min(34rem,85%)] rounded-[1.35rem] px-4 py-3 text-sm leading-5 shadow-sm",
           isUser
             ? "rounded-br-md bg-primary text-primary-foreground"
             : isAssistant
