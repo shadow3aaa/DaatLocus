@@ -145,7 +145,7 @@ function CoreCard({
             },
             {
               label: "Daemon",
-              value: `:${summary.daemon.serving_port}`,
+              value: `${summary.daemon.bind_host}:${summary.daemon.serving_port}`,
               meta: portChanged ? `config :${summary.daemon.configured_port}` : undefined,
             },
             {

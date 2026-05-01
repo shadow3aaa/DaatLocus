@@ -10,6 +10,7 @@ export type DaemonStatus = {
   pid: number;
   started_at_ms: number;
   version: string;
+  bind_host: string;
   port: number;
   state: DaemonLifecycleState;
   connected_clients: number;
@@ -228,6 +229,7 @@ export type SettingsSummary = {
   providers: SettingsProviderSummary[];
   models: SettingsModelSummary[];
   daemon: {
+    bind_host: string;
     configured_port: number;
     serving_port: number;
   };

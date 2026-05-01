@@ -1,4 +1,5 @@
 use std::{
+    net::Ipv4Addr,
     path::PathBuf,
     process::Stdio,
     sync::{
@@ -59,7 +60,9 @@ pub use auth::{
     load_or_create_daemon_token_registry, revoke_daemon_token, rotate_daemon_token,
 };
 
-const LOCALHOST: &str = "127.0.0.1";
+pub const DAEMON_BIND_HOST: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
+pub const DAEMON_CLIENT_HOST: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
+pub const DAEMON_HOST_DISPLAY: &str = "0.0.0.0";
 /// Daemon cold start can include browser runtime install plus hindsight/uv
 /// first-run setup. Hindsight itself allows 10 minutes for daemon start, so the
 /// outer readiness window must be longer than that inner startup budget.
@@ -82,6 +85,7 @@ pub struct StatusResponse {
     pub pid: u32,
     pub started_at_ms: i64,
     pub version: String,
+    pub bind_host: String,
     pub port: u16,
     pub state: DaemonLifecycleState,
     pub connected_clients: usize,
@@ -251,6 +255,7 @@ pub struct SettingsModelSummary {
 
 #[derive(Debug, Serialize)]
 pub struct SettingsDaemonSummary {
+    pub bind_host: String,
     pub configured_port: u16,
     pub serving_port: u16,
 }
@@ -303,6 +308,7 @@ pub enum DaemonControlCommand {
 #[derive(Clone)]
 struct ServerState {
     started_at_ms: i64,
+    bind_host: String,
     port: u16,
     auth_registry: DaemonTokenRegistryHandle,
     lifecycle: DaemonLifecycleHandle,
@@ -436,9 +442,15 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         shutdown_rx,
     } = params;
 
-    let listener = TcpListener::bind((LOCALHOST, port))
+    let listener = TcpListener::bind((DAEMON_BIND_HOST, port))
         .await
-        .map_err(|err| miette!("bind daemon listener failed: {err}"))?;
+        .map_err(|err| {
+            miette!(
+                "bind daemon listener on {}:{} failed: {err}",
+                DAEMON_HOST_DISPLAY,
+                port
+            )
+        })?;
     let local_addr = listener
         .local_addr()
         .map_err(|err| miette!("read daemon listener address failed: {err}"))?;
@@ -446,6 +458,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
 
     let app_state = ServerState {
         started_at_ms,
+        bind_host: DAEMON_HOST_DISPLAY.to_string(),
         port: local_addr.port(),
         auth_registry,
         lifecycle,
@@ -587,6 +600,7 @@ async fn status_handler(State(state): State<ServerState>) -> impl IntoResponse {
         pid: std::process::id(),
         started_at_ms: state.started_at_ms,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        bind_host: state.bind_host.clone(),
         port: state.port,
         state: state.lifecycle.get(),
         connected_clients: state
@@ -776,6 +790,7 @@ fn settings_summary_response(
         providers,
         models,
         daemon: SettingsDaemonSummary {
+            bind_host: DAEMON_HOST_DISPLAY.to_string(),
             configured_port: config.daemon.port,
             serving_port,
         },
@@ -1019,7 +1034,10 @@ impl DaemonClient {
     pub fn new(port: u16) -> Self {
         Self {
             port,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("build daemon http client"),
             auth_token: None,
         }
     }
@@ -1027,7 +1045,10 @@ impl DaemonClient {
     pub async fn authenticated(port: u16) -> Result<Self> {
         Ok(Self {
             port,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .map_err(|err| miette!("build daemon http client failed: {err}"))?,
             auth_token: Some(load_daemon_auth_token().await?),
         })
     }
@@ -1037,11 +1058,11 @@ impl DaemonClient {
     }
 
     fn base_url(&self) -> String {
-        format!("http://{}:{}", LOCALHOST, self.port)
+        format!("http://{}:{}", DAEMON_CLIENT_HOST, self.port)
     }
 
     fn ws_url(&self) -> String {
-        format!("ws://{}:{}/dashboard/stream", LOCALHOST, self.port)
+        format!("ws://{}:{}/dashboard/stream", DAEMON_CLIENT_HOST, self.port)
     }
 
     fn with_auth(&self, request: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
@@ -1242,7 +1263,7 @@ pub async fn wait_for_daemon_shutdown(port: u16) -> Result<()> {
     }
     Err(miette!(
         "daemon on {}:{} did not stop accepting connections within {}s",
-        LOCALHOST,
+        DAEMON_HOST_DISPLAY,
         port,
         SHUTDOWN_TIMEOUT.as_secs()
     ))
@@ -1408,7 +1429,7 @@ pub fn status_summary(status: &StatusResponse) -> String {
     format!(
         "daemon pid={} {}:{} state={} started_at_ms={} version={} connected_clients={}",
         status.pid,
-        LOCALHOST,
+        status.bind_host,
         status.port,
         status.state,
         status.started_at_ms,

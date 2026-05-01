@@ -34,7 +34,7 @@ cargo run -- config-schema
 - `[models]`：模型定义注册表。
 - `locale`：用户界面本地化语言。
 - `main_model`：主运行时使用的 model key。
-- `[daemon]`：daemon 端口。
+- `[daemon]`：daemon 端口。daemon 会监听所有 IPv4 接口（`0.0.0.0`）以支持 LAN 访问；远程 Dashboard/API 访问需要用 daemon token 保护。
 - `[judge]`：judge / pairwise 评估配置。
 - `[sandbox]`：运行时沙箱控制。
 - `[hindsight]`：由 Daat Locus 托管的 `hindsight-embed` 配置。
@@ -63,6 +63,8 @@ max_completion_tokens = 4000
 tool_output_max_tokens = 2000
 
 [daemon]
+# Daat Locus 会监听 0.0.0.0:<port>，LAN 客户端可打开
+# http://<本机-LAN-IP>:<port>/ 并用 daemon token 认证。
 port = 53825
 
 [sandbox]
@@ -81,6 +83,10 @@ enabled = true
 bot_token = "your-telegram-bot-token"
 poll_timeout_secs = 30
 ```
+
+## Daemon LAN 访问
+
+Daat Locus daemon 绑定到 `0.0.0.0:<daemon.port>`，不再绑定回环地址，因此同一 LAN 内的设备可以通过 `http://<本机-LAN-IP>:<daemon.port>/` 打开内嵌 WebUI。Dashboard API、命令 API 和 WebSocket stream 仍需要 daemon token；可用 `daat-locus daemon token create <name>` 创建，然后在 WebUI 登录页粘贴。
 
 ## Provider 说明
 

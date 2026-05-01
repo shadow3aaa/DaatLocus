@@ -39,7 +39,7 @@ Editors can reference it through GitHub raw, for example:
 - `[models]`: model definition registry.
 - `locale`: UI localization language.
 - `main_model`: model key used by the main runtime.
-- `[daemon]`: daemon port.
+- `[daemon]`: daemon port. The daemon listens on all IPv4 interfaces (`0.0.0.0`) for LAN access; protect remote dashboard/API access with daemon tokens.
 - `[judge]`: judge / pairwise evaluation config.
 - `[sandbox]`: runtime sandbox controls.
 - `[hindsight]`: Daat Locus-managed `hindsight-embed` config.
@@ -68,6 +68,8 @@ max_completion_tokens = 4000
 tool_output_max_tokens = 2000
 
 [daemon]
+# Daat Locus listens on 0.0.0.0:<port>, so LAN clients can open
+# http://<this-machine-lan-ip>:<port>/ and authenticate with a daemon token.
 port = 53825
 
 [sandbox]
@@ -86,6 +88,14 @@ enabled = true
 bot_token = "your-telegram-bot-token"
 poll_timeout_secs = 30
 ```
+
+## Daemon LAN Access
+
+The Daat Locus daemon binds to `0.0.0.0:<daemon.port>` instead of a loopback
+address, so machines on the same LAN can open the embedded WebUI at
+`http://<this-machine-lan-ip>:<daemon.port>/`. Dashboard APIs, command APIs,
+and the WebSocket stream require a daemon token; create one with
+`daat-locus daemon token create <name>` and paste it into the WebUI login page.
 
 ## Provider Notes
 

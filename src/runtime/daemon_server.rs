@@ -4,9 +4,9 @@ use crate::{
     app::{AppId, AppManager},
     context::Context,
     daemon::{
-        DaemonControlCommand as RuntimeDaemonControlCommand, DaemonLifecycleHandle,
-        DaemonLifecycleState, DaemonLock, DaemonServerStartParams, spawn_detached_daemon_process,
-        start_server,
+        DAEMON_HOST_DISPLAY, DaemonControlCommand as RuntimeDaemonControlCommand,
+        DaemonLifecycleHandle, DaemonLifecycleState, DaemonLock, DaemonServerStartParams,
+        spawn_detached_daemon_process, start_server,
     },
     dashboard::render::{
         current_plan_step_for_dashboard, render_activity_for_dashboard,
@@ -90,7 +90,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     .await?;
     emit_startup_progress(format!(
         "[daemon] listening on http://{}:{}",
-        "127.0.0.1", daemon_server.port
+        DAEMON_HOST_DISPLAY, daemon_server.port
     ));
 
     // Register signal handling before expensive initialization so Ctrl+C /
