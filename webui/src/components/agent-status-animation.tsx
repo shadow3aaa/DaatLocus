@@ -85,11 +85,9 @@ const rightWorkingEyeFrames = {
   y: "31;31;31;31;43;43;31",
 } as const;
 const idleLookDistance = 8;
-const idleLookMoveDurationMs = 360;
-const idleLookMinRestMs = 1_100;
-const idleLookMaxRestMs = 3_400;
-const idleLookMinHoldMs = 650;
-const idleLookMaxHoldMs = 1_350;
+const idleLookIntervalMs = 3_000;
+const idleLookMoveDurationMs = 420;
+const idleLookHoldMs = 760;
 
 type ExpressionVisualKind = keyof typeof mouthPathByVisualKind;
 type IdleLookDirection = -1 | 0 | 1;
@@ -111,6 +109,10 @@ function lerp(from: number, to: number, progress: number) {
 
 function easeOutCubic(progress: number) {
   return 1 - Math.pow(1 - progress, 3);
+}
+
+function easeInOutSine(progress: number) {
+  return -(Math.cos(Math.PI * progress) - 1) / 2;
 }
 
 function formatSvgNumber(value: number) {
@@ -462,11 +464,11 @@ function useIdleEyeLook(isActive: boolean) {
   const [lookOffset, setLookOffset] = useState(0);
   const animationFrameRef = useRef<number | null>(null);
   const currentOffsetRef = useRef(0);
-  const lastLookDirectionRef = useRef<IdleLookDirection>(0);
+  const queuedLookDirectionsRef = useRef<IdleLookDirection[]>([]);
 
   useEffect(() => {
     let isCurrent = true;
-    let timeoutId: number | null = null;
+    const timeoutIds = new Set<number>();
 
     const clearAnimationFrame = () => {
       if (animationFrameRef.current === null) {
@@ -491,7 +493,7 @@ function useIdleEyeLook(isActive: boolean) {
         const nextOffset = lerp(
           fromOffset,
           targetOffset,
-          easeOutCubic(rawProgress),
+          easeInOutSine(rawProgress),
         );
 
         currentOffsetRef.current = nextOffset;
@@ -514,71 +516,72 @@ function useIdleEyeLook(isActive: boolean) {
       animationFrameRef.current = window.requestAnimationFrame(animate);
     };
 
+    const setManagedTimeout = (callback: () => void, delayMs: number) => {
+      const timeoutId = window.setTimeout(() => {
+        timeoutIds.delete(timeoutId);
+        callback();
+      }, delayMs);
+
+      timeoutIds.add(timeoutId);
+    };
+
+    const clearManagedTimeouts = () => {
+      timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      timeoutIds.clear();
+    };
+
+    const pickLookDirection = () => {
+      if (queuedLookDirectionsRef.current.length === 0) {
+        queuedLookDirectionsRef.current =
+          Math.random() < 0.5 ? [-1, 1] : [1, -1];
+      }
+
+      return queuedLookDirectionsRef.current.shift() ?? 1;
+    };
+
     if (!isActive) {
-      lastLookDirectionRef.current = 0;
+      queuedLookDirectionsRef.current = [];
       animateToOffset(0);
 
       return () => {
         isCurrent = false;
+        clearManagedTimeouts();
         clearAnimationFrame();
       };
     }
 
     const returnToCenter = () => {
       animateToOffset(0);
-      scheduleNextLook();
     };
 
     const lookAside = () => {
-      const nextDirection = pickIdleLookDirection(lastLookDirectionRef.current);
+      const nextDirection = pickLookDirection();
 
-      lastLookDirectionRef.current = nextDirection;
       animateToOffset(nextDirection * idleLookDistance);
-      timeoutId = window.setTimeout(
-        returnToCenter,
-        randomInteger(idleLookMinHoldMs, idleLookMaxHoldMs),
-      );
+      setManagedTimeout(returnToCenter, idleLookHoldMs);
     };
 
     function scheduleNextLook() {
-      timeoutId = window.setTimeout(
-        lookAside,
-        randomInteger(idleLookMinRestMs, idleLookMaxRestMs),
-      );
+      setManagedTimeout(() => {
+        if (!isCurrent) {
+          return;
+        }
+
+        lookAside();
+        scheduleNextLook();
+      }, idleLookIntervalMs);
     }
 
     scheduleNextLook();
 
     return () => {
       isCurrent = false;
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
-      }
+      clearManagedTimeouts();
       clearAnimationFrame();
     };
   }, [isActive]);
 
   return lookOffset;
-}
-
-function pickIdleLookDirection(
-  previousDirection: IdleLookDirection,
-): IdleLookDirection {
-  const randomDirection: IdleLookDirection = Math.random() < 0.5 ? -1 : 1;
-
-  if (previousDirection !== 0 && randomDirection === previousDirection) {
-    return Math.random() < 0.65
-      ? (-previousDirection as IdleLookDirection)
-      : randomDirection;
-  }
-
-  return randomDirection;
-}
-
-function randomInteger(minInclusive: number, maxInclusive: number) {
-  return Math.floor(
-    minInclusive + Math.random() * (maxInclusive - minInclusive + 1),
-  );
 }
 
 function usePrefersReducedMotion() {
