@@ -3,10 +3,10 @@ use std::{collections::HashSet, future::Future, pin::Pin};
 use async_trait::async_trait;
 use miette::{Result, miette};
 use schemars::schema_for;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
-    app::{AppToolExecutionContext, AppToolScope},
+    app::{AppId, AppToolExecutionContext, AppToolScope},
     context::Context,
     context_budget::truncate_text_to_token_budget_with_notice,
     live_progress::TelegramLiveStatus,
@@ -339,6 +339,7 @@ LF: /\n/"#
 }
 
 struct AppRuntimeTool {
+    app_id: AppId,
     name: String,
     description: String,
     input_spec: AgentToolInputSpec,
@@ -383,7 +384,10 @@ impl RuntimeTool for AppRuntimeTool {
                 .tool_output_max_tokens
                 .max(1),
         };
-        let result = context.apps.execute_tool(call, &app_context).await?;
+        let result = context
+            .apps
+            .execute_tool_for_app(&self.app_id, call, &app_context)
+            .await?;
         let mut output =
             ToolExecutionResult::new(result.summary.clone(), result.payload, result.ui_event);
         if let Some(model_content) = result.model_content {
@@ -408,29 +412,25 @@ fn build_app_runtime_tools(
 ) -> Vec<Box<dyn RuntimeTool>> {
     let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
     let mut seen_names = reserved_names.clone();
-    let app_tools = match context.apps.tool_specs() {
-        Ok(app_tools) => app_tools,
-        Err(err) => {
-            tracing::warn!("failed to list focused app tools: {err:?}");
-            return tools;
-        }
-    };
-    for tool in app_tools {
+    for (app_id, tool) in context.apps.all_tool_specs() {
         if !is_valid_dynamic_tool_name(&tool.name) {
             tracing::warn!(
-                "skipping focused app tool `{}` because its name must match [A-Za-z0-9_-]+",
-                tool.name
+                "skipping app tool `{}` from app `{}` because its name must match [A-Za-z0-9_-]+",
+                tool.name,
+                app_id
             );
             continue;
         }
         if !seen_names.insert(tool.name.clone()) {
             tracing::warn!(
-                "skipping focused app tool `{}` because its name conflicts with another runtime tool",
-                tool.name
+                "skipping app tool `{}` from app `{}` because its name conflicts with another runtime tool",
+                tool.name,
+                app_id
             );
             continue;
         }
         tools.push(Box::new(AppRuntimeTool {
+            app_id,
             name: tool.name,
             description: tool.description,
             input_spec: AgentToolInputSpec::JsonSchema {
@@ -461,7 +461,7 @@ fn is_valid_dynamic_tool_name(name: &str) -> bool {
 
 fn context_free_error<T>() -> miette::Result<T> {
     Err(miette!(
-        "focused app runtime tools require app-owned summarize/call-ui dispatch"
+        "app runtime tools require app-owned summarize/call-ui dispatch"
     ))
 }
 
@@ -478,21 +478,14 @@ fn find_runtime_tool<'a>(
 
 pub fn build_runtime_tool_specs(context: &Context) -> Vec<AgentToolSpec> {
     let tools = build_runtime_tools(context);
-    tools
-        .into_iter()
-        .filter(|tool| tool.is_available(context))
-        .filter(|tool| {
-            tool_visible_for_workflow_phase(context.bound_workflow_id.as_deref(), tool.name())
-        })
-        .map(|tool| tool.spec())
-        .collect()
+    tools.into_iter().map(|tool| tool.spec()).collect()
 }
 
 fn is_workflow_binding_tool(name: &str) -> bool {
     matches!(name, "activate_workflow" | "create_workflow")
 }
 
-fn tool_visible_for_workflow_phase(bound_workflow_id: Option<&str>, tool_name: &str) -> bool {
+fn tool_allowed_for_workflow_phase(bound_workflow_id: Option<&str>, tool_name: &str) -> bool {
     if bound_workflow_id.is_none() {
         is_workflow_binding_tool(tool_name)
     } else {
@@ -500,26 +493,100 @@ fn tool_visible_for_workflow_phase(bound_workflow_id: Option<&str>, tool_name: &
     }
 }
 
+fn workflow_phase_denial(
+    bound_workflow_id: Option<&str>,
+    tool_name: &str,
+) -> Option<(String, String)> {
+    if tool_allowed_for_workflow_phase(bound_workflow_id, tool_name) {
+        return None;
+    }
+
+    if bound_workflow_id.is_none() {
+        return Some((
+            "No workflow is bound. Runtime policy requires binding a workflow before using non-workflow tools.".to_string(),
+            "Call activate_workflow with the best routed workflow_id, or call create_workflow if no routed workflow fits.".to_string(),
+        ));
+    }
+
+    Some((
+        format!(
+            "Workflow `{}` is already bound. Workflow binding tools are only available before a workflow is bound.",
+            bound_workflow_id.unwrap_or("<unknown>")
+        ),
+        "Continue under the currently bound workflow instead of calling activate_workflow/create_workflow again.".to_string(),
+    ))
+}
+
+fn runtime_availability_denial(
+    context: &Context,
+    tool: &dyn RuntimeTool,
+) -> Option<(String, String)> {
+    if tool.is_available(context) {
+        return None;
+    }
+
+    match tool.name() {
+        "apply_patch" => Some((
+            "`apply_patch` is scoped to the Terminal app, but Terminal is not the focused app."
+                .to_string(),
+            "Call focus_app with app=\"Terminal\" before editing files with apply_patch."
+                .to_string(),
+        )),
+        name => Some((
+            format!("`{name}` is disabled by the current runtime availability policy."),
+            "Use a currently allowed tool, or satisfy the tool's required runtime state before retrying."
+                .to_string(),
+        )),
+    }
+}
+
+fn unavailable_tool_result(
+    call: &AgentToolCall,
+    reason: String,
+    allowed_next_action: String,
+) -> ToolExecutionResult {
+    let model_content = format!(
+        "Tool unavailable: `{}`\nReason: {reason}\nAllowed next action: {allowed_next_action}",
+        call.name
+    );
+    ToolExecutionResult::new(
+        format!("{} unavailable", call.name),
+        json!({
+            "available": false,
+            "tool": call.name,
+            "reason": reason,
+            "allowed_next_action": allowed_next_action,
+        }),
+        ToolUiEvent::error(
+            format!("{} unavailable", call.name),
+            vec![reason, allowed_next_action],
+        ),
+    )
+    .with_model_content(model_content)
+}
+
 pub fn summarize_action_from_tool_call(
     context: &Context,
     call: &AgentToolCall,
 ) -> Result<EpisodeActionRecord> {
-    if let Ok(summary) = context.apps.summarize_tool_call(call) {
-        return Ok(summary);
-    }
     let tools = build_runtime_tools(context);
-    find_runtime_tool(&tools, &call.name)?.summarize_action(call)
+    let tool = find_runtime_tool(&tools, &call.name)?;
+    match tool.summarize_action(call) {
+        Ok(summary) => Ok(summary),
+        Err(_) => context.apps.summarize_tool_call(call),
+    }
 }
 
 pub fn render_tool_call_ui_event(
     context: &Context,
     call: &AgentToolCall,
 ) -> Result<ToolCallUiEvent> {
-    if let Ok(event) = context.apps.render_tool_call_ui(call) {
-        return Ok(event);
-    }
     let tools = build_runtime_tools(context);
-    find_runtime_tool(&tools, &call.name)?.call_ui_event(call)
+    let tool = find_runtime_tool(&tools, &call.name)?;
+    match tool.call_ui_event(call) {
+        Ok(event) => Ok(event),
+        Err(_) => context.apps.render_tool_call_ui(call),
+    }
 }
 
 pub fn render_telegram_tool_result_status(
@@ -723,8 +790,13 @@ pub async fn execute_agent_tool_call(
 ) -> Result<ToolExecutionResult> {
     let tools = build_runtime_tools(context);
     let tool = find_runtime_tool(&tools, &call.name)?;
-    if !tool.is_available(context) {
-        return Err(miette!("tool `{}` is not currently available", call.name));
+    if let Some((reason, allowed_next_action)) =
+        workflow_phase_denial(context.bound_workflow_id.as_deref(), tool.name())
+    {
+        return Ok(unavailable_tool_result(call, reason, allowed_next_action));
+    }
+    if let Some((reason, allowed_next_action)) = runtime_availability_denial(context, tool) {
+        return Ok(unavailable_tool_result(call, reason, allowed_next_action));
     }
     let result = tool.execute(context, call).await?;
     Ok(result.ensure_model_content_with_budget(
@@ -758,28 +830,28 @@ mod tests {
     }
 
     #[test]
-    fn workflow_selection_phase_exposes_only_binding_tools() {
-        assert!(tool_visible_for_workflow_phase(None, "activate_workflow"));
-        assert!(tool_visible_for_workflow_phase(None, "create_workflow"));
-        assert!(!tool_visible_for_workflow_phase(None, "finish_and_send"));
-        assert!(!tool_visible_for_workflow_phase(None, "terminal_exec"));
+    fn workflow_selection_phase_allows_only_binding_tools() {
+        assert!(tool_allowed_for_workflow_phase(None, "activate_workflow"));
+        assert!(tool_allowed_for_workflow_phase(None, "create_workflow"));
+        assert!(!tool_allowed_for_workflow_phase(None, "finish_and_send"));
+        assert!(!tool_allowed_for_workflow_phase(None, "terminal_exec"));
     }
 
     #[test]
-    fn bound_workflow_phase_hides_binding_tools() {
-        assert!(!tool_visible_for_workflow_phase(
+    fn bound_workflow_phase_rejects_binding_tools() {
+        assert!(!tool_allowed_for_workflow_phase(
             Some("repo-analysis-summary"),
             "activate_workflow"
         ));
-        assert!(!tool_visible_for_workflow_phase(
+        assert!(!tool_allowed_for_workflow_phase(
             Some("repo-analysis-summary"),
             "create_workflow"
         ));
-        assert!(tool_visible_for_workflow_phase(
+        assert!(tool_allowed_for_workflow_phase(
             Some("repo-analysis-summary"),
             "finish_and_send"
         ));
-        assert!(tool_visible_for_workflow_phase(
+        assert!(tool_allowed_for_workflow_phase(
             Some("repo-analysis-summary"),
             "terminal_exec"
         ));

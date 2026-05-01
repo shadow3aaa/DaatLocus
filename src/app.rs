@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use miette::{Result, miette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     dashboard::DashboardState,
@@ -349,45 +349,59 @@ impl AppManager {
         Ok(())
     }
 
-    pub fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
-        let Some(focused) = self.focused.clone() else {
-            return Ok(Vec::new());
-        };
-        let app = self
-            .apps
-            .get(&focused)
-            .ok_or_else(|| miette!("focused app missing: {focused}"))?;
-        app.tool_specs()
+    pub fn all_tool_specs(&self) -> Vec<(AppId, AppToolSpec)> {
+        let mut tools = Vec::new();
+        for id in &self.order {
+            let Some(app) = self.apps.get(id) else {
+                continue;
+            };
+            match app.tool_specs() {
+                Ok(app_tools) => {
+                    tools.extend(app_tools.into_iter().map(|tool| (id.clone(), tool)));
+                }
+                Err(err) => {
+                    tracing::warn!("failed to list tools for app `{id}`: {err:?}");
+                }
+            }
+        }
+        tools
     }
 
     pub fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-        let Some(focused) = self.focused.clone() else {
-            return Err(miette!("no focused app"));
-        };
+        let app_id = self.app_id_for_tool_name(&call.name)?;
         let app = self
             .apps
-            .get(&focused)
-            .ok_or_else(|| miette!("focused app missing: {focused}"))?;
+            .get(&app_id)
+            .ok_or_else(|| miette!("app missing for tool `{}`: {app_id}", call.name))?;
         app.summarize_tool_call(call)
     }
 
     pub fn render_tool_call_ui(&self, call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-        let Some(focused) = self.focused.clone() else {
-            return Err(miette!("no focused app"));
-        };
+        let app_id = self.app_id_for_tool_name(&call.name)?;
         let app = self
             .apps
-            .get(&focused)
-            .ok_or_else(|| miette!("focused app missing: {focused}"))?;
+            .get(&app_id)
+            .ok_or_else(|| miette!("app missing for tool `{}`: {app_id}", call.name))?;
         app.render_tool_call_ui(call)
     }
 
-    pub async fn execute_tool(
+    pub async fn execute_tool_for_app(
         &mut self,
+        app_id: &AppId,
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
     ) -> Result<AppToolExecutionResult> {
-        let app = self.focused_app_mut()?;
+        if self.focused.as_ref() != Some(app_id) {
+            return Ok(app_tool_unavailable_result(
+                app_id,
+                self.focused.as_ref(),
+                call,
+            ));
+        }
+        let app = self
+            .apps
+            .get_mut(app_id)
+            .ok_or_else(|| miette!("app missing for tool `{}`: {app_id}", call.name))?;
         app.execute_tool(call, context).await
     }
 
@@ -469,6 +483,7 @@ impl AppManager {
         app.wait_until_settled(silence_duration, timeout).await
     }
 
+    #[cfg(test)]
     fn focused_app_mut(&mut self) -> Result<&mut Box<dyn App>> {
         let Some(focused) = self.focused.clone() else {
             return Err(miette!("no focused app"));
@@ -476,6 +491,25 @@ impl AppManager {
         self.apps
             .get_mut(&focused)
             .ok_or_else(|| miette!("focused app missing: {focused}"))
+    }
+
+    fn app_id_for_tool_name(&self, tool_name: &str) -> Result<AppId> {
+        for id in &self.order {
+            let Some(app) = self.apps.get(id) else {
+                continue;
+            };
+            match app.tool_specs() {
+                Ok(app_tools) => {
+                    if app_tools.iter().any(|tool| tool.name == tool_name) {
+                        return Ok(id.clone());
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("failed to list tools for app `{id}`: {err:?}");
+                }
+            }
+        }
+        Err(miette!("unknown app tool `{tool_name}`"))
     }
 
     #[cfg(test)]
@@ -495,5 +529,44 @@ impl AppManager {
             }
         }
         Ok(())
+    }
+}
+
+fn app_tool_unavailable_result(
+    app_id: &AppId,
+    focused: Option<&AppId>,
+    call: &AgentToolCall,
+) -> AppToolExecutionResult {
+    let focused_text = focused
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "<none>".to_string());
+    let reason = format!(
+        "`{}` is scoped to app `{app_id}`, but the focused app is `{focused_text}`.",
+        call.name
+    );
+    let allowed_next_action = format!(
+        "Call focus_app with app=\"{app_id}\" before using `{}` if the task requires this app.",
+        call.name
+    );
+    let model_content = format!(
+        "Tool unavailable: `{}`\nReason: {reason}\nAllowed next action: {allowed_next_action}",
+        call.name
+    );
+    AppToolExecutionResult {
+        summary: format!("{} unavailable", call.name),
+        payload: json!({
+            "available": false,
+            "tool": call.name,
+            "app": app_id.to_string(),
+            "focused_app": focused_text,
+            "reason": reason,
+            "allowed_next_action": allowed_next_action,
+        }),
+        model_content: Some(model_content),
+        ui_event: ToolUiEvent::error(
+            format!("{} unavailable", call.name),
+            vec![reason, allowed_next_action],
+        ),
+        turn_boundary_reason: None,
     }
 }
