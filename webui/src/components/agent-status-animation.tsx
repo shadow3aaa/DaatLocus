@@ -84,8 +84,15 @@ const rightWorkingEyeFrames = {
   x: "78;78;78;78;78;78;78",
   y: "31;31;31;31;43;43;31",
 } as const;
+const idleLookDistance = 8;
+const idleLookMoveDurationMs = 360;
+const idleLookMinRestMs = 1_100;
+const idleLookMaxRestMs = 3_400;
+const idleLookMinHoldMs = 650;
+const idleLookMaxHoldMs = 1_350;
 
 type ExpressionVisualKind = keyof typeof mouthPathByVisualKind;
+type IdleLookDirection = -1 | 0 | 1;
 
 type ExpressionTransition = {
   from: ExpressionVisualKind;
@@ -129,6 +136,9 @@ export const AgentStatusAnimation = memo(function AgentStatusAnimation({
     visualKind,
     prefersReducedMotion,
   );
+  const idleEyeLookOffset = useIdleEyeLook(
+    status === "idle" && !prefersReducedMotion && expressionTransition === null,
+  );
   const shouldAnimateWorking =
     isWorking && !prefersReducedMotion && expressionTransition === null;
   const mouthPath =
@@ -160,7 +170,14 @@ export const AgentStatusAnimation = memo(function AgentStatusAnimation({
         role="img"
         viewBox={`0 0 ${faceViewBoxWidth} ${faceViewBoxHeight}`}
       >
-        <g fill="black">
+        <g
+          fill="black"
+          transform={
+            idleEyeLookOffset === 0
+              ? undefined
+              : `translate(${formatSvgNumber(idleEyeLookOffset)} 0)`
+          }
+        >
           <rect height="41" rx="8.5" width="17" x="37" y="31">
             {expressionTransition && (
               <>
@@ -439,6 +456,129 @@ function useExpressionTransition(
   }, [prefersReducedMotion, visualKind]);
 
   return transition;
+}
+
+function useIdleEyeLook(isActive: boolean) {
+  const [lookOffset, setLookOffset] = useState(0);
+  const animationFrameRef = useRef<number | null>(null);
+  const currentOffsetRef = useRef(0);
+  const lastLookDirectionRef = useRef<IdleLookDirection>(0);
+
+  useEffect(() => {
+    let isCurrent = true;
+    let timeoutId: number | null = null;
+
+    const clearAnimationFrame = () => {
+      if (animationFrameRef.current === null) {
+        return;
+      }
+
+      window.cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    };
+
+    const animateToOffset = (targetOffset: number) => {
+      clearAnimationFrame();
+
+      const fromOffset = currentOffsetRef.current;
+      const startTime = performance.now();
+
+      const animate = (currentTime: number) => {
+        const rawProgress = Math.min(
+          (currentTime - startTime) / idleLookMoveDurationMs,
+          1,
+        );
+        const nextOffset = lerp(
+          fromOffset,
+          targetOffset,
+          easeOutCubic(rawProgress),
+        );
+
+        currentOffsetRef.current = nextOffset;
+        if (isCurrent) {
+          setLookOffset(nextOffset);
+        }
+
+        if (rawProgress < 1) {
+          animationFrameRef.current = window.requestAnimationFrame(animate);
+          return;
+        }
+
+        currentOffsetRef.current = targetOffset;
+        if (isCurrent) {
+          setLookOffset(targetOffset);
+        }
+        animationFrameRef.current = null;
+      };
+
+      animationFrameRef.current = window.requestAnimationFrame(animate);
+    };
+
+    if (!isActive) {
+      lastLookDirectionRef.current = 0;
+      animateToOffset(0);
+
+      return () => {
+        isCurrent = false;
+        clearAnimationFrame();
+      };
+    }
+
+    const returnToCenter = () => {
+      animateToOffset(0);
+      scheduleNextLook();
+    };
+
+    const lookAside = () => {
+      const nextDirection = pickIdleLookDirection(lastLookDirectionRef.current);
+
+      lastLookDirectionRef.current = nextDirection;
+      animateToOffset(nextDirection * idleLookDistance);
+      timeoutId = window.setTimeout(
+        returnToCenter,
+        randomInteger(idleLookMinHoldMs, idleLookMaxHoldMs),
+      );
+    };
+
+    function scheduleNextLook() {
+      timeoutId = window.setTimeout(
+        lookAside,
+        randomInteger(idleLookMinRestMs, idleLookMaxRestMs),
+      );
+    }
+
+    scheduleNextLook();
+
+    return () => {
+      isCurrent = false;
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+      clearAnimationFrame();
+    };
+  }, [isActive]);
+
+  return lookOffset;
+}
+
+function pickIdleLookDirection(
+  previousDirection: IdleLookDirection,
+): IdleLookDirection {
+  const randomDirection: IdleLookDirection = Math.random() < 0.5 ? -1 : 1;
+
+  if (previousDirection !== 0 && randomDirection === previousDirection) {
+    return Math.random() < 0.65
+      ? (-previousDirection as IdleLookDirection)
+      : randomDirection;
+  }
+
+  return randomDirection;
+}
+
+function randomInteger(minInclusive: number, maxInclusive: number) {
+  return Math.floor(
+    minInclusive + Math.random() * (maxInclusive - minInclusive + 1),
+  );
 }
 
 function usePrefersReducedMotion() {
