@@ -21,10 +21,6 @@ fn build_embedded_webui(manifest_dir: &Path) {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("out dir"));
     let webui_work = out_dir.join("webui-work");
     let webui_dist = out_dir.join("webui-dist");
-    println!(
-        "cargo:rustc-env=DAAT_LOCUS_WEBUI_DIST={}",
-        webui_dist.display()
-    );
     println!("cargo:rerun-if-env-changed=DAAT_LOCUS_WEBUI_PM");
     emit_webui_rerun_inputs(&webui_dir);
 

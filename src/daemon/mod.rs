@@ -70,7 +70,7 @@ const DAEMON_MAIN_LOG: &str = "daat-locus.log";
 const DAEMON_STDERR_LOG: &str = "daemon-stderr.log";
 pub const DAEMONIZE_ENV: &str = "DAAT_LOCUS_DAEMONIZE";
 
-static EMBEDDED_WEBUI_DIST: Dir<'_> = include_dir!("$DAAT_LOCUS_WEBUI_DIST");
+static EMBEDDED_WEBUI_DIST: Dir<'_> = include_dir!("$OUT_DIR/webui-dist");
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
