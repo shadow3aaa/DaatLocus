@@ -1,17 +1,27 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type DragEvent,
+  type FocusEvent,
+  type FormEvent,
   type KeyboardEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 
 import {
   AgentStatusAnimation,
   type AgentAnimationStatus,
 } from "@/components/agent-status-animation";
-import { CheckIcon, GripVerticalIcon, XIcon } from "lucide-react";
+import {
+  CheckIcon,
+  GripVerticalIcon,
+  Loader2Icon,
+  SendHorizontalIcon,
+  XIcon,
+} from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -51,6 +61,8 @@ const SUMMARY_TYPE_INTERVAL_MS = 28;
 const TOKEN_USAGE_MAX_VISIBLE_DAYS = 7;
 const STATUS_CARD_ORDER_STORAGE_KEY = "daat-locus.status.card-order";
 const CONTEXT_COMPOSITION_MAX_VISIBLE_SEGMENTS = 8;
+const AGENT_CHAT_MAX_VISIBLE_BUBBLES = 24;
+const AGENT_CHAT_MESSAGE_LINE_LIMIT = 5;
 const TOKEN_USAGE_CHART_CONFIG = {
   cached: {
     label: "Cached",
@@ -279,6 +291,8 @@ function useDashboardSnapshot() {
 
 export function AgentPage() {
   const { isLoading, loadError, snapshot } = useDashboardSnapshot();
+  const chatPanelRef = useRef<HTMLDivElement>(null);
+  const [isChatFocused, setIsChatFocused] = useState(false);
   const agentStatus = deriveAgentStatus({
     hasLoadError: Boolean(loadError),
     isLoading,
@@ -291,16 +305,21 @@ export function AgentPage() {
     <section
       id="agent"
       aria-label="Agent"
-      className="flex min-h-screen w-full items-center justify-center px-6 py-10"
+      className="relative flex min-h-screen w-full items-center justify-center overflow-hidden px-6 py-10"
     >
-      <div className="flex flex-col items-center justify-center gap-5 text-center">
+      <AgentChatBubbles
+        snapshot={snapshot}
+        isFocused={isChatFocused}
+        panelRef={chatPanelRef}
+      />
+      <div className="relative z-10 flex flex-col items-center justify-center gap-5 text-center">
         <AgentStatusAnimation
           status={agentStatus.animationStatus}
-          className="w-64 md:w-80"
+          className="relative z-20 w-64 md:w-80"
         />
         <p
           aria-live="polite"
-          className="min-h-6 max-w-[min(32rem,calc(100vw-3rem))] text-balance text-sm font-medium leading-6 text-muted-foreground md:text-base"
+          className="relative z-20 min-h-6 max-w-[min(32rem,calc(100vw-3rem))] text-balance text-sm font-medium leading-6 text-muted-foreground md:text-base"
         >
           {typedSummaryText ? (
             <>
@@ -321,8 +340,465 @@ export function AgentPage() {
           {agentStatus.label}
         </span>
       </div>
+      <AgentChatComposer
+        isFocused={isChatFocused}
+        onFocusChange={setIsChatFocused}
+        chatPanelRef={chatPanelRef}
+      />
     </section>
   );
+}
+
+type AgentChatBubble = {
+  id: string;
+  role: "assistant" | "user" | "tool" | "telegram";
+  title: string;
+  detailLines: string[];
+  messageLines: string[];
+  live?: boolean;
+};
+
+function AgentChatBubbles({
+  snapshot,
+  isFocused,
+  panelRef,
+}: {
+  snapshot: DashboardSnapshot | null;
+  isFocused: boolean;
+  panelRef: RefObject<HTMLDivElement | null>;
+}) {
+  const bubbles = useMemo(() => agentChatBubblesFromSnapshot(snapshot), [snapshot]);
+
+  useEffect(() => {
+    if (!isFocused || !panelRef.current) {
+      return;
+    }
+    panelRef.current.scrollTop = panelRef.current.scrollHeight;
+  }, [bubbles.length, isFocused, panelRef]);
+
+  return (
+    <div
+      ref={panelRef}
+      aria-label="Agent chat preview"
+      aria-hidden={!isFocused}
+      className={cn(
+        "absolute left-1/2 z-0 flex w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 flex-col gap-3 rounded-[2rem] border border-border/60 bg-background/70 p-4 text-left shadow-2xl shadow-background/40 backdrop-blur-xl transition-all duration-300 ease-out",
+        isFocused
+          ? "bottom-[calc(50%+8rem)] top-6 translate-y-0 overflow-y-auto opacity-100"
+          : "pointer-events-none bottom-auto top-[calc(50%+8rem)] max-h-28 translate-y-8 overflow-hidden opacity-35 blur-[1px]",
+      )}
+    >
+      {bubbles.length > 0 ? (
+        bubbles.map((bubble) => (
+          <AgentChatBubbleItem
+            key={bubble.id}
+            bubble={bubble}
+            isFocused={isFocused}
+          />
+        ))
+      ) : (
+        <div className="rounded-3xl border border-dashed border-border/70 bg-muted/30 px-4 py-3 text-center text-xs text-muted-foreground">
+          聚焦底部输入框后，这里会显示与 agent 的消息流预览。
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentChatBubbleItem({
+  bubble,
+  isFocused,
+}: {
+  bubble: AgentChatBubble;
+  isFocused: boolean;
+}) {
+  const isUser = bubble.role === "user";
+  const isAssistant = bubble.role === "assistant";
+  const lines = bubble.messageLines.length > 0 ? bubble.messageLines : bubble.detailLines;
+  const detailLines = bubble.messageLines.length > 0 ? bubble.detailLines : [];
+  const visibleLines = (lines.length > 0 ? lines : [bubble.title]).slice(
+    0,
+    AGENT_CHAT_MESSAGE_LINE_LIMIT,
+  );
+
+  return (
+    <article
+      className={cn(
+        "flex w-full",
+        isUser ? "justify-end" : "justify-start",
+        !isFocused && "select-none",
+      )}
+    >
+      <div
+        className={cn(
+          "max-w-[85%] rounded-[1.35rem] px-4 py-3 text-sm leading-5 shadow-sm",
+          isUser
+            ? "rounded-br-md bg-primary text-primary-foreground"
+            : isAssistant
+              ? "rounded-bl-md border border-cyan-400/20 bg-cyan-950/40 text-cyan-50"
+              : bubble.role === "telegram"
+                ? "rounded-bl-md border border-sky-400/20 bg-sky-950/35 text-sky-50"
+                : "rounded-bl-md border border-border/70 bg-card/90 text-card-foreground",
+        )}
+      >
+        <div
+          className={cn(
+            "mb-1 flex items-center gap-2 text-[0.68rem] font-semibold uppercase tracking-[0.16em]",
+            isUser
+              ? "text-primary-foreground/75"
+              : isAssistant
+                ? "text-cyan-200/75"
+                : "text-muted-foreground",
+          )}
+        >
+          {bubble.live ? (
+            <span className="size-1.5 rounded-full bg-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,0.18)]" />
+          ) : null}
+          <span>{agentChatBubbleLabel(bubble)}</span>
+        </div>
+        <div className="space-y-1">
+          {visibleLines.map((line, index) => (
+            <p
+              key={`${bubble.id}-line-${index}`}
+              className="break-words"
+            >
+              {line}
+            </p>
+          ))}
+        </div>
+        {detailLines.length > 0 ? (
+          <div
+            className={cn(
+              "mt-2 space-y-0.5 border-t pt-2 text-xs",
+              isUser
+                ? "border-primary-foreground/20 text-primary-foreground/70"
+                : "border-white/10 text-muted-foreground",
+            )}
+          >
+            {detailLines.slice(0, 2).map((line, index) => (
+              <p
+                key={`${bubble.id}-detail-${index}`}
+                className="break-words"
+              >
+                {line}
+              </p>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+function AgentChatComposer({
+  isFocused,
+  onFocusChange,
+  chatPanelRef,
+}: {
+  isFocused: boolean;
+  onFocusChange: (isFocused: boolean) => void;
+  chatPanelRef: RefObject<HTMLDivElement | null>;
+}) {
+  const [message, setMessage] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [sendResult, setSendResult] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  function handleFocus() {
+    onFocusChange(true);
+  }
+
+  function handleBlur(event: FocusEvent<HTMLFormElement>) {
+    if (event.currentTarget.contains(event.relatedTarget)) {
+      return;
+    }
+    onFocusChange(false);
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = message.trim();
+
+    if (!trimmed || isSending) {
+      return;
+    }
+
+    setIsSending(true);
+    setSendResult(null);
+    setSendError(null);
+
+    try {
+      const output = await runDashboardCommand(trimmed);
+      setMessage("");
+      setSendResult(agentChatSendResultText(output));
+      onFocusChange(true);
+      window.requestAnimationFrame(() => {
+        if (chatPanelRef.current) {
+          chatPanelRef.current.scrollTop = chatPanelRef.current.scrollHeight;
+        }
+      });
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSending(false);
+    }
+  }
+
+  return (
+    <form
+      aria-label="Send message to agent"
+      onSubmit={handleSubmit}
+      onFocus={handleFocus}
+      onBlur={handleBlur}
+      className={cn(
+        "fixed bottom-5 left-1/2 z-30 w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 rounded-[2rem] border bg-background/85 p-2 shadow-2xl shadow-background/40 backdrop-blur-xl transition-all duration-300",
+        isFocused
+          ? "border-primary/45 ring-4 ring-primary/10"
+          : "border-border/70 hover:border-primary/30",
+      )}
+    >
+      <div className="flex items-end gap-2">
+        <textarea
+          value={message}
+          rows={1}
+          placeholder="和 agent 说点什么…"
+          aria-label="Message"
+          onChange={(event) => {
+            setMessage(event.target.value);
+            setSendError(null);
+            setSendResult(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+          className="max-h-32 min-h-11 flex-1 resize-none bg-transparent px-4 py-3 text-sm leading-5 outline-none placeholder:text-muted-foreground/70"
+        />
+        <Button
+          type="submit"
+          size="icon-lg"
+          disabled={!message.trim() || isSending}
+          aria-label="Send message"
+          className="mb-0.5 rounded-full"
+        >
+          {isSending ? (
+            <Loader2Icon className="size-4 animate-spin" />
+          ) : (
+            <SendHorizontalIcon className="size-4" />
+          )}
+        </Button>
+      </div>
+      {sendError || sendResult ? (
+        <p
+          role={sendError ? "alert" : "status"}
+          className={cn(
+            "px-4 pb-1 pt-0.5 text-xs",
+            sendError ? "text-destructive" : "text-muted-foreground",
+          )}
+        >
+          {sendError ?? sendResult}
+        </p>
+      ) : null}
+    </form>
+  );
+}
+
+function agentChatBubblesFromSnapshot(
+  snapshot: DashboardSnapshot | null,
+): AgentChatBubble[] {
+  if (!snapshot) {
+    return [];
+  }
+
+  const committed = snapshot.activity_cells
+    .map((cell, index) => agentChatBubbleFromActivityCell(cell, `activity-${index}`))
+    .filter((bubble): bubble is AgentChatBubble => Boolean(bubble));
+  const live = snapshot.live_activity_cells
+    .map((entry, index) =>
+      agentChatBubbleFromActivityCell(
+        entry.cell,
+        `live-${entry.key || index}`,
+        true,
+      ),
+    )
+    .filter((bubble): bubble is AgentChatBubble => Boolean(bubble));
+
+  return [...committed, ...live].slice(-AGENT_CHAT_MAX_VISIBLE_BUBBLES);
+}
+
+function agentChatBubbleFromActivityCell(
+  cell: unknown,
+  fallbackId: string,
+  live = false,
+): AgentChatBubble | null {
+  const record = asRecord(cell);
+
+  if (!record) {
+    return null;
+  }
+
+  if ("Assistant" in record) {
+    return agentChatBubbleFromTextCell(
+      record.Assistant,
+      fallbackId,
+      "assistant",
+      live,
+    );
+  }
+
+  if ("User" in record) {
+    return agentChatBubbleFromTextCell(record.User, fallbackId, "user", live);
+  }
+
+  if ("Telegram" in record) {
+    const telegram = asRecord(record.Telegram);
+    if (!telegram) {
+      return null;
+    }
+    return {
+      id: fallbackId,
+      role: "telegram",
+      title: stringValue(telegram.title, "Telegram"),
+      detailLines: stringArrayValue(telegram.detail_lines),
+      messageLines: stringArrayValue(telegram.message_lines),
+      live,
+    };
+  }
+
+  if ("Reply" in record) {
+    const reply = asRecord(record.Reply);
+    if (!reply) {
+      return null;
+    }
+    return {
+      id: fallbackId,
+      role: "assistant",
+      title: "Agent reply",
+      detailLines: [],
+      messageLines: stringArrayValue(reply.message_lines),
+      live,
+    };
+  }
+
+  if ("LiveExec" in record) {
+    return agentChatBubbleFromExecCell(record.LiveExec, fallbackId, live);
+  }
+
+  if ("ExecResult" in record) {
+    return agentChatBubbleFromExecCell(record.ExecResult, fallbackId, live);
+  }
+
+  if ("TerminalWait" in record) {
+    return agentChatBubbleFromTextCell(
+      record.TerminalWait,
+      fallbackId,
+      "tool",
+      live,
+    );
+  }
+
+  if ("Error" in record) {
+    return agentChatBubbleFromTextCell(record.Error, fallbackId, "tool", live);
+  }
+
+  return null;
+}
+
+function agentChatBubbleFromTextCell(
+  cell: unknown,
+  id: string,
+  role: AgentChatBubble["role"],
+  live: boolean,
+): AgentChatBubble | null {
+  const record = asRecord(cell);
+
+  if (!record) {
+    return null;
+  }
+
+  return {
+    id,
+    role,
+    title: stringValue(
+      record.title,
+      role === "assistant" ? "Agent" : role === "user" ? "You" : "Tool",
+    ),
+    detailLines: [],
+    messageLines: stringArrayValue(record.body_lines),
+    live,
+  };
+}
+
+function agentChatBubbleFromExecCell(
+  cell: unknown,
+  id: string,
+  live: boolean,
+): AgentChatBubble | null {
+  const record = asRecord(cell);
+
+  if (!record) {
+    return null;
+  }
+
+  const callLines = stringArrayValue(record.call_lines);
+  const outputLines = stringArrayValue(record.output_lines);
+  const meta = stringValue(record.meta, "");
+
+  return {
+    id,
+    role: "tool",
+    title: stringValue(record.title, live ? "Tool running" : "Tool result"),
+    detailLines: meta ? [meta, ...callLines] : callLines,
+    messageLines: outputLines,
+    live,
+  };
+}
+
+function agentChatBubbleLabel(bubble: AgentChatBubble) {
+  if (bubble.role === "assistant") {
+    return bubble.live ? "Agent · streaming" : "Agent";
+  }
+
+  if (bubble.role === "user") {
+    return "You";
+  }
+
+  if (bubble.role === "telegram") {
+    return "Telegram";
+  }
+
+  return bubble.live ? "Tool · running" : "Tool";
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function stringValue(value: unknown, fallback: string) {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function stringArrayValue(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((line): line is string => typeof line === "string")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function agentChatSendResultText(output: string) {
+  return /^queued terminal message as event\b/.test(output)
+    ? "已发送给 agent"
+    : output;
 }
 
 export function StatusPage() {
