@@ -399,6 +399,26 @@ type AgentChatTimelineSection = {
   bubbles: AgentChatBubble[];
 };
 
+type AgentChatMarkdownBlockData =
+  | { type: "paragraph"; text: string }
+  | { type: "heading"; level: number; text: string }
+  | { type: "list"; ordered: boolean; items: string[] }
+  | { type: "blockquote"; lines: string[] }
+  | { type: "rule" };
+
+type AgentChatMarkdownInlineNode =
+  | { type: "text"; text: string }
+  | { type: "code"; text: string }
+  | { type: "strong"; text: string }
+  | { type: "em"; text: string }
+  | { type: "link"; label: string; href: string };
+
+type AgentChatMarkdownInlineToken = {
+  start: number;
+  end: number;
+  node: AgentChatMarkdownInlineNode;
+};
+
 function AgentChatComposer({
   isFocused,
   onFocusChange,
@@ -626,9 +646,8 @@ function AgentChatTimelineSectionItem({
         ) : null}
         <div
           className={cn(
-            "space-y-2 rounded-[1.75rem] border border-border/60 bg-card/20 px-3 py-3 shadow-sm backdrop-blur-sm",
-            section.current && "border-primary/25 bg-primary/[0.035]",
-            !isFocused && "rounded-2xl border-transparent bg-transparent px-0 py-1 shadow-none backdrop-blur-0",
+            "space-y-3 py-1",
+            !isFocused && "space-y-2",
           )}
         >
           {section.bubbles.length > 0 ? (
@@ -679,14 +698,12 @@ function AgentChatBubbleItem({
   return (
     <article
       className={cn(
-        "w-full rounded-2xl px-1 py-1",
-        bubble.live || bubble.status === "running"
-          ? "bg-emerald-400/[0.035]"
-          : "bg-transparent",
+        "w-full py-1",
+        bubble.live || bubble.status === "running" ? "text-foreground" : "text-foreground/95",
         !isFocused && "select-none",
       )}
     >
-      <div className="px-1 py-1 text-sm leading-5 text-foreground">
+      <div className="text-sm leading-6 text-foreground">
         <div className="space-y-2 text-foreground/90">
           {visibleBlocks.map((block, index) => (
             <AgentChatBlock
@@ -792,9 +809,9 @@ function AgentChatBlock({
 
   if (type === "text") {
     return (
-      <AgentChatTextLines
+      <AgentChatMarkdownText
         id={blockId}
-        lines={splitDisplayLines(stringValue(record.text, ""))}
+        text={stringValue(record.text, "")}
         limit={lineLimit}
       />
     );
@@ -899,6 +916,132 @@ function FragmentPair({ left, right }: { left: string; right: string }) {
       <dd className="min-w-0 break-words text-foreground/80">{right}</dd>
     </>
   );
+}
+
+function AgentChatMarkdownText({
+  id,
+  text,
+  limit,
+  tone = "default",
+}: {
+  id: string;
+  text: string;
+  limit: number;
+  tone?: "default" | "error";
+}) {
+  const blocks = parseAgentChatMarkdownBlocks(text);
+  const visibleBlocks = blocks.slice(0, limit);
+  const hiddenBlocks = blocks.slice(limit);
+
+  if (blocks.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      className={cn(
+        "space-y-2 text-sm leading-6 text-foreground/90",
+        tone === "error" && "text-destructive",
+      )}
+    >
+      {visibleBlocks.map((block, index) => (
+        <AgentChatMarkdownBlock
+          key={`${id}-markdown-${index}`}
+          block={block}
+          blockId={`${id}-markdown-${index}`}
+        />
+      ))}
+      {hiddenBlocks.length > 0 ? (
+        <details className="text-xs text-muted-foreground">
+          <summary className="cursor-pointer list-none hover:text-foreground/80">
+            展开剩余 {hiddenBlocks.length} 段
+          </summary>
+          <div className="mt-2 space-y-2">
+            {hiddenBlocks.map((block, index) => (
+              <AgentChatMarkdownBlock
+                key={`${id}-hidden-markdown-${index}`}
+                block={block}
+                blockId={`${id}-hidden-markdown-${index}`}
+              />
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentChatMarkdownBlock({
+  block,
+  blockId,
+}: {
+  block: AgentChatMarkdownBlockData;
+  blockId: string;
+}) {
+  if (block.type === "heading") {
+    const content = <AgentChatMarkdownInline text={block.text} />;
+    const className = "mt-3 break-words text-base font-semibold leading-7 text-foreground first:mt-0";
+
+    if (block.level <= 1) {
+      return <h3 className={className}>{content}</h3>;
+    }
+
+    if (block.level === 2) {
+      return <h4 className={className}>{content}</h4>;
+    }
+
+    return <h5 className={className}>{content}</h5>;
+  }
+
+  if (block.type === "list") {
+    return block.ordered ? (
+      <ol
+        className="list-decimal space-y-1 pl-5 text-foreground/90"
+      >
+        {block.items.map((item, index) => (
+          <li key={`${blockId}-item-${index}`} className="break-words pl-1">
+            <AgentChatMarkdownInline text={item} />
+          </li>
+        ))}
+      </ol>
+    ) : (
+      <ul
+        className="list-disc space-y-1 pl-5 text-foreground/90"
+      >
+        {block.items.map((item, index) => (
+          <li key={`${blockId}-item-${index}`} className="break-words pl-1">
+            <AgentChatMarkdownInline text={item} />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  if (block.type === "blockquote") {
+    return (
+      <blockquote className="border-l-2 border-border/70 pl-3 text-muted-foreground">
+        {block.lines.map((line, index) => (
+          <p key={`${blockId}-quote-${index}`} className="break-words">
+            <AgentChatMarkdownInline text={line} />
+          </p>
+        ))}
+      </blockquote>
+    );
+  }
+
+  if (block.type === "rule") {
+    return <hr className="border-border/70" />;
+  }
+
+  return (
+    <p className="break-words">
+      <AgentChatMarkdownInline text={block.text} />
+    </p>
+  );
+}
+
+function AgentChatMarkdownInline({ text }: { text: string }) {
+  return <>{parseAgentChatMarkdownInline(text).map(renderAgentChatMarkdownInlineNode)}</>;
 }
 
 function AgentChatTextLines({
@@ -1467,6 +1610,246 @@ function agentChatSplitMarkdownCodeFences(block: WebActivityBlock): WebActivityB
   flushText();
 
   return blocks.length > 0 ? blocks : [block];
+}
+
+function parseAgentChatMarkdownBlocks(text: string): AgentChatMarkdownBlockData[] {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const blocks: AgentChatMarkdownBlockData[] = [];
+  let paragraphLines: string[] = [];
+
+  function flushParagraph() {
+    const content = paragraphLines.join(" ").replace(/\s+/g, " ").trim();
+    paragraphLines = [];
+
+    if (content) {
+      blocks.push({ type: "paragraph", text: content });
+    }
+  }
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      flushParagraph();
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      flushParagraph();
+      blocks.push({
+        type: "heading",
+        level: headingMatch[1]?.length ?? 1,
+        text: headingMatch[2]?.trim() ?? "",
+      });
+      continue;
+    }
+
+    if (/^([-*_]\s*){3,}$/.test(trimmed)) {
+      flushParagraph();
+      blocks.push({ type: "rule" });
+      continue;
+    }
+
+    const unorderedMatch = trimmed.match(/^[-*+]\s+(.+)$/);
+    const orderedMatch = trimmed.match(/^\d+[.)]\s+(.+)$/);
+    if (unorderedMatch || orderedMatch) {
+      const ordered = Boolean(orderedMatch);
+      const items: string[] = [];
+      let cursor = index;
+
+      while (cursor < lines.length) {
+        const candidate = (lines[cursor] ?? "").trim();
+        const candidateUnorderedMatch = candidate.match(/^[-*+]\s+(.+)$/);
+        const candidateOrderedMatch = candidate.match(/^\d+[.)]\s+(.+)$/);
+        const candidateIsOrdered = Boolean(candidateOrderedMatch);
+
+        if (
+          !candidate ||
+          (ordered ? !candidateOrderedMatch : !candidateUnorderedMatch) ||
+          candidateIsOrdered !== ordered
+        ) {
+          break;
+        }
+
+        items.push((candidateOrderedMatch?.[1] ?? candidateUnorderedMatch?.[1] ?? "").trim());
+        cursor += 1;
+      }
+
+      flushParagraph();
+      blocks.push({ type: "list", ordered, items });
+      index = cursor - 1;
+      continue;
+    }
+
+    const quoteMatch = trimmed.match(/^>\s?(.*)$/);
+    if (quoteMatch) {
+      const quoteLines: string[] = [];
+      let cursor = index;
+
+      while (cursor < lines.length) {
+        const candidate = (lines[cursor] ?? "").trim();
+        const candidateMatch = candidate.match(/^>\s?(.*)$/);
+        if (!candidateMatch) {
+          break;
+        }
+        quoteLines.push(candidateMatch[1]?.trim() ?? "");
+        cursor += 1;
+      }
+
+      flushParagraph();
+      blocks.push({
+        type: "blockquote",
+        lines: quoteLines.filter(Boolean),
+      });
+      index = cursor - 1;
+      continue;
+    }
+
+    paragraphLines.push(trimmed);
+  }
+
+  flushParagraph();
+
+  return blocks;
+}
+
+function parseAgentChatMarkdownInline(text: string): AgentChatMarkdownInlineNode[] {
+  const tokenPatterns: Array<{
+    pattern: RegExp;
+    toNode: (match: RegExpExecArray) => AgentChatMarkdownInlineNode | null;
+  }> = [
+    {
+      pattern: /`([^`]+)`/g,
+      toNode: (match) => ({ type: "code", text: match[1] ?? "" }),
+    },
+    {
+      pattern: /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      toNode: (match) => ({
+        type: "link",
+        label: match[1] ?? "",
+        href: match[2] ?? "",
+      }),
+    },
+    {
+      pattern: /\*\*([^*]+)\*\*/g,
+      toNode: (match) => ({ type: "strong", text: match[1] ?? "" }),
+    },
+    {
+      pattern: /__([^_]+)__/g,
+      toNode: (match) => ({ type: "strong", text: match[1] ?? "" }),
+    },
+    {
+      pattern: /(?<!\*)\*([^*\s][^*]*?)\*(?!\*)/g,
+      toNode: (match) => ({ type: "em", text: match[1] ?? "" }),
+    },
+    {
+      pattern: /(?<!_)_([^_\s][^_]*?)_(?!_)/g,
+      toNode: (match) => ({ type: "em", text: match[1] ?? "" }),
+    },
+  ];
+  const tokens: AgentChatMarkdownInlineToken[] = [];
+
+  for (const { pattern, toNode } of tokenPatterns) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      const node = toNode(match);
+      if (!node) {
+        continue;
+      }
+      tokens.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        node,
+      });
+    }
+  }
+
+  const acceptedTokens = tokens
+    .sort((left, right) =>
+      left.start === right.start
+        ? right.end - right.start - (left.end - left.start)
+        : left.start - right.start,
+    )
+    .reduce<AgentChatMarkdownInlineToken[]>((accepted, token) => {
+      if (token.start < (accepted[accepted.length - 1]?.end ?? 0)) {
+        return accepted;
+      }
+      accepted.push(token);
+      return accepted;
+    }, []);
+
+  const nodes: AgentChatMarkdownInlineNode[] = [];
+  let cursor = 0;
+
+  for (const token of acceptedTokens) {
+    if (token.start > cursor) {
+      nodes.push({ type: "text", text: text.slice(cursor, token.start) });
+    }
+    nodes.push(token.node);
+    cursor = token.end;
+  }
+
+  if (cursor < text.length) {
+    nodes.push({ type: "text", text: text.slice(cursor) });
+  }
+
+  return nodes.filter((node) => {
+    if (node.type === "link") {
+      return Boolean(node.href && node.label);
+    }
+    return Boolean(node.text);
+  });
+}
+
+function renderAgentChatMarkdownInlineNode(
+  node: AgentChatMarkdownInlineNode,
+  index: number,
+) {
+  if (node.type === "code") {
+    return (
+      <code
+        key={`inline-code-${index}`}
+        className="rounded bg-muted/50 px-1 py-0.5 font-mono text-[0.85em] text-foreground"
+      >
+        {node.text}
+      </code>
+    );
+  }
+
+  if (node.type === "strong") {
+    return (
+      <strong key={`inline-strong-${index}`} className="font-semibold text-foreground">
+        {node.text}
+      </strong>
+    );
+  }
+
+  if (node.type === "em") {
+    return (
+      <em key={`inline-em-${index}`} className="italic">
+        {node.text}
+      </em>
+    );
+  }
+
+  if (node.type === "link") {
+    return (
+      <a
+        key={`inline-link-${index}`}
+        href={node.href}
+        target="_blank"
+        rel="noreferrer"
+        className="break-all text-sky-300 underline-offset-4 hover:underline"
+      >
+        {node.label}
+      </a>
+    );
+  }
+
+  return node.text;
 }
 
 type AgentChatDiffFile = {
