@@ -18,6 +18,7 @@ import {
 import {
   ArrowDownIcon,
   CheckIcon,
+  ClipboardIcon,
   GripVerticalIcon,
   Loader2Icon,
   SendHorizontalIcon,
@@ -750,44 +751,49 @@ function AgentChatTimelineSectionItem({
   return (
     <section
       className={cn(
-        "relative w-full max-w-[min(48rem,94%)] pl-7",
-        !isFocused && "max-w-[min(42rem,88%)] pl-5",
+        "relative w-full max-w-[min(48rem,94%)] pl-9",
+        !isFocused && "max-w-[min(42rem,88%)] pl-6",
       )}
     >
       <div
         aria-hidden="true"
         className={cn(
-          "absolute bottom-1 left-[0.47rem] top-5 w-px bg-border/70",
-          section.current && "bg-primary/45",
-          !isFocused && "left-[0.35rem]",
+          "absolute bottom-1 left-[0.68rem] top-7 w-px bg-gradient-to-b from-border/80 via-border/45 to-transparent",
+          section.current && "from-primary/65 via-primary/35",
+          !isFocused && "left-[0.48rem] top-6",
         )}
       />
       <div
         aria-hidden="true"
         className={cn(
-          "absolute left-0 top-1.5 grid size-4 place-items-center rounded-full border bg-background shadow-[0_0_0_5px_hsl(var(--background)/0.75)]",
+          "absolute left-0 top-3 grid size-6 place-items-center rounded-full border bg-background shadow-[0_0_0_6px_hsl(var(--background)/0.82)]",
           agentChatTimelineDotClass(section.status, section.current),
-          !isFocused && "size-3",
+          !isFocused && "top-3.5 size-4 shadow-[0_0_0_4px_hsl(var(--background)/0.75)]",
         )}
       >
         {section.current ? (
-          <span className="size-1.5 rounded-full bg-current" />
+          <span className="size-2 rounded-full bg-current" />
         ) : null}
       </div>
-      <div className="space-y-2 pb-2">
+      <div className="space-y-2 pb-3">
         {section.showTitle ? (
           <div
             className={cn(
-              "text-sm font-semibold leading-6 text-foreground",
+              "inline-flex max-w-full items-center gap-2 rounded-full border border-border/45 bg-background/72 px-3 py-1 text-sm font-semibold leading-6 text-foreground shadow-sm backdrop-blur",
               !isFocused && "text-xs leading-5 text-foreground/80",
             )}
           >
-            {section.title}
+            <span className="min-w-0 truncate">{section.title}</span>
+            {section.current ? (
+              <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-0.5 text-[0.62rem] leading-none text-primary">
+                当前
+              </span>
+            ) : null}
           </div>
         ) : null}
         <div
           className={cn(
-            "space-y-3 py-1",
+            "space-y-3 py-1.5",
             !isFocused && "space-y-2",
           )}
         >
@@ -820,7 +826,9 @@ function AgentChatBubbleItem({
   const isConversationMessage = agentChatBubbleIsConversationMessage(bubble);
   const rawPrimaryBlocks = bubble.blocks.length > 0
     ? bubble.blocks
-    : ([{ type: "text", text: bubble.title }] as WebActivityBlock[]);
+    : isConversationMessage
+      ? ([{ type: "text", text: bubble.title }] as WebActivityBlock[])
+      : [];
   const primaryBlocks = agentChatDisplayBlocksForBubble(bubble, rawPrimaryBlocks);
   const visibleBlockLimit = isConversationMessage && isFocused
     ? primaryBlocks.length
@@ -839,12 +847,15 @@ function AgentChatBubbleItem({
   return (
     <article
       className={cn(
-        "w-full py-1",
+        "w-full py-1.5",
         bubble.live || bubble.status === "running" ? "text-foreground" : "text-foreground/95",
         !isFocused && "select-none",
       )}
     >
-      <div className="text-sm leading-6 text-foreground">
+      <div className="space-y-2 text-sm leading-6 text-foreground">
+        {!isConversationMessage ? (
+          <AgentChatActivityHeader bubble={bubble} isFocused={isFocused} />
+        ) : null}
         <div className="space-y-2 text-foreground/90">
           {visibleBlocks.map((block, index) => (
             <AgentChatBlock
@@ -894,6 +905,66 @@ function AgentChatBubbleItem({
         ) : null}
       </div>
     </article>
+  );
+}
+
+function AgentChatActivityHeader({
+  bubble,
+  isFocused,
+}: {
+  bubble: AgentChatBubble;
+  isFocused: boolean;
+}) {
+  const isRunning = bubble.live || bubble.status === "running";
+  const statusText = agentChatActivityStatusText(bubble.status, bubble.live);
+  const subtitle = agentChatActivitySubtitle(bubble);
+
+  return (
+    <div
+      className={cn(
+        "flex min-w-0 items-start gap-2 text-foreground",
+        !isFocused && "opacity-90",
+      )}
+    >
+      <span
+        aria-hidden="true"
+        className={cn(
+          "mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full border bg-background/90 font-mono text-[0.65rem] font-semibold leading-none shadow-sm",
+          agentChatActivityIconClass(bubble),
+          !isFocused && "size-4 text-[0.58rem]",
+        )}
+      >
+        {agentChatActivityGlyph(bubble)}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <p
+            className={cn(
+              "min-w-0 break-words text-sm font-semibold leading-6 text-foreground",
+              !isFocused && "text-xs leading-5",
+            )}
+          >
+            {bubble.title}
+          </p>
+          {isRunning || bubble.status === "failed" ? (
+            <span
+              className={cn(
+                "inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[0.62rem] font-medium leading-none",
+                agentChatActivityStatusClass(bubble.status, bubble.live),
+              )}
+            >
+              {isRunning ? <Loader2Icon className="size-2.5 animate-spin" /> : null}
+              {statusText}
+            </span>
+          ) : null}
+        </div>
+        {subtitle && isFocused ? (
+          <p className="break-words text-xs leading-5 text-muted-foreground/80">
+            {subtitle}
+          </p>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -1239,36 +1310,117 @@ function AgentChatCodeBlock({
   language: string;
   limit: number;
 }) {
+  const [hasCopied, setHasCopied] = useState(false);
   const lines = code.split(/\r?\n/);
   const visibleLines = lines.slice(0, limit);
   const hiddenLines = lines.slice(limit);
+  const label = agentChatCodeLanguageLabel(language);
+  const canCopy = typeof navigator !== "undefined" && Boolean(navigator.clipboard);
+
+  async function handleCopyCode() {
+    if (!canCopy) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(code);
+      setHasCopied(true);
+      window.setTimeout(() => setHasCopied(false), 1600);
+    } catch {
+      setHasCopied(false);
+    }
+  }
 
   if (!code.trim()) {
     return <p className="text-muted-foreground">(no output)</p>;
   }
 
   return (
-    <div className="space-y-1">
-      {language ? (
-        <p className="text-[0.68rem] uppercase tracking-[0.14em] text-muted-foreground">
-          {language}
-        </p>
-      ) : null}
-      <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-muted/35 px-3 py-2 font-mono text-xs leading-5 text-foreground/85">
-        {visibleLines.join("\n")}
-      </pre>
+    <div className="overflow-hidden rounded-[1.35rem] border border-border/55 bg-background/70 shadow-sm shadow-background/30 backdrop-blur">
+      <div className="flex items-center justify-between gap-3 border-b border-border/45 bg-muted/25 px-4 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span
+            aria-hidden="true"
+            className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground"
+          >
+            <span className="font-mono text-[0.7rem] leading-none">&lt;/&gt;</span>
+          </span>
+          <span className="truncate text-sm font-semibold text-foreground/90">
+            {label}
+          </span>
+        </div>
+        {canCopy ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={`Copy ${label} code`}
+            onClick={handleCopyCode}
+            className="rounded-full text-muted-foreground hover:text-foreground"
+          >
+            {hasCopied ? (
+              <CheckIcon className="size-3.5" />
+            ) : (
+              <ClipboardIcon className="size-3.5" />
+            )}
+          </Button>
+        ) : null}
+      </div>
+      <div className="relative">
+        <pre
+          className="max-h-72 overflow-auto whitespace-pre px-4 py-3 font-mono text-[0.82rem] leading-6 text-foreground/90 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]"
+          data-code-block-id={id}
+        >
+          {visibleLines.join("\n")}
+        </pre>
+        {hiddenLines.length > 0 ? (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background/95 to-transparent"
+          />
+        ) : null}
+      </div>
       {hiddenLines.length > 0 ? (
-        <details className="text-xs text-muted-foreground">
-          <summary className="cursor-pointer list-none hover:text-foreground/80">
+        <details className="border-t border-border/40 bg-muted/15 px-4 py-2 text-xs text-muted-foreground">
+          <summary className="cursor-pointer list-none select-none hover:text-foreground/80">
             展开完整输出（+{hiddenLines.length} 行）
           </summary>
-          <pre className="mt-1 overflow-x-auto whitespace-pre-wrap rounded-md bg-muted/35 px-3 py-2 font-mono text-xs leading-5 text-foreground/85">
+          <pre className="mt-2 max-h-[28rem] overflow-auto whitespace-pre rounded-xl bg-background/70 px-3 py-2 font-mono text-[0.78rem] leading-6 text-foreground/85 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
             {code}
           </pre>
         </details>
       ) : null}
     </div>
   );
+}
+
+function agentChatCodeLanguageLabel(language: string) {
+  const normalized = language.trim().toLowerCase();
+
+  if (!normalized) {
+    return "Code";
+  }
+
+  const labels: Record<string, string> = {
+    bash: "Bash",
+    css: "CSS",
+    html: "HTML",
+    js: "JavaScript",
+    json: "JSON",
+    jsx: "JSX",
+    md: "Markdown",
+    py: "Python",
+    python: "Python",
+    rs: "Rust",
+    rust: "Rust",
+    sh: "Shell",
+    shell: "Shell",
+    ts: "TypeScript",
+    tsx: "TSX",
+    zsh: "Zsh",
+  };
+
+  return labels[normalized] ?? `${normalized[0]?.toUpperCase() ?? ""}${normalized.slice(1)}`;
 }
 
 function AgentChatDiffBlock({
@@ -1290,20 +1442,26 @@ function AgentChatDiffBlock({
         const visibleLines = file.lines.slice(0, limit);
         const hiddenLines = file.lines.slice(limit);
         return (
-          <div key={`${id}-file-${fileIndex}`} className="space-y-1">
-            <p className="break-all text-foreground/85">
-              {file.path} <span className="text-emerald-300">+{file.added_lines}</span>{" "}
-              <span className="text-red-300">-{file.removed_lines}</span>
-            </p>
-            <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-muted/30 px-3 py-2 leading-5">
+          <div
+            key={`${id}-file-${fileIndex}`}
+            className="overflow-hidden rounded-[1.1rem] border border-border/45 bg-background/60"
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-border/40 bg-muted/20 px-3 py-2">
+              <p className="min-w-0 truncate text-foreground/85">{file.path}</p>
+              <span className="shrink-0 font-sans text-[0.68rem] text-muted-foreground">
+                <span className="text-emerald-300">+{file.added_lines}</span>{" "}
+                <span className="text-red-300">-{file.removed_lines}</span>
+              </span>
+            </div>
+            <pre className="max-h-72 overflow-auto whitespace-pre px-3 py-2 leading-5 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
               {visibleLines.map((line) => renderDiffLine(line)).join("\n")}
             </pre>
             {hiddenLines.length > 0 ? (
-              <details className="font-sans text-xs text-muted-foreground">
+              <details className="border-t border-border/40 bg-muted/15 px-3 py-2 font-sans text-xs text-muted-foreground">
                 <summary className="cursor-pointer list-none hover:text-foreground/80">
                   展开剩余 {hiddenLines.length} 行 diff
                 </summary>
-                <pre className="mt-1 overflow-x-auto whitespace-pre-wrap rounded-md bg-muted/30 px-3 py-2 font-mono leading-5">
+                <pre className="mt-2 max-h-[28rem] overflow-auto whitespace-pre rounded-xl bg-background/70 px-3 py-2 font-mono leading-5 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
                   {file.lines.map((line) => renderDiffLine(line)).join("\n")}
                 </pre>
               </details>
@@ -1543,18 +1701,101 @@ function agentChatTimelineDotClass(
   current: boolean,
 ) {
   if (current || status === "in_progress") {
-    return "border-primary/60 text-primary";
+    return "border-primary/65 bg-primary/10 text-primary shadow-primary/10";
   }
 
   if (status === "completed") {
-    return "border-emerald-400/50 text-emerald-400";
+    return "border-emerald-400/55 bg-emerald-400/10 text-emerald-400";
   }
 
   if (status === "pending") {
-    return "border-muted-foreground/35 text-muted-foreground";
+    return "border-muted-foreground/35 bg-muted/35 text-muted-foreground";
   }
 
-  return "border-border text-muted-foreground";
+  return "border-border bg-muted/20 text-muted-foreground";
+}
+
+function agentChatActivityGlyph(bubble: AgentChatBubble) {
+  if (bubble.kind === "tool") {
+    if (bubble.toolName === "terminal") {
+      return "$";
+    }
+    if (bubble.toolName === "browser") {
+      return "↗";
+    }
+    return "⌁";
+  }
+
+  if (bubble.kind === "patch") {
+    return "±";
+  }
+
+  if (bubble.kind === "workflow") {
+    return "◇";
+  }
+
+  if (bubble.kind === "memory") {
+    return "◌";
+  }
+
+  if (bubble.kind === "error" || bubble.status === "failed") {
+    return "!";
+  }
+
+  return "·";
+}
+
+function agentChatActivityIconClass(bubble: AgentChatBubble) {
+  if (bubble.status === "failed" || bubble.kind === "error") {
+    return "border-destructive/45 text-destructive";
+  }
+
+  if (bubble.live || bubble.status === "running") {
+    return "border-primary/55 text-primary";
+  }
+
+  if (bubble.kind === "patch") {
+    return "border-emerald-400/45 text-emerald-400";
+  }
+
+  return "border-border/70 text-muted-foreground";
+}
+
+function agentChatActivityStatusText(status: string, live?: boolean) {
+  if (live || status === "running") {
+    return "进行中";
+  }
+
+  if (status === "failed") {
+    return "失败";
+  }
+
+  if (status === "dismissed") {
+    return "已忽略";
+  }
+
+  return status || "activity";
+}
+
+function agentChatActivityStatusClass(status: string, live?: boolean) {
+  if (live || status === "running") {
+    return "border-primary/30 bg-primary/10 text-primary";
+  }
+
+  if (status === "failed") {
+    return "border-destructive/30 bg-destructive/10 text-destructive";
+  }
+
+  return "border-border/50 bg-muted/30 text-muted-foreground";
+}
+
+function agentChatActivitySubtitle(bubble: AgentChatBubble) {
+  return [
+    bubble.appName || bubble.toolName || bubble.kind,
+    bubble.sourceLabel,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 function agentChatBubbleIsConversationMessage(bubble: AgentChatBubble) {
