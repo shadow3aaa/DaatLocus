@@ -1,22 +1,14 @@
-use ratatui::{
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-};
 use serde::{Deserialize, Serialize};
 
-use crate::tool_ui::{
-    AppAttentionUiAction, AppAttentionUiData, BrowserUiAction, BrowserUiData, glyph,
-};
+use crate::tool_ui::{AppAttentionUiAction, AppAttentionUiData, BrowserUiAction, BrowserUiData};
 
-use super::primitives::{Cell, render_text_activity_lines};
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppAttentionActivityCell {
     pub title: String,
     pub body_lines: Vec<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrowserActivityCell {
     pub title: String,
     pub body_lines: Vec<String>,
@@ -25,96 +17,11 @@ pub struct BrowserActivityCell {
     pub ref_count: Option<usize>,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LiveBrowserActivityCell {
     pub title: String,
     pub body_lines: Vec<String>,
     pub url: Option<String>,
-}
-
-impl Cell for AppAttentionActivityCell {
-    fn render_lines(&self) -> Vec<Line<'static>> {
-        render_text_activity_lines(
-            glyph::APP_ATTENTION,
-            Color::LightBlue,
-            &self.title,
-            &self.body_lines,
-            6,
-            None,
-        )
-    }
-}
-
-impl Cell for BrowserActivityCell {
-    fn render_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(vec![
-            Span::styled(
-                glyph::BROWSER,
-                Style::default()
-                    .fg(Color::LightBlue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!(
-                    "Captured URL: {}",
-                    self.url
-                        .as_deref()
-                        .map(compact_browser_url)
-                        .unwrap_or_else(|| "unknown".to_string())
-                ),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])];
-        let mut stats = Vec::new();
-        if let Some(line_count) = self.line_count {
-            stats.push(format!("{line_count} lines"));
-        }
-        if let Some(ref_count) = self.ref_count {
-            stats.push(format!("{ref_count} refs"));
-        }
-        if !stats.is_empty() {
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(stats.join(" · "), Style::default().fg(Color::Gray)),
-            ]));
-        }
-        lines
-    }
-}
-
-impl Cell for LiveBrowserActivityCell {
-    fn render_lines(&self) -> Vec<Line<'static>> {
-        let title = self
-            .url
-            .as_deref()
-            .map(|url| format!("Opening URL: {}", compact_browser_url(url)))
-            .unwrap_or_else(|| self.title.clone());
-        let mut lines = vec![Line::from(vec![
-            Span::styled(
-                glyph::BROWSER,
-                Style::default()
-                    .fg(Color::LightBlue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                title,
-                Style::default()
-                    .fg(Color::LightBlue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])];
-        for line in self.body_lines.iter().take(1) {
-            lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::styled(line.clone(), Style::default().fg(Color::Gray)),
-            ]));
-        }
-        lines
-    }
 }
 
 impl From<AppAttentionUiData> for AppAttentionActivityCell {

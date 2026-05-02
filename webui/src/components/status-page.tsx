@@ -53,6 +53,7 @@ import {
   type DashboardContextCompositionSegment,
   type DashboardPendingAccessRequest,
   type DashboardSnapshot,
+  type ActivityCellVariant,
   type WebActivityBlock,
   type WebActivityItem,
   type TokenUsage,
@@ -70,6 +71,9 @@ const AGENT_CHAT_MESSAGE_LINE_LIMIT = 5;
 const AGENT_CHAT_FOCUSED_MESSAGE_LINE_LIMIT = 12;
 const AGENT_CHAT_DETAIL_LINE_LIMIT = 8;
 const AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT = Number.MAX_SAFE_INTEGER;
+const AGENT_CHAT_CANONICAL_CELL_BLOCK_LIMIT = 4;
+const AGENT_CHAT_CANONICAL_CELL_DIFF_FILE_LIMIT = 4;
+const AGENT_CHAT_CANONICAL_CELL_DIFF_LINE_LIMIT = 18;
 const AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX = 72;
 const AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX = 160;
 const TOKEN_USAGE_CHART_CONFIG = {
@@ -381,6 +385,7 @@ type AgentChatBubble = {
   sourceLabel?: string;
   errorLines: string[];
   affectedFiles: string[];
+  cell?: ActivityCellVariant | null;
 };
 
 type AgentChatPlanStepStatus =
@@ -830,6 +835,11 @@ function AgentChatBubbleItem({
       ? ([{ type: "text", text: bubble.title }] as WebActivityBlock[])
       : [];
   const primaryBlocks = agentChatDisplayBlocksForBubble(bubble, rawPrimaryBlocks);
+  const canonicalBlocks = agentChatCanonicalCellBlocksForBubble(bubble);
+  const visibleCanonicalBlocks = canonicalBlocks.slice(
+    0,
+    AGENT_CHAT_CANONICAL_CELL_BLOCK_LIMIT,
+  );
   const visibleBlockLimit = isConversationMessage && isFocused
     ? primaryBlocks.length
     : isFocused
@@ -840,6 +850,7 @@ function AgentChatBubbleItem({
   const hasDetails =
     bubble.detailBlocks.length > 0 ||
     hiddenBlocks.length > 0 ||
+    visibleCanonicalBlocks.length > 0 ||
     bubble.errorLines.length > 0 ||
     bubble.affectedFiles.length > 0 ||
     Boolean(bubble.toolName || bubble.appName || bubble.sourceLabel);
@@ -891,6 +902,12 @@ function AgentChatBubbleItem({
                   messageMode={isConversationMessage}
                 />
               ))}
+              {visibleCanonicalBlocks.length > 0 ? (
+                <AgentChatCanonicalCellBlocks
+                  bubble={bubble}
+                  blocks={visibleCanonicalBlocks}
+                />
+              ) : null}
               {bubble.detailBlocks.map((block, index) => (
                 <AgentChatBlock
                   key={`${bubble.id}-detail-block-${index}`}
@@ -998,12 +1015,14 @@ function AgentChatBlock({
   isFocused,
   messageMode = false,
   detail = false,
+  dense = false,
 }: {
   block: WebActivityBlock;
   blockId: string;
   isFocused: boolean;
   messageMode?: boolean;
   detail?: boolean;
+  dense?: boolean;
 }) {
   const record = asRecord(block);
   const type = typeof record?.type === "string" ? record.type : "unknown";
@@ -1058,17 +1077,12 @@ function AgentChatBlock({
   if (type === "list") {
     const items = stringArrayValue(record.items);
     return items.length > 0 ? (
-      <ul className="space-y-1 text-sm text-foreground/90">
-        {items.slice(0, lineLimit).map((item, index) => (
-          <li key={`${blockId}-item-${index}`} className="flex gap-2 break-words">
-            <span className="text-muted-foreground">•</span>
-            <span>{item}</span>
-          </li>
-        ))}
-        {items.length > lineLimit ? (
-          <li className="text-xs text-muted-foreground">… +{items.length - lineLimit} more</li>
-        ) : null}
-      </ul>
+      <AgentChatListItems
+        blockId={blockId}
+        items={items}
+        limit={lineLimit}
+        dense={dense}
+      />
     ) : null;
   }
 
@@ -1078,6 +1092,7 @@ function AgentChatBlock({
         id={blockId}
         files={diffFilesValue(record.files)}
         limit={lineLimit}
+        fileLimit={dense ? AGENT_CHAT_CANONICAL_CELL_DIFF_FILE_LIMIT : undefined}
       />
     );
   }
@@ -1127,6 +1142,67 @@ function FragmentPair({ left, right }: { left: string; right: string }) {
       <dt className="font-medium text-muted-foreground/80">{left}</dt>
       <dd className="min-w-0 break-words text-foreground/80">{right}</dd>
     </>
+  );
+}
+
+
+type AgentChatCanonicalBlock = WebActivityBlock & { title?: string };
+
+function AgentChatCanonicalCellBlocks({
+  bubble,
+  blocks,
+}: {
+  bubble: AgentChatBubble;
+  blocks: AgentChatCanonicalBlock[];
+}) {
+  if (blocks.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-2">
+      <p className="text-[0.68rem] font-semibold uppercase tracking-wide text-muted-foreground/75">
+        ActivityCell: {agentChatCanonicalCellVariantName(bubble.cell) ?? "unknown"}
+      </p>
+      {blocks.map((block, index) => (
+        <AgentChatCanonicalCellBlock
+          key={`${bubble.id}-canonical-${index}`}
+          bubbleId={bubble.id}
+          block={block}
+          index={index}
+        />
+      ))}
+    </div>
+  );
+}
+
+function AgentChatCanonicalCellBlock({
+  bubbleId,
+  block,
+  index,
+}: {
+  bubbleId: string;
+  block: AgentChatCanonicalBlock;
+  index: number;
+}) {
+  const blockId = `${bubbleId}-canonical-${index}`;
+  const title = typeof block.title === "string" ? block.title.trim() : "";
+  const renderableBlock = { ...block };
+  delete renderableBlock.title;
+
+  return (
+    <div className="space-y-1 rounded-xl border border-border/35 bg-muted/10 p-3">
+      {title ? (
+        <p className="text-xs font-semibold text-foreground/80">{title}</p>
+      ) : null}
+      <AgentChatBlock
+        block={renderableBlock}
+        blockId={blockId}
+        isFocused={true}
+        detail
+        dense
+      />
+    </div>
   );
 }
 
@@ -1254,6 +1330,42 @@ function AgentChatMarkdownBlock({
 
 function AgentChatMarkdownInline({ text }: { text: string }) {
   return <>{parseAgentChatMarkdownInline(text).map(renderAgentChatMarkdownInlineNode)}</>;
+}
+
+function AgentChatListItems({
+  blockId,
+  items,
+  limit,
+  dense = false,
+}: {
+  blockId: string;
+  items: string[];
+  limit: number;
+  dense?: boolean;
+}) {
+  const visibleItems = items.slice(0, limit);
+  const hiddenItems = items.slice(limit);
+
+  return (
+    <ul
+      className={cn(
+        "space-y-1 text-foreground/90",
+        dense ? "text-xs" : "text-sm",
+      )}
+    >
+      {visibleItems.map((item, index) => (
+        <li key={`${blockId}-item-${index}`} className="flex gap-2 break-words">
+          <span className="text-muted-foreground">•</span>
+          <span>{item}</span>
+        </li>
+      ))}
+      {hiddenItems.length > 0 ? (
+        <li className="text-xs text-muted-foreground">
+          … +{hiddenItems.length} more
+        </li>
+      ) : null}
+    </ul>
+  );
 }
 
 function AgentChatTextLines({
@@ -1427,18 +1539,23 @@ function AgentChatDiffBlock({
   id,
   files,
   limit,
+  fileLimit = 3,
 }: {
   id: string;
   files: AgentChatDiffFile[];
   limit: number;
+  fileLimit?: number;
 }) {
   if (files.length === 0) {
     return null;
   }
 
+  const visibleFiles = files.slice(0, fileLimit);
+  const hiddenFileCount = files.length - visibleFiles.length;
+
   return (
     <div className="space-y-2 font-mono text-xs">
-      {files.slice(0, 3).map((file, fileIndex) => {
+      {visibleFiles.map((file, fileIndex) => {
         const visibleLines = file.lines.slice(0, limit);
         const hiddenLines = file.lines.slice(limit);
         return (
@@ -1469,8 +1586,8 @@ function AgentChatDiffBlock({
           </div>
         );
       })}
-      {files.length > 3 ? (
-        <p className="font-sans text-xs text-muted-foreground">… +{files.length - 3} more file(s)</p>
+      {hiddenFileCount > 0 ? (
+        <p className="font-sans text-xs text-muted-foreground">… +{hiddenFileCount} more file(s)</p>
       ) : null}
     </div>
   );
@@ -1645,6 +1762,7 @@ function agentChatBubbleFromWebActivityItem(
       ? [stringValue(error.message, ""), ...stringArrayValue(error.details)].filter(Boolean)
       : [],
     affectedFiles: tool ? stringArrayValue(tool.affected_files) : [],
+    cell: asActivityCellVariant(record.cell),
   };
 }
 
@@ -1816,6 +1934,403 @@ function agentChatDisplayBlocksForBubble(
   return blocks.flatMap((block) => agentChatSplitMarkdownCodeFences(block));
 }
 
+function agentChatCanonicalCellBlocksForBubble(
+  bubble: AgentChatBubble,
+): AgentChatCanonicalBlock[] {
+  const cell = bubble.cell;
+  const common = agentChatCommonActivityCell(cell);
+
+  if (common) {
+    return agentChatCommonActivityCellBlocks(common.title, common.body_lines);
+  }
+
+  const browser = agentChatActivityCellPayload(cell, "Browser");
+  if (browser) {
+    return agentChatBrowserActivityCellBlocks(browser);
+  }
+
+  const liveBrowser = agentChatActivityCellPayload(cell, "LiveBrowser");
+  if (liveBrowser) {
+    return agentChatBrowserActivityCellBlocks(liveBrowser);
+  }
+
+  const execResult = agentChatActivityCellPayload(cell, "ExecResult");
+  if (execResult) {
+    return agentChatExecResultActivityCellBlocks(execResult);
+  }
+
+  const liveExec = agentChatActivityCellPayload(cell, "LiveExec");
+  if (liveExec) {
+    return agentChatLiveExecActivityCellBlocks(liveExec);
+  }
+
+  const patch = agentChatActivityCellPayload(cell, "Patch");
+  if (patch) {
+    return agentChatPatchActivityCellBlocks(patch);
+  }
+
+  const telegram = agentChatActivityCellPayload(cell, "Telegram");
+  if (telegram) {
+    return agentChatTelegramActivityCellBlocks(telegram);
+  }
+
+  const reply = agentChatActivityCellPayload(cell, "Reply");
+  if (reply) {
+    return agentChatReplyActivityCellBlocks(reply);
+  }
+
+  const plan = agentChatActivityCellPayload(cell, "PlanResult");
+  if (plan) {
+    return agentChatPlanActivityCellBlocks(plan);
+  }
+
+  const createWorkflow = agentChatActivityCellPayload(cell, "CreateWorkflowResult");
+  if (createWorkflow) {
+    return agentChatWorkflowActivityCellBlocks("Created Workflow", createWorkflow);
+  }
+
+  const activateWorkflow = agentChatActivityCellPayload(cell, "ActivateWorkflowResult");
+  if (activateWorkflow) {
+    return agentChatWorkflowActivityCellBlocks("Activated Workflow", activateWorkflow);
+  }
+
+  const deepRecall = agentChatActivityCellPayload(cell, "DeepRecallResult");
+  if (deepRecall) {
+    const memoryCount = numberValue(deepRecall.memory_count, 0);
+    return [
+      {
+        type: "kv",
+        title: `Recalled ${memoryCount} Memories`,
+        entries: [{ key: "memory_count", value: String(memoryCount) }],
+      },
+    ];
+  }
+
+  return [];
+}
+
+function agentChatCommonActivityCell(
+  cell: ActivityCellVariant | null | undefined,
+): Record<string, unknown> | null {
+  return (
+    agentChatActivityCellPayload(cell, "Assistant") ??
+    agentChatActivityCellPayload(cell, "User") ??
+    agentChatActivityCellPayload(cell, "AppAttention") ??
+    agentChatActivityCellPayload(cell, "GenericApp") ??
+    agentChatActivityCellPayload(cell, "ToolResult") ??
+    agentChatActivityCellPayload(cell, "TerminalWait") ??
+    agentChatActivityCellPayload(cell, "Error")
+  );
+}
+
+function agentChatCommonActivityCellBlocks(
+  titleValue: unknown,
+  bodyLinesValue: unknown,
+): AgentChatCanonicalBlock[] {
+  const title = stringValue(titleValue, "Activity");
+  const lines = stringArrayValue(bodyLinesValue);
+
+  return [
+    {
+      type: "text",
+      title,
+      text: [title, ...lines].filter(Boolean).join("\n"),
+    },
+  ];
+}
+
+function agentChatBrowserActivityCellBlocks(
+  cell: Record<string, unknown>,
+): AgentChatCanonicalBlock[] {
+  const title = stringValue(cell.title, "Browser");
+  const entries = [
+    { key: "title", value: title },
+    nullableStringEntry("url", cell.url),
+    nullableStringEntry("lines", cell.line_count),
+    nullableStringEntry("refs", cell.ref_count),
+  ].filter((entry): entry is { key: string; value: string } => Boolean(entry));
+  const bodyLines = stringArrayValue(cell.body_lines);
+  const blocks: AgentChatCanonicalBlock[] = entries.length > 0
+    ? [{ type: "kv", title, entries }]
+    : [];
+
+  if (bodyLines.length > 0) {
+    blocks.push({
+      type: "text",
+      title: "Details",
+      text: bodyLines.join("\n"),
+    });
+  }
+
+  return blocks;
+}
+
+function agentChatExecResultActivityCellBlocks(
+  cell: Record<string, unknown>,
+): AgentChatCanonicalBlock[] {
+  const title = stringValue(cell.title, "Command");
+  const outputLines = stringArrayValue(cell.output_lines);
+  const blocks: AgentChatCanonicalBlock[] = [
+    {
+      type: "code",
+      title,
+      code: outputLines.length > 0 ? outputLines.join("\n") : "(no output)",
+    },
+  ];
+  const meta = nullableStringEntry("meta", cell.meta);
+
+  if (meta) {
+    blocks.push({
+      type: "kv",
+      title: "Metadata",
+      entries: [meta],
+    });
+  }
+
+  return blocks;
+}
+
+function agentChatLiveExecActivityCellBlocks(
+  cell: Record<string, unknown>,
+): AgentChatCanonicalBlock[] {
+  const title = stringValue(cell.title, "Command");
+  const outputLines = stringArrayValue(cell.output_lines);
+  const entries = [
+    nullableStringEntry("meta", cell.meta),
+    nullableStringEntry("started_at_ms", cell.started_at_ms),
+  ].filter((entry): entry is { key: string; value: string } => Boolean(entry));
+  const blocks: AgentChatCanonicalBlock[] = [
+    {
+      type: "code",
+      title,
+      code: outputLines.length > 0 ? outputLines.join("\n") : "running...",
+    },
+  ];
+  const callLines = stringArrayValue(cell.call_lines);
+
+  if (callLines.length > 0) {
+    blocks.unshift({
+      type: "code",
+      title: "Input",
+      code: callLines.join("\n"),
+    });
+  }
+
+  if (entries.length > 0) {
+    blocks.push({ type: "kv", title: "Metadata", entries });
+  }
+
+  return blocks;
+}
+
+function agentChatPatchActivityCellBlocks(
+  cell: Record<string, unknown>,
+): AgentChatCanonicalBlock[] {
+  const files = diffFilesValue(
+    arrayValue(cell.files).map((file) => {
+      const record = asRecord(file);
+      return record
+        ? {
+            ...record,
+            lines: record.diff_lines,
+          }
+        : file;
+    }),
+  );
+
+  return [
+    {
+      type: "diff",
+      title: stringValue(cell.summary_line, "Patch"),
+      files,
+    },
+  ];
+}
+
+function agentChatTelegramActivityCellBlocks(
+  cell: Record<string, unknown>,
+): AgentChatCanonicalBlock[] {
+  const title = stringValue(cell.title, "Telegram");
+  const messageLines = stringArrayValue(cell.message_lines);
+  const detailLines = stringArrayValue(cell.detail_lines);
+  const blocks: AgentChatCanonicalBlock[] = [];
+
+  if (messageLines.length > 0) {
+    blocks.push({
+      type: "text",
+      title,
+      text: messageLines.join("\n"),
+    });
+  }
+
+  if (detailLines.length > 0) {
+    blocks.push({
+      type: "text",
+      title: "Details",
+      text: detailLines.join("\n"),
+    });
+  }
+
+  return blocks.length > 0 ? blocks : agentChatCommonActivityCellBlocks(title, []);
+}
+
+function agentChatReplyActivityCellBlocks(
+  cell: Record<string, unknown>,
+): AgentChatCanonicalBlock[] {
+  const disposition = stringValue(cell.disposition, "unknown");
+  const subject = stringValue(cell.subject, "message");
+  const messageLines = stringArrayValue(cell.message_lines);
+  const blocks: AgentChatCanonicalBlock[] = [];
+
+  if (messageLines.length > 0) {
+    blocks.push({
+      type: "text",
+      title: "Message",
+      text: messageLines.join("\n"),
+    });
+  }
+
+  blocks.push({
+    type: "kv",
+    title: "Reply",
+    entries: [
+      { key: "disposition", value: disposition },
+      { key: "subject", value: subject },
+    ],
+  });
+
+  return blocks;
+}
+
+function agentChatPlanActivityCellBlocks(
+  cell: Record<string, unknown>,
+): AgentChatCanonicalBlock[] {
+  const items = arrayValue(cell.steps)
+    .map(asRecord)
+    .filter((step): step is Record<string, unknown> => Boolean(step))
+    .map((step) => {
+      const status = normalizeCanonicalPlanStepStatus(step.status);
+      const marker = canonicalPlanStepMarker(status);
+      const text = stringValue(step.text, "");
+      return text ? `${marker} ${text}` : "";
+    })
+    .filter(Boolean);
+
+  return items.length > 0
+    ? [{ type: "list", title: "Plan", items }]
+    : [];
+}
+
+function agentChatWorkflowActivityCellBlocks(
+  title: string,
+  cell: Record<string, unknown>,
+): AgentChatCanonicalBlock[] {
+  return [
+    {
+      type: "kv",
+      title,
+      entries: [
+        {
+          key: "workflow_id",
+          value: stringValue(cell.workflow_id, "unknown"),
+        },
+      ],
+    },
+  ];
+}
+
+function agentChatPlanStepsFromActivityCell(
+  cell: ActivityCellVariant | null | undefined,
+): AgentChatPlanStep[] {
+  const plan = agentChatActivityCellPayload(cell, "PlanResult");
+
+  if (!plan) {
+    return [];
+  }
+
+  return arrayValue(plan.steps)
+    .map(asRecord)
+    .filter((step): step is Record<string, unknown> => Boolean(step))
+    .map((step) => {
+      const text = stringValue(step.text, "");
+      if (!text) {
+        return null;
+      }
+      return {
+        status: normalizeCanonicalPlanStepStatus(step.status),
+        text,
+      } satisfies AgentChatPlanStep;
+    })
+    .filter((step): step is AgentChatPlanStep => Boolean(step));
+}
+
+function agentChatCanonicalCellVariantName(
+  cell: ActivityCellVariant | null | undefined,
+): string | null {
+  const record = asActivityCellVariant(cell);
+
+  if (!record) {
+    return null;
+  }
+
+  return Object.keys(record)[0] ?? null;
+}
+
+function agentChatActivityCellPayload(
+  cell: ActivityCellVariant | null | undefined,
+  variant: string,
+): Record<string, unknown> | null {
+  const record = asActivityCellVariant(cell) as Record<string, unknown> | null;
+  return asRecord(record?.[variant]);
+}
+
+function normalizeCanonicalPlanStepStatus(value: unknown): AgentChatPlanStepStatus {
+  if (value === "Pending" || value === "pending") {
+    return "pending";
+  }
+
+  if (value === "InProgress" || value === "in_progress") {
+    return "in_progress";
+  }
+
+  if (value === "Completed" || value === "completed") {
+    return "completed";
+  }
+
+  return "unknown";
+}
+
+function canonicalPlanStepMarker(status: AgentChatPlanStepStatus) {
+  if (status === "pending") {
+    return "○";
+  }
+
+  if (status === "in_progress" || status === "completed") {
+    return "●";
+  }
+
+  return "•";
+}
+
+function nullableStringEntry(
+  key: string,
+  value: unknown,
+): { key: string; value: string } | null {
+  if (typeof value === "string") {
+    return value.trim() ? { key, value } : null;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return { key, value: String(value) };
+  }
+
+  if (typeof value === "boolean") {
+    return { key, value: value ? "true" : "false" };
+  }
+
+  return null;
+}
+
 function agentChatPlanStepsFromBubble(
   bubble: AgentChatBubble | undefined,
 ): AgentChatPlanStep[] {
@@ -1825,6 +2340,12 @@ function agentChatPlanStepsFromBubble(
 
   if (bubble.planSteps.length > 0) {
     return bubble.planSteps;
+  }
+
+  const canonicalSteps = agentChatPlanStepsFromActivityCell(bubble.cell);
+
+  if (canonicalSteps.length > 0) {
+    return canonicalSteps;
   }
 
   return bubble.blocks
@@ -1881,7 +2402,7 @@ function agentChatPlanStepsFromMetadata(value: unknown): AgentChatPlanStep[] {
 }
 
 function agentChatPlanStepFromLine(line: string): AgentChatPlanStep | null {
-  const match = line.match(/^([✓→○•-])\s*(.+)$/u);
+  const match = line.match(/^([✓→○●•-])\s*(.+)$/u);
   const marker = match?.[1] ?? "";
   const text = (match?.[2] ?? line).trim();
 
@@ -2260,6 +2781,26 @@ function webActivityBlocksValue(value: unknown): WebActivityBlock[] {
   });
 }
 
+function asActivityCellVariant(value: unknown): ActivityCellVariant | null {
+  const record = asRecord(value);
+
+  if (!record) {
+    return null;
+  }
+
+  const keys = Object.keys(record);
+
+  if (keys.length !== 1) {
+    return null;
+  }
+
+  return record as ActivityCellVariant;
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
 function kvEntriesValue(value: unknown) {
   if (!Array.isArray(value)) {
     return [];
@@ -2310,6 +2851,10 @@ function diffLinesValue(value: unknown): AgentChatDiffLine[] {
 
 function renderDiffLine(line: AgentChatDiffLine) {
   const prefix = line.kind === "add" ? "+" : line.kind === "delete" ? "-" : " ";
+  if (line.kind === "hunk_break") {
+    return `  ${line.text}`;
+  }
+
   return `${prefix} ${line.text}`;
 }
 

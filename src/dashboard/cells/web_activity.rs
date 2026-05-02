@@ -20,7 +20,7 @@ use super::{
     workflow::{ActivateWorkflowActivityCell, CreateWorkflowActivityCell, DeepRecallActivityCell},
 };
 
-pub const WEB_ACTIVITY_VERSION: u8 = 1;
+pub const WEB_ACTIVITY_VERSION: u8 = 2;
 
 pub fn default_web_activity_version() -> u8 {
     WEB_ACTIVITY_VERSION
@@ -58,6 +58,8 @@ pub struct WebActivityItem {
     pub id: String,
     pub kind: WebActivityKind,
     pub status: WebActivityStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_hint: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<WebActivityActor>,
@@ -75,6 +77,8 @@ pub struct WebActivityItem {
     pub error: Option<WebActivityError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell: Option<ActivityCell>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -247,6 +251,7 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
         } else {
             WebActivityStatus::Completed
         },
+        ui_hint: None,
         title: "Activity".to_string(),
         actor: None,
         created_at: now,
@@ -257,6 +262,7 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
         detail_blocks: Vec::new(),
         error: None,
         metadata: None,
+        cell: Some(cell.clone()),
     };
 
     match cell {
@@ -284,11 +290,34 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
         ActivityCell::TerminalWait(cell) => apply_terminal_wait_cell(&mut item, cell),
         ActivityCell::Error(cell) => apply_error_cell(&mut item, cell),
     }
+    item.ui_hint = Some(activity_cell_variant_name(cell).to_string());
 
     if matches!(item.kind, WebActivityKind::Error) {
         item.status = WebActivityStatus::Failed;
     }
     item
+}
+
+fn activity_cell_variant_name(cell: &ActivityCell) -> &'static str {
+    match cell {
+        ActivityCell::Assistant(_) => "Assistant",
+        ActivityCell::User(_) => "User",
+        ActivityCell::AppAttention(_) => "AppAttention",
+        ActivityCell::Browser(_) => "Browser",
+        ActivityCell::LiveBrowser(_) => "LiveBrowser",
+        ActivityCell::GenericApp(_) => "GenericApp",
+        ActivityCell::PlanResult(_) => "PlanResult",
+        ActivityCell::CreateWorkflowResult(_) => "CreateWorkflowResult",
+        ActivityCell::ActivateWorkflowResult(_) => "ActivateWorkflowResult",
+        ActivityCell::DeepRecallResult(_) => "DeepRecallResult",
+        ActivityCell::ExecResult(_) => "ExecResult",
+        ActivityCell::LiveExec(_) => "LiveExec",
+        ActivityCell::Patch(_) => "Patch",
+        ActivityCell::Telegram(_) => "Telegram",
+        ActivityCell::Reply(_) => "Reply",
+        ActivityCell::TerminalWait(_) => "TerminalWait",
+        ActivityCell::Error(_) => "Error",
+    }
 }
 
 fn apply_assistant_cell(item: &mut WebActivityItem, cell: &AssistantActivityCell) {
@@ -374,7 +403,11 @@ fn apply_exec_cell(item: &mut WebActivityItem, cell: &ExecResultActivityCell) {
         exit_code,
         affected_files: Vec::new(),
     });
-    item.blocks = output_blocks(&cell.output_lines);
+    item.blocks = if cell.output_lines.is_empty() {
+        text_blocks(vec!["(no output)".to_string()])
+    } else {
+        output_blocks(&cell.output_lines)
+    };
     item.detail_blocks = kv_block(optional_kv_entries(vec![
         ("meta", cell.meta.clone()),
         ("command", Some(cell.title.clone())),
@@ -795,7 +828,7 @@ fn plan_status_marker(status: PlanStepDisplayStatus) -> &'static str {
     match status {
         PlanStepDisplayStatus::Pending => "○",
         PlanStepDisplayStatus::InProgress => "●",
-        PlanStepDisplayStatus::Completed => "✓",
+        PlanStepDisplayStatus::Completed => "●",
     }
 }
 

@@ -1,86 +1,20 @@
-use ratatui::{
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-};
 use serde::{Deserialize, Serialize};
 
-use crate::tool_ui::{ActivateWorkflowUiData, CreateWorkflowUiData, DeepRecallUiData, glyph};
+use crate::tool_ui::{ActivateWorkflowUiData, CreateWorkflowUiData, DeepRecallUiData};
 
-use super::primitives::Cell;
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivateWorkflowActivityCell {
     pub workflow_id: String,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreateWorkflowActivityCell {
     pub workflow_id: String,
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeepRecallActivityCell {
     pub memory_count: usize,
-}
-
-impl Cell for ActivateWorkflowActivityCell {
-    fn render_lines(&self) -> Vec<Line<'static>> {
-        vec![Line::from(vec![
-            Span::styled(
-                glyph::WORKFLOW,
-                Style::default()
-                    .fg(Color::LightBlue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("Activated Workflow: {}", self.workflow_id),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])]
-    }
-}
-
-impl Cell for CreateWorkflowActivityCell {
-    fn render_lines(&self) -> Vec<Line<'static>> {
-        vec![Line::from(vec![
-            Span::styled(
-                glyph::WORKFLOW,
-                Style::default()
-                    .fg(Color::LightBlue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("Created Workflow: {}", self.workflow_id),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])]
-    }
-}
-
-impl Cell for DeepRecallActivityCell {
-    fn render_lines(&self) -> Vec<Line<'static>> {
-        vec![Line::from(vec![
-            Span::styled(
-                glyph::MEMORY,
-                Style::default()
-                    .fg(Color::LightBlue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("Recalled {} Memories", self.memory_count),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])]
-    }
 }
 
 impl From<ActivateWorkflowUiData> for ActivateWorkflowActivityCell {

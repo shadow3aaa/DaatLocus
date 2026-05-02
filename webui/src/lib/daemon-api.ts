@@ -240,11 +240,105 @@ export type WebActivityBlock =
   | WebActivityArtifactBlock
   | WebActivityUnknownBlock;
 
+export type ActivityCellCommon = {
+  title: string;
+  body_lines?: string[];
+};
+
+export type ActivityCellBrowser = ActivityCellCommon & {
+  url?: string | null;
+  line_count?: number | null;
+  ref_count?: number | null;
+};
+
+export type ActivityCellLiveExec = {
+  title: string;
+  call_lines?: string[];
+  meta?: string | null;
+  output_lines?: string[];
+  started_at_ms?: number | null;
+};
+
+export type ActivityCellExecResult = {
+  title: string;
+  meta?: string | null;
+  output_lines?: string[];
+};
+
+export type ActivityCellPatchDiffLine = {
+  kind: "context" | "delete" | "add" | "hunk_break" | (string & {});
+  old_lineno?: number | null;
+  new_lineno?: number | null;
+  text: string;
+};
+
+export type ActivityCellPatchFile = {
+  path: string;
+  operation: "add" | "delete" | "update" | (string & {});
+  added_lines: number;
+  removed_lines: number;
+  diff_lines?: ActivityCellPatchDiffLine[];
+};
+
+export type ActivityCellPatch = {
+  summary_line: string;
+  files?: ActivityCellPatchFile[];
+};
+
+export type ActivityCellTelegram = {
+  title: string;
+  detail_lines?: string[];
+  message_lines?: string[];
+};
+
+export type ActivityCellReply = {
+  disposition: "resolved" | "dismissed" | "failed" | (string & {});
+  subject?: "message" | "notice" | (string & {});
+  message_lines?: string[];
+};
+
+export type ActivityCellPlan = {
+  steps?: Array<{
+    status: "Pending" | "InProgress" | "Completed" | (string & {});
+    text: string;
+  }>;
+};
+
+export type ActivityCellWorkflow = {
+  workflow_id: string;
+};
+
+export type ActivityCellDeepRecall = {
+  memory_count: number;
+};
+
+export type ActivityCellVariant =
+  | { Assistant: ActivityCellCommon }
+  | { User: ActivityCellCommon }
+  | { AppAttention: ActivityCellCommon }
+  | { Browser: ActivityCellBrowser }
+  | { LiveBrowser: ActivityCellBrowser }
+  | { GenericApp: ActivityCellCommon }
+  | { ToolResult: ActivityCellCommon }
+  | { PlanResult: ActivityCellPlan }
+  | { CreateWorkflowResult: ActivityCellWorkflow }
+  | { ActivateWorkflowResult: ActivityCellWorkflow }
+  | { DeepRecallResult: ActivityCellDeepRecall }
+  | { ExecResult: ActivityCellExecResult }
+  | { LiveExec: ActivityCellLiveExec }
+  | { Patch: ActivityCellPatch }
+  | { Telegram: ActivityCellTelegram }
+  | { Reply: ActivityCellReply }
+  | { TerminalWait: ActivityCellCommon }
+  | { Error: ActivityCellCommon }
+  | Record<string, unknown>;
+
 export type WebActivityItem = {
   web_activity_version: number;
   id: string;
   kind: WebActivityKind;
   status: WebActivityStatus;
+  ui_hint?: string | null;
   title: string;
   actor?: WebActivityActor | null;
   created_at: number;
@@ -258,6 +352,7 @@ export type WebActivityItem = {
     details?: string[];
   } | null;
   metadata?: unknown;
+  cell?: ActivityCellVariant | null;
 };
 
 export type LiveWebActivityItem = {
@@ -596,7 +691,9 @@ export function subscribeDashboardSnapshots({
 
   socket.addEventListener("message", (event) => {
     if (typeof event.data !== "string") {
-      onError?.(new DaemonApiError("Dashboard stream returned a non-text message."));
+      onError?.(
+        new DaemonApiError("Dashboard stream returned a non-text message."),
+      );
       return;
     }
 

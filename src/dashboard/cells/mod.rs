@@ -4,16 +4,10 @@ mod exec;
 mod highlight;
 mod messages;
 mod plan;
-mod primitives;
+mod tui;
 mod web_activity;
 mod workflow;
 
-use ratatui::{
-    prelude::*,
-    style::{Color, Style},
-    text::{Line, Span, Text},
-    widgets::{Paragraph, Wrap},
-};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -30,20 +24,20 @@ use common::{
 use exec::{ExecResultActivityCell, LiveExecActivityCell, live_exec_cell};
 use messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell};
 use plan::PlanActivityCell;
-use primitives::Cell;
 use workflow::{ActivateWorkflowActivityCell, CreateWorkflowActivityCell, DeepRecallActivityCell};
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LiveActivityCell {
     pub key: String,
     pub cell: ActivityCell,
 }
 
+pub use tui::render_activity_feed;
 pub use web_activity::{
     LiveWebActivityItem, WebActivityItem, default_web_activity_version, sync_web_activity_state,
 };
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ActivityCell {
     Assistant(AssistantActivityCell),
     User(UserActivityCell),
@@ -104,53 +98,6 @@ pub fn render_activity_from_messages(messages: Vec<HistoryMessage>) -> Vec<Activ
         .flat_map(activity_cells_from_prompt_message)
         .collect::<Vec<_>>();
     coalesce_activity_cells(cells)
-}
-
-pub fn render_activity_feed(
-    f: &mut Frame,
-    area: Rect,
-    cells: &[ActivityCell],
-    live_cells: &[LiveActivityCell],
-) {
-    let lines = if cells.is_empty() && live_cells.is_empty() {
-        vec![Line::from(vec![Span::styled(
-            "No activity yet",
-            Style::default().fg(Color::DarkGray),
-        )])]
-    } else {
-        let mut visible_cells = cells.to_vec();
-        visible_cells.extend(live_cells.iter().map(|cell| cell.cell.clone()));
-        let mut lines = Vec::new();
-        for (idx, cell) in visible_cells.iter().enumerate() {
-            lines.extend(render_activity_cell_lines(cell));
-            if idx + 1 < visible_cells.len() {
-                lines.push(Line::from(""));
-            }
-        }
-        lines
-    };
-    let text = if lines.is_empty() {
-        Text::from(Line::from(vec![Span::styled(
-            "No activity yet",
-            Style::default().fg(Color::DarkGray),
-        )]))
-    } else {
-        Text::from(lines)
-    };
-    let inner = Rect {
-        x: area.x.saturating_add(1),
-        y: area.y,
-        width: area.width.saturating_sub(2),
-        height: area.height,
-    };
-    let max_scroll = text
-        .lines
-        .len()
-        .saturating_sub(inner.height.saturating_sub(1) as usize) as u16;
-    let widget = Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .scroll((max_scroll, 0));
-    f.render_widget(widget, inner);
 }
 
 pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivityEvent) {
@@ -260,28 +207,6 @@ pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> Option<Activit
         ToolUiEvent::DeepRecall(event) => Some(ActivityCell::DeepRecallResult(event.into())),
         ToolUiEvent::App(event) => Some(ActivityCell::GenericApp(event.into())),
         ToolUiEvent::Error(event) => Some(ActivityCell::Error(event.into())),
-    }
-}
-
-fn render_activity_cell_lines(cell: &ActivityCell) -> Vec<Line<'static>> {
-    match cell {
-        ActivityCell::Assistant(cell) => cell.render_lines(),
-        ActivityCell::User(cell) => cell.render_lines(),
-        ActivityCell::AppAttention(cell) => cell.render_lines(),
-        ActivityCell::Browser(cell) => cell.render_lines(),
-        ActivityCell::LiveBrowser(cell) => cell.render_lines(),
-        ActivityCell::GenericApp(cell) => cell.render_lines(),
-        ActivityCell::PlanResult(cell) => cell.render_lines(),
-        ActivityCell::CreateWorkflowResult(cell) => cell.render_lines(),
-        ActivityCell::ActivateWorkflowResult(cell) => cell.render_lines(),
-        ActivityCell::DeepRecallResult(cell) => cell.render_lines(),
-        ActivityCell::ExecResult(cell) => cell.render_lines(),
-        ActivityCell::LiveExec(cell) => cell.render_lines(),
-        ActivityCell::Patch(cell) => cell.render_lines(),
-        ActivityCell::Telegram(cell) => cell.render_lines(),
-        ActivityCell::Reply(cell) => cell.render_lines(),
-        ActivityCell::TerminalWait(cell) => cell.render_lines(),
-        ActivityCell::Error(cell) => cell.render_lines(),
     }
 }
 
