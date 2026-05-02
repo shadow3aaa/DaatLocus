@@ -5,6 +5,7 @@ mod highlight;
 mod messages;
 mod plan;
 mod primitives;
+mod web_activity;
 mod workflow;
 
 use ratatui::{
@@ -37,6 +38,10 @@ pub struct LiveActivityCell {
     pub key: String,
     pub cell: ActivityCell,
 }
+
+pub use web_activity::{
+    LiveWebActivityItem, WebActivityItem, default_web_activity_version, sync_web_activity_state,
+};
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ActivityCell {
@@ -200,6 +205,7 @@ pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivity
             state.live_activity_cells.retain(|cell| cell.key != key);
         }
     }
+    sync_web_activity_state(state);
 }
 
 pub fn assistant_activity_cell(content: &str) -> Option<ActivityCell> {

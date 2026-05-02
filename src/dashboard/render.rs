@@ -38,6 +38,7 @@ pub fn sync_dashboard_state(
         state.app_status_outputs = render_app_status_outputs_for_dashboard(context);
         state.pending_access_requests = context.telegram_acl.pending_requests();
         state.activity_cells = render_activity_for_dashboard(context);
+        crate::dashboard::sync_web_activity_state(state);
         state.last_cycle_elapsed_ms = last_cycle_elapsed_ms;
         state.footer_context =
             render_dashboard_footer_context(context, state.footer_estimated_input_tokens);

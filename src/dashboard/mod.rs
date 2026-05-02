@@ -4,9 +4,10 @@ pub mod cells;
 pub mod render;
 
 pub use cells::{
-    ActivityCell, DashboardActivityEvent, LiveActivityCell, activity_cell_from_tool_ui_event,
-    apply_activity_event, assistant_activity_cell, render_activity_feed,
-    render_activity_from_messages,
+    ActivityCell, DashboardActivityEvent, LiveActivityCell, LiveWebActivityItem, WebActivityItem,
+    activity_cell_from_tool_ui_event, apply_activity_event, assistant_activity_cell,
+    default_web_activity_version, render_activity_feed, render_activity_from_messages,
+    sync_web_activity_state,
 };
 
 use std::time::Duration;
@@ -139,6 +140,12 @@ pub struct DashboardState {
     pub pending_access_requests: Vec<PendingAccessRequest>,
     pub activity_cells: Vec<ActivityCell>,
     pub live_activity_cells: Vec<LiveActivityCell>,
+    #[serde(default = "default_web_activity_version")]
+    pub web_activity_version: u8,
+    #[serde(default)]
+    pub web_activity_items: Vec<WebActivityItem>,
+    #[serde(default)]
+    pub live_web_activity_items: Vec<LiveWebActivityItem>,
     pub last_cycle_elapsed_ms: Option<u128>,
     pub runtime_status: Option<String>,
     #[serde(default)]

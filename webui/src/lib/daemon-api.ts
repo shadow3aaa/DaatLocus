@@ -127,6 +127,144 @@ export type DashboardPendingAccessRequest = {
   last_seen_at_ms: number;
 };
 
+export type WebActivityKind =
+  | "message"
+  | "tool"
+  | "app"
+  | "plan"
+  | "workflow"
+  | "memory"
+  | "patch"
+  | "error"
+  | "unknown"
+  | (string & {});
+
+export type WebActivityStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "dismissed"
+  | "unknown"
+  | (string & {});
+
+export type WebActivityActor =
+  | "user"
+  | "assistant"
+  | "telegram"
+  | "tool"
+  | "system"
+  | (string & {});
+
+export type WebActivitySource = {
+  source_type: string;
+  label?: string | null;
+};
+
+export type WebActivityTool = {
+  name: string;
+  app?: string | null;
+  input_preview?: string | null;
+  output_preview?: string | null;
+  output_ref?: string | null;
+  duration_ms?: number | null;
+  exit_code?: number | null;
+  affected_files?: string[];
+};
+
+export type WebActivityTextBlock = {
+  type: "text";
+  text: string;
+};
+
+export type WebActivityCodeBlock = {
+  type: "code";
+  code: string;
+  language?: string | null;
+};
+
+export type WebActivityKvBlock = {
+  type: "kv";
+  entries: Array<{
+    key: string;
+    value: string;
+  }>;
+};
+
+export type WebActivityListBlock = {
+  type: "list";
+  items: string[];
+};
+
+export type WebActivityDiffBlock = {
+  type: "diff";
+  files: Array<{
+    path: string;
+    operation: string;
+    added_lines: number;
+    removed_lines: number;
+    lines: Array<{
+      kind: "context" | "delete" | "add" | "hunk_break" | (string & {});
+      old_lineno?: number | null;
+      new_lineno?: number | null;
+      text: string;
+    }>;
+  }>;
+};
+
+export type WebActivityLinkBlock = {
+  type: "link";
+  label: string;
+  url: string;
+};
+
+export type WebActivityArtifactBlock = {
+  type: "artifact";
+  label: string;
+  uri?: string | null;
+  mime_type?: string | null;
+};
+
+export type WebActivityUnknownBlock = {
+  type: string;
+  [key: string]: unknown;
+};
+
+export type WebActivityBlock =
+  | WebActivityTextBlock
+  | WebActivityCodeBlock
+  | WebActivityKvBlock
+  | WebActivityListBlock
+  | WebActivityDiffBlock
+  | WebActivityLinkBlock
+  | WebActivityArtifactBlock
+  | WebActivityUnknownBlock;
+
+export type WebActivityItem = {
+  web_activity_version: number;
+  id: string;
+  kind: WebActivityKind;
+  status: WebActivityStatus;
+  title: string;
+  actor?: WebActivityActor | null;
+  created_at: number;
+  updated_at: number;
+  source?: WebActivitySource | null;
+  tool?: WebActivityTool | null;
+  blocks?: WebActivityBlock[];
+  detail_blocks?: WebActivityBlock[];
+  error?: {
+    message: string;
+    details?: string[];
+  } | null;
+  metadata?: unknown;
+};
+
+export type LiveWebActivityItem = {
+  key: string;
+  item: WebActivityItem;
+};
+
 export type DashboardSnapshot = {
   focused_app: string | null;
   status_output: string;
@@ -141,6 +279,9 @@ export type DashboardSnapshot = {
     key: string;
     cell: unknown;
   }>;
+  web_activity_version?: number;
+  web_activity_items?: WebActivityItem[];
+  live_web_activity_items?: LiveWebActivityItem[];
   last_cycle_elapsed_ms: number | null;
   runtime_status: string | null;
   current_plan_step: DashboardPlanStep | null;

@@ -16,7 +16,7 @@ use crate::{
         runtime_optimization_snapshot_for_dashboard, token_usage_snapshot_for_dashboard,
         workflow_optimization_snapshot_for_dashboard,
     },
-    dashboard::{DashboardControlCommand, DashboardState},
+    dashboard::{DashboardControlCommand, DashboardState, sync_web_activity_state},
     events::EventStore,
     hindsight::managed::HindsightManagedServer,
     memory::Memory,
@@ -234,6 +234,9 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             pending_access_requests: context.telegram_acl.pending_requests(),
             activity_cells: render_activity_for_dashboard(&context),
             live_activity_cells: Vec::new(),
+            web_activity_version: crate::dashboard::default_web_activity_version(),
+            web_activity_items: Vec::new(),
+            live_web_activity_items: Vec::new(),
             last_cycle_elapsed_ms: None,
             runtime_status: None,
             current_plan_step: current_plan_step_for_dashboard(&context),
@@ -244,6 +247,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             footer_context: render_dashboard_footer_context(&context, None),
             footer_estimated_input_tokens: None,
         };
+        sync_web_activity_state(state);
     });
 
     let workspace_app_watcher = match start_workspace_app_watcher(

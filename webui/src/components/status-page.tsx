@@ -51,6 +51,8 @@ import {
   type DashboardContextCompositionSegment,
   type DashboardPendingAccessRequest,
   type DashboardSnapshot,
+  type WebActivityBlock,
+  type WebActivityItem,
   type TokenUsage,
   type TokenUsageInfo,
 } from "@/lib/daemon-api";
@@ -63,6 +65,8 @@ const STATUS_CARD_ORDER_STORAGE_KEY = "daat-locus.status.card-order";
 const CONTEXT_COMPOSITION_MAX_VISIBLE_SEGMENTS = 8;
 const AGENT_CHAT_MAX_VISIBLE_BUBBLES = 24;
 const AGENT_CHAT_MESSAGE_LINE_LIMIT = 5;
+const AGENT_CHAT_FOCUSED_MESSAGE_LINE_LIMIT = 12;
+const AGENT_CHAT_DETAIL_LINE_LIMIT = 8;
 const TOKEN_USAGE_CHART_CONFIG = {
   cached: {
     label: "Cached",
@@ -355,151 +359,23 @@ export function AgentPage() {
   );
 }
 
+type AgentChatBubbleRole = "assistant" | "user" | "tool" | "telegram" | "system";
+
 type AgentChatBubble = {
   id: string;
-  role: "assistant" | "user" | "tool" | "telegram";
+  role: AgentChatBubbleRole;
+  kind: string;
+  status: string;
   title: string;
-  detailLines: string[];
-  messageLines: string[];
+  blocks: WebActivityBlock[];
+  detailBlocks: WebActivityBlock[];
   live?: boolean;
+  toolName?: string;
+  appName?: string;
+  sourceLabel?: string;
+  errorLines: string[];
+  affectedFiles: string[];
 };
-
-function AgentChatBubbles({
-  snapshot,
-  isFocused,
-  panelRef,
-}: {
-  snapshot: DashboardSnapshot | null;
-  isFocused: boolean;
-  panelRef: RefObject<HTMLDivElement | null>;
-}) {
-  const bubbles = useMemo(() => agentChatBubblesFromSnapshot(snapshot), [snapshot]);
-
-  useEffect(() => {
-    if (!isFocused || !panelRef.current) {
-      return;
-    }
-    panelRef.current.scrollTop = panelRef.current.scrollHeight;
-  }, [bubbles.length, isFocused, panelRef]);
-
-  return (
-    <div
-      ref={panelRef}
-      aria-label="Agent chat preview"
-      aria-hidden={!isFocused}
-      className={cn(
-        "absolute inset-0 w-full text-left transition-[filter,opacity] duration-300 ease-out",
-        isFocused
-          ? "pointer-events-auto z-20 overflow-y-auto px-4 pb-[calc(50vh+9rem)] pt-6 opacity-100 [scrollbar-gutter:stable] md:px-8"
-          : "pointer-events-none z-0 overflow-hidden px-4 pb-24 pt-[calc(50vh+8rem)] opacity-35 blur-[1px] md:px-8",
-      )}
-    >
-      <div
-        aria-hidden="true"
-        className={cn(
-          "pointer-events-none absolute left-1/2 top-1/2 z-0 h-[min(34rem,72vw)] w-[min(34rem,72vw)] -translate-x-1/2 -translate-y-1/2 rounded-full bg-background/10 opacity-0 backdrop-blur-0 transition-[backdrop-filter,opacity] duration-300",
-          isFocused && "opacity-100 backdrop-blur-md",
-        )}
-      />
-      <div
-        className={cn(
-          "relative z-10 flex min-h-full w-full flex-col gap-3 transition-transform duration-300 ease-out",
-          isFocused ? "justify-end" : "justify-start translate-y-8",
-        )}
-      >
-        {bubbles.length > 0 ? (
-          bubbles.map((bubble) => (
-            <AgentChatBubbleItem
-              key={bubble.id}
-              bubble={bubble}
-              isFocused={isFocused}
-            />
-          ))
-        ) : (
-          <p className="mx-auto max-w-[min(32rem,calc(100vw-3rem))] px-4 py-3 text-center text-xs text-muted-foreground/70">
-            聚焦底部输入框后，消息流会在整个屏幕上围绕 agent 浮动。
-          </p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function AgentChatBubbleItem({
-  bubble,
-  isFocused,
-}: {
-  bubble: AgentChatBubble;
-  isFocused: boolean;
-}) {
-  const isUser = bubble.role === "user";
-  const isAssistant = bubble.role === "assistant";
-  const lines = bubble.messageLines.length > 0 ? bubble.messageLines : bubble.detailLines;
-  const detailLines = bubble.messageLines.length > 0 ? bubble.detailLines : [];
-  const visibleLines = (lines.length > 0 ? lines : [bubble.title]).slice(
-    0,
-    AGENT_CHAT_MESSAGE_LINE_LIMIT,
-  );
-
-  return (
-    <article
-      className={cn(
-        "w-full",
-        !isFocused && "select-none",
-      )}
-    >
-      <div
-        className={cn(
-          "max-w-[min(34rem,85%)] px-1 py-2 text-sm leading-5 text-foreground",
-        )}
-      >
-        <div
-          className={cn(
-            "mb-1 flex items-center gap-2 text-[0.68rem] font-semibold uppercase tracking-[0.16em]",
-            isUser
-              ? "text-primary"
-              : isAssistant
-                ? "text-cyan-300"
-                : bubble.role === "telegram"
-                  ? "text-sky-300"
-                  : "text-muted-foreground",
-          )}
-        >
-          {bubble.live ? (
-            <span className="size-1.5 rounded-full bg-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,0.18)]" />
-          ) : null}
-          <span>{agentChatBubbleLabel(bubble)}</span>
-        </div>
-        <div className="space-y-1 text-foreground/90">
-          {visibleLines.map((line, index) => (
-            <p
-              key={`${bubble.id}-line-${index}`}
-              className="break-words"
-            >
-              {line}
-            </p>
-          ))}
-        </div>
-        {detailLines.length > 0 ? (
-          <div
-            className={cn(
-              "mt-2 space-y-0.5 text-xs text-muted-foreground",
-            )}
-          >
-            {detailLines.slice(0, 2).map((line, index) => (
-              <p
-                key={`${bubble.id}-detail-${index}`}
-                className="break-words"
-              >
-                {line}
-              </p>
-            ))}
-          </div>
-        ) : null}
-      </div>
-    </article>
-  );
-}
 
 function AgentChatComposer({
   isFocused,
@@ -616,6 +492,463 @@ function AgentChatComposer({
   );
 }
 
+function AgentChatBubbles({
+  snapshot,
+  isFocused,
+  panelRef,
+}: {
+  snapshot: DashboardSnapshot | null;
+  isFocused: boolean;
+  panelRef: RefObject<HTMLDivElement | null>;
+}) {
+  const bubbles = useMemo(() => agentChatBubblesFromSnapshot(snapshot), [snapshot]);
+
+  useEffect(() => {
+    if (!isFocused || !panelRef.current) {
+      return;
+    }
+    panelRef.current.scrollTop = panelRef.current.scrollHeight;
+  }, [bubbles.length, isFocused, panelRef]);
+
+  return (
+    <div
+      ref={panelRef}
+      aria-label="Agent chat preview"
+      aria-hidden={!isFocused}
+      className={cn(
+        "absolute inset-0 w-full text-left transition-[filter,opacity] duration-300 ease-out",
+        isFocused
+          ? "pointer-events-auto z-20 overflow-y-auto px-4 pb-[calc(50vh+9rem)] pt-6 opacity-100 [scrollbar-gutter:stable] md:px-8"
+          : "pointer-events-none z-0 overflow-hidden px-4 pb-24 pt-[calc(50vh+8rem)] opacity-35 blur-[1px] md:px-8",
+      )}
+    >
+      <div
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute left-1/2 top-1/2 z-0 h-[min(34rem,72vw)] w-[min(34rem,72vw)] -translate-x-1/2 -translate-y-1/2 rounded-full bg-background/10 opacity-0 backdrop-blur-0 transition-[backdrop-filter,opacity] duration-300",
+          isFocused && "opacity-100 backdrop-blur-md",
+        )}
+      />
+      <div
+        className={cn(
+          "relative z-10 flex min-h-full w-full flex-col gap-3 transition-transform duration-300 ease-out",
+          isFocused ? "justify-end" : "justify-start translate-y-8",
+        )}
+      >
+        {bubbles.length > 0 ? (
+          bubbles.map((bubble) => (
+            <AgentChatBubbleItem
+              key={bubble.id}
+              bubble={bubble}
+              isFocused={isFocused}
+            />
+          ))
+        ) : (
+          <p className="mx-auto max-w-[min(32rem,calc(100vw-3rem))] px-4 py-3 text-center text-xs text-muted-foreground/70">
+            聚焦底部输入框后，消息流会在整个屏幕上围绕 agent 浮动。
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AgentChatBubbleItem({
+  bubble,
+  isFocused,
+}: {
+  bubble: AgentChatBubble;
+  isFocused: boolean;
+}) {
+  const isUser = bubble.role === "user";
+  const isAssistant = bubble.role === "assistant";
+  const primaryBlocks = bubble.blocks.length > 0
+    ? bubble.blocks
+    : ([{ type: "text", text: bubble.title }] as WebActivityBlock[]);
+  const visibleBlockLimit = isFocused ? 6 : 3;
+  const visibleBlocks = primaryBlocks.slice(0, visibleBlockLimit);
+  const hiddenBlocks = primaryBlocks.slice(visibleBlockLimit);
+  const hasDetails =
+    bubble.detailBlocks.length > 0 ||
+    hiddenBlocks.length > 0 ||
+    bubble.errorLines.length > 0 ||
+    bubble.affectedFiles.length > 0 ||
+    Boolean(bubble.toolName || bubble.appName || bubble.sourceLabel);
+
+  return (
+    <article
+      className={cn(
+        "w-full",
+        !isFocused && "select-none",
+      )}
+    >
+      <div className="max-w-[min(44rem,88%)] px-1 py-2 text-sm leading-5 text-foreground">
+        <div
+          className={cn(
+            "mb-1 flex flex-wrap items-center gap-2 text-[0.68rem] font-semibold uppercase tracking-[0.16em]",
+            isUser
+              ? "text-primary"
+              : isAssistant
+                ? "text-cyan-300"
+                : bubble.role === "telegram"
+                  ? "text-sky-300"
+                  : bubble.role === "system"
+                    ? "text-violet-300"
+                    : "text-muted-foreground",
+          )}
+        >
+          {bubble.live || bubble.status === "running" ? (
+            <span className="size-1.5 rounded-full bg-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,0.18)]" />
+          ) : null}
+          <span>{agentChatBubbleLabel(bubble)}</span>
+          {bubble.status && !["completed", "unknown"].includes(bubble.status) ? (
+            <span className="text-muted-foreground/70">· {agentChatStatusLabel(bubble.status)}</span>
+          ) : null}
+          {bubble.toolName ? (
+            <span className="text-muted-foreground/70">· {bubble.toolName}</span>
+          ) : null}
+        </div>
+        <div className="space-y-2 text-foreground/90">
+          {visibleBlocks.map((block, index) => (
+            <AgentChatBlock
+              key={`${bubble.id}-block-${index}`}
+              block={block}
+              blockId={`${bubble.id}-block-${index}`}
+              isFocused={isFocused}
+            />
+          ))}
+        </div>
+        {hasDetails ? (
+          <details className="mt-2 text-xs text-muted-foreground">
+            <summary className="cursor-pointer list-none select-none hover:text-foreground/80">
+              详情
+            </summary>
+            <div className="mt-1 space-y-2 border-l border-border/50 pl-3">
+              <AgentChatMetadata bubble={bubble} />
+              {bubble.errorLines.length > 0 ? (
+                <AgentChatTextLines
+                  id={`${bubble.id}-error`}
+                  lines={bubble.errorLines}
+                  limit={AGENT_CHAT_DETAIL_LINE_LIMIT}
+                  tone="error"
+                />
+              ) : null}
+              {hiddenBlocks.map((block, index) => (
+                <AgentChatBlock
+                  key={`${bubble.id}-hidden-${index}`}
+                  block={block}
+                  blockId={`${bubble.id}-hidden-${index}`}
+                  isFocused={true}
+                />
+              ))}
+              {bubble.detailBlocks.map((block, index) => (
+                <AgentChatBlock
+                  key={`${bubble.id}-detail-block-${index}`}
+                  block={block}
+                  blockId={`${bubble.id}-detail-block-${index}`}
+                  isFocused={true}
+                  detail
+                />
+              ))}
+            </div>
+          </details>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+function AgentChatMetadata({ bubble }: { bubble: AgentChatBubble }) {
+  const lines = [
+    bubble.appName ? `app: ${bubble.appName}` : null,
+    bubble.sourceLabel ? `source: ${bubble.sourceLabel}` : null,
+    bubble.affectedFiles.length > 0
+      ? `files: ${bubble.affectedFiles.slice(0, 5).join(", ")}${bubble.affectedFiles.length > 5 ? " …" : ""}`
+      : null,
+  ].filter((line): line is string => Boolean(line));
+
+  if (lines.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-0.5">
+      {lines.map((line) => (
+        <p key={line} className="break-words">
+          {line}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function AgentChatBlock({
+  block,
+  blockId,
+  isFocused,
+  detail = false,
+}: {
+  block: WebActivityBlock;
+  blockId: string;
+  isFocused: boolean;
+  detail?: boolean;
+}) {
+  const record = asRecord(block);
+  const type = typeof record?.type === "string" ? record.type : "unknown";
+  const lineLimit = detail
+    ? AGENT_CHAT_DETAIL_LINE_LIMIT
+    : isFocused
+      ? AGENT_CHAT_FOCUSED_MESSAGE_LINE_LIMIT
+      : AGENT_CHAT_MESSAGE_LINE_LIMIT;
+
+  if (!record) {
+    return null;
+  }
+
+  if (type === "text") {
+    return (
+      <AgentChatTextLines
+        id={blockId}
+        lines={splitDisplayLines(stringValue(record.text, ""))}
+        limit={lineLimit}
+      />
+    );
+  }
+
+  if (type === "code") {
+    return (
+      <AgentChatCodeBlock
+        id={blockId}
+        code={stringValue(record.code, "")}
+        language={stringValue(record.language, "")}
+        limit={lineLimit}
+      />
+    );
+  }
+
+  if (type === "kv") {
+    const entries = kvEntriesValue(record.entries);
+    return entries.length > 0 ? (
+      <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        {entries.map((entry, index) => (
+          <FragmentPair
+            key={`${blockId}-kv-${index}`}
+            left={entry.key}
+            right={entry.value}
+          />
+        ))}
+      </dl>
+    ) : null;
+  }
+
+  if (type === "list") {
+    const items = stringArrayValue(record.items);
+    return items.length > 0 ? (
+      <ul className="space-y-1 text-sm text-foreground/90">
+        {items.slice(0, lineLimit).map((item, index) => (
+          <li key={`${blockId}-item-${index}`} className="flex gap-2 break-words">
+            <span className="text-muted-foreground">•</span>
+            <span>{item}</span>
+          </li>
+        ))}
+        {items.length > lineLimit ? (
+          <li className="text-xs text-muted-foreground">… +{items.length - lineLimit} more</li>
+        ) : null}
+      </ul>
+    ) : null;
+  }
+
+  if (type === "diff") {
+    return (
+      <AgentChatDiffBlock
+        id={blockId}
+        files={diffFilesValue(record.files)}
+        limit={lineLimit}
+      />
+    );
+  }
+
+  if (type === "link") {
+    const url = stringValue(record.url, "");
+    const label = stringValue(record.label, url);
+    return url ? (
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="break-all text-sky-300 underline-offset-4 hover:underline"
+      >
+        {label}
+      </a>
+    ) : null;
+  }
+
+  if (type === "artifact") {
+    const label = stringValue(record.label, "Artifact");
+    const uri = stringValue(record.uri, "");
+    return uri ? (
+      <a
+        href={uri}
+        target="_blank"
+        rel="noreferrer"
+        className="break-all text-sky-300 underline-offset-4 hover:underline"
+      >
+        {label}
+      </a>
+    ) : (
+      <p className="break-words text-muted-foreground">{label}</p>
+    );
+  }
+
+  return (
+    <p className="break-words text-xs text-muted-foreground">
+      Unsupported activity block: {safeJsonPreview(record)}
+    </p>
+  );
+}
+
+function FragmentPair({ left, right }: { left: string; right: string }) {
+  return (
+    <>
+      <dt className="font-medium text-muted-foreground/80">{left}</dt>
+      <dd className="min-w-0 break-words text-foreground/80">{right}</dd>
+    </>
+  );
+}
+
+function AgentChatTextLines({
+  id,
+  lines,
+  limit,
+  tone = "default",
+}: {
+  id: string;
+  lines: string[];
+  limit: number;
+  tone?: "default" | "error";
+}) {
+  const visibleLines = lines.slice(0, limit);
+  const hiddenLines = lines.slice(limit);
+
+  if (lines.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className={cn("space-y-1", tone === "error" && "text-destructive")}>
+      {visibleLines.map((line, index) => (
+        <p key={`${id}-line-${index}`} className="break-words">
+          {line}
+        </p>
+      ))}
+      {hiddenLines.length > 0 ? (
+        <details className="text-xs text-muted-foreground">
+          <summary className="cursor-pointer list-none hover:text-foreground/80">
+            展开剩余 {hiddenLines.length} 行
+          </summary>
+          <div className="mt-1 space-y-1">
+            {hiddenLines.map((line, index) => (
+              <p key={`${id}-hidden-line-${index}`} className="break-words">
+                {line}
+              </p>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentChatCodeBlock({
+  id,
+  code,
+  language,
+  limit,
+}: {
+  id: string;
+  code: string;
+  language: string;
+  limit: number;
+}) {
+  const lines = code.split(/\r?\n/);
+  const visibleLines = lines.slice(0, limit);
+  const hiddenLines = lines.slice(limit);
+
+  if (!code.trim()) {
+    return <p className="text-muted-foreground">(no output)</p>;
+  }
+
+  return (
+    <div className="space-y-1">
+      {language ? (
+        <p className="text-[0.68rem] uppercase tracking-[0.14em] text-muted-foreground">
+          {language}
+        </p>
+      ) : null}
+      <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-muted/35 px-3 py-2 font-mono text-xs leading-5 text-foreground/85">
+        {visibleLines.join("\n")}
+      </pre>
+      {hiddenLines.length > 0 ? (
+        <details className="text-xs text-muted-foreground">
+          <summary className="cursor-pointer list-none hover:text-foreground/80">
+            展开完整输出（+{hiddenLines.length} 行）
+          </summary>
+          <pre className="mt-1 overflow-x-auto whitespace-pre-wrap rounded-md bg-muted/35 px-3 py-2 font-mono text-xs leading-5 text-foreground/85">
+            {code}
+          </pre>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentChatDiffBlock({
+  id,
+  files,
+  limit,
+}: {
+  id: string;
+  files: AgentChatDiffFile[];
+  limit: number;
+}) {
+  if (files.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-2 font-mono text-xs">
+      {files.slice(0, 3).map((file, fileIndex) => {
+        const visibleLines = file.lines.slice(0, limit);
+        const hiddenLines = file.lines.slice(limit);
+        return (
+          <div key={`${id}-file-${fileIndex}`} className="space-y-1">
+            <p className="break-all text-foreground/85">
+              {file.path} <span className="text-emerald-300">+{file.added_lines}</span>{" "}
+              <span className="text-red-300">-{file.removed_lines}</span>
+            </p>
+            <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-muted/30 px-3 py-2 leading-5">
+              {visibleLines.map((line) => renderDiffLine(line)).join("\n")}
+            </pre>
+            {hiddenLines.length > 0 ? (
+              <details className="font-sans text-xs text-muted-foreground">
+                <summary className="cursor-pointer list-none hover:text-foreground/80">
+                  展开剩余 {hiddenLines.length} 行 diff
+                </summary>
+                <pre className="mt-1 overflow-x-auto whitespace-pre-wrap rounded-md bg-muted/30 px-3 py-2 font-mono leading-5">
+                  {file.lines.map((line) => renderDiffLine(line)).join("\n")}
+                </pre>
+              </details>
+            ) : null}
+          </div>
+        );
+      })}
+      {files.length > 3 ? (
+        <p className="font-sans text-xs text-muted-foreground">… +{files.length - 3} more file(s)</p>
+      ) : null}
+    </div>
+  );
+}
+
 function agentChatBubblesFromSnapshot(
   snapshot: DashboardSnapshot | null,
 ): AgentChatBubble[] {
@@ -623,13 +956,13 @@ function agentChatBubblesFromSnapshot(
     return [];
   }
 
-  const committed = snapshot.activity_cells
-    .map((cell, index) => agentChatBubbleFromActivityCell(cell, `activity-${index}`))
+  const committed = (snapshot.web_activity_items ?? [])
+    .map((item, index) => agentChatBubbleFromWebActivityItem(item, `activity-${index}`))
     .filter((bubble): bubble is AgentChatBubble => Boolean(bubble));
-  const live = snapshot.live_activity_cells
+  const live = (snapshot.live_web_activity_items ?? [])
     .map((entry, index) =>
-      agentChatBubbleFromActivityCell(
-        entry.cell,
+      agentChatBubbleFromWebActivityItem(
+        entry.item,
         `live-${entry.key || index}`,
         true,
       ),
@@ -639,137 +972,96 @@ function agentChatBubblesFromSnapshot(
   return [...committed, ...live].slice(-AGENT_CHAT_MAX_VISIBLE_BUBBLES);
 }
 
-function agentChatBubbleFromActivityCell(
-  cell: unknown,
+function agentChatBubbleFromWebActivityItem(
+  item: WebActivityItem | unknown,
   fallbackId: string,
   live = false,
 ): AgentChatBubble | null {
-  const record = asRecord(cell);
+  const record = asRecord(item);
 
   if (!record) {
     return null;
   }
 
-  if ("Assistant" in record) {
-    return agentChatBubbleFromTextCell(
-      record.Assistant,
-      fallbackId,
-      "assistant",
-      live,
-    );
-  }
-
-  if ("User" in record) {
-    return agentChatBubbleFromTextCell(record.User, fallbackId, "user", live);
-  }
-
-  if ("Telegram" in record) {
-    const telegram = asRecord(record.Telegram);
-    if (!telegram) {
-      return null;
-    }
-    return {
-      id: fallbackId,
-      role: "telegram",
-      title: stringValue(telegram.title, "Telegram"),
-      detailLines: stringArrayValue(telegram.detail_lines),
-      messageLines: stringArrayValue(telegram.message_lines),
-      live,
-    };
-  }
-
-  if ("Reply" in record) {
-    const reply = asRecord(record.Reply);
-    if (!reply) {
-      return null;
-    }
-    return {
-      id: fallbackId,
-      role: "assistant",
-      title: "Agent reply",
-      detailLines: [],
-      messageLines: stringArrayValue(reply.message_lines),
-      live,
-    };
-  }
-
-  if ("LiveExec" in record) {
-    return agentChatBubbleFromExecCell(record.LiveExec, fallbackId, live);
-  }
-
-  if ("ExecResult" in record) {
-    return agentChatBubbleFromExecCell(record.ExecResult, fallbackId, live);
-  }
-
-  if ("TerminalWait" in record) {
-    return agentChatBubbleFromTextCell(
-      record.TerminalWait,
-      fallbackId,
-      "tool",
-      live,
-    );
-  }
-
-  if ("Error" in record) {
-    return agentChatBubbleFromTextCell(record.Error, fallbackId, "tool", live);
-  }
-
-  return null;
-}
-
-function agentChatBubbleFromTextCell(
-  cell: unknown,
-  id: string,
-  role: AgentChatBubble["role"],
-  live: boolean,
-): AgentChatBubble | null {
-  const record = asRecord(cell);
-
-  if (!record) {
-    return null;
-  }
+  const id = stringValue(record.id, fallbackId);
+  const kind = stringValue(record.kind, "unknown");
+  const status = live ? "running" : stringValue(record.status, "unknown");
+  const actor = stringValue(record.actor, "");
+  const title = stringValue(record.title, agentChatFallbackTitle(actor, kind));
+  const tool = asRecord(record.tool);
+  const source = asRecord(record.source);
+  const error = asRecord(record.error);
 
   return {
     id,
-    role,
-    title: stringValue(
-      record.title,
-      role === "assistant" ? "Agent" : role === "user" ? "You" : "Tool",
-    ),
-    detailLines: [],
-    messageLines: stringArrayValue(record.body_lines),
+    role: agentChatRoleFromWebActivity(actor, kind, source),
+    kind,
+    status,
+    title,
+    blocks: webActivityBlocksValue(record.blocks),
+    detailBlocks: webActivityBlocksValue(record.detail_blocks),
     live,
+    toolName: tool ? stringValue(tool.name, "") : undefined,
+    appName: tool ? stringValue(tool.app, "") : undefined,
+    sourceLabel: source ? stringValue(source.label, stringValue(source.source_type, "")) : undefined,
+    errorLines: error
+      ? [stringValue(error.message, ""), ...stringArrayValue(error.details)].filter(Boolean)
+      : [],
+    affectedFiles: tool ? stringArrayValue(tool.affected_files) : [],
   };
 }
 
-function agentChatBubbleFromExecCell(
-  cell: unknown,
-  id: string,
-  live: boolean,
-): AgentChatBubble | null {
-  const record = asRecord(cell);
-
-  if (!record) {
-    return null;
+function agentChatRoleFromWebActivity(
+  actor: string,
+  kind: string,
+  source: Record<string, unknown> | null,
+): AgentChatBubbleRole {
+  if (actor === "assistant") {
+    return "assistant";
   }
 
-  const callLines = stringArrayValue(record.call_lines);
-  const outputLines = stringArrayValue(record.output_lines);
-  const meta = stringValue(record.meta, "");
+  if (actor === "user") {
+    return "user";
+  }
 
-  return {
-    id,
-    role: "tool",
-    title: stringValue(record.title, live ? "Tool running" : "Tool result"),
-    detailLines: meta ? [meta, ...callLines] : callLines,
-    messageLines: outputLines,
-    live,
-  };
+  if (actor === "telegram" || stringValue(source?.source_type, "") === "telegram") {
+    return "telegram";
+  }
+
+  if (["plan", "workflow", "memory"].includes(kind) || actor === "system") {
+    return "system";
+  }
+
+  return "tool";
+}
+
+function agentChatFallbackTitle(actor: string, kind: string) {
+  if (actor === "assistant") {
+    return "Agent";
+  }
+
+  if (actor === "user") {
+    return "You";
+  }
+
+  if (actor === "telegram") {
+    return "Telegram";
+  }
+
+  if (kind === "plan") {
+    return "Plan";
+  }
+
+  if (kind === "workflow") {
+    return "Workflow";
+  }
+
+  return "Activity";
 }
 
 function agentChatBubbleLabel(bubble: AgentChatBubble) {
   if (bubble.role === "assistant") {
-    return bubble.live ? "Agent · streaming" : "Agent";
+    return bubble.live || bubble.status === "running" ? "Agent · streaming" : "Agent";
   }
 
   if (bubble.role === "user") {
@@ -780,7 +1072,112 @@ function agentChatBubbleLabel(bubble: AgentChatBubble) {
     return "Telegram";
   }
 
-  return bubble.live ? "Tool · running" : "Tool";
+  if (bubble.role === "system") {
+    return bubble.kind === "workflow" ? "Workflow" : bubble.kind === "memory" ? "Memory" : "System";
+  }
+
+  return bubble.live || bubble.status === "running" ? "Tool · running" : "Tool";
+}
+
+function agentChatStatusLabel(status: string) {
+  switch (status) {
+    case "pending":
+      return "pending";
+    case "running":
+      return "running";
+    case "failed":
+      return "failed";
+    case "dismissed":
+      return "dismissed";
+    default:
+      return status;
+  }
+}
+
+type AgentChatDiffFile = {
+  path: string;
+  operation: string;
+  added_lines: number;
+  removed_lines: number;
+  lines: AgentChatDiffLine[];
+};
+
+type AgentChatDiffLine = {
+  kind: string;
+  text: string;
+  old_lineno?: number | null;
+  new_lineno?: number | null;
+};
+
+function webActivityBlocksValue(value: unknown): WebActivityBlock[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((block): block is WebActivityBlock => {
+    const record = asRecord(block);
+    return Boolean(record && typeof record.type === "string");
+  });
+}
+
+function kvEntriesValue(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map(asRecord)
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    .map((entry) => ({
+      key: stringValue(entry.key, ""),
+      value: stringValue(entry.value, ""),
+    }))
+    .filter((entry) => entry.key || entry.value);
+}
+
+function diffFilesValue(value: unknown): AgentChatDiffFile[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map(asRecord)
+    .filter((file): file is Record<string, unknown> => Boolean(file))
+    .map((file) => ({
+      path: stringValue(file.path, "unknown"),
+      operation: stringValue(file.operation, "update"),
+      added_lines: numberValue(file.added_lines, 0),
+      removed_lines: numberValue(file.removed_lines, 0),
+      lines: diffLinesValue(file.lines),
+    }));
+}
+
+function diffLinesValue(value: unknown): AgentChatDiffLine[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map(asRecord)
+    .filter((line): line is Record<string, unknown> => Boolean(line))
+    .map((line) => ({
+      kind: stringValue(line.kind, "context"),
+      text: stringValue(line.text, ""),
+      old_lineno: nullableNumberValue(line.old_lineno),
+      new_lineno: nullableNumberValue(line.new_lineno),
+    }));
+}
+
+function renderDiffLine(line: AgentChatDiffLine) {
+  const prefix = line.kind === "add" ? "+" : line.kind === "delete" ? "-" : " ";
+  return `${prefix} ${line.text}`;
+}
+
+function splitDisplayLines(text: string) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -795,6 +1192,14 @@ function stringValue(value: unknown, fallback: string) {
   return typeof value === "string" && value.trim() ? value : fallback;
 }
 
+function numberValue(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function nullableNumberValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function stringArrayValue(value: unknown) {
   if (!Array.isArray(value)) {
     return [];
@@ -804,6 +1209,18 @@ function stringArrayValue(value: unknown) {
     .filter((line): line is string => typeof line === "string")
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function safeJsonPreview(value: unknown) {
+  try {
+    const text = JSON.stringify(value);
+    if (!text) {
+      return "unknown";
+    }
+    return text.length > 160 ? `${text.slice(0, 160)}…` : text;
+  } catch {
+    return "unknown";
+  }
 }
 
 function agentChatSendResultText(output: string) {
