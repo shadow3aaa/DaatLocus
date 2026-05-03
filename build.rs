@@ -164,7 +164,25 @@ fn webui_package_manager() -> Vec<String> {
         }
     }
 
-    if command_exists("corepack") {
+    default_webui_package_manager()
+}
+
+#[cfg(windows)]
+fn default_webui_package_manager() -> Vec<String> {
+    if resolve_command("corepack").is_some() {
+        return vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            "corepack".to_string(),
+            "yarn".to_string(),
+        ];
+    }
+    vec!["cmd".to_string(), "/C".to_string(), "yarn".to_string()]
+}
+
+#[cfg(not(windows))]
+fn default_webui_package_manager() -> Vec<String> {
+    if resolve_command("corepack").is_some() {
         return vec!["corepack".to_string(), "yarn".to_string()];
     }
     vec!["yarn".to_string()]
@@ -177,6 +195,7 @@ fn run_webui_build_command(package_manager: &[String], webui_dir: &Path, out_dir
         .arg("build")
         .env("DAAT_LOCUS_WEBUI_OUT_DIR", out_dir)
         .current_dir(webui_dir);
+    configure_webui_command(&mut command);
     run_webui_command_status(command, "WebUI build");
 }
 
@@ -186,8 +205,17 @@ fn run_webui_command(package_manager: &[String], args: &[&str], webui_dir: &Path
         .args(&package_manager[1..])
         .args(args)
         .current_dir(webui_dir);
+    configure_webui_command(&mut command);
     run_webui_command_status(command, "WebUI command");
 }
+
+#[cfg(windows)]
+fn configure_webui_command(command: &mut Command) {
+    command.env("YARN_NODE_LINKER", "node-modules");
+}
+
+#[cfg(not(windows))]
+fn configure_webui_command(_command: &mut Command) {}
 
 fn run_webui_command_status(mut command: Command, label: &str) {
     let status = command
@@ -198,42 +226,40 @@ fn run_webui_command_status(mut command: Command, label: &str) {
     }
 }
 
-fn command_exists(command: &str) -> bool {
+fn resolve_command(command: &str) -> Option<PathBuf> {
     let command_path = Path::new(command);
     if command_path.components().count() > 1 {
-        return executable_candidate_exists(command_path);
+        return executable_candidate(command_path);
     }
-    env::var_os("PATH")
-        .map(|path| {
-            env::split_paths(&path).any(|dir| {
-                let candidate = dir.join(command);
-                executable_candidate_exists(&candidate)
-            })
+    env::var_os("PATH").and_then(|path| {
+        env::split_paths(&path).find_map(|dir| {
+            let candidate = dir.join(command);
+            executable_candidate(&candidate)
         })
-        .unwrap_or(false)
+    })
 }
 
-fn executable_candidate_exists(candidate: &Path) -> bool {
+fn executable_candidate(candidate: &Path) -> Option<PathBuf> {
     if candidate.is_file() {
-        return true;
+        return Some(candidate.to_path_buf());
     }
 
     #[cfg(windows)]
     {
-        env::var_os("PATHEXT")
-            .map(|pathext| {
-                env::split_paths(&pathext).any(|extension| {
-                    let extension = extension.to_string_lossy();
-                    let extension = extension.trim_start_matches('.');
-                    candidate.with_extension(extension).is_file()
-                })
-            })
-            .unwrap_or(false)
+        let pathext = env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        pathext.to_string_lossy().split(';').find_map(|extension| {
+            let extension = extension.trim().trim_start_matches('.');
+            if extension.is_empty() {
+                return None;
+            }
+            let candidate = candidate.with_extension(extension);
+            candidate.is_file().then_some(candidate)
+        })
     }
 
     #[cfg(not(windows))]
     {
-        false
+        None
     }
 }
 

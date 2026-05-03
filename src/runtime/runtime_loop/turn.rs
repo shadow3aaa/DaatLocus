@@ -1237,7 +1237,7 @@ fn persist_dashboard_activity_items(
     history: &DashboardActivityHistoryStore,
     items: &[crate::dashboard::WebActivityItem],
 ) -> miette::Result<DashboardActivityHistoryWindow> {
-    history.append_items(&items)?;
+    history.append_items(items)?;
     Ok(history.load_initial_window())
 }
 

@@ -10,10 +10,7 @@ pub use cells::{
     default_web_activity_version, render_activity_feed, render_activity_from_messages,
     sync_web_activity_state, web_activity_item_from_cell,
 };
-pub use history::{
-    DASHBOARD_ACTIVITY_HISTORY_INITIAL_LIMIT, DashboardActivityHistoryPage,
-    DashboardActivityHistoryStore, DashboardActivityHistoryWindow,
-};
+pub use history::{DashboardActivityHistoryStore, DashboardActivityHistoryWindow};
 
 use std::time::Duration;
 
