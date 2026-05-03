@@ -70,10 +70,7 @@ const CONTEXT_COMPOSITION_MAX_VISIBLE_SEGMENTS = 8;
 const AGENT_CHAT_MAX_VISIBLE_BUBBLES = 24;
 const AGENT_CHAT_MESSAGE_LINE_LIMIT = 5;
 const AGENT_CHAT_FOCUSED_MESSAGE_LINE_LIMIT = 12;
-const AGENT_CHAT_DETAIL_LINE_LIMIT = 8;
 const AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT = Number.MAX_SAFE_INTEGER;
-const AGENT_CHAT_CANONICAL_CELL_BLOCK_LIMIT = 4;
-const AGENT_CHAT_CANONICAL_CELL_DIFF_FILE_LIMIT = 4;
 const AGENT_CHAT_CANONICAL_CELL_DIFF_LINE_LIMIT = 18;
 const AGENT_CHAT_PLAN_STEP_LIMIT = 8;
 const AGENT_CHAT_TERMINAL_OUTPUT_HEAD_LINES = 4;
@@ -388,14 +385,11 @@ type AgentChatBubble = {
   status: string;
   title: string;
   blocks: WebActivityBlock[];
-  detailBlocks: WebActivityBlock[];
   planSteps: AgentChatPlanStep[];
   live?: boolean;
   toolName?: string;
   appName?: string;
   sourceLabel?: string;
-  errorLines: string[];
-  affectedFiles: string[];
   cell?: ActivityCellVariant | null;
 };
 
@@ -832,33 +826,22 @@ function AgentChatBubbleItem({
   const isConversationMessage = agentChatBubbleIsConversationMessage(bubble);
   const activityCellRender = agentChatActivityCellRenderForBubble(bubble);
   const useCanonicalActivityCell = Boolean(activityCellRender);
-  const rawPrimaryBlocks = bubble.blocks.length > 0
-    ? bubble.blocks
-    : isConversationMessage
-      ? ([{ type: "text", text: bubble.title }] as WebActivityBlock[])
-      : [];
   const primaryBlocks = useCanonicalActivityCell
     ? []
-    : agentChatDisplayBlocksForBubble(bubble, rawPrimaryBlocks);
-  const canonicalBlocks = agentChatCanonicalCellBlocksForBubble(bubble);
-  const visibleCanonicalBlocks = canonicalBlocks.slice(
-    0,
-    AGENT_CHAT_CANONICAL_CELL_BLOCK_LIMIT,
-  );
+    : agentChatDisplayBlocksForBubble(
+        bubble,
+        bubble.blocks.length > 0
+          ? bubble.blocks
+          : isConversationMessage
+            ? ([{ type: "text", text: bubble.title }] as WebActivityBlock[])
+            : [],
+      );
   const visibleBlockLimit = isConversationMessage && isFocused
     ? primaryBlocks.length
     : isFocused
       ? 6
       : 3;
   const visibleBlocks = primaryBlocks.slice(0, visibleBlockLimit);
-  const hiddenBlocks = primaryBlocks.slice(visibleBlockLimit);
-  const hasDetails =
-    (!useCanonicalActivityCell && bubble.detailBlocks.length > 0) ||
-    hiddenBlocks.length > 0 ||
-    (!useCanonicalActivityCell && visibleCanonicalBlocks.length > 0) ||
-    (!useCanonicalActivityCell && bubble.errorLines.length > 0) ||
-    bubble.affectedFiles.length > 0 ||
-    Boolean(bubble.toolName || bubble.appName || bubble.sourceLabel);
 
   return (
     <article
@@ -890,50 +873,6 @@ function AgentChatBubbleItem({
             ))}
           </div>
         )}
-        {hasDetails ? (
-          <details className="mt-2 text-xs text-muted-foreground">
-            <summary className="cursor-pointer list-none select-none hover:text-foreground/80">
-              详情
-            </summary>
-            <div className="mt-1 space-y-2 border-l border-border/50 pl-3">
-              <AgentChatMetadata bubble={bubble} />
-              {!useCanonicalActivityCell && bubble.errorLines.length > 0 ? (
-                <AgentChatTextLines
-                  id={`${bubble.id}-error`}
-                  lines={bubble.errorLines}
-                  limit={AGENT_CHAT_DETAIL_LINE_LIMIT}
-                  tone="error"
-                />
-              ) : null}
-              {hiddenBlocks.map((block, index) => (
-                <AgentChatBlock
-                  key={`${bubble.id}-hidden-${index}`}
-                  block={block}
-                  blockId={`${bubble.id}-hidden-${index}`}
-                  isFocused={true}
-                  messageMode={isConversationMessage}
-                />
-              ))}
-              {!useCanonicalActivityCell && visibleCanonicalBlocks.length > 0 ? (
-                <AgentChatCanonicalCellBlocks
-                  bubble={bubble}
-                  blocks={visibleCanonicalBlocks}
-                />
-              ) : null}
-              {!useCanonicalActivityCell
-                ? bubble.detailBlocks.map((block, index) => (
-                    <AgentChatBlock
-                      key={`${bubble.id}-detail-block-${index}`}
-                      block={block}
-                      blockId={`${bubble.id}-detail-block-${index}`}
-                      isFocused={true}
-                      detail
-                    />
-                  ))
-                : null}
-            </div>
-          </details>
-        ) : null}
       </div>
     </article>
   );
@@ -1624,50 +1563,20 @@ function AgentChatReplyActivityLine({
   );
 }
 
-function AgentChatMetadata({ bubble }: { bubble: AgentChatBubble }) {
-  const lines = [
-    bubble.appName ? `app: ${bubble.appName}` : null,
-    bubble.sourceLabel ? `source: ${bubble.sourceLabel}` : null,
-    bubble.affectedFiles.length > 0
-      ? `files: ${bubble.affectedFiles.slice(0, 5).join(", ")}${bubble.affectedFiles.length > 5 ? " …" : ""}`
-      : null,
-  ].filter((line): line is string => Boolean(line));
-
-  if (lines.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="space-y-0.5">
-      {lines.map((line) => (
-        <p key={line} className="break-words">
-          {line}
-        </p>
-      ))}
-    </div>
-  );
-}
-
 function AgentChatBlock({
   block,
   blockId,
   isFocused,
   messageMode = false,
-  detail = false,
-  dense = false,
 }: {
   block: WebActivityBlock;
   blockId: string;
   isFocused: boolean;
   messageMode?: boolean;
-  detail?: boolean;
-  dense?: boolean;
 }) {
   const record = asRecord(block);
   const type = typeof record?.type === "string" ? record.type : "unknown";
-  const lineLimit = detail
-    ? AGENT_CHAT_DETAIL_LINE_LIMIT
-    : messageMode && isFocused
+  const lineLimit = messageMode && isFocused
       ? AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT
     : isFocused
       ? AGENT_CHAT_FOCUSED_MESSAGE_LINE_LIMIT
@@ -1720,7 +1629,6 @@ function AgentChatBlock({
         blockId={blockId}
         items={items}
         limit={lineLimit}
-        dense={dense}
       />
     ) : null;
   }
@@ -1731,7 +1639,6 @@ function AgentChatBlock({
         id={blockId}
         files={diffFilesValue(record.files)}
         limit={lineLimit}
-        fileLimit={dense ? AGENT_CHAT_CANONICAL_CELL_DIFF_FILE_LIMIT : undefined}
       />
     );
   }
@@ -1785,66 +1692,6 @@ function FragmentPair({ left, right }: { left: string; right: string }) {
 }
 
 
-type AgentChatCanonicalBlock = WebActivityBlock & { title?: string };
-
-function AgentChatCanonicalCellBlocks({
-  bubble,
-  blocks,
-}: {
-  bubble: AgentChatBubble;
-  blocks: AgentChatCanonicalBlock[];
-}) {
-  if (blocks.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="space-y-2">
-      <p className="text-[0.68rem] font-semibold uppercase tracking-wide text-muted-foreground/75">
-        ActivityCell: {agentChatCanonicalCellVariantName(bubble.cell) ?? "unknown"}
-      </p>
-      {blocks.map((block, index) => (
-        <AgentChatCanonicalCellBlock
-          key={`${bubble.id}-canonical-${index}`}
-          bubbleId={bubble.id}
-          block={block}
-          index={index}
-        />
-      ))}
-    </div>
-  );
-}
-
-function AgentChatCanonicalCellBlock({
-  bubbleId,
-  block,
-  index,
-}: {
-  bubbleId: string;
-  block: AgentChatCanonicalBlock;
-  index: number;
-}) {
-  const blockId = `${bubbleId}-canonical-${index}`;
-  const title = typeof block.title === "string" ? block.title.trim() : "";
-  const renderableBlock = { ...block };
-  delete renderableBlock.title;
-
-  return (
-    <div className="space-y-1 rounded-xl border border-border/35 bg-muted/10 p-3">
-      {title ? (
-        <p className="text-xs font-semibold text-foreground/80">{title}</p>
-      ) : null}
-      <AgentChatBlock
-        block={renderableBlock}
-        blockId={blockId}
-        isFocused={true}
-        detail
-        dense
-      />
-    </div>
-  );
-}
-
 function AgentChatMarkdownText({
   id,
   text,
@@ -1858,7 +1705,6 @@ function AgentChatMarkdownText({
 }) {
   const blocks = parseAgentChatMarkdownBlocks(text);
   const visibleBlocks = blocks.slice(0, limit);
-  const hiddenBlocks = blocks.slice(limit);
 
   if (blocks.length === 0) {
     return null;
@@ -1878,21 +1724,10 @@ function AgentChatMarkdownText({
           blockId={`${id}-markdown-${index}`}
         />
       ))}
-      {hiddenBlocks.length > 0 ? (
-        <details className="text-xs text-muted-foreground">
-          <summary className="cursor-pointer list-none hover:text-foreground/80">
-            展开剩余 {hiddenBlocks.length} 段
-          </summary>
-          <div className="mt-2 space-y-2">
-            {hiddenBlocks.map((block, index) => (
-              <AgentChatMarkdownBlock
-                key={`${id}-hidden-markdown-${index}`}
-                block={block}
-                blockId={`${id}-hidden-markdown-${index}`}
-              />
-            ))}
-          </div>
-        </details>
+      {blocks.length > visibleBlocks.length ? (
+        <p className="text-xs text-muted-foreground">
+          … +{blocks.length - visibleBlocks.length} more block(s)
+        </p>
       ) : null}
     </div>
   );
@@ -2019,7 +1854,6 @@ function AgentChatTextLines({
   tone?: "default" | "error";
 }) {
   const visibleLines = lines.slice(0, limit);
-  const hiddenLines = lines.slice(limit);
 
   if (lines.length === 0) {
     return null;
@@ -2032,19 +1866,10 @@ function AgentChatTextLines({
           {line}
         </p>
       ))}
-      {hiddenLines.length > 0 ? (
-        <details className="text-xs text-muted-foreground">
-          <summary className="cursor-pointer list-none hover:text-foreground/80">
-            展开剩余 {hiddenLines.length} 行
-          </summary>
-          <div className="mt-1 space-y-1">
-            {hiddenLines.map((line, index) => (
-              <p key={`${id}-hidden-line-${index}`} className="break-words">
-                {line}
-              </p>
-            ))}
-          </div>
-        </details>
+      {lines.length > visibleLines.length ? (
+        <p className="text-xs text-muted-foreground">
+          … +{lines.length - visibleLines.length} more line(s)
+        </p>
       ) : null}
     </div>
   );
@@ -2132,14 +1957,9 @@ function AgentChatCodeBlock({
         ) : null}
       </div>
       {hiddenLines.length > 0 ? (
-        <details className="border-t border-border/40 bg-muted/15 px-4 py-2 text-xs text-muted-foreground">
-          <summary className="cursor-pointer list-none select-none hover:text-foreground/80">
-            展开完整输出（+{hiddenLines.length} 行）
-          </summary>
-          <pre className="mt-2 max-h-[28rem] overflow-auto whitespace-pre rounded-xl bg-background/70 px-3 py-2 font-mono text-[0.78rem] leading-6 text-foreground/85 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
-            {code}
-          </pre>
-        </details>
+        <p className="border-t border-border/40 bg-muted/15 px-4 py-2 text-xs text-muted-foreground">
+          … +{hiddenLines.length} more line(s)
+        </p>
       ) : null}
     </div>
   );
@@ -2213,14 +2033,9 @@ function AgentChatDiffBlock({
               {visibleLines.map((line) => renderDiffLine(line)).join("\n")}
             </pre>
             {hiddenLines.length > 0 ? (
-              <details className="border-t border-border/40 bg-muted/15 px-3 py-2 font-sans text-xs text-muted-foreground">
-                <summary className="cursor-pointer list-none hover:text-foreground/80">
-                  展开剩余 {hiddenLines.length} 行 diff
-                </summary>
-                <pre className="mt-2 max-h-[28rem] overflow-auto whitespace-pre rounded-xl bg-background/70 px-3 py-2 font-mono leading-5 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
-                  {file.lines.map((line) => renderDiffLine(line)).join("\n")}
-                </pre>
-              </details>
+              <p className="border-t border-border/40 bg-muted/15 px-3 py-2 font-sans text-xs text-muted-foreground">
+                … +{hiddenLines.length} more diff line(s)
+              </p>
             ) : null}
           </div>
         );
@@ -2273,7 +2088,6 @@ function agentChatBubbleFromWebActivityItem(
   const title = stringValue(record.title, agentChatFallbackTitle(actor, kind));
   const tool = asRecord(record.tool);
   const source = asRecord(record.source);
-  const error = asRecord(record.error);
 
   return {
     id,
@@ -2282,16 +2096,11 @@ function agentChatBubbleFromWebActivityItem(
     status,
     title,
     blocks: webActivityBlocksValue(record.blocks),
-    detailBlocks: webActivityBlocksValue(record.detail_blocks),
     planSteps: agentChatPlanStepsFromMetadata(record.metadata),
     live,
     toolName: tool ? stringValue(tool.name, "") : undefined,
     appName: tool ? stringValue(tool.app, "") : undefined,
     sourceLabel: source ? stringValue(source.label, stringValue(source.source_type, "")) : undefined,
-    errorLines: error
-      ? [stringValue(error.message, ""), ...stringArrayValue(error.details)].filter(Boolean)
-      : [],
-    affectedFiles: tool ? stringArrayValue(tool.affected_files) : [],
     cell: asActivityCellVariant(record.cell),
   };
 }
@@ -2751,311 +2560,6 @@ function agentChatDiffLineNumberWidth(
   );
 }
 
-function agentChatCanonicalCellBlocksForBubble(
-  bubble: AgentChatBubble,
-): AgentChatCanonicalBlock[] {
-  const cell = bubble.cell;
-  const common = agentChatCommonActivityCell(cell);
-
-  if (common) {
-    return agentChatCommonActivityCellBlocks(common.title, common.body_lines);
-  }
-
-  const browser = agentChatActivityCellPayload(cell, "Browser");
-  if (browser) {
-    return agentChatBrowserActivityCellBlocks(browser);
-  }
-
-  const liveBrowser = agentChatActivityCellPayload(cell, "LiveBrowser");
-  if (liveBrowser) {
-    return agentChatBrowserActivityCellBlocks(liveBrowser);
-  }
-
-  const execResult = agentChatActivityCellPayload(cell, "ExecResult");
-  if (execResult) {
-    return agentChatExecResultActivityCellBlocks(execResult);
-  }
-
-  const liveExec = agentChatActivityCellPayload(cell, "LiveExec");
-  if (liveExec) {
-    return agentChatLiveExecActivityCellBlocks(liveExec);
-  }
-
-  const patch = agentChatActivityCellPayload(cell, "Patch");
-  if (patch) {
-    return agentChatPatchActivityCellBlocks(patch);
-  }
-
-  const telegram = agentChatActivityCellPayload(cell, "Telegram");
-  if (telegram) {
-    return agentChatTelegramActivityCellBlocks(telegram);
-  }
-
-  const reply = agentChatActivityCellPayload(cell, "Reply");
-  if (reply) {
-    return agentChatReplyActivityCellBlocks(reply);
-  }
-
-  const plan = agentChatActivityCellPayload(cell, "PlanResult");
-  if (plan) {
-    return agentChatPlanActivityCellBlocks(plan);
-  }
-
-  const createWorkflow = agentChatActivityCellPayload(cell, "CreateWorkflowResult");
-  if (createWorkflow) {
-    return agentChatWorkflowActivityCellBlocks("Created Workflow", createWorkflow);
-  }
-
-  const activateWorkflow = agentChatActivityCellPayload(cell, "ActivateWorkflowResult");
-  if (activateWorkflow) {
-    return agentChatWorkflowActivityCellBlocks("Activated Workflow", activateWorkflow);
-  }
-
-  const deepRecall = agentChatActivityCellPayload(cell, "DeepRecallResult");
-  if (deepRecall) {
-    const memoryCount = numberValue(deepRecall.memory_count, 0);
-    return [
-      {
-        type: "kv",
-        title: `Recalled ${memoryCount} Memories`,
-        entries: [{ key: "memory_count", value: String(memoryCount) }],
-      },
-    ];
-  }
-
-  return [];
-}
-
-function agentChatCommonActivityCell(
-  cell: ActivityCellVariant | null | undefined,
-): Record<string, unknown> | null {
-  return (
-    agentChatActivityCellPayload(cell, "Assistant") ??
-    agentChatActivityCellPayload(cell, "User") ??
-    agentChatActivityCellPayload(cell, "AppAttention") ??
-    agentChatActivityCellPayload(cell, "GenericApp") ??
-    agentChatActivityCellPayload(cell, "ToolResult") ??
-    agentChatActivityCellPayload(cell, "TerminalWait") ??
-    agentChatActivityCellPayload(cell, "Error")
-  );
-}
-
-function agentChatCommonActivityCellBlocks(
-  titleValue: unknown,
-  bodyLinesValue: unknown,
-): AgentChatCanonicalBlock[] {
-  const title = stringValue(titleValue, "Activity");
-  const lines = stringArrayValue(bodyLinesValue);
-
-  return [
-    {
-      type: "text",
-      title,
-      text: [title, ...lines].filter(Boolean).join("\n"),
-    },
-  ];
-}
-
-function agentChatBrowserActivityCellBlocks(
-  cell: Record<string, unknown>,
-): AgentChatCanonicalBlock[] {
-  const title = stringValue(cell.title, "Browser");
-  const entries = [
-    { key: "title", value: title },
-    nullableStringEntry("url", cell.url),
-    nullableStringEntry("lines", cell.line_count),
-    nullableStringEntry("refs", cell.ref_count),
-  ].filter((entry): entry is { key: string; value: string } => Boolean(entry));
-  const bodyLines = stringArrayValue(cell.body_lines);
-  const blocks: AgentChatCanonicalBlock[] = entries.length > 0
-    ? [{ type: "kv", title, entries }]
-    : [];
-
-  if (bodyLines.length > 0) {
-    blocks.push({
-      type: "text",
-      title: "Details",
-      text: bodyLines.join("\n"),
-    });
-  }
-
-  return blocks;
-}
-
-function agentChatExecResultActivityCellBlocks(
-  cell: Record<string, unknown>,
-): AgentChatCanonicalBlock[] {
-  const title = stringValue(cell.title, "Command");
-  const outputLines = stringArrayValue(cell.output_lines);
-  const blocks: AgentChatCanonicalBlock[] = [
-    {
-      type: "code",
-      title,
-      code: outputLines.length > 0 ? outputLines.join("\n") : "(no output)",
-    },
-  ];
-  const meta = nullableStringEntry("meta", cell.meta);
-
-  if (meta) {
-    blocks.push({
-      type: "kv",
-      title: "Metadata",
-      entries: [meta],
-    });
-  }
-
-  return blocks;
-}
-
-function agentChatLiveExecActivityCellBlocks(
-  cell: Record<string, unknown>,
-): AgentChatCanonicalBlock[] {
-  const title = stringValue(cell.title, "Command");
-  const outputLines = stringArrayValue(cell.output_lines);
-  const entries = [
-    nullableStringEntry("meta", cell.meta),
-    nullableStringEntry("started_at_ms", cell.started_at_ms),
-  ].filter((entry): entry is { key: string; value: string } => Boolean(entry));
-  const blocks: AgentChatCanonicalBlock[] = [
-    {
-      type: "code",
-      title,
-      code: outputLines.length > 0 ? outputLines.join("\n") : "running...",
-    },
-  ];
-  const callLines = stringArrayValue(cell.call_lines);
-
-  if (callLines.length > 0) {
-    blocks.unshift({
-      type: "code",
-      title: "Input",
-      code: callLines.join("\n"),
-    });
-  }
-
-  if (entries.length > 0) {
-    blocks.push({ type: "kv", title: "Metadata", entries });
-  }
-
-  return blocks;
-}
-
-function agentChatPatchActivityCellBlocks(
-  cell: Record<string, unknown>,
-): AgentChatCanonicalBlock[] {
-  const files = diffFilesValue(
-    arrayValue(cell.files).map((file) => {
-      const record = asRecord(file);
-      return record
-        ? {
-            ...record,
-            lines: record.diff_lines,
-          }
-        : file;
-    }),
-  );
-
-  return [
-    {
-      type: "diff",
-      title: stringValue(cell.summary_line, "Patch"),
-      files,
-    },
-  ];
-}
-
-function agentChatTelegramActivityCellBlocks(
-  cell: Record<string, unknown>,
-): AgentChatCanonicalBlock[] {
-  const title = stringValue(cell.title, "Telegram");
-  const messageLines = stringArrayValue(cell.message_lines);
-  const detailLines = stringArrayValue(cell.detail_lines);
-  const blocks: AgentChatCanonicalBlock[] = [];
-
-  if (messageLines.length > 0) {
-    blocks.push({
-      type: "text",
-      title,
-      text: messageLines.join("\n"),
-    });
-  }
-
-  if (detailLines.length > 0) {
-    blocks.push({
-      type: "text",
-      title: "Details",
-      text: detailLines.join("\n"),
-    });
-  }
-
-  return blocks.length > 0 ? blocks : agentChatCommonActivityCellBlocks(title, []);
-}
-
-function agentChatReplyActivityCellBlocks(
-  cell: Record<string, unknown>,
-): AgentChatCanonicalBlock[] {
-  const disposition = stringValue(cell.disposition, "unknown");
-  const subject = stringValue(cell.subject, "message");
-  const messageLines = stringArrayValue(cell.message_lines);
-  const blocks: AgentChatCanonicalBlock[] = [];
-
-  if (messageLines.length > 0) {
-    blocks.push({
-      type: "text",
-      title: "Message",
-      text: messageLines.join("\n"),
-    });
-  }
-
-  blocks.push({
-    type: "kv",
-    title: "Reply",
-    entries: [
-      { key: "disposition", value: disposition },
-      { key: "subject", value: subject },
-    ],
-  });
-
-  return blocks;
-}
-
-function agentChatPlanActivityCellBlocks(
-  cell: Record<string, unknown>,
-): AgentChatCanonicalBlock[] {
-  const items = arrayValue(cell.steps)
-    .map(asRecord)
-    .filter((step): step is Record<string, unknown> => Boolean(step))
-    .map((step) => {
-      const status = normalizeCanonicalPlanStepStatus(step.status);
-      const marker = canonicalPlanStepMarker(status);
-      const text = stringValue(step.text, "");
-      return text ? `${marker} ${text}` : "";
-    })
-    .filter(Boolean);
-
-  return items.length > 0
-    ? [{ type: "list", title: "Plan", items }]
-    : [];
-}
-
-function agentChatWorkflowActivityCellBlocks(
-  title: string,
-  cell: Record<string, unknown>,
-): AgentChatCanonicalBlock[] {
-  return [
-    {
-      type: "kv",
-      title,
-      entries: [
-        {
-          key: "workflow_id",
-          value: stringValue(cell.workflow_id, "unknown"),
-        },
-      ],
-    },
-  ];
-}
-
 function agentChatPlanStepsFromActivityCell(
   cell: ActivityCellVariant | null | undefined,
 ): AgentChatPlanStep[] {
@@ -3127,25 +2631,6 @@ function canonicalPlanStepMarker(status: AgentChatPlanStepStatus) {
   }
 
   return "•";
-}
-
-function nullableStringEntry(
-  key: string,
-  value: unknown,
-): { key: string; value: string } | null {
-  if (typeof value === "string") {
-    return value.trim() ? { key, value } : null;
-  }
-
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return { key, value: String(value) };
-  }
-
-  if (typeof value === "boolean") {
-    return { key, value: value ? "true" : "false" };
-  }
-
-  return null;
 }
 
 function agentChatPlanStepsFromMetadata(value: unknown): AgentChatPlanStep[] {
