@@ -755,7 +755,7 @@ function AgentChatBubbles({
         aria-hidden={!isFocused}
         onScroll={handleScroll}
         className={cn(
-          "absolute inset-0 w-full overflow-y-auto px-4 pb-[calc(50vh+9rem)] pt-6 text-left [scrollbar-gutter:stable] transition-[filter,opacity] duration-300 ease-out md:px-8",
+          "absolute inset-0 w-full overflow-y-auto pb-[calc(50vh+9rem)] pt-6 text-left [scrollbar-gutter:stable] transition-[filter,opacity] duration-300 ease-out",
           isFocused
             ? "pointer-events-auto z-20 opacity-100"
             : "pointer-events-none z-0 opacity-35 blur-[1px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
@@ -765,7 +765,7 @@ function AgentChatBubbles({
           {bubbles.length > 0 ? (
             <div
               className={cn(
-                "mx-auto w-full max-w-[min(48rem,94%)] space-y-3 py-1.5",
+                "me-auto w-full max-w-[min(48rem,94%)] space-y-3 py-1.5",
                 !isFocused && "max-w-[min(42rem,88%)] space-y-2",
               )}
             >
