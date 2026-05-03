@@ -1761,15 +1761,13 @@ function AgentChatReplyActivityLine({
         </p>
       </div>
       {messageLines.length > 0 ? (
-        <div className="space-y-0.5 px-3 text-foreground/90">
-          {messageLines.map((line, index) => (
-            <p
-              key={`${id}-reply-${index}`}
-              className="min-w-0 break-words"
-            >
-              <AgentChatMarkdownInline text={line} />
-            </p>
-          ))}
+        <div className="px-3 text-foreground/90">
+          <AgentChatMarkdownText
+            id={`${id}-reply`}
+            text={messageLines.join("\n")}
+            limit={AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT}
+            tone={disposition === "failed" ? "error" : "default"}
+          />
         </div>
       ) : null}
     </div>
