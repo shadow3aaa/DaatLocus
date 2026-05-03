@@ -15,8 +15,9 @@ use crate::{
         render_dashboard_footer_context, sync_dashboard_state,
     },
     dashboard::{
-        DashboardActivityEvent, DashboardControlCommand, DashboardState,
-        activity_cell_from_tool_ui_event, apply_activity_event, assistant_activity_cell,
+        DashboardActivityEvent, DashboardActivityHistoryStore, DashboardActivityHistoryWindow,
+        DashboardControlCommand, DashboardState, activity_cell_from_tool_ui_event,
+        apply_activity_event, assistant_activity_cell, web_activity_item_from_cell,
     },
     events::{EventPayload, EventStatus, EventView},
     hindsight::HindsightRecallOptions,

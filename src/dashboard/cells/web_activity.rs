@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -27,23 +25,14 @@ pub fn default_web_activity_version() -> u8 {
 }
 
 pub fn sync_web_activity_state(state: &mut crate::dashboard::DashboardState) {
-    let previous_items = state
-        .web_activity_items
-        .iter()
-        .map(|item| (item.id.clone(), item.clone()))
-        .collect::<HashMap<_, _>>();
     let previous_live_items = state
         .live_web_activity_items
         .iter()
         .map(|entry| (entry.item.id.clone(), entry.item.clone()))
-        .collect::<HashMap<_, _>>();
+        .collect::<std::collections::HashMap<_, _>>();
 
     state.web_activity_version = WEB_ACTIVITY_VERSION;
-    let mut items = render_web_activity_items(&state.activity_cells);
-    for item in &mut items {
-        preserve_item_timestamps(item, &previous_items);
-    }
-    state.web_activity_items = items;
+    state.web_activity_items = state.activity_history.items.clone();
 
     let mut live_items = render_live_web_activity_items(&state.live_activity_cells);
     for entry in &mut live_items {
@@ -211,14 +200,6 @@ pub struct WebActivityError {
 pub struct LiveWebActivityItem {
     pub key: String,
     pub item: WebActivityItem,
-}
-
-pub fn render_web_activity_items(cells: &[ActivityCell]) -> Vec<WebActivityItem> {
-    cells
-        .iter()
-        .enumerate()
-        .map(|(index, cell)| web_activity_item_from_cell(cell, &format!("activity-{index}"), false))
-        .collect()
 }
 
 pub fn render_live_web_activity_items(cells: &[LiveActivityCell]) -> Vec<LiveWebActivityItem> {
@@ -711,7 +692,7 @@ fn web_diff_file_from_patch_file(file: &PatchFileUiData) -> WebActivityDiffFile 
 
 fn preserve_item_timestamps(
     item: &mut WebActivityItem,
-    previous_items: &HashMap<String, WebActivityItem>,
+    previous_items: &std::collections::HashMap<String, WebActivityItem>,
 ) {
     let Some(previous) = previous_items.get(&item.id) else {
         return;

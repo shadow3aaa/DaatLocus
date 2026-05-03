@@ -257,6 +257,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         execution_cwd,
         sandbox_policy,
         dashboard_tx: None,
+        dashboard_history: None,
         daemon_control_tx,
         latest_context_composition: None,
         active_runtime_turn: false,

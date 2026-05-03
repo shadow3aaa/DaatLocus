@@ -16,7 +16,10 @@ use crate::{
         runtime_optimization_snapshot_for_dashboard, token_usage_snapshot_for_dashboard,
         workflow_optimization_snapshot_for_dashboard,
     },
-    dashboard::{DashboardControlCommand, DashboardState, sync_web_activity_state},
+    dashboard::{
+        DashboardActivityHistoryStore, DashboardControlCommand, DashboardState,
+        sync_web_activity_state,
+    },
     events::EventStore,
     hindsight::managed::HindsightManagedServer,
     memory::Memory,
@@ -59,10 +62,13 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     let telegram_acl = TelegramAclHandle::load().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
+    let dashboard_history = DashboardActivityHistoryStore::new().await?;
+    let initial_activity_history = dashboard_history.load_initial_window();
     let (tx, _rx) = tokio::sync::watch::channel(DashboardState {
         runtime_status: Some("Daemon initializing".to_string()),
         footer_context: "Daemon is initializing; runtime commands are disabled until ready."
             .to_string(),
+        activity_history: initial_activity_history,
         ..DashboardState::default()
     });
     let (dashboard_control_tx, mut dashboard_control_rx) =
@@ -80,6 +86,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         auth_registry: daemon_token_registry,
         lifecycle: daemon_lifecycle.clone(),
         dashboard_rx: tx.subscribe(),
+        dashboard_history: dashboard_history.clone(),
         telegram_acl: telegram_acl.clone(),
         events: events.clone(),
         pending_work: pending_work.clone(),
@@ -198,6 +205,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         execution_cwd,
         sandbox_policy,
         dashboard_tx: Some(tx.clone()),
+        dashboard_history: Some(dashboard_history.clone()),
         daemon_control_tx: daemon_control_tx.clone(),
         latest_context_composition: None,
         active_runtime_turn: false,
@@ -237,6 +245,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             web_activity_version: crate::dashboard::default_web_activity_version(),
             web_activity_items: Vec::new(),
             live_web_activity_items: Vec::new(),
+            activity_history: dashboard_history.load_initial_window(),
             last_cycle_elapsed_ms: None,
             runtime_status: None,
             current_plan_step: current_plan_step_for_dashboard(&context),

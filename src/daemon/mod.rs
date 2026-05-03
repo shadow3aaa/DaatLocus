@@ -43,7 +43,8 @@ use crate::{
     config::{Config, ModelConfig, ProviderConfig, ThinkingBudget, load_config},
     daat_locus_paths::daat_locus_paths,
     dashboard::{
-        DashboardCommandRunner, DashboardControlCommand, DashboardState, execute_remote_command,
+        DashboardActivityHistoryStore, DashboardCommandRunner, DashboardControlCommand,
+        DashboardState, execute_remote_command,
     },
     events::EventStore,
     pending_work::PendingWorkQueue,
@@ -299,6 +300,13 @@ struct DashboardStreamQuery {
     token: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DashboardActivityHistoryQuery {
+    before: Option<i64>,
+    after: Option<i64>,
+    limit: Option<usize>,
+}
+
 #[derive(Debug)]
 pub enum DaemonControlCommand {
     ShutdownRequested { completion_tx: oneshot::Sender<()> },
@@ -313,6 +321,7 @@ struct ServerState {
     auth_registry: DaemonTokenRegistryHandle,
     lifecycle: DaemonLifecycleHandle,
     dashboard_rx: watch::Receiver<DashboardState>,
+    dashboard_history: DashboardActivityHistoryStore,
     telegram_acl: TelegramAclHandle,
     events: EventStore,
     pending_work: PendingWorkQueue,
@@ -331,6 +340,7 @@ pub struct DaemonServerStartParams {
     pub auth_registry: DaemonTokenRegistryHandle,
     pub lifecycle: DaemonLifecycleHandle,
     pub dashboard_rx: watch::Receiver<DashboardState>,
+    pub dashboard_history: DashboardActivityHistoryStore,
     pub telegram_acl: TelegramAclHandle,
     pub events: EventStore,
     pub pending_work: PendingWorkQueue,
@@ -434,6 +444,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         auth_registry,
         lifecycle,
         dashboard_rx,
+        dashboard_history,
         telegram_acl,
         events,
         pending_work,
@@ -463,6 +474,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         auth_registry,
         lifecycle,
         dashboard_rx,
+        dashboard_history,
         telegram_acl,
         events,
         pending_work,
@@ -476,6 +488,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/status", get(status_handler))
         .route("/dashboard/snapshot", get(snapshot_handler))
         .route("/dashboard/stream", get(stream_handler))
+        .route("/dashboard/activity-history", get(activity_history_handler))
         .route("/settings/summary", get(settings_summary_handler))
         .route("/logs/sources", get(logs::sources_handler))
         .route("/logs/read", get(logs::read_handler))
@@ -618,6 +631,35 @@ async fn snapshot_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(state.dashboard_rx.borrow().clone()).into_response()
+}
+
+async fn activity_history_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(query): Query<DashboardActivityHistoryQuery>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let result = if let Some(after) = query.after {
+        state
+            .dashboard_history
+            .query_after(Some(after), query.limit.unwrap_or(80))
+    } else {
+        state
+            .dashboard_history
+            .query_before(query.before, query.limit.unwrap_or(80))
+    };
+
+    match result {
+        Ok(page) => Json(page).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("dashboard activity history query failed: {err:?}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn settings_summary_handler(

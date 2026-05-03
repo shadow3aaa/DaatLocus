@@ -1,13 +1,18 @@
 //! Dashboard: activity feed + command console.
 
 pub mod cells;
+pub mod history;
 pub mod render;
 
 pub use cells::{
     ActivityCell, DashboardActivityEvent, LiveActivityCell, LiveWebActivityItem, WebActivityItem,
     activity_cell_from_tool_ui_event, apply_activity_event, assistant_activity_cell,
     default_web_activity_version, render_activity_feed, render_activity_from_messages,
-    sync_web_activity_state,
+    sync_web_activity_state, web_activity_item_from_cell,
+};
+pub use history::{
+    DASHBOARD_ACTIVITY_HISTORY_INITIAL_LIMIT, DashboardActivityHistoryPage,
+    DashboardActivityHistoryStore, DashboardActivityHistoryWindow,
 };
 
 use std::time::Duration;
@@ -146,6 +151,8 @@ pub struct DashboardState {
     pub web_activity_items: Vec<WebActivityItem>,
     #[serde(default)]
     pub live_web_activity_items: Vec<LiveWebActivityItem>,
+    #[serde(default)]
+    pub activity_history: DashboardActivityHistoryWindow,
     pub last_cycle_elapsed_ms: Option<u128>,
     pub runtime_status: Option<String>,
     #[serde(default)]

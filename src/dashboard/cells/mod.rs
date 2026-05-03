@@ -34,7 +34,8 @@ pub struct LiveActivityCell {
 
 pub use tui::render_activity_feed;
 pub use web_activity::{
-    LiveWebActivityItem, WebActivityItem, default_web_activity_version, sync_web_activity_state,
+    LiveWebActivityItem, WebActivityItem, WebActivityKind, WebActivityStatus,
+    default_web_activity_version, sync_web_activity_state, web_activity_item_from_cell,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

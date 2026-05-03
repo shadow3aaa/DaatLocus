@@ -545,7 +545,7 @@ pub(crate) async fn execute_agent_loop_step(
                 terminal_actions.push(terminal_action.clone());
                 runtime_step.push_history_message(HistoryMessage::assistant(observation.clone()));
                 if let Some(cell) = assistant_activity_cell(&observation) {
-                    append_committed_activity_cells(tx, vec![cell]);
+                    append_committed_activity_cells(context, tx, vec![cell]);
                 }
                 break 'agent_loop AgentLoopStepOutput {
                     observation: observation.clone(),
@@ -633,7 +633,7 @@ pub(crate) async fn execute_agent_loop_step(
             {
                 committed_cells.push(cell);
             }
-            append_committed_activity_cells(tx, committed_cells);
+            append_committed_activity_cells(context, tx, committed_cells);
             for (call, call_ui_event) in calls.iter().zip(tool_call_ui_events.iter()) {
                 let action_record =
                     summarize_action_from_tool_call(context, call).unwrap_or_else(|_| {
@@ -780,6 +780,7 @@ pub(crate) async fn execute_agent_loop_step(
                     result.ui_event.clone(),
                 ));
                 append_committed_activity_cells(
+                    context,
                     tx,
                     activity_cell_from_tool_ui_event(result.ui_event.clone())
                         .into_iter()
@@ -892,7 +893,7 @@ pub(crate) async fn execute_agent_loop_step(
         runtime_step.set_current_doing(current_doing.clone());
         runtime_step.push_history_message(HistoryMessage::assistant(content.clone()));
         if let Some(cell) = assistant_activity_cell(&content) {
-            append_committed_activity_cells(tx, vec![cell]);
+            append_committed_activity_cells(context, tx, vec![cell]);
         }
         break 'agent_loop AgentLoopStepOutput {
             observation: if tool_results.is_empty() {
@@ -1182,20 +1183,62 @@ fn compact_runtime_error_text(text: &str, max_chars: usize) -> String {
 }
 
 fn append_committed_activity_cells(
+    context: &Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
     cells: Vec<crate::dashboard::ActivityCell>,
 ) {
     if cells.is_empty() {
         return;
     }
+    let history_items = dashboard_activity_items_from_cells(&cells);
+    let persisted_window = context.dashboard_history.as_ref().and_then(|history| {
+        persist_dashboard_activity_items(history, &history_items).map_or_else(
+            |err| {
+                tracing::warn!("persist dashboard activity history failed: {err:?}");
+                None
+            },
+            Some,
+        )
+    });
     if let Some(tx) = tx {
         tx.send_modify(|state| {
+            if let Some(window) = persisted_window.as_ref() {
+                state.activity_history = window.clone();
+            } else {
+                state
+                    .activity_history
+                    .merge_new_items(history_items.clone());
+            }
             apply_activity_event(
                 state,
                 DashboardActivityEvent::AppendCommittedCells { cells },
             );
         });
     }
+}
+
+fn dashboard_activity_items_from_cells(
+    cells: &[crate::dashboard::ActivityCell],
+) -> Vec<crate::dashboard::WebActivityItem> {
+    cells
+        .iter()
+        .map(|cell| {
+            let item_id = format!(
+                "activity-{}-{}",
+                chrono::Utc::now().timestamp_millis(),
+                uuid::Uuid::new_v4()
+            );
+            web_activity_item_from_cell(cell, &item_id, false)
+        })
+        .collect()
+}
+
+fn persist_dashboard_activity_items(
+    history: &DashboardActivityHistoryStore,
+    items: &[crate::dashboard::WebActivityItem],
+) -> miette::Result<DashboardActivityHistoryWindow> {
+    history.append_items(&items)?;
+    Ok(history.load_initial_window())
 }
 
 #[cfg(test)]

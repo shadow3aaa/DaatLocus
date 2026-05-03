@@ -360,6 +360,21 @@ export type LiveWebActivityItem = {
   item: WebActivityItem;
 };
 
+export type DashboardActivityHistoryWindow = {
+  items: WebActivityItem[];
+  oldest_cursor: number | null;
+  newest_cursor: number | null;
+  has_more_before: boolean;
+};
+
+export type DashboardActivityHistoryPage = {
+  items: WebActivityItem[];
+  oldest_cursor: number | null;
+  newest_cursor: number | null;
+  has_more_before: boolean;
+  has_more_after: boolean;
+};
+
 export type DashboardSnapshot = {
   focused_app: string | null;
   status_output: string;
@@ -377,6 +392,7 @@ export type DashboardSnapshot = {
   web_activity_version?: number;
   web_activity_items?: WebActivityItem[];
   live_web_activity_items?: LiveWebActivityItem[];
+  activity_history?: DashboardActivityHistoryWindow;
   last_cycle_elapsed_ms: number | null;
   runtime_status: string | null;
   current_plan_step: DashboardPlanStep | null;
@@ -561,6 +577,47 @@ export async function fetchDashboardSnapshot({
   });
 
   return parseJsonResponse<DashboardSnapshot>(response, "Dashboard snapshot");
+}
+
+export async function fetchDashboardActivityHistory({
+  before,
+  after,
+  limit = 80,
+  signal,
+  token = getStoredDaemonToken(),
+}: FetchOptions & {
+  before?: number;
+  after?: number;
+  limit?: number;
+} = {}): Promise<DashboardActivityHistoryPage> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for dashboard activity history.");
+  }
+
+  const url = new URL("/dashboard/activity-history", window.location.href);
+  url.searchParams.set("limit", String(limit));
+  if (before !== undefined) {
+    url.searchParams.set("before", String(before));
+  }
+  if (after !== undefined) {
+    url.searchParams.set("after", String(after));
+  }
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  return parseJsonResponse<DashboardActivityHistoryPage>(
+    response,
+    "Dashboard activity history",
+  );
 }
 
 export async function fetchSettingsSummary({

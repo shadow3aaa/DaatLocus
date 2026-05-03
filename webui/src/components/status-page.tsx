@@ -50,8 +50,10 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import {
+  fetchDashboardActivityHistory,
   runDashboardCommand,
   subscribeDashboardSnapshots,
+  type DashboardActivityHistoryPage,
   type DashboardContextCompositionSegment,
   type DashboardPendingAccessRequest,
   type DashboardSnapshot,
@@ -68,7 +70,8 @@ const SUMMARY_TYPE_INTERVAL_MS = 28;
 const TOKEN_USAGE_MAX_VISIBLE_DAYS = 7;
 const STATUS_CARD_ORDER_STORAGE_KEY = "daat-locus.status.card-order";
 const CONTEXT_COMPOSITION_MAX_VISIBLE_SEGMENTS = 8;
-const AGENT_CHAT_MAX_VISIBLE_BUBBLES = 24;
+const AGENT_CHAT_HISTORY_PAGE_LIMIT = 80;
+const AGENT_CHAT_PREVIEW_MAX_VISIBLE_BUBBLES = 24;
 const AGENT_CHAT_MESSAGE_LINE_LIMIT = 5;
 const AGENT_CHAT_FOCUSED_MESSAGE_LINE_LIMIT = 12;
 const AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT = Number.MAX_SAFE_INTEGER;
@@ -730,12 +733,28 @@ function AgentChatBubbles({
   panelRef: RefObject<HTMLDivElement | null>;
   composerHeight: number;
 }) {
-  const bubbles = useMemo(() => agentChatBubblesFromSnapshot(snapshot), [snapshot]);
+  const snapshotBubbles = useMemo(() => agentChatBubblesFromSnapshot(snapshot), [snapshot]);
+  const [historyBubbles, setHistoryBubbles] = useState<AgentChatBubble[]>([]);
+  const [oldestCursor, setOldestCursor] = useState<number | null>(null);
+  const [hasMoreBefore, setHasMoreBefore] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const lastFocusedScrollTopRef = useRef(0);
   const hasFocusedScrollPositionRef = useRef(false);
   const shouldRestoreFocusScrollRef = useRef(false);
   const isFocusedNearBottomRef = useRef(true);
+  const restoreAfterPrependRef = useRef<{
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const bubbles = useMemo(
+    () => mergeAgentChatBubbles(historyBubbles, snapshotBubbles),
+    [historyBubbles, snapshotBubbles],
+  );
+  const visibleBubbles = isFocused
+    ? bubbles
+    : bubbles.slice(-AGENT_CHAT_PREVIEW_MAX_VISIBLE_BUBBLES);
 
   function scrollToChatBottom(behavior: ScrollBehavior = "auto") {
     const panel = panelRef.current;
@@ -772,6 +791,14 @@ function AgentChatBubbles({
     setShowScrollToBottom(
       isFocused && distanceFromBottom > AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX,
     );
+    if (
+      isFocused &&
+      panel.scrollTop <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX &&
+      hasMoreBefore &&
+      !isLoadingHistory
+    ) {
+      void loadOlderHistory();
+    }
   }
 
   function handleScrollToBottomClick() {
@@ -779,6 +806,39 @@ function AgentChatBubbles({
     scrollToChatBottom("smooth");
     setShowScrollToBottom(false);
   }
+
+  const loadOlderHistory = useCallback(async () => {
+    if (!isFocused || isLoadingHistory || !hasMoreBefore || oldestCursor === null) {
+      return;
+    }
+
+    const panel = panelRef.current;
+    if (panel) {
+      restoreAfterPrependRef.current = {
+        scrollHeight: panel.scrollHeight,
+        scrollTop: panel.scrollTop,
+      };
+    }
+
+    setIsLoadingHistory(true);
+    setHistoryError(null);
+    try {
+      const page = await fetchDashboardActivityHistory({
+        before: oldestCursor,
+        limit: AGENT_CHAT_HISTORY_PAGE_LIMIT,
+      });
+      setHistoryBubbles((current) =>
+        mergeAgentChatBubbles(agentChatBubblesFromHistoryPage(page), current),
+      );
+      setOldestCursor(page.oldest_cursor ?? oldestCursor);
+      setHasMoreBefore(page.has_more_before);
+    } catch (error) {
+      restoreAfterPrependRef.current = null;
+      setHistoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }, [hasMoreBefore, isFocused, isLoadingHistory, oldestCursor, panelRef]);
 
   useEffect(() => {
     const panel = panelRef.current;
@@ -802,6 +862,39 @@ function AgentChatBubbles({
       scrollToChatBottom();
     });
   }, [isFocused, panelRef]);
+
+  useEffect(() => {
+    const historyWindow = snapshot?.activity_history;
+    setHistoryBubbles(agentChatCommittedBubblesFromSnapshot(snapshot));
+    setOldestCursor(historyWindow?.oldest_cursor ?? null);
+    setHasMoreBefore(Boolean(historyWindow?.has_more_before));
+    setHistoryError(null);
+    restoreAfterPrependRef.current = null;
+  }, [snapshot?.activity_history?.newest_cursor]);
+
+  useEffect(() => {
+    if (!isFocused) {
+      return;
+    }
+
+    const restore = restoreAfterPrependRef.current;
+    if (!restore) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      const panel = panelRef.current;
+      if (!panel) {
+        restoreAfterPrependRef.current = null;
+        return;
+      }
+      panel.scrollTop =
+        panel.scrollHeight - restore.scrollHeight + restore.scrollTop;
+      lastFocusedScrollTopRef.current = panel.scrollTop;
+      updateScrollButtonVisibility(panel);
+      restoreAfterPrependRef.current = null;
+    });
+  }, [historyBubbles.length, isFocused, panelRef]);
 
   useEffect(() => {
     const panel = panelRef.current;
@@ -852,6 +945,23 @@ function AgentChatBubbles({
     }
   }, [bubbles.length, isFocused, panelRef]);
 
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (
+      !panel ||
+      !isFocused ||
+      !hasMoreBefore ||
+      isLoadingHistory ||
+      restoreAfterPrependRef.current
+    ) {
+      return;
+    }
+
+    if (panel.scrollTop <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX) {
+      void loadOlderHistory();
+    }
+  }, [hasMoreBefore, isFocused, isLoadingHistory, loadOlderHistory, panelRef]);
+
   return (
     <>
       <div
@@ -870,14 +980,37 @@ function AgentChatBubbles({
         )}
       >
         <div className="relative z-10 flex min-h-full w-full flex-col justify-end">
-          {bubbles.length > 0 ? (
+          {visibleBubbles.length > 0 ? (
             <div
               className={cn(
                 "me-auto w-full max-w-[min(48rem,94%)] space-y-3 py-1.5",
                 !isFocused && "max-w-[min(42rem,88%)] space-y-2",
               )}
             >
-              {bubbles.map((bubble) => (
+              {isFocused && (hasMoreBefore || isLoadingHistory || historyError) ? (
+                <div className="flex justify-center py-1">
+                  {hasMoreBefore ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={isLoadingHistory}
+                      onClick={() => {
+                        void loadOlderHistory();
+                      }}
+                      className="rounded-full border border-border/70 bg-background/80 px-3 text-xs text-muted-foreground shadow-sm backdrop-blur-xl"
+                    >
+                      {isLoadingHistory ? "加载中…" : "加载更早记录"}
+                    </Button>
+                  ) : null}
+                  {historyError ? (
+                    <p role="alert" className="px-3 text-xs text-destructive">
+                      {historyError}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+              {visibleBubbles.map((bubble) => (
                 <AgentChatBubbleItem
                   key={bubble.id}
                   bubble={bubble}
@@ -2131,9 +2264,7 @@ function agentChatBubblesFromSnapshot(
     return [];
   }
 
-  const committed = (snapshot.web_activity_items ?? [])
-    .map((item, index) => agentChatBubbleFromWebActivityItem(item, `activity-${index}`))
-    .filter((bubble): bubble is AgentChatBubble => Boolean(bubble));
+  const committed = agentChatCommittedBubblesFromSnapshot(snapshot);
   const live = (snapshot.live_web_activity_items ?? [])
     .map((entry, index) =>
       agentChatBubbleFromWebActivityItem(
@@ -2144,7 +2275,47 @@ function agentChatBubblesFromSnapshot(
     )
     .filter((bubble): bubble is AgentChatBubble => Boolean(bubble));
 
-  return [...committed, ...live].slice(-AGENT_CHAT_MAX_VISIBLE_BUBBLES);
+  return mergeAgentChatBubbles(committed, live);
+}
+
+function agentChatCommittedBubblesFromSnapshot(
+  snapshot: DashboardSnapshot | null,
+): AgentChatBubble[] {
+  if (!snapshot) {
+    return [];
+  }
+
+  return agentChatBubblesFromWebActivityItems(
+    snapshot.activity_history?.items ?? snapshot.web_activity_items ?? [],
+    "activity",
+  );
+}
+
+function agentChatBubblesFromHistoryPage(
+  page: DashboardActivityHistoryPage,
+): AgentChatBubble[] {
+  return agentChatBubblesFromWebActivityItems(page.items ?? [], "history-page");
+}
+
+function agentChatBubblesFromWebActivityItems(
+  items: WebActivityItem[],
+  fallbackPrefix: string,
+): AgentChatBubble[] {
+  return items
+    .map((item, index) =>
+      agentChatBubbleFromWebActivityItem(item, `${fallbackPrefix}-${index}`),
+    )
+    .filter((bubble): bubble is AgentChatBubble => Boolean(bubble));
+}
+
+function mergeAgentChatBubbles(
+  ...groups: AgentChatBubble[][]
+): AgentChatBubble[] {
+  const merged = new Map<string, AgentChatBubble>();
+  for (const bubble of groups.flat()) {
+    merged.set(bubble.id, bubble);
+  }
+  return Array.from(merged.values());
 }
 
 function agentChatBubbleFromWebActivityItem(
