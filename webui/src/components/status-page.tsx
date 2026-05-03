@@ -660,13 +660,13 @@ function AgentChatComposer({
       onSubmit={handleSubmit}
       onFocus={handleFocus}
       className={cn(
-        "fixed bottom-5 left-1/2 z-30 w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 rounded-[2rem] border bg-background/85 p-2 shadow-2xl shadow-background/40 backdrop-blur-xl transition-all duration-300",
+        "fixed bottom-5 left-1/2 z-30 w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 rounded-[16px] border bg-background/85 p-2 shadow-2xl shadow-background/40 backdrop-blur-xl transition-all duration-300",
         isFocused
           ? "border-primary/45 ring-4 ring-primary/10"
           : "border-border/70 hover:border-primary/30",
       )}
     >
-      <div className="flex items-end gap-2">
+      <div className="flex items-center gap-2">
         <textarea
           value={message}
           rows={1}
@@ -691,7 +691,7 @@ function AgentChatComposer({
             size="icon-lg"
             aria-label="Collapse agent chat"
             onClick={handleCloseFocus}
-            className="mb-0.5 rounded-full text-muted-foreground hover:text-foreground"
+            className="rounded-full text-muted-foreground hover:text-foreground"
           >
             <XIcon className="size-4" />
           </Button>
@@ -701,7 +701,7 @@ function AgentChatComposer({
           size="icon-lg"
           disabled={!message.trim() || isSending}
           aria-label="Send message"
-          className="mb-0.5 rounded-full"
+          className="rounded-full"
         >
           {isSending ? (
             <Loader2Icon className="size-4 animate-spin" />
