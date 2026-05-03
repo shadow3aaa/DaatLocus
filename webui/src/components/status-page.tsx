@@ -1281,6 +1281,29 @@ function AgentChatActivityCellView({
   );
 }
 
+function AgentChatActivityMarker({
+  marker,
+  tone = "default",
+  className,
+}: {
+  marker: string;
+  tone?: "default" | "error";
+  className?: string;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "inline-flex h-6 w-6 shrink-0 items-center justify-center font-mono text-sm font-semibold leading-none text-muted-foreground",
+        tone === "error" && "text-destructive",
+        className,
+      )}
+    >
+      {marker}
+    </span>
+  );
+}
+
 function AgentChatActivityTextCell({
   id,
   marker,
@@ -1311,16 +1334,11 @@ function AgentChatActivityTextCell({
         tone === "muted" && "text-muted-foreground",
       )}
     >
-      <div className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-baseline gap-2 px-3">
-        <span
-          aria-hidden="true"
-          className={cn(
-            "shrink-0 text-right font-mono text-sm font-semibold text-muted-foreground",
-            tone === "error" && "text-destructive",
-          )}
-        >
-          {marker}
-        </span>
+      <div className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-2 px-3">
+        <AgentChatActivityMarker
+          marker={marker}
+          tone={tone === "error" ? "error" : "default"}
+        />
         <p
           className={cn(
             "min-w-0 break-words font-semibold text-foreground",
@@ -1372,13 +1390,8 @@ function AgentChatStatusLineCell({
   valueClassName?: string;
 }) {
   return (
-    <div className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-baseline gap-2 px-3 text-sm leading-6 text-foreground/90">
-      <span
-        aria-hidden="true"
-        className="shrink-0 text-right font-mono text-sm font-semibold text-muted-foreground"
-      >
-        {marker}
-      </span>
+    <div className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-2 px-3 text-sm leading-6 text-foreground/90">
+      <AgentChatActivityMarker marker={marker} />
       <p className="min-w-0 break-words font-semibold text-foreground">
         {label}
         {value ? (
@@ -1406,10 +1419,8 @@ function AgentChatPlanActivityPanel({
 
   return (
     <div className="space-y-1.5 text-sm">
-      <div className="flex min-w-0 items-center gap-2 px-3">
-        <span aria-hidden="true" className="shrink-0 font-mono font-semibold text-muted-foreground">
-          {marker}
-        </span>
+      <div className="flex min-w-0 items-start gap-2 px-3 leading-6">
+        <AgentChatActivityMarker marker={marker} />
         <p className="min-w-0 break-words font-semibold text-foreground">{title}</p>
       </div>
       {visibleSteps.length > 0 ? (
@@ -1498,13 +1509,13 @@ function AgentChatCommandExecutionPanel({
 
   return (
     <div className="space-y-1 text-sm">
-      <div className="flex min-w-0 items-baseline gap-x-2 px-3">
+      <div className="flex min-w-0 items-start gap-x-2 px-3 leading-6">
         {mode === "running" ? (
-          <Loader2Icon className="size-3.5 shrink-0 self-center animate-spin text-muted-foreground" />
-        ) : (
-          <span aria-hidden="true" className="shrink-0 font-mono font-semibold text-muted-foreground">
-            {marker}
+          <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center text-muted-foreground">
+            <Loader2Icon className="size-3.5 animate-spin" />
           </span>
+        ) : (
+          <AgentChatActivityMarker marker={marker} />
         )}
         <p className="min-w-0 flex-1 truncate font-semibold text-foreground" title={`${verb} ${title}`}>
           {verb}{" "}
@@ -1548,10 +1559,8 @@ function AgentChatPatchActivityPanel({
 
   return (
     <div className="space-y-1.5 text-sm">
-      <div className="flex min-w-0 items-center gap-2 px-3">
-        <span aria-hidden="true" className="shrink-0 font-mono font-semibold text-muted-foreground">
-          {marker}
-        </span>
+      <div className="flex min-w-0 items-start gap-2 px-3 leading-6">
+        <AgentChatActivityMarker marker={marker} />
         <p className="min-w-0 break-words font-semibold text-foreground">{title}</p>
       </div>
       {visibleFiles.length > 0 ? (
@@ -1682,10 +1691,8 @@ function AgentChatMessageActivityLine({
 
   return (
     <div className="space-y-1 text-sm leading-6 text-foreground/90">
-      <div className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-baseline gap-2 px-3">
-        <span aria-hidden="true" className="shrink-0 text-right font-mono font-semibold text-muted-foreground">
-          {marker}
-        </span>
+      <div className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-start gap-2 px-3">
+        <AgentChatActivityMarker marker={marker} />
         <p className="min-w-0 break-words font-semibold text-foreground">{title}</p>
       </div>
       {visibleDetailLines.length > 0 || hiddenDetailCount > 0 ? (
@@ -1740,16 +1747,12 @@ function AgentChatReplyActivityLine({
         disposition === "dismissed" && "text-muted-foreground",
       )}
     >
-      <div className="flex min-w-0 items-center gap-2 px-3">
-        <span
-          aria-hidden="true"
-          className={cn(
-            "shrink-0 font-mono font-semibold text-muted-foreground",
-            disposition === "failed" && "text-destructive",
-          )}
-        >
-          {marker}
-        </span>
+      <div className="flex min-w-0 items-start gap-2 px-3 leading-6">
+        <AgentChatActivityMarker
+          marker={marker}
+          tone={disposition === "failed" ? "error" : "default"}
+          className={disposition === "dismissed" ? "text-muted-foreground" : undefined}
+        />
         <p
           className={cn(
             "min-w-0 break-words font-semibold text-foreground",
