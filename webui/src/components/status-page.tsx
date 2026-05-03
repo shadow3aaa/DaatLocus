@@ -763,13 +763,6 @@ function AgentChatBubbles({
             : "pointer-events-none z-0 opacity-35 blur-[1px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
         )}
       >
-        <div
-          aria-hidden="true"
-          className={cn(
-            "pointer-events-none fixed left-1/2 top-1/2 z-0 h-[min(34rem,72vw)] w-[min(34rem,72vw)] -translate-x-1/2 -translate-y-1/2 rounded-full bg-background/10 opacity-0 backdrop-blur-0 transition-[backdrop-filter,opacity] duration-300",
-            isFocused && "opacity-100 backdrop-blur-md",
-          )}
-        />
         <div className="relative z-10 flex min-h-full w-full flex-col justify-end">
           {bubbles.length > 0 ? (
             <div
@@ -899,7 +892,7 @@ function AgentChatActivityHeader({
       <span
         aria-hidden="true"
         className={cn(
-          "mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full border bg-background/90 font-mono text-[0.65rem] font-semibold leading-none shadow-sm",
+          "mt-0.5 inline-flex size-5 shrink-0 items-center justify-center font-mono text-[0.65rem] font-semibold leading-none",
           agentChatActivityIconClass(bubble),
           !isFocused && "size-4 text-[0.58rem]",
         )}
@@ -919,7 +912,7 @@ function AgentChatActivityHeader({
           {isRunning || bubble.status === "failed" ? (
             <span
               className={cn(
-                "inline-flex shrink-0 items-center gap-1 rounded-full border px-1.5 py-0.5 text-[0.62rem] font-medium leading-none",
+                "inline-flex shrink-0 items-center gap-1 text-[0.62rem] font-medium leading-none",
                 agentChatActivityStatusClass(bubble.status, bubble.live),
               )}
             >
@@ -1182,18 +1175,18 @@ function AgentChatPlanActivityPanel({
   const visibleSteps = steps.slice(0, AGENT_CHAT_PLAN_STEP_LIMIT);
 
   return (
-    <div className="overflow-hidden rounded-md border border-border bg-background text-sm shadow-sm shadow-background/20">
-      <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-3 py-2">
+    <div className="space-y-1.5 text-sm">
+      <div className="flex items-center gap-2 px-3">
         <span aria-hidden="true" className="font-mono font-semibold text-muted-foreground">
           {marker}
         </span>
         <p className="font-semibold text-foreground">{title}</p>
       </div>
       {visibleSteps.length > 0 ? (
-        <div role="table" aria-label="Plan" className="divide-y divide-border/50">
+        <div role="table" aria-label="Plan" className="space-y-1">
           <div
             role="row"
-            className="grid grid-cols-[8.5rem_1fr] gap-3 bg-muted/15 px-3 py-1.5 text-[0.68rem] font-semibold uppercase tracking-wide text-muted-foreground"
+            className="grid grid-cols-[8.5rem_1fr] gap-3 px-3 py-0.5 text-[0.68rem] font-semibold uppercase tracking-wide text-muted-foreground"
           >
             <span role="columnheader">Status</span>
             <span role="columnheader">Step</span>
@@ -1206,8 +1199,8 @@ function AgentChatPlanActivityPanel({
                 role="row"
                 aria-current={isCurrent ? "step" : undefined}
                 className={cn(
-                  "grid grid-cols-[8.5rem_1fr] gap-3 px-3 py-2 text-sm",
-                  isCurrent && "bg-muted/45",
+                  "grid grid-cols-[8.5rem_1fr] gap-3 px-3 py-0.5 text-sm",
+                  isCurrent && "font-medium",
                 )}
               >
                 <span role="cell">
@@ -1239,7 +1232,7 @@ function AgentChatPlanStatusBadge({ status }: { status: AgentChatPlanStepStatus 
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-0.5 text-xs font-medium text-muted-foreground",
+        "inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground",
         status === "in_progress" && "text-foreground",
       )}
     >
@@ -1274,8 +1267,8 @@ function AgentChatCommandExecutionPanel({
   const verb = mode === "running" ? "Running" : "Ran";
 
   return (
-    <div className="overflow-hidden rounded-md border border-border bg-background text-sm shadow-sm shadow-background/20">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-muted/30 px-3 py-2">
+    <div className="space-y-1 text-sm">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-3">
         {mode === "running" ? (
           <Loader2Icon className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
         ) : (
@@ -1288,7 +1281,7 @@ function AgentChatCommandExecutionPanel({
           <span className="font-mono font-medium text-foreground/90">{title}</span>
         </p>
         {typeof exitCode === "number" ? (
-          <span className="rounded-md border border-border bg-background px-1.5 py-0.5 text-[0.68rem] font-medium leading-none text-muted-foreground">
+          <span className="text-[0.68rem] font-medium leading-none text-muted-foreground">
             exit {exitCode}
           </span>
         ) : null}
@@ -1300,7 +1293,7 @@ function AgentChatCommandExecutionPanel({
 
 function AgentChatTerminalOutputBlock({ lines }: { lines: string[] }) {
   return (
-    <pre className="overflow-x-auto whitespace-pre px-3 py-2 font-mono text-xs leading-5 text-muted-foreground [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
+    <pre className="overflow-x-auto whitespace-pre px-3 font-mono text-xs leading-5 text-muted-foreground [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
       {lines.map((line, index) => (
         <Fragment key={`terminal-output-${index}`}>
           <span className={cn(line.startsWith("… +") && "text-muted-foreground/70")}>{line}</span>
@@ -1324,15 +1317,15 @@ function AgentChatPatchActivityPanel({
   const hiddenFileCount = files.length - visibleFiles.length;
 
   return (
-    <div className="overflow-hidden rounded-md border border-border bg-background text-sm shadow-sm shadow-background/20">
-      <div className="flex min-w-0 items-center gap-2 border-b border-border bg-muted/30 px-3 py-2">
+    <div className="space-y-1.5 text-sm">
+      <div className="flex min-w-0 items-center gap-2 px-3">
         <span aria-hidden="true" className="shrink-0 font-mono font-semibold text-muted-foreground">
           {marker}
         </span>
         <p className="min-w-0 break-words font-semibold text-foreground">{title}</p>
       </div>
       {visibleFiles.length > 0 ? (
-        <div className="space-y-3 p-3">
+        <div className="space-y-2 px-3">
           {visibleFiles.map((file, index) => (
             <AgentChatPatchFileBlock
               key={`${file.path}-${index}`}
@@ -1344,7 +1337,7 @@ function AgentChatPatchActivityPanel({
           ) : null}
         </div>
       ) : (
-        <p className="px-3 py-2 text-xs text-muted-foreground">No file changes</p>
+        <p className="px-3 text-xs text-muted-foreground">No file changes</p>
       )}
     </div>
   );
@@ -1357,12 +1350,12 @@ function AgentChatPatchFileBlock({ file }: { file: AgentChatDiffFile }) {
   const newWidth = agentChatDiffLineNumberWidth(visibleLines, "new_lineno");
 
   return (
-    <div className="overflow-hidden rounded-md border border-border/70 bg-muted/10">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/70 bg-background/70 px-3 py-2">
+    <div className="space-y-1">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <p className="min-w-0 break-all font-mono text-xs font-semibold text-foreground/90">
           {file.path}
         </p>
-        <span className="rounded-md border border-border bg-muted/25 px-1.5 py-0.5 text-[0.68rem] font-medium leading-none text-muted-foreground">
+        <span className="text-[0.68rem] font-medium leading-none text-muted-foreground">
           {file.operation}
         </span>
         <span className="font-mono text-[0.7rem] text-muted-foreground">
@@ -1382,7 +1375,7 @@ function AgentChatPatchFileBlock({ file }: { file: AgentChatDiffFile }) {
         </div>
       ) : null}
       {hiddenLineCount > 0 ? (
-        <p className="border-t border-border/70 px-3 py-2 text-xs text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           … {hiddenLineCount} more line(s)
         </p>
       ) : null}
@@ -1920,12 +1913,12 @@ function AgentChatCodeBlock({
   }
 
   return (
-    <div className="overflow-hidden rounded-[1.35rem] border border-border/55 bg-background/70 shadow-sm shadow-background/30 backdrop-blur">
-      <div className="flex items-center justify-between gap-3 border-b border-border/45 bg-muted/25 px-4 py-2">
+    <div className="space-y-1">
+      <div className="flex items-center justify-between gap-3 px-3">
         <div className="flex min-w-0 items-center gap-2">
           <span
             aria-hidden="true"
-            className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground"
+            className="inline-flex size-5 shrink-0 items-center justify-center text-muted-foreground"
           >
             <span className="font-mono text-[0.7rem] leading-none">&lt;/&gt;</span>
           </span>
@@ -1952,7 +1945,7 @@ function AgentChatCodeBlock({
       </div>
       <div className="relative">
         <pre
-          className="max-h-72 overflow-auto whitespace-pre px-4 py-3 font-mono text-[0.82rem] leading-6 text-foreground/90 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]"
+          className="max-h-72 overflow-auto whitespace-pre px-3 font-mono text-[0.82rem] leading-6 text-foreground/90 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]"
           data-code-block-id={id}
         >
           {visibleLines.join("\n")}
@@ -1965,7 +1958,7 @@ function AgentChatCodeBlock({
         ) : null}
       </div>
       {hiddenLines.length > 0 ? (
-        <p className="border-t border-border/40 bg-muted/15 px-4 py-2 text-xs text-muted-foreground">
+        <p className="px-3 text-xs text-muted-foreground">
           … +{hiddenLines.length} more line(s)
         </p>
       ) : null}
@@ -2026,22 +2019,19 @@ function AgentChatDiffBlock({
         const visibleLines = file.lines.slice(0, limit);
         const hiddenLines = file.lines.slice(limit);
         return (
-          <div
-            key={`${id}-file-${fileIndex}`}
-            className="overflow-hidden rounded-[1.1rem] border border-border/45 bg-background/60"
-          >
-            <div className="flex items-center justify-between gap-3 border-b border-border/40 bg-muted/20 px-3 py-2">
+          <div key={`${id}-file-${fileIndex}`} className="space-y-1">
+            <div className="flex items-center justify-between gap-3 px-3">
               <p className="min-w-0 truncate text-foreground/85">{file.path}</p>
               <span className="shrink-0 font-sans text-[0.68rem] text-muted-foreground">
                 <span className="text-emerald-300">+{file.added_lines}</span>{" "}
                 <span className="text-red-300">-{file.removed_lines}</span>
               </span>
             </div>
-            <pre className="max-h-72 overflow-auto whitespace-pre px-3 py-2 leading-5 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
+            <pre className="max-h-72 overflow-auto whitespace-pre px-3 leading-5 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
               {visibleLines.map((line) => renderDiffLine(line)).join("\n")}
             </pre>
             {hiddenLines.length > 0 ? (
-              <p className="border-t border-border/40 bg-muted/15 px-3 py-2 font-sans text-xs text-muted-foreground">
+              <p className="px-3 font-sans text-xs text-muted-foreground">
                 … +{hiddenLines.length} more diff line(s)
               </p>
             ) : null}
@@ -2193,18 +2183,18 @@ function agentChatActivityGlyph(bubble: AgentChatBubble) {
 
 function agentChatActivityIconClass(bubble: AgentChatBubble) {
   if (bubble.status === "failed" || bubble.kind === "error") {
-    return "border-destructive/45 text-destructive";
+    return "text-destructive";
   }
 
   if (bubble.live || bubble.status === "running") {
-    return "border-primary/55 text-primary";
+    return "text-primary";
   }
 
   if (bubble.kind === "patch") {
-    return "border-emerald-400/45 text-emerald-400";
+    return "text-emerald-400";
   }
 
-  return "border-border/70 text-muted-foreground";
+  return "text-muted-foreground";
 }
 
 function agentChatActivityStatusText(status: string, live?: boolean) {
@@ -2225,14 +2215,14 @@ function agentChatActivityStatusText(status: string, live?: boolean) {
 
 function agentChatActivityStatusClass(status: string, live?: boolean) {
   if (live || status === "running") {
-    return "border-primary/30 bg-primary/10 text-primary";
+    return "text-primary";
   }
 
   if (status === "failed") {
-    return "border-destructive/30 bg-destructive/10 text-destructive";
+    return "text-destructive";
   }
 
-  return "border-border/50 bg-muted/30 text-muted-foreground";
+  return "text-muted-foreground";
 }
 
 function agentChatActivitySubtitle(bubble: AgentChatBubble) {
@@ -2945,7 +2935,7 @@ function renderAgentChatMarkdownInlineNode(
     return (
       <code
         key={`inline-code-${index}`}
-        className="rounded bg-muted/50 px-1 py-0.5 font-mono text-[0.85em] text-foreground"
+        className="font-mono text-[0.85em] text-foreground"
       >
         {node.text}
       </code>
