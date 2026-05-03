@@ -1267,20 +1267,20 @@ function AgentChatCommandExecutionPanel({
 
   return (
     <div className="space-y-1 text-sm">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-3">
+      <div className="flex min-w-0 items-baseline gap-x-2 px-3">
         {mode === "running" ? (
-          <Loader2Icon className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+          <Loader2Icon className="size-3.5 shrink-0 self-center animate-spin text-muted-foreground" />
         ) : (
           <span aria-hidden="true" className="shrink-0 font-mono font-semibold text-muted-foreground">
             {marker}
           </span>
         )}
-        <p className="min-w-0 break-words font-semibold text-foreground">
+        <p className="min-w-0 flex-1 break-words font-semibold text-foreground">
           {verb}{" "}
           <span className="font-mono font-medium text-foreground/90">{title}</span>
         </p>
         {typeof exitCode === "number" ? (
-          <span className="text-[0.68rem] font-medium leading-none text-muted-foreground">
+          <span className="shrink-0 text-[0.68rem] font-medium leading-none text-muted-foreground">
             exit {exitCode}
           </span>
         ) : null}
