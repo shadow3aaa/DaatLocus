@@ -83,6 +83,8 @@ const AGENT_CHAT_TERMINAL_WAIT_LINE_LIMIT = 6;
 const AGENT_CHAT_ERROR_LINE_LIMIT = 12;
 const AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX = 72;
 const AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX = 160;
+const AGENT_CHAT_COMPOSER_DEFAULT_HEIGHT_PX = 60;
+const AGENT_CHAT_COMPOSER_BOTTOM_GAP_PX = 16;
 const TOKEN_USAGE_CHART_CONFIG = {
   cached: {
     label: "Cached",
@@ -312,6 +314,9 @@ function useDashboardSnapshot() {
 export function AgentPage() {
   const { isLoading, loadError, snapshot } = useDashboardSnapshot();
   const chatPanelRef = useRef<HTMLDivElement>(null);
+  const [chatComposerHeight, setChatComposerHeight] = useState(
+    AGENT_CHAT_COMPOSER_DEFAULT_HEIGHT_PX,
+  );
   const [isChatFocused, setIsChatFocused] = useState(false);
   const agentStatus = deriveAgentStatus({
     hasLoadError: Boolean(loadError),
@@ -331,6 +336,7 @@ export function AgentPage() {
         snapshot={snapshot}
         isFocused={isChatFocused}
         panelRef={chatPanelRef}
+        composerHeight={chatComposerHeight}
       />
       <div className="relative z-10 flex flex-col items-center justify-center gap-5 text-center">
         <AgentStatusAnimation
@@ -370,6 +376,7 @@ export function AgentPage() {
         isFocused={isChatFocused}
         onFocusChange={setIsChatFocused}
         chatPanelRef={chatPanelRef}
+        onHeightChange={setChatComposerHeight}
       />
     </section>
   );
@@ -497,15 +504,41 @@ function AgentChatComposer({
   isFocused,
   onFocusChange,
   chatPanelRef,
+  onHeightChange,
 }: {
   isFocused: boolean;
   onFocusChange: (isFocused: boolean) => void;
   chatPanelRef: RefObject<HTMLDivElement | null>;
+  onHeightChange: (height: number) => void;
 }) {
+  const formRef = useRef<HTMLFormElement>(null);
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [sendResult, setSendResult] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const form = formRef.current;
+    if (!form) {
+      return;
+    }
+
+    const updateHeight = () => {
+      onHeightChange(Math.ceil(form.getBoundingClientRect().height));
+    };
+
+    updateHeight();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateHeight);
+      return () => window.removeEventListener("resize", updateHeight);
+    }
+
+    const resizeObserver = new ResizeObserver(updateHeight);
+    resizeObserver.observe(form);
+
+    return () => resizeObserver.disconnect();
+  }, [onHeightChange]);
 
   function handleFocus() {
     onFocusChange(true);
@@ -546,6 +579,7 @@ function AgentChatComposer({
 
   return (
     <form
+      ref={formRef}
       aria-label="Send message to agent"
       onSubmit={handleSubmit}
       onFocus={handleFocus}
@@ -620,10 +654,12 @@ function AgentChatBubbles({
   snapshot,
   isFocused,
   panelRef,
+  composerHeight,
 }: {
   snapshot: DashboardSnapshot | null;
   isFocused: boolean;
   panelRef: RefObject<HTMLDivElement | null>;
+  composerHeight: number;
 }) {
   const bubbles = useMemo(() => agentChatBubblesFromSnapshot(snapshot), [snapshot]);
   const lastFocusedScrollTopRef = useRef(0);
@@ -754,8 +790,11 @@ function AgentChatBubbles({
         aria-label="Agent chat preview"
         aria-hidden={!isFocused}
         onScroll={handleScroll}
+        style={{
+          paddingBottom: composerHeight + AGENT_CHAT_COMPOSER_BOTTOM_GAP_PX,
+        }}
         className={cn(
-          "absolute inset-0 w-full overflow-y-auto pb-[calc(50vh+9rem)] pt-6 text-left [scrollbar-gutter:stable] transition-[filter,opacity] duration-300 ease-out",
+          "absolute inset-0 w-full overflow-y-auto pt-6 text-left [scrollbar-gutter:stable] transition-[filter,opacity] duration-300 ease-out",
           isFocused
             ? "pointer-events-auto z-20 opacity-100"
             : "pointer-events-none z-0 opacity-35 blur-[1px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
