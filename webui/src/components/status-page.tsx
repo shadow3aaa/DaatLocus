@@ -1082,11 +1082,11 @@ function AgentChatActivityTextCell({
         tone === "muted" && "text-muted-foreground",
       )}
     >
-      <div className="flex min-w-0 items-baseline gap-2">
+      <div className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-baseline gap-2 px-3">
         <span
           aria-hidden="true"
           className={cn(
-            "shrink-0 font-mono text-sm font-semibold text-muted-foreground",
+            "shrink-0 text-right font-mono text-sm font-semibold text-muted-foreground",
             tone === "error" && "text-destructive",
           )}
         >
@@ -1105,7 +1105,7 @@ function AgentChatActivityTextCell({
       {visibleLines.length > 0 ? (
         <div
           className={cn(
-            "space-y-0.5 text-muted-foreground",
+            "space-y-0.5 px-3 text-muted-foreground",
             tone === "error" && "text-destructive/90",
             tone === "muted" && "text-muted-foreground",
           )}
@@ -1113,10 +1113,7 @@ function AgentChatActivityTextCell({
           {visibleLines.map((line, index) => (
             <p
               key={`${id}-activity-line-${index}`}
-              className={cn(
-                "grid min-w-0 gap-2 break-words",
-                bodyPrefix === "branch" ? "grid-cols-[1.25rem_1fr]" : "grid-cols-[1.25rem_1fr]",
-              )}
+              className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] gap-2 break-words"
             >
               <span className="select-none text-right font-mono text-muted-foreground/70">
                 {bodyPrefix === "branch" ? "└" : ""}
@@ -1127,7 +1124,7 @@ function AgentChatActivityTextCell({
             </p>
           ))}
           {hiddenLineCount > 0 ? (
-            <p className="grid grid-cols-[1.25rem_1fr] gap-2 text-xs text-muted-foreground">
+            <p className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-2 text-xs text-muted-foreground">
               <span aria-hidden="true" />
               <span>… {hiddenLineCount} more line(s)</span>
             </p>
@@ -1152,10 +1149,10 @@ function AgentChatStatusLineCell({
   valueClassName?: string;
 }) {
   return (
-    <div className="flex min-w-0 items-baseline gap-2 text-sm leading-6 text-foreground/90">
+    <div className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-baseline gap-2 px-3 text-sm leading-6 text-foreground/90">
       <span
         aria-hidden="true"
-        className="shrink-0 font-mono text-sm font-semibold text-muted-foreground"
+        className="shrink-0 text-right font-mono text-sm font-semibold text-muted-foreground"
       >
         {marker}
       </span>
@@ -1462,14 +1459,14 @@ function AgentChatMessageActivityLine({
 
   return (
     <div className="space-y-1 text-sm leading-6 text-foreground/90">
-      <div className="flex min-w-0 items-baseline gap-2">
-        <span aria-hidden="true" className="shrink-0 font-mono font-semibold text-muted-foreground">
+      <div className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-baseline gap-2 px-3">
+        <span aria-hidden="true" className="shrink-0 text-right font-mono font-semibold text-muted-foreground">
           {marker}
         </span>
         <p className="min-w-0 break-words font-semibold text-foreground">{title}</p>
       </div>
       {visibleDetailLines.length > 0 || hiddenDetailCount > 0 ? (
-        <div className="space-y-0.5 pl-6 text-xs leading-5 text-muted-foreground">
+        <div className="space-y-0.5 pl-11 pr-3 text-xs leading-5 text-muted-foreground">
           {visibleDetailLines.map((line, index) => (
             <p key={`${id}-detail-${index}`} className="break-words">
               {line}
@@ -1479,11 +1476,11 @@ function AgentChatMessageActivityLine({
         </div>
       ) : null}
       {visibleMessageLines.length > 0 || hiddenMessageCount > 0 ? (
-        <div className="space-y-0.5 text-foreground/90">
+        <div className="space-y-0.5 px-3 text-foreground/90">
           {visibleMessageLines.map((line, index) => (
             <p
               key={`${id}-message-${index}`}
-              className="grid min-w-0 grid-cols-[1.5rem_1fr] gap-2 break-words"
+              className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] gap-2 break-words"
             >
               <span className="select-none text-right font-mono text-muted-foreground/70">
                 {index === 0 ? "└" : ""}
@@ -1492,7 +1489,7 @@ function AgentChatMessageActivityLine({
             </p>
           ))}
           {hiddenMessageCount > 0 ? (
-            <p className="grid grid-cols-[1.5rem_1fr] gap-2 text-xs text-muted-foreground">
+            <p className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-2 text-xs text-muted-foreground">
               <span />
               <span>… {hiddenMessageCount} more line(s)</span>
             </p>
@@ -1527,11 +1524,11 @@ function AgentChatReplyActivityLine({
         disposition === "dismissed" && "text-muted-foreground",
       )}
     >
-      <div className="flex min-w-0 items-baseline gap-2">
+      <div className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] items-baseline gap-2 px-3">
         <span
           aria-hidden="true"
           className={cn(
-            "shrink-0 font-mono font-semibold text-muted-foreground",
+            "shrink-0 text-right font-mono font-semibold text-muted-foreground",
             disposition === "failed" && "text-destructive",
           )}
         >
@@ -1548,14 +1545,25 @@ function AgentChatReplyActivityLine({
         </p>
       </div>
       {visibleLines.length > 0 || hiddenLineCount > 0 ? (
-        <div className="space-y-0.5 pl-6 text-foreground/90">
+        <div className="space-y-0.5 px-3 text-foreground/90">
           {visibleLines.map((line, index) => (
-            <p key={`${id}-reply-${index}`} className="break-words">
-              <AgentChatMarkdownInline text={line} />
+            <p
+              key={`${id}-reply-${index}`}
+              className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] gap-2 break-words"
+            >
+              <span className="select-none text-right font-mono text-muted-foreground/70">
+                {index === 0 ? "└" : ""}
+              </span>
+              <span className="min-w-0 break-words">
+                <AgentChatMarkdownInline text={line} />
+              </span>
             </p>
           ))}
           {hiddenLineCount > 0 ? (
-            <p className="text-xs text-muted-foreground">… {hiddenLineCount} more line(s)</p>
+            <p className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-2 text-xs text-muted-foreground">
+              <span aria-hidden="true" />
+              <span>… {hiddenLineCount} more line(s)</span>
+            </p>
           ) : null}
         </div>
       ) : null}
