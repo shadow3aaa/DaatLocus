@@ -1,5 +1,6 @@
 import {
   Fragment,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -85,6 +86,8 @@ const AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX = 72;
 const AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX = 160;
 const AGENT_CHAT_COMPOSER_DEFAULT_HEIGHT_PX = 60;
 const AGENT_CHAT_COMPOSER_BOTTOM_GAP_PX = 16;
+const AGENT_CHAT_PREVIEW_NOTICE_VISIBLE_MS = 3000;
+const AGENT_CHAT_PREVIEW_NOTICE_FADE_MS = 300;
 const TOKEN_USAGE_CHART_CONFIG = {
   cached: {
     label: "Cached",
@@ -318,6 +321,11 @@ export function AgentPage() {
     AGENT_CHAT_COMPOSER_DEFAULT_HEIGHT_PX,
   );
   const [isChatFocused, setIsChatFocused] = useState(false);
+  const [chatPreviewNotice, setChatPreviewNotice] = useState<string | null>(null);
+  const [isChatPreviewNoticeVisible, setIsChatPreviewNoticeVisible] = useState(false);
+  const chatPreviewNoticeFrameRef = useRef<number | undefined>(undefined);
+  const chatPreviewNoticeHideTimeoutRef = useRef<number | undefined>(undefined);
+  const chatPreviewNoticeClearTimeoutRef = useRef<number | undefined>(undefined);
   const agentStatus = deriveAgentStatus({
     hasLoadError: Boolean(loadError),
     isLoading,
@@ -325,6 +333,49 @@ export function AgentPage() {
   });
   const summaryText = derivePlanSummaryText(snapshot);
   const { isTyping, text: typedSummaryText } = useTypewriterText(summaryText);
+  const clearChatPreviewNoticeSchedule = useCallback(() => {
+    if (chatPreviewNoticeFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(chatPreviewNoticeFrameRef.current);
+      chatPreviewNoticeFrameRef.current = undefined;
+    }
+
+    if (chatPreviewNoticeHideTimeoutRef.current !== undefined) {
+      window.clearTimeout(chatPreviewNoticeHideTimeoutRef.current);
+      chatPreviewNoticeHideTimeoutRef.current = undefined;
+    }
+
+    if (chatPreviewNoticeClearTimeoutRef.current !== undefined) {
+      window.clearTimeout(chatPreviewNoticeClearTimeoutRef.current);
+      chatPreviewNoticeClearTimeoutRef.current = undefined;
+    }
+  }, []);
+
+  useEffect(() => {
+    return clearChatPreviewNoticeSchedule;
+  }, [clearChatPreviewNoticeSchedule]);
+
+  const handleAgentChatSendResult = useCallback(
+    (resultText: string) => {
+      clearChatPreviewNoticeSchedule();
+      setChatPreviewNotice(resultText);
+      setIsChatPreviewNoticeVisible(false);
+
+      chatPreviewNoticeFrameRef.current = window.requestAnimationFrame(() => {
+        setIsChatPreviewNoticeVisible(true);
+        chatPreviewNoticeFrameRef.current = undefined;
+      });
+
+      chatPreviewNoticeHideTimeoutRef.current = window.setTimeout(() => {
+        setIsChatPreviewNoticeVisible(false);
+        chatPreviewNoticeHideTimeoutRef.current = undefined;
+        chatPreviewNoticeClearTimeoutRef.current = window.setTimeout(() => {
+          setChatPreviewNotice(null);
+          chatPreviewNoticeClearTimeoutRef.current = undefined;
+        }, AGENT_CHAT_PREVIEW_NOTICE_FADE_MS);
+      }, AGENT_CHAT_PREVIEW_NOTICE_VISIBLE_MS);
+    },
+    [clearChatPreviewNoticeSchedule],
+  );
 
   return (
     <section
@@ -349,20 +400,38 @@ export function AgentPage() {
         <p
           aria-live="polite"
           className={cn(
-            "relative z-20 min-h-6 max-w-[min(32rem,calc(100vw-3rem))] text-balance text-sm font-medium leading-6 text-muted-foreground transition-opacity duration-300 md:text-base",
+            "relative z-20 grid min-h-6 max-w-[min(32rem,calc(100vw-3rem))] text-balance text-sm font-medium leading-6 text-muted-foreground transition-opacity duration-300 md:text-base",
             isChatFocused && "opacity-40",
           )}
         >
-          {typedSummaryText ? (
-            <>
-              <span>{typedSummaryText}</span>
-              {isTyping ? (
-                <span
-                  aria-hidden="true"
-                  className="ml-0.5 inline-block h-4 w-px translate-y-0.5 bg-muted-foreground/70 motion-reduce:hidden"
-                />
-              ) : null}
-            </>
+          <span
+            aria-hidden={Boolean(chatPreviewNotice)}
+            className={cn(
+              "col-start-1 row-start-1 transition-opacity duration-300",
+              chatPreviewNotice ? "opacity-0" : "opacity-100",
+            )}
+          >
+            {typedSummaryText ? (
+              <>
+                <span>{typedSummaryText}</span>
+                {isTyping ? (
+                  <span
+                    aria-hidden="true"
+                    className="ml-0.5 inline-block h-4 w-px translate-y-0.5 bg-muted-foreground/70 motion-reduce:hidden"
+                  />
+                ) : null}
+              </>
+            ) : null}
+          </span>
+          {chatPreviewNotice ? (
+            <span
+              className={cn(
+                "col-start-1 row-start-1 transition-opacity duration-300",
+                isChatPreviewNoticeVisible ? "opacity-100" : "opacity-0",
+              )}
+            >
+              {chatPreviewNotice}
+            </span>
           ) : null}
         </p>
         <span
@@ -377,6 +446,7 @@ export function AgentPage() {
         onFocusChange={setIsChatFocused}
         chatPanelRef={chatPanelRef}
         onHeightChange={setChatComposerHeight}
+        onSendResult={handleAgentChatSendResult}
       />
     </section>
   );
@@ -505,16 +575,17 @@ function AgentChatComposer({
   onFocusChange,
   chatPanelRef,
   onHeightChange,
+  onSendResult,
 }: {
   isFocused: boolean;
   onFocusChange: (isFocused: boolean) => void;
   chatPanelRef: RefObject<HTMLDivElement | null>;
   onHeightChange: (height: number) => void;
+  onSendResult: (resultText: string) => void;
 }) {
   const formRef = useRef<HTMLFormElement>(null);
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const [sendResult, setSendResult] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -557,13 +628,15 @@ function AgentChatComposer({
     }
 
     setIsSending(true);
-    setSendResult(null);
     setSendError(null);
 
     try {
       const output = await runDashboardCommand(trimmed);
+      const sendResultText = agentChatSendResultText(output);
       setMessage("");
-      setSendResult(agentChatSendResultText(output));
+      if (sendResultText) {
+        onSendResult(sendResultText);
+      }
       onFocusChange(true);
       window.requestAnimationFrame(() => {
         if (chatPanelRef.current) {
@@ -599,7 +672,6 @@ function AgentChatComposer({
           onChange={(event) => {
             setMessage(event.target.value);
             setSendError(null);
-            setSendResult(null);
           }}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -635,15 +707,12 @@ function AgentChatComposer({
           )}
         </Button>
       </div>
-      {sendError || sendResult ? (
+      {sendError ? (
         <p
-          role={sendError ? "alert" : "status"}
-          className={cn(
-            "px-4 pb-1 pt-0.5 text-xs",
-            sendError ? "text-destructive" : "text-muted-foreground",
-          )}
+          role="alert"
+          className="px-4 pb-1 pt-0.5 text-xs text-destructive"
         >
-          {sendError ?? sendResult}
+          {sendError}
         </p>
       ) : null}
     </form>
