@@ -79,7 +79,6 @@ const AGENT_CHAT_PATCH_FILE_LIMIT = 4;
 const AGENT_CHAT_PATCH_DIFF_LINE_LIMIT = 18;
 const AGENT_CHAT_TELEGRAM_DETAIL_LIMIT = 6;
 const AGENT_CHAT_TELEGRAM_MESSAGE_LIMIT = 6;
-const AGENT_CHAT_REPLY_MESSAGE_LIMIT = 8;
 const AGENT_CHAT_TERMINAL_WAIT_LINE_LIMIT = 6;
 const AGENT_CHAT_ERROR_LINE_LIMIT = 12;
 const AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX = 72;
@@ -1506,9 +1505,6 @@ function AgentChatReplyActivityLine({
   messageLines: string[];
   disposition: string;
 }) {
-  const visibleLines = messageLines.slice(0, AGENT_CHAT_REPLY_MESSAGE_LIMIT);
-  const hiddenLineCount = messageLines.length - visibleLines.length;
-
   return (
     <div
       className={cn(
@@ -1537,9 +1533,9 @@ function AgentChatReplyActivityLine({
           {title}
         </p>
       </div>
-      {visibleLines.length > 0 || hiddenLineCount > 0 ? (
+      {messageLines.length > 0 ? (
         <div className="space-y-0.5 px-3 text-foreground/90">
-          {visibleLines.map((line, index) => (
+          {messageLines.map((line, index) => (
             <p
               key={`${id}-reply-${index}`}
               className="grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)] gap-2 break-words"
@@ -1552,12 +1548,6 @@ function AgentChatReplyActivityLine({
               </span>
             </p>
           ))}
-          {hiddenLineCount > 0 ? (
-            <p className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-2 text-xs text-muted-foreground">
-              <span aria-hidden="true" />
-              <span>… {hiddenLineCount} more line(s)</span>
-            </p>
-          ) : null}
         </div>
       ) : null}
     </div>

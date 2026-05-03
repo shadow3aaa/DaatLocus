@@ -326,7 +326,6 @@ fn execute_event_resolve_tool<'a>(
                     .lines()
                     .map(str::trim)
                     .filter(|line| !line.is_empty())
-                    .take(8)
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
             })
