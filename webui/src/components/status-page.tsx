@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useMemo,
   useRef,
@@ -74,6 +75,16 @@ const AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT = Number.MAX_SAFE_INTEGER;
 const AGENT_CHAT_CANONICAL_CELL_BLOCK_LIMIT = 4;
 const AGENT_CHAT_CANONICAL_CELL_DIFF_FILE_LIMIT = 4;
 const AGENT_CHAT_CANONICAL_CELL_DIFF_LINE_LIMIT = 18;
+const AGENT_CHAT_PLAN_STEP_LIMIT = 8;
+const AGENT_CHAT_TERMINAL_OUTPUT_HEAD_LINES = 4;
+const AGENT_CHAT_TERMINAL_OUTPUT_TAIL_LINES = 4;
+const AGENT_CHAT_PATCH_FILE_LIMIT = 4;
+const AGENT_CHAT_PATCH_DIFF_LINE_LIMIT = 18;
+const AGENT_CHAT_TELEGRAM_DETAIL_LIMIT = 6;
+const AGENT_CHAT_TELEGRAM_MESSAGE_LIMIT = 6;
+const AGENT_CHAT_REPLY_MESSAGE_LIMIT = 8;
+const AGENT_CHAT_TERMINAL_WAIT_LINE_LIMIT = 6;
+const AGENT_CHAT_ERROR_LINE_LIMIT = 12;
 const AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX = 72;
 const AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX = 160;
 const TOKEN_USAGE_CHART_CONFIG = {
@@ -406,6 +417,77 @@ type AgentChatTimelineSection = {
   current: boolean;
   showTitle: boolean;
   bubbles: AgentChatBubble[];
+};
+
+type AgentChatActivityCellRender =
+  | {
+      kind: "text";
+      marker: string;
+      title: string;
+      bodyLines: string[];
+      bodyLimit?: number;
+      bodyPrefix?: "none" | "branch";
+      tone?: "default" | "error" | "muted";
+    }
+  | {
+      kind: "browser";
+      marker: string;
+      title: string;
+      detailLines: string[];
+      detailLimit?: number;
+    }
+  | {
+      kind: "plan";
+      marker: string;
+      title: string;
+      steps: AgentChatPlanStep[];
+    }
+  | {
+      kind: "workflow";
+      marker: string;
+      title: string;
+      workflowId: string;
+    }
+  | {
+      kind: "deepRecall";
+      marker: string;
+      title: string;
+      memoryCount: number;
+    }
+  | {
+      kind: "exec";
+      marker: string;
+      title: string;
+      outputLines: string[];
+      running?: boolean;
+      exitCode?: number | null;
+    }
+  | {
+      kind: "patch";
+      marker: string;
+      title: string;
+      files: AgentChatDiffFile[];
+    }
+  | {
+      kind: "messageActivity";
+      marker: string;
+      title: string;
+      detailLines: string[];
+      messageLines: string[];
+      detailLimit: number;
+      messageLimit: number;
+    }
+  | {
+      kind: "reply";
+      marker: string;
+      title: string;
+      messageLines: string[];
+      disposition: string;
+    };
+
+type AgentChatActivityCellViewProps = {
+  bubbleId: string;
+  render: AgentChatActivityCellRender;
 };
 
 type AgentChatMarkdownBlockData =
@@ -829,12 +911,16 @@ function AgentChatBubbleItem({
   isFocused: boolean;
 }) {
   const isConversationMessage = agentChatBubbleIsConversationMessage(bubble);
+  const activityCellRender = agentChatActivityCellRenderForBubble(bubble);
+  const useCanonicalActivityCell = Boolean(activityCellRender);
   const rawPrimaryBlocks = bubble.blocks.length > 0
     ? bubble.blocks
     : isConversationMessage
       ? ([{ type: "text", text: bubble.title }] as WebActivityBlock[])
       : [];
-  const primaryBlocks = agentChatDisplayBlocksForBubble(bubble, rawPrimaryBlocks);
+  const primaryBlocks = useCanonicalActivityCell
+    ? []
+    : agentChatDisplayBlocksForBubble(bubble, rawPrimaryBlocks);
   const canonicalBlocks = agentChatCanonicalCellBlocksForBubble(bubble);
   const visibleCanonicalBlocks = canonicalBlocks.slice(
     0,
@@ -848,10 +934,10 @@ function AgentChatBubbleItem({
   const visibleBlocks = primaryBlocks.slice(0, visibleBlockLimit);
   const hiddenBlocks = primaryBlocks.slice(visibleBlockLimit);
   const hasDetails =
-    bubble.detailBlocks.length > 0 ||
+    (!useCanonicalActivityCell && bubble.detailBlocks.length > 0) ||
     hiddenBlocks.length > 0 ||
-    visibleCanonicalBlocks.length > 0 ||
-    bubble.errorLines.length > 0 ||
+    (!useCanonicalActivityCell && visibleCanonicalBlocks.length > 0) ||
+    (!useCanonicalActivityCell && bubble.errorLines.length > 0) ||
     bubble.affectedFiles.length > 0 ||
     Boolean(bubble.toolName || bubble.appName || bubble.sourceLabel);
 
@@ -864,20 +950,27 @@ function AgentChatBubbleItem({
       )}
     >
       <div className="space-y-2 text-sm leading-6 text-foreground">
-        {!isConversationMessage ? (
+        {!isConversationMessage && !useCanonicalActivityCell ? (
           <AgentChatActivityHeader bubble={bubble} isFocused={isFocused} />
         ) : null}
-        <div className="space-y-2 text-foreground/90">
-          {visibleBlocks.map((block, index) => (
-            <AgentChatBlock
-              key={`${bubble.id}-block-${index}`}
-              block={block}
-              blockId={`${bubble.id}-block-${index}`}
-              isFocused={isFocused}
-              messageMode={isConversationMessage}
-            />
-          ))}
-        </div>
+        {activityCellRender ? (
+          <AgentChatActivityCellView
+            bubbleId={bubble.id}
+            render={activityCellRender}
+          />
+        ) : (
+          <div className="space-y-2 text-foreground/90">
+            {visibleBlocks.map((block, index) => (
+              <AgentChatBlock
+                key={`${bubble.id}-block-${index}`}
+                block={block}
+                blockId={`${bubble.id}-block-${index}`}
+                isFocused={isFocused}
+                messageMode={isConversationMessage}
+              />
+            ))}
+          </div>
+        )}
         {hasDetails ? (
           <details className="mt-2 text-xs text-muted-foreground">
             <summary className="cursor-pointer list-none select-none hover:text-foreground/80">
@@ -885,7 +978,7 @@ function AgentChatBubbleItem({
             </summary>
             <div className="mt-1 space-y-2 border-l border-border/50 pl-3">
               <AgentChatMetadata bubble={bubble} />
-              {bubble.errorLines.length > 0 ? (
+              {!useCanonicalActivityCell && bubble.errorLines.length > 0 ? (
                 <AgentChatTextLines
                   id={`${bubble.id}-error`}
                   lines={bubble.errorLines}
@@ -902,21 +995,23 @@ function AgentChatBubbleItem({
                   messageMode={isConversationMessage}
                 />
               ))}
-              {visibleCanonicalBlocks.length > 0 ? (
+              {!useCanonicalActivityCell && visibleCanonicalBlocks.length > 0 ? (
                 <AgentChatCanonicalCellBlocks
                   bubble={bubble}
                   blocks={visibleCanonicalBlocks}
                 />
               ) : null}
-              {bubble.detailBlocks.map((block, index) => (
-                <AgentChatBlock
-                  key={`${bubble.id}-detail-block-${index}`}
-                  block={block}
-                  blockId={`${bubble.id}-detail-block-${index}`}
-                  isFocused={true}
-                  detail
-                />
-              ))}
+              {!useCanonicalActivityCell
+                ? bubble.detailBlocks.map((block, index) => (
+                    <AgentChatBlock
+                      key={`${bubble.id}-detail-block-${index}`}
+                      block={block}
+                      blockId={`${bubble.id}-detail-block-${index}`}
+                      isFocused={true}
+                      detail
+                    />
+                  ))
+                : null}
             </div>
           </details>
         ) : null}
@@ -981,6 +1076,631 @@ function AgentChatActivityHeader({
           </p>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+
+function AgentChatActivityCellView({
+  bubbleId,
+  render,
+}: AgentChatActivityCellViewProps) {
+  if (render.kind === "text") {
+    return (
+      <AgentChatActivityTextCell
+        id={bubbleId}
+        marker={render.marker}
+        title={render.title}
+        bodyLines={render.bodyLines}
+        bodyLimit={render.bodyLimit}
+        bodyPrefix={render.bodyPrefix}
+        tone={render.tone}
+      />
+    );
+  }
+
+  if (render.kind === "browser") {
+    return (
+      <AgentChatActivityTextCell
+        id={bubbleId}
+        marker={render.marker}
+        title={render.title}
+        bodyLines={render.detailLines}
+        bodyLimit={render.detailLimit}
+        tone="muted"
+      />
+    );
+  }
+
+  if (render.kind === "plan") {
+    return (
+      <AgentChatPlanActivityPanel
+        marker={render.marker}
+        title={render.title}
+        steps={render.steps}
+      />
+    );
+  }
+
+  if (render.kind === "workflow") {
+    return (
+      <AgentChatStatusLineCell
+        marker={render.marker}
+        label={render.title}
+        value={render.workflowId}
+        valueClassName="font-mono break-all"
+      />
+    );
+  }
+
+  if (render.kind === "deepRecall") {
+    return (
+      <AgentChatStatusLineCell
+        marker={render.marker}
+        label={render.title}
+        value={String(render.memoryCount)}
+        suffix=" Memories"
+        valueClassName="tabular-nums"
+      />
+    );
+  }
+
+  if (render.kind === "exec") {
+    return (
+      <AgentChatCommandExecutionPanel
+        mode={render.running ? "running" : "completed"}
+        marker={render.marker}
+        title={render.title}
+        outputLines={render.outputLines}
+        exitCode={render.exitCode}
+      />
+    );
+  }
+
+  if (render.kind === "patch") {
+    return (
+      <AgentChatPatchActivityPanel
+        marker={render.marker}
+        title={render.title}
+        files={render.files}
+      />
+    );
+  }
+
+  if (render.kind === "messageActivity") {
+    return (
+      <AgentChatMessageActivityLine
+        id={bubbleId}
+        marker={render.marker}
+        title={render.title}
+        detailLines={render.detailLines}
+        messageLines={render.messageLines}
+        detailLimit={render.detailLimit}
+        messageLimit={render.messageLimit}
+      />
+    );
+  }
+
+  return (
+    <AgentChatReplyActivityLine
+      id={bubbleId}
+      marker={render.marker}
+      title={render.title}
+      messageLines={render.messageLines}
+      disposition={render.disposition}
+    />
+  );
+}
+
+function AgentChatActivityTextCell({
+  id,
+  marker,
+  title,
+  bodyLines,
+  bodyLimit,
+  bodyPrefix = "none",
+  tone = "default",
+}: {
+  id: string;
+  marker: string;
+  title: string;
+  bodyLines: string[];
+  bodyLimit?: number;
+  bodyPrefix?: "none" | "branch";
+  tone?: "default" | "error" | "muted";
+}) {
+  const visibleLines = typeof bodyLimit === "number"
+    ? bodyLines.slice(0, bodyLimit)
+    : bodyLines;
+  const hiddenLineCount = typeof bodyLimit === "number"
+    ? Math.max(0, bodyLines.length - visibleLines.length)
+    : 0;
+
+  return (
+    <div
+      className={cn(
+        "space-y-1 text-sm leading-6 text-foreground/90",
+        tone === "error" && "text-destructive",
+        tone === "muted" && "text-muted-foreground",
+      )}
+    >
+      <div className="flex min-w-0 items-baseline gap-2">
+        <span
+          aria-hidden="true"
+          className={cn(
+            "shrink-0 font-mono text-sm font-semibold text-muted-foreground",
+            tone === "error" && "text-destructive",
+          )}
+        >
+          {marker}
+        </span>
+        <p
+          className={cn(
+            "min-w-0 break-words font-semibold text-foreground",
+            tone === "error" && "text-destructive",
+            tone === "muted" && "text-foreground/90",
+          )}
+        >
+          <AgentChatMarkdownInline text={title} />
+        </p>
+      </div>
+      {visibleLines.length > 0 ? (
+        <div
+          className={cn(
+            "space-y-0.5 text-muted-foreground",
+            tone === "error" && "text-destructive/90",
+            tone === "muted" && "text-muted-foreground",
+          )}
+        >
+          {visibleLines.map((line, index) => (
+            <p
+              key={`${id}-activity-line-${index}`}
+              className={cn(
+                "grid min-w-0 gap-2 break-words",
+                bodyPrefix === "branch" ? "grid-cols-[1.25rem_1fr]" : "grid-cols-[1.25rem_1fr]",
+              )}
+            >
+              <span className="select-none text-right font-mono text-muted-foreground/70">
+                {bodyPrefix === "branch" ? "└" : ""}
+              </span>
+              <span className="min-w-0 break-words">
+                <AgentChatMarkdownInline text={line} />
+              </span>
+            </p>
+          ))}
+          {hiddenLineCount > 0 ? (
+            <p className="grid grid-cols-[1.25rem_1fr] gap-2 text-xs text-muted-foreground">
+              <span aria-hidden="true" />
+              <span>… {hiddenLineCount} more line(s)</span>
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentChatStatusLineCell({
+  marker,
+  label,
+  value,
+  suffix = "",
+  valueClassName,
+}: {
+  marker: string;
+  label: string;
+  value?: string;
+  suffix?: string;
+  valueClassName?: string;
+}) {
+  return (
+    <div className="flex min-w-0 items-baseline gap-2 text-sm leading-6 text-foreground/90">
+      <span
+        aria-hidden="true"
+        className="shrink-0 font-mono text-sm font-semibold text-muted-foreground"
+      >
+        {marker}
+      </span>
+      <p className="min-w-0 break-words font-semibold text-foreground">
+        {label}
+        {value ? (
+          <>
+            {" "}
+            <span className={cn("text-foreground/90", valueClassName)}>{value}</span>
+            {suffix}
+          </>
+        ) : null}
+      </p>
+    </div>
+  );
+}
+
+function AgentChatPlanActivityPanel({
+  marker,
+  title,
+  steps,
+}: {
+  marker: string;
+  title: string;
+  steps: AgentChatPlanStep[];
+}) {
+  const visibleSteps = steps.slice(0, AGENT_CHAT_PLAN_STEP_LIMIT);
+
+  return (
+    <div className="overflow-hidden rounded-md border border-border bg-background text-sm shadow-sm shadow-background/20">
+      <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-3 py-2">
+        <span aria-hidden="true" className="font-mono font-semibold text-muted-foreground">
+          {marker}
+        </span>
+        <p className="font-semibold text-foreground">{title}</p>
+      </div>
+      {visibleSteps.length > 0 ? (
+        <div role="table" aria-label="Plan" className="divide-y divide-border/50">
+          <div
+            role="row"
+            className="grid grid-cols-[8.5rem_1fr] gap-3 bg-muted/15 px-3 py-1.5 text-[0.68rem] font-semibold uppercase tracking-wide text-muted-foreground"
+          >
+            <span role="columnheader">Status</span>
+            <span role="columnheader">Step</span>
+          </div>
+          {visibleSteps.map((step, index) => {
+            const isCurrent = step.status === "in_progress";
+            return (
+              <div
+                key={`plan-step-${index}`}
+                role="row"
+                aria-current={isCurrent ? "step" : undefined}
+                className={cn(
+                  "grid grid-cols-[8.5rem_1fr] gap-3 px-3 py-2 text-sm",
+                  isCurrent && "bg-muted/45",
+                )}
+              >
+                <span role="cell">
+                  <AgentChatPlanStatusBadge status={step.status} />
+                </span>
+                <span
+                  role="cell"
+                  className={cn(
+                    "min-w-0 break-words text-foreground/90",
+                    isCurrent && "font-medium text-foreground",
+                    step.status === "pending" && "text-muted-foreground",
+                  )}
+                >
+                  {step.text}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentChatPlanStatusBadge({ status }: { status: AgentChatPlanStepStatus }) {
+  const label = agentChatPlanStatusLabel(status);
+  const marker = status === "pending" ? "○" : "●";
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-0.5 text-xs font-medium text-muted-foreground",
+        status === "in_progress" && "text-foreground",
+      )}
+    >
+      <span aria-hidden="true" className="font-mono text-[0.65rem]">
+        {marker}
+      </span>
+      {label}
+    </span>
+  );
+}
+
+function AgentChatCommandExecutionPanel({
+  mode,
+  marker,
+  title,
+  outputLines,
+  exitCode,
+}: {
+  mode: "running" | "completed";
+  marker: string;
+  title: string;
+  outputLines: string[];
+  exitCode?: number | null;
+}) {
+  const renderedOutput = outputLines.length > 0
+    ? truncateAgentChatLinesMiddle(
+        outputLines,
+        AGENT_CHAT_TERMINAL_OUTPUT_HEAD_LINES,
+        AGENT_CHAT_TERMINAL_OUTPUT_TAIL_LINES,
+      )
+    : [mode === "running" ? "running..." : "(no output)"];
+  const verb = mode === "running" ? "Running" : "Ran";
+
+  return (
+    <div className="overflow-hidden rounded-md border border-border bg-background text-sm shadow-sm shadow-background/20">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border bg-muted/30 px-3 py-2">
+        {mode === "running" ? (
+          <Loader2Icon className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+        ) : (
+          <span aria-hidden="true" className="shrink-0 font-mono font-semibold text-muted-foreground">
+            {marker}
+          </span>
+        )}
+        <p className="min-w-0 break-words font-semibold text-foreground">
+          {verb}{" "}
+          <span className="font-mono font-medium text-foreground/90">{title}</span>
+        </p>
+        {typeof exitCode === "number" ? (
+          <span className="rounded-md border border-border bg-background px-1.5 py-0.5 text-[0.68rem] font-medium leading-none text-muted-foreground">
+            exit {exitCode}
+          </span>
+        ) : null}
+      </div>
+      <AgentChatTerminalOutputBlock lines={renderedOutput} />
+    </div>
+  );
+}
+
+function AgentChatTerminalOutputBlock({ lines }: { lines: string[] }) {
+  return (
+    <pre className="overflow-x-auto whitespace-pre px-3 py-2 font-mono text-xs leading-5 text-muted-foreground [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
+      {lines.map((line, index) => (
+        <Fragment key={`terminal-output-${index}`}>
+          <span className={cn(line.startsWith("… +") && "text-muted-foreground/70")}>{line}</span>
+          {index + 1 < lines.length ? "\n" : null}
+        </Fragment>
+      ))}
+    </pre>
+  );
+}
+
+function AgentChatPatchActivityPanel({
+  marker,
+  title,
+  files,
+}: {
+  marker: string;
+  title: string;
+  files: AgentChatDiffFile[];
+}) {
+  const visibleFiles = files.slice(0, AGENT_CHAT_PATCH_FILE_LIMIT);
+  const hiddenFileCount = files.length - visibleFiles.length;
+
+  return (
+    <div className="overflow-hidden rounded-md border border-border bg-background text-sm shadow-sm shadow-background/20">
+      <div className="flex min-w-0 items-center gap-2 border-b border-border bg-muted/30 px-3 py-2">
+        <span aria-hidden="true" className="shrink-0 font-mono font-semibold text-muted-foreground">
+          {marker}
+        </span>
+        <p className="min-w-0 break-words font-semibold text-foreground">{title}</p>
+      </div>
+      {visibleFiles.length > 0 ? (
+        <div className="space-y-3 p-3">
+          {visibleFiles.map((file, index) => (
+            <AgentChatPatchFileBlock
+              key={`${file.path}-${index}`}
+              file={file}
+            />
+          ))}
+          {hiddenFileCount > 0 ? (
+            <p className="text-xs text-muted-foreground">… {hiddenFileCount} more file(s)</p>
+          ) : null}
+        </div>
+      ) : (
+        <p className="px-3 py-2 text-xs text-muted-foreground">No file changes</p>
+      )}
+    </div>
+  );
+}
+
+function AgentChatPatchFileBlock({ file }: { file: AgentChatDiffFile }) {
+  const visibleLines = file.lines.slice(0, AGENT_CHAT_PATCH_DIFF_LINE_LIMIT);
+  const hiddenLineCount = file.lines.length - visibleLines.length;
+  const oldWidth = agentChatDiffLineNumberWidth(visibleLines, "old_lineno");
+  const newWidth = agentChatDiffLineNumberWidth(visibleLines, "new_lineno");
+
+  return (
+    <div className="overflow-hidden rounded-md border border-border/70 bg-muted/10">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/70 bg-background/70 px-3 py-2">
+        <p className="min-w-0 break-all font-mono text-xs font-semibold text-foreground/90">
+          {file.path}
+        </p>
+        <span className="rounded-md border border-border bg-muted/25 px-1.5 py-0.5 text-[0.68rem] font-medium leading-none text-muted-foreground">
+          {file.operation}
+        </span>
+        <span className="font-mono text-[0.7rem] text-muted-foreground">
+          +{file.added_lines} -{file.removed_lines}
+        </span>
+      </div>
+      {visibleLines.length > 0 ? (
+        <div className="overflow-x-auto font-mono text-xs leading-5 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
+          {visibleLines.map((line, index) => (
+            <AgentChatPatchDiffRow
+              key={`patch-line-${index}`}
+              line={line}
+              oldWidth={oldWidth}
+              newWidth={newWidth}
+            />
+          ))}
+        </div>
+      ) : null}
+      {hiddenLineCount > 0 ? (
+        <p className="border-t border-border/70 px-3 py-2 text-xs text-muted-foreground">
+          … {hiddenLineCount} more line(s)
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentChatPatchDiffRow({
+  line,
+  oldWidth,
+  newWidth,
+}: {
+  line: AgentChatDiffLine;
+  oldWidth: number;
+  newWidth: number;
+}) {
+  if (line.kind === "hunk_break") {
+    return (
+      <div className="grid min-w-max grid-cols-[var(--old-width)_var(--new-width)_1rem_minmax(0,1fr)] gap-2 px-3 py-0.5 text-muted-foreground/70 [--new-width:2.5rem] [--old-width:2.5rem]">
+        <span>{"".padStart(oldWidth, " ")}</span>
+        <span>{"".padStart(newWidth, " ")}</span>
+        <span>⋮</span>
+        <span />
+      </div>
+    );
+  }
+
+  const oldLineNumber = typeof line.old_lineno === "number"
+    ? String(line.old_lineno).padStart(oldWidth, " ")
+    : "".padStart(oldWidth, " ");
+  const newLineNumber = typeof line.new_lineno === "number"
+    ? String(line.new_lineno).padStart(newWidth, " ")
+    : "".padStart(newWidth, " ");
+  const gutter = line.kind === "add" ? "+" : line.kind === "delete" ? "-" : " ";
+
+  return (
+    <div
+      className={cn(
+        "grid min-w-max grid-cols-[var(--old-width)_var(--new-width)_1rem_minmax(0,1fr)] gap-2 px-3 py-0.5",
+        "[--new-width:2.5rem] [--old-width:2.5rem]",
+        line.kind === "add" && "bg-muted/30",
+        line.kind === "delete" && "bg-muted/20",
+      )}
+    >
+      <span className="select-none text-right text-muted-foreground/65">{oldLineNumber}</span>
+      <span className="select-none text-right text-muted-foreground/65">{newLineNumber}</span>
+      <span className="select-none font-semibold text-muted-foreground">{gutter}</span>
+      <span className="whitespace-pre text-foreground/85">{line.text}</span>
+    </div>
+  );
+}
+
+function AgentChatMessageActivityLine({
+  id,
+  marker,
+  title,
+  detailLines,
+  messageLines,
+  detailLimit,
+  messageLimit,
+}: {
+  id: string;
+  marker: string;
+  title: string;
+  detailLines: string[];
+  messageLines: string[];
+  detailLimit: number;
+  messageLimit: number;
+}) {
+  const visibleDetailLines = detailLines.slice(0, detailLimit);
+  const hiddenDetailCount = detailLines.length - visibleDetailLines.length;
+  const visibleMessageLines = messageLines.slice(0, messageLimit);
+  const hiddenMessageCount = messageLines.length - visibleMessageLines.length;
+
+  return (
+    <div className="space-y-1 text-sm leading-6 text-foreground/90">
+      <div className="flex min-w-0 items-baseline gap-2">
+        <span aria-hidden="true" className="shrink-0 font-mono font-semibold text-muted-foreground">
+          {marker}
+        </span>
+        <p className="min-w-0 break-words font-semibold text-foreground">{title}</p>
+      </div>
+      {visibleDetailLines.length > 0 || hiddenDetailCount > 0 ? (
+        <div className="space-y-0.5 pl-6 text-xs leading-5 text-muted-foreground">
+          {visibleDetailLines.map((line, index) => (
+            <p key={`${id}-detail-${index}`} className="break-words">
+              {line}
+            </p>
+          ))}
+          {hiddenDetailCount > 0 ? <p>… {hiddenDetailCount} more line(s)</p> : null}
+        </div>
+      ) : null}
+      {visibleMessageLines.length > 0 || hiddenMessageCount > 0 ? (
+        <div className="space-y-0.5 text-foreground/90">
+          {visibleMessageLines.map((line, index) => (
+            <p
+              key={`${id}-message-${index}`}
+              className="grid min-w-0 grid-cols-[1.5rem_1fr] gap-2 break-words"
+            >
+              <span className="select-none text-right font-mono text-muted-foreground/70">
+                {index === 0 ? "└" : ""}
+              </span>
+              <span className="min-w-0 break-words"><AgentChatMarkdownInline text={line} /></span>
+            </p>
+          ))}
+          {hiddenMessageCount > 0 ? (
+            <p className="grid grid-cols-[1.5rem_1fr] gap-2 text-xs text-muted-foreground">
+              <span />
+              <span>… {hiddenMessageCount} more line(s)</span>
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentChatReplyActivityLine({
+  id,
+  marker,
+  title,
+  messageLines,
+  disposition,
+}: {
+  id: string;
+  marker: string;
+  title: string;
+  messageLines: string[];
+  disposition: string;
+}) {
+  const visibleLines = messageLines.slice(0, AGENT_CHAT_REPLY_MESSAGE_LIMIT);
+  const hiddenLineCount = messageLines.length - visibleLines.length;
+
+  return (
+    <div
+      className={cn(
+        "space-y-1 text-sm leading-6 text-foreground/90",
+        disposition === "failed" && "text-destructive",
+        disposition === "dismissed" && "text-muted-foreground",
+      )}
+    >
+      <div className="flex min-w-0 items-baseline gap-2">
+        <span
+          aria-hidden="true"
+          className={cn(
+            "shrink-0 font-mono font-semibold text-muted-foreground",
+            disposition === "failed" && "text-destructive",
+          )}
+        >
+          {marker}
+        </span>
+        <p
+          className={cn(
+            "min-w-0 break-words font-semibold text-foreground",
+            disposition === "failed" && "text-destructive",
+            disposition === "dismissed" && "text-muted-foreground",
+          )}
+        >
+          {title}
+        </p>
+      </div>
+      {visibleLines.length > 0 || hiddenLineCount > 0 ? (
+        <div className="space-y-0.5 pl-6 text-foreground/90">
+          {visibleLines.map((line, index) => (
+            <p key={`${id}-reply-${index}`} className="break-words">
+              <AgentChatMarkdownInline text={line} />
+            </p>
+          ))}
+          {hiddenLineCount > 0 ? (
+            <p className="text-xs text-muted-foreground">… {hiddenLineCount} more line(s)</p>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1932,6 +2652,312 @@ function agentChatDisplayBlocksForBubble(
   }
 
   return blocks.flatMap((block) => agentChatSplitMarkdownCodeFences(block));
+}
+
+
+function agentChatActivityCellRenderForBubble(
+  bubble: AgentChatBubble,
+): AgentChatActivityCellRender | null {
+  const cell = bubble.cell;
+
+  const assistant = agentChatActivityCellPayload(cell, "Assistant");
+  if (assistant) {
+    return agentChatTextActivityRender("›", assistant, "Activity");
+  }
+
+  const user = agentChatActivityCellPayload(cell, "User");
+  if (user) {
+    return agentChatTextActivityRender("•", user, "user");
+  }
+
+  const appAttention = agentChatActivityCellPayload(cell, "AppAttention");
+  if (appAttention) {
+    return agentChatTextActivityRender("◉", appAttention, "Focused App");
+  }
+
+  const browser = agentChatActivityCellPayload(cell, "Browser");
+  if (browser) {
+    return {
+      kind: "browser",
+      marker: "↗",
+      title: `Captured URL: ${compactAgentChatBrowserUrl(nullableStringValue(browser.url) ?? "unknown")}`,
+      detailLines: agentChatBrowserStatsLines(browser),
+    };
+  }
+
+  const liveBrowser = agentChatActivityCellPayload(cell, "LiveBrowser");
+  if (liveBrowser) {
+    const url = nullableStringValue(liveBrowser.url);
+    return {
+      kind: "browser",
+      marker: "↗",
+      title: url
+        ? `Opening URL: ${compactAgentChatBrowserUrl(url)}`
+        : stringValue(liveBrowser.title, "Browser action"),
+      detailLines: stringArrayValue(liveBrowser.body_lines),
+      detailLimit: 1,
+    };
+  }
+
+  const genericApp = agentChatActivityCellPayload(cell, "GenericApp") ??
+    agentChatActivityCellPayload(cell, "ToolResult");
+  if (genericApp) {
+    return {
+      kind: "text",
+      marker: "•",
+      title: `App: ${stringValue(genericApp.title, "Tool")}`,
+      bodyLines: [],
+    };
+  }
+
+  const plan = agentChatActivityCellPayload(cell, "PlanResult");
+  if (plan) {
+    return {
+      kind: "plan",
+      marker: "∷",
+      title: "Plan",
+      steps: agentChatPlanStepsFromActivityCell(cell),
+    };
+  }
+
+  const createWorkflow = agentChatActivityCellPayload(cell, "CreateWorkflowResult");
+  if (createWorkflow) {
+    return {
+      kind: "workflow",
+      marker: "⌘",
+      title: "Created Workflow:",
+      workflowId: stringValue(createWorkflow.workflow_id, "unknown"),
+    };
+  }
+
+  const activateWorkflow = agentChatActivityCellPayload(cell, "ActivateWorkflowResult");
+  if (activateWorkflow) {
+    return {
+      kind: "workflow",
+      marker: "⌘",
+      title: "Activated Workflow:",
+      workflowId: stringValue(activateWorkflow.workflow_id, "unknown"),
+    };
+  }
+
+  const deepRecall = agentChatActivityCellPayload(cell, "DeepRecallResult");
+  if (deepRecall) {
+    return {
+      kind: "deepRecall",
+      marker: "⟲",
+      title: "Recalled",
+      memoryCount: numberValue(deepRecall.memory_count, 0),
+    };
+  }
+
+  const execResult = agentChatActivityCellPayload(cell, "ExecResult");
+  if (execResult) {
+    return {
+      kind: "exec",
+      marker: "•",
+      title: stringValue(execResult.title, "Command"),
+      outputLines: stringArrayValuePreserveWhitespace(execResult.output_lines),
+      exitCode: parseAgentChatExitCode(nullableStringValue(execResult.meta)),
+    };
+  }
+
+  const liveExec = agentChatActivityCellPayload(cell, "LiveExec");
+  if (liveExec) {
+    return {
+      kind: "exec",
+      marker: "•",
+      title: stringValue(liveExec.title, "Tool running"),
+      outputLines: stringArrayValuePreserveWhitespace(liveExec.output_lines),
+      running: true,
+      exitCode: null,
+    };
+  }
+
+  const patch = agentChatActivityCellPayload(cell, "Patch");
+  if (patch) {
+    const files = agentChatPatchFilesFromActivityCell(patch);
+    return {
+      kind: "patch",
+      marker: "∂",
+      title: agentChatPatchTitle(files),
+      files,
+    };
+  }
+
+  const telegram = agentChatActivityCellPayload(cell, "Telegram");
+  if (telegram) {
+    return {
+      kind: "messageActivity",
+      marker: "◦",
+      title: stringValue(telegram.title, "Telegram"),
+      detailLines: stringArrayValue(telegram.detail_lines),
+      messageLines: stringArrayValue(telegram.message_lines),
+      detailLimit: AGENT_CHAT_TELEGRAM_DETAIL_LIMIT,
+      messageLimit: AGENT_CHAT_TELEGRAM_MESSAGE_LIMIT,
+    };
+  }
+
+  const reply = agentChatActivityCellPayload(cell, "Reply");
+  if (reply) {
+    const disposition = normalizeAgentChatReplyDisposition(reply.disposition);
+    return {
+      kind: "reply",
+      marker: "✣",
+      title: agentChatReplyTitle(disposition, stringValue(reply.subject, "message")),
+      messageLines: stringArrayValue(reply.message_lines),
+      disposition,
+    };
+  }
+
+  const terminalWait = agentChatActivityCellPayload(cell, "TerminalWait");
+  if (terminalWait) {
+    return {
+      kind: "text",
+      marker: "•",
+      title: stringValue(terminalWait.title, "Terminal wait"),
+      bodyLines: stringArrayValue(terminalWait.body_lines),
+      bodyLimit: AGENT_CHAT_TERMINAL_WAIT_LINE_LIMIT,
+      bodyPrefix: "branch",
+    };
+  }
+
+  const error = agentChatActivityCellPayload(cell, "Error");
+  if (error) {
+    return {
+      kind: "text",
+      marker: "!",
+      title: stringValue(error.title, "Error"),
+      bodyLines: stringArrayValue(error.body_lines),
+      bodyLimit: AGENT_CHAT_ERROR_LINE_LIMIT,
+      tone: "error",
+    };
+  }
+
+  return null;
+}
+
+function agentChatTextActivityRender(
+  marker: string,
+  cell: Record<string, unknown>,
+  fallbackTitle: string,
+): AgentChatActivityCellRender {
+  return {
+    kind: "text",
+    marker,
+    title: stringValue(cell.title, fallbackTitle),
+    bodyLines: stringArrayValue(cell.body_lines),
+  };
+}
+
+function agentChatBrowserStatsLines(cell: Record<string, unknown>): string[] {
+  const lineCount = nullableNumberValue(cell.line_count);
+  const refCount = nullableNumberValue(cell.ref_count);
+  const stats = [
+    lineCount !== null ? `${lineCount} lines` : null,
+    refCount !== null ? `${refCount} refs` : null,
+  ].filter((line): line is string => Boolean(line));
+
+  return stats.length > 0 ? [stats.join(" · ")] : [];
+}
+
+function compactAgentChatBrowserUrl(value: string) {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length > 88 ? `${compact.slice(0, 85)}...` : compact;
+}
+
+function agentChatPatchFilesFromActivityCell(
+  cell: Record<string, unknown>,
+): AgentChatDiffFile[] {
+  return diffFilesValue(
+    arrayValue(cell.files).map((file) => {
+      const record = asRecord(file);
+      return record
+        ? {
+            ...record,
+            lines: record.diff_lines,
+          }
+        : file;
+    }),
+  );
+}
+
+function agentChatPatchTitle(files: AgentChatDiffFile[]) {
+  const fileNoun = files.length === 1 ? "File" : "Files";
+  return `Edited ${files.length} ${fileNoun}`;
+}
+
+function agentChatPlanStatusLabel(status: AgentChatPlanStepStatus) {
+  if (status === "in_progress") {
+    return "In progress";
+  }
+
+  if (status === "completed") {
+    return "Completed";
+  }
+
+  if (status === "pending") {
+    return "Pending";
+  }
+
+  return "Unknown";
+}
+
+function normalizeAgentChatReplyDisposition(value: unknown) {
+  const normalized = typeof value === "string" ? value.toLowerCase() : "";
+  if (normalized === "resolved" || normalized === "dismissed" || normalized === "failed") {
+    return normalized;
+  }
+  return "unknown";
+}
+
+function agentChatReplyTitle(disposition: string, subject: string) {
+  if (disposition === "resolved") {
+    return subject.toLowerCase() === "notice" ? "Resolved Notice" : "Resolved Message";
+  }
+
+  if (disposition === "dismissed") {
+    return "Dismissed";
+  }
+
+  if (disposition === "failed") {
+    return "Failed";
+  }
+
+  return "Reply";
+}
+
+function parseAgentChatExitCode(meta: string | null) {
+  const match = meta?.match(/exit=(-?\d+)/);
+  return match ? Number(match[1]) : null;
+}
+
+function truncateAgentChatLinesMiddle(
+  lines: string[],
+  headCount: number,
+  tailCount: number,
+) {
+  if (lines.length <= headCount + tailCount) {
+    return lines;
+  }
+
+  const hiddenCount = lines.length - headCount - tailCount;
+  return [
+    ...lines.slice(0, headCount),
+    `… +${hiddenCount} more line(s)`,
+    ...lines.slice(lines.length - tailCount),
+  ];
+}
+
+function agentChatDiffLineNumberWidth(
+  lines: AgentChatDiffLine[],
+  key: "old_lineno" | "new_lineno",
+) {
+  return Math.max(
+    1,
+    ...lines.map((line) =>
+      typeof line[key] === "number" ? String(line[key]).length : 0,
+    ),
+  );
 }
 
 function agentChatCanonicalCellBlocksForBubble(
@@ -2894,6 +3920,18 @@ function stringArrayValue(value: unknown) {
     .filter((line): line is string => typeof line === "string")
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function stringArrayValuePreserveWhitespace(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((line): line is string => typeof line === "string");
+}
+
+function nullableStringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function safeJsonPreview(value: unknown) {
