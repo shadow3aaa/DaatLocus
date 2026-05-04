@@ -93,6 +93,7 @@ const AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX = 72;
 const AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX = 160;
 const AGENT_CHAT_MAX_IMAGE_ATTACHMENTS = 4;
 const AGENT_CHAT_MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const AGENT_CHAT_INLINE_PREVIEW_MAX_BYTES = 2 * 1024 * 1024;
 const AGENT_CHAT_COMPOSER_DEFAULT_HEIGHT_PX = 60;
 const AGENT_CHAT_COMPOSER_BOTTOM_GAP_PX = 16;
 const AGENT_CHAT_PREVIEW_NOTICE_VISIBLE_MS = 3000;
@@ -498,7 +499,7 @@ type AgentChatImageAttachmentData = {
 type AgentChatPendingImageAttachment = {
   id: string;
   file: File;
-  previewUrl: string;
+  previewUrl?: string;
 };
 
 type AgentChatActivityCellRender =
@@ -612,6 +613,7 @@ function AgentChatComposer({
     AgentChatPendingImageAttachment[]
   >([]);
   const imageAttachmentsRef = useRef<AgentChatPendingImageAttachment[]>([]);
+  const nextImageAttachmentIdRef = useRef(0);
   const [isSending, setIsSending] = useState(false);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -623,7 +625,7 @@ function AgentChatComposer({
   useEffect(() => {
     return () => {
       for (const attachment of imageAttachmentsRef.current) {
-        URL.revokeObjectURL(attachment.previewUrl);
+        revokeImagePreviewUrl(attachment);
       }
     };
   }, []);
@@ -657,6 +659,18 @@ function AgentChatComposer({
 
   function handleCloseFocus() {
     onFocusChange(false);
+  }
+
+  function createPendingImageAttachment(
+    file: File,
+  ): AgentChatPendingImageAttachment {
+    const nextId = nextImageAttachmentIdRef.current;
+    nextImageAttachmentIdRef.current += 1;
+    return {
+      id: `${file.name}-${file.size}-${file.lastModified}-${Date.now()}-${nextId}`,
+      file,
+      previewUrl: createImagePreviewUrl(file),
+    };
   }
 
   function addImageFiles(files: Iterable<File>) {
@@ -697,11 +711,7 @@ function AgentChatComposer({
 
       return [
         ...current,
-        ...valid.map((file) => ({
-          id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`,
-          file,
-          previewUrl: URL.createObjectURL(file),
-        })),
+        ...valid.map((file) => createPendingImageAttachment(file)),
       ];
     });
   }
@@ -710,7 +720,7 @@ function AgentChatComposer({
     setImageAttachments((current) => {
       const removed = current.find((attachment) => attachment.id === id);
       if (removed) {
-        URL.revokeObjectURL(removed.previewUrl);
+        revokeImagePreviewUrl(removed);
       }
       return current.filter((attachment) => attachment.id !== id);
     });
@@ -746,7 +756,7 @@ function AgentChatComposer({
       setMessage("");
       setImageAttachments((current) => {
         for (const attachment of current) {
-          URL.revokeObjectURL(attachment.previewUrl);
+          revokeImagePreviewUrl(attachment);
         }
         return [];
       });
@@ -840,11 +850,21 @@ function AgentChatComposer({
               className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-border/70 bg-muted"
               title={`${attachment.file.name} · ${formatFileSize(attachment.file.size)}`}
             >
-              <img
-                src={attachment.previewUrl}
-                alt={attachment.file.name || "Pending image attachment"}
-                className="h-full w-full object-cover"
-              />
+              {attachment.previewUrl ? (
+                <img
+                  src={attachment.previewUrl}
+                  alt={attachment.file.name || "Pending image attachment"}
+                  className="h-full w-full object-cover"
+                />
+              ) : (
+                <div
+                  aria-label={attachment.file.name || "Pending image attachment"}
+                  className="flex h-full w-full flex-col items-center justify-center gap-1 p-1 text-center text-[10px] leading-tight text-muted-foreground"
+                >
+                  <ImagePlusIcon className="size-4 shrink-0" aria-hidden="true" />
+                  <span className="max-w-full truncate">已选择图片</span>
+                </div>
+              )}
               <button
                 type="button"
                 aria-label={`Remove ${attachment.file.name || "image"}`}
@@ -858,20 +878,6 @@ function AgentChatComposer({
         </div>
       ) : null}
       <div className="flex items-center gap-2">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-lg"
-          aria-label="Attach image"
-          onClick={() => fileInputRef.current?.click()}
-          className="rounded-full text-muted-foreground hover:text-foreground"
-          disabled={
-            isSending ||
-            imageAttachments.length >= AGENT_CHAT_MAX_IMAGE_ATTACHMENTS
-          }
-        >
-          <ImagePlusIcon className="size-4" />
-        </Button>
         <textarea
           value={message}
           rows={1}
@@ -902,6 +908,20 @@ function AgentChatComposer({
             <XIcon className="size-4" />
           </Button>
         ) : null}
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-lg"
+          aria-label="Attach image"
+          onClick={() => fileInputRef.current?.click()}
+          className="rounded-full text-muted-foreground hover:text-foreground"
+          disabled={
+            isSending ||
+            imageAttachments.length >= AGENT_CHAT_MAX_IMAGE_ATTACHMENTS
+          }
+        >
+          <ImagePlusIcon className="size-4" />
+        </Button>
         <Button
           type="submit"
           size="icon-lg"
@@ -937,6 +957,40 @@ function hasImageDragItems(dataTransfer: DataTransfer) {
     }
     return false;
   });
+}
+
+function shouldRenderInlineImagePreview(file: File) {
+  return (
+    file.size <= AGENT_CHAT_INLINE_PREVIEW_MAX_BYTES &&
+    typeof URL !== "undefined" &&
+    typeof URL.createObjectURL === "function"
+  );
+}
+
+function createImagePreviewUrl(file: File) {
+  if (!shouldRenderInlineImagePreview(file)) {
+    return undefined;
+  }
+  try {
+    return URL.createObjectURL(file);
+  } catch {
+    return undefined;
+  }
+}
+
+function revokeImagePreviewUrl(attachment: AgentChatPendingImageAttachment) {
+  if (
+    !attachment.previewUrl ||
+    typeof URL === "undefined" ||
+    typeof URL.revokeObjectURL !== "function"
+  ) {
+    return;
+  }
+  try {
+    URL.revokeObjectURL(attachment.previewUrl);
+  } catch {
+    // Some mobile WebViews throw while revoking blob URLs during teardown.
+  }
 }
 
 function readFileAsDataUrl(file: File) {
