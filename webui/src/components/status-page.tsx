@@ -1629,7 +1629,7 @@ function AgentChatActivityMarker({
     <span
       aria-hidden="true"
       className={cn(
-        "inline-flex h-6 w-6 shrink-0 items-center justify-center font-mono text-sm font-semibold leading-none text-muted-foreground",
+        "inline-flex h-6 w-6 shrink-0 items-center justify-start font-mono text-sm font-semibold leading-none text-muted-foreground",
         tone === "error" && "text-destructive",
         className,
       )}
