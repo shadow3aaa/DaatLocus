@@ -321,6 +321,16 @@ fn apply_user_cell(item: &mut WebActivityItem, cell: &UserActivityCell) {
         cell.title.clone()
     };
     item.blocks = text_blocks(primary_lines(&cell.title, &cell.body_lines));
+    item.blocks
+        .extend(
+            cell.image_attachments
+                .iter()
+                .map(|attachment| WebActivityBlock::Artifact {
+                    label: attachment.label.clone(),
+                    uri: Some(attachment.uri.clone()),
+                    mime_type: Some(attachment.mime_type.clone()),
+                }),
+        );
 }
 
 fn apply_telegram_cell(item: &mut WebActivityItem, cell: &TelegramActivityCell) {

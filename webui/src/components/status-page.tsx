@@ -51,6 +51,7 @@ import {
 } from "@/components/ui/chart";
 import {
   fetchDashboardActivityHistory,
+  getDashboardAttachmentUrl,
   runDashboardCommand,
   subscribeDashboardSnapshots,
   type DashboardActivityHistoryPage,
@@ -483,12 +484,19 @@ type AgentChatPlanStep = {
   text: string;
 };
 
+type AgentChatImageAttachmentData = {
+  label: string;
+  uri: string;
+  mimeType: string;
+};
+
 type AgentChatActivityCellRender =
   | {
       kind: "text";
       marker: string;
       title: string;
       bodyLines: string[];
+      imageAttachments?: AgentChatImageAttachmentData[];
       bodyLimit?: number;
       tone?: "default" | "error" | "muted";
     }
@@ -1182,6 +1190,7 @@ function AgentChatActivityCellView({
         marker={render.marker}
         title={render.title}
         bodyLines={render.bodyLines}
+        imageAttachments={render.imageAttachments}
         bodyLimit={render.bodyLimit}
         tone={render.tone}
       />
@@ -1309,6 +1318,7 @@ function AgentChatActivityTextCell({
   marker,
   title,
   bodyLines,
+  imageAttachments = [],
   bodyLimit,
   tone = "default",
 }: {
@@ -1316,6 +1326,7 @@ function AgentChatActivityTextCell({
   marker: string;
   title: string;
   bodyLines: string[];
+  imageAttachments?: AgentChatImageAttachmentData[];
   bodyLimit?: number;
   tone?: "default" | "error" | "muted";
 }) {
@@ -1370,6 +1381,18 @@ function AgentChatActivityTextCell({
               … {hiddenLineCount} more line(s)
             </p>
           ) : null}
+        </div>
+      ) : null}
+      {imageAttachments.length > 0 ? (
+        <div className="space-y-2 px-3">
+          {imageAttachments.map((attachment, index) => (
+            <AgentChatImageAttachment
+              key={`${id}-activity-image-${index}`}
+              label={attachment.label}
+              uri={attachment.uri}
+              mimeType={attachment.mimeType}
+            />
+          ))}
         </div>
       ) : null}
     </div>
@@ -1872,9 +1895,19 @@ function AgentChatBlock({
     ) : null;
   }
 
-  if (type === "artifact") {
+  if (type === "image" || type === "artifact") {
     const label = stringValue(record.label, "Artifact");
     const uri = stringValue(record.uri, "");
+    const mimeType = stringValue(record.mime_type, "");
+    if (uri && (type === "image" || mimeType.startsWith("image/"))) {
+      return (
+        <AgentChatImageAttachment
+          label={label}
+          uri={uri}
+          mimeType={mimeType}
+        />
+      );
+    }
     return uri ? (
       <a
         href={uri}
@@ -2053,6 +2086,37 @@ function AgentChatListItems({
         </li>
       ) : null}
     </ul>
+  );
+}
+
+function AgentChatImageAttachment({
+  label,
+  uri,
+  mimeType,
+}: {
+  label: string;
+  uri: string;
+  mimeType: string;
+}) {
+  const imageUrl = getDashboardAttachmentUrl(uri);
+  const title = [label, mimeType].filter(Boolean).join(" · ");
+
+  return (
+    <figure className="max-w-[min(28rem,100%)] overflow-hidden rounded-2xl border border-border/60 bg-muted/20">
+      <a href={imageUrl} target="_blank" rel="noreferrer" className="block">
+        <img
+          src={imageUrl}
+          alt={label}
+          title={title || label}
+          loading="lazy"
+          className="max-h-[22rem] w-full object-contain"
+        />
+      </a>
+      <figcaption className="flex items-center justify-between gap-3 border-t border-border/50 px-3 py-1.5 text-xs text-muted-foreground">
+        <span className="min-w-0 truncate">{label}</span>
+        {mimeType ? <span className="shrink-0">{mimeType}</span> : null}
+      </figcaption>
+    </figure>
   );
 }
 
@@ -2516,7 +2580,9 @@ function agentChatActivityCellRenderForBubble(
 
   const user = agentChatActivityCellPayload(cell, "User");
   if (user) {
-    return agentChatTextActivityRender("•", user, "user");
+    const render = agentChatTextActivityRender("•", user, "user");
+    render.imageAttachments = imageAttachmentsValue(user.image_attachments);
+    return render;
   }
 
   const appAttention = agentChatActivityCellPayload(cell, "AppAttention");
@@ -2688,7 +2754,7 @@ function agentChatTextActivityRender(
   marker: string,
   cell: Record<string, unknown>,
   fallbackTitle: string,
-): AgentChatActivityCellRender {
+): Extract<AgentChatActivityCellRender, { kind: "text" }> {
   return {
     kind: "text",
     marker,
@@ -3269,6 +3335,18 @@ function asActivityCellVariant(value: unknown): ActivityCellVariant | null {
 
 function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
+}
+
+function imageAttachmentsValue(value: unknown): AgentChatImageAttachmentData[] {
+  return arrayValue(value)
+    .map(asRecord)
+    .filter((attachment): attachment is Record<string, unknown> => Boolean(attachment))
+    .map((attachment) => ({
+      label: stringValue(attachment.label, "Image"),
+      uri: stringValue(attachment.uri, ""),
+      mimeType: stringValue(attachment.mime_type, ""),
+    }))
+    .filter((attachment) => attachment.uri);
 }
 
 function kvEntriesValue(value: unknown) {

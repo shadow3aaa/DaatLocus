@@ -444,7 +444,9 @@ pub(crate) async fn execute_agent_loop_step(
         .memory
         .begin_runtime_step_from_parts(request_envelope, conversation_slice);
     for message in injected_context_messages {
+        let committed_cells = render_activity_from_messages(vec![message.clone()]);
         runtime_step.push_history_message(message);
+        append_committed_activity_cells(context, tx, committed_cells);
     }
     let mut tool_results = Vec::new();
     let mut actions = Vec::new();

@@ -12,7 +12,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{
-        Query, State, WebSocketUpgrade,
+        Path, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION},
@@ -41,7 +41,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::{
     config::{Config, ModelConfig, ProviderConfig, ThinkingBudget, load_config},
-    daat_locus_paths::daat_locus_paths,
+    daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync},
     dashboard::{
         DashboardActivityHistoryStore, DashboardCommandRunner, DashboardControlCommand,
         DashboardState, execute_remote_command,
@@ -489,6 +489,10 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/dashboard/snapshot", get(snapshot_handler))
         .route("/dashboard/stream", get(stream_handler))
         .route("/dashboard/activity-history", get(activity_history_handler))
+        .route(
+            "/dashboard/attachments/{encoded_path}",
+            get(dashboard_attachment_handler),
+        )
         .route("/settings/summary", get(settings_summary_handler))
         .route("/logs/sources", get(logs::sources_handler))
         .route("/logs/read", get(logs::read_handler))
@@ -583,6 +587,7 @@ fn webui_content_type(path: &str) -> &'static str {
         "gif" => "image/gif",
         "html" => "text/html; charset=utf-8",
         "ico" => "image/x-icon",
+        "jpg" | "jpeg" => "image/jpeg",
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "json" | "map" => "application/json; charset=utf-8",
         "png" => "image/png",
@@ -602,6 +607,89 @@ fn webui_cache_control(path: &str) -> &'static str {
     } else {
         "public, max-age=31536000, immutable"
     }
+}
+
+async fn dashboard_attachment_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(query): Query<DashboardAttachmentQuery>,
+    Path(encoded_path): Path<String>,
+) -> impl IntoResponse {
+    if !authorize_dashboard_attachment_request(&state, &headers, query.token.as_deref()).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let Some(path) = decode_dashboard_attachment_path(&encoded_path) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+
+    if !is_allowed_dashboard_attachment_path(&path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let Ok(bytes) = tokio::fs::read(&path).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    Response::builder()
+        .header(CONTENT_TYPE, webui_content_type(&path.to_string_lossy()))
+        .header(CACHE_CONTROL, "no-store")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn decode_dashboard_attachment_path(encoded_path: &str) -> Option<PathBuf> {
+    if encoded_path.is_empty() || encoded_path.len() % 2 != 0 {
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity(encoded_path.len() / 2);
+    let mut chars = encoded_path.as_bytes().chunks_exact(2);
+    for pair in &mut chars {
+        let pair = std::str::from_utf8(pair).ok()?;
+        let byte = u8::from_str_radix(pair, 16).ok()?;
+        bytes.push(byte);
+    }
+    String::from_utf8(bytes).ok().map(PathBuf::from)
+}
+
+fn is_allowed_dashboard_attachment_path(path: &std::path::Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+
+    let paths = daat_locus_paths_sync();
+    let Ok(canonical_path) = path.canonicalize() else {
+        return false;
+    };
+    let Ok(attachments_dir) = paths
+        .state_dir()
+        .join("telegram_attachments")
+        .canonicalize()
+    else {
+        return false;
+    };
+    canonical_path.starts_with(attachments_dir)
+}
+
+#[derive(Debug, Deserialize)]
+struct DashboardAttachmentQuery {
+    token: Option<String>,
+}
+
+async fn authorize_dashboard_attachment_request(
+    state: &ServerState,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+) -> bool {
+    if state.auth_registry.authorize_headers(headers).await {
+        return true;
+    }
+
+    let Some(token) = query_token.map(str::trim).filter(|token| !token.is_empty()) else {
+        return false;
+    };
+    state.auth_registry.authorize_token(token).await
 }
 
 async fn health_handler() -> impl IntoResponse {

@@ -11,15 +11,16 @@ mod workflow;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    reasoning::runtime::{AgentMessage, HistoryMessage},
+    reasoning::runtime::{AgentContent, AgentContentPart, AgentMessage, HistoryMessage},
     tool_ui::{AppAttentionUiAction, BrowserUiData, TerminalUiAction, ToolUiEvent},
 };
 
 use super::DashboardState;
 use apps::{AppAttentionActivityCell, BrowserActivityCell, LiveBrowserActivityCell};
 use common::{
-    AssistantActivityCell, ErrorActivityCell, GenericAppActivityCell, TerminalWaitActivityCell,
-    UserActivityCell, assistant_cell, error_cell, terminal_wait_cell, user_cell,
+    AssistantActivityCell, ErrorActivityCell, GenericAppActivityCell, MessageImageAttachment,
+    TerminalWaitActivityCell, UserActivityCell, assistant_cell, error_cell, terminal_wait_cell,
+    user_cell,
 };
 use exec::{ExecResultActivityCell, LiveExecActivityCell, live_exec_cell};
 use messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell};
@@ -240,12 +241,67 @@ fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<ActivityCe
             .and_then(activity_cell_from_tool_ui_event)
             .into_iter()
             .collect(),
-        AgentMessage::User { content } => vec![ActivityCell::User(user_cell(
-            first_line_or_fallback(content.as_text(), "user"),
-            remaining_lines_with_limit(content.as_text(), 8),
-        ))],
+        AgentMessage::User { content } => {
+            vec![ActivityCell::User(user_cell_from_agent_content(content))]
+        }
         AgentMessage::System { .. } => Vec::new(),
     }
+}
+
+fn user_cell_from_agent_content(content: &AgentContent) -> UserActivityCell {
+    let mut cell = user_cell(
+        first_line_or_fallback(content.as_text(), "user"),
+        remaining_lines_with_limit(content.as_text(), 8),
+    );
+    cell.image_attachments = content
+        .parts()
+        .iter()
+        .filter_map(message_image_attachment_from_part)
+        .collect();
+    cell
+}
+
+fn message_image_attachment_from_part(part: &AgentContentPart) -> Option<MessageImageAttachment> {
+    let AgentContentPart::Image {
+        path,
+        media_type,
+        description,
+    } = part
+    else {
+        return None;
+    };
+    if path.trim().is_empty() || !media_type.trim().starts_with("image/") {
+        return None;
+    }
+    let label = description
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            std::path::Path::new(path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("image")
+                .to_string()
+        });
+    Some(MessageImageAttachment {
+        label,
+        uri: dashboard_attachment_uri(path),
+        mime_type: media_type.trim().to_string(),
+        description: description.clone(),
+    })
+}
+
+fn dashboard_attachment_uri(path: &str) -> String {
+    format!(
+        "/dashboard/attachments/{}",
+        path.as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
 }
 
 fn is_runtime_context_history_message(message: &HistoryMessage) -> bool {

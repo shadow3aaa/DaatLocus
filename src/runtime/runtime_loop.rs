@@ -17,7 +17,8 @@ use crate::{
     dashboard::{
         DashboardActivityEvent, DashboardActivityHistoryStore, DashboardActivityHistoryWindow,
         DashboardControlCommand, DashboardState, activity_cell_from_tool_ui_event,
-        apply_activity_event, assistant_activity_cell, web_activity_item_from_cell,
+        apply_activity_event, assistant_activity_cell, render_activity_from_messages,
+        web_activity_item_from_cell,
     },
     events::{EventPayload, EventStatus, EventView},
     hindsight::HindsightRecallOptions,

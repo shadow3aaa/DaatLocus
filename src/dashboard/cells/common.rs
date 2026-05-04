@@ -12,6 +12,17 @@ pub struct AssistantActivityCell {
 pub struct UserActivityCell {
     pub title: String,
     pub body_lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_attachments: Vec<MessageImageAttachment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageImageAttachment {
+    pub label: String,
+    pub uri: String,
+    pub mime_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +54,7 @@ pub fn user_cell(title: impl Into<String>, body_lines: Vec<String>) -> UserActiv
     UserActivityCell {
         title: title.into(),
         body_lines,
+        image_attachments: Vec::new(),
     }
 }
 

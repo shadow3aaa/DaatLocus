@@ -225,6 +225,20 @@ export type WebActivityArtifactBlock = {
   mime_type?: string | null;
 };
 
+export type WebActivityImageBlock = {
+  type: "image";
+  label: string;
+  uri: string;
+  mime_type?: string | null;
+};
+
+export type WebActivityImageAttachment = {
+  label: string;
+  uri: string;
+  mime_type: string;
+  description?: string | null;
+};
+
 export type WebActivityUnknownBlock = {
   type: string;
   [key: string]: unknown;
@@ -238,11 +252,16 @@ export type WebActivityBlock =
   | WebActivityDiffBlock
   | WebActivityLinkBlock
   | WebActivityArtifactBlock
+  | WebActivityImageBlock
   | WebActivityUnknownBlock;
 
 export type ActivityCellCommon = {
   title: string;
   body_lines?: string[];
+};
+
+export type ActivityCellUser = ActivityCellCommon & {
+  image_attachments?: WebActivityImageAttachment[];
 };
 
 export type ActivityCellBrowser = ActivityCellCommon & {
@@ -314,7 +333,7 @@ export type ActivityCellDeepRecall = {
 
 export type ActivityCellVariant =
   | { Assistant: ActivityCellCommon }
-  | { User: ActivityCellCommon }
+  | { User: ActivityCellUser }
   | { AppAttention: ActivityCellCommon }
   | { Browser: ActivityCellBrowser }
   | { LiveBrowser: ActivityCellBrowser }
@@ -618,6 +637,16 @@ export async function fetchDashboardActivityHistory({
     response,
     "Dashboard activity history",
   );
+}
+
+export function getDashboardAttachmentUrl(uri: string) {
+  if (!uri.startsWith("/dashboard/attachments/")) {
+    return uri;
+  }
+
+  const token = getStoredDaemonToken().trim();
+  const separator = uri.includes("?") ? "&" : "?";
+  return token ? `${uri}${separator}token=${encodeURIComponent(token)}` : uri;
 }
 
 export async function fetchSettingsSummary({
