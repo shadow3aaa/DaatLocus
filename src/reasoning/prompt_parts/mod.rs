@@ -554,12 +554,18 @@ fn render_afterclaim_events(events: &[EventView]) -> String {
                 ));
             }
             EventPayload::TerminalIncoming(payload) => {
+                let attachment_summary = if payload.attachments.is_empty() {
+                    String::new()
+                } else {
+                    format!(" attachments={}", payload.attachments.len())
+                };
                 lines.push(format!(
-                    "- {}. [terminal / {} / arrived_at_ms={}] {}: {}",
+                    "- {}. [terminal / {} / arrived_at_ms={}] {}{}: {}",
                     event.event_id,
                     event.status,
                     event.arrived_at_ms,
                     payload.origin,
+                    attachment_summary,
                     summarize_context_text(&payload.incoming_text, 240)
                 ));
             }

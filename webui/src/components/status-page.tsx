@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent,
   type DragEvent,
   type FormEvent,
   type KeyboardEvent,
@@ -22,6 +23,7 @@ import {
   CheckIcon,
   ClipboardIcon,
   GripVerticalIcon,
+  ImagePlusIcon,
   Loader2Icon,
   SendHorizontalIcon,
   XIcon,
@@ -55,6 +57,7 @@ import {
   runDashboardCommand,
   subscribeDashboardSnapshots,
   type DashboardActivityHistoryPage,
+  type DashboardCommandAttachment,
   type DashboardContextCompositionSegment,
   type DashboardPendingAccessRequest,
   type DashboardSnapshot,
@@ -88,6 +91,8 @@ const AGENT_CHAT_TERMINAL_WAIT_LINE_LIMIT = 6;
 const AGENT_CHAT_ERROR_LINE_LIMIT = 12;
 const AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX = 72;
 const AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX = 160;
+const AGENT_CHAT_MAX_IMAGE_ATTACHMENTS = 4;
+const AGENT_CHAT_MAX_IMAGE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const AGENT_CHAT_COMPOSER_DEFAULT_HEIGHT_PX = 60;
 const AGENT_CHAT_COMPOSER_BOTTOM_GAP_PX = 16;
 const AGENT_CHAT_PREVIEW_NOTICE_VISIBLE_MS = 3000;
@@ -490,6 +495,12 @@ type AgentChatImageAttachmentData = {
   mimeType: string;
 };
 
+type AgentChatPendingImageAttachment = {
+  id: string;
+  file: File;
+  previewUrl: string;
+};
+
 type AgentChatActivityCellRender =
   | {
       kind: "text";
@@ -595,9 +606,27 @@ function AgentChatComposer({
   onSendResult: (resultText: string) => void;
 }) {
   const formRef = useRef<HTMLFormElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [message, setMessage] = useState("");
+  const [imageAttachments, setImageAttachments] = useState<
+    AgentChatPendingImageAttachment[]
+  >([]);
+  const imageAttachmentsRef = useRef<AgentChatPendingImageAttachment[]>([]);
   const [isSending, setIsSending] = useState(false);
+  const [isDraggingImage, setIsDraggingImage] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+
+  useEffect(() => {
+    imageAttachmentsRef.current = imageAttachments;
+  }, [imageAttachments]);
+
+  useEffect(() => {
+    return () => {
+      for (const attachment of imageAttachmentsRef.current) {
+        URL.revokeObjectURL(attachment.previewUrl);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const form = formRef.current;
@@ -630,11 +659,80 @@ function AgentChatComposer({
     onFocusChange(false);
   }
 
+  function addImageFiles(files: Iterable<File>) {
+    const nextFiles = Array.from(files).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+    if (nextFiles.length === 0) {
+      return;
+    }
+
+    setImageAttachments((current) => {
+      const remainingSlots = Math.max(
+        0,
+        AGENT_CHAT_MAX_IMAGE_ATTACHMENTS - current.length,
+      );
+      const accepted = nextFiles.slice(0, remainingSlots);
+      const rejectedForCount = nextFiles.length - accepted.length;
+      const valid = accepted.filter(
+        (file) => file.size <= AGENT_CHAT_MAX_IMAGE_ATTACHMENT_BYTES,
+      );
+      const oversized = accepted.find(
+        (file) => file.size > AGENT_CHAT_MAX_IMAGE_ATTACHMENT_BYTES,
+      );
+
+      if (rejectedForCount > 0) {
+        setSendError(
+          `最多只能附加 ${AGENT_CHAT_MAX_IMAGE_ATTACHMENTS} 张图片。`,
+        );
+      } else if (oversized) {
+        setSendError(
+          `${oversized.name} 太大了，单张图片上限是 ${formatFileSize(
+            AGENT_CHAT_MAX_IMAGE_ATTACHMENT_BYTES,
+          )}。`,
+        );
+      } else if (valid.length > 0) {
+        setSendError(null);
+      }
+
+      return [
+        ...current,
+        ...valid.map((file) => ({
+          id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`,
+          file,
+          previewUrl: URL.createObjectURL(file),
+        })),
+      ];
+    });
+  }
+
+  function removeImageAttachment(id: string) {
+    setImageAttachments((current) => {
+      const removed = current.find((attachment) => attachment.id === id);
+      if (removed) {
+        URL.revokeObjectURL(removed.previewUrl);
+      }
+      return current.filter((attachment) => attachment.id !== id);
+    });
+  }
+
+  async function commandAttachmentsFromPendingImages(): Promise<
+    DashboardCommandAttachment[]
+  > {
+    return Promise.all(
+      imageAttachments.map(async (attachment) => ({
+        name: attachment.file.name || "image",
+        media_type: attachment.file.type || "application/octet-stream",
+        data_url: await readFileAsDataUrl(attachment.file),
+      })),
+    );
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = message.trim();
 
-    if (!trimmed || isSending) {
+    if ((!trimmed && imageAttachments.length === 0) || isSending) {
       return;
     }
 
@@ -642,9 +740,16 @@ function AgentChatComposer({
     setSendError(null);
 
     try {
-      const output = await runDashboardCommand(trimmed);
+      const attachments = await commandAttachmentsFromPendingImages();
+      const output = await runDashboardCommand(trimmed, { attachments });
       const sendResultText = agentChatSendResultText(output);
       setMessage("");
+      setImageAttachments((current) => {
+        for (const attachment of current) {
+          URL.revokeObjectURL(attachment.previewUrl);
+        }
+        return [];
+      });
       if (sendResultText) {
         onSendResult(sendResultText);
       }
@@ -661,29 +766,122 @@ function AgentChatComposer({
     }
   }
 
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.clipboardData.files).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+    if (files.length > 0) {
+      addImageFiles(files);
+    }
+  }
+
+  function handleDrop(event: DragEvent<HTMLFormElement>) {
+    const files = Array.from(event.dataTransfer.files).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+    if (files.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    setIsDraggingImage(false);
+    addImageFiles(files);
+  }
+
   return (
     <form
       ref={formRef}
       aria-label="Send message to agent"
       onSubmit={handleSubmit}
       onFocus={handleFocus}
+      onDragEnter={(event) => {
+        if (hasImageDragItems(event.dataTransfer)) {
+          event.preventDefault();
+          setIsDraggingImage(true);
+        }
+      }}
+      onDragOver={(event) => {
+        if (hasImageDragItems(event.dataTransfer)) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+          setIsDraggingImage(true);
+        }
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setIsDraggingImage(false);
+        }
+      }}
+      onDrop={handleDrop}
       className={cn(
         "fixed bottom-5 left-1/2 z-30 w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 rounded-[16px] border bg-background/85 p-2 shadow-2xl shadow-background/40 backdrop-blur-xl transition-all duration-300",
+        isDraggingImage && "border-primary/70 ring-4 ring-primary/15",
         isFocused
           ? "border-primary/45 ring-4 ring-primary/10"
           : "border-border/70 hover:border-primary/30",
       )}
     >
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="sr-only"
+        aria-label="Attach images"
+        onChange={(event) => {
+          addImageFiles(event.target.files ?? []);
+          event.currentTarget.value = "";
+        }}
+      />
+      {imageAttachments.length > 0 ? (
+        <div className="flex gap-2 overflow-x-auto px-2 pb-2">
+          {imageAttachments.map((attachment) => (
+            <div
+              key={attachment.id}
+              className="group relative h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-border/70 bg-muted"
+              title={`${attachment.file.name} · ${formatFileSize(attachment.file.size)}`}
+            >
+              <img
+                src={attachment.previewUrl}
+                alt={attachment.file.name || "Pending image attachment"}
+                className="h-full w-full object-cover"
+              />
+              <button
+                type="button"
+                aria-label={`Remove ${attachment.file.name || "image"}`}
+                onClick={() => removeImageAttachment(attachment.id)}
+                className="absolute right-1 top-1 rounded-full bg-background/90 p-1 text-muted-foreground opacity-90 shadow-sm transition hover:text-foreground group-hover:opacity-100"
+              >
+                <XIcon className="size-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-lg"
+          aria-label="Attach image"
+          onClick={() => fileInputRef.current?.click()}
+          className="rounded-full text-muted-foreground hover:text-foreground"
+          disabled={
+            isSending ||
+            imageAttachments.length >= AGENT_CHAT_MAX_IMAGE_ATTACHMENTS
+          }
+        >
+          <ImagePlusIcon className="size-4" />
+        </Button>
         <textarea
           value={message}
           rows={1}
-          placeholder="和 agent 说点什么…"
+          placeholder="和 agent 说点什么，或粘贴/拖入图片…"
           aria-label="Message"
           onChange={(event) => {
             setMessage(event.target.value);
             setSendError(null);
           }}
+          onPaste={handlePaste}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
@@ -707,7 +905,9 @@ function AgentChatComposer({
         <Button
           type="submit"
           size="icon-lg"
-          disabled={!message.trim() || isSending}
+          disabled={
+            (!message.trim() && imageAttachments.length === 0) || isSending
+          }
           aria-label="Send message"
           className="rounded-full"
         >
@@ -728,6 +928,47 @@ function AgentChatComposer({
       ) : null}
     </form>
   );
+}
+
+function hasImageDragItems(dataTransfer: DataTransfer) {
+  return Array.from(dataTransfer.items).some((item) => {
+    if (item.kind === "file") {
+      return item.type.startsWith("image/");
+    }
+    return false;
+  });
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("读取图片失败。"));
+      }
+    });
+    reader.addEventListener("error", () => {
+      reject(reader.error ?? new Error("读取图片失败。"));
+    });
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const maximumFractionDigits = value >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${value.toFixed(maximumFractionDigits)} ${units[unitIndex]}`;
 }
 
 function AgentChatBubbles({

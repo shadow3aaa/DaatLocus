@@ -103,6 +103,23 @@ pub struct TerminalIncomingEvent {
     #[serde(default = "default_terminal_origin")]
     pub origin: String,
     pub incoming_text: String,
+    #[serde(default)]
+    pub attachments: Vec<TerminalIncomingAttachment>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TerminalIncomingAttachment {
+    pub kind: TerminalIncomingAttachmentKind,
+    pub media_type: String,
+    pub local_path: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalIncomingAttachmentKind {
+    Image,
 }
 
 fn default_telegram_chat_kind() -> String {
@@ -486,6 +503,7 @@ mod tests {
                 payload: EventPayload::TerminalIncoming(TerminalIncomingEvent {
                     origin: "dashboard".to_string(),
                     incoming_text: "local command".to_string(),
+                    attachments: Vec::new(),
                 }),
                 last_error: Some("failed locally".to_string()),
             },
@@ -538,6 +556,7 @@ mod tests {
             .register_terminal_incoming(TerminalIncomingEvent {
                 origin: "dashboard".to_string(),
                 incoming_text: "hello from terminal".to_string(),
+                attachments: Vec::new(),
             })
             .expect("register terminal event");
         let event = store
@@ -569,6 +588,7 @@ mod tests {
                 payload: EventPayload::TerminalIncoming(TerminalIncomingEvent {
                     origin: "dashboard".to_string(),
                     incoming_text: "finish this".to_string(),
+                    attachments: Vec::new(),
                 }),
                 last_error: None,
             },
@@ -589,6 +609,7 @@ mod tests {
             .register_terminal_incoming(TerminalIncomingEvent {
                 origin: "dashboard".to_string(),
                 incoming_text: "still needs work".to_string(),
+                attachments: Vec::new(),
             })
             .expect("register terminal event");
         let claimed = store
@@ -615,6 +636,7 @@ mod tests {
             .register_terminal_incoming(TerminalIncomingEvent {
                 origin: "dashboard".to_string(),
                 incoming_text: "cannot complete".to_string(),
+                attachments: Vec::new(),
             })
             .expect("register terminal event");
 
@@ -641,6 +663,7 @@ mod tests {
             .register_terminal_incoming(TerminalIncomingEvent {
                 origin: "dashboard".to_string(),
                 incoming_text: "local runtime question".to_string(),
+                attachments: Vec::new(),
             })
             .expect("register terminal event");
         let _ = store
@@ -664,12 +687,14 @@ mod tests {
             .register_terminal_incoming(TerminalIncomingEvent {
                 origin: "dashboard".to_string(),
                 incoming_text: "pending".to_string(),
+                attachments: Vec::new(),
             })
             .expect("register pending");
         let claimed = store
             .register_terminal_incoming(TerminalIncomingEvent {
                 origin: "dashboard".to_string(),
                 incoming_text: "claimed".to_string(),
+                attachments: Vec::new(),
             })
             .expect("register claimed");
         store
@@ -680,6 +705,7 @@ mod tests {
             .register_terminal_incoming(TerminalIncomingEvent {
                 origin: "dashboard".to_string(),
                 incoming_text: "awaiting".to_string(),
+                attachments: Vec::new(),
             })
             .expect("register awaiting");
         store
@@ -693,6 +719,7 @@ mod tests {
             .register_terminal_incoming(TerminalIncomingEvent {
                 origin: "dashboard".to_string(),
                 incoming_text: "resolved".to_string(),
+                attachments: Vec::new(),
             })
             .expect("register resolved");
         store
@@ -702,6 +729,7 @@ mod tests {
             .register_terminal_incoming(TerminalIncomingEvent {
                 origin: "dashboard".to_string(),
                 incoming_text: "dismissed".to_string(),
+                attachments: Vec::new(),
             })
             .expect("register dismissed");
         store
@@ -711,6 +739,7 @@ mod tests {
             .register_terminal_incoming(TerminalIncomingEvent {
                 origin: "dashboard".to_string(),
                 incoming_text: "failed".to_string(),
+                attachments: Vec::new(),
             })
             .expect("register failed");
         store

@@ -1,6 +1,6 @@
 use std::{
     net::Ipv4Addr,
-    path::PathBuf,
+    path::{Path as StdPath, PathBuf},
     process::Stdio,
     sync::{
         Arc,
@@ -27,10 +27,12 @@ use axum::{
     },
     response::Response,
 };
+use base64::Engine;
 use futures_util::StreamExt;
 use include_dir::{Dir, include_dir};
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sysinfo::{Pid, System};
 use tokio::{
     net::TcpListener,
@@ -44,7 +46,8 @@ use crate::{
     daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync},
     dashboard::{
         DashboardActivityHistoryStore, DashboardCommandRunner, DashboardControlCommand,
-        DashboardState, execute_remote_command,
+        DashboardIncomingAttachment, DashboardState, execute_remote_command,
+        execute_remote_message,
     },
     events::EventStore,
     pending_work::PendingWorkQueue,
@@ -73,6 +76,8 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const DAEMON_MAIN_LOG: &str = "daat-locus.log";
 const DAEMON_STDERR_LOG: &str = "daemon-stderr.log";
 pub const DAEMONIZE_ENV: &str = "DAAT_LOCUS_DAEMONIZE";
+const MAX_COMMAND_ATTACHMENTS: usize = 4;
+const MAX_COMMAND_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 
 static EMBEDDED_WEBUI_DIST: Dir<'_> = include_dir!("$OUT_DIR/webui-dist");
 
@@ -181,6 +186,15 @@ impl DaemonLifecycleHandle {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommandRequest {
     pub command: String,
+    #[serde(default)]
+    pub attachments: Vec<CommandAttachmentRequest>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CommandAttachmentRequest {
+    pub name: String,
+    pub media_type: String,
+    pub data_url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -638,6 +652,137 @@ async fn dashboard_attachment_handler(
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+async fn store_command_attachments(
+    attachments: &[CommandAttachmentRequest],
+) -> std::result::Result<Vec<DashboardIncomingAttachment>, String> {
+    if attachments.len() > MAX_COMMAND_ATTACHMENTS {
+        return Err(format!(
+            "too many image attachments: maximum is {MAX_COMMAND_ATTACHMENTS}"
+        ));
+    }
+
+    let mut stored = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        stored.push(store_command_attachment(attachment).await?);
+    }
+    Ok(stored)
+}
+
+async fn store_command_attachment(
+    attachment: &CommandAttachmentRequest,
+) -> std::result::Result<DashboardIncomingAttachment, String> {
+    let media_type =
+        normalize_dashboard_image_media_type(&attachment.media_type).ok_or_else(|| {
+            "only PNG, JPEG, WebP, and GIF image attachments are supported".to_string()
+        })?;
+    let bytes = decode_image_data_url(&attachment.data_url, &media_type)?;
+    if bytes.len() > MAX_COMMAND_ATTACHMENT_BYTES {
+        return Err(format!(
+            "image attachment is too large: maximum is {} MiB",
+            MAX_COMMAND_ATTACHMENT_BYTES / 1024 / 1024
+        ));
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
+    let digest_hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let original_name = attachment.name.trim();
+    let display_name = if original_name.is_empty() {
+        "webui-image"
+    } else {
+        original_name
+    };
+    let extension = extension_for_dashboard_image(display_name, &media_type);
+    let file_name = format!(
+        "dashboard-{}-{}.{}",
+        chrono::Utc::now().timestamp_millis(),
+        &digest_hex[..16],
+        extension
+    );
+    let dir = daat_locus_paths_sync()
+        .state_dir()
+        .join("dashboard_attachments");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|err| format!("failed to create dashboard attachment directory: {err}"))?;
+    let path = dir.join(file_name);
+    tokio::fs::write(&path, bytes)
+        .await
+        .map_err(|err| format!("failed to write dashboard attachment: {err}"))?;
+
+    Ok(DashboardIncomingAttachment {
+        media_type,
+        local_path: path.display().to_string(),
+        description: Some(format!("webui image {display_name}")),
+    })
+}
+
+fn decode_image_data_url(
+    data_url: &str,
+    expected_media_type: &str,
+) -> std::result::Result<Vec<u8>, String> {
+    let trimmed = data_url.trim();
+    let payload = if let Some(rest) = trimmed.strip_prefix("data:") {
+        let (metadata, payload) = rest
+            .split_once(',')
+            .ok_or_else(|| "invalid image data URL".to_string())?;
+        let mut metadata_parts = metadata.split(';');
+        let data_media_type = metadata_parts
+            .next()
+            .and_then(normalize_dashboard_image_media_type)
+            .ok_or_else(|| "unsupported image data URL media type".to_string())?;
+        if data_media_type != expected_media_type {
+            return Err(
+                "image data URL media type does not match attachment media type".to_string(),
+            );
+        }
+        if !metadata_parts.any(|part| part.eq_ignore_ascii_case("base64")) {
+            return Err("image data URL must be base64 encoded".to_string());
+        }
+        payload
+    } else {
+        trimmed
+    };
+
+    base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|err| format!("invalid base64 image attachment: {err}"))
+}
+
+fn normalize_dashboard_image_media_type(media_type: &str) -> Option<String> {
+    match media_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some("image/png".to_string()),
+        "image/jpeg" | "image/jpg" => Some("image/jpeg".to_string()),
+        "image/webp" => Some("image/webp".to_string()),
+        "image/gif" => Some("image/gif".to_string()),
+        _ => None,
+    }
+}
+
+fn extension_for_dashboard_image(file_name: &str, media_type: &str) -> &'static str {
+    match StdPath::new(file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "png",
+        Some("jpg") | Some("jpeg") => "jpg",
+        Some("webp") => "webp",
+        Some("gif") => "gif",
+        _ => match media_type {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            _ => "jpg",
+        },
+    }
+}
+
 fn decode_dashboard_attachment_path(encoded_path: &str) -> Option<PathBuf> {
     if encoded_path.is_empty() || encoded_path.len() % 2 != 0 {
         return None;
@@ -662,14 +807,10 @@ fn is_allowed_dashboard_attachment_path(path: &std::path::Path) -> bool {
     let Ok(canonical_path) = path.canonicalize() else {
         return false;
     };
-    let Ok(attachments_dir) = paths
-        .state_dir()
-        .join("telegram_attachments")
-        .canonicalize()
-    else {
-        return false;
-    };
-    canonical_path.starts_with(attachments_dir)
+    ["telegram_attachments", "dashboard_attachments"]
+        .iter()
+        .filter_map(|dir| paths.state_dir().join(dir).canonicalize().ok())
+        .any(|attachments_dir| canonical_path.starts_with(attachments_dir))
 }
 
 #[derive(Debug, Deserialize)]
@@ -808,6 +949,25 @@ async fn command_handler(
     }
     if !state.lifecycle.get().allows_runtime_commands() {
         return runtime_not_ready_response(state.lifecycle.get());
+    }
+    let attachments = match store_command_attachments(&request.attachments).await {
+        Ok(attachments) => attachments,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(CommandResponse { output: err }),
+            )
+                .into_response();
+        }
+    };
+    if !attachments.is_empty() {
+        let output = execute_remote_message(
+            &request.command,
+            attachments,
+            &state.events,
+            &state.pending_work,
+        );
+        return Json(CommandResponse { output }).into_response();
     }
     let snapshot = state.dashboard_rx.borrow().clone();
     let output = execute_remote_command(
@@ -1253,6 +1413,7 @@ impl DaemonClient {
                     .post(format!("{}/commands/run", self.base_url()))
                     .json(&CommandRequest {
                         command: command.to_string(),
+                        attachments: Vec::new(),
                     }),
             )?
             .send()

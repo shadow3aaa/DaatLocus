@@ -26,7 +26,7 @@ use ratatui::{
 use crate::{
     app::AppId,
     core::TokenUsageInfo,
-    events::{EventStore, TerminalIncomingEvent},
+    events::{EventStore, TerminalIncomingAttachment, TerminalIncomingEvent},
     pending_work::{PendingWork, PendingWorkQueue},
     reasoning::turn_compile::{
         load_prompt_persona_spec_sync, prompt_persona_path_sync, render_prompt_persona_markdown,
@@ -176,6 +176,13 @@ pub enum DashboardControlCommand {
 #[async_trait]
 pub trait DashboardCommandRunner: Send + Sync {
     async fn run_command(&self, command: &str, state: &DashboardState) -> String;
+}
+
+#[derive(Clone)]
+pub struct DashboardIncomingAttachment {
+    pub media_type: String,
+    pub local_path: String,
+    pub description: Option<String>,
 }
 
 struct CommandOverlay {
@@ -1442,14 +1449,41 @@ pub(crate) fn execute_remote_command(
     execute_control_command(command, telegram_acl, state, control_tx)
 }
 
+pub(crate) fn execute_remote_message(
+    input: &str,
+    attachments: Vec<DashboardIncomingAttachment>,
+    events: &EventStore,
+    pending_work: &PendingWorkQueue,
+) -> String {
+    enqueue_terminal_message_with_attachments(events, pending_work, input.trim(), attachments)
+}
+
 fn enqueue_terminal_message(
     events: &EventStore,
     pending_work: &PendingWorkQueue,
     input: &str,
 ) -> String {
+    enqueue_terminal_message_with_attachments(events, pending_work, input, Vec::new())
+}
+
+fn enqueue_terminal_message_with_attachments(
+    events: &EventStore,
+    pending_work: &PendingWorkQueue,
+    input: &str,
+    attachments: Vec<DashboardIncomingAttachment>,
+) -> String {
     match events.register_terminal_incoming(TerminalIncomingEvent {
         origin: "dashboard".to_string(),
         incoming_text: input.to_string(),
+        attachments: attachments
+            .into_iter()
+            .map(|attachment| TerminalIncomingAttachment {
+                kind: crate::events::TerminalIncomingAttachmentKind::Image,
+                media_type: attachment.media_type,
+                local_path: attachment.local_path,
+                description: attachment.description,
+            })
+            .collect(),
     }) {
         Ok(event_id) => match pending_work.enqueue(PendingWork::Event { event_id }) {
             Ok(_) => format!("queued terminal message as event {event_id}"),

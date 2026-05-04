@@ -128,7 +128,19 @@ fn afterclaim_agent_content(text: String, input: &AfterClaimContextInput) -> Age
                     }
                 })
                 .collect::<Vec<_>>(),
-            EventPayload::TerminalIncoming(_) => Vec::new(),
+            EventPayload::TerminalIncoming(payload) => payload
+                .attachments
+                .iter()
+                .map(|attachment| match attachment.kind {
+                    crate::events::TerminalIncomingAttachmentKind::Image => {
+                        AgentContentPart::Image {
+                            path: attachment.local_path.clone(),
+                            media_type: attachment.media_type.clone(),
+                            description: attachment.description.clone(),
+                        }
+                    }
+                })
+                .collect::<Vec<_>>(),
         })
         .collect::<Vec<_>>();
     if parts.is_empty() {

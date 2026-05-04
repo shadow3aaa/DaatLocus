@@ -552,6 +552,12 @@ type DashboardCommandResponse = {
   output: string;
 };
 
+export type DashboardCommandAttachment = {
+  name: string;
+  media_type: string;
+  data_url: string;
+};
+
 export class DaemonApiError extends Error {
   status?: number;
 
@@ -673,7 +679,11 @@ export async function fetchSettingsSummary({
 
 export async function runDashboardCommand(
   command: string,
-  { signal, token = getStoredDaemonToken() }: FetchOptions = {},
+  {
+    attachments = [],
+    signal,
+    token = getStoredDaemonToken(),
+  }: FetchOptions & { attachments?: DashboardCommandAttachment[] } = {},
 ): Promise<string> {
   const daemonToken = token.trim();
 
@@ -688,7 +698,7 @@ export async function runDashboardCommand(
       Authorization: `Bearer ${daemonToken}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ command }),
+    body: JSON.stringify({ command, attachments }),
     signal,
   });
 
