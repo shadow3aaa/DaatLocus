@@ -1362,21 +1362,26 @@ function AgentChatBubbles({
       <Button
         type="button"
         variant="secondary"
-        size="sm"
-        aria-label="Scroll agent chat to bottom"
+        size="icon-lg"
+        aria-label="Back to bottom"
+        title="Back to bottom"
         onMouseDown={(event) => {
           event.preventDefault();
         }}
         onClick={handleScrollToBottomClick}
+        style={{
+          bottom: `calc(max(1.25rem, env(safe-area-inset-bottom)) + ${
+            composerHeight + AGENT_CHAT_COMPOSER_BOTTOM_GAP_PX
+          }px)`,
+        }}
         className={cn(
-          "fixed bottom-[calc(max(1.25rem,env(safe-area-inset-bottom))+6rem)] left-1/2 z-40 -translate-x-1/2 rounded-full border border-border/70 bg-background/90 px-3 shadow-lg shadow-background/30 backdrop-blur-xl transition-all duration-200",
+          "fixed left-1/2 z-40 -translate-x-1/2 rounded-full border border-border/70 bg-background/90 shadow-lg shadow-background/30 backdrop-blur-xl transition-all duration-200",
           showScrollToBottom
             ? "pointer-events-auto translate-y-0 opacity-100"
             : "pointer-events-none translate-y-2 opacity-0",
         )}
       >
-        <ArrowDownIcon className="size-3.5" />
-        Back to bottom
+        <ArrowDownIcon className="size-4" aria-hidden="true" />
       </Button>
     </>
   );
