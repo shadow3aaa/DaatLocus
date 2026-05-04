@@ -6,9 +6,10 @@ pub mod render;
 
 pub use cells::{
     ActivityCell, DashboardActivityEvent, LiveActivityCell, LiveWebActivityItem, WebActivityItem,
-    activity_cell_from_tool_ui_event, apply_activity_event, assistant_activity_cell,
-    default_web_activity_version, render_activity_feed, render_activity_from_messages,
-    sync_web_activity_state, web_activity_item_from_cell,
+    activity_cell_from_tool_ui_event, activity_cells_from_history_items, apply_activity_event,
+    assistant_activity_cell, default_web_activity_version, render_activity_feed,
+    render_activity_from_messages, sync_web_activity_state, user_activity_cell_from_event,
+    web_activity_item_from_cell,
 };
 pub use history::{DashboardActivityHistoryStore, DashboardActivityHistoryWindow};
 

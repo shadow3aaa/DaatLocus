@@ -11,6 +11,7 @@ mod workflow;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    events::{EventPayload, EventView},
     reasoning::runtime::{AgentContent, AgentContentPart, AgentMessage, HistoryMessage},
     tool_ui::{AppAttentionUiAction, BrowserUiData, TerminalUiAction, ToolUiEvent},
 };
@@ -102,11 +103,24 @@ pub fn render_activity_from_messages(messages: Vec<HistoryMessage>) -> Vec<Activ
     coalesce_activity_cells(cells)
 }
 
+pub fn activity_cells_from_history_items(items: &[WebActivityItem]) -> Vec<ActivityCell> {
+    coalesce_activity_cells(
+        items
+            .iter()
+            .filter_map(|item| item.cell.clone())
+            .collect::<Vec<_>>(),
+    )
+}
+
 pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivityEvent) {
     match event {
         DashboardActivityEvent::AppendCommittedCells { mut cells } => {
             state.activity_cells.append(&mut cells);
             state.activity_cells = coalesce_activity_cells(state.activity_cells.clone());
+            let history_cells = activity_cells_from_history_items(&state.activity_history.items);
+            if !history_cells.is_empty() {
+                state.activity_cells = history_cells;
+            }
         }
         DashboardActivityEvent::ExecBegin {
             key,
@@ -173,6 +187,11 @@ pub fn assistant_activity_cell(content: &str) -> Option<ActivityCell> {
     )))
 }
 
+pub fn user_activity_cell_from_event(event: &EventView) -> Option<ActivityCell> {
+    let content = user_agent_content_from_event(event)?;
+    Some(ActivityCell::User(user_cell_from_agent_content(&content)))
+}
+
 pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> Option<ActivityCell> {
     match ui_event {
         ToolUiEvent::Exec(event) => Some(ActivityCell::ExecResult(event.into())),
@@ -210,6 +229,51 @@ pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> Option<Activit
         ToolUiEvent::DeepRecall(event) => Some(ActivityCell::DeepRecallResult(event.into())),
         ToolUiEvent::App(event) => Some(ActivityCell::GenericApp(event.into())),
         ToolUiEvent::Error(event) => Some(ActivityCell::Error(event.into())),
+    }
+}
+
+fn user_agent_content_from_event(event: &EventView) -> Option<AgentContent> {
+    let (text, parts) = match &event.payload {
+        EventPayload::TelegramIncoming(payload) => (
+            payload.incoming_text.clone(),
+            payload
+                .attachments
+                .iter()
+                .map(|attachment| match attachment.kind {
+                    crate::events::TelegramIncomingAttachmentKind::Image => {
+                        AgentContentPart::Image {
+                            path: attachment.local_path.clone(),
+                            media_type: attachment.media_type.clone(),
+                            description: attachment.description.clone(),
+                        }
+                    }
+                })
+                .collect::<Vec<_>>(),
+        ),
+        EventPayload::TerminalIncoming(payload) => (
+            payload.incoming_text.clone(),
+            payload
+                .attachments
+                .iter()
+                .map(|attachment| match attachment.kind {
+                    crate::events::TerminalIncomingAttachmentKind::Image => {
+                        AgentContentPart::Image {
+                            path: attachment.local_path.clone(),
+                            media_type: attachment.media_type.clone(),
+                            description: attachment.description.clone(),
+                        }
+                    }
+                })
+                .collect::<Vec<_>>(),
+        ),
+    };
+
+    if text.trim().is_empty() && parts.is_empty() {
+        None
+    } else if parts.is_empty() {
+        Some(AgentContent::text(text))
+    } else {
+        Some(AgentContent::multimodal(text, parts))
     }
 }
 
@@ -444,6 +508,27 @@ mod tests {
     use super::*;
     use crate::tool_ui::{PlanUiData, ToolUiEvent};
 
+    fn terminal_event_view_with_attachment() -> EventView {
+        EventView {
+            event_id: uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                .expect("valid uuid"),
+            source: crate::events::EventSource::Terminal,
+            status: crate::events::EventStatus::Claimed,
+            arrived_at_ms: 1,
+            payload: EventPayload::TerminalIncoming(crate::events::TerminalIncomingEvent {
+                origin: "dashboard".to_string(),
+                incoming_text: "show this".to_string(),
+                attachments: vec![crate::events::TerminalIncomingAttachment {
+                    kind: crate::events::TerminalIncomingAttachmentKind::Image,
+                    media_type: "image/png".to_string(),
+                    local_path: "/tmp/dashboard-image.png".to_string(),
+                    description: Some("dashboard screenshot".to_string()),
+                }],
+            }),
+            last_error: None,
+        }
+    }
+
     #[test]
     fn activity_feed_hides_runtime_context_messages_before_limit() {
         let mut messages = vec![HistoryMessage::user("real user message")];
@@ -471,5 +556,25 @@ mod tests {
             activity_cell_from_tool_ui_event(ToolUiEvent::Plan(PlanUiData { steps: Vec::new() }));
 
         assert!(cell.is_none());
+    }
+
+    #[test]
+    fn user_activity_cell_from_event_preserves_dashboard_attachments() {
+        let cell = user_activity_cell_from_event(&terminal_event_view_with_attachment())
+            .expect("user event cell");
+
+        match cell {
+            ActivityCell::User(cell) => {
+                assert_eq!(cell.title, "show this");
+                assert_eq!(cell.image_attachments.len(), 1);
+                assert_eq!(cell.image_attachments[0].label, "dashboard screenshot");
+                assert_eq!(cell.image_attachments[0].mime_type, "image/png");
+                assert_eq!(
+                    cell.image_attachments[0].uri,
+                    "/dashboard/attachments/2f746d702f64617368626f6172642d696d6167652e706e67"
+                );
+            }
+            _ => panic!("expected user activity cell"),
+        }
     }
 }

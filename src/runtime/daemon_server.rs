@@ -18,7 +18,7 @@ use crate::{
     },
     dashboard::{
         DashboardActivityHistoryStore, DashboardControlCommand, DashboardState,
-        dashboard_agent_name, sync_web_activity_state,
+        activity_cells_from_history_items, dashboard_agent_name, sync_web_activity_state,
     },
     events::EventStore,
     hindsight::managed::HindsightManagedServer,
@@ -231,6 +231,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     let startup_preturn_context_output =
         build_preturn_context_text(&context, &startup_preturn_state);
     let app_renders = context.apps.state_renders();
+    let activity_history = dashboard_history.load_initial_window();
     tx.send_modify(|state| {
         *state = DashboardState {
             agent_name: dashboard_agent_name(),
@@ -242,12 +243,16 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             preturn_context_output: startup_preturn_context_output,
             app_status_outputs: render_app_status_outputs_for_dashboard(&context),
             pending_access_requests: context.telegram_acl.pending_requests(),
-            activity_cells: render_activity_for_dashboard(&context),
+            activity_cells: if activity_history.items.is_empty() {
+                render_activity_for_dashboard(&context)
+            } else {
+                activity_cells_from_history_items(&activity_history.items)
+            },
             live_activity_cells: Vec::new(),
             web_activity_version: crate::dashboard::default_web_activity_version(),
             web_activity_items: Vec::new(),
             live_web_activity_items: Vec::new(),
-            activity_history: dashboard_history.load_initial_window(),
+            activity_history,
             last_cycle_elapsed_ms: None,
             runtime_status: None,
             current_plan_step: current_plan_step_for_dashboard(&context),

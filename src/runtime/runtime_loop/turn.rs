@@ -210,6 +210,7 @@ pub(crate) async fn execute_agent_loop_step(
         })
         .collect::<Vec<_>>();
     context.claimed_app_notices = claimed_app_notice_entries.clone();
+    append_claimed_input_activity_cells(context, tx, &claimed_inputs);
 
     let preflight_timeout = Duration::from_secs(RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS);
     enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightMemory);
@@ -1201,10 +1202,22 @@ fn append_committed_activity_cells(
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
     cells: Vec<crate::dashboard::ActivityCell>,
 ) {
+    append_committed_activity_cells_with_ids(context, tx, cells, None);
+}
+
+fn append_committed_activity_cells_with_ids(
+    context: &Context,
+    tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+    cells: Vec<crate::dashboard::ActivityCell>,
+    stable_ids: Option<Vec<String>>,
+) {
     if cells.is_empty() {
         return;
     }
-    let history_items = dashboard_activity_items_from_cells(&cells);
+    let history_items = match stable_ids {
+        Some(ids) => dashboard_activity_items_from_cells_with_ids(&cells, ids),
+        None => dashboard_activity_items_from_cells(&cells),
+    };
     let persisted_window = context.dashboard_history.as_ref().and_then(|history| {
         persist_dashboard_activity_items(history, &history_items).map_or_else(
             |err| {
@@ -1231,19 +1244,54 @@ fn append_committed_activity_cells(
     }
 }
 
+fn append_claimed_input_activity_cells(
+    context: &Context,
+    tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+    inputs: &[ClaimedRuntimeInput],
+) {
+    let mut cells = Vec::new();
+    let mut stable_ids = Vec::new();
+    for input in inputs {
+        if let ClaimedRuntimeInput::Event(event) = input
+            && let Some(cell) = user_activity_cell_from_event(event)
+        {
+            cells.push(cell);
+            stable_ids.push(dashboard_user_activity_item_id(event));
+        }
+    }
+    append_committed_activity_cells_with_ids(context, tx, cells, Some(stable_ids));
+}
+
+fn dashboard_user_activity_item_id(event: &EventView) -> String {
+    format!("activity-user-event-{}", event.event_id)
+}
+
 fn dashboard_activity_items_from_cells(
     cells: &[crate::dashboard::ActivityCell],
 ) -> Vec<crate::dashboard::WebActivityItem> {
+    dashboard_activity_items_from_cells_with_ids(
+        cells,
+        cells
+            .iter()
+            .map(|_| {
+                format!(
+                    "activity-{}-{}",
+                    chrono::Utc::now().timestamp_millis(),
+                    uuid::Uuid::new_v4()
+                )
+            })
+            .collect(),
+    )
+}
+
+fn dashboard_activity_items_from_cells_with_ids(
+    cells: &[crate::dashboard::ActivityCell],
+    item_ids: Vec<String>,
+) -> Vec<crate::dashboard::WebActivityItem> {
     cells
         .iter()
-        .map(|cell| {
-            let item_id = format!(
-                "activity-{}-{}",
-                chrono::Utc::now().timestamp_millis(),
-                uuid::Uuid::new_v4()
-            );
-            web_activity_item_from_cell(cell, &item_id, false)
-        })
+        .zip(item_ids)
+        .map(|(cell, item_id)| web_activity_item_from_cell(cell, &item_id, false))
         .collect()
 }
 
@@ -1313,6 +1361,42 @@ mod tests {
                 description: Some("telegram photo 512x512".to_string()),
             }]
         );
+    }
+
+    #[test]
+    fn claimed_event_activity_cells_use_stable_event_ids() {
+        let first_event_id =
+            uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("valid uuid");
+        let second_event_id =
+            uuid::Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("valid uuid");
+        let cells = render_activity_from_messages(vec![
+            HistoryMessage::user("hello"),
+            HistoryMessage::assistant("ack"),
+        ]);
+
+        let items = dashboard_activity_items_from_cells_with_ids(
+            &cells,
+            vec![
+                format!("activity-user-event-{first_event_id}"),
+                format!("activity-user-event-{second_event_id}"),
+            ],
+        );
+
+        let item_ids = items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            item_ids,
+            vec![
+                "activity-user-event-11111111-1111-4111-8111-111111111111",
+                "activity-user-event-22222222-2222-4222-8222-222222222222",
+            ]
+        );
+        assert!(matches!(
+            items[0].cell,
+            Some(crate::dashboard::ActivityCell::User(_))
+        ));
     }
 
     #[test]
