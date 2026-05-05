@@ -55,6 +55,8 @@ import {
   CollapsibleTrigger,
   useCollapsibleState,
 } from "@/components/ui/collapsible";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   fetchDashboardActivityHistory,
   fetchSettingsSummary,
@@ -605,26 +607,6 @@ type AgentChatActivityCellRender =
 type AgentChatActivityCellViewProps = {
   bubbleId: string;
   render: AgentChatActivityCellRender;
-};
-
-type AgentChatMarkdownBlockData =
-  | { type: "paragraph"; text: string }
-  | { type: "heading"; level: number; text: string }
-  | { type: "list"; ordered: boolean; items: string[] }
-  | { type: "blockquote"; lines: string[] }
-  | { type: "rule" };
-
-type AgentChatMarkdownInlineNode =
-  | { type: "text"; text: string }
-  | { type: "code"; text: string }
-  | { type: "strong"; text: string }
-  | { type: "em"; text: string }
-  | { type: "link"; label: string; href: string };
-
-type AgentChatMarkdownInlineToken = {
-  start: number;
-  end: number;
-  node: AgentChatMarkdownInlineNode;
 };
 
 function AgentChatComposer({
