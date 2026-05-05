@@ -52,6 +52,10 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import {
+  CollapsibleTrigger,
+  useCollapsibleState,
+} from "@/components/ui/collapsible";
+import {
   fetchDashboardActivityHistory,
   fetchSettingsSummary,
   getDashboardAttachmentUrl,
@@ -90,6 +94,7 @@ const AGENT_CHAT_TELEGRAM_DETAIL_LIMIT = 6;
 const AGENT_CHAT_TELEGRAM_MESSAGE_LIMIT = 6;
 const AGENT_CHAT_TERMINAL_WAIT_LINE_LIMIT = 6;
 const AGENT_CHAT_ERROR_LINE_LIMIT = 12;
+const AGENT_CHAT_THINKING_PREVIEW_LINE_LIMIT = 3;
 const AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX = 72;
 const AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX = 160;
 const AGENT_CHAT_MAX_IMAGE_ATTACHMENTS = 4;
@@ -587,6 +592,14 @@ type AgentChatActivityCellRender =
       title: string;
       messageLines: string[];
       disposition: string;
+    }
+  | {
+      kind: "thinking";
+      marker: string;
+      title: string;
+      bodyLines: string[];
+      fullBody?: string | null;
+      bodyLimit: number;
     };
 
 type AgentChatActivityCellViewProps = {
@@ -1564,6 +1577,19 @@ function AgentChatActivityCellView({
       />
     );
   }
+  
+  if (render.kind === "thinking") {
+    return (
+      <AgentChatThinkingCollapsibleCell
+        id={bubbleId}
+        marker={render.marker}
+        title={render.title}
+        bodyLines={render.bodyLines}
+        fullBody={render.fullBody}
+        bodyLimit={render.bodyLimit}
+      />
+    );
+  }
 
   if (render.kind === "browser") {
     return (
@@ -1793,6 +1819,63 @@ function AgentChatStatusLineCell({
           </>
         ) : null}
       </p>
+    </div>
+  );
+}
+
+function AgentChatThinkingCollapsibleCell({
+  id,
+  marker,
+  title,
+  bodyLines,
+  fullBody,
+  bodyLimit,
+}: {
+  id: string;
+  marker: string;
+  title: string;
+  bodyLines: string[];
+  fullBody?: string | null;
+  bodyLimit: number;
+}) {
+  const { open, toggle } = useCollapsibleState(false);
+  const contentLines: string[] = fullBody ? fullBody.split("\n") : bodyLines;
+  const isTruncatable = Boolean(fullBody) || bodyLines.length > bodyLimit;
+
+  return (
+    <div className="space-y-1 text-sm leading-6 text-foreground/90">
+      <div className="grid min-w-0 grid-cols-[0.75rem_minmax(0,1fr)] items-start gap-x-[16px] px-3">
+        <AgentChatActivityMarker marker={marker} />
+        <div className="flex items-center gap-1.5 min-w-0">
+          <p className="min-w-0 break-words font-semibold text-foreground">
+            <AgentChatMarkdownInline text={title} />
+          </p>
+          {isTruncatable ? (
+            <CollapsibleTrigger open={open} onToggle={toggle} className="ml-auto shrink-0 w-auto text-xs">
+              {open ? "Hide" : "Expand"}
+            </CollapsibleTrigger>
+          ) : null}
+        </div>
+      </div>
+      {contentLines.length > 0 ? (
+        <div
+          className={`relative space-y-0.5 text-muted-foreground border-l-2 border-muted ml-[calc(0.75rem+8px)] pl-3 pr-3 ${
+            !open && isTruncatable ? "max-h-[4.5rem] overflow-hidden" : ""
+          }`}
+        >
+          {contentLines.map((line, index) => (
+            <p
+              key={`${id}-thinking-line-${index}`}
+              className="min-w-0 break-words"
+            >
+              <AgentChatMarkdownInline text={line} />
+            </p>
+          ))}
+          {!open && isTruncatable ? (
+            <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-background to-transparent pointer-events-none" />
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -3112,6 +3195,18 @@ function agentChatActivityCellRenderForBubble(
       bodyLines: stringArrayValue(error.body_lines),
       bodyLimit: AGENT_CHAT_ERROR_LINE_LIMIT,
       tone: "error",
+    };
+  }
+  
+  const thinking = agentChatActivityCellPayload(cell, "Thinking");
+  if (thinking) {
+    return {
+      kind: "thinking",
+      marker: "\u2699",
+      title: stringValue(thinking.title, "Thinking"),
+      bodyLines: stringArrayValue(thinking.body_lines),
+      fullBody: nullableStringValue(thinking.full_body),
+      bodyLimit: AGENT_CHAT_THINKING_PREVIEW_LINE_LIMIT,
     };
   }
 

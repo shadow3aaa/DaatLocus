@@ -8,6 +8,18 @@ pub struct AssistantActivityCell {
     pub body_lines: Vec<String>,
 }
 
+/// Thinking / reasoning content produced by the model.
+/// Rendered truncated in TUI and collapsible in WebUI.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThinkingActivityCell {
+    pub title: String,
+    pub body_lines: Vec<String>,
+    /// Full reasoning text (may be very long for DeepSeek-style thinking).
+    /// Kept for WebUI expand-to-view; TUI uses body_lines (truncated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_body: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserActivityCell {
     pub title: String,
@@ -82,6 +94,18 @@ pub fn error_cell(title: impl Into<String>, body_lines: Vec<String>) -> ErrorAct
     ErrorActivityCell {
         title: title.into(),
         body_lines,
+    }
+}
+
+pub fn thinking_cell(
+    title: impl Into<String>,
+    body_lines: Vec<String>,
+    full_body: Option<String>,
+) -> ThinkingActivityCell {
+    ThinkingActivityCell {
+        title: title.into(),
+        body_lines,
+        full_body,
     }
 }
 

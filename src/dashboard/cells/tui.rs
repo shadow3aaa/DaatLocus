@@ -12,7 +12,7 @@ use super::{
     apps::{AppAttentionActivityCell, BrowserActivityCell, LiveBrowserActivityCell},
     common::{
         AssistantActivityCell, ErrorActivityCell, GenericAppActivityCell, TerminalWaitActivityCell,
-        UserActivityCell,
+        ThinkingActivityCell, UserActivityCell,
     },
     exec::{ExecResultActivityCell, LiveExecActivityCell},
     highlight::{DiffScopeBackgrounds, diff_scope_backgrounds, highlight_patch_lines},
@@ -88,11 +88,23 @@ fn render_activity_cell_lines(cell: &ActivityCell) -> Vec<Line<'static>> {
         ActivityCell::Reply(cell) => render_reply_cell_lines(cell),
         ActivityCell::TerminalWait(cell) => render_terminal_wait_cell_lines(cell),
         ActivityCell::Error(cell) => render_error_cell_lines(cell),
+        ActivityCell::Thinking(cell) => render_thinking_cell_lines(cell),
     }
 }
 
 fn render_assistant_cell_lines(cell: &AssistantActivityCell) -> Vec<Line<'static>> {
     render_text_activity_lines("›", Color::Cyan, &cell.title, &cell.body_lines, 8, None)
+}
+
+fn render_thinking_cell_lines(cell: &ThinkingActivityCell) -> Vec<Line<'static>> {
+    render_text_activity_lines(
+        "\u{2699}",
+        Color::Magenta,
+        &cell.title,
+        &cell.body_lines,
+        3,
+        None,
+    )
 }
 
 fn render_user_cell_lines(cell: &UserActivityCell) -> Vec<Line<'static>> {

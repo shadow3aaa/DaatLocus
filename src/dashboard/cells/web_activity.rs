@@ -10,7 +10,7 @@ use super::{
     apps::{BrowserActivityCell, LiveBrowserActivityCell},
     common::{
         AssistantActivityCell, ErrorActivityCell, GenericAppActivityCell, TerminalWaitActivityCell,
-        UserActivityCell,
+        ThinkingActivityCell, UserActivityCell,
     },
     exec::{ExecResultActivityCell, LiveExecActivityCell},
     messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell},
@@ -270,6 +270,7 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
         ActivityCell::Reply(cell) => apply_reply_cell(&mut item, cell),
         ActivityCell::TerminalWait(cell) => apply_terminal_wait_cell(&mut item, cell),
         ActivityCell::Error(cell) => apply_error_cell(&mut item, cell),
+        ActivityCell::Thinking(cell) => apply_thinking_cell(&mut item, cell),
     }
     item.ui_hint = Some(activity_cell_variant_name(cell).to_string());
 
@@ -298,6 +299,7 @@ fn activity_cell_variant_name(cell: &ActivityCell) -> &'static str {
         ActivityCell::Reply(_) => "Reply",
         ActivityCell::TerminalWait(_) => "TerminalWait",
         ActivityCell::Error(_) => "Error",
+        ActivityCell::Thinking(_) => "Thinking",
     }
 }
 
@@ -310,6 +312,19 @@ fn apply_assistant_cell(item: &mut WebActivityItem, cell: &AssistantActivityCell
         cell.title.clone()
     };
     item.blocks = text_blocks(primary_lines(&cell.title, &cell.body_lines));
+}
+
+fn apply_thinking_cell(item: &mut WebActivityItem, cell: &ThinkingActivityCell) {
+    item.kind = WebActivityKind::Message;
+    item.actor = Some(WebActivityActor::Assistant);
+    item.title = "Thinking".to_string();
+    // Preview blocks: truncated lines shown initially
+    item.blocks = text_blocks(primary_lines("Thinking", &cell.body_lines));
+    // Full body hidden behind expand, signaled via ui_hint
+    if let Some(ref full) = cell.full_body {
+        item.ui_hint = Some("thinking-collapsible".to_string());
+        item.detail_blocks = text_blocks(vec![full.clone()]);
+    }
 }
 
 fn apply_user_cell(item: &mut WebActivityItem, cell: &UserActivityCell) {

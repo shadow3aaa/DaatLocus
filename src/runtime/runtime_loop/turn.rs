@@ -591,6 +591,9 @@ pub(crate) async fn execute_agent_loop_step(
             && !reasoning_content.trim().is_empty()
         {
             context.emit_live_reasoning_progress(reasoning_content);
+            if let Some(cell) = thinking_activity_cell(reasoning_content) {
+                append_committed_activity_cells(context, tx, vec![cell]);
+            }
         }
         if let Some(content) = response_assistant_content.as_deref()
             && !content.trim().is_empty()

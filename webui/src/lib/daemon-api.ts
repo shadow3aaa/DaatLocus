@@ -350,6 +350,7 @@ export type ActivityCellVariant =
   | { Reply: ActivityCellReply }
   | { TerminalWait: ActivityCellCommon }
   | { Error: ActivityCellCommon }
+  | { Thinking: ActivityCellCommon & { full_body?: string | null } }
   | Record<string, unknown>;
 
 export type WebActivityItem = {

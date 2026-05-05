@@ -18,6 +18,8 @@ use crate::{
 
 use super::DashboardState;
 use apps::{AppAttentionActivityCell, BrowserActivityCell, LiveBrowserActivityCell};
+use common::ThinkingActivityCell;
+use common::thinking_cell;
 use common::{
     AssistantActivityCell, ErrorActivityCell, GenericAppActivityCell, MessageImageAttachment,
     TerminalWaitActivityCell, UserActivityCell, assistant_cell, error_cell, terminal_wait_cell,
@@ -60,6 +62,7 @@ pub enum ActivityCell {
     Reply(ReplyActivityCell),
     TerminalWait(TerminalWaitActivityCell),
     Error(ErrorActivityCell),
+    Thinking(ThinkingActivityCell),
 }
 
 #[derive(Clone)]
@@ -184,6 +187,27 @@ pub fn assistant_activity_cell(content: &str) -> Option<ActivityCell> {
     Some(ActivityCell::Assistant(assistant_cell(
         first_line_or_fallback(content, "assistant"),
         remaining_lines_with_limit(content, 8),
+    )))
+}
+
+pub fn thinking_activity_cell(reasoning_content: &str) -> Option<ActivityCell> {
+    let trimmed = reasoning_content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut lines: Vec<&str> = trimmed.lines().collect();
+    let full_body = if lines.len() > 3 {
+        let full = trimmed.to_string();
+        lines.truncate(2);
+        lines.push("... (truncated in TUI, expand in WebUI)");
+        Some(full)
+    } else {
+        None
+    };
+    let body_lines: Vec<String> = lines.into_iter().map(|s| s.to_string()).collect();
+    let title = "Thinking".to_string();
+    Some(ActivityCell::Thinking(thinking_cell(
+        title, body_lines, full_body,
     )))
 }
 
