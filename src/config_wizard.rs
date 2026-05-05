@@ -2658,7 +2658,7 @@ mod tests {
             ModelCapacity {
                 context_window_tokens: 12_345,
                 max_completion_tokens: 678,
-                supports_vision: false,
+                supports_vision: true,
             }
         );
     }
@@ -2672,7 +2672,7 @@ mod tests {
             ModelCapacity {
                 context_window_tokens: 12_345,
                 max_completion_tokens: 32_768,
-                supports_vision: false,
+                supports_vision: true,
             }
         );
     }

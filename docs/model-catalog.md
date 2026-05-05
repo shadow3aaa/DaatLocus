@@ -16,10 +16,12 @@ entries that need Daat Locus-specific conservative defaults.
 Documented snapshot date: 2026-04-25.
 
 Primary fields:
-
+ 
 - `model_id`: normalized, lower-case provider model identifier.
 - `context_window_tokens`: total context window used for budgeting.
 - `max_completion_tokens`: maximum output budget used for conservative setup.
+- `supports_vision`: whether the model accepts image/vision input (from litellm
+  `supports_vision` field when available, falling back to name heuristic).
 
 ## Refresh Process
 
