@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::{
     app::{AppId, AppManager},
@@ -82,6 +82,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         tokio::sync::mpsc::unbounded_channel::<RuntimeDaemonControlCommand>();
     let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::oneshot::channel();
 
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let daemon_server = start_server(DaemonServerStartParams {
         port: config.daemon.port,
         auth_registry: daemon_token_registry,
@@ -94,6 +95,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         dashboard_control_tx: dashboard_control_tx.clone(),
         daemon_control_tx: daemon_control_tx.clone(),
         shutdown_rx: server_shutdown_rx,
+        shutdown_notify: shutdown_notify.clone(),
     })
     .await?;
     emit_startup_progress(format!(
@@ -403,13 +405,16 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     if let Some(completion_tx) = shutdown_completion_tx.take() {
         let _ = completion_tx.send(());
     }
-    // Drop the dashboard watch sender so that any active WebSocket
-    // connections (dashboard_ws) see a closed channel and exit their
-    // rx.changed() loops promptly, allowing the axum graceful shutdown
-    // to complete without hanging.
+    // Notify all WebSocket connections to shut down, then drop the
+    // dashboard watch sender so that any active connections that are
+    // still in rx.changed() see a closed channel and exit promptly.
+    shutdown_notify.notify_waiters();
     drop(tx);
     let _ = server_shutdown_tx.send(());
-    daemon_server.shutdown().await;
+    // Wait for the axum server to fully shut down, but don't hang
+    // indefinitely. If connections don't drain within 15 seconds,
+    // proceed anyway — the process is about to exit.
+    let _ = tokio::time::timeout(Duration::from_secs(15), daemon_server.shutdown()).await;
     if restart_requested {
         spawn_detached_daemon_process().await?;
     }

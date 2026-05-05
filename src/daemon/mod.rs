@@ -36,7 +36,7 @@ use sha2::{Digest, Sha256};
 use sysinfo::{Pid, System};
 use tokio::{
     net::TcpListener,
-    sync::{mpsc, oneshot, watch},
+    sync::{Notify, mpsc, oneshot, watch},
     task::JoinHandle,
 };
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -345,6 +345,7 @@ struct ServerState {
     dashboard_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
     connected_clients: Arc<std::sync::atomic::AtomicUsize>,
+    shutdown_notify: Arc<Notify>,
 }
 
 pub struct DaemonServerHandle {
@@ -364,6 +365,7 @@ pub struct DaemonServerStartParams {
     pub dashboard_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     pub daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
     pub shutdown_rx: oneshot::Receiver<()>,
+    pub shutdown_notify: Arc<Notify>,
 }
 
 impl DaemonServerHandle {
@@ -468,6 +470,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         dashboard_control_tx,
         daemon_control_tx,
         shutdown_rx,
+        shutdown_notify,
     } = params;
 
     let listener = TcpListener::bind((DAEMON_BIND_HOST, port))
@@ -498,6 +501,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         dashboard_control_tx,
         daemon_control_tx,
         connected_clients: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        shutdown_notify,
     };
 
     let router = Router::new()
@@ -1293,18 +1297,31 @@ async fn dashboard_ws(mut socket: WebSocket, state: ServerState) {
         .connected_clients
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut rx = state.dashboard_rx.clone();
+    let shutdown_notify = state.shutdown_notify.clone();
     let initial_snapshot = rx.borrow_and_update().clone();
     if send_dashboard_ws_snapshot(&mut socket, &initial_snapshot)
         .await
         .is_ok()
     {
-        while rx.changed().await.is_ok() {
-            let snapshot = rx.borrow().clone();
-            if send_dashboard_ws_snapshot(&mut socket, &snapshot)
-                .await
-                .is_err()
-            {
-                break;
+        loop {
+            tokio::select! {
+                result = rx.changed() => {
+                    match result {
+                        Ok(()) => {
+                            let snapshot = rx.borrow().clone();
+                            if send_dashboard_ws_snapshot(&mut socket, &snapshot)
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                _ = shutdown_notify.notified() => {
+                    break;
+                }
             }
         }
     }
