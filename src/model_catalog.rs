@@ -6,6 +6,8 @@
 pub struct ModelCapacity {
     pub context_window_tokens: usize,
     pub max_completion_tokens: usize,
+    /// Whether the model accepts image/vision input in messages.
+    pub supports_vision: bool,
 }
 
 pub const CONSERVATIVE_CONTEXT_WINDOW_TOKENS: usize = 32_768;
@@ -16,6 +18,8 @@ pub fn conservative_model_capacity() -> ModelCapacity {
     ModelCapacity {
         context_window_tokens: CONSERVATIVE_CONTEXT_WINDOW_TOKENS,
         max_completion_tokens: CONSERVATIVE_MAX_COMPLETION_TOKENS,
+        // Unknown model: assume vision capable to avoid stripping images unnecessarily.
+        supports_vision: true,
     }
 }
 
@@ -28,7 +32,51 @@ pub fn catalog_model_capacity(model_id: &str) -> Option<ModelCapacity> {
     Some(ModelCapacity {
         context_window_tokens,
         max_completion_tokens,
+        supports_vision: model_name_suggests_vision(&normalized),
     })
+}
+
+/// Heuristic: returns `true` when the model name implies image/vision support.
+/// This is used as a static prior; runtime detection and explicit config override
+/// take precedence.
+pub fn model_name_suggests_vision(model_id: &str) -> bool {
+    let lower = model_id.trim().to_ascii_lowercase();
+    // Explicit vision/multimodal marker in the name
+    if lower.contains("vision")
+        || lower.contains("multimodal")
+        || lower.contains("-vl")
+        || lower.contains("vl-")
+        || lower.contains("llava")
+        || lower.contains("pixtral")
+    {
+        return true;
+    }
+    // GPT-4o and o-series support vision
+    if lower.starts_with("gpt-4o")
+        || lower.contains("/gpt-4o")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+    {
+        return true;
+    }
+    // Claude 3+ family supports vision
+    if lower.contains("claude-3")
+        || lower.contains("claude-sonnet-4")
+        || lower.contains("claude-opus-4")
+        || lower.contains("claude-haiku-4")
+    {
+        return true;
+    }
+    // Gemini models support vision
+    if lower.contains("gemini") {
+        return true;
+    }
+    // GPT-4 Turbo supports vision
+    if lower.contains("gpt-4-turbo") {
+        return true;
+    }
+    false
 }
 
 const LITELLM_MODEL_CAPACITIES: &[(&str, usize, usize)] = &[
@@ -3881,6 +3929,7 @@ mod tests {
             Some(ModelCapacity {
                 context_window_tokens: 1_047_576,
                 max_completion_tokens: 32_768,
+                supports_vision: false,
             })
         );
     }

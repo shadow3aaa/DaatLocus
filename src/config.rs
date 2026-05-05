@@ -140,6 +140,13 @@ pub struct ModelConfig {
     pub effective_context_window_percent: i64,
     pub max_completion_tokens: usize,
     pub tool_output_max_tokens: usize,
+    /// Explicitly set whether this model accepts image attachments in messages.
+    /// When `None`, vision support is inferred from the model name via the
+    /// built-in catalog heuristic.  Set to `false` to unconditionally strip
+    /// images before sending; set to `true` to skip runtime detection and
+    /// always include images.
+    #[serde(default)]
+    pub supports_vision: Option<bool>,
 }
 
 impl Default for ModelConfig {
@@ -157,6 +164,7 @@ impl Default for ModelConfig {
             effective_context_window_percent: DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
             max_completion_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
             tool_output_max_tokens: DEFAULT_TOOL_OUTPUT_MAX_TOKENS,
+            supports_vision: None,
         }
     }
 }

@@ -61,6 +61,20 @@ pub(super) fn should_retry_request_without_thinking_budget(body: &str) -> bool {
         || body.contains("unknown parameter: \"reasoning.effort\"")
 }
 
+/// Returns `true` when the provider error indicates the model does not accept
+/// `image_url` (or `input_image`) content blocks.
+pub(super) fn looks_like_vision_unsupported_error(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    // Providers that use OpenAI-compatible deserialization emit this when an
+    // enum variant (image_url / input_image) is unknown.
+    (body.contains("image_url") || body.contains("input_image"))
+        && body.contains("unknown variant")
+        // Generic "does not support image/vision" messages from various providers
+        || body.contains("does not support image")
+        || body.contains("does not support vision")
+        || (body.contains("vision") && body.contains("not supported"))
+}
+
 pub(super) fn summarize_agent_turn_request(
     request: &AgentTurnRequest,
     budget: Option<&RequestBudgetBreakdown>,

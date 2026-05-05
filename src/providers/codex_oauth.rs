@@ -74,6 +74,9 @@ struct CodexResponsesClient {
     token_usage: std::sync::Mutex<TokenUsageInfo>,
     client_version: String,
     installation_id: String,
+    /// Whether this model accepts image/vision input. Derived from config
+    /// or catalog heuristic; can be set to `false` at runtime on error.
+    supports_vision: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -139,6 +142,15 @@ impl CodexResponsesClient {
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
         let max_completion_tokens = model_config.max_completion_tokens();
         let client_version = codex_oauth_client_version();
+        let supports_vision_initial = {
+            use crate::model_catalog::{catalog_model_capacity, model_name_suggests_vision};
+            match model_config.supports_vision {
+                Some(v) => v,
+                None => catalog_model_capacity(&model_config.model_id)
+                    .map(|c| c.supports_vision)
+                    .unwrap_or_else(|| model_name_suggests_vision(&model_config.model_id)),
+            }
+        };
         Self {
             client,
             api_key: "placeholder".to_string(),
@@ -165,6 +177,7 @@ impl CodexResponsesClient {
             }),
             client_version,
             installation_id: Uuid::new_v4().to_string(),
+            supports_vision: std::sync::atomic::AtomicBool::new(supports_vision_initial),
         }
     }
 
@@ -408,7 +421,9 @@ impl CodexResponsesClient {
             .into());
         }
         let request_context = summarize_agent_turn_request(&request, Some(&budget));
-        let payload = build_agent_responses_payload(self, request);
+        use std::sync::atomic::Ordering;
+        let strip_images = !self.supports_vision.load(Ordering::Relaxed);
+        let payload = build_agent_responses_payload(self, request.clone(), strip_images);
         let response = self
             .post_responses_with_retry(&payload, &request_context)
             .await?;
@@ -429,6 +444,35 @@ impl CodexResponsesClient {
                     )),
                 )
                 .into());
+            }
+            if super::io::looks_like_vision_unsupported_error(&body)
+                && self.supports_vision.load(Ordering::Relaxed)
+            {
+                self.supports_vision.store(false, Ordering::Relaxed);
+                warn!(
+                    "Codex Responses rejected image input; retrying agent turn without images\n{}",
+                    request_context.join("\n")
+                );
+                let payload =
+                    build_agent_responses_payload(self, request, /*strip_images=*/ true);
+                let response = self
+                    .post_responses_with_retry(&payload, &request_context)
+                    .await?;
+                let status = response.status();
+                if status.is_success() {
+                    return self
+                        .parse_responses_stream(Some(context), response, true)
+                        .await;
+                }
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|err| miette!("Codex Responses body read failed: {err}"))?;
+                return Err(miette!(
+                    "Codex Responses returned HTTP {}: {}",
+                    status,
+                    truncate_for_error(&body)
+                ));
             }
             return Err(miette!(
                 "Codex Responses returned HTTP {}: {}",
@@ -776,7 +820,9 @@ fn build_prompt_responses_payload(
     output_schema: Value,
 ) -> Value {
     let messages = request.all_messages();
-    let (instructions, input) = history_messages_to_responses_parts(messages);
+    // Prompt requests are structured output calls; pass strip_images=false as
+    // prompts don't carry user-uploaded image attachments.
+    let (instructions, input) = history_messages_to_responses_parts(messages, false);
     let mut payload = base_responses_payload(client, instructions, input, Vec::new());
     payload["text"] = json!({
         "format": {
@@ -792,8 +838,9 @@ fn build_prompt_responses_payload(
 fn build_agent_responses_payload(
     client: &CodexResponsesClient,
     request: AgentTurnRequest,
+    strip_images: bool,
 ) -> Value {
-    let (instructions, input) = agent_messages_to_responses_parts(request.messages);
+    let (instructions, input) = agent_messages_to_responses_parts(request.messages, strip_images);
     let tools = request
         .tools
         .into_iter()
@@ -1005,15 +1052,21 @@ fn openai_usage_json(usage: &TokenUsage) -> Value {
     })
 }
 
-fn history_messages_to_responses_parts(messages: Vec<HistoryMessage>) -> (String, Vec<Value>) {
+fn history_messages_to_responses_parts(
+    messages: Vec<HistoryMessage>,
+    strip_images: bool,
+) -> (String, Vec<Value>) {
     let messages = messages
         .into_iter()
         .map(|message| message.message)
         .collect::<Vec<_>>();
-    agent_messages_to_responses_parts(messages)
+    agent_messages_to_responses_parts(messages, strip_images)
 }
 
-fn agent_messages_to_responses_parts(messages: Vec<AgentMessage>) -> (String, Vec<Value>) {
+fn agent_messages_to_responses_parts(
+    messages: Vec<AgentMessage>,
+    strip_images: bool,
+) -> (String, Vec<Value>) {
     let mut instructions = Vec::new();
     let mut input = Vec::new();
     let mut valid_tool_call_ids = HashSet::new();
@@ -1021,7 +1074,9 @@ fn agent_messages_to_responses_parts(messages: Vec<AgentMessage>) -> (String, Ve
     for message in messages {
         match message {
             AgentMessage::System { content } => instructions.push(content),
-            AgentMessage::User { content } => input.push(responses_user_message(content)),
+            AgentMessage::User { content } => {
+                input.push(responses_user_message(content, strip_images))
+            }
             AgentMessage::Assistant { content } => {
                 input.push(responses_message("assistant", "output_text", content));
             }
@@ -1075,7 +1130,7 @@ fn responses_message(role: &str, content_type: &str, text: String) -> Value {
     })
 }
 
-fn responses_user_message(content: AgentContent) -> Value {
+fn responses_user_message(content: AgentContent, strip_images: bool) -> Value {
     if content.is_plain_text() {
         return responses_message("user", "input_text", content.as_text().to_string());
     }
@@ -1098,6 +1153,16 @@ fn responses_user_message(content: AgentContent) -> Value {
             AgentContentPart::Image {
                 path, description, ..
             } => {
+                if strip_images {
+                    parts.push(json!({
+                        "type": "input_text",
+                        "text": format!(
+                            "[image: {}]",
+                            description.as_deref().unwrap_or(path)
+                        ),
+                    }));
+                    continue;
+                }
                 let Some(url) = super::payload::image_part_data_url(part) else {
                     parts.push(json!({
                         "type": "input_text",
@@ -1811,7 +1876,7 @@ mod tests {
             ],
         };
 
-        let payload = build_agent_responses_payload(&client, request);
+        let payload = build_agent_responses_payload(&client, request, false);
 
         assert_eq!(payload["instructions"], "base instructions");
         assert_eq!(payload["input"][1]["type"], "function_call");
@@ -1844,8 +1909,8 @@ mod tests {
             tools: Vec::new(),
         };
 
-        let first = build_agent_responses_payload(&client, request.clone());
-        let second = build_agent_responses_payload(&client, request);
+        let first = build_agent_responses_payload(&client, request.clone(), false);
+        let second = build_agent_responses_payload(&client, request, false);
 
         assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
         assert_eq!(
@@ -1899,6 +1964,7 @@ mod tests {
                 messages: first_messages,
                 tools: tools.clone(),
             },
+            false,
         );
         let second = build_agent_responses_payload(
             &client,
@@ -1906,6 +1972,7 @@ mod tests {
                 messages: second_messages,
                 tools,
             },
+            false,
         );
 
         let first_input = first["input"].as_array().expect("first input");
@@ -1939,7 +2006,7 @@ mod tests {
             tools: vec![],
         };
 
-        let payload = build_agent_responses_payload(&client, request);
+        let payload = build_agent_responses_payload(&client, request, false);
 
         assert_eq!(payload["input"][0]["role"], "user");
         assert_eq!(payload["input"][0]["content"][0]["type"], "input_text");
@@ -1978,7 +2045,7 @@ mod tests {
             }],
         };
 
-        let payload = build_agent_responses_payload(&client, request);
+        let payload = build_agent_responses_payload(&client, request, false);
 
         assert_eq!(payload["tools"][0]["type"], "custom");
         assert_eq!(payload["tools"][0]["format"]["type"], "grammar");

@@ -8,10 +8,12 @@ pub(super) fn build_agent_turn_payload_common(
     stream: bool,
     flatten_orphan_tool_messages: bool,
 ) -> serde_json::Value {
+    let strip_images = client.adapter_state_guard().vision_mode == VisionMode::Disabled;
     let messages = agent_turn_request_to_openai_messages(
         request.messages,
         flatten_orphan_tool_messages,
         is_deepseek_api_base_url(&client.base_url),
+        strip_images,
     );
     let tools = request
         .tools
@@ -112,6 +114,7 @@ pub(super) fn prompt_request_to_openai_messages(
 pub(super) fn agent_message_to_openai_message(
     message: AgentMessage,
     include_reasoning_content: bool,
+    strip_images: bool,
 ) -> serde_json::Value {
     match message {
         AgentMessage::System { content } => json!({
@@ -120,7 +123,7 @@ pub(super) fn agent_message_to_openai_message(
         }),
         AgentMessage::User { content } => json!({
             "role": "user",
-            "content": openai_user_content(content),
+            "content": openai_user_content(content, strip_images),
         }),
         AgentMessage::Assistant { content } => json!({
             "role": "assistant",
@@ -185,13 +188,14 @@ pub(super) fn provider_message_from_agent_message(
             _ => {}
         }
     }
-    agent_message_to_openai_message(message.clone(), false)
+    agent_message_to_openai_message(message.clone(), false, false)
 }
 
 pub(super) fn agent_turn_request_to_openai_messages(
     messages: Vec<AgentMessage>,
     flatten_orphan_tool_messages: bool,
     include_reasoning_content: bool,
+    strip_images: bool,
 ) -> Vec<serde_json::Value> {
     let mut valid_tool_call_ids = HashSet::new();
     let mut serialized = Vec::with_capacity(messages.len());
@@ -212,6 +216,7 @@ pub(super) fn agent_turn_request_to_openai_messages(
                         calls,
                     },
                     include_reasoning_content,
+                    strip_images,
                 ));
             }
             AgentMessage::Tool {
@@ -224,7 +229,7 @@ pub(super) fn agent_turn_request_to_openai_messages(
                     "content": flatten_tool_result_as_assistant_text(&name, &content),
                 }));
             }
-            other => serialized.push(agent_message_to_openai_message(other, false)),
+            other => serialized.push(agent_message_to_openai_message(other, false, strip_images)),
         }
     }
     serialized
@@ -279,7 +284,7 @@ fn normalize_image_part_media_type(path: &str, media_type: &str) -> Option<Strin
     }
 }
 
-fn openai_user_content(content: AgentContent) -> serde_json::Value {
+fn openai_user_content(content: AgentContent, strip_images: bool) -> serde_json::Value {
     if content.is_plain_text() {
         return json!(content.as_text());
     }
@@ -302,6 +307,16 @@ fn openai_user_content(content: AgentContent) -> serde_json::Value {
             AgentContentPart::Image {
                 path, description, ..
             } => {
+                if strip_images {
+                    parts.push(json!({
+                        "type": "text",
+                        "text": format!(
+                            "[image: {}]",
+                            description.as_deref().unwrap_or(path)
+                        ),
+                    }));
+                    continue;
+                }
                 let Some(url) = image_part_data_url(part) else {
                     parts.push(json!({
                         "type": "text",

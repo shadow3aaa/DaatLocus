@@ -84,9 +84,18 @@ enum ThinkingBudgetMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisionMode {
+    /// Model accepts `image_url` content (default assumption).
+    Enabled,
+    /// Model rejected `image_url`; strip all images before sending.
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ChatCompletionsAdapterState {
     prompt_tool_choice_mode: PromptToolChoiceMode,
     thinking_budget_mode: ThinkingBudgetMode,
+    vision_mode: VisionMode,
 }
 
 impl Default for ChatCompletionsAdapterState {
@@ -94,6 +103,7 @@ impl Default for ChatCompletionsAdapterState {
         Self {
             prompt_tool_choice_mode: PromptToolChoiceMode::NamedFunction,
             thinking_budget_mode: ThinkingBudgetMode::ReasoningEffortString,
+            vision_mode: VisionMode::Enabled,
         }
     }
 }
@@ -165,7 +175,27 @@ impl OpenAIClient {
                 &model_config.model_id,
                 model_config.rpm(),
             ),
-            adapter_state: Mutex::new(ChatCompletionsAdapterState::default()),
+            adapter_state: Mutex::new({
+                use crate::model_catalog::{catalog_model_capacity, model_name_suggests_vision};
+                let vision_mode = match model_config.supports_vision {
+                    Some(true) => VisionMode::Enabled,
+                    Some(false) => VisionMode::Disabled,
+                    None => {
+                        let supports = catalog_model_capacity(&model_config.model_id)
+                            .map(|c| c.supports_vision)
+                            .unwrap_or_else(|| model_name_suggests_vision(&model_config.model_id));
+                        if supports {
+                            VisionMode::Enabled
+                        } else {
+                            VisionMode::Disabled
+                        }
+                    }
+                };
+                ChatCompletionsAdapterState {
+                    vision_mode,
+                    ..ChatCompletionsAdapterState::default()
+                }
+            }),
             token_usage: Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
@@ -632,6 +662,18 @@ impl OpenAIClient {
                 self.update_adapter_state(adapter_state);
                 warn!(
                     "llm provider rejected thinking budget parameter; retrying agent turn without it\n{}",
+                    request_context.join("\n")
+                );
+                continue;
+            }
+
+            if looks_like_vision_unsupported_error(&body)
+                && adapter_state.vision_mode == VisionMode::Enabled
+            {
+                adapter_state.vision_mode = VisionMode::Disabled;
+                self.update_adapter_state(adapter_state);
+                warn!(
+                    "llm provider rejected image input; retrying agent turn without images\n{}",
                     request_context.join("\n")
                 );
                 continue;
@@ -1109,6 +1151,7 @@ mod tests {
             ],
             true,
             false,
+            false,
         );
 
         assert_eq!(messages.len(), 2);
@@ -1138,6 +1181,7 @@ mod tests {
             ],
             true,
             false,
+            false,
         );
 
         assert_eq!(messages.len(), 2);
@@ -1160,6 +1204,7 @@ mod tests {
                     description: Some("sample".to_string()),
                 }],
             )),
+            false,
             false,
         );
 
@@ -1234,6 +1279,7 @@ mod tests {
             )],
             true,
             false,
+            false,
         );
 
         assert_eq!(messages.len(), 1);
@@ -1269,6 +1315,7 @@ mod tests {
             ],
             false,
             true,
+            false,
         );
 
         assert_eq!(messages[0]["reasoning_content"], "old reasoning");

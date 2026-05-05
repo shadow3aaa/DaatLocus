@@ -1564,6 +1564,9 @@ fn resolve_model_capacity(
         max_completion_tokens: detected_max_output
             .or_else(|| catalog.map(|capacity| capacity.max_completion_tokens))
             .unwrap_or(fallback.max_completion_tokens),
+        supports_vision: catalog
+            .map(|c| c.supports_vision)
+            .unwrap_or(fallback.supports_vision),
     }
 }
 
@@ -2655,6 +2658,7 @@ mod tests {
             ModelCapacity {
                 context_window_tokens: 12_345,
                 max_completion_tokens: 678,
+                supports_vision: false,
             }
         );
     }
@@ -2668,6 +2672,7 @@ mod tests {
             ModelCapacity {
                 context_window_tokens: 12_345,
                 max_completion_tokens: 32_768,
+                supports_vision: false,
             }
         );
     }
