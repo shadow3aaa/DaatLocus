@@ -306,12 +306,8 @@ fn activity_cell_variant_name(cell: &ActivityCell) -> &'static str {
 fn apply_assistant_cell(item: &mut WebActivityItem, cell: &AssistantActivityCell) {
     item.kind = WebActivityKind::Message;
     item.actor = Some(WebActivityActor::Assistant);
-    item.title = if cell.title.trim().is_empty() {
-        "Agent".to_string()
-    } else {
-        cell.title.clone()
-    };
-    item.blocks = text_blocks(primary_lines(&cell.title, &cell.body_lines));
+    item.title = crate::dashboard::dashboard_agent_name();
+    item.blocks = text_blocks(cell.body_lines.clone());
 }
 
 fn apply_thinking_cell(item: &mut WebActivityItem, cell: &ThinkingActivityCell) {
@@ -330,12 +326,8 @@ fn apply_thinking_cell(item: &mut WebActivityItem, cell: &ThinkingActivityCell) 
 fn apply_user_cell(item: &mut WebActivityItem, cell: &UserActivityCell) {
     item.kind = WebActivityKind::Message;
     item.actor = Some(WebActivityActor::User);
-    item.title = if cell.title.trim().is_empty() {
-        "You".to_string()
-    } else {
-        cell.title.clone()
-    };
-    item.blocks = text_blocks(primary_lines(&cell.title, &cell.body_lines));
+    item.title = "User".to_string();
+    item.blocks = text_blocks(cell.body_lines.clone());
     item.blocks
         .extend(
             cell.image_attachments
