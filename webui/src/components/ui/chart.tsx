@@ -85,7 +85,7 @@ function ChartStyle({ id, config }: { id: string; config: ChartConfig }) {
       dangerouslySetInnerHTML={{
         __html: Object.entries(THEMES)
           .map(
-            ([theme, prefix]) => `
+            ([_theme, prefix]) => `
 ${prefix} [data-chart=${id}] {
 ${colorConfig
   .map(([key, item]) => `  --color-${key}: ${item.color};`)

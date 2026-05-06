@@ -21,6 +21,7 @@ import {
 import {
   ArrowDownIcon,
   CheckIcon,
+  ChevronRight,
   ClipboardIcon,
   GripVerticalIcon,
   ImagePlusIcon,
@@ -31,9 +32,6 @@ import {
 import {
   Bar,
   BarChart,
-  Cell,
-  Pie,
-  PieChart,
   XAxis,
   YAxis,
 } from "recharts";
@@ -86,7 +84,6 @@ const AGENT_CHAT_PREVIEW_MAX_VISIBLE_BUBBLES = 24;
 const AGENT_CHAT_MESSAGE_LINE_LIMIT = 5;
 const AGENT_CHAT_FOCUSED_MESSAGE_LINE_LIMIT = 12;
 const AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT = Number.MAX_SAFE_INTEGER;
-const AGENT_CHAT_CANONICAL_CELL_DIFF_LINE_LIMIT = 18;
 const AGENT_CHAT_PLAN_STEP_LIMIT = 8;
 const AGENT_CHAT_TERMINAL_OUTPUT_HEAD_LINES = 4;
 const AGENT_CHAT_TERMINAL_OUTPUT_TAIL_LINES = 4;
@@ -1657,7 +1654,6 @@ function AgentChatActivityCellView({
 
   return (
     <AgentChatReplyActivityLine
-      id={bubbleId}
       marker={render.marker}
       title={render.title}
       messageLines={render.messageLines}
@@ -2183,13 +2179,11 @@ function AgentChatMessageActivityLine({
 }
 
 function AgentChatReplyActivityLine({
-  id,
   marker,
   title,
   messageLines,
   disposition,
 }: {
-  id: string;
   marker: string;
   title: string;
   messageLines: string[];
@@ -2222,7 +2216,6 @@ function AgentChatReplyActivityLine({
       {messageLines.length > 0 ? (
         <div className="px-3 text-foreground/90">
           <AgentChatMarkdownText
-            id={`${id}-reply`}
             text={messageLines.join("\n")}
             limit={AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT}
             tone={disposition === "failed" ? "error" : "default"}
@@ -2259,7 +2252,6 @@ function AgentChatBlock({
   if (type === "text") {
     return (
       <AgentChatMarkdownText
-        id={blockId}
         text={stringValue(record.text, "")}
         limit={lineLimit}
       />
@@ -2380,12 +2372,10 @@ function limitMarkdownInput(text: string, limit: number): string {
 }
 
 function AgentChatMarkdownText({
-  id,
   text,
   limit,
   tone = "default",
 }: {
-  id: string;
   text: string;
   limit: number;
   tone?: "default" | "error";
@@ -2406,56 +2396,56 @@ function AgentChatMarkdownText({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          h1: ({ children, ..._ }: any) => (
+          h1: ({ children }: any) => (
             <h3 className="mt-3 break-words text-base font-semibold leading-7 text-foreground first:mt-0">
               {children}
             </h3>
           ),
-          h2: ({ children, ..._ }: any) => (
+          h2: ({ children }: any) => (
             <h4 className="mt-3 break-words text-base font-semibold leading-7 text-foreground first:mt-0">
               {children}
             </h4>
           ),
-          h3: ({ children, ..._ }: any) => (
+          h3: ({ children }: any) => (
             <h5 className="mt-3 break-words text-base font-semibold leading-7 text-foreground first:mt-0">
               {children}
             </h5>
           ),
-          h4: ({ children, ..._ }: any) => (
+          h4: ({ children }: any) => (
             <h5 className="mt-3 break-words text-base font-semibold leading-7 text-foreground first:mt-0">
               {children}
             </h5>
           ),
-          h5: ({ children, ..._ }: any) => (
+          h5: ({ children }: any) => (
             <h5 className="mt-3 break-words text-base font-semibold leading-7 text-foreground first:mt-0">
               {children}
             </h5>
           ),
-          h6: ({ children, ..._ }: any) => (
+          h6: ({ children }: any) => (
             <h5 className="mt-3 break-words text-base font-semibold leading-7 text-foreground first:mt-0">
               {children}
             </h5>
           ),
-          ul: ({ children, ..._ }: any) => (
+          ul: ({ children }: any) => (
             <ul className="list-disc space-y-1 pl-5 text-foreground/90">
               {children}
             </ul>
           ),
-          ol: ({ children, ..._ }: any) => (
+          ol: ({ children }: any) => (
             <ol className="list-decimal space-y-1 pl-5 text-foreground/90">
               {children}
             </ol>
           ),
-          li: ({ children, ..._ }: any) => (
+          li: ({ children }: any) => (
             <li className="break-words pl-1">{children}</li>
           ),
-          blockquote: ({ children, ..._ }: any) => (
+          blockquote: ({ children }: any) => (
             <blockquote className="border-l-2 border-border/70 pl-3 text-muted-foreground">
               {children}
             </blockquote>
           ),
-          hr: (_: any) => <hr className="border-border/70" />,
-          p: ({ children, ..._ }: any) => (
+          hr: () => <hr className="border-border/70" />,
+          p: ({ children }: any) => (
             <p className="break-words">{children}</p>
           ),
           code: (props: any) => {
@@ -2498,10 +2488,10 @@ function AgentChatMarkdownText({
               </a>
             );
           },
-          strong: ({ children, ..._ }: any) => (
+          strong: ({ children }: any) => (
             <strong className="font-semibold text-foreground">{children}</strong>
           ),
-          em: ({ children, ..._ }: any) => (
+          em: ({ children }: any) => (
             <em className="italic">{children}</em>
           ),
         }}
@@ -2526,7 +2516,7 @@ function AgentChatMarkdownInline({ text }: { text: string }) {
       ]}
       unwrapDisallowed
       components={{
-        code: ({ children, ..._ }: any) => (
+        code: ({ children }: any) => (
           <code className="font-mono text-[0.85em] text-foreground">
             {children}
           </code>
@@ -2544,10 +2534,10 @@ function AgentChatMarkdownInline({ text }: { text: string }) {
             </a>
           );
         },
-        strong: ({ children, ..._ }: any) => (
+        strong: ({ children }: any) => (
           <strong className="font-semibold text-foreground">{children}</strong>
         ),
-        em: ({ children, ..._ }: any) => (
+        em: ({ children }: any) => (
           <em className="italic">{children}</em>
         ),
       }}
@@ -2620,39 +2610,6 @@ function AgentChatImageAttachment({
         {mimeType ? <span className="shrink-0">{mimeType}</span> : null}
       </figcaption>
     </figure>
-  );
-}
-
-function AgentChatTextLines({
-  id,
-  lines,
-  limit,
-  tone = "default",
-}: {
-  id: string;
-  lines: string[];
-  limit: number;
-  tone?: "default" | "error";
-}) {
-  const visibleLines = lines.slice(0, limit);
-
-  if (lines.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className={cn("space-y-1", tone === "error" && "text-destructive")}>
-      {visibleLines.map((line, index) => (
-        <p key={`${id}-line-${index}`} className="break-words">
-          {line}
-        </p>
-      ))}
-      {lines.length > visibleLines.length ? (
-        <p className="text-xs text-muted-foreground">
-          … +{lines.length - visibleLines.length} more line(s)
-        </p>
-      ) : null}
-    </div>
   );
 }
 
@@ -3414,18 +3371,6 @@ function agentChatPlanStepsFromActivityCell(
     .filter((step): step is AgentChatPlanStep => Boolean(step));
 }
 
-function agentChatCanonicalCellVariantName(
-  cell: ActivityCellVariant | null | undefined,
-): string | null {
-  const record = asActivityCellVariant(cell);
-
-  if (!record) {
-    return null;
-  }
-
-  return Object.keys(record)[0] ?? null;
-}
-
 function agentChatActivityCellPayload(
   cell: ActivityCellVariant | null | undefined,
   variant: string,
@@ -3448,18 +3393,6 @@ function normalizeCanonicalPlanStepStatus(value: unknown): AgentChatPlanStepStat
   }
 
   return "unknown";
-}
-
-function canonicalPlanStepMarker(status: AgentChatPlanStepStatus) {
-  if (status === "pending") {
-    return "○";
-  }
-
-  if (status === "in_progress" || status === "completed") {
-    return "●";
-  }
-
-  return "•";
 }
 
 function agentChatPlanStepsFromMetadata(value: unknown): AgentChatPlanStep[] {
@@ -3608,13 +3541,6 @@ function renderDiffLine(line: AgentChatDiffLine) {
   }
 
   return `${prefix} ${line.text}`;
-}
-
-function splitDisplayLines(text: string) {
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -4291,6 +4217,22 @@ function WorkflowOptimizationCard({
   );
   const total = progressData.reduce((sum, item) => sum + item.value, 0);
 
+  if (total === 0) {
+    return (
+      <Card className="w-full overflow-visible">
+        <CardHeader>
+          <CardTitle>Workflow Optimization</CardTitle>
+          <CardAction>{dragHandle}</CardAction>
+        </CardHeader>
+        <CardContent>
+          <div className="flex h-32 items-center justify-center">
+            <p className="text-sm text-muted-foreground">No data</p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
   return (
     <Card className="w-full overflow-visible">
       <CardHeader>
@@ -4298,45 +4240,49 @@ function WorkflowOptimizationCard({
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
-        <div className="relative mx-auto h-48 w-full max-w-48">
+        <div className="space-y-3">
           <ChartContainer
             config={WORKFLOW_OPTIMIZATION_CHART_CONFIG}
-            className="h-full w-full overflow-visible [&_.recharts-wrapper]:overflow-visible"
+            className="h-10 w-full"
           >
-            <PieChart accessibilityLayer>
+            <BarChart
+              accessibilityLayer
+              data={[Object.fromEntries(chartData.map((d) => [d.key, d.chartValue]))]}
+              layout="vertical"
+              margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
+            >
               <ChartTooltip
                 cursor={false}
-                wrapperStyle={{ zIndex: 50 }}
-                content={<WorkflowOptimizationTooltip />}
+                content={<WorkflowOptimizationBarTooltip />}
               />
-              <Pie
-                data={chartData}
-                dataKey="chartValue"
-                nameKey="label"
-                innerRadius={44}
-                outerRadius={66}
-                paddingAngle={2}
-                strokeWidth={0}
-                isAnimationActive={false}
-              >
-                {chartData.map((item) => (
-                  <Cell
-                    key={item.key}
-                    fill={`var(--color-${item.colorKey})`}
-                  />
-                ))}
-              </Pie>
-            </PieChart>
+              <XAxis type="number" hide />
+              {chartData.map((item, index) => (
+                <Bar
+                  key={item.key}
+                  dataKey={item.key}
+                  stackId="pipeline"
+                  fill={`var(--color-${item.colorKey})`}
+                  radius={
+                    index === 0
+                      ? [4, 0, 0, 4]
+                      : index === chartData.length - 1
+                        ? [0, 4, 4, 0]
+                        : 0
+                  }
+                  isAnimationActive={false}
+                />
+              ))}
+            </BarChart>
           </ChartContainer>
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <div className="text-center">
-              <div className="font-mono text-2xl font-medium tabular-nums text-foreground">
-                {formatCompactNumber(total)}
-              </div>
-              <div className="text-xs text-muted-foreground">
-                {total > 0 ? "Events" : "No data"}
-              </div>
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <div className="flex items-center gap-1.5">
+              <span>Queued</span>
+              <ChevronRight className="h-3 w-3" />
+              <span>Applied</span>
             </div>
+            <span className="font-mono tabular-nums text-foreground">
+              {formatCompactNumber(total)} total
+            </span>
           </div>
         </div>
       </CardContent>
@@ -4361,6 +4307,22 @@ function RuntimeOptimizationCard({
   );
   const total = progressData.reduce((sum, item) => sum + item.value, 0);
 
+  if (total === 0) {
+    return (
+      <Card className="w-full overflow-visible">
+        <CardHeader>
+          <CardTitle>Runtime Optimization</CardTitle>
+          <CardAction>{dragHandle}</CardAction>
+        </CardHeader>
+        <CardContent>
+          <div className="flex h-32 items-center justify-center">
+            <p className="text-sm text-muted-foreground">No data</p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
   return (
     <Card className="w-full overflow-visible">
       <CardHeader>
@@ -4368,45 +4330,49 @@ function RuntimeOptimizationCard({
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
-        <div className="relative mx-auto h-48 w-full max-w-48">
+        <div className="space-y-3">
           <ChartContainer
             config={RUNTIME_OPTIMIZATION_CHART_CONFIG}
-            className="h-full w-full overflow-visible [&_.recharts-wrapper]:overflow-visible"
+            className="h-10 w-full"
           >
-            <PieChart accessibilityLayer>
+            <BarChart
+              accessibilityLayer
+              data={[Object.fromEntries(chartData.map((d) => [d.key, d.chartValue]))]}
+              layout="vertical"
+              margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
+            >
               <ChartTooltip
                 cursor={false}
-                wrapperStyle={{ zIndex: 50 }}
-                content={<RuntimeOptimizationTooltip />}
+                content={<RuntimeOptimizationBarTooltip />}
               />
-              <Pie
-                data={chartData}
-                dataKey="chartValue"
-                nameKey="label"
-                innerRadius={44}
-                outerRadius={66}
-                paddingAngle={2}
-                strokeWidth={0}
-                isAnimationActive={false}
-              >
-                {chartData.map((item) => (
-                  <Cell
-                    key={item.key}
-                    fill={`var(--color-${item.colorKey})`}
-                  />
-                ))}
-              </Pie>
-            </PieChart>
+              <XAxis type="number" hide />
+              {chartData.map((item, index) => (
+                <Bar
+                  key={item.key}
+                  dataKey={item.key}
+                  stackId="pipeline"
+                  fill={`var(--color-${item.colorKey})`}
+                  radius={
+                    index === 0
+                      ? [4, 0, 0, 4]
+                      : index === chartData.length - 1
+                        ? [0, 4, 4, 0]
+                        : 0
+                  }
+                  isAnimationActive={false}
+                />
+              ))}
+            </BarChart>
           </ChartContainer>
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <div className="text-center">
-              <div className="font-mono text-2xl font-medium tabular-nums text-foreground">
-                {formatCompactNumber(total)}
-              </div>
-              <div className="text-xs text-muted-foreground">
-                {total > 0 ? "Events" : "No data"}
-              </div>
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <div className="flex items-center gap-1.5">
+              <span>Queued</span>
+              <ChevronRight className="h-3 w-3" />
+              <span>Applied</span>
             </div>
+            <span className="font-mono tabular-nums text-foreground">
+              {formatCompactNumber(total)} total
+            </span>
           </div>
         </div>
       </CardContent>
@@ -4617,10 +4583,6 @@ type WorkflowOptimizationDonutDatum = WorkflowOptimizationChartDatum & {
   chartValue: number;
 };
 
-type WorkflowOptimizationTooltipPayloadItem = {
-  payload?: WorkflowOptimizationDonutDatum;
-};
-
 type RuntimeOptimizationChartDatum = {
   key: string;
   label: string;
@@ -4631,10 +4593,6 @@ type RuntimeOptimizationChartDatum = {
 
 type RuntimeOptimizationDonutDatum = RuntimeOptimizationChartDatum & {
   chartValue: number;
-};
-
-type RuntimeOptimizationTooltipPayloadItem = {
-  payload?: RuntimeOptimizationDonutDatum;
 };
 
 function dailyTokenUsageChartData(
@@ -5101,6 +5059,81 @@ function runtimeOptimizationDonutData(
   ];
 }
 
+
+function WorkflowOptimizationBarTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{
+    name: string;
+    value: number;
+    payload: Record<string, number>;
+  }>;
+}) {
+  if (!active || !payload || payload.length === 0) {
+    return null;
+  }
+  const entry = payload[0]?.payload;
+  if (!entry) return null;
+  const items = Object.entries(entry)
+    .filter(([_, v]) => v > 0)
+    .map(([key, value]) => {
+      const configKey = key as keyof typeof WORKFLOW_OPTIMIZATION_CHART_CONFIG;
+      const config = WORKFLOW_OPTIMIZATION_CHART_CONFIG[configKey];
+      return { key, value, label: config?.label ?? key };
+    });
+  return (
+    <div className="rounded-md border bg-popover p-2 text-xs shadow-md">
+      {items.map((item) => (
+        <div key={item.key} className="flex justify-between gap-4 py-0.5">
+          <span>{item.label}</span>
+          <span className="font-mono tabular-nums font-medium">
+            {formatCompactNumber(item.value)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RuntimeOptimizationBarTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{
+    name: string;
+    value: number;
+    payload: Record<string, number>;
+  }>;
+}) {
+  if (!active || !payload || payload.length === 0) {
+    return null;
+  }
+  const entry = payload[0]?.payload;
+  if (!entry) return null;
+  const items = Object.entries(entry)
+    .filter(([_, v]) => v > 0)
+    .map(([key, value]) => {
+      const configKey = key as keyof typeof RUNTIME_OPTIMIZATION_CHART_CONFIG;
+      const config = RUNTIME_OPTIMIZATION_CHART_CONFIG[configKey];
+      return { key, value, label: config?.label ?? key };
+    });
+  return (
+    <div className="rounded-md border bg-popover p-2 text-xs shadow-md">
+      {items.map((item) => (
+        <div key={item.key} className="flex justify-between gap-4 py-0.5">
+          <span>{item.label}</span>
+          <span className="font-mono tabular-nums font-medium">
+            {formatCompactNumber(item.value)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function TokenUsageTooltip({
   active,
   payload,
@@ -5311,72 +5344,6 @@ function ContextCompositionTooltipRow({
       <span className="truncate font-mono font-medium tabular-nums text-foreground">
         {value}
       </span>
-    </div>
-  );
-}
-
-function WorkflowOptimizationTooltip({
-  active,
-  payload,
-}: {
-  active?: boolean;
-  payload?: WorkflowOptimizationTooltipPayloadItem[];
-}) {
-  if (!active) {
-    return null;
-  }
-
-  const datum = payload?.[0]?.payload;
-  if (!datum) {
-    return null;
-  }
-
-  return (
-    <div className="grid min-w-56 gap-1.5 rounded-lg border bg-background px-3 py-2.5 text-xs shadow-xl">
-      <div className="flex items-center gap-2 font-medium text-foreground">
-        <span
-          className="size-2 shrink-0 rounded-[2px]"
-          style={{ backgroundColor: `var(--color-${datum.colorKey})` }}
-        />
-        <span>{datum.label}</span>
-        <span className="ml-auto font-mono tabular-nums">
-          {formatCompactNumber(datum.value)}
-        </span>
-      </div>
-      <div className="text-muted-foreground">{datum.detail}</div>
-    </div>
-  );
-}
-
-function RuntimeOptimizationTooltip({
-  active,
-  payload,
-}: {
-  active?: boolean;
-  payload?: RuntimeOptimizationTooltipPayloadItem[];
-}) {
-  if (!active) {
-    return null;
-  }
-
-  const datum = payload?.[0]?.payload;
-  if (!datum) {
-    return null;
-  }
-
-  return (
-    <div className="grid min-w-56 gap-1.5 rounded-lg border bg-background px-3 py-2.5 text-xs shadow-xl">
-      <div className="flex items-center gap-2 font-medium text-foreground">
-        <span
-          className="size-2 shrink-0 rounded-[2px]"
-          style={{ backgroundColor: `var(--color-${datum.colorKey})` }}
-        />
-        <span>{datum.label}</span>
-        <span className="ml-auto font-mono tabular-nums">
-          {formatCompactNumber(datum.value)}
-        </span>
-      </div>
-      <div className="text-muted-foreground">{datum.detail}</div>
     </div>
   );
 }
