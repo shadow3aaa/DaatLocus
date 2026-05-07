@@ -98,7 +98,7 @@ fn render_assistant_cell_lines(cell: &AssistantActivityCell) -> Vec<Line<'static
 
 fn render_thinking_cell_lines(cell: &ThinkingActivityCell) -> Vec<Line<'static>> {
     render_text_activity_lines(
-        "\u{2699}\u{fe0e}",
+         glyph::THINKING,
         Color::Magenta,
         &cell.title,
         &cell.body_lines,
