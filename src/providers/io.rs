@@ -1,14 +1,14 @@
 use super::*;
 
 #[derive(Default, Clone)]
-pub(super) struct StreamingToolCallBuilder {
+pub(crate) struct StreamingToolCallBuilder {
     id: String,
     name: String,
     arguments: String,
 }
 
 impl StreamingToolCallBuilder {
-    pub(super) fn apply_delta(&mut self, delta: &serde_json::Value) {
+    pub(crate) fn apply_delta(&mut self, delta: &serde_json::Value) {
         if let Some(id) = delta["id"].as_str() {
             self.id.push_str(id);
         }
@@ -20,7 +20,7 @@ impl StreamingToolCallBuilder {
         }
     }
 
-    pub(super) fn try_build(&self) -> Option<AgentToolCall> {
+    pub(crate) fn try_build(&self) -> Option<AgentToolCall> {
         if self.id.is_empty() || self.name.is_empty() {
             return None;
         }
@@ -53,7 +53,7 @@ pub(super) fn should_retry_prompt_request_with_nested_thinking_budget(body: &str
         || body.contains("unknown parameter: \"reasoning_effort\"")
 }
 
-pub(super) fn should_retry_request_without_thinking_budget(body: &str) -> bool {
+pub(crate) fn should_retry_request_without_thinking_budget(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     body.contains("unknown parameter: 'reasoning'")
         || body.contains("unknown parameter: \"reasoning\"")
@@ -63,7 +63,7 @@ pub(super) fn should_retry_request_without_thinking_budget(body: &str) -> bool {
 
 /// Returns `true` when the provider error indicates the model does not accept
 /// `image_url` (or `input_image`) content blocks.
-pub(super) fn looks_like_vision_unsupported_error(body: &str) -> bool {
+pub(crate) fn looks_like_vision_unsupported_error(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
     // Providers that use OpenAI-compatible deserialization emit this when an
     // enum variant (image_url / input_image) is unknown.
@@ -75,7 +75,7 @@ pub(super) fn looks_like_vision_unsupported_error(body: &str) -> bool {
         || (body.contains("vision") && body.contains("not supported"))
 }
 
-pub(super) fn summarize_agent_turn_request(
+pub(crate) fn summarize_agent_turn_request(
     request: &AgentTurnRequest,
     budget: Option<&RequestBudgetBreakdown>,
 ) -> Vec<String> {
@@ -111,7 +111,7 @@ pub(super) fn summarize_agent_turn_request(
     lines
 }
 
-pub(super) fn summarize_prompt_request(
+pub(crate) fn summarize_prompt_request(
     request: &PromptRequest,
     budget: Option<&RequestBudgetBreakdown>,
 ) -> Vec<String> {
@@ -305,7 +305,7 @@ pub(super) fn take_next_sse_event(buffer: &mut String) -> Option<String> {
     Some(event)
 }
 
-pub(super) fn format_request_error(
+pub(crate) fn format_request_error(
     prefix: &str,
     url: &str,
     request_context: &[String],
@@ -339,7 +339,7 @@ pub(super) fn format_request_error(
     miette!(lines.join("\n"))
 }
 
-pub(super) fn truncate_for_error(text: &str) -> String {
+pub(crate) fn truncate_for_error(text: &str) -> String {
     const MAX_LEN: usize = 600;
     if text.chars().count() <= MAX_LEN {
         return text.to_string();
@@ -348,7 +348,7 @@ pub(super) fn truncate_for_error(text: &str) -> String {
     format!("{truncated}...")
 }
 
-pub(super) fn non_empty_string(text: String) -> Option<String> {
+pub(crate) fn non_empty_string(text: String) -> Option<String> {
     if text.trim().is_empty() {
         None
     } else {
@@ -356,7 +356,7 @@ pub(super) fn non_empty_string(text: String) -> Option<String> {
     }
 }
 
-pub(super) fn looks_like_context_window_error(body: &str) -> bool {
+pub(crate) fn looks_like_context_window_error(body: &str) -> bool {
     let normalized = body.to_ascii_lowercase();
     normalized.contains("context length")
         || normalized.contains("context window")
@@ -365,15 +365,15 @@ pub(super) fn looks_like_context_window_error(body: &str) -> bool {
         || normalized.contains("max context")
 }
 
-pub(super) fn truncate_for_json_error(value: &serde_json::Value) -> String {
+pub(crate) fn truncate_for_json_error(value: &serde_json::Value) -> String {
     truncate_for_error(&value.to_string())
 }
 
-pub(super) fn parse_retry_after_seconds(value: &str) -> Option<u64> {
+pub(crate) fn parse_retry_after_seconds(value: &str) -> Option<u64> {
     value.trim().parse::<u64>().ok()
 }
 
-pub(super) fn default_rate_limit_backoff(attempt: usize) -> Duration {
+pub(crate) fn default_rate_limit_backoff(attempt: usize) -> Duration {
     let seconds = match attempt {
         0 => 2,
         1 => 4,

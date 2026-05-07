@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::{
     config::{Config, ModelConfig, ProviderConfig, resolve_env_reference},
-    providers::{CodexOAuthClient, CopilotClient, OpenAIClient},
+    providers::{CodexOAuthClient, CopilotClient, OllamaClient, OpenAIClient},
 };
 
 // Hindsight retain/consolidation calls are background memory writes. Keep them
@@ -70,6 +70,7 @@ enum HindsightLlmProxyTarget {
     OpenAi(OpenAIClient),
     Copilot(CopilotClient),
     CodexOAuth(CodexOAuthClient),
+    Ollama(OllamaClient),
 }
 
 impl HindsightLlmProxy {
@@ -173,6 +174,16 @@ impl HindsightLlmProxyTarget {
                 base_url.as_deref(),
                 model,
             ))),
+            ProviderConfig::Ollama {
+                host,
+                api_key,
+                keep_alive,
+            } => Ok(Self::Ollama(OllamaClient::from_parts(
+                host.as_deref(),
+                model,
+                api_key.as_deref(),
+                keep_alive.as_deref(),
+            ))),
         }
     }
 
@@ -181,6 +192,7 @@ impl HindsightLlmProxyTarget {
             Self::OpenAi(client) => client.post_compatible_chat_completion(payload).await,
             Self::Copilot(client) => client.post_compatible_chat_completion(payload).await,
             Self::CodexOAuth(client) => client.post_compatible_chat_completion(payload).await,
+            Self::Ollama(client) => client.post_compatible_chat_completion(payload).await,
         }
     }
 }

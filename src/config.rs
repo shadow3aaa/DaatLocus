@@ -65,6 +65,14 @@ pub enum ProviderConfig {
         base_url: String,
         api_key: String,
     },
+    Ollama {
+        #[serde(default)]
+        host: Option<String>,
+        #[serde(default)]
+        api_key: Option<String>,
+        #[serde(default)]
+        keep_alive: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +345,11 @@ impl Config {
                     push_secret_env_ref(&mut vars, github_token);
                 }
                 ProviderConfig::OpenaiCodexOauth { .. } => {}
+                ProviderConfig::Ollama { api_key, .. } => {
+                    if let Some(key) = api_key {
+                        push_secret_env_ref(&mut vars, key);
+                    }
+                }
             }
         }
         push_secret_env_ref(&mut vars, &self.telegram.bot_token);

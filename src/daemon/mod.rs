@@ -1174,6 +1174,32 @@ fn settings_provider_summary(name: &str, provider: &ProviderConfig) -> SettingsP
             credential: credential_summary(api_key, Some("your-api-key")),
             auth_file: None,
         },
+        ProviderConfig::Ollama { host, api_key, .. } => {
+            let is_cloud = api_key.is_some();
+            SettingsProviderSummary {
+                name: name.to_string(),
+                provider_type: if is_cloud { "ollama-cloud" } else { "ollama" },
+                base_url: Some(host.clone().unwrap_or_else(|| {
+                    if is_cloud {
+                        "https://ollama.com".to_string()
+                    } else {
+                        "http://127.0.0.1:11434".to_string()
+                    }
+                })),
+                credential: if is_cloud {
+                    credential_summary(
+                        api_key.as_deref().unwrap_or(""),
+                        Some("your-ollama-api-key"),
+                    )
+                } else {
+                    SettingsCredentialSummary {
+                        status: SettingsCredentialStatus::Placeholder,
+                        source: None,
+                    }
+                },
+                auth_file: None,
+            }
+        }
     }
 }
 

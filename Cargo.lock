@@ -814,6 +814,7 @@ dependencies = [
  "parking_lot",
  "postcard",
  "ratatui",
+ "regex",
  "reqwest 0.13.2",
  "rusqlite",
  "rust-i18n",

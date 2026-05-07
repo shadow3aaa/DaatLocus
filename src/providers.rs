@@ -25,9 +25,10 @@ use crate::{
         estimate_agent_turn_request, estimate_prompt_request,
     },
     core::{Llm, TokenUsage, TokenUsageInfo},
+    dsml_repair,
     reasoning::runtime::{
         AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
-        AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, PromptRequest,
+        AgentToolSpec, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, PromptRequest,
         assistant_tool_call_protocol_char_count, summarize_assistant_tool_call_protocol,
     },
     schema_utils::normalize_provider_function_schema,
@@ -40,6 +41,8 @@ pub(crate) use codex_oauth::{
     CodexOAuthClient, CodexOAuthTokens, codex_oauth_access_from_file, codex_oauth_auth_file,
     codex_oauth_client_version, codex_oauth_default_base_url, write_codex_oauth_tokens,
 };
+mod ollama;
+pub use ollama::OllamaClient;
 
 mod io;
 use io::*;
@@ -698,8 +701,18 @@ impl OpenAIClient {
                 )
             })?;
             self.record_usage_from_response(&response_json);
-            return parse_agent_turn_stream_result_from_json(&response_json);
+            let mut result = parse_agent_turn_stream_result_from_json(&response_json)?;
+            result = repair_dsml_in_stream_result(result, &request.tools);
+            return Ok(result);
         }
+
+        let allowed_tool_names: HashSet<String> =
+            request.tools.iter().map(|t| t.name.clone()).collect();
+        let allowed_tool_names = if allowed_tool_names.is_empty() {
+            None
+        } else {
+            Some(allowed_tool_names)
+        };
 
         let mut buffer = String::new();
         let mut content = String::new();
@@ -813,17 +826,20 @@ impl OpenAIClient {
         if !tool_calls.is_empty() {
             let mut calls = Vec::with_capacity(tool_calls.len());
             for (index, builder) in tool_calls.into_iter().enumerate() {
-                let call = builder.try_build().ok_or_else(|| {
+                let mut call = builder.try_build().ok_or_else(|| {
                     miette!(
                         "llm streaming response ended with incomplete tool call at index {index}"
                     )
                 })?;
+                dsml_repair::repair_tool_call_arguments(&mut call);
                 calls.push(call);
             }
-            let assistant_message = if content.trim().is_empty() {
+            let cleaned_content = dsml_repair::strip_dsml_from_thinking(&content);
+            let cleaned_reasoning = dsml_repair::strip_dsml_from_thinking(&reasoning_content);
+            let assistant_message = if cleaned_content.trim().is_empty() {
                 None
             } else {
-                Some(content)
+                Some(cleaned_content)
             };
             let mut items =
                 Vec::with_capacity(calls.len() + usize::from(assistant_message.is_some()));
@@ -839,14 +855,49 @@ impl OpenAIClient {
                 items,
                 raw_stream_follow_up: true,
                 last_assistant_message: assistant_message,
-                last_reasoning_content: non_empty_string(reasoning_content),
+                last_reasoning_content: non_empty_string(cleaned_reasoning),
             });
         }
 
-        let last_assistant_message = if content.trim().is_empty() {
+        let scavenged_calls = if let Some(ref allowed) = allowed_tool_names {
+            let combined = format!("{reasoning_content}\n{content}");
+            dsml_repair::scavenge_dsml_tool_calls(&combined, allowed, 4)
+        } else {
+            Vec::new()
+        };
+
+        let cleaned_content = dsml_repair::strip_dsml_from_thinking(&content);
+        let cleaned_reasoning = dsml_repair::strip_dsml_from_thinking(&reasoning_content);
+
+        if !scavenged_calls.is_empty() {
+            let assistant_message = if cleaned_content.trim().is_empty() {
+                None
+            } else {
+                Some(cleaned_content)
+            };
+            let mut items = Vec::with_capacity(
+                scavenged_calls.len() + usize::from(assistant_message.is_some()),
+            );
+            if let Some(content) = assistant_message.clone() {
+                items.push(AgentTurnItem::AssistantMessage { content });
+            }
+            items.extend(
+                scavenged_calls
+                    .into_iter()
+                    .map(|call| AgentTurnItem::ToolCall { call }),
+            );
+            return Ok(AgentTurnStreamResult {
+                items,
+                raw_stream_follow_up: true,
+                last_assistant_message: assistant_message,
+                last_reasoning_content: non_empty_string(cleaned_reasoning),
+            });
+        }
+
+        let last_assistant_message = if cleaned_content.trim().is_empty() {
             None
         } else {
-            Some(content)
+            Some(cleaned_content)
         };
         Ok(AgentTurnStreamResult {
             items: last_assistant_message
@@ -856,7 +907,7 @@ impl OpenAIClient {
                 .collect(),
             raw_stream_follow_up: false,
             last_assistant_message,
-            last_reasoning_content: non_empty_string(reasoning_content),
+            last_reasoning_content: non_empty_string(cleaned_reasoning),
         })
     }
 
@@ -1133,7 +1184,70 @@ pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn Llm + Send
             base_url.as_deref(),
             model_config,
         ))),
+        ProviderConfig::Ollama {
+            host,
+            api_key,
+            keep_alive,
+        } => Ok(Box::new(OllamaClient::from_parts(
+            host.as_deref(),
+            model_config,
+            api_key.as_deref(),
+            keep_alive.as_deref(),
+        ))),
     }
+}
+
+fn repair_dsml_in_stream_result(
+    mut result: AgentTurnStreamResult,
+    tools: &[AgentToolSpec],
+) -> AgentTurnStreamResult {
+    let allowed_tool_names: HashSet<String> = tools.iter().map(|t| t.name.clone()).collect();
+
+    let raw_reasoning = result.last_reasoning_content.clone().unwrap_or_default();
+    let raw_content = result.last_assistant_message.clone().unwrap_or_default();
+
+    let has_tool_calls = result
+        .items
+        .iter()
+        .any(|item| matches!(item, AgentTurnItem::ToolCall { .. }));
+
+    if !has_tool_calls && !allowed_tool_names.is_empty() {
+        let combined = format!("{raw_reasoning}\n{raw_content}");
+        let scavenged = dsml_repair::scavenge_dsml_tool_calls(&combined, &allowed_tool_names, 4);
+        if !scavenged.is_empty() {
+            result.items.extend(
+                scavenged
+                    .into_iter()
+                    .map(|call| AgentTurnItem::ToolCall { call }),
+            );
+            result.raw_stream_follow_up = true;
+        }
+    }
+
+    for item in &mut result.items {
+        match item {
+            AgentTurnItem::ToolCall { call } => {
+                dsml_repair::repair_tool_call_arguments(call);
+            }
+            AgentTurnItem::AssistantMessage { content } => {
+                let cleaned = dsml_repair::strip_dsml_from_thinking(content);
+                *content = cleaned;
+            }
+        }
+    }
+
+    if let Some(ref rc) = result.last_reasoning_content {
+        result.last_reasoning_content = non_empty_string(dsml_repair::strip_dsml_from_thinking(rc));
+    }
+    if let Some(ref c) = result.last_assistant_message {
+        result.last_assistant_message = if c.trim().is_empty() {
+            None
+        } else {
+            Some(dsml_repair::strip_dsml_from_thinking(c))
+        };
+    }
+
+    result
 }
 
 #[cfg(test)]

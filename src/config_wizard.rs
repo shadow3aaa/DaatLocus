@@ -1365,6 +1365,8 @@ enum ProviderKind {
     OpenAICodexOauth,
     GithubCopilot,
     OpenAICompatible,
+    Ollama,
+    OllamaCloud,
 }
 
 impl ProviderKind {
@@ -1374,6 +1376,8 @@ impl ProviderKind {
             "OpenAI Codex OAuth".to_string(),
             "GitHub Copilot".to_string(),
             crate::tr!(locale, "config.provider_openai_compatible"),
+            crate::tr!(locale, "config.provider_ollama_local"),
+            crate::tr!(locale, "config.provider_ollama_cloud"),
         ]
     }
 
@@ -1382,7 +1386,9 @@ impl ProviderKind {
             0 => Self::OpenAI,
             1 => Self::OpenAICodexOauth,
             2 => Self::GithubCopilot,
-            _ => Self::OpenAICompatible,
+            3 => Self::OpenAICompatible,
+            4 => Self::Ollama,
+            _ => Self::OllamaCloud,
         }
     }
 }
@@ -1402,6 +1408,8 @@ async fn prompt_provider(
         ProviderKind::OpenAICodexOauth => "codex-oauth",
         ProviderKind::GithubCopilot => "copilot",
         ProviderKind::OpenAICompatible => "local",
+        ProviderKind::Ollama => "ollama",
+        ProviderKind::OllamaCloud => "ollama-cloud",
     };
     // Suffix duplicate defaults to avoid a collision.
     let default_name = if existing_names.contains(&default_name.to_string()) {
@@ -1509,6 +1517,52 @@ async fn prompt_provider(
                 api_key,
             }
         }
+        ProviderKind::Ollama => {
+            let default_host = "http://127.0.0.1:11434".to_string();
+            let host = ui.text(
+                &crate::tr!(locale, "config.ollama_host"),
+                Some(&default_host),
+            )?;
+            let host = if host.trim().is_empty() {
+                default_host
+            } else {
+                host
+            };
+            let use_keep_alive = ui.confirm(
+                &crate::tr!(locale, "config.ollama_keep_alive_enable"),
+                false,
+            )?;
+            let keep_alive = if use_keep_alive {
+                let v = ui.text(&crate::tr!(locale, "config.ollama_keep_alive"), Some("5m"))?;
+                if v.trim().is_empty() { None } else { Some(v) }
+            } else {
+                None
+            };
+            ProviderConfig::Ollama {
+                host: Some(host),
+                api_key: None,
+                keep_alive,
+            }
+        }
+        ProviderKind::OllamaCloud => {
+            let host = "https://ollama.com".to_string();
+            let api_key = ui.password(&crate::tr!(locale, "config.ollama_cloud_api_key"))?;
+            let use_keep_alive = ui.confirm(
+                &crate::tr!(locale, "config.ollama_keep_alive_enable"),
+                false,
+            )?;
+            let keep_alive = if use_keep_alive {
+                let v = ui.text(&crate::tr!(locale, "config.ollama_keep_alive"), Some("5m"))?;
+                if v.trim().is_empty() { None } else { Some(v) }
+            } else {
+                None
+            };
+            ProviderConfig::Ollama {
+                host: Some(host),
+                api_key: Some(api_key),
+                keep_alive,
+            }
+        }
     };
 
     Ok((name, provider))
@@ -1545,6 +1599,7 @@ fn codex_oauth_fallback_models() -> Vec<DiscoveredModel> {
                 id: (*id).to_string(),
                 context_window: capacity.map(|capacity| capacity.context_window_tokens),
                 max_output_tokens: capacity.map(|capacity| capacity.max_completion_tokens),
+                supports_vision: capacity.map(|c| c.supports_vision),
             }
         })
         .collect()
@@ -1554,6 +1609,7 @@ fn resolve_model_capacity(
     model_id: &str,
     detected_context_window: Option<usize>,
     detected_max_output: Option<usize>,
+    detected_supports_vision: Option<bool>,
 ) -> ModelCapacity {
     let catalog = catalog_model_capacity(model_id);
     let fallback = conservative_model_capacity();
@@ -1564,9 +1620,11 @@ fn resolve_model_capacity(
         max_completion_tokens: detected_max_output
             .or_else(|| catalog.map(|capacity| capacity.max_completion_tokens))
             .unwrap_or(fallback.max_completion_tokens),
-        supports_vision: catalog
-            .map(|c| c.supports_vision)
-            .unwrap_or(fallback.supports_vision),
+        supports_vision: detected_supports_vision.unwrap_or_else(|| {
+            catalog
+                .map(|c| c.supports_vision)
+                .unwrap_or(fallback.supports_vision)
+        }),
     }
 }
 
@@ -1579,6 +1637,7 @@ async fn fetch_copilot_models(github_token: &str) -> Vec<DiscoveredModel> {
                 id: s.to_string(),
                 context_window: None,
                 max_output_tokens: None,
+                supports_vision: None,
             })
             .collect::<Vec<_>>()
     };
@@ -1678,6 +1737,7 @@ struct DiscoveredModel {
     id: String,
     context_window: Option<usize>,
     max_output_tokens: Option<usize>,
+    supports_vision: Option<bool>,
 }
 
 /// Fetch provider model IDs. Failures return an empty list.
@@ -1701,6 +1761,13 @@ async fn fetch_model_ids(provider_name: &str, provider: &ProviderConfig) -> Vec<
         ProviderConfig::OpenaiCompatible { base_url, api_key } => {
             let api_key = resolve_env_reference(api_key);
             fetch_openai_models(base_url, &api_key).await
+        }
+        ProviderConfig::Ollama { host, .. } => {
+            let host = host
+                .as_deref()
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
+            fetch_ollama_models(&host).await
         }
     }
 }
@@ -1742,6 +1809,150 @@ async fn fetch_openai_models_path(url: &str, api_key: &str) -> Vec<DiscoveredMod
         return vec![];
     }
     parse_models_response(resp.json().await.ok())
+}
+
+async fn fetch_ollama_models(host: &str) -> Vec<DiscoveredModel> {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("fetch_ollama_models: failed to build http client: {e}");
+            return vec![];
+        }
+    };
+
+    let tags_url = format!("{host}/api/tags");
+    let resp = match client.get(&tags_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(url = %tags_url, "fetch_ollama_models: request failed: {e}");
+            return vec![];
+        }
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        tracing::warn!(url = %tags_url, http_status = %status, "fetch_ollama_models: non-2xx");
+        return vec![];
+    }
+    let tags_json: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("fetch_ollama_models: failed to parse JSON: {e}");
+            return vec![];
+        }
+    };
+    let Some(model_list) = tags_json.get("models").and_then(|m| m.as_array()) else {
+        return vec![];
+    };
+
+    let model_ids: Vec<String> = model_list
+        .iter()
+        .filter_map(|m| {
+            m.get("model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+
+    let show_client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return model_ids
+                .into_iter()
+                .map(|id| DiscoveredModel {
+                    id,
+                    context_window: None,
+                    max_output_tokens: None,
+                    supports_vision: None,
+                })
+                .collect();
+        }
+    };
+
+    let mut handles = Vec::new();
+    for model_id in model_ids {
+        let client = show_client.clone();
+        let url = format!("{host}/api/show");
+        let handle = tokio::spawn(async move {
+            let resp = client
+                .post(&url)
+                .json(&serde_json::json!({"model": model_id, "verbose": true}))
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                return Ok::<_, reqwest::Error>((model_id, None, None));
+            }
+            let json: serde_json::Value = resp.json().await?;
+            let ctx = extract_context_from_model_info(&json);
+            let vision = extract_vision_from_capabilities(&json);
+            Ok((model_id, ctx, vision))
+        });
+        handles.push(handle);
+    }
+
+    let mut discovered = Vec::new();
+    for handle in handles {
+        if let Ok(Ok((id, ctx, vision))) = handle.await {
+            discovered.push(DiscoveredModel {
+                id,
+                context_window: ctx,
+                max_output_tokens: None,
+                supports_vision: vision,
+            });
+        }
+    }
+    discovered.sort_by(|a, b| a.id.cmp(&b.id));
+    discovered
+}
+
+fn extract_context_from_model_info(response: &serde_json::Value) -> Option<usize> {
+    let info = response.get("model_info")?;
+    if let Some(obj) = info.as_object() {
+        for (key, val) in obj {
+            if let Some(ctx) = extract_context_value(key, val) {
+                return Some(ctx);
+            }
+        }
+    }
+    None
+}
+
+fn extract_vision_from_capabilities(response: &serde_json::Value) -> Option<bool> {
+    let caps = response.get("capabilities")?.as_array()?;
+    for cap in caps {
+        if let Some(s) = cap.as_str()
+            && s == "vision"
+        {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+fn extract_context_value(key: &str, val: &serde_json::Value) -> Option<usize> {
+    if key.ends_with("context_length") {
+        if let Some(n) = val.as_u64() {
+            return Some(n as usize);
+        }
+        if let Some(n) = val.as_i64()
+            && n > 0
+        {
+            return Some(n as usize);
+        }
+    }
+    if let Some(inner) = val.as_object() {
+        for (sub_key, sub_val) in inner {
+            if let Some(ctx) = extract_context_value(sub_key, sub_val) {
+                return Some(ctx);
+            }
+        }
+    }
+    None
 }
 
 async fn fetch_codex_oauth_models(
@@ -1872,6 +2083,7 @@ fn parse_models_response(json: Option<serde_json::Value>) -> Vec<DiscoveredModel
                 id,
                 context_window,
                 max_output_tokens,
+                supports_vision: None,
             })
         })
         .collect();
@@ -1896,9 +2108,9 @@ async fn prompt_model(
     )?;
     let discovered = fetch_model_ids(provider_name, provider).await;
 
-    let (model_id, api_ctx, api_out) = if discovered.is_empty() {
+    let (model_id, api_ctx, api_out, api_vision) = if discovered.is_empty() {
         let id = ui.text("Model ID", None)?;
-        (id, None, None)
+        (id, None, None, None)
     } else {
         let manual = crate::tr!(locale, "config.manual_model");
         let labels: Vec<String> = discovered
@@ -1911,14 +2123,19 @@ async fn prompt_model(
 
         if labels[idx] == manual {
             let id = ui.text("Model ID", None)?;
-            (id, None, None)
+            (id, None, None, None)
         } else {
             let m = &discovered[idx];
-            (m.id.clone(), m.context_window, m.max_output_tokens)
+            (
+                m.id.clone(),
+                m.context_window,
+                m.max_output_tokens,
+                m.supports_vision,
+            )
         }
     };
 
-    let capacity = resolve_model_capacity(&model_id, api_ctx, api_out);
+    let capacity = resolve_model_capacity(&model_id, api_ctx, api_out, api_vision);
 
     let default_name = model_id
         .split(['/', ':'])
@@ -1941,6 +2158,7 @@ async fn prompt_model(
             model_id,
             context_window_tokens: context_window,
             max_completion_tokens: max_completion,
+            supports_vision: api_vision,
             ..ModelConfig::default()
         },
     ))
@@ -2213,6 +2431,18 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
             ProviderConfig::OpenaiCompatible { base_url, api_key } => {
                 let masked = mask_secret(api_key);
                 format!("openai-compatible  url={base_url}  key={masked}")
+            }
+            ProviderConfig::Ollama {
+                host,
+                api_key,
+                keep_alive,
+            } => {
+                let host = host.as_deref().unwrap_or("http://127.0.0.1:11434");
+                let cloud_mark = if api_key.is_some() { " [cloud]" } else { "" };
+                match keep_alive {
+                    Some(v) => format!("ollama{cloud_mark}  url={host}  keep_alive={v}"),
+                    None => format!("ollama{cloud_mark}  url={host}"),
+                }
             }
         };
         lines.push(format!("  [{name}]  {desc}"));
@@ -2651,7 +2881,7 @@ mod tests {
 
     #[test]
     fn model_capacity_prefers_detected_values() {
-        let capacity = resolve_model_capacity("gpt-4.1", Some(12_345), Some(678));
+        let capacity = resolve_model_capacity("gpt-4.1", Some(12_345), Some(678), None);
 
         assert_eq!(
             capacity,
@@ -2665,7 +2895,7 @@ mod tests {
 
     #[test]
     fn model_capacity_fills_missing_detected_fields_from_exact_catalog_match() {
-        let capacity = resolve_model_capacity("gpt-4.1", Some(12_345), None);
+        let capacity = resolve_model_capacity("gpt-4.1", Some(12_345), None, None);
 
         assert_eq!(
             capacity,
@@ -2679,16 +2909,30 @@ mod tests {
 
     #[test]
     fn model_capacity_uses_conservative_defaults_for_unknown_models() {
-        let capacity = resolve_model_capacity("unknown-local-model", None, None);
+        let capacity = resolve_model_capacity("unknown-local-model", None, None, None);
 
         assert_eq!(capacity, conservative_model_capacity());
     }
 
     #[test]
     fn model_catalog_does_not_substring_match_similar_model_names() {
-        let capacity = resolve_model_capacity("gpt-4.1-custom", None, None);
+        let capacity = resolve_model_capacity("gpt-4.1-custom", None, None, None);
 
         assert_eq!(capacity, conservative_model_capacity());
+    }
+
+    #[test]
+    fn model_capacity_uses_detected_vision_over_catalog() {
+        let capacity = resolve_model_capacity("gpt-4.1", None, None, Some(false));
+
+        assert!(!capacity.supports_vision);
+    }
+
+    #[test]
+    fn model_capacity_uses_detected_vision_true_for_unknown() {
+        let capacity = resolve_model_capacity("unknown-model", None, None, Some(true));
+
+        assert!(capacity.supports_vision);
     }
 
     #[test]
