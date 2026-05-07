@@ -594,7 +594,6 @@ type AgentChatActivityCellRender =
     }
   | {
       kind: "thinking";
-      marker: string;
       title: string;
       bodyLines: string[];
       fullBody?: string | null;
@@ -1561,7 +1560,6 @@ function AgentChatActivityCellView({
     return (
       <AgentChatThinkingCollapsibleCell
         id={bubbleId}
-        marker={render.marker}
         title={render.title}
         bodyLines={render.bodyLines}
         fullBody={render.fullBody}
@@ -1803,14 +1801,12 @@ function AgentChatStatusLineCell({
 
 function AgentChatThinkingCollapsibleCell({
   id,
-  marker,
   title,
   bodyLines,
   fullBody,
   bodyLimit,
 }: {
   id: string;
-  marker: string;
   title: string;
   bodyLines: string[];
   fullBody?: string | null;
@@ -1821,10 +1817,8 @@ function AgentChatThinkingCollapsibleCell({
   const isTruncatable = Boolean(fullBody) || bodyLines.length > bodyLimit;
 
   return (
-    <div className="space-y-1 text-sm leading-6 text-foreground/90">
-      <div className="grid min-w-0 grid-cols-[0.75rem_minmax(0,1fr)] items-start gap-x-[16px] px-3">
-        <AgentChatActivityMarker marker={marker} />
-        <div className="flex items-center gap-1.5 min-w-0">
+    <div className="space-y-0.5 text-sm leading-6 text-foreground/90 border-l-2 border-muted pl-3 ml-3">
+      <div className="flex items-center gap-1.5 min-w-0">
           <p className="min-w-0 break-words font-semibold text-foreground">
             <AgentChatMarkdownInline text={title} />
           </p>
@@ -1833,11 +1827,10 @@ function AgentChatThinkingCollapsibleCell({
               {open ? "Hide" : "Expand"}
             </CollapsibleTrigger>
           ) : null}
-        </div>
       </div>
       {contentLines.length > 0 ? (
         <div
-          className={`relative space-y-0.5 text-muted-foreground border-l-2 border-muted ml-[calc(0.75rem+8px)] pl-3 pr-3 ${
+          className={`relative text-muted-foreground ${
             !open && isTruncatable ? "max-h-[4.5rem] overflow-hidden" : ""
           }`}
         >
@@ -3211,7 +3204,6 @@ function agentChatActivityCellRenderForBubble(
   if (thinking) {
     return {
       kind: "thinking",
-      marker: "\u2699",
       title: stringValue(thinking.title, "Thinking"),
       bodyLines: stringArrayValue(thinking.body_lines),
       fullBody: nullableStringValue(thinking.full_body),
