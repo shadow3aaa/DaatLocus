@@ -45,7 +45,9 @@ use crate::{
     config::{Config, ModelConfig, ProviderConfig, ThinkingBudget, load_config},
     daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync},
     dashboard::{
-        DashboardActivityHistoryStore, DashboardCommandRunner, DashboardControlCommand,
+        DashboardActivityHistoryPage, DashboardActivityHistoryStore, DashboardCommandRunner,
+        DashboardHistoryLoader,
+        DashboardControlCommand,
         DashboardIncomingAttachment, DashboardState, execute_remote_command,
         execute_remote_message,
     },
@@ -1490,6 +1492,26 @@ impl DaemonClient {
             .map_err(|err| miette!("decode run command response failed: {err}"))?;
         Ok(response.output)
     }
+    
+    pub async fn activity_history_before(
+        &self,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<DashboardActivityHistoryPage> {
+        let mut url = format!("{}/dashboard/activity-history?limit={}", self.base_url(), limit);
+        if let Some(before) = before {
+            url.push_str(&format!("&before={}", before));
+        }
+        self.with_auth(self.http.get(&url))?
+            .send()
+            .await
+            .map_err(|err| miette!("activity history request failed: {err}"))?
+            .error_for_status()
+            .map_err(|err| miette!("activity history returned error: {err}"))?
+            .json::<DashboardActivityHistoryPage>()
+            .await
+            .map_err(|err| miette!("decode activity history response failed: {err}"))
+    }
 
     pub async fn shutdown(&self) -> Result<()> {
         self.with_auth(
@@ -1564,6 +1586,19 @@ impl DashboardCommandRunner for DaemonClient {
             Ok(output) => output,
             Err(err) => format!("command failed: {err}"),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl DashboardHistoryLoader for DaemonClient {
+    async fn load_history_before(
+        &self,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<DashboardActivityHistoryPage, String> {
+        self.activity_history_before(before, limit)
+            .await
+            .map_err(|err| err.to_string())
     }
 }
 

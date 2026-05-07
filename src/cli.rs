@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{
     commands::reset::{run_compile_reset, run_memory_reset, run_reset_all, run_state_reset},
     config::load_config,
@@ -405,7 +407,7 @@ async fn attach_to_daemon(client: DaemonClient) -> Result<()> {
     let stream_task = tokio::spawn(async move {
         let _ = stream_client.stream_to(tx, stop_rx).await;
     });
-    run_tui_dashboard(&mut rx, &client)
+    run_tui_dashboard(&mut rx, &client, Some(Arc::new(client.clone())))
         .await
         .map_err(|err| miette!("dashboard attach failed: {err}"))?;
     let _ = stop_tx.send(());

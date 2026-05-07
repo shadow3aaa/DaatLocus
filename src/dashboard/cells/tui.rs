@@ -27,6 +27,7 @@ pub fn render_activity_feed(
     area: Rect,
     cells: &[ActivityCell],
     live_cells: &[LiveActivityCell],
+    scroll_offset: u16,
 ) {
     let lines = if cells.is_empty() && live_cells.is_empty() {
         vec![Line::from(vec![Span::styled(
@@ -64,9 +65,10 @@ pub fn render_activity_feed(
         .lines
         .len()
         .saturating_sub(inner.height.saturating_sub(1) as usize) as u16;
+    let scroll = scroll_offset.min(max_scroll);
     let widget = Paragraph::new(text)
         .wrap(Wrap { trim: false })
-        .scroll((max_scroll, 0));
+        .scroll((scroll, 0));
     f.render_widget(widget, inner);
 }
 

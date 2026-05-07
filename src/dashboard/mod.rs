@@ -11,9 +11,12 @@ pub use cells::{
     render_activity_from_messages, sync_web_activity_state, thinking_activity_cell,
     user_activity_cell_from_event, web_activity_item_from_cell,
 };
-pub use history::{DashboardActivityHistoryStore, DashboardActivityHistoryWindow};
+pub use history::{DashboardActivityHistoryPage, DashboardActivityHistoryStore, DashboardActivityHistoryWindow};
 
-use std::time::Duration;
+use std::{
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
@@ -194,6 +197,15 @@ pub enum DashboardControlCommand {
 #[async_trait]
 pub trait DashboardCommandRunner: Send + Sync {
     async fn run_command(&self, command: &str, state: &DashboardState) -> String;
+}
+
+#[async_trait]
+pub trait DashboardHistoryLoader: Send + Sync {
+    async fn load_history_before(
+        &self,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<DashboardActivityHistoryPage, String>;
 }
 
 #[derive(Clone)]
@@ -1076,6 +1088,7 @@ fn adjusted_picker_scroll(current_scroll: usize, selected_index: usize, total: u
 pub async fn run_tui_dashboard(
     rx: &mut tokio::sync::watch::Receiver<DashboardState>,
     command_runner: &dyn DashboardCommandRunner,
+    history_loader: Option<Arc<dyn DashboardHistoryLoader>>,
 ) -> Result<(), std::io::Error> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -1087,6 +1100,14 @@ pub async fn run_tui_dashboard(
     let mut command_popup_scroll: usize = 0;
     let mut command_overlay: Option<CommandOverlay> = None;
     let mut telegram_access_picker: Option<TelegramAccessPicker> = None;
+    // Scroll and lazy-load state
+    let mut scroll_offset: u16 = u16::MAX;
+    let mut extra_history_cells: Vec<ActivityCell> = Vec::new();
+    let mut oldest_cursor: Option<i64> = None;
+    let mut has_more_before: bool = false;
+    let mut loading_history: bool = false;
+    let mut load_cooldown: u8 = 0;
+    let mut history_load_rx: Option<tokio::sync::oneshot::Receiver<Result<DashboardActivityHistoryPage, String>>> = None;
 
     loop {
         let pending_requests = rx.borrow().pending_access_requests.clone();
@@ -1205,6 +1226,37 @@ pub async fn run_tui_dashboard(
                     _ => {}
                 }
                 continue;
+            }
+            // Activity feed scroll keys (normal mode)
+            {
+                let mut scrolled = true;
+                match key.code {
+                    KeyCode::Up => {
+                        scroll_offset = scroll_offset.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        scroll_offset = scroll_offset.saturating_add(1);
+                    }
+                    KeyCode::PageUp => {
+                        scroll_offset = scroll_offset.saturating_sub(10);
+                    }
+                    KeyCode::PageDown => {
+                        scroll_offset = scroll_offset.saturating_add(10);
+                    }
+                    KeyCode::Home => {
+                        scroll_offset = 0;
+                    }
+                    KeyCode::End => {
+                        scroll_offset = u16::MAX;
+                    }
+                    _ => {
+                        scrolled = false;
+                    }
+                }
+                if scrolled {
+                    // Reset End→MAX; keep cursor at bottom for new activity
+                    continue;
+                }
             }
             match key.code {
                 KeyCode::Char(c) => {
@@ -1339,6 +1391,71 @@ pub async fn run_tui_dashboard(
             0
         };
 
+        // Decrement load cooldown each tick
+        load_cooldown = load_cooldown.saturating_sub(1);
+
+        // Lazy-load more history when scrolled near the top
+        if history_loader.is_some()
+            && !loading_history
+            && load_cooldown == 0
+            && has_more_before
+            && scroll_offset <= 3
+        {
+            loading_history = true;
+            if let Some(loader) = history_loader.clone() {
+                let cursor = oldest_cursor;
+                let (load_tx, load_rx) = tokio::sync::oneshot::channel();
+                history_load_rx = Some(load_rx);
+                tokio::spawn(async move {
+                    let result = loader.load_history_before(cursor, 40).await;
+                    let _ = load_tx.send(result);
+                });
+            }
+        }
+
+        // Check if a lazy load completed and merge results
+        if let Some(mut rx) = history_load_rx.take() {
+            match rx.try_recv() {
+                Ok(Ok(page)) => {
+                    let new_cells = activity_cells_from_history_items(&page.items);
+                    let mut merged = new_cells;
+                    merged.extend(extra_history_cells.clone());
+                    extra_history_cells = merged;
+                    // Reset to top to show newly loaded content
+                    scroll_offset = 0;
+                    oldest_cursor = page.oldest_cursor;
+                    has_more_before = page.has_more_before;
+                    loading_history = false;
+                    // Prevent immediate cascade: require user to scroll again
+                    load_cooldown = 10;
+                }
+                Ok(Err(err)) => {
+                    tracing::warn!("TUI history lazy load failed: {err}");
+                    loading_history = false;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    // Still loading
+                    history_load_rx = Some(rx);
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    loading_history = false;
+                }
+            }
+        }
+
+        // On first iteration, sync cursor from state
+        if oldest_cursor.is_none() {
+            let state = rx.borrow();
+            if !state.activity_history.items.is_empty() {
+                oldest_cursor = state.activity_history.oldest_cursor;
+                has_more_before = state.activity_history.has_more_before;
+            }
+        }
+
+        // Build combined cells: extra history + current state
+        let mut combined_cells: Vec<ActivityCell> = extra_history_cells.clone();
+        combined_cells.extend(state.activity_cells.clone());
+
         terminal.draw(|f| {
             let root = Layout::default()
                 .direction(Direction::Vertical)
@@ -1347,8 +1464,9 @@ pub async fn run_tui_dashboard(
             render_activity_feed(
                 f,
                 root[0],
-                &state.activity_cells,
+                &combined_cells,
                 &state.live_activity_cells,
+                scroll_offset,
             );
             if let Some(overlay) = command_overlay.as_ref() {
                 render_command_overlay(f, root[0], overlay);
