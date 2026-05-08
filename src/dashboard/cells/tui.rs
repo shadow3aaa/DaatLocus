@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use ratatui::{
+    buffer::Buffer,
     prelude::*,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -23,9 +24,145 @@ use super::{
 use crate::tool_ui::{PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, glyph};
 use super::markdown::render_markdown;
 
+use super::super::renderable::Renderable;
+
+// ---------------------------------------------------------------------------
+// Per-cell Renderable wrapper for viewport-culled rendering
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+pub struct ActivityCellRenderable<'a> {
+    pub cell: &'a ActivityCell,
+}
+
+impl Renderable for ActivityCellRenderable<'_> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        render_activity_cell_to_buf(self.cell, area, buf);
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        desired_height(self.cell, width)
+    }
+}
+
+/// Estimate the height (rows) of a cell for the given available width.
+/// Overestimating is safe; underestimating may cause visible content to be skipped.
+pub fn desired_height(cell: &ActivityCell, width: u16) -> u16 {
+    match cell {
+        ActivityCell::Assistant(c) => {
+            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 8) + 1
+        }
+        ActivityCell::User(c) => {
+            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 6) + 1
+        }
+        ActivityCell::AppAttention(c) => {
+            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 6) + 1
+        }
+        ActivityCell::Browser(c) => {
+            let mut h: u16 = 1;
+            let has_stats = c.line_count.is_some() || c.ref_count.is_some();
+            if has_stats { h += 1; }
+            h + 1
+        }
+        ActivityCell::LiveBrowser(c) => {
+            1 + c.body_lines.len().min(1) as u16 + 1
+        }
+        ActivityCell::GenericApp(c) => {
+            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 6) + 1
+        }
+        ActivityCell::PlanResult(c) => {
+            1 + c.steps.len().min(8) as u16 + 1
+        }
+        ActivityCell::CreateWorkflowResult(_) => 2,
+        ActivityCell::ActivateWorkflowResult(_) => 2,
+        ActivityCell::DeepRecallResult(_) => 2,
+        ActivityCell::ExecResult(c) => {
+            let n = if c.output_lines.is_empty() { 1 } else { c.output_lines.len().min(8) };
+            1 + n as u16 + 1
+        }
+        ActivityCell::LiveExec(c) => {
+            let n = if c.output_lines.is_empty() { 1 } else { c.output_lines.len().min(8) };
+            1 + n as u16 + 1
+        }
+        ActivityCell::Patch(c) => {
+            let n_files = c.files.len().min(4);
+            let mut h: u16 = 1;
+            if n_files > 0 {
+                h += 1;
+                for _ in 0..n_files {
+                    h += 1;
+                    h += 19;
+                    h += 1;
+                }
+                h -= 1;
+            }
+            if c.files.len() > n_files {
+                h += 1;
+                h += 1;
+            }
+            h + 1
+        }
+        ActivityCell::Telegram(c) => {
+            1 + c.detail_lines.len().min(6) as u16
+                + count_wrapped_lines(&c.message_lines, width.saturating_sub(5), 6)
+                + 1
+        }
+        ActivityCell::Reply(c) => {
+            let msg_h = if c.message_lines.is_empty() {
+                0
+            } else {
+                count_wrapped_lines(&c.message_lines, width.saturating_sub(3), 8)
+            };
+            1 + msg_h + 1
+        }
+        ActivityCell::TerminalWait(c) => {
+            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 6) + 1
+        }
+        ActivityCell::Error(c) => {
+            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 8) + 1
+        }
+        ActivityCell::Thinking(c) => {
+            if c.expanded && c.full_body.is_some() {
+                let full = c.full_body.as_deref().unwrap_or("");
+                let cw = (width.saturating_sub(2)).max(20) as usize;
+                let wrapped = textwrap::wrap(full, cw);
+                1 + wrapped.len() as u16 + 1
+            } else {
+                1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(2), 5) + 1
+            }
+        }
+    }
+}
+
+fn count_wrapped_lines(lines: &[String], wrap_width: u16, limit: usize) -> u16 {
+    if lines.is_empty() { return 0; }
+    let w = wrap_width.max(3) as usize;
+    let mut total: usize = 0;
+    for line in lines.iter().take(limit) {
+        let wrapped = textwrap::wrap(line, w);
+        total += wrapped.len().max(1);
+    }
+    total as u16
+}
+
+/// Render a single cell into a buffer at the given area.
+pub fn render_activity_cell_to_buf(cell: &ActivityCell, area: Rect, buf: &mut Buffer) {
+    let lines = render_activity_cell_lines(cell, area.width);
+    if lines.is_empty() { return; }
+    let text = Text::from(lines);
+    Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .render(area, buf);
+}
+
 /// Cached rendered lines to avoid rebuilding every frame.
 /// Cells are replaced entirely (not mutated in-place), so comparing cell count
 /// is sufficient to detect changes.
+///
+/// Currently retained for future per-cell markdown-line caching;
+/// the viewport-culled render path uses `desired_height` for culling
+/// and calls `render_activity_cell_lines` only for visible cells.
+#[allow(dead_code)]
 pub struct CachedActivityLines {
     pub lines: Vec<Line<'static>>,
     width: u16,
@@ -33,6 +170,7 @@ pub struct CachedActivityLines {
     expanded_count: usize,
 }
 
+#[allow(dead_code)]
 impl CachedActivityLines {
     pub fn new() -> Self {
         Self {
@@ -51,64 +189,70 @@ impl CachedActivityLines {
 /// Render the activity feed and return max_scroll for key-handling / auto-scroll.
 /// Uses `cache` to avoid rebuilding all lines every frame.
 pub fn render_activity_feed_cached(
-    f: &mut Frame,
+    buf: &mut Buffer,
     area: Rect,
     cells: &[ActivityCell],
     live_cells: &[LiveActivityCell],
     scroll_offset: u16,
-    cache: &mut CachedActivityLines,
-    expanded_count: usize,
+    _cache: &mut CachedActivityLines,
+    _expanded_count: usize,
 ) -> u16 {
     let inner_width = area.width.saturating_sub(2);
     let total_cells = cells.len() + live_cells.len();
 
-    // Only rebuild lines when cells change, terminal resized, or expanded state changes
-    if cache.needs_rebuild(inner_width, total_cells, expanded_count) {
-        cache.lines = if total_cells == 0 {
-            vec![Line::from(vec![Span::styled(
-                "No activity yet",
-                Style::default().fg(Color::DarkGray),
-            )])]
-        } else {
-            let mut visible_cells = cells.to_vec();
-            visible_cells.extend(live_cells.iter().map(|cell| cell.cell.clone()));
-            let mut lines = Vec::new();
-            for (idx, cell) in visible_cells.iter().enumerate() {
-                lines.extend(render_activity_cell_lines(cell, inner_width));
-                if idx + 1 < visible_cells.len() {
-                    lines.push(Line::from(""));
-                }
-            }
-            lines
-        };
-        cache.width = inner_width;
-        cache.total_cells = total_cells;
-        cache.expanded_count = expanded_count;
-    }
-
-    let text = if cache.lines.is_empty() {
-        Text::from(Line::from(vec![Span::styled(
-            "No activity yet",
-            Style::default().fg(Color::DarkGray),
-        )]))
+    // Compute total content height for max_scroll
+    let total_height: u16 = if total_cells == 0 {
+        0
     } else {
-        Text::from(cache.lines.clone())
+        cells.iter().map(|c| desired_height(c, inner_width)).sum::<u16>()
+            + live_cells.iter().map(|c| desired_height(&c.cell, inner_width)).sum::<u16>()
     };
+
     let inner = Rect {
         x: area.x.saturating_add(1),
         y: area.y,
         width: area.width.saturating_sub(2),
         height: area.height,
     };
-    let max_scroll = text
-        .lines
-        .len()
-        .saturating_sub(inner.height.saturating_sub(1) as usize) as u16;
+
+    let max_scroll = total_height.saturating_sub(inner.height.saturating_sub(1));
     let scroll = scroll_offset.min(max_scroll);
-    let widget = Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    f.render_widget(widget, inner);
+
+    if total_cells == 0 {
+        // Render placeholder
+        let placeholder = Paragraph::new("No activity yet")
+            .style(Style::default().fg(Color::DarkGray));
+        placeholder.render(inner, buf);
+    } else {
+        // Viewport-culled rendering: only render cells that overlap with the visible area
+        let viewport_top = scroll;
+        let viewport_bottom = scroll + inner.height;
+        let mut y: u16 = 0;
+
+        // Combine committed and live cells in order
+        let all_cells: Vec<&ActivityCell> = cells
+            .iter()
+            .chain(live_cells.iter().map(|lc| &lc.cell))
+            .collect();
+
+        for cell in &all_cells {
+            let cell_h = desired_height(cell, inner_width);
+            let cell_bottom = y + cell_h;
+
+            if cell_bottom > viewport_top && y < viewport_bottom {
+                // Cell overlaps with viewport – render the full cell at its screen position
+                let screen_y = inner.y + y.saturating_sub(viewport_top);
+                let cell_area = Rect::new(inner.x, screen_y, inner.width, cell_h);
+                let clipped = cell_area.intersection(inner);
+                if !clipped.is_empty() {
+                    render_activity_cell_to_buf(cell, cell_area, buf);
+                }
+            }
+
+            y += cell_h;
+        }
+    }
+
     max_scroll
 }
 

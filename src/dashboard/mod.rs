@@ -2,6 +2,7 @@
 
 pub mod cells;
 pub mod history;
+pub mod renderable;
 pub mod render;
 
 pub use cells::{
@@ -1579,7 +1580,7 @@ pub async fn run_tui_dashboard(
                 .split(f.area());
             // max_scroll now returned directly from render (no double traversal)
             max_scroll_storage = render_activity_feed_cached(
-                f,
+                f.buffer_mut(),
                 root[0],
                 &combined_cells,
                 &state.live_activity_cells,
