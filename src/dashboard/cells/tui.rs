@@ -22,38 +22,72 @@ use super::{
 };
 use crate::tool_ui::{PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, glyph};
 
-pub fn render_activity_feed(
+/// Cached rendered lines to avoid rebuilding every frame.
+/// Cells are replaced entirely (not mutated in-place), so comparing cell count
+/// is sufficient to detect changes.
+pub struct CachedActivityLines {
+    pub lines: Vec<Line<'static>>,
+    width: u16,
+    total_cells: usize,
+}
+
+impl CachedActivityLines {
+    pub fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            width: 0,
+            total_cells: 0,
+        }
+    }
+
+    fn needs_rebuild(&self, inner_width: u16, total_cells: usize) -> bool {
+        self.width != inner_width || self.total_cells != total_cells
+    }
+}
+
+/// Render the activity feed and return max_scroll for key-handling / auto-scroll.
+/// Uses `cache` to avoid rebuilding all lines every frame.
+pub fn render_activity_feed_cached(
     f: &mut Frame,
     area: Rect,
     cells: &[ActivityCell],
     live_cells: &[LiveActivityCell],
     scroll_offset: u16,
-) {
-    let lines = if cells.is_empty() && live_cells.is_empty() {
-        vec![Line::from(vec![Span::styled(
-            "No activity yet",
-            Style::default().fg(Color::DarkGray),
-        )])]
-    } else {
-        let inner_width = area.width.saturating_sub(2);
-        let mut visible_cells = cells.to_vec();
-        visible_cells.extend(live_cells.iter().map(|cell| cell.cell.clone()));
-        let mut lines = Vec::new();
-        for (idx, cell) in visible_cells.iter().enumerate() {
-            lines.extend(render_activity_cell_lines(cell, inner_width));
-            if idx + 1 < visible_cells.len() {
-                lines.push(Line::from(""));
+    cache: &mut CachedActivityLines,
+) -> u16 {
+    let inner_width = area.width.saturating_sub(2);
+    let total_cells = cells.len() + live_cells.len();
+
+    // Only rebuild lines when cells change or terminal is resized
+    if cache.needs_rebuild(inner_width, total_cells) {
+        cache.lines = if total_cells == 0 {
+            vec![Line::from(vec![Span::styled(
+                "No activity yet",
+                Style::default().fg(Color::DarkGray),
+            )])]
+        } else {
+            let mut visible_cells = cells.to_vec();
+            visible_cells.extend(live_cells.iter().map(|cell| cell.cell.clone()));
+            let mut lines = Vec::new();
+            for (idx, cell) in visible_cells.iter().enumerate() {
+                lines.extend(render_activity_cell_lines(cell, inner_width));
+                if idx + 1 < visible_cells.len() {
+                    lines.push(Line::from(""));
+                }
             }
-        }
-        lines
-    };
-    let text = if lines.is_empty() {
+            lines
+        };
+        cache.width = inner_width;
+        cache.total_cells = total_cells;
+    }
+
+    let text = if cache.lines.is_empty() {
         Text::from(Line::from(vec![Span::styled(
             "No activity yet",
             Style::default().fg(Color::DarkGray),
         )]))
     } else {
-        Text::from(lines)
+        Text::from(cache.lines.clone())
     };
     let inner = Rect {
         x: area.x.saturating_add(1),
@@ -70,27 +104,7 @@ pub fn render_activity_feed(
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     f.render_widget(widget, inner);
-}
-
-/// Count total rendered lines (used by TUI to compute max_scroll for auto-scroll logic).
-pub fn count_activity_lines(
-    cells: &[ActivityCell],
-    live_cells: &[LiveActivityCell],
-    inner_width: u16,
-) -> usize {
-    if cells.is_empty() && live_cells.is_empty() {
-        return 1; // "No activity yet"
-    }
-    let mut visible_cells: Vec<ActivityCell> = cells.to_vec();
-    visible_cells.extend(live_cells.iter().map(|cell| cell.cell.clone()));
-    let mut count = 0;
-    for (idx, cell) in visible_cells.iter().enumerate() {
-        count += render_activity_cell_lines(cell, inner_width).len();
-        if idx + 1 < visible_cells.len() {
-            count += 1; // blank separator
-        }
-    }
-    count
+    max_scroll
 }
 
 fn render_activity_cell_lines(cell: &ActivityCell, max_width: u16) -> Vec<Line<'static>> {

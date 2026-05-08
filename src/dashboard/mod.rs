@@ -7,8 +7,8 @@ pub mod render;
 pub use cells::{
     ActivityCell, DashboardActivityEvent, LiveActivityCell, LiveWebActivityItem, WebActivityItem,
     activity_cell_from_tool_ui_event, activity_cells_from_history_items, apply_activity_event,
-    assistant_activity_cell, default_web_activity_version, render_activity_feed,
-    count_activity_lines,
+    assistant_activity_cell, default_web_activity_version,
+    render_activity_feed_cached, CachedActivityLines,
     render_activity_from_messages, sync_web_activity_state, thinking_activity_cell,
     user_activity_cell_from_event, web_activity_item_from_cell,
 };
@@ -1118,6 +1118,7 @@ pub async fn run_tui_dashboard(
     let mut loading_history: bool = false;
     let mut load_cooldown: u8 = 0;
     let mut history_load_rx: Option<tokio::sync::oneshot::Receiver<Result<DashboardActivityHistoryPage, String>>> = None;
+    let mut cached_activity_lines = CachedActivityLines::new();
 
     loop {
         let pending_requests = rx.borrow().pending_access_requests.clone();
@@ -1527,21 +1528,15 @@ pub async fn run_tui_dashboard(
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(18), Constraint::Length(4 + popup_rows)])
                 .split(f.area());
-            render_activity_feed(
+            // max_scroll now returned directly from render (no double traversal)
+            max_scroll_storage = render_activity_feed_cached(
                 f,
                 root[0],
                 &combined_cells,
                 &state.live_activity_cells,
                 display_scroll,
+                &mut cached_activity_lines,
             );
-            // Compute max_scroll for next frame's key handling
-            max_scroll_storage = count_activity_lines(
-                &combined_cells,
-                &state.live_activity_cells,
-                root[0].width.saturating_sub(2),
-            )
-            .saturating_sub(root[0].height.saturating_sub(1) as usize)
-            as u16;
             // Update page height for PageUp/PageDown
             page_height = root[0].height.saturating_sub(1);
 
