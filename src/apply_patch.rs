@@ -367,12 +367,12 @@ fn parse_envelope_update_hunks(
             ));
         };
         // Treat empty lines inside hunks as blank context lines.
-        let prefix = if line.is_empty() {
-            ' '
+        let (prefix, text) = if line.is_empty() {
+            (' ', String::new())
         } else {
-            line.chars().next().unwrap()
+            let p = line.chars().next().unwrap();
+            (p, line[p.len_utf8()..].to_string())
         };
-        let text = line[prefix.len_utf8()..].to_string();
         let kind = match prefix {
             ' ' => PatchHunkLineKind::Context,
             '-' => PatchHunkLineKind::Delete,

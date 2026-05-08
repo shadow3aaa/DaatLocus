@@ -46,10 +46,8 @@ use crate::{
     daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync},
     dashboard::{
         DashboardActivityHistoryPage, DashboardActivityHistoryStore, DashboardCommandRunner,
-        DashboardHistoryLoader,
-        DashboardControlCommand,
-        DashboardIncomingAttachment, DashboardState, execute_remote_command,
-        execute_remote_message,
+        DashboardControlCommand, DashboardHistoryLoader, DashboardIncomingAttachment,
+        DashboardState, execute_remote_command, execute_remote_message,
     },
     events::EventStore,
     model_catalog::catalog_model_capacity,
@@ -1492,13 +1490,17 @@ impl DaemonClient {
             .map_err(|err| miette!("decode run command response failed: {err}"))?;
         Ok(response.output)
     }
-    
+
     pub async fn activity_history_before(
         &self,
         before: Option<i64>,
         limit: usize,
     ) -> Result<DashboardActivityHistoryPage> {
-        let mut url = format!("{}/dashboard/activity-history?limit={}", self.base_url(), limit);
+        let mut url = format!(
+            "{}/dashboard/activity-history?limit={}",
+            self.base_url(),
+            limit
+        );
         if let Some(before) = before {
             url.push_str(&format!("&before={}", before));
         }

@@ -5,23 +5,22 @@ pub mod history;
 pub mod render;
 
 pub use cells::{
-    ActivityCell, DashboardActivityEvent, LiveActivityCell, LiveWebActivityItem, WebActivityItem,
-    activity_cell_from_tool_ui_event, activity_cells_from_history_items, apply_activity_event,
-    assistant_activity_cell, default_web_activity_version,
-    render_activity_feed_cached, CachedActivityLines,
-    render_activity_from_messages, sync_web_activity_state, thinking_activity_cell,
-    user_activity_cell_from_event, web_activity_item_from_cell,
+    ActivityCell, CachedActivityLines, DashboardActivityEvent, LiveActivityCell,
+    LiveWebActivityItem, WebActivityItem, activity_cell_from_tool_ui_event,
+    activity_cells_from_history_items, apply_activity_event, assistant_activity_cell,
+    default_web_activity_version, render_activity_feed_cached, render_activity_from_messages,
+    sync_web_activity_state, thinking_activity_cell, user_activity_cell_from_event,
+    web_activity_item_from_cell,
 };
-pub use history::{DashboardActivityHistoryPage, DashboardActivityHistoryStore, DashboardActivityHistoryWindow};
+pub use history::{
+    DashboardActivityHistoryPage, DashboardActivityHistoryStore, DashboardActivityHistoryWindow,
+};
 
-use std::{
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use crossterm::event::{Event, KeyCode, KeyEventKind};
 use crossterm::event::MouseEventKind;
+use crossterm::event::{Event, KeyCode, KeyEventKind};
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
@@ -1117,14 +1116,15 @@ pub async fn run_tui_dashboard(
     let mut has_more_before: bool = false;
     let mut loading_history: bool = false;
     let mut load_cooldown: u8 = 0;
-    let mut history_load_rx: Option<tokio::sync::oneshot::Receiver<Result<DashboardActivityHistoryPage, String>>> = None;
+    let mut history_load_rx: Option<
+        tokio::sync::oneshot::Receiver<Result<DashboardActivityHistoryPage, String>>,
+    > = None;
     let mut cached_activity_lines = CachedActivityLines::new();
 
     loop {
         let pending_requests = rx.borrow().pending_access_requests.clone();
 
-        if crossterm::event::poll(Duration::from_millis(16))?
-        {
+        if crossterm::event::poll(Duration::from_millis(16))? {
             let event = crossterm::event::read()?;
 
             // Mouse scroll wheel for activity feed (works regardless of input state)
@@ -1150,7 +1150,9 @@ pub async fn run_tui_dashboard(
                 }
             }
 
-            let Event::Key(key) = event else { continue; };
+            let Event::Key(key) = event else {
+                continue;
+            };
             if key.kind != KeyEventKind::Press {
                 continue;
             }
@@ -1268,57 +1270,57 @@ pub async fn run_tui_dashboard(
             // Activity feed scroll keys (normal mode)
             // Only active when command input is empty – popup nav works otherwise
             if command_input.is_empty() {
-            {
-                let mut scrolled = true;
-                match key.code {
-                    KeyCode::Up => {
-                        if auto_scroll {
+                {
+                    let mut scrolled = true;
+                    match key.code {
+                        KeyCode::Up => {
+                            if auto_scroll {
+                                auto_scroll = false;
+                                scroll_offset = max_scroll_storage.saturating_sub(1);
+                            } else {
+                                scroll_offset = scroll_offset.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            scroll_offset = scroll_offset.saturating_add(1);
+                            if scroll_offset >= max_scroll_storage {
+                                auto_scroll = true;
+                            }
+                        }
+                        KeyCode::PageUp => {
+                            if auto_scroll {
+                                auto_scroll = false;
+                                scroll_offset = max_scroll_storage.saturating_sub(page_height);
+                            } else {
+                                scroll_offset = scroll_offset.saturating_sub(page_height);
+                            }
+                        }
+                        KeyCode::PageDown => {
+                            scroll_offset = scroll_offset.saturating_add(page_height);
+                            if scroll_offset >= max_scroll_storage {
+                                auto_scroll = true;
+                            }
+                        }
+                        KeyCode::Home => {
                             auto_scroll = false;
-                            scroll_offset = max_scroll_storage.saturating_sub(1);
-                        } else {
-                            scroll_offset = scroll_offset.saturating_sub(1);
+                            scroll_offset = 0;
+                        }
+                        KeyCode::End => {
+                            auto_scroll = true;
+                            scroll_offset = 0;
+                        }
+                        _ => {
+                            scrolled = false;
                         }
                     }
-                    KeyCode::Down => {
-                        scroll_offset = scroll_offset.saturating_add(1);
+                    if scrolled {
+                        // Reset End→MAX; keep cursor at bottom for new activity
                         if scroll_offset >= max_scroll_storage {
                             auto_scroll = true;
                         }
-                    }
-                    KeyCode::PageUp => {
-                        if auto_scroll {
-                            auto_scroll = false;
-                            scroll_offset = max_scroll_storage.saturating_sub(page_height);
-                        } else {
-                            scroll_offset = scroll_offset.saturating_sub(page_height);
-                        }
-                    }
-                    KeyCode::PageDown => {
-                        scroll_offset = scroll_offset.saturating_add(page_height);
-                        if scroll_offset >= max_scroll_storage {
-                            auto_scroll = true;
-                        }
-                    }
-                    KeyCode::Home => {
-                        auto_scroll = false;
-                        scroll_offset = 0;
-                    }
-                    KeyCode::End => {
-                        auto_scroll = true;
-                        scroll_offset = 0;
-                    }
-                    _ => {
-                        scrolled = false;
+                        continue;
                     }
                 }
-                if scrolled {
-                    // Reset End→MAX; keep cursor at bottom for new activity
-                    if scroll_offset >= max_scroll_storage {
-                        auto_scroll = true;
-                    }
-                    continue;
-                }
-            }
             }
             match key.code {
                 KeyCode::Char(c) => {
@@ -1457,7 +1459,11 @@ pub async fn run_tui_dashboard(
         load_cooldown = load_cooldown.saturating_sub(1);
 
         // Lazy-load more history when scrolled near the top
-        let effective_scroll = if auto_scroll { max_scroll_storage } else { scroll_offset };
+        let effective_scroll = if auto_scroll {
+            max_scroll_storage
+        } else {
+            scroll_offset
+        };
         if history_loader.is_some()
             && !loading_history
             && load_cooldown == 0
@@ -2045,8 +2051,11 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
     // Show cursor after the prompt prefix and input text
     let cursor_x = rows[1].x + 2 + input.len() as u16;
     let cursor_y = rows[1].y;
-    if last_cursor_pos.map_or(true, |(px, py)| px != cursor_x || py != cursor_y) {
-        f.set_cursor_position(Position { x: cursor_x, y: cursor_y });
+    if last_cursor_pos.is_none_or(|(px, py)| px != cursor_x || py != cursor_y) {
+        f.set_cursor_position(Position {
+            x: cursor_x,
+            y: cursor_y,
+        });
         *last_cursor_pos = Some((cursor_x, cursor_y));
     }
     let footer_row = if popup_rows > 0 {
