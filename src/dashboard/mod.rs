@@ -1994,6 +1994,11 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
         },
     ]);
     f.render_widget(Paragraph::new(prompt), rows[1]);
+    // Show cursor after the prompt prefix and input text
+    f.set_cursor_position(Position {
+        x: rows[1].x + 2 + input.len() as u16,
+        y: rows[1].y,
+    });
     let footer_row = if popup_rows > 0 {
         render_command_popup(f, rows[2], input, context, popup_selection, popup_scroll);
         rows[3]
