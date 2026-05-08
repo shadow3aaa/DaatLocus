@@ -157,3 +157,28 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Add a dependency license audit note for transitive dependencies.
   - [x] Track dependencies with weak-copyleft or attribution-sensitive licenses.
   - [x] Document when a project-level `NOTICE` file becomes necessary.
+
+- [ ] TUI：引入 cell 级视口裁剪替代全量 Vec<Line> 渲染
+  - [ ] 实现 Renderable trait 和 ColumnRenderable 组合器（参考 codex renderable.rs）。
+  - [ ] 每个 ActivityCell 实现 desired_height / render，视口外 cell 跳过绘制。
+  - [ ] 用 FlexRenderable 将活动列表、命令输入框、弹窗组合为布局树。
+  - [ ] 保留 CachedActivityLines 作为 cell 内 markdown 行缓存。
+
+- [ ] TUI：修复命令输入框光标位置
+  - [ ] 在 terminal.draw 闭包中调用 frame.set_cursor_position()。
+  - [ ] 光标位置从布局树递归定位到命令输入框底部（参考 codex cursor_pos）。
+  - [ ] 调用 frame.set_cursor_style(SetCursorStyle::SteadyBar) 恢复可见光标。
+  - [ ] 确认 crossterm 层面没有 EnableMouseCapture 残留影响光标行为。
+
+- [ ] TUI：重构事件循环为 async stream 模式
+  - [ ] 引入 TuiEvent 枚举（Key / Paste / Resize / Draw）替代裸 crossterm Event。
+  - [ ] 用 tokio::select! 同时监听 tui_events、app_events、app_server_events。
+  - [ ] 引入 FrameRequester + FrameScheduler 机制让组件按需请求重绘。
+  - [ ] 加入 FrameRateLimiter (120fps cap) 防止过度绘制。
+  - [ ] 移除手动的 needs_render / poll_timeout / next_animation_deadline 轮询逻辑。
+
+- [ ] TUI：实现 history_cell 级 markdown 增量渲染
+  - [ ] 参考 codex history_cell.rs 的 display_lines(width) 模式。
+  - [ ] 将 render_markdown 输入改为按 cell 调用，而非拼接全部 body_lines。
+  - [ ] 为 Assistant 消息 cell 添加 Rich / Raw 双模式支持。
+  - [ ] 加入 ReducedMotionIndicator 控制动画行为。
