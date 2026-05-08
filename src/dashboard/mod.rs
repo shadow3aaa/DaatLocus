@@ -1124,11 +1124,16 @@ pub async fn run_tui_dashboard(
     let mut cached_activity_lines = CachedActivityLines::new();
     let mut expanded_thinking: HashSet<usize> = HashSet::new();
 
+    // needs_render persists across loop iterations so that input events
+    // (scroll keys, picker nav, etc.) that set it to true and then
+    // `continue` still trigger a render on the next pass.
+    let mut needs_render = true;
+
     loop {
-        // Check if dashboard state has changed since last render.
-        // Must be checked *before* any rx.borrow() call.
-        let state_changed = rx.has_changed().unwrap_or(true);
-        let mut needs_render = state_changed;
+        // If dashboard state changed, flag a render.
+        if rx.has_changed().unwrap_or(true) {
+            needs_render = true;
+        }
 
         // Longer poll when idle to avoid busy-looping the cursor.
         let poll_timeout = if needs_render {
@@ -1456,9 +1461,11 @@ pub async fn run_tui_dashboard(
             }
         }
 
+        // If nothing changed and no input arrived, keep sleeping.
         if !needs_render {
             continue;
         }
+        needs_render = false;
 
         let state = rx.borrow_and_update();
         let pending_requests = state.pending_access_requests.clone();
