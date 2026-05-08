@@ -9,7 +9,6 @@ use crate::reasoning::runtime::{
 
 pub const APPROX_BYTES_PER_TOKEN: usize = 4;
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 128_000;
-pub const DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS: usize = 100_000;
 pub const DEFAULT_MAX_COMPLETION_TOKENS: usize = 4_000;
 pub const DEFAULT_TOOL_OUTPUT_MAX_TOKENS: usize = 2_000;
 

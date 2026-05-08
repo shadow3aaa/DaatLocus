@@ -37,16 +37,28 @@ impl MdStyles {
     fn new(base_color: Color) -> Self {
         Self {
             base: Style::default().fg(base_color),
-            h1: Style::default().fg(base_color).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            h1: Style::default()
+                .fg(base_color)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             h2: Style::default().fg(base_color).add_modifier(Modifier::BOLD),
             h3: Style::default().fg(base_color).add_modifier(Modifier::BOLD),
-            h4: Style::default().fg(base_color).add_modifier(Modifier::ITALIC),
-            h5: Style::default().fg(base_color).add_modifier(Modifier::ITALIC),
-            h6: Style::default().fg(base_color).add_modifier(Modifier::ITALIC),
+            h4: Style::default()
+                .fg(base_color)
+                .add_modifier(Modifier::ITALIC),
+            h5: Style::default()
+                .fg(base_color)
+                .add_modifier(Modifier::ITALIC),
+            h6: Style::default()
+                .fg(base_color)
+                .add_modifier(Modifier::ITALIC),
             code: Style::default().fg(Color::Yellow),
-            emphasis: Style::default().fg(base_color).add_modifier(Modifier::ITALIC),
+            emphasis: Style::default()
+                .fg(base_color)
+                .add_modifier(Modifier::ITALIC),
             strong: Style::default().fg(base_color).add_modifier(Modifier::BOLD),
-            strikethrough: Style::default().fg(base_color).add_modifier(Modifier::CROSSED_OUT),
+            strikethrough: Style::default()
+                .fg(base_color)
+                .add_modifier(Modifier::CROSSED_OUT),
             list_marker: Style::default().fg(Color::DarkGray),
             blockquote: Style::default().fg(Color::Green),
         }
@@ -196,8 +208,8 @@ where
             | Tag::TableRow
             | Tag::TableCell
             | Tag::Image { .. }
-            | Tag::MetadataBlock(_)
-            | _ => {}
+            | Tag::MetadataBlock(_) => {}
+            _ => {}
         }
     }
 
@@ -226,10 +238,10 @@ where
                 self.needs_newline = true;
             }
             TagEnd::Item => {
-                if self.list_item_needs_blank.last_mut().is_some_and(|n| *n) {
-                    if let Some(last) = self.list_item_needs_blank.last_mut() {
-                        *last = false;
-                    }
+                if self.list_item_needs_blank.last_mut().is_some_and(|n| *n)
+                    && let Some(last) = self.list_item_needs_blank.last_mut()
+                {
+                    *last = false;
                 }
                 self.indent_stack.pop();
                 self.pending_marker = false;
@@ -245,8 +257,8 @@ where
             | TagEnd::TableRow
             | TagEnd::TableCell
             | TagEnd::Image
-            | TagEnd::MetadataBlock(_)
-            | _ => {}
+            | TagEnd::MetadataBlock(_) => {}
+            _ => {}
         }
     }
 
@@ -264,10 +276,7 @@ where
             HeadingLevel::H5 => self.styles.h5,
             HeadingLevel::H6 => self.styles.h6,
         };
-        self.push_line(Line::from(vec![Span::styled(
-            format!("{marker} "),
-            style,
-        )]));
+        self.push_line(Line::from(vec![Span::styled(format!("{marker} "), style)]));
         self.push_inline(style);
     }
 
@@ -371,11 +380,13 @@ where
                 self.flush_current();
                 self.needs_newline = false;
             }
-            let style = self.inline_styles.last().copied().unwrap_or(self.styles.base);
-            self.current.push_span(Span::styled(
-                line.to_string(),
-                style,
-            ));
+            let style = self
+                .inline_styles
+                .last()
+                .copied()
+                .unwrap_or(self.styles.base);
+            self.current
+                .push_span(Span::styled(line.to_string(), style));
         }
     }
 
@@ -404,7 +415,11 @@ where
     // ── inline style stack ────────────────────────────────────────────
 
     fn push_inline(&mut self, style: Style) {
-        let current = self.inline_styles.last().copied().unwrap_or(self.styles.base);
+        let current = self
+            .inline_styles
+            .last()
+            .copied()
+            .unwrap_or(self.styles.base);
         self.inline_styles.push(current.patch(style));
     }
 

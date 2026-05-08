@@ -4,9 +4,9 @@ pub mod cells;
 pub mod frame_rate_limiter;
 pub mod frame_requester;
 pub mod history;
+pub mod render;
 pub mod renderable;
 pub mod tui_event;
-pub mod render;
 
 pub use cells::{
     ActivityCell, CachedActivityLines, DashboardActivityEvent, LiveActivityCell,
@@ -20,14 +20,11 @@ pub use history::{
     DashboardActivityHistoryPage, DashboardActivityHistoryStore, DashboardActivityHistoryWindow,
 };
 
-use std::{
-    collections::HashSet,
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
-use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::cursor::SetCursorStyle;
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use ratatui::{
     prelude::*,
@@ -1101,16 +1098,10 @@ pub async fn run_tui_dashboard(
 ) -> Result<(), std::io::Error> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    crossterm::execute!(
-        stdout,
-        crossterm::terminal::EnterAlternateScreen,
-    )?;
+    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen,)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        SetCursorStyle::SteadyBar,
-    )?;
+    crossterm::execute!(terminal.backend_mut(), SetCursorStyle::SteadyBar,)?;
     let mut command_input = String::new();
     let mut command_popup_selection: usize = 0;
     let mut command_popup_scroll: usize = 0;
@@ -1142,347 +1133,347 @@ pub async fn run_tui_dashboard(
 
     loop {
         tokio::select! {
-            event = event_stream.next() => {
-                let event = match event {
-                    Some(Ok(e)) => e,
-                    _ => continue,
-                };
-                let Some(tui_event) = tui_event::TuiEvent::from_crossterm(event) else {
-                    continue;
-                };
-                match tui_event {
-                    tui_event::TuiEvent::Key(key) => {
-                        needs_render = true;
-                        if key.kind != KeyEventKind::Press {
+                    event = event_stream.next() => {
+                        let event = match event {
+                            Some(Ok(e)) => e,
+                            _ => continue,
+                        };
+                        let Some(tui_event) = tui_event::TuiEvent::from_crossterm(event) else {
                             continue;
-                        }
-                        let pending_requests = rx.borrow_and_update().pending_access_requests.clone();
-            if telegram_access_picker.is_some() {
-                let mut command_to_run: Option<String> = None;
-                let mut close_picker = false;
-                if let Some(picker) = telegram_access_picker.as_mut() {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            close_picker = true;
-                        }
-                        KeyCode::Up => {
-                            picker.selected = picker
-                                .selected
-                                .saturating_sub(1)
-                                .min(picker.requests.len().saturating_sub(1));
-                            picker.scroll = adjusted_picker_scroll(
-                                picker.scroll,
-                                picker.selected,
-                                picker.requests.len(),
-                            );
-                        }
-                        KeyCode::Down => {
-                            picker.selected =
-                                (picker.selected + 1).min(picker.requests.len().saturating_sub(1));
-                            picker.scroll = adjusted_picker_scroll(
-                                picker.scroll,
-                                picker.selected,
-                                picker.requests.len(),
-                            );
-                        }
-                        KeyCode::PageUp => {
-                            picker.selected = picker.selected.saturating_sub(8);
-                            picker.scroll = adjusted_picker_scroll(
-                                picker.scroll,
-                                picker.selected,
-                                picker.requests.len(),
-                            );
-                        }
-                        KeyCode::PageDown => {
-                            picker.selected =
-                                (picker.selected + 8).min(picker.requests.len().saturating_sub(1));
-                            picker.scroll = adjusted_picker_scroll(
-                                picker.scroll,
-                                picker.selected,
-                                picker.requests.len(),
-                            );
-                        }
-                        KeyCode::Home => {
-                            picker.selected = 0;
-                            picker.scroll = 0;
-                        }
-                        KeyCode::End => {
-                            picker.selected = picker.requests.len().saturating_sub(1);
-                            picker.scroll = adjusted_picker_scroll(
-                                picker.scroll,
-                                picker.selected,
-                                picker.requests.len(),
-                            );
-                        }
-                        KeyCode::Enter => {
-                            if let Some(request) = picker.requests.get(picker.selected) {
-                                command_to_run = Some(format!(
-                                    "/telegram {} {}",
-                                    picker.action.verb(),
-                                    request.chat_id
-                                ));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if close_picker {
-                    telegram_access_picker = None;
-                }
-                if let Some(command) = command_to_run {
-                    telegram_access_picker = None;
-                    let state = rx.borrow().clone();
-                    let response = command_runner.run_command(&command, &state).await;
-                    command_overlay = Some(CommandOverlay {
-                        title: command.to_uppercase(),
-                        text: response,
-                        scroll: 0,
-                    });
-                }
-                continue;
-            }
-            if let Some(overlay) = command_overlay.as_mut() {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        command_overlay = None;
-                    }
-                    KeyCode::Up => {
-                        overlay.scroll = overlay.scroll.saturating_sub(1);
-                    }
-                    KeyCode::Down => {
-                        overlay.scroll = overlay.scroll.saturating_add(1);
-                    }
-                    KeyCode::PageUp => {
-                        overlay.scroll = overlay.scroll.saturating_sub(10);
-                    }
-                    KeyCode::PageDown => {
-                        overlay.scroll = overlay.scroll.saturating_add(10);
-                    }
-                    KeyCode::Home => {
-                        overlay.scroll = 0;
-                    }
-                    KeyCode::End => {
-                        overlay.scroll = u16::MAX;
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-            // Activity feed scroll keys (normal mode)
-            // Only active when command input is empty – popup nav works otherwise
-            if command_input.is_empty() {
-                {
-                    let mut scrolled = true;
-                    // Ctrl+T toggles all thinking cell expansion
-                    if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                        let state = rx.borrow();
-                        let mut any_thinking = false;
-                        let offset = extra_history_cells.len();
-                        for (i, cell) in state.activity_cells.iter().enumerate() {
-                            if matches!(cell, ActivityCell::Thinking(_)) {
-                                let idx = offset + i;
-                                if expanded_thinking.contains(&idx) {
-                                    expanded_thinking.remove(&idx);
-                                } else {
-                                    expanded_thinking.insert(idx);
+                        };
+                        match tui_event {
+                            tui_event::TuiEvent::Key(key) => {
+                                needs_render = true;
+                                if key.kind != KeyEventKind::Press {
+                                    continue;
                                 }
-                                any_thinking = true;
+                                let pending_requests = rx.borrow_and_update().pending_access_requests.clone();
+                    if telegram_access_picker.is_some() {
+                        let mut command_to_run: Option<String> = None;
+                        let mut close_picker = false;
+                        if let Some(picker) = telegram_access_picker.as_mut() {
+                            match key.code {
+                                KeyCode::Esc | KeyCode::Char('q') => {
+                                    close_picker = true;
+                                }
+                                KeyCode::Up => {
+                                    picker.selected = picker
+                                        .selected
+                                        .saturating_sub(1)
+                                        .min(picker.requests.len().saturating_sub(1));
+                                    picker.scroll = adjusted_picker_scroll(
+                                        picker.scroll,
+                                        picker.selected,
+                                        picker.requests.len(),
+                                    );
+                                }
+                                KeyCode::Down => {
+                                    picker.selected =
+                                        (picker.selected + 1).min(picker.requests.len().saturating_sub(1));
+                                    picker.scroll = adjusted_picker_scroll(
+                                        picker.scroll,
+                                        picker.selected,
+                                        picker.requests.len(),
+                                    );
+                                }
+                                KeyCode::PageUp => {
+                                    picker.selected = picker.selected.saturating_sub(8);
+                                    picker.scroll = adjusted_picker_scroll(
+                                        picker.scroll,
+                                        picker.selected,
+                                        picker.requests.len(),
+                                    );
+                                }
+                                KeyCode::PageDown => {
+                                    picker.selected =
+                                        (picker.selected + 8).min(picker.requests.len().saturating_sub(1));
+                                    picker.scroll = adjusted_picker_scroll(
+                                        picker.scroll,
+                                        picker.selected,
+                                        picker.requests.len(),
+                                    );
+                                }
+                                KeyCode::Home => {
+                                    picker.selected = 0;
+                                    picker.scroll = 0;
+                                }
+                                KeyCode::End => {
+                                    picker.selected = picker.requests.len().saturating_sub(1);
+                                    picker.scroll = adjusted_picker_scroll(
+                                        picker.scroll,
+                                        picker.selected,
+                                        picker.requests.len(),
+                                    );
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(request) = picker.requests.get(picker.selected) {
+                                        command_to_run = Some(format!(
+                                            "/telegram {} {}",
+                                            picker.action.verb(),
+                                            request.chat_id
+                                        ));
+                                    }
+                                }
+                                _ => {}
                             }
                         }
-                        if any_thinking {
-                            cached_activity_lines = CachedActivityLines::new();
+                        if close_picker {
+                            telegram_access_picker = None;
                         }
-                        continue;
-                    }
-                    match key.code {
-                        KeyCode::Up => {
-                            if auto_scroll {
-                                auto_scroll = false;
-                                scroll_offset = max_scroll_storage.saturating_sub(1);
-                            } else {
-                                scroll_offset = scroll_offset.saturating_sub(1);
-                            }
-                        }
-                        KeyCode::Down => {
-                            scroll_offset = scroll_offset.saturating_add(1);
-                            if scroll_offset >= max_scroll_storage {
-                                auto_scroll = true;
-                            }
-                        }
-                        KeyCode::PageUp => {
-                            if auto_scroll {
-                                auto_scroll = false;
-                                scroll_offset = max_scroll_storage.saturating_sub(page_height);
-                            } else {
-                                scroll_offset = scroll_offset.saturating_sub(page_height);
-                            }
-                        }
-                        KeyCode::PageDown => {
-                            scroll_offset = scroll_offset.saturating_add(page_height);
-                            if scroll_offset >= max_scroll_storage {
-                                auto_scroll = true;
-                            }
-                        }
-                        KeyCode::Home => {
-                            auto_scroll = false;
-                            scroll_offset = 0;
-                        }
-                        KeyCode::End => {
-                            auto_scroll = true;
-                            scroll_offset = 0;
-                        }
-                        _ => {
-                            scrolled = false;
-                        }
-                    }
-                    if scrolled {
-                        // Reset End→MAX; keep cursor at bottom for new activity
-                        if scroll_offset >= max_scroll_storage {
-                            auto_scroll = true;
-                        }
-                        continue;
-                    }
-                }
-            }
-            match key.code {
-                KeyCode::Char(c) => {
-                    command_input.push(c);
-                    command_popup_selection = 0;
-                    command_popup_scroll = 0;
-                }
-                KeyCode::Tab => {
-                    let state = rx.borrow();
-                    let command_context = DashboardCommandContext {
-                        requests: &pending_requests,
-                        state: &state,
-                        executor: None,
-                    };
-                    if let Some(completion) = selected_command_completion(
-                        &command_input,
-                        command_popup_selection,
-                        &command_context,
-                    ) {
-                        command_input = completion;
-                        command_popup_selection = 0;
-                        command_popup_scroll = 0;
-                    }
-                }
-                KeyCode::Backspace => {
-                    command_input.pop();
-                    command_popup_selection = 0;
-                    command_popup_scroll = 0;
-                }
-                KeyCode::Up => {
-                    let state = rx.borrow();
-                    let command_context = DashboardCommandContext {
-                        requests: &pending_requests,
-                        state: &state,
-                        executor: None,
-                    };
-                    let matches = matching_commands(&command_input, &command_context);
-                    if !matches.is_empty() {
-                        command_popup_selection = command_popup_selection
-                            .saturating_sub(1)
-                            .min(matches.len() - 1);
-                        command_popup_scroll = adjusted_popup_scroll(
-                            command_popup_scroll,
-                            command_popup_selection,
-                            matches.len(),
-                        );
-                    }
-                }
-                KeyCode::Down => {
-                    let state = rx.borrow();
-                    let command_context = DashboardCommandContext {
-                        requests: &pending_requests,
-                        state: &state,
-                        executor: None,
-                    };
-                    let matches = matching_commands(&command_input, &command_context);
-                    if !matches.is_empty() {
-                        command_popup_selection =
-                            (command_popup_selection + 1).min(matches.len() - 1);
-                        command_popup_scroll = adjusted_popup_scroll(
-                            command_popup_scroll,
-                            command_popup_selection,
-                            matches.len(),
-                        );
-                    }
-                }
-                KeyCode::Esc => {
-                    command_input.clear();
-                    command_popup_selection = 0;
-                    command_popup_scroll = 0;
-                }
-                KeyCode::Enter => {
-                    let state = rx.borrow().clone();
-                    let command_context = DashboardCommandContext {
-                        requests: &pending_requests,
-                        state: &state,
-                        executor: None,
-                    };
-                    if let Some(completion) = selected_command_completion(
-                        &command_input,
-                        command_popup_selection,
-                        &command_context,
-                    ) && completion != command_input
-                    {
-                        command_input = completion;
-                        command_popup_selection = 0;
-                        command_popup_scroll = 0;
-                        continue;
-                    }
-                    let input = command_input.trim().to_string();
-                    if !input.is_empty() {
-                        if matches!(dashboard_command_body(&input), Some("quit" | "q" | "exit")) {
-                            break;
-                        }
-                        if let Some(picker) =
-                            telegram_access_picker_for_input(&input, &pending_requests)
-                        {
-                            telegram_access_picker = Some(picker);
-                            command_input.clear();
-                            command_popup_selection = 0;
-                            command_popup_scroll = 0;
-                            continue;
-                        }
-                        let response = command_runner.run_command(&input, &state).await;
-                        if is_dashboard_command_input(&input) {
+                        if let Some(command) = command_to_run {
+                            telegram_access_picker = None;
+                            let state = rx.borrow().clone();
+                            let response = command_runner.run_command(&command, &state).await;
                             command_overlay = Some(CommandOverlay {
-                                title: input.to_uppercase(),
+                                title: command.to_uppercase(),
                                 text: response,
                                 scroll: 0,
                             });
-                        } else {
-                            command_overlay = None;
+                        }
+                        continue;
+                    }
+                    if let Some(overlay) = command_overlay.as_mut() {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('q') => {
+                                command_overlay = None;
+                            }
+                            KeyCode::Up => {
+                                overlay.scroll = overlay.scroll.saturating_sub(1);
+                            }
+                            KeyCode::Down => {
+                                overlay.scroll = overlay.scroll.saturating_add(1);
+                            }
+                            KeyCode::PageUp => {
+                                overlay.scroll = overlay.scroll.saturating_sub(10);
+                            }
+                            KeyCode::PageDown => {
+                                overlay.scroll = overlay.scroll.saturating_add(10);
+                            }
+                            KeyCode::Home => {
+                                overlay.scroll = 0;
+                            }
+                            KeyCode::End => {
+                                overlay.scroll = u16::MAX;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    // Activity feed scroll keys (normal mode)
+                    // Only active when command input is empty – popup nav works otherwise
+                    if command_input.is_empty() {
+                        {
+                            let mut scrolled = true;
+                            // Ctrl+T toggles all thinking cell expansion
+                            if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                                let state = rx.borrow();
+                                let mut any_thinking = false;
+                                let offset = extra_history_cells.len();
+                                for (i, cell) in state.activity_cells.iter().enumerate() {
+                                    if matches!(cell, ActivityCell::Thinking(_)) {
+                                        let idx = offset + i;
+                                        if expanded_thinking.contains(&idx) {
+                                            expanded_thinking.remove(&idx);
+                                        } else {
+                                            expanded_thinking.insert(idx);
+                                        }
+                                        any_thinking = true;
+                                    }
+                                }
+                                if any_thinking {
+                                    cached_activity_lines = CachedActivityLines::new();
+                                }
+                                continue;
+                            }
+                            match key.code {
+                                KeyCode::Up => {
+                                    if auto_scroll {
+                                        auto_scroll = false;
+                                        scroll_offset = max_scroll_storage.saturating_sub(1);
+                                    } else {
+                                        scroll_offset = scroll_offset.saturating_sub(1);
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    scroll_offset = scroll_offset.saturating_add(1);
+                                    if scroll_offset >= max_scroll_storage {
+                                        auto_scroll = true;
+                                    }
+                                }
+                                KeyCode::PageUp => {
+                                    if auto_scroll {
+                                        auto_scroll = false;
+                                        scroll_offset = max_scroll_storage.saturating_sub(page_height);
+                                    } else {
+                                        scroll_offset = scroll_offset.saturating_sub(page_height);
+                                    }
+                                }
+                                KeyCode::PageDown => {
+                                    scroll_offset = scroll_offset.saturating_add(page_height);
+                                    if scroll_offset >= max_scroll_storage {
+                                        auto_scroll = true;
+                                    }
+                                }
+                                KeyCode::Home => {
+                                    auto_scroll = false;
+                                    scroll_offset = 0;
+                                }
+                                KeyCode::End => {
+                                    auto_scroll = true;
+                                    scroll_offset = 0;
+                                }
+                                _ => {
+                                    scrolled = false;
+                                }
+                            }
+                            if scrolled {
+                                // Reset End→MAX; keep cursor at bottom for new activity
+                                if scroll_offset >= max_scroll_storage {
+                                    auto_scroll = true;
+                                }
+                                continue;
+                            }
                         }
                     }
-                    command_input.clear();
-                    command_popup_selection = 0;
-                    command_popup_scroll = 0;
+                    match key.code {
+                        KeyCode::Char(c) => {
+                            command_input.push(c);
+                            command_popup_selection = 0;
+                            command_popup_scroll = 0;
+                        }
+                        KeyCode::Tab => {
+                            let state = rx.borrow();
+                            let command_context = DashboardCommandContext {
+                                requests: &pending_requests,
+                                state: &state,
+                                executor: None,
+                            };
+                            if let Some(completion) = selected_command_completion(
+                                &command_input,
+                                command_popup_selection,
+                                &command_context,
+                            ) {
+                                command_input = completion;
+                                command_popup_selection = 0;
+                                command_popup_scroll = 0;
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            command_input.pop();
+                            command_popup_selection = 0;
+                            command_popup_scroll = 0;
+                        }
+                        KeyCode::Up => {
+                            let state = rx.borrow();
+                            let command_context = DashboardCommandContext {
+                                requests: &pending_requests,
+                                state: &state,
+                                executor: None,
+                            };
+                            let matches = matching_commands(&command_input, &command_context);
+                            if !matches.is_empty() {
+                                command_popup_selection = command_popup_selection
+                                    .saturating_sub(1)
+                                    .min(matches.len() - 1);
+                                command_popup_scroll = adjusted_popup_scroll(
+                                    command_popup_scroll,
+                                    command_popup_selection,
+                                    matches.len(),
+                                );
+                            }
+                        }
+                        KeyCode::Down => {
+                            let state = rx.borrow();
+                            let command_context = DashboardCommandContext {
+                                requests: &pending_requests,
+                                state: &state,
+                                executor: None,
+                            };
+                            let matches = matching_commands(&command_input, &command_context);
+                            if !matches.is_empty() {
+                                command_popup_selection =
+                                    (command_popup_selection + 1).min(matches.len() - 1);
+                                command_popup_scroll = adjusted_popup_scroll(
+                                    command_popup_scroll,
+                                    command_popup_selection,
+                                    matches.len(),
+                                );
+                            }
+                        }
+                        KeyCode::Esc => {
+                            command_input.clear();
+                            command_popup_selection = 0;
+                            command_popup_scroll = 0;
+                        }
+                        KeyCode::Enter => {
+                            let state = rx.borrow().clone();
+                            let command_context = DashboardCommandContext {
+                                requests: &pending_requests,
+                                state: &state,
+                                executor: None,
+                            };
+                            if let Some(completion) = selected_command_completion(
+                                &command_input,
+                                command_popup_selection,
+                                &command_context,
+                            ) && completion != command_input
+                            {
+                                command_input = completion;
+                                command_popup_selection = 0;
+                                command_popup_scroll = 0;
+                                continue;
+                            }
+                            let input = command_input.trim().to_string();
+                            if !input.is_empty() {
+                                if matches!(dashboard_command_body(&input), Some("quit" | "q" | "exit")) {
+                                    break;
+                                }
+                                if let Some(picker) =
+                                    telegram_access_picker_for_input(&input, &pending_requests)
+                                {
+                                    telegram_access_picker = Some(picker);
+                                    command_input.clear();
+                                    command_popup_selection = 0;
+                                    command_popup_scroll = 0;
+                                    continue;
+                                }
+                                let response = command_runner.run_command(&input, &state).await;
+                                if is_dashboard_command_input(&input) {
+                                    command_overlay = Some(CommandOverlay {
+                                        title: input.to_uppercase(),
+                                        text: response,
+                                        scroll: 0,
+                                    });
+                                } else {
+                                    command_overlay = None;
+                                }
+                            }
+                            command_input.clear();
+                            command_popup_selection = 0;
+                            command_popup_scroll = 0;
+                        }
+                        _ => {}
+                    }
+                    }
+                    tui_event::TuiEvent::Resize => {
+                        needs_render = true;
+                    }
+                    tui_event::TuiEvent::Paste(_) | tui_event::TuiEvent::Draw => {
+                        needs_render = true;
+                    }
                 }
-                _ => {}
             }
+            result = rx.changed() => {
+                if result.is_ok() {
+                    needs_render = true;
+                }
             }
-            tui_event::TuiEvent::Resize => {
-                needs_render = true;
-            }
-            tui_event::TuiEvent::Paste(_) | tui_event::TuiEvent::Draw => {
-                needs_render = true;
+            result = draw_rx.recv() => {
+                if result.is_ok() {
+                    needs_render = true;
+                }
             }
         }
-    }
-    result = rx.changed() => {
-        if result.is_ok() {
-            needs_render = true;
-        }
-    }
-    result = draw_rx.recv() => {
-        if result.is_ok() {
-            needs_render = true;
-        }
-    }
-}
 
         // If nothing changed and no input arrived, keep sleeping.
         if !needs_render {
@@ -1562,11 +1553,9 @@ pub async fn run_tui_dashboard(
         }
 
         // On first iteration, sync cursor from state
-        if oldest_cursor.is_none() {
-            if !state.activity_history.items.is_empty() {
-                oldest_cursor = state.activity_history.oldest_cursor;
-                has_more_before = state.activity_history.has_more_before;
-            }
+        if oldest_cursor.is_none() && !state.activity_history.items.is_empty() {
+            oldest_cursor = state.activity_history.oldest_cursor;
+            has_more_before = state.activity_history.has_more_before;
         }
 
         // Build combined cells: extra history + current state

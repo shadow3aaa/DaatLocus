@@ -7,8 +7,8 @@ use thiserror::Error;
 
 use crate::{
     context_budget::{
-        DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS, DEFAULT_CONTEXT_WINDOW_TOKENS,
-        DEFAULT_MAX_COMPLETION_TOKENS, DEFAULT_TOOL_OUTPUT_MAX_TOKENS,
+        DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_MAX_COMPLETION_TOKENS,
+        DEFAULT_TOOL_OUTPUT_MAX_TOKENS,
     },
     i18n::Locale,
     persistence::{PersistenceFileMode, PersistenceStore, write_bytes_atomic},
@@ -168,7 +168,7 @@ impl Default for ModelConfig {
             request_timeout_secs: 300,
             stream_idle_timeout_secs: 45,
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
-            auto_compact_token_limit: Some(DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS),
+            auto_compact_token_limit: None,
             effective_context_window_percent: DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
             max_completion_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
             tool_output_max_tokens: DEFAULT_TOOL_OUTPUT_MAX_TOKENS,

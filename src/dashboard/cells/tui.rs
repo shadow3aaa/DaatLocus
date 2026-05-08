@@ -8,6 +8,7 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
+use super::markdown::render_markdown;
 use super::{
     ActivityCell, LiveActivityCell,
     apps::{AppAttentionActivityCell, BrowserActivityCell, LiveBrowserActivityCell},
@@ -22,7 +23,6 @@ use super::{
     workflow::{ActivateWorkflowActivityCell, CreateWorkflowActivityCell, DeepRecallActivityCell},
 };
 use crate::tool_ui::{PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, glyph};
-use super::markdown::render_markdown;
 
 use super::super::renderable::Renderable;
 
@@ -61,27 +61,33 @@ pub fn desired_height(cell: &ActivityCell, width: u16) -> u16 {
         ActivityCell::Browser(c) => {
             let mut h: u16 = 1;
             let has_stats = c.line_count.is_some() || c.ref_count.is_some();
-            if has_stats { h += 1; }
+            if has_stats {
+                h += 1;
+            }
             h + 1
         }
-        ActivityCell::LiveBrowser(c) => {
-            1 + c.body_lines.len().min(1) as u16 + 1
-        }
+        ActivityCell::LiveBrowser(c) => 1 + c.body_lines.len().min(1) as u16 + 1,
         ActivityCell::GenericApp(c) => {
             1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 6) + 1
         }
-        ActivityCell::PlanResult(c) => {
-            1 + c.steps.len().min(8) as u16 + 1
-        }
+        ActivityCell::PlanResult(c) => 1 + c.steps.len().min(8) as u16 + 1,
         ActivityCell::CreateWorkflowResult(_) => 2,
         ActivityCell::ActivateWorkflowResult(_) => 2,
         ActivityCell::DeepRecallResult(_) => 2,
         ActivityCell::ExecResult(c) => {
-            let n = if c.output_lines.is_empty() { 1 } else { c.output_lines.len().min(8) };
+            let n = if c.output_lines.is_empty() {
+                1
+            } else {
+                c.output_lines.len().min(8)
+            };
             1 + n as u16 + 1
         }
         ActivityCell::LiveExec(c) => {
-            let n = if c.output_lines.is_empty() { 1 } else { c.output_lines.len().min(8) };
+            let n = if c.output_lines.is_empty() {
+                1
+            } else {
+                c.output_lines.len().min(8)
+            };
             1 + n as u16 + 1
         }
         ActivityCell::Patch(c) => {
@@ -135,7 +141,9 @@ pub fn desired_height(cell: &ActivityCell, width: u16) -> u16 {
 }
 
 fn count_wrapped_lines(lines: &[String], wrap_width: u16, limit: usize) -> u16 {
-    if lines.is_empty() { return 0; }
+    if lines.is_empty() {
+        return 0;
+    }
     let w = wrap_width.max(3) as usize;
     let mut total: usize = 0;
     for line in lines.iter().take(limit) {
@@ -148,7 +156,9 @@ fn count_wrapped_lines(lines: &[String], wrap_width: u16, limit: usize) -> u16 {
 /// Render a single cell into a buffer at the given area.
 pub fn render_activity_cell_to_buf(cell: &ActivityCell, area: Rect, buf: &mut Buffer) {
     let lines = render_activity_cell_lines(cell, area.width);
-    if lines.is_empty() { return; }
+    if lines.is_empty() {
+        return;
+    }
     let text = Text::from(lines);
     Paragraph::new(text)
         .wrap(Wrap { trim: false })
@@ -182,7 +192,9 @@ impl CachedActivityLines {
     }
 
     fn needs_rebuild(&self, inner_width: u16, total_cells: usize, expanded_count: usize) -> bool {
-        self.width != inner_width || self.total_cells != total_cells || self.expanded_count != expanded_count
+        self.width != inner_width
+            || self.total_cells != total_cells
+            || self.expanded_count != expanded_count
     }
 }
 
@@ -204,8 +216,14 @@ pub fn render_activity_feed_cached(
     let total_height: u16 = if total_cells == 0 {
         0
     } else {
-        cells.iter().map(|c| desired_height(c, inner_width)).sum::<u16>()
-            + live_cells.iter().map(|c| desired_height(&c.cell, inner_width)).sum::<u16>()
+        cells
+            .iter()
+            .map(|c| desired_height(c, inner_width))
+            .sum::<u16>()
+            + live_cells
+                .iter()
+                .map(|c| desired_height(&c.cell, inner_width))
+                .sum::<u16>()
     };
 
     let inner = Rect {
@@ -220,8 +238,8 @@ pub fn render_activity_feed_cached(
 
     if total_cells == 0 {
         // Render placeholder
-        let placeholder = Paragraph::new("No activity yet")
-            .style(Style::default().fg(Color::DarkGray));
+        let placeholder =
+            Paragraph::new("No activity yet").style(Style::default().fg(Color::DarkGray));
         placeholder.render(inner, buf);
     } else {
         // Viewport-culled rendering: only render cells that overlap with the visible area
@@ -280,7 +298,15 @@ fn render_activity_cell_lines(cell: &ActivityCell, max_width: u16) -> Vec<Line<'
 }
 
 fn render_assistant_cell_lines(cell: &AssistantActivityCell) -> Vec<Line<'static>> {
-    render_text_activity_lines("›", Color::Cyan, &cell.title, &cell.body_lines, 8, None, true)
+    render_text_activity_lines(
+        "›",
+        Color::Cyan,
+        &cell.title,
+        &cell.body_lines,
+        8,
+        None,
+        true,
+    )
 }
 
 fn render_thinking_cell_lines(cell: &ThinkingActivityCell, max_width: u16) -> Vec<Line<'static>> {
@@ -641,7 +667,13 @@ fn render_reply_cell_lines(cell: &ReplyActivityCell) -> Vec<Line<'static>> {
         ),
     ])];
     if !cell.message_lines.is_empty() {
-        let joined = cell.message_lines.iter().take(8).cloned().collect::<Vec<_>>().join("\n");
+        let joined = cell
+            .message_lines
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
         let md_lines = render_markdown(&joined, Color::White);
         lines.extend(md_lines);
     }
@@ -768,12 +800,20 @@ fn render_text_activity_lines(
     let ep = extra_prefix.unwrap_or("");
 
     if markdown && !body_lines.is_empty() {
-        let joined = body_lines.iter().take(limit).cloned().collect::<Vec<_>>().join("\n");
+        let joined = body_lines
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
         let md_lines = render_markdown(&joined, Color::Gray);
         for md_line in md_lines {
             let mut spans: Vec<Span<'static>> = vec![Span::raw("   ")];
             if !ep.is_empty() {
-                spans.push(Span::styled(ep.to_string(), Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    ep.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
             spans.extend(md_line.spans);
             lines.push(Line::from(spans));
@@ -782,15 +822,22 @@ fn render_text_activity_lines(
         for line in body_lines.iter().take(limit) {
             let mut spans: Vec<Span<'static>> = vec![Span::raw("   ")];
             if !ep.is_empty() {
-                spans.push(Span::styled(ep.to_string(), Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    ep.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
-            spans.push(Span::styled(line.to_string(), Style::default().fg(Color::Gray)));
+            spans.push(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::Gray),
+            ));
             lines.push(Line::from(spans));
         }
     }
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_message_activity_lines(
     marker: &str,
     accent: Color,
@@ -820,7 +867,12 @@ fn render_message_activity_lines(
     }
 
     if markdown && !message_lines.is_empty() {
-        let joined = message_lines.iter().take(message_limit).cloned().collect::<Vec<_>>().join("\n");
+        let joined = message_lines
+            .iter()
+            .take(message_limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
         let md_lines = render_markdown(&joined, Color::White);
         for (index, md_line) in md_lines.into_iter().enumerate() {
             let mut msg_spans = vec![Span::styled(
@@ -836,7 +888,10 @@ fn render_message_activity_lines(
                 if index == 0 { "  └ " } else { "    " },
                 Style::default().fg(Color::DarkGray),
             )];
-            msg_spans.push(Span::styled(line.to_string(), Style::default().fg(Color::White)));
+            msg_spans.push(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::White),
+            ));
             lines.push(Line::from(msg_spans));
         }
     }

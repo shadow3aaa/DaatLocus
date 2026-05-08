@@ -129,7 +129,10 @@ impl<'a> FlexRenderable<'a> {
                 total_flex += fc.flex;
                 last_flex_idx = Some(i);
             } else {
-                let h = fc.child.desired_height(area.width).min(max_height.saturating_sub(allocated));
+                let h = fc
+                    .child
+                    .desired_height(area.width)
+                    .min(max_height.saturating_sub(allocated));
                 sizes[i] = h;
                 allocated += h;
             }
@@ -218,13 +221,10 @@ impl<'a> ViewportCulledColumn<'a> {
             // Check if child overlaps with viewport
             if child_bottom > viewport_top && content_y < viewport_bottom {
                 // Child is (at least partially) visible
-                let rel_y = if content_y >= viewport_top {
-                    0 // child starts within or below viewport top
-                } else {
-                    viewport_top - content_y // scroll into child
-                };
+                let rel_y = viewport_top.saturating_sub(content_y);
 
-                let visible_h = (child_h - rel_y).min(area.height.saturating_sub(area.y.saturating_sub(area.y)));
+                let visible_h = (child_h - rel_y)
+                    .min(area.height.saturating_sub(area.y.saturating_sub(area.y)));
 
                 let child_area = Rect::new(
                     area.x,
