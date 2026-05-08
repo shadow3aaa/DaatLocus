@@ -24,7 +24,7 @@ use std::{
 
 use async_trait::async_trait;
 use crossterm::event::MouseEventKind;
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
@@ -1277,6 +1277,27 @@ pub async fn run_tui_dashboard(
             if command_input.is_empty() {
                 {
                     let mut scrolled = true;
+                    // Ctrl+T toggles all thinking cell expansion
+                    if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        let state = rx.borrow();
+                        let mut any_thinking = false;
+                        let offset = extra_history_cells.len();
+                        for (i, cell) in state.activity_cells.iter().enumerate() {
+                            if matches!(cell, ActivityCell::Thinking(_)) {
+                                let idx = offset + i;
+                                if expanded_thinking.contains(&idx) {
+                                    expanded_thinking.remove(&idx);
+                                } else {
+                                    expanded_thinking.insert(idx);
+                                }
+                                any_thinking = true;
+                            }
+                        }
+                        if any_thinking {
+                            cached_activity_lines = CachedActivityLines::new();
+                        }
+                        continue;
+                    }
                     match key.code {
                         KeyCode::Up => {
                             if auto_scroll {
@@ -1313,27 +1334,6 @@ pub async fn run_tui_dashboard(
                         KeyCode::End => {
                             auto_scroll = true;
                             scroll_offset = 0;
-                        }
-                        KeyCode::Enter => {
-                            // Toggle all thinking cell expansion
-                            let state = rx.borrow();
-                            let mut any_thinking = false;
-                            let offset = extra_history_cells.len();
-                            for (i, cell) in state.activity_cells.iter().enumerate() {
-                                if matches!(cell, ActivityCell::Thinking(_)) {
-                                    let idx = offset + i;
-                                    if expanded_thinking.contains(&idx) {
-                                        expanded_thinking.remove(&idx);
-                                    } else {
-                                        expanded_thinking.insert(idx);
-                                    }
-                                    any_thinking = true;
-                                }
-                            }
-                            if any_thinking {
-                                cached_activity_lines = CachedActivityLines::new();
-                            }
-                            continue;
                         }
                         _ => {
                             scrolled = false;

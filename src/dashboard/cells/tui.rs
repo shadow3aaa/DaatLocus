@@ -142,7 +142,7 @@ fn render_thinking_cell_lines(cell: &ThinkingActivityCell, max_width: u16) -> Ve
     let bar = Span::styled("│", Style::default().fg(Color::DarkGray));
     let mut lines = Vec::new();
 
-    // First line: │ Thinking [Enter ↕]
+    // First line: │ Thinking [Ctrl+T]
     let mut title_spans = vec![
         bar.clone(),
         Span::raw(" "),
@@ -156,7 +156,7 @@ fn render_thinking_cell_lines(cell: &ThinkingActivityCell, max_width: u16) -> Ve
     if cell.full_body.is_some() {
         title_spans.push(Span::raw("  "));
         title_spans.push(Span::styled(
-            if cell.expanded { "[Enter ↑]" } else { "[Enter ↕]" },
+            "[Ctrl+T]",
             Style::default().fg(Color::DarkGray),
         ));
     }
