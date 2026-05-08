@@ -2,6 +2,7 @@ mod apps;
 mod common;
 mod exec;
 mod highlight;
+mod markdown;
 mod messages;
 mod plan;
 mod tui;

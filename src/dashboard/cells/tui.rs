@@ -21,6 +21,7 @@ use super::{
     workflow::{ActivateWorkflowActivityCell, CreateWorkflowActivityCell, DeepRecallActivityCell},
 };
 use crate::tool_ui::{PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, glyph};
+use super::markdown::markdown_to_spans;
 
 /// Cached rendered lines to avoid rebuilding every frame.
 /// Cells are replaced entirely (not mutated in-place), so comparing cell count
@@ -135,7 +136,7 @@ fn render_activity_cell_lines(cell: &ActivityCell, max_width: u16) -> Vec<Line<'
 }
 
 fn render_assistant_cell_lines(cell: &AssistantActivityCell) -> Vec<Line<'static>> {
-    render_text_activity_lines("›", Color::Cyan, &cell.title, &cell.body_lines, 8, None)
+    render_text_activity_lines("›", Color::Cyan, &cell.title, &cell.body_lines, 8, None, true)
 }
 
 fn render_thinking_cell_lines(cell: &ThinkingActivityCell, max_width: u16) -> Vec<Line<'static>> {
@@ -202,6 +203,7 @@ fn render_user_cell_lines(cell: &UserActivityCell) -> Vec<Line<'static>> {
         &cell.body_lines,
         6,
         None,
+        true,
     )
 }
 
@@ -213,6 +215,7 @@ fn render_generic_app_cell_lines(cell: &GenericAppActivityCell) -> Vec<Line<'sta
         &[],
         0,
         None,
+        false,
     )
 }
 
@@ -232,6 +235,7 @@ fn render_app_attention_cell_lines(cell: &AppAttentionActivityCell) -> Vec<Line<
         &cell.body_lines,
         6,
         None,
+        false,
     )
 }
 
@@ -469,6 +473,7 @@ fn render_telegram_cell_lines(cell: &TelegramActivityCell) -> Vec<Line<'static>>
         &cell.message_lines,
         6,
         6,
+        false,
     )
 }
 
@@ -492,10 +497,15 @@ fn render_reply_cell_lines(cell: &ReplyActivityCell) -> Vec<Line<'static>> {
         ),
     ])];
     for line in cell.message_lines.iter().take(8) {
-        lines.push(Line::from(vec![Span::styled(
-            line.to_string(),
-            Style::default().fg(Color::White),
-        )]));
+        let md_spans = markdown_to_spans(line, Color::White);
+        if md_spans.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::White),
+            )]));
+        } else {
+            lines.push(Line::from(md_spans));
+        }
     }
     lines
 }
@@ -603,6 +613,7 @@ fn render_text_activity_lines(
     body_lines: &[String],
     limit: usize,
     prefix: Option<&str>,
+    markdown: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(vec![
         Span::styled(
@@ -623,10 +634,15 @@ fn render_text_activity_lines(
                 Style::default().fg(Color::DarkGray),
             ));
         }
-        spans.push(Span::styled(
-            line.to_string(),
-            Style::default().fg(Color::Gray),
-        ));
+        if markdown {
+            let md_spans = markdown_to_spans(line, Color::Gray);
+            spans.extend(md_spans);
+        } else {
+            spans.push(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::Gray),
+            ));
+        }
         lines.push(Line::from(spans));
     }
     lines
@@ -640,6 +656,7 @@ fn render_message_activity_lines(
     message_lines: &[String],
     detail_limit: usize,
     message_limit: usize,
+    markdown: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(vec![
         Span::styled(
@@ -659,13 +676,17 @@ fn render_message_activity_lines(
         ]));
     }
     for (index, line) in message_lines.iter().take(message_limit).enumerate() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                if index == 0 { "  └ " } else { "    " },
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(line.to_string(), Style::default().fg(Color::White)),
-        ]));
+        let mut msg_spans = vec![Span::styled(
+            if index == 0 { "  └ " } else { "    " },
+            Style::default().fg(Color::DarkGray),
+        )];
+        if markdown {
+            let md_spans = markdown_to_spans(line, Color::White);
+            msg_spans.extend(md_spans);
+        } else {
+            msg_spans.push(Span::styled(line.to_string(), Style::default().fg(Color::White)));
+        }
+        lines.push(Line::from(msg_spans));
     }
     lines
 }
