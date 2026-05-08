@@ -20,6 +20,7 @@ use std::{
 
 use async_trait::async_trait;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::MouseEventKind;
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
@@ -1092,7 +1093,11 @@ pub async fn run_tui_dashboard(
 ) -> Result<(), std::io::Error> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+    crossterm::execute!(
+        stdout,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture,
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut command_input = String::new();
@@ -1113,9 +1118,28 @@ pub async fn run_tui_dashboard(
         let pending_requests = rx.borrow().pending_access_requests.clone();
 
         if crossterm::event::poll(Duration::from_millis(16))?
-            && let Event::Key(key) = crossterm::event::read()?
-            && key.kind == KeyEventKind::Press
         {
+            let event = crossterm::event::read()?;
+
+            // Mouse scroll wheel for activity feed (works regardless of input state)
+            if let Event::Mouse(mouse) = &event {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        scroll_offset = scroll_offset.saturating_sub(3);
+                        continue;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        scroll_offset = scroll_offset.saturating_add(3);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            let Event::Key(key) = event else { continue; };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             if telegram_access_picker.is_some() {
                 let mut command_to_run: Option<String> = None;
                 let mut close_picker = false;
@@ -1228,6 +1252,8 @@ pub async fn run_tui_dashboard(
                 continue;
             }
             // Activity feed scroll keys (normal mode)
+            // Only active when command input is empty – popup nav works otherwise
+            if command_input.is_empty() {
             {
                 let mut scrolled = true;
                 match key.code {
@@ -1257,6 +1283,7 @@ pub async fn run_tui_dashboard(
                     // Reset End→MAX; keep cursor at bottom for new activity
                     continue;
                 }
+            }
             }
             match key.code {
                 KeyCode::Char(c) => {
@@ -1497,7 +1524,8 @@ pub async fn run_tui_dashboard(
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture,
     )?;
     Ok(())
 }
