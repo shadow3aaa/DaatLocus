@@ -21,7 +21,7 @@ use super::{
     workflow::{ActivateWorkflowActivityCell, CreateWorkflowActivityCell, DeepRecallActivityCell},
 };
 use crate::tool_ui::{PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, glyph};
-use super::markdown::markdown_to_spans;
+use super::markdown::render_markdown;
 
 /// Cached rendered lines to avoid rebuilding every frame.
 /// Cells are replaced entirely (not mutated in-place), so comparing cell count
@@ -496,16 +496,10 @@ fn render_reply_cell_lines(cell: &ReplyActivityCell) -> Vec<Line<'static>> {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
     ])];
-    for line in cell.message_lines.iter().take(8) {
-        let md_spans = markdown_to_spans(line, Color::White);
-        if md_spans.is_empty() {
-            lines.push(Line::from(vec![Span::styled(
-                line.to_string(),
-                Style::default().fg(Color::White),
-            )]));
-        } else {
-            lines.push(Line::from(md_spans));
-        }
+    if !cell.message_lines.is_empty() {
+        let joined = cell.message_lines.iter().take(8).cloned().collect::<Vec<_>>().join("\n");
+        let md_lines = render_markdown(&joined, Color::White);
+        lines.extend(md_lines);
     }
     lines
 }
@@ -612,7 +606,7 @@ fn render_text_activity_lines(
     title: &str,
     body_lines: &[String],
     limit: usize,
-    prefix: Option<&str>,
+    extra_prefix: Option<&str>,
     markdown: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(vec![
@@ -626,24 +620,29 @@ fn render_text_activity_lines(
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
     ])];
-    for line in body_lines.iter().take(limit) {
-        let mut spans = vec![Span::raw("   ")];
-        if let Some(prefix) = prefix {
-            spans.push(Span::styled(
-                prefix.to_string(),
-                Style::default().fg(Color::DarkGray),
-            ));
+
+    let ep = extra_prefix.unwrap_or("");
+
+    if markdown && !body_lines.is_empty() {
+        let joined = body_lines.iter().take(limit).cloned().collect::<Vec<_>>().join("\n");
+        let md_lines = render_markdown(&joined, Color::Gray);
+        for md_line in md_lines {
+            let mut spans: Vec<Span<'static>> = vec![Span::raw("   ")];
+            if !ep.is_empty() {
+                spans.push(Span::styled(ep.to_string(), Style::default().fg(Color::DarkGray)));
+            }
+            spans.extend(md_line.spans);
+            lines.push(Line::from(spans));
         }
-        if markdown {
-            let md_spans = markdown_to_spans(line, Color::Gray);
-            spans.extend(md_spans);
-        } else {
-            spans.push(Span::styled(
-                line.to_string(),
-                Style::default().fg(Color::Gray),
-            ));
+    } else {
+        for line in body_lines.iter().take(limit) {
+            let mut spans: Vec<Span<'static>> = vec![Span::raw("   ")];
+            if !ep.is_empty() {
+                spans.push(Span::styled(ep.to_string(), Style::default().fg(Color::DarkGray)));
+            }
+            spans.push(Span::styled(line.to_string(), Style::default().fg(Color::Gray)));
+            lines.push(Line::from(spans));
         }
-        lines.push(Line::from(spans));
     }
     lines
 }
@@ -675,18 +674,27 @@ fn render_message_activity_lines(
             Span::styled(line.to_string(), Style::default().fg(Color::Gray)),
         ]));
     }
-    for (index, line) in message_lines.iter().take(message_limit).enumerate() {
-        let mut msg_spans = vec![Span::styled(
-            if index == 0 { "  └ " } else { "    " },
-            Style::default().fg(Color::DarkGray),
-        )];
-        if markdown {
-            let md_spans = markdown_to_spans(line, Color::White);
-            msg_spans.extend(md_spans);
-        } else {
-            msg_spans.push(Span::styled(line.to_string(), Style::default().fg(Color::White)));
+
+    if markdown && !message_lines.is_empty() {
+        let joined = message_lines.iter().take(message_limit).cloned().collect::<Vec<_>>().join("\n");
+        let md_lines = render_markdown(&joined, Color::White);
+        for (index, md_line) in md_lines.into_iter().enumerate() {
+            let mut msg_spans = vec![Span::styled(
+                if index == 0 { "  └ " } else { "    " },
+                Style::default().fg(Color::DarkGray),
+            )];
+            msg_spans.extend(md_line.spans);
+            lines.push(Line::from(msg_spans));
         }
-        lines.push(Line::from(msg_spans));
+    } else {
+        for (index, line) in message_lines.iter().take(message_limit).enumerate() {
+            let mut msg_spans = vec![Span::styled(
+                if index == 0 { "  └ " } else { "    " },
+                Style::default().fg(Color::DarkGray),
+            )];
+            msg_spans.push(Span::styled(line.to_string(), Style::default().fg(Color::White)));
+            lines.push(Line::from(msg_spans));
+        }
     }
     lines
 }
