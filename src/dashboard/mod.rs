@@ -25,6 +25,7 @@ use std::{collections::HashSet, sync::Arc};
 use async_trait::async_trait;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+use std::time::Duration;
 use futures_util::StreamExt;
 use ratatui::{
     prelude::*,
@@ -1133,6 +1134,9 @@ pub async fn run_tui_dashboard(
     // FrameRequester spawns FrameScheduler; keep alive so the task isn't cancelled.
     let _frame_requester = frame_requester::FrameRequester::new(draw_tx.clone());
 
+    // Periodic tick for animations: breathing light, working indicator (~60fps).
+    let mut animation_tick = tokio::time::interval(Duration::from_millis(16));
+
     loop {
         tokio::select! {
                     event = event_stream.next() => {
@@ -1474,6 +1478,9 @@ pub async fn run_tui_dashboard(
                 if result.is_ok() {
                     needs_render = true;
                 }
+            }
+            _ = animation_tick.tick() => {
+                needs_render = true;
             }
         }
 
