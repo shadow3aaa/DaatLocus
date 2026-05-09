@@ -20,6 +20,18 @@ pub trait Renderable {
 
     /// Return the height (in rows) this item would like to occupy at the given width.
     fn desired_height(&self, width: u16) -> u16;
+
+    /// Render with `skip` leading rows omitted.
+    ///
+    /// Default implementation ignores `skip` and delegates to `render`.
+    /// Override this when the concrete type can efficiently skip rows
+    /// (e.g. `Paragraph::scroll`), so that `ViewportCulledColumn` can
+    /// handle partial overlap without sticky-header artefacts.
+    fn render_skip(&self, area: Rect, skip: u16, buf: &mut Buffer) {
+        let _ = skip;
+        self.render(area, buf);
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -80,22 +92,18 @@ impl Renderable for ColumnRenderable {
 // ---------------------------------------------------------------------------
 // FlexRenderable
 // ---------------------------------------------------------------------------
-#[allow(dead_code)]
 
 /// Lays out children in a column, allocating remaining height to flex children
 /// proportionally to their flex factor.  Loosely inspired by Flutter's Flex widget.
 pub struct FlexRenderable {
-#[allow(dead_code)]
     children: Vec<FlexChild>,
 }
 
-#[allow(dead_code)]
 struct FlexChild {
     flex: i32,
     child: Box<dyn Renderable>,
 }
 
-#[allow(dead_code)]
 impl FlexRenderable {
     pub fn new() -> Self {
         Self { children: vec![] }
@@ -194,13 +202,11 @@ impl Renderable for FlexRenderable {
 ///
 /// Implements `Renderable` using stored scroll offset (set via `set_scroll`).
 /// Also exposes `render_with_scroll` for direct scroll control (returns `max_scroll`).
-#[allow(dead_code)]
 pub struct ViewportCulledColumn {
     children: Vec<Box<dyn Renderable>>,
     scroll: u16,
 }
 
-#[allow(dead_code)]
 impl ViewportCulledColumn {
     pub fn new() -> Self {
         Self {
@@ -230,24 +236,25 @@ impl Renderable for ViewportCulledColumn {
             let child_bottom = y.saturating_add(child_h);
 
             if child_bottom > viewport_top && y < viewport_bottom {
-                // Child overlaps viewport — compute its screen-relative Rect using
-                // signed offset so that cells starting above the viewport get a
-                // negative screen_y (their top lines render off-buffer and are
-                // silently dropped by ratatui's Paragraph::render).
-                let offset: i32 = y as i32 - viewport_top as i32;
-                let screen_y: i32 = area.y as i32 + offset;
-                let child_area = Rect::new(
-                    area.x,
-                    screen_y.max(0) as u16,
-                    area.width,
-                    child_h,
-                );
-                // Render the full child. Ratatui ignores rows outside the buffer,
-                // so partial overlap works correctly — top rows offset above the
-                // viewport are dropped, visible rows render at the right offset.
-                // Using `intersection` would shift line 0 (title) to the clipped
-                // top, causing a sticky-header illusion.
-                child.render(child_area, buf);
+                // Child overlaps viewport.
+                // Compute how many leading rows to skip and the visible area.
+                let skip = if y < viewport_top {
+                    viewport_top - y
+                } else {
+                    0
+                };
+                let screen_y = area.y.saturating_add(y.saturating_sub(viewport_top));
+                let visible_h = (child_h - skip)
+                    .min(area.height.saturating_sub(screen_y.saturating_sub(area.y)));
+                if visible_h == 0 {
+                    y = child_bottom;
+                    continue;
+                }
+                let child_area = Rect::new(area.x, screen_y, area.width, visible_h);
+
+                // delegate to render_skip — CachedCellLines overrides this with
+                // Paragraph::scroll so title rows are properly skipped.
+                child.render_skip(child_area, skip, buf);
             }
 
             y = y.saturating_add(child_h);

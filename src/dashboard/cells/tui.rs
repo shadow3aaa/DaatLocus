@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use super::markdown::render_markdown;
-use crate::dashboard::renderable::Renderable;
+use crate::dashboard::renderable::{FlexRenderable, Renderable, ViewportCulledColumn};
 use super::{
     ActivityCell, LiveActivityCell,
     apps::{AppAttentionActivityCell, BrowserActivityCell, LiveBrowserActivityCell},
@@ -80,7 +80,6 @@ impl CachedActivityLines {
     }
 }
 
-#[allow(dead_code)]
 /// Thin Renderable wrapper around pre-computed lines.
 #[derive(Clone)]
 struct CachedCellLines(Vec<Line<'static>>);
@@ -97,6 +96,20 @@ impl Renderable for CachedCellLines {
 
     fn desired_height(&self, _width: u16) -> u16 {
         self.0.len() as u16
+    }
+
+    fn render_skip(&self, area: Rect, skip: u16, buf: &mut Buffer) {
+        if self.0.is_empty() {
+            return;
+        }
+        if skip == 0 {
+            self.render(area, buf);
+            return;
+        }
+        Paragraph::new(Text::from(self.0.clone()))
+            .wrap(Wrap { trim: false })
+            .scroll((skip, 0))
+            .render(area, buf);
     }
 }
 
@@ -135,13 +148,9 @@ pub fn render_activity_feed_cached(
 
     cache.ensure_capacity(total_cells);
 
-    // Collect all lines into a flat list: (lines, is_spacer).
-    // We do viewport culling manually here instead of delegating to
-    // ViewportCulledColumn so we can correctly skip leading lines of a
-    // partially-visible cell — ratatui's Rect uses u16, so a negative
-    // screen_y cannot be expressed and would keep line 0 (title) pinned
-    // to the viewport top.
-    let mut flat: Vec<(Vec<Line<'static>>, bool)> = Vec::new();
+    let mut column = ViewportCulledColumn::new();
+
+    let spacer_line = CachedCellLines(vec![Line::from("")]);
 
     // Committed cells: use cache to skip markdown re-render.
     for (i, cell) in cells.iter().enumerate() {
@@ -152,12 +161,10 @@ pub fn render_activity_feed_cached(
             cache.set(i, inner.width, lines.clone());
             lines
         };
-        if !lines.is_empty() {
-            flat.push((lines, false));
-            // Blank line spacing between adjacent cells (matches old Vec<Line> behavior).
-            if !live_cells.is_empty() || i + 1 < cells.len() {
-                flat.push((vec![Line::from("")], true));
-            }
+        column.push(CachedCellLines(lines));
+        // Blank line spacing between adjacent cells (matches old Vec<Line> behavior).
+        if !live_cells.is_empty() || i + 1 < cells.len() {
+            column.push(spacer_line.clone());
         }
     }
 
@@ -172,69 +179,35 @@ pub fn render_activity_feed_cached(
             }
         }
         cache.set(idx, inner.width, lines.clone());
-        if !lines.is_empty() {
-            flat.push((lines, false));
-            if i + 1 < live_cells.len() {
-                flat.push((vec![Line::from("")], true));
-            }
+        column.push(CachedCellLines(lines));
+        // Blank line spacing between adjacent cells.
+        if i + 1 < live_cells.len() {
+            column.push(spacer_line.clone());
         }
     }
-
-    // Compute total content height.
-    let total_height: u16 = flat.iter().map(|(l, _)| l.len() as u16).sum();
 
     // Auto-scroll (u16::MAX): precompute total height and pin to bottom.
     let effective_scroll = if scroll_offset == u16::MAX {
-        total_height.saturating_sub(inner.height)
+        let total = column.desired_height(inner.width);
+        total.saturating_sub(inner.height)
     } else {
-        scroll_offset.min(total_height.saturating_sub(inner.height))
+        scroll_offset
     };
+    column.set_scroll(effective_scroll);
 
-    // Manual viewport-culled rendering.
-    let viewport_top = effective_scroll;
-    let viewport_bottom = effective_scroll.saturating_add(inner.height);
+    // Render through the layout tree.
+    // ViewportCulledColumn calls render_skip on each child — CachedCellLines
+    // overrides render_skip with Paragraph::scroll((n,0)), so cells whose
+    // top rows have scrolled above the viewport render correctly without
+    // sticky-header artefacts.
+    let max_scroll = column.desired_height(inner.width)
+        .saturating_sub(inner.height.saturating_sub(1));
 
-    let mut y: u16 = 0;
-    for (lines, _is_spacer) in &flat {
-        let h = lines.len() as u16;
-        let bottom = y.saturating_add(h);
+    let mut flex = FlexRenderable::new();
+    flex.push(1, column);
+    flex.render(inner, buf);
 
-        if bottom > viewport_top && y < viewport_bottom {
-            let skip = if y < viewport_top { viewport_top.saturating_sub(y) } else { 0 };
-            let screen_y = inner.y.saturating_add(y.saturating_sub(viewport_top));
-            let visible_h = h
-                .saturating_sub(skip)
-                .min(inner.height.saturating_sub(screen_y.saturating_sub(inner.y)));
-
-            if visible_h == 0 {
-                y = bottom;
-                continue;
-            }
-
-            let render_area = Rect::new(inner.x, screen_y, inner.width, visible_h);
-            if skip == 0 && visible_h == h {
-                // Fully visible — render all lines.
-                Paragraph::new(Text::from(lines.clone()))
-                    .wrap(Wrap { trim: false })
-                    .render(render_area, buf);
-            } else {
-                // Partially visible — only render the lines within the viewport.
-                let end = (skip.saturating_add(visible_h)) as usize;
-                let start = skip as usize;
-                let visible_lines: Vec<Line<'static>> = lines[start..end.min(lines.len())].to_vec();
-                Paragraph::new(Text::from(visible_lines))
-                    .wrap(Wrap { trim: false })
-                    .render(render_area, buf);
-            }
-        }
-
-        y = bottom;
-        if y >= viewport_bottom {
-            break;
-        }
-    }
-
-    total_height.saturating_sub(inner.height.saturating_sub(1))
+    max_scroll
 }
 
 // ---------------------------------------------------------------------------
