@@ -673,7 +673,11 @@ fn render_reply_cell_lines(cell: &ReplyActivityCell) -> Vec<Line<'static>> {
             .collect::<Vec<_>>()
             .join("\n");
         let md_lines = render_markdown(&joined, Color::White);
-        lines.extend(md_lines);
+        for md_line in md_lines {
+            let mut spans = vec![Span::raw("   ")];
+            spans.extend(md_line.spans);
+            lines.push(Line::from(spans));
+        }
     }
     lines
 }

@@ -308,14 +308,14 @@ where
         // Build marker text and indent
         let marker = if let Some(counter) = self.list_counters.last_mut() {
             match counter {
-                None => "• ".to_string(),
+                None => "- ".to_string(),
                 Some(n) => {
                     *n += 1;
                     format!("{}. ", *n - 1)
                 }
             }
         } else {
-            "• ".to_string()
+            "- ".to_string()
         };
 
         // Continuation indent: align with text after marker
