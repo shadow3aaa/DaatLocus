@@ -8,6 +8,9 @@ use super::frame_rate_limiter::FrameRateLimiter;
 /// to request future redraws of the TUI.
 #[derive(Clone, Debug)]
 pub struct FrameRequester {
+    /// The TX half of the frame-scheduling channel. The RX half is owned by
+    /// `FrameScheduler`. This field is never read directly but must be kept
+    /// alive so the channel stays open while `FrameRequester` exists.
     #[allow(dead_code)]
     frame_schedule_tx: mpsc::UnboundedSender<Instant>,
 }
