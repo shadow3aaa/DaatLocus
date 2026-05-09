@@ -814,7 +814,6 @@ dependencies = [
  "notify",
  "parking_lot",
  "postcard",
- "pulldown-cmark",
  "ratatui",
  "regex",
  "reqwest 0.13.2",

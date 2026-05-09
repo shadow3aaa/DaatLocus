@@ -419,9 +419,8 @@ fn remaining_lines_with_limit(content: &str, limit: usize) -> Vec<String> {
     let mut lines = content.lines();
     let _ = lines.next();
     lines
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
         .take(limit)
+        .map(str::trim)
         .map(ToString::to_string)
         .collect()
 }
