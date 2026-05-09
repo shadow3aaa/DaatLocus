@@ -416,9 +416,21 @@ fn first_line_or_fallback<'a>(content: &'a str, fallback: &'a str) -> &'a str {
 }
 
 fn remaining_lines_with_limit(content: &str, limit: usize) -> Vec<String> {
-    let mut lines = content.lines();
-    let _ = lines.next();
+    let mut lines: Vec<&str> = content.lines().collect();
+    // drop first line (used as title)
+    if !lines.is_empty() {
+        lines.remove(0);
+    }
+    // trim leading blank lines
+    while lines.first().map_or(false, |l| l.trim().is_empty()) {
+        lines.remove(0);
+    }
+    // trim trailing blank lines
+    while lines.last().map_or(false, |l| l.trim().is_empty()) {
+        lines.pop();
+    }
     lines
+        .into_iter()
         .take(limit)
         .map(str::trim)
         .map(ToString::to_string)
