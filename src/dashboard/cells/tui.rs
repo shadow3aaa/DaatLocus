@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use super::markdown::render_markdown;
+use crate::dashboard::renderable::{FlexRenderable, Renderable, ViewportCulledColumn};
 use super::{
     ActivityCell, LiveActivityCell,
     apps::{AppAttentionActivityCell, BrowserActivityCell, LiveBrowserActivityCell},
@@ -24,208 +25,93 @@ use super::{
 };
 use crate::tool_ui::{PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, glyph};
 
-use super::super::renderable::Renderable;
-
 // ---------------------------------------------------------------------------
-// Per-cell Renderable wrapper for viewport-culled rendering
+// Viewport-culled rendering
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
-pub struct ActivityCellRenderable<'a> {
-    pub cell: &'a ActivityCell,
-}
-
-impl Renderable for ActivityCellRenderable<'_> {
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        render_activity_cell_to_buf(self.cell, area, buf);
-    }
-
-    fn desired_height(&self, width: u16) -> u16 {
-        desired_height(self.cell, width)
-    }
-}
-
-/// Estimate the height (rows) of a cell for the given available width.
-/// Overestimating is safe; underestimating may cause visible content to be skipped.
-pub fn desired_height(cell: &ActivityCell, width: u16) -> u16 {
-    match cell {
-        ActivityCell::Assistant(c) => {
-            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 8) + 1
-        }
-        ActivityCell::User(c) => {
-            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 6) + 1
-        }
-        ActivityCell::AppAttention(c) => {
-            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 6) + 1
-        }
-        ActivityCell::Browser(c) => {
-            let mut h: u16 = 1;
-            let has_stats = c.line_count.is_some() || c.ref_count.is_some();
-            if has_stats {
-                h += 1;
-            }
-            h + 1
-        }
-        ActivityCell::LiveBrowser(c) => 1 + c.body_lines.len().min(1) as u16 + 1,
-        ActivityCell::GenericApp(c) => {
-            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 6) + 1
-        }
-        ActivityCell::PlanResult(c) => 1 + c.steps.len().min(8) as u16 + 1,
-        ActivityCell::CreateWorkflowResult(_) => 2,
-        ActivityCell::ActivateWorkflowResult(_) => 2,
-        ActivityCell::DeepRecallResult(_) => 2,
-        ActivityCell::ExecResult(c) => {
-            let n = if c.output_lines.is_empty() {
-                1
-            } else {
-                c.output_lines.len().min(8)
-            };
-            1 + n as u16 + 1
-        }
-        ActivityCell::LiveExec(c) => {
-            let n = if c.output_lines.is_empty() {
-                1
-            } else {
-                c.output_lines.len().min(8)
-            };
-            1 + n as u16 + 1
-        }
-        ActivityCell::Patch(c) => {
-            let n_files = c.files.len().min(4);
-            let mut h: u16 = 1;
-            if n_files > 0 {
-                h += 1;
-                for _ in 0..n_files {
-                    h += 1;
-                    h += 19;
-                    h += 1;
-                }
-                h -= 1;
-            }
-            if c.files.len() > n_files {
-                h += 1;
-                h += 1;
-            }
-            h + 1
-        }
-        ActivityCell::Telegram(c) => {
-            1 + c.detail_lines.len().min(6) as u16
-                + count_wrapped_lines(&c.message_lines, width.saturating_sub(5), 6)
-                + 1
-        }
-        ActivityCell::Reply(c) => {
-            let msg_h = if c.message_lines.is_empty() {
-                0
-            } else {
-                count_wrapped_lines(&c.message_lines, width.saturating_sub(3), 8)
-            };
-            1 + msg_h + 1
-        }
-        ActivityCell::TerminalWait(c) => {
-            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 6) + 1
-        }
-        ActivityCell::Error(c) => {
-            1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(5), 8) + 1
-        }
-        ActivityCell::Thinking(c) => {
-            if c.expanded && c.full_body.is_some() {
-                let full = c.full_body.as_deref().unwrap_or("");
-                let cw = (width.saturating_sub(2)).max(20) as usize;
-                let wrapped = textwrap::wrap(full, cw);
-                1 + wrapped.len() as u16 + 1
-            } else {
-                1 + count_wrapped_lines(&c.body_lines, width.saturating_sub(2), 5) + 1
-            }
-        }
-    }
-}
-
-fn count_wrapped_lines(lines: &[String], wrap_width: u16, limit: usize) -> u16 {
-    if lines.is_empty() {
-        return 0;
-    }
-    let w = wrap_width.max(3) as usize;
-    let mut total: usize = 0;
-    for line in lines.iter().take(limit) {
-        let wrapped = textwrap::wrap(line, w);
-        total += wrapped.len().max(1);
-    }
-    total as u16
-}
-
-/// Render a single cell into a buffer at the given area.
-pub fn render_activity_cell_to_buf(cell: &ActivityCell, area: Rect, buf: &mut Buffer) {
-    let lines = render_activity_cell_lines(cell, area.width);
-    if lines.is_empty() {
-        return;
-    }
-    let text = Text::from(lines);
-    Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .render(area, buf);
-}
-
-/// Cached rendered lines to avoid rebuilding every frame.
-/// Cells are replaced entirely (not mutated in-place), so comparing cell count
-/// is sufficient to detect changes.
-///
-/// Currently retained for future per-cell markdown-line caching;
-/// the viewport-culled render path uses `desired_height` for culling
-/// and calls `render_activity_cell_lines` only for visible cells.
-#[allow(dead_code)]
+/// Cached pre-rendered lines per cell, keyed by index and width.
+/// Avoids re-running expensive markdown rendering every frame.
 pub struct CachedActivityLines {
-    pub lines: Vec<Line<'static>>,
-    width: u16,
-    total_cells: usize,
-    expanded_count: usize,
+    entries: Vec<Option<CacheEntry>>,
 }
 
-#[allow(dead_code)]
+struct CacheEntry {
+    width: u16,
+    lines: Vec<Line<'static>>,
+}
+
 impl CachedActivityLines {
     pub fn new() -> Self {
-        Self {
-            lines: Vec::new(),
-            width: 0,
-            total_cells: 0,
-            expanded_count: 0,
+        Self { entries: vec![] }
+    }
+
+#[allow(dead_code)]
+    /// Drop all cached entries (e.g. after expand/collapse toggle).
+    pub fn invalidate(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Make room for at least `count` cells.
+    fn ensure_capacity(&mut self, count: usize) {
+        if self.entries.len() < count {
+            self.entries.resize_with(count, || None);
         }
     }
 
-    fn needs_rebuild(&self, inner_width: u16, total_cells: usize, expanded_count: usize) -> bool {
-        self.width != inner_width
-            || self.total_cells != total_cells
-            || self.expanded_count != expanded_count
+    /// Return cached lines for cell `index` at `width`, if available.
+    fn get(&self, index: usize, width: u16) -> Option<&Vec<Line<'static>>> {
+        self.entries.get(index).and_then(|e| {
+            e.as_ref().and_then(|entry| {
+                if entry.width == width {
+                    Some(&entry.lines)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    /// Store rendered lines for cell `index`.
+    fn set(&mut self, index: usize, width: u16, lines: Vec<Line<'static>>) {
+        if index >= self.entries.len() {
+            self.entries.resize_with(index + 1, || None);
+        }
+        self.entries[index] = Some(CacheEntry { width, lines });
     }
 }
 
-/// Render the activity feed and return max_scroll for key-handling / auto-scroll.
-/// Uses `cache` to avoid rebuilding all lines every frame.
+/// Thin Renderable wrapper around pre-computed lines.
+struct CachedCellLines(Vec<Line<'static>>);
+
+impl Renderable for CachedCellLines {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        if self.0.is_empty() {
+            return;
+        }
+        Paragraph::new(Text::from(self.0.clone()))
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+    }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        self.0.len() as u16
+    }
+}
+
+/// Render the activity feed through the layout tree and return `max_scroll`.
+///
+/// Builds a `ViewportCulledColumn` of pre-rendered `CachedCellLines` entries
+/// (using `cache` to skip repeated markdown rendering), then delegates to
+/// `render_with_scroll` for viewport-culled drawing.
 pub fn render_activity_feed_cached(
     buf: &mut Buffer,
     area: Rect,
     cells: &[ActivityCell],
     live_cells: &[LiveActivityCell],
     scroll_offset: u16,
-    _cache: &mut CachedActivityLines,
+    cache: &mut CachedActivityLines,
     _expanded_count: usize,
 ) -> u16 {
-    let inner_width = area.width.saturating_sub(2);
-    let total_cells = cells.len() + live_cells.len();
-
-    // Compute total content height for max_scroll
-    let total_height: u16 = if total_cells == 0 {
-        0
-    } else {
-        cells
-            .iter()
-            .map(|c| desired_height(c, inner_width))
-            .sum::<u16>()
-            + live_cells
-                .iter()
-                .map(|c| desired_height(&c.cell, inner_width))
-                .sum::<u16>()
-    };
-
     let inner = Rect {
         x: area.x.saturating_add(1),
         y: area.y,
@@ -233,45 +119,96 @@ pub fn render_activity_feed_cached(
         height: area.height,
     };
 
-    let max_scroll = total_height.saturating_sub(inner.height.saturating_sub(1));
-    let scroll = scroll_offset.min(max_scroll);
+    let total_cells = cells.len() + live_cells.len();
 
     if total_cells == 0 {
-        // Render placeholder
-        let placeholder =
-            Paragraph::new("No activity yet").style(Style::default().fg(Color::DarkGray));
+        let placeholder = Paragraph::new("No activity yet")
+            .style(Style::default().fg(Color::DarkGray));
         placeholder.render(inner, buf);
-    } else {
-        // Viewport-culled rendering: only render cells that overlap with the visible area
-        let viewport_top = scroll;
-        let viewport_bottom = scroll + inner.height;
-        let mut y: u16 = 0;
-
-        // Combine committed and live cells in order
-        let all_cells: Vec<&ActivityCell> = cells
-            .iter()
-            .chain(live_cells.iter().map(|lc| &lc.cell))
-            .collect();
-
-        for cell in &all_cells {
-            let cell_h = desired_height(cell, inner_width);
-            let cell_bottom = y + cell_h;
-
-            if cell_bottom > viewport_top && y < viewport_bottom {
-                // Cell overlaps with viewport – render the full cell at its screen position
-                let screen_y = inner.y + y.saturating_sub(viewport_top);
-                let cell_area = Rect::new(inner.x, screen_y, inner.width, cell_h);
-                let clipped = cell_area.intersection(inner);
-                if !clipped.is_empty() {
-                    render_activity_cell_to_buf(cell, cell_area, buf);
-                }
-            }
-
-            y += cell_h;
-        }
+        return 0;
     }
 
-    max_scroll
+    cache.ensure_capacity(total_cells);
+
+    let mut column = ViewportCulledColumn::new();
+
+    // Committed cells: use cache to skip markdown re-render.
+    for (i, cell) in cells.iter().enumerate() {
+        let lines = if let Some(cached) = cache.get(i, inner.width) {
+            cached.clone()
+        } else {
+            let lines = render_activity_cell_lines(cell, inner.width);
+            cache.set(i, inner.width, lines.clone());
+            lines
+        };
+        column.push(CachedCellLines(lines));
+    }
+
+    // Live cells are always re-rendered (they change every frame).
+    for (i, lc) in live_cells.iter().enumerate() {
+        let idx = cells.len() + i;
+        let lines = render_activity_cell_lines(&lc.cell, inner.width);
+        // Still cache for consistency (the next frame may hit cache if cell stabilizes).
+        if let Some(cached) = cache.get(idx, inner.width) {
+            if cached.len() == lines.len() {
+                // Reuse cached if same structure; live cells rarely change shape.
+            }
+        }
+        cache.set(idx, inner.width, lines.clone());
+        column.push(CachedCellLines(lines));
+    }
+
+    column.set_scroll(scroll_offset);
+
+    let mut flex = FlexRenderable::new();
+    flex.push(1, column);
+    flex.render(inner, buf);
+
+    let total = flex.desired_height(inner.width);
+    total.saturating_sub(inner.height.saturating_sub(1))
+}
+
+// ---------------------------------------------------------------------------
+// Renderable impl for ActivityCell
+// ---------------------------------------------------------------------------
+
+impl Renderable for ActivityCell {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let lines = render_activity_cell_lines(self, area.width);
+        if lines.is_empty() {
+            return;
+        }
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+    }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        // conservative estimate: overestimation is safe for viewport culling
+        match self {
+            ActivityCell::Assistant(c) => 3 + (c.body_lines.len() as u16).min(40),
+            ActivityCell::User(c) => 3 + (c.body_lines.len() as u16).min(20),
+            ActivityCell::Thinking(c) => 3 + (c.body_lines.len() as u16).min(20),
+            ActivityCell::GenericApp(c) => 3 + (c.body_lines.len() as u16).min(10),
+            ActivityCell::TerminalWait(c) => 3 + (c.body_lines.len() as u16).min(10),
+            ActivityCell::Error(c) => 3 + (c.body_lines.len() as u16).min(10),
+            ActivityCell::AppAttention(c) => 3 + (c.body_lines.len() as u16).min(10),
+            ActivityCell::Browser(_) => 8,
+            ActivityCell::LiveBrowser(_) => 12,
+            ActivityCell::ExecResult(c) => 3 + (c.output_lines.len() as u16).min(20),
+            ActivityCell::LiveExec(c) => 3 + (c.output_lines.len() as u16).min(20),
+            ActivityCell::Patch(c) => {
+                let file_count = c.files.len() as u16;
+                3 + file_count * 6
+            }
+            ActivityCell::Telegram(c) => 3 + (c.message_lines.len() as u16).min(20),
+            ActivityCell::Reply(c) => 3 + (c.message_lines.len() as u16).min(20),
+            ActivityCell::PlanResult(c) => 3 + (c.steps.len() as u16).min(20),
+            ActivityCell::CreateWorkflowResult(_) => 3,
+            ActivityCell::ActivateWorkflowResult(_) => 3,
+            ActivityCell::DeepRecallResult(_) => 3,
+        }
+    }
 }
 
 fn render_activity_cell_lines(cell: &ActivityCell, max_width: u16) -> Vec<Line<'static>> {

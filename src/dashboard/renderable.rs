@@ -1,273 +1,252 @@
-//! Layout-tree Renderable trait and combinators for viewport-culled TUI rendering.
 //!
-//! Adapted from codex-rs tui/src/render/renderable.rs.
-//! The trait and combinators are infrastructure for the layout-tree rendering
-//! architecture; they are used by ActivityCellRenderable now and by future
-//! components (command bar, popups, etc.).
-#![allow(dead_code)]
+//! Based on the codex renderable.rs pattern but adapted for DaatLocus:
+//! - Renderable: minimal trait (render + desired_height), no cursor support for now.
+//! - ColumnRenderable: stacks children vertically.
+//! - FlexRenderable: column with flex factors, allocates remaining space proportionally.
+//! - ViewportCulledColumn: wraps a column, renders only children overlapping the viewport.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-/// A widget that can compute its desired height and render itself into a buffer.
+// ---------------------------------------------------------------------------
+// Renderable trait
+// ---------------------------------------------------------------------------
+
+/// A renderable item that can produce its own desired height and render into a buffer.
 pub trait Renderable {
-    /// Render into the given area of the buffer.
+    /// Render self into `buf` within `area`.  The caller guarantees that `area` fits in `buf`.
     fn render(&self, area: Rect, buf: &mut Buffer);
 
-    /// Desired height in rows for the given available width.
-    /// Used for viewport-culling and layout.
+    /// Return the height (in rows) this item would like to occupy at the given width.
     fn desired_height(&self, width: u16) -> u16;
 }
 
 // ---------------------------------------------------------------------------
-// Blanket impls
+// ColumnRenderable
 // ---------------------------------------------------------------------------
 
-impl<R: Renderable> Renderable for &R {
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        (*self).render(area, buf);
-    }
-    fn desired_height(&self, width: u16) -> u16 {
-        (*self).desired_height(width)
-    }
+#[allow(dead_code)]
+#[allow(dead_code)]
+/// Stacks children vertically, one after the other.
+pub struct ColumnRenderable {
+    children: Vec<Box<dyn Renderable>>,
 }
 
-impl<R: Renderable> Renderable for Box<R> {
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        self.as_ref().render(area, buf);
-    }
-    fn desired_height(&self, width: u16) -> u16 {
-        self.as_ref().desired_height(width)
-    }
-}
-
-impl<R: Renderable> Renderable for Option<R> {
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        if let Some(r) = self {
-            r.render(area, buf);
-        }
-    }
-    fn desired_height(&self, width: u16) -> u16 {
-        self.as_ref().map_or(0, |r| r.desired_height(width))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ColumnRenderable – stacks children vertically
-// ---------------------------------------------------------------------------
-
-pub struct ColumnRenderable<'a> {
-    children: Vec<Box<dyn Renderable + 'a>>,
-}
-
-impl<'a> ColumnRenderable<'a> {
+#[allow(dead_code)]
+impl ColumnRenderable {
     pub fn new() -> Self {
         Self { children: vec![] }
     }
 
-    pub fn push(&mut self, child: impl Renderable + 'a) {
+    pub fn push(&mut self, child: impl Renderable + 'static) {
         self.children.push(Box::new(child));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.children.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.children.len()
     }
 }
 
-impl Renderable for ColumnRenderable<'_> {
+impl Renderable for ColumnRenderable {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let mut y = area.y;
         for child in &self.children {
-            let h = child.desired_height(area.width);
-            let child_area = Rect::new(area.x, y, area.width, h).intersection(area);
-            if !child_area.is_empty() {
-                child.render(child_area, buf);
+            let child_h = child.desired_height(area.width);
+            let child_area = Rect::new(area.x, y, area.width, child_h);
+            let clipped = child_area.intersection(area);
+            if !clipped.is_empty() {
+                child.render(clipped, buf);
             }
-            y += h;
+            y = y.saturating_add(child_h);
+            if y >= area.bottom() {
+                break;
+            }
         }
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        self.children.iter().map(|c| c.desired_height(width)).sum()
+        self.children
+            .iter()
+            .map(|c| c.desired_height(width))
+            .sum()
     }
 }
 
 // ---------------------------------------------------------------------------
-// FlexRenderable – column with flex-grow children
+// FlexRenderable
 // ---------------------------------------------------------------------------
+#[allow(dead_code)]
 
-struct FlexChild<'a> {
+/// Lays out children in a column, allocating remaining height to flex children
+/// proportionally to their flex factor.  Loosely inspired by Flutter's Flex widget.
+pub struct FlexRenderable {
+#[allow(dead_code)]
+    children: Vec<FlexChild>,
+}
+
+struct FlexChild {
     flex: i32,
-    child: Box<dyn Renderable + 'a>,
+    child: Box<dyn Renderable>,
 }
 
-pub struct FlexRenderable<'a> {
-    children: Vec<FlexChild<'a>>,
-}
-
-impl<'a> FlexRenderable<'a> {
+impl FlexRenderable {
     pub fn new() -> Self {
         Self { children: vec![] }
     }
 
-    /// Push a child. `flex` > 0 means the child will share remaining space
-    /// proportional to its flex value.
-    pub fn push(&mut self, flex: i32, child: impl Renderable + 'a) {
+    /// Add a child.  `flex` > 0 means the child gets a share of remaining space;
+    /// `flex == 0` means the child uses only its `desired_height`.
+    pub fn push(&mut self, flex: i32, child: impl Renderable + 'static) {
         self.children.push(FlexChild {
             flex,
             child: Box::new(child),
         });
     }
 
+    /// Allocate vertical space among children and return their Rects.
     fn allocate(&self, area: Rect) -> Vec<Rect> {
-        let max_height = area.height;
         let n = self.children.len();
+        if n == 0 {
+            return vec![];
+        }
+
         let mut sizes = vec![0u16; n];
         let mut allocated = 0u16;
         let mut total_flex: i32 = 0;
-        let mut last_flex_idx: Option<usize> = None;
+        let mut last_flex_idx: usize = 0;
 
-        // Pass 1: non-flex children get their desired height
+        let max_h = area.height;
+
+        // Pass 1: non-flex children.
         for (i, fc) in self.children.iter().enumerate() {
             if fc.flex > 0 {
                 total_flex += fc.flex;
-                last_flex_idx = Some(i);
+                last_flex_idx = i;
             } else {
                 let h = fc
                     .child
                     .desired_height(area.width)
-                    .min(max_height.saturating_sub(allocated));
+                    .min(max_h.saturating_sub(allocated));
                 sizes[i] = h;
-                allocated += h;
+                allocated = allocated.saturating_add(h);
             }
         }
 
-        let free = max_height.saturating_sub(allocated);
+        let free_space = max_h.saturating_sub(allocated);
 
-        // Pass 2: flex children share remaining space
-        if total_flex > 0 && free > 0 {
-            let per_flex = free / total_flex as u16;
-            let mut flex_allocated = 0u16;
+        // Pass 2: flex children.
+        if total_flex > 0 && free_space > 0 {
+            let space_per_flex = free_space / total_flex as u16;
+            let mut allocated_flex = 0u16;
             for (i, fc) in self.children.iter().enumerate() {
                 if fc.flex > 0 {
-                    let max_child = if Some(i) == last_flex_idx {
-                        free.saturating_sub(flex_allocated)
+                    let max_child = if i == last_flex_idx {
+                        free_space.saturating_sub(allocated_flex)
                     } else {
-                        per_flex * fc.flex as u16
+                        space_per_flex * fc.flex as u16
                     };
                     let h = fc.child.desired_height(area.width).min(max_child);
                     sizes[i] = h;
-                    flex_allocated += h;
+                    allocated_flex = allocated_flex.saturating_add(h);
                 }
             }
         }
 
+        let mut rects = Vec::with_capacity(n);
         let mut y = area.y;
-        sizes
-            .into_iter()
-            .map(|h| {
-                let r = Rect::new(area.x, y, area.width, h);
-                y += h;
-                r
-            })
-            .collect()
+        for &h in &sizes {
+            rects.push(Rect::new(area.x, y, area.width, h));
+            y = y.saturating_add(h);
+        }
+        rects
     }
 }
 
-impl Renderable for FlexRenderable<'_> {
+impl Renderable for FlexRenderable {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let rects = self.allocate(area);
         for (rect, fc) in rects.into_iter().zip(self.children.iter()) {
-            fc.child.render(rect, buf);
+            if !rect.is_empty() {
+                fc.child.render(rect, buf);
+            }
         }
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        self.allocate(Rect::new(0, 0, width, u16::MAX))
-            .last()
-            .map(|r| r.bottom())
-            .unwrap_or(0)
+        // allocate with u16::MAX height so flex children aren't artificially capped
+        let rects = self.allocate(Rect::new(0, 0, width, u16::MAX));
+        rects.last().map(|r| r.bottom()).unwrap_or(0)
     }
 }
 
 // ---------------------------------------------------------------------------
-// ViewportCulledColumn – stacks children with scroll-offset culling
+// ViewportCulledColumn
 // ---------------------------------------------------------------------------
 
-/// Like `ColumnRenderable` but skips rendering children that fall entirely
-/// outside a scroll viewport. `scroll_offset` is the number of rows scrolled
-/// past the top of the content.
-pub struct ViewportCulledColumn<'a> {
-    children: Vec<Box<dyn Renderable + 'a>>,
+/// A column of children that only renders those overlapping a scroll viewport.
+///
+/// Implements `Renderable` using stored scroll offset (set via `set_scroll`).
+/// Also exposes `render_with_scroll` for direct scroll control (returns `max_scroll`).
+pub struct ViewportCulledColumn {
+    children: Vec<Box<dyn Renderable>>,
+    scroll: u16,
 }
 
-impl<'a> ViewportCulledColumn<'a> {
+impl ViewportCulledColumn {
     pub fn new() -> Self {
-        Self { children: vec![] }
+        Self {
+            children: vec![],
+            scroll: 0,
+        }
     }
 
-    pub fn push(&mut self, child: impl Renderable + 'a) {
+    pub fn push(&mut self, child: impl Renderable + 'static) {
         self.children.push(Box::new(child));
     }
 
-    /// Render children that overlap with the viewport defined by
-    /// `scroll_offset`..(scroll_offset + area.height).
-    pub fn render_with_scroll(&self, area: Rect, buf: &mut Buffer, scroll_offset: u16) -> u16 {
-        let viewport_top = scroll_offset;
-        let viewport_bottom = scroll_offset + area.height;
-        let mut content_y: u16 = 0;
-        let total_height = self.desired_height(area.width);
-
-        for child in &self.children {
-            let child_h = child.desired_height(area.width);
-            let child_bottom = content_y + child_h;
-
-            // Check if child overlaps with viewport
-            if child_bottom > viewport_top && content_y < viewport_bottom {
-                // Child is (at least partially) visible
-                let rel_y = viewport_top.saturating_sub(content_y);
-
-                let visible_h = (child_h - rel_y)
-                    .min(area.height.saturating_sub(area.y.saturating_sub(area.y)));
-
-                let child_area = Rect::new(
-                    area.x,
-                    area.y + content_y.saturating_sub(viewport_top),
-                    area.width,
-                    visible_h,
-                );
-
-                if !child_area.is_empty() && child_area.intersects(area) {
-                    child.render(
-                        Rect::new(
-                            area.x,
-                            area.y + content_y.saturating_sub(viewport_top) - rel_y,
-                            area.width,
-                            child_h,
-                        ),
-                        buf,
-                    );
-                }
-            }
-
-            content_y += child_h;
-        }
-
-        total_height.saturating_sub(area.height)
+    /// Set scroll offset for `Renderable::render`.
+    pub fn set_scroll(&mut self, scroll: u16) {
+        self.scroll = scroll;
     }
 }
 
-impl Renderable for ViewportCulledColumn<'_> {
+impl Renderable for ViewportCulledColumn {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        // Without scroll, behave like ColumnRenderable
-        let mut y = area.y;
+        let viewport_top = self.scroll;
+        let viewport_bottom = self.scroll.saturating_add(area.height);
+
+        let mut y: u16 = 0;
         for child in &self.children {
-            let h = child.desired_height(area.width);
-            let child_area = Rect::new(area.x, y, area.width, h).intersection(area);
-            if !child_area.is_empty() {
-                child.render(child_area, buf);
+            let child_h = child.desired_height(area.width);
+            let child_bottom = y.saturating_add(child_h);
+
+            if child_bottom > viewport_top && y < viewport_bottom {
+                // Child overlaps viewport — compute its screen-relative Rect.
+                let screen_y = area
+                    .y
+                    .saturating_add(y.saturating_sub(viewport_top));
+                let child_area = Rect::new(area.x, screen_y, area.width, child_h);
+                let clipped = child_area.intersection(area);
+                if !clipped.is_empty() {
+                    child.render(clipped, buf);
+                }
             }
-            y += h;
+
+            y = y.saturating_add(child_h);
+            if y >= viewport_bottom {
+                break;
+            }
         }
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        self.children.iter().map(|c| c.desired_height(width)).sum()
+        self.children
+            .iter()
+            .map(|c| c.desired_height(width))
+            .sum()
     }
 }

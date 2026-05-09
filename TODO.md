@@ -158,11 +158,11 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Track dependencies with weak-copyleft or attribution-sensitive licenses.
   - [x] Document when a project-level `NOTICE` file becomes necessary.
 
-- [x] TUI：引入 cell 级视口裁剪替代全量 Vec<Line> 渲染
-  - [x] 实现 Renderable trait 和 ColumnRenderable 组合器（参考 codex renderable.rs）。
-  - [x] 每个 ActivityCell 实现 desired_height / render，视口外 cell 跳过绘制。
-  - [x] 用 FlexRenderable 将活动列表、命令输入框、弹窗组合为布局树。
-  - [x] 保留 CachedActivityLines 作为 cell 内 markdown 行缓存。
+- [ ] TUI：引入 cell 级视口裁剪替代全量 Vec<Line> 渲染
+  - [ ] 实现 Renderable trait 和 ColumnRenderable 组合器（参考 codex renderable.rs）。
+  - [ ] 每个 ActivityCell 实现 desired_height / render，视口外 cell 跳过绘制。
+  - [ ] 用 FlexRenderable 将活动列表、命令输入框、弹窗组合为布局树。
+  - [ ] 保留 CachedActivityLines 作为 cell 内 markdown 行缓存。
 
 - [x] TUI：修复命令输入框光标位置
   - [x] 在 terminal.draw 闭包中调用 frame.set_cursor_position()（已在 render_command_bar 实现）。
