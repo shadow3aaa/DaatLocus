@@ -12,6 +12,7 @@ use ratatui::layout::Rect;
 // Renderable trait
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 /// A renderable item that can produce its own desired height and render into a buffer.
 pub trait Renderable {
     /// Render self into `buf` within `area`.  The caller guarantees that `area` fits in `buf`.
@@ -88,11 +89,13 @@ pub struct FlexRenderable {
     children: Vec<FlexChild>,
 }
 
+#[allow(dead_code)]
 struct FlexChild {
     flex: i32,
     child: Box<dyn Renderable>,
 }
 
+#[allow(dead_code)]
 impl FlexRenderable {
     pub fn new() -> Self {
         Self { children: vec![] }
@@ -191,11 +194,13 @@ impl Renderable for FlexRenderable {
 ///
 /// Implements `Renderable` using stored scroll offset (set via `set_scroll`).
 /// Also exposes `render_with_scroll` for direct scroll control (returns `max_scroll`).
+#[allow(dead_code)]
 pub struct ViewportCulledColumn {
     children: Vec<Box<dyn Renderable>>,
     scroll: u16,
 }
 
+#[allow(dead_code)]
 impl ViewportCulledColumn {
     pub fn new() -> Self {
         Self {
