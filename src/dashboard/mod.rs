@@ -1466,7 +1466,9 @@ pub async fn run_tui_dashboard(
                         needs_render = true;
                     }
                     tui_event::TuiEvent::Paste(text) => {
-                        command_input.push_str(&text);
+                        // Replace newlines with spaces: the command bar is a single-line input,
+                        // and ratatui Line/Span treats \n as a literal character, not a line break.
+                        command_input.push_str(&text.replace('\n', " "));
                         needs_render = true;
                     }
                     tui_event::TuiEvent::Draw => {
