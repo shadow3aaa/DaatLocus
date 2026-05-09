@@ -2104,13 +2104,11 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
     // Show cursor after the prompt prefix and input text
     let cursor_x = rows[1].x + 2 + input.len() as u16;
     let cursor_y = rows[1].y;
-    if last_cursor_pos.is_none_or(|(px, py)| px != cursor_x || py != cursor_y) {
-        f.set_cursor_position(Position {
-            x: cursor_x,
-            y: cursor_y,
-        });
-        *last_cursor_pos = Some((cursor_x, cursor_y));
-    }
+    f.set_cursor_position(Position {
+        x: cursor_x,
+        y: cursor_y,
+    });
+    *last_cursor_pos = Some((cursor_x, cursor_y));
     let footer_row = if popup_rows > 0 {
         render_command_popup(f, rows[2], input, context, popup_selection, popup_scroll);
         rows[3]
