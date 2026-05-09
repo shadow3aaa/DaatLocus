@@ -225,15 +225,24 @@ impl Renderable for ViewportCulledColumn {
             let child_bottom = y.saturating_add(child_h);
 
             if child_bottom > viewport_top && y < viewport_bottom {
-                // Child overlaps viewport — compute its screen-relative Rect.
-                let screen_y = area
-                    .y
-                    .saturating_add(y.saturating_sub(viewport_top));
-                let child_area = Rect::new(area.x, screen_y, area.width, child_h);
-                let clipped = child_area.intersection(area);
-                if !clipped.is_empty() {
-                    child.render(clipped, buf);
-                }
+                // Child overlaps viewport — compute its screen-relative Rect using
+                // signed offset so that cells starting above the viewport get a
+                // negative screen_y (their top lines render off-buffer and are
+                // silently dropped by ratatui's Paragraph::render).
+                let offset: i32 = y as i32 - viewport_top as i32;
+                let screen_y: i32 = area.y as i32 + offset;
+                let child_area = Rect::new(
+                    area.x,
+                    screen_y.max(0) as u16,
+                    area.width,
+                    child_h,
+                );
+                // Render the full child. Ratatui ignores rows outside the buffer,
+                // so partial overlap works correctly — top rows offset above the
+                // viewport are dropped, visible rows render at the right offset.
+                // Using `intersection` would shift line 0 (title) to the clipped
+                // top, causing a sticky-header illusion.
+                child.render(child_area, buf);
             }
 
             y = y.saturating_add(child_h);
