@@ -81,6 +81,7 @@ impl CachedActivityLines {
 }
 
 /// Thin Renderable wrapper around pre-computed lines.
+#[derive(Clone)]
 struct CachedCellLines(Vec<Line<'static>>);
 
 impl Renderable for CachedCellLines {
@@ -132,6 +133,8 @@ pub fn render_activity_feed_cached(
 
     let mut column = ViewportCulledColumn::new();
 
+    let spacer_line = CachedCellLines(vec![Line::from("")]);
+
     // Committed cells: use cache to skip markdown re-render.
     for (i, cell) in cells.iter().enumerate() {
         let lines = if let Some(cached) = cache.get(i, inner.width) {
@@ -142,6 +145,10 @@ pub fn render_activity_feed_cached(
             lines
         };
         column.push(CachedCellLines(lines));
+        // Blank line spacing between adjacent cells (matches old Vec<Line> behavior).
+        if !live_cells.is_empty() || i + 1 < cells.len() {
+            column.push(spacer_line.clone());
+        }
     }
 
     // Live cells are always re-rendered (they change every frame).
@@ -156,6 +163,10 @@ pub fn render_activity_feed_cached(
         }
         cache.set(idx, inner.width, lines.clone());
         column.push(CachedCellLines(lines));
+        // Blank line spacing between adjacent cells.
+        if i + 1 < live_cells.len() {
+            column.push(spacer_line.clone());
+        }
     }
 
     // Auto-scroll (u16::MAX): precompute total height and pin to bottom.
