@@ -158,7 +158,14 @@ pub fn render_activity_feed_cached(
         column.push(CachedCellLines(lines));
     }
 
-    column.set_scroll(scroll_offset);
+    // Auto-scroll (u16::MAX): precompute total height and pin to bottom.
+    let effective_scroll = if scroll_offset == u16::MAX {
+        let total = column.desired_height(inner.width);
+        total.saturating_sub(inner.height)
+    } else {
+        scroll_offset
+    };
+    column.set_scroll(effective_scroll);
 
     let mut flex = FlexRenderable::new();
     flex.push(1, column);
