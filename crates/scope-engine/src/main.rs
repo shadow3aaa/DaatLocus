@@ -2,15 +2,18 @@ mod language;
 mod analyzer;
 mod api;
 mod lsp;
+mod selector;
 mod server;
 mod state;
 mod treesitter;
 
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
+    let mut project_root: Option<PathBuf> = None;
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -35,7 +38,14 @@ fn main() {
             }
         };
 
-        let resp = server::dispatch(&req);
+        // Track project_root from open_project calls
+        if req.method == "open_project" {
+            if let Ok(params) = serde_json::from_value::<api::OpenProjectRequest>(req.params.clone()) {
+                project_root = Some(PathBuf::from(&params.project_root));
+            }
+        }
+
+        let resp = server::dispatch(&req, project_root.as_deref());
         let json = serde_json::to_string(&resp).unwrap_or_default();
         let _ = writeln!(stdout.lock(), "{json}");
     }
