@@ -1,5 +1,6 @@
 import {
   Fragment,
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -2364,7 +2365,7 @@ function limitMarkdownInput(text: string, limit: number): string {
   return chunks.slice(0, limit).join("\n\n");
 }
 
-function AgentChatMarkdownText({
+const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
   text,
   limit,
   tone = "default",
@@ -2494,6 +2495,7 @@ function AgentChatMarkdownText({
     </div>
   );
 }
+);
 function AgentChatMarkdownInline({ text }: { text: string }) {
   if (!text) {
     return null;
@@ -2606,7 +2608,7 @@ function AgentChatImageAttachment({
   );
 }
 
-function AgentChatCodeBlock({
+const AgentChatCodeBlock = memo(function AgentChatCodeBlock({
   id,
   code,
   language,
@@ -2695,6 +2697,7 @@ function AgentChatCodeBlock({
     </div>
   );
 }
+);
 
 function agentChatCodeLanguageLabel(language: string) {
   const normalized = language.trim().toLowerCase();
