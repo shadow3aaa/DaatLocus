@@ -236,9 +236,25 @@ pub fn edit_code_apply(
     let parsed = crate::selector::parse_selector(selector_str)
         .map_err(|e| format!("bad selector: {e}"))?;
 
-    let (full_path, _ext) = crate::selector::resolve_file(&parsed, project_root)
-        .map_err(|e| format!("cannot resolve file: {e}"))?;
+    // resolve_file only checks existence for reading; for creation we only need the path
+    let full_path = if parsed.file_path.is_absolute() {
+        parsed.file_path.clone()
+    } else {
+        project_root.join(&parsed.file_path)
+    };
 
+    if !full_path.exists() {
+        // Create new file: ensure parent dirs exist, write patch as full content
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create parent dirs for {}: {e}", full_path.display()))?;
+        }
+        std::fs::write(&full_path, patch)
+            .map_err(|e| format!("cannot create {}: {e}", full_path.display()))?;
+        return Ok(vec![]);
+    }
+
+    // Existing file: apply stripped v4a hunk patch
     let original = std::fs::read_to_string(&full_path)
         .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?;
 
