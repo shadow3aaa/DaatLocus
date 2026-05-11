@@ -330,7 +330,9 @@ fn render_assistant_cell_lines(cell: &AssistantActivityCell) -> Vec<Line<'static
             for md_line in md_lines {
                 let mut spans = vec![Span::raw("   ")];
                 spans.extend(md_line.spans);
-                lines.push(Line::from(spans));
+            let mut line = Line::from(spans);
+            line.style = md_line.style;
+            lines.push(line);
             }
             return lines;
         }
@@ -707,7 +709,9 @@ fn render_reply_cell_lines(cell: &ReplyActivityCell) -> Vec<Line<'static>> {
         for md_line in md_lines {
             let mut spans = vec![Span::raw("   ")];
             spans.extend(md_line.spans);
-            lines.push(Line::from(spans));
+            let mut line = Line::from(spans);
+            line.style = md_line.style;
+            lines.push(line);
         }
     }
     lines
@@ -849,7 +853,9 @@ fn render_text_activity_lines(
                 ));
             }
             spans.extend(md_line.spans);
-            lines.push(Line::from(spans));
+            let mut line = Line::from(spans);
+            line.style = md_line.style;
+            lines.push(line);
         }
     } else {
         for line in body_lines.iter().take(limit) {
@@ -913,7 +919,9 @@ fn render_message_activity_lines(
                 Style::default().fg(Color::DarkGray),
             )];
             msg_spans.extend(md_line.spans);
-            lines.push(Line::from(msg_spans));
+            let mut line = Line::from(msg_spans);
+            line.style = md_line.style;
+            lines.push(line);
         }
     } else {
         for (index, line) in message_lines.iter().take(message_limit).enumerate() {
@@ -1175,6 +1183,80 @@ fn truncate_lines_middle(lines: &[String], head: usize, tail: usize) -> Vec<Stri
 mod tests {
     use super::*;
     use crate::tool_ui::{PatchDiffLineKind, PatchFileOperation, ReplyDisposition, ReplySubject};
+
+    /// Verify that fenced code blocks inside an assistant cell produce
+    /// spans styled with the code colour (Yellow), not the base colour.
+    #[test]
+    fn assistant_cell_renders_code_block_with_code_style() {
+        let body = "\
+Here is some code:
+
+```rust
+fn main() {
+    println!(\"hello\");
+}
+```
+
+That's it.";
+        let cell = AssistantActivityCell {
+            title: "Here is some code:".to_string(),
+            body_lines: body.lines().skip(1).take(8).map(|s| s.to_string()).collect(),
+            full_body: Some(body.to_string()),
+            rich_mode: true,
+        };
+        let lines = render_assistant_cell_lines(&cell);
+
+        // Find the line that contains "fn main()".
+        let code_line = lines
+            .iter()
+            .find(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("fn main()"))
+            });
+        assert!(
+            code_line.is_some(),
+            "expected to find code line 'fn main()' in rendered output"
+        );
+        let code_line = code_line.unwrap();
+
+        // Code-block spans delegate colour to the line style:
+        // the span itself has no fg, but the line carries Yellow.
+        let code_span = code_line
+            .spans
+            .iter()
+            .find(|span| span.content.contains("fn main()"))
+            .unwrap();
+        assert_eq!(
+            code_span.style.fg,
+            None,
+            "code span '{}' should have no fg (inherits from line style)",
+            code_span.content
+        );
+        assert_eq!(
+            code_line.style.fg,
+            Some(Color::Yellow),
+            "code line should have Yellow line style, got {:?}",
+            code_line.style.fg
+        );
+
+        // The plain text "Here is some code:" should NOT be Yellow.
+        // It should have the base colour (White) on the span itself.
+        let plain_text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("That's it"))
+            .and_then(|span| span.style.fg);
+        assert!(
+            plain_text.is_some(),
+            "expected to find plain text line in rendered output"
+        );
+        assert_eq!(
+            plain_text,
+            Some(Color::White),
+            "plain text should have White fg (base_color)"
+        );
+    }
 
     fn line_text(line: &Line<'static>) -> String {
         line.spans

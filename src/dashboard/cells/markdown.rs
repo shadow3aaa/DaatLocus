@@ -92,13 +92,20 @@ pub fn render_markdown(input: &str, base_color: Color) -> Vec<Line<'static>> {
     text.lines
         .into_iter()
         .map(|line| {
+            let line_style = line.style;
             let spans: Vec<Span<'static>> = line
                 .spans
                 .into_iter()
                 .map(|s| {
-                    let style = if s.style.fg.is_none()
-                        && s.style.bg.is_none()
-                        && s.style.underline_color.is_none()
+                    // A span is "uncoloured" only when neither the span
+                    // nor the line style provides a colour attribute.
+                    let has_span_color = s.style.fg.is_some()
+                        || s.style.bg.is_some()
+                        || s.style.underline_color.is_some();
+                    let has_line_color = line_style.fg.is_some()
+                        || line_style.bg.is_some()
+                        || line_style.underline_color.is_some();
+                    let style = if !has_span_color && !has_line_color
                     {
                         s.style.fg(base_color)
                     } else {
@@ -107,7 +114,12 @@ pub fn render_markdown(input: &str, base_color: Color) -> Vec<Line<'static>> {
                     Span::styled(s.content.into_owned(), style)
                 })
                 .collect();
-            Line::from(spans)
+            let mut new_line = Line::from(spans);
+            // Preserve line-level style so that constructs whose
+            // colour lives on the line (e.g. fenced code blocks via
+            // tui-markdown's line_styles stack) are not lost.
+            new_line.style = line_style;
+            new_line
         })
         .collect()
 }
