@@ -1,6 +1,7 @@
 mod language;
 mod analyzer;
 mod api;
+mod patch;
 mod lsp;
 mod selector;
 mod server;

@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::patch;
 use crate::api::*;
 use crate::selector;
 use crate::treesitter::TreeSitterAnalyzer;
@@ -37,30 +38,14 @@ pub fn dispatch(req: &JsonRpcRequest, project_root: Option<&Path>) -> JsonRpcRes
                 Ok(p) => p,
                 Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
             };
-            let _sel = match selector::parse_selector(&params.selector) {
-                Ok(s) => s,
-                Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Bad selector: {e}")),
-            };
-            // TODO: apply stripped v4a patch via propagation engine
-            JsonRpcResponse::ok(
-                req.id.clone(),
-                serde_json::to_value(AffectedResponse { affected_selectors: vec![] }).unwrap(),
-            )
+            handle_edit_code(req, &params, project_root)
         }
         "delete_code" => {
             let params: DeleteCodeRequest = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
                 Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
             };
-            let _sel = match selector::parse_selector(&params.selector) {
-                Ok(s) => s,
-                Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Bad selector: {e}")),
-            };
-            // TODO: apply deletion via propagation engine
-            JsonRpcResponse::ok(
-                req.id.clone(),
-                serde_json::to_value(AffectedResponse { affected_selectors: vec![] }).unwrap(),
-            )
+            handle_delete_code(req, &params, project_root)
         }
         "ack_next_event" => {
             JsonRpcResponse::ok(
@@ -229,5 +214,62 @@ fn guess_language(path: &Path) -> &'static str {
         Some("yaml") | Some("yml") => "yaml",
         Some("md") => "markdown",
         _ => "text",
+    }
+}
+
+
+fn handle_edit_code(
+    req: &JsonRpcRequest,
+    params: &EditCodeRequest,
+    project_root: Option<&Path>,
+) -> JsonRpcResponse {
+    let project_root = match project_root {
+        Some(r) => r,
+        None => {
+            return JsonRpcResponse::err(
+                req.id.clone(),
+                -32000,
+                "No project open; call open_project first",
+            );
+        }
+    };
+
+    match patch::edit_code_apply(&params.selector, &params.patch, project_root) {
+        Ok(affected) => JsonRpcResponse::ok(
+            req.id.clone(),
+            serde_json::to_value(AffectedResponse {
+                affected_selectors: affected,
+            })
+            .unwrap(),
+        ),
+        Err(e) => JsonRpcResponse::err(req.id.clone(), -32001, e),
+    }
+}
+
+fn handle_delete_code(
+    req: &JsonRpcRequest,
+    params: &DeleteCodeRequest,
+    project_root: Option<&Path>,
+) -> JsonRpcResponse {
+    let project_root = match project_root {
+        Some(r) => r,
+        None => {
+            return JsonRpcResponse::err(
+                req.id.clone(),
+                -32000,
+                "No project open; call open_project first",
+            );
+        }
+    };
+
+    match patch::delete_code_apply(&params.selector, project_root) {
+        Ok(affected) => JsonRpcResponse::ok(
+            req.id.clone(),
+            serde_json::to_value(AffectedResponse {
+                affected_selectors: affected,
+            })
+            .unwrap(),
+        ),
+        Err(e) => JsonRpcResponse::err(req.id.clone(), -32001, e),
     }
 }
