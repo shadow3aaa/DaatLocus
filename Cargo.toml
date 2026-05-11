@@ -62,7 +62,7 @@ mlua = { version = "0.11.4", features = ["lua54", "vendored", "serde"] }
 notify = "8.2.0"
 parking_lot = "0.12.5"
 postcard = { version = "1.1.3", features = ["alloc", "use-std"] }
-tui-markdown = { version = "0.3", default-features = false }
+tui-markdown = { version = "0.3", default-features = false, features = ["highlight-code"] }
 ratatui = "0.30.0"
 reqwest = { version = "0.13.2", features = ["json", "stream", "multipart"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }

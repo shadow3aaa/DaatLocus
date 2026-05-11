@@ -93,6 +93,18 @@ pub fn render_markdown(input: &str, base_color: Color) -> Vec<Line<'static>> {
         .into_iter()
         .map(|line| {
             let line_style = line.style;
+            // tui-markdown renders fenced code-block delimiters
+            // ("```" and "```lang") as regular spans.  Detect them
+            // and apply a subtle colour so they act as visual
+            // boundaries without blending into the body text.
+            let is_fence = line.spans.first().map_or(false, |s| {
+                s.content.starts_with("```")
+            });
+            let fence_color = if is_fence {
+                Some(Color::DarkGray)
+            } else {
+                None
+            };
             let spans: Vec<Span<'static>> = line
                 .spans
                 .into_iter()
@@ -107,7 +119,7 @@ pub fn render_markdown(input: &str, base_color: Color) -> Vec<Line<'static>> {
                         || line_style.underline_color.is_some();
                     let style = if !has_span_color && !has_line_color
                     {
-                        s.style.fg(base_color)
+                        s.style.fg(fence_color.unwrap_or(base_color))
                     } else {
                         s.style
                     };
@@ -119,6 +131,13 @@ pub fn render_markdown(input: &str, base_color: Color) -> Vec<Line<'static>> {
             // colour lives on the line (e.g. fenced code blocks via
             // tui-markdown's line_styles stack) are not lost.
             new_line.style = line_style;
+            // For fence lines also set the line style so that any
+            // indentation spans (inserted by callers) inherit it.
+            if let Some(fc) = fence_color {
+                if new_line.style.fg.is_none() {
+                    new_line.style = new_line.style.fg(fc);
+                }
+            }
             new_line
         })
         .collect()

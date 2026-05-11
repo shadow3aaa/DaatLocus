@@ -1184,8 +1184,10 @@ mod tests {
     use super::*;
     use crate::tool_ui::{PatchDiffLineKind, PatchFileOperation, ReplyDisposition, ReplySubject};
 
+
     /// Verify that fenced code blocks inside an assistant cell produce
-    /// spans styled with the code colour (Yellow), not the base colour.
+    /// syntax-highlighted spans (syntect per-token colours) and fence
+    /// markers styled as DarkGray delimiters.
     #[test]
     fn assistant_cell_renders_code_block_with_code_style() {
         let body = "\
@@ -1206,42 +1208,68 @@ That's it.";
         };
         let lines = render_assistant_cell_lines(&cell);
 
-        // Find the line that contains "fn main()".
+        // ── Fence line(s) are DarkGray ──────────────────────────
+        // Callers prepend "   " indentation, so check past that
+        // and also verify the line-level style.
+        let fence_lines: Vec<_> = lines
+            .iter()
+            .filter(|line| {
+                line.spans.iter().any(|s| s.content.starts_with("```"))
+            })
+            .collect();
+        assert!(
+            !fence_lines.is_empty(),
+            "expected at least one fence line (```)"
+        );
+        for fl in &fence_lines {
+            let fence_span = fl.spans.iter()
+                .find(|s| s.content.starts_with("```"))
+                .unwrap();
+            assert_eq!(
+                fence_span.style.fg, Some(Color::DarkGray),
+                "fence span should be DarkGray, got {:?}", fence_span.style
+            );
+            assert_eq!(
+                fl.style.fg, Some(Color::DarkGray),
+                "fence LINE style should be DarkGray, got {:?}", fl.style
+            );
+        }
+
+        // ── Code content is syntax‑highlighted ─────────────────
         let code_line = lines
             .iter()
-            .find(|line| {
-                line.spans
-                    .iter()
-                    .any(|span| span.content.contains("fn main()"))
-            });
+            .find(|line| line_text(line).contains("fn main()"));
         assert!(
             code_line.is_some(),
             "expected to find code line 'fn main()' in rendered output"
         );
         let code_line = code_line.unwrap();
 
-        // Code-block spans delegate colour to the line style:
-        // the span itself has no fg, but the line carries Yellow.
+        // Skip "   " indentation span; syntect‑coloured spans follow.
         let code_span = code_line
             .spans
             .iter()
-            .find(|span| span.content.contains("fn main()"))
-            .unwrap();
-        assert_eq!(
-            code_span.style.fg,
-            None,
-            "code span '{}' should have no fg (inherits from line style)",
+            .find(|s| s.style.fg.is_some())
+            .expect("at least one span in the code line should have syntect fg");
+        assert!(
+            code_span.style.fg.is_some(),
+            "code span '{}' should have syntect fg, got None",
             code_span.content
         );
-        assert_eq!(
-            code_line.style.fg,
-            Some(Color::Yellow),
-            "code line should have Yellow line style, got {:?}",
-            code_line.style.fg
+
+        // At least 2 distinct colours → syntax highlighting active.
+        let unique_fgs: std::collections::HashSet<Color> = code_line
+            .spans
+            .iter()
+            .filter_map(|s| s.style.fg)
+            .collect();
+        assert!(
+            unique_fgs.len() >= 2,
+            "code block should have >= 2 distinct colours, got {:?}",
+            unique_fgs
         );
 
-        // The plain text "Here is some code:" should NOT be Yellow.
-        // It should have the base colour (White) on the span itself.
+        // ── Plain text is White (base_color) ────────────────────
         let plain_text = lines
             .iter()
             .flat_map(|line| line.spans.iter())
