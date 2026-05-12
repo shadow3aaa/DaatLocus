@@ -1,5 +1,8 @@
-use crate::api::AffectedSelector;
+use std::collections::HashSet;
 use std::path::Path;
+
+use crate::api::AffectedSelector;
+use crate::treesitter::TreeSitterAnalyzer;
 
 /// A single hunk inside a stripped v4a patch.
 #[derive(Debug, Clone)]
@@ -32,7 +35,7 @@ pub fn apply_stripped_v4a_patch(
     original: &str,
     patch: &str,
 ) -> Result<String, String> {
-    let hunks = parse_hunks(patch)?;
+    let hunks = parse_stripped_v4a_hunks(patch)?;
     if hunks.is_empty() {
         return Err("no hunks found in patch".to_string());
     }
@@ -40,7 +43,7 @@ pub fn apply_stripped_v4a_patch(
 }
 
 /// Parse the stripped v4a hunk-only format.
-fn parse_hunks(patch: &str) -> Result<Vec<Hunk>, String> {
+pub fn parse_stripped_v4a_hunks(patch: &str) -> Result<Vec<Hunk>, String> {
     let mut hunks: Vec<Hunk> = Vec::new();
     let mut current_lines: Vec<HunkLine> = Vec::new();
     let mut current_header: Option<(usize, usize, usize, usize)> = None;
@@ -236,7 +239,6 @@ pub fn edit_code_apply(
     let parsed = crate::selector::parse_selector(selector_str)
         .map_err(|e| format!("bad selector: {e}"))?;
 
-    // resolve_file only checks existence for reading; for creation we only need the path
     let full_path = if parsed.file_path.is_absolute() {
         parsed.file_path.clone()
     } else {
@@ -254,16 +256,47 @@ pub fn edit_code_apply(
         return Ok(vec![]);
     }
 
-    // Existing file: apply stripped v4a hunk patch
     let original = std::fs::read_to_string(&full_path)
         .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?;
 
-    let new_content = apply_stripped_v4a_patch(&original, patch)?;
+    // ── Propagation: extract affected symbols from hunk line ranges ──
+    let hunks = parse_stripped_v4a_hunks(patch)?;
+    let analyzer = TreeSitterAnalyzer::new();
+    let mut affected = Vec::new();
+    let mut seen = HashSet::new();
 
+    for hunk in &hunks {
+        if hunk.old_count > 0 {
+            let end = hunk.old_start + hunk.old_count;
+            for line in hunk.old_start..end {
+                if let Some(sel) = analyzer.find_containing_symbol(&full_path, line, project_root) {
+                    if seen.insert(sel.clone()) {
+                        affected.push(AffectedSelector {
+                            selector: sel,
+                            reason: format!("hunk modified original line {}", line),
+                        });
+                    }
+                }
+            }
+        } else {
+            // addition-only hunk: use the insertion point
+            if let Some(sel) = analyzer.find_containing_symbol(&full_path, hunk.old_start, project_root) {
+                if seen.insert(sel.clone()) {
+                    affected.push(AffectedSelector {
+                        selector: sel,
+                        reason: format!("hunk added content at original line {}", hunk.old_start),
+                    });
+                }
+            }
+        }
+    }
+
+    // ── Apply the patch ──
+    let new_content = apply_stripped_v4a_patch(&original, patch)?;
     std::fs::write(&full_path, &new_content)
         .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
 
-    Ok(vec![])
+    Ok(affected)
 }
 
 /// Apply a delete_code operation: parse selector, resolve file, remove the symbol.
@@ -280,13 +313,41 @@ pub fn delete_code_apply(
     let original = std::fs::read_to_string(&full_path)
         .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?;
 
+    // Find the affected line before deletion for propagation
+    let delete_line = original
+        .lines()
+        .position(|l| l.contains(&parsed.name))
+        .map(|idx| idx + 1); // 1-based
+
     let new_content = remove_hunk_lines(&original, &parsed.name, 3)
         .ok_or_else(|| format!("symbol '{}' not found in {}", parsed.name, full_path.display()))?;
 
     std::fs::write(&full_path, &new_content)
         .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
 
-    Ok(vec![])
+    // Propagate: delete affected is the deleted symbol itself
+    let mut affected = vec![AffectedSelector {
+        selector: selector_str.to_string(),
+        reason: format!("deleted symbol {} from {}", parsed.name, full_path.display()),
+    }];
+
+    // Also find containing symbol for the deleted line
+    if let Some(line) = delete_line {
+        let analyzer = TreeSitterAnalyzer::new();
+        if let Some(sel) = analyzer.find_containing_symbol(&full_path, line, project_root) {
+            if sel != selector_str {
+                let mut seen: HashSet<String> = HashSet::from([selector_str.to_string()]);
+                if seen.insert(sel.clone()) {
+                    affected.push(AffectedSelector {
+                        selector: sel,
+                        reason: format!("contained deleted content at line {}", line),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(affected)
 }
 
 /// Remove lines matching a pattern with surrounding context (simple delete tool).

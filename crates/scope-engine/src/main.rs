@@ -10,11 +10,13 @@ mod treesitter;
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut project_root: Option<PathBuf> = None;
+    let affected_state = Mutex::new(state::AffectedState::new());
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -46,7 +48,7 @@ fn main() {
             }
         }
 
-        let resp = server::dispatch(&req, project_root.as_deref());
+        let resp = server::dispatch(&req, project_root.as_deref(), &affected_state);
         let json = serde_json::to_string(&resp).unwrap_or_default();
         let _ = writeln!(stdout.lock(), "{json}");
     }

@@ -2,11 +2,13 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::patch;
+use crate::state::AffectedState;
 use crate::api::*;
+use std::sync::Mutex;
 use crate::selector;
 use crate::treesitter::TreeSitterAnalyzer;
 
-pub fn dispatch(req: &JsonRpcRequest, project_root: Option<&Path>) -> JsonRpcResponse {
+pub fn dispatch(req: &JsonRpcRequest, project_root: Option<&Path>, affected_state: &Mutex<AffectedState>) -> JsonRpcResponse {
     match req.method.as_str() {
         "open_project" => {
             let params: OpenProjectRequest = match serde_json::from_value(req.params.clone()) {
@@ -38,19 +40,24 @@ pub fn dispatch(req: &JsonRpcRequest, project_root: Option<&Path>) -> JsonRpcRes
                 Ok(p) => p,
                 Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
             };
-            handle_edit_code(req, &params, project_root)
+            handle_edit_code(req, &params, project_root, affected_state)
         }
         "delete_code" => {
             let params: DeleteCodeRequest = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
                 Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
             };
-            handle_delete_code(req, &params, project_root)
+            handle_delete_code(req, &params, project_root, affected_state)
         }
         "ack_next_event" => {
+            let mut state = match affected_state.lock() {
+                Ok(s) => s,
+                Err(_) => return JsonRpcResponse::err(req.id.clone(), -32603, "lock poisoned"),
+            };
+            let review = state.next_review();
             JsonRpcResponse::ok(
                 req.id.clone(),
-                serde_json::to_value(NextReviewResponse { review: None }).unwrap(),
+                serde_json::to_value(NextReviewResponse { review }).unwrap(),
             )
         }
         _ => JsonRpcResponse::err(req.id.clone(), -32601, format!("Method not found: {}", req.method)),
@@ -222,6 +229,7 @@ fn handle_edit_code(
     req: &JsonRpcRequest,
     params: &EditCodeRequest,
     project_root: Option<&Path>,
+    affected_state: &Mutex<AffectedState>,
 ) -> JsonRpcResponse {
     let project_root = match project_root {
         Some(r) => r,
@@ -235,13 +243,20 @@ fn handle_edit_code(
     };
 
     match patch::edit_code_apply(&params.selector, &params.patch, project_root) {
-        Ok(affected) => JsonRpcResponse::ok(
-            req.id.clone(),
-            serde_json::to_value(AffectedResponse {
-                affected_selectors: affected,
-            })
-            .unwrap(),
-        ),
+        Ok(affected) => {
+            if !affected.is_empty() {
+                if let Ok(mut state) = affected_state.lock() {
+                    state.accumulate(affected.clone());
+                }
+            }
+            JsonRpcResponse::ok(
+                req.id.clone(),
+                serde_json::to_value(AffectedResponse {
+                    affected_selectors: affected,
+                })
+                .unwrap(),
+            )
+        }
         Err(e) => JsonRpcResponse::err(req.id.clone(), -32001, e),
     }
 }
@@ -250,6 +265,7 @@ fn handle_delete_code(
     req: &JsonRpcRequest,
     params: &DeleteCodeRequest,
     project_root: Option<&Path>,
+    affected_state: &Mutex<AffectedState>,
 ) -> JsonRpcResponse {
     let project_root = match project_root {
         Some(r) => r,
@@ -263,13 +279,20 @@ fn handle_delete_code(
     };
 
     match patch::delete_code_apply(&params.selector, project_root) {
-        Ok(affected) => JsonRpcResponse::ok(
-            req.id.clone(),
-            serde_json::to_value(AffectedResponse {
-                affected_selectors: affected,
-            })
-            .unwrap(),
-        ),
+        Ok(affected) => {
+            if !affected.is_empty() {
+                if let Ok(mut state) = affected_state.lock() {
+                    state.accumulate(affected.clone());
+                }
+            }
+            JsonRpcResponse::ok(
+                req.id.clone(),
+                serde_json::to_value(AffectedResponse {
+                    affected_selectors: affected,
+                })
+                .unwrap(),
+            )
+        }
         Err(e) => JsonRpcResponse::err(req.id.clone(), -32001, e),
     }
 }
