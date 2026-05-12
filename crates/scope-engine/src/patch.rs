@@ -314,10 +314,14 @@ pub fn edit_code_apply(
         let mut lsp_refs: Vec<PropagationResult> = Vec::new();
         if let Ok(mut lsp_guard) = lsp_analyzer.lock() {
             if let Some(ref mut lsp) = *lsp_guard {
-                // Find the symbol's position in the file for LSP query
-                // Use the first hunk's line as a rough position hint
-                let hint_line = hunks.first().map(|h| h.old_start).unwrap_or(1);
-                lsp_refs = lsp.find_references_for_symbol(&full_path, hint_line, 0, project_root);
+                // Find the symbol's precise position in the file for LSP query
+                // Search for the symbol name in the modified content
+                let (line, character) = find_symbol_position(&new_content, sym_name)
+                    .unwrap_or_else(|| {
+                        let hint_line = hunks.first().map(|h| h.old_start).unwrap_or(1);
+                        (hint_line, 0)
+                    });
+                lsp_refs = lsp.find_references_for_symbol(&full_path, line, character, project_root);
             }
         }
         if lsp_refs.is_empty() {
@@ -423,16 +427,15 @@ pub fn delete_code_apply(
     let mut lsp_refs: Vec<PropagationResult> = Vec::new();
     if let Ok(mut lsp_guard) = lsp_analyzer.lock() {
         if let Some(ref mut lsp) = *lsp_guard {
-            // Find the deleted symbol's position — use tree-sitter to locate it
-            let hint_line = ts.find_containing_symbol(&full_path, 1, project_root)
-                .and_then(|sel| {
-                    let _ = sel;
-                    // Try to find the line where this symbol is defined
-                    original.lines().position(|l| l.contains(&parsed.name))
-                })
-                .map(|idx| idx + 1)
-                .unwrap_or(1);
-            lsp_refs = lsp.find_references_for_symbol(&full_path, hint_line, 0, project_root);
+            // Find the symbol's precise position in the file for LSP query
+            let (line, character) = find_symbol_position(&original, &parsed.name)
+                .unwrap_or_else(|| {
+                    let hint_line = original.lines().position(|l| l.contains(&parsed.name))
+                        .map(|idx| idx + 1)
+                        .unwrap_or(1);
+                    (hint_line, 0)
+                });
+            lsp_refs = lsp.find_references_for_symbol(&full_path, line, character, project_root);
         }
     }
     if lsp_refs.is_empty() {
@@ -652,4 +655,22 @@ mod e2e_tests {
         // Should have an OpenEnded result for the deleted symbol
         assert!(propagation.iter().any(|r| r.reason.contains("deleted")), "Should note deletion");
     }
+}
+
+/// Find the (1-based line, 0-based character) position of a symbol name in source text.
+/// Searches for the first occurrence of `sym_name` as a word boundary match
+/// (e.g. "greet" should match "fn greet(" but not "greeting").
+fn find_symbol_position(content: &str, sym_name: &str) -> Option<(usize, usize)> {
+    for (line_idx, line) in content.lines().enumerate() {
+        if let Some(pos) = line.find(sym_name) {
+            // Check that this is a word boundary match
+            let before_ok = pos == 0 || !line.as_bytes()[pos - 1].is_ascii_alphanumeric();
+            let after_idx = pos + sym_name.len();
+            let after_ok = after_idx >= line.len() || !line.as_bytes()[after_idx].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                return Some((line_idx + 1, pos)); // 1-based line, 0-based character
+            }
+        }
+    }
+    None
 }

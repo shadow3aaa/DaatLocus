@@ -234,6 +234,8 @@ impl LspAnalyzer {
             })?;
 
         eprintln!("[scope-engine/lsp] rust-analyzer initialized for {}", project_root.display());
+        // Give RA some time to start indexing
+        std::thread::sleep(std::time::Duration::from_secs(3));
         Ok((child, writer, reader))
     }
 
@@ -322,6 +324,7 @@ impl LspAnalyzer {
             "context": { "includeDeclaration": false }
         });
 
+
         let (writer, reader) = match (&mut self.stdin_writer, &mut self.stdout_reader) {
             (Some(w), Some(r)) => (w, r),
             _ => return vec![],
@@ -330,7 +333,8 @@ impl LspAnalyzer {
         let id = self.next_id;
         self.next_id += 1;
 
-        let resp = match Self::send_request_raw(writer, reader, id, "textDocument/references", params) {
+        let params = params.clone(); // clone for retry
+        let resp = match Self::send_request_raw(writer, reader, id, "textDocument/references", params.clone()) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[scope-engine/lsp] textDocument/references failed: {e}");
@@ -338,11 +342,33 @@ impl LspAnalyzer {
             }
         };
 
+
         // Parse result — LSP returns Location[] or null
         let locations = match resp.get("result") {
-            Some(serde_json::Value::Array(arr)) => arr,
+            Some(serde_json::Value::Array(arr)) => arr.clone(),
+            Some(serde_json::Value::Null) | None => {
+                // RA might still be indexing — retry after a delay
+                eprintln!("[scope-engine/lsp] references returned null, waiting and retrying...");
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let retry_id = self.next_id;
+                self.next_id += 1;
+                let retry_resp = match Self::send_request_raw(writer, reader, retry_id, "textDocument/references", params) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("[scope-engine/lsp] retry textDocument/references also failed: {e}");
+                        return vec![];
+                    }
+                };
+                eprintln!("[scope-engine/lsp] retry response: {}", serde_json::to_string(&retry_resp).unwrap_or_default());
+                match retry_resp.get("result") {
+                    Some(serde_json::Value::Array(arr)) => arr.clone(),
+                    _ => return vec![],
+                }
+            }
             _ => return vec![],
         };
+
+        eprintln!("[scope-engine/lsp] found {} reference locations", locations.len());
 
         let ts = TreeSitterAnalyzer::new();
         let mut results = Vec::new();
@@ -486,7 +512,9 @@ impl LspAnalyzer {
 
             // Check if this is a response (has "id") or a notification (no "id")
             if let Some(resp_id) = body.get("id").and_then(|v| v.as_u64()) {
-                if resp_id == expected_id {
+                // A response has "result" or "error" field; a request/notification has "method"
+                let is_response = body.get("result").is_some() || body.get("error").is_some();
+                if resp_id == expected_id && is_response {
                     return Ok(body);
                 }
                 // Response for a different id — skip

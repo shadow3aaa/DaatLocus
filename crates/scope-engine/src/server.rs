@@ -38,6 +38,27 @@ pub fn dispatch(
                 *lsp_guard = Some(new_lsp);
             }
 
+            // Open all existing .rs files in LSP so that references work
+            if lsp_lang == "rust" {
+                let mut lsp_guard = match lsp_analyzer.lock() {
+                    Ok(g) => g,
+                    Err(_) => return JsonRpcResponse::err(req.id.clone(), -32603, "lock poisoned"),
+                };
+                if let Some(ref mut lsp) = *lsp_guard {
+                    let root = Path::new(&params.project_root);
+                    if let Ok(entries) = std::fs::read_dir(root.join("src")) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                                if let Ok(content) = std::fs::read_to_string(&path) {
+                                    lsp.notify_did_open(&path, &content);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             JsonRpcResponse::ok(req.id.clone(), serde_json::json!({
                 "status": "opened",
                 "project_root": params.project_root,
