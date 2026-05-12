@@ -884,8 +884,10 @@ impl Llm for OllamaClient {
             payload["format"] = output_schema;
         }
 
-        if self.should_inject_think() {
-            inject_ollama_think(&mut payload);
+        if let Some(budget) = self.thinking_budget
+            && self.should_inject_think()
+        {
+            inject_ollama_think(&mut payload, budget);
         }
         if let Some(keep_alive) = &self.keep_alive {
             payload["keep_alive"] = json!(keep_alive);
@@ -971,8 +973,10 @@ impl Llm for OllamaClient {
             "messages": messages,
             "stream": true,
         });
-        if self.should_inject_think() {
-            inject_ollama_think(&mut payload);
+        if let Some(budget) = self.thinking_budget
+            && self.should_inject_think()
+        {
+            inject_ollama_think(&mut payload, budget);
         }
         if !tools.is_empty() {
             payload["tools"] = json!(tools);
@@ -1003,8 +1007,14 @@ fn build_ollama_options(temperature: f64, num_ctx: usize) -> Value {
     })
 }
 
-fn inject_ollama_think(payload: &mut Value) {
-    payload["think"] = json!(true);
+fn inject_ollama_think(payload: &mut Value, budget: ThinkingBudget) {
+    let think_value = match budget {
+        ThinkingBudget::Max | ThinkingBudget::High => json!("high"),
+        ThinkingBudget::Medium => json!("medium"),
+        ThinkingBudget::Low | ThinkingBudget::Minimal => json!("low"),
+        ThinkingBudget::None => return,
+    };
+    payload["think"] = think_value;
 }
 
 fn agent_message_to_ollama_content(
