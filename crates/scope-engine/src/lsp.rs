@@ -1,23 +1,529 @@
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+
 use crate::analyzer::Analyzer;
 use crate::api::{PropagationResult, PropagationSource};
+use crate::treesitter::TreeSitterAnalyzer;
 
-pub struct LspAnalyzer;
+// ── Constants ────────────────────────────────────────────────
+
+const RA_BINARY_NAME: &str = "rust-analyzer";
+const RA_VERSION: &str = "2025-05-05";
+const RA_GITHUB_RELEASE: &str =
+    "https://github.com/rust-lang/rust-analyzer/releases/download/2025-05-05/rust-analyzer-x86_64-apple-darwin";
+
+// ── LspAnalyzer ──────────────────────────────────────────────
+
+/// Manages a rust-analyzer subprocess and communicates via LSP JSON-RPC 2.0.
+///
+/// Lifecycle:
+/// 1. `new()` — locate or download rust-analyzer, spawn it, perform LSP `initialize`.
+/// 2. `notify_did_open()` / `notify_did_change()` / `notify_did_close()` — keep LSP in sync.
+/// 3. `find_references()` — query cross-file references via `textDocument/references`.
+/// 4. `shutdown()` — send `shutdown`, then kill the subprocess.
+pub struct LspAnalyzer {
+    process: Option<Child>,
+    stdin_writer: Option<BufWriter<ChildStdin>>,
+    stdout_reader: Option<std::io::BufReader<ChildStdout>>,
+    project_root: PathBuf,
+    next_id: u64,
+    /// If true, LSP is fully initialized and ready to accept requests.
+    initialized: bool,
+}
+
+// Newtype wrappers so we can implement Read/Write on the inner types
+struct BufWriter<W: Write>(W);
+
+impl<W: Write> Write for BufWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
 
 impl LspAnalyzer {
-    /// Create a new LspAnalyzer. Currently a placeholder.
-    /// TODO: spawn and communicate with an actual LSP server (e.g. rust-analyzer).
-    pub fn new(_project_root: &str, _language: &str) -> Self {
-        Self
+    /// Create a new LspAnalyzer: locate/download rust-analyzer, spawn it,
+    /// perform LSP initialize handshake.
+    ///
+    /// If rust-analyzer is not found and cannot be downloaded, returns an
+    /// LspAnalyzer in "not available" mode (find_references returns empty).
+    pub fn new(project_root: &Path, language: &str) -> Self {
+        let project_root = project_root.to_path_buf();
+
+        // Only support rust-analyzer for Rust projects
+        if language != "rust" {
+            eprintln!("[scope-engine/lsp] language '{language}' not supported by LSP; only 'rust' is supported");
+            return Self {
+                process: None,
+                stdin_writer: None,
+                stdout_reader: None,
+                project_root,
+                next_id: 0,
+                initialized: false,
+            };
+        }
+
+        let binary_path = match Self::locate_or_download_ra() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[scope-engine/lsp] cannot locate or download rust-analyzer: {e}");
+                return Self {
+                    process: None,
+                    stdin_writer: None,
+                    stdout_reader: None,
+                    project_root,
+                    next_id: 0,
+                    initialized: false,
+                };
+            }
+        };
+
+        match Self::spawn_and_initialize(&binary_path, &project_root) {
+            Ok((process, stdin_w, stdout_r)) => Self {
+                process: Some(process),
+                stdin_writer: Some(stdin_w),
+                stdout_reader: Some(stdout_r),
+                project_root,
+                next_id: 1, // id 0 was used for initialize
+                initialized: true,
+            },
+            Err(e) => {
+                eprintln!("[scope-engine/lsp] failed to spawn/initialize rust-analyzer: {e}");
+                Self {
+                    process: None,
+                    stdin_writer: None,
+                    stdout_reader: None,
+                    project_root,
+                    next_id: 0,
+                    initialized: false,
+                }
+            }
+        }
+    }
+
+    /// Whether the LSP server is available and initialized.
+    pub fn is_available(&self) -> bool {
+        self.initialized
+    }
+
+    // ── Binary location ───────────────────────────────────────
+
+    /// Try PATH first; if not found, try the cache dir; if still not found,
+    /// attempt to download from GitHub.
+    fn locate_or_download_ra() -> Result<PathBuf, String> {
+        // 1. Check PATH
+        if let Ok(output) = Command::new("which").arg(RA_BINARY_NAME).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    eprintln!("[scope-engine/lsp] found rust-analyzer on PATH: {path}");
+                    return Ok(PathBuf::from(path));
+                }
+            }
+        }
+
+        // 2. Check cache
+        let cache_dir = Self::cache_dir()?;
+        let cached = cache_dir.join(format!("rust-analyzer-{RA_VERSION}"));
+        if cached.is_file() {
+            eprintln!("[scope-engine/lsp] found cached rust-analyzer: {}", cached.display());
+            return Ok(cached);
+        }
+
+        // 3. Download
+        Self::download_ra(&cache_dir, &cached)
+    }
+
+    fn cache_dir() -> Result<PathBuf, String> {
+        let base = dirs::cache_dir()
+            .ok_or_else(|| "cannot determine cache directory".to_string())?;
+        let dir = base.join("daat-locus").join("lsp-binaries");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("cannot create cache dir {}: {e}", dir.display()))?;
+        Ok(dir)
+    }
+
+    #[cfg(feature = "download-ra")]
+    fn download_ra(cache_dir: &Path, target: &Path) -> Result<PathBuf, String> {
+        eprintln!("[scope-engine/lsp] downloading rust-analyzer {RA_VERSION} from GitHub...");
+        let tmp = cache_dir.join("rust-analyzer-download.tmp");
+        let mut resp = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| format!("HTTP client build failed: {e}"))?
+            .get(RA_GITHUB_RELEASE)
+            .send()
+            .map_err(|e| format!("download failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("download returned HTTP {}", resp.status()));
+        }
+
+        let mut file = std::fs::File::create(&tmp)
+            .map_err(|e| format!("cannot create tmp file: {e}"))?;
+        resp.copy_to(&mut file)
+            .map_err(|e| format!("download write failed: {e}"))?;
+        drop(file);
+
+        std::fs::rename(&tmp, target)
+            .map_err(|e| format!("cannot rename tmp to final path: {e}"))?;
+
+        // Make executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("cannot chmod: {e}"))?;
+        }
+
+        eprintln!("[scope-engine/lsp] downloaded rust-analyzer to {}", target.display());
+        Ok(target.to_path_buf())
+    }
+
+    #[cfg(not(feature = "download-ra"))]
+    fn download_ra(_cache_dir: &Path, _target: &Path) -> Result<PathBuf, String> {
+        Err("rust-analyzer download not available (feature 'download-ra' disabled)".to_string())
+    }
+
+    // ── Subprocess management ──────────────────────────────────
+
+    fn spawn_and_initialize(
+        binary_path: &Path,
+        project_root: &Path,
+    ) -> Result<(Child, BufWriter<ChildStdin>, std::io::BufReader<ChildStdout>), String> {
+        let mut child = Command::new(binary_path)
+            .current_dir(project_root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("cannot spawn rust-analyzer: {e}"))?;
+
+        let stdin = child.stdin.take().ok_or("cannot take stdin")?;
+        let stdout = child.stdout.take().ok_or("cannot take stdout")?;
+
+        let mut writer = BufWriter(stdin);
+        let mut reader = std::io::BufReader::new(stdout);
+
+        // ── LSP initialize ─────────────────────────────────────
+        let root_uri = path_to_file_uri(project_root);
+        let init_params = serde_json::json!({
+            "rootUri": root_uri,
+            "capabilities": {},
+        });
+
+        let resp = Self::send_request_raw(&mut writer, &mut reader, 0, "initialize", init_params)
+            .map_err(|e| {
+                let _ = child.kill();
+                format!("initialize failed: {e}")
+            })?;
+
+        if let Some(err) = resp.get("error") {
+            let _ = child.kill();
+            return Err(format!("initialize error: {err}"));
+        }
+
+        // ── initialized notification ───────────────────────────
+        Self::send_notification(&mut writer, "initialized", serde_json::json!({}))
+            .map_err(|e| {
+                let _ = child.kill();
+                format!("initialized notification failed: {e}")
+            })?;
+
+        eprintln!("[scope-engine/lsp] rust-analyzer initialized for {}", project_root.display());
+        Ok((child, writer, reader))
+    }
+
+    /// Shut down the LSP server gracefully.
+    pub fn shutdown(&mut self) {
+        if !self.initialized {
+            return;
+        }
+        if let (Some(writer), Some(reader)) =
+            (&mut self.stdin_writer, &mut self.stdout_reader)
+        {
+            let _ = Self::send_request_raw(writer, reader, self.next_id, "shutdown", serde_json::json!(null));
+            let _ = Self::send_notification(writer, "exit", serde_json::json!(null));
+        }
+        if let Some(ref mut child) = self.process {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.initialized = false;
+        self.process = None;
+        self.stdin_writer = None;
+        self.stdout_reader = None;
+        eprintln!("[scope-engine/lsp] rust-analyzer shut down");
+    }
+
+    // ── LSP file synchronization ────────────────────────────────
+
+    /// Notify LSP that a file was opened.
+    pub fn notify_did_open(&mut self, file_path: &Path, text: &str) {
+        if !self.initialized { return; }
+        let uri = path_to_file_uri(file_path);
+        let params = serde_json::json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "rust",
+                "version": 0,
+                "text": text,
+            }
+        });
+        if let Some(ref mut writer) = self.stdin_writer {
+            let _ = Self::send_notification(writer, "textDocument/didOpen", params);
+        }
+    }
+
+    /// Notify LSP that a file was modified (full sync).
+    pub fn notify_did_change(&mut self, file_path: &Path, version: i32, text: &str) {
+        if !self.initialized { return; }
+        let uri = path_to_file_uri(file_path);
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri, "version": version },
+            "contentChanges": [{ "text": text }]
+        });
+        if let Some(ref mut writer) = self.stdin_writer {
+            let _ = Self::send_notification(writer, "textDocument/didChange", params);
+        }
+    }
+
+    /// Notify LSP that a file was closed.
+    pub fn notify_did_close(&mut self, file_path: &Path) {
+        if !self.initialized { return; }
+        let uri = path_to_file_uri(file_path);
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri }
+        });
+        if let Some(ref mut writer) = self.stdin_writer {
+            let _ = Self::send_notification(writer, "textDocument/didClose", params);
+        }
+    }
+
+    // ── LSP requests ──────────────────────────────────────────
+
+    /// Send `textDocument/references` and map results to PropagationResult.
+    pub fn find_references_for_symbol(
+        &mut self,
+        file_path: &Path,
+        line: usize,
+        character: usize,
+        project_root: &Path,
+    ) -> Vec<PropagationResult> {
+        if !self.initialized { return vec![]; }
+
+        let uri = path_to_file_uri(file_path);
+        let params = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line.saturating_sub(1), "character": character },
+            "context": { "includeDeclaration": false }
+        });
+
+        let (writer, reader) = match (&mut self.stdin_writer, &mut self.stdout_reader) {
+            (Some(w), Some(r)) => (w, r),
+            _ => return vec![],
+        };
+
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let resp = match Self::send_request_raw(writer, reader, id, "textDocument/references", params) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[scope-engine/lsp] textDocument/references failed: {e}");
+                return vec![];
+            }
+        };
+
+        // Parse result — LSP returns Location[] or null
+        let locations = match resp.get("result") {
+            Some(serde_json::Value::Array(arr)) => arr,
+            _ => return vec![],
+        };
+
+        let ts = TreeSitterAnalyzer::new();
+        let mut results = Vec::new();
+
+        for loc in locations {
+            let loc_uri = loc.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+            let loc_line = loc.get("range")
+                .and_then(|r| r.get("start"))
+                .and_then(|s| s.get("line"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+
+            // Convert file URI back to a path
+            let loc_path = uri_to_path(loc_uri);
+            let rel_path = loc_path
+                .strip_prefix(project_root)
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| loc_path.to_string_lossy().to_string());
+
+            // Get context: read the line
+            let context_line = std::fs::read_to_string(&loc_path)
+                .ok()
+                .and_then(|content| content.lines().nth(loc_line).map(|l| l.to_string()))
+                .unwrap_or_default();
+
+            // Map to containing symbol selector
+            let selector = ts.find_containing_symbol(&loc_path, loc_line + 1, project_root)
+                .unwrap_or_else(|| format!("{rel_path}::line {}", loc_line + 1));
+
+            // Build lsp_references tuple
+            let lsp_ref = (selector.clone(), loc_line + 1, context_line.clone());
+
+            results.push(PropagationResult {
+                selector,
+                reason: format!("LSP reference found at {}:{}",
+                    rel_path, loc_line + 1),
+                source: PropagationSource::Lsp,
+                lsp_references: Some(vec![lsp_ref]),
+                diff_summary: None,
+                file_snippet: None,
+                project_files: None,
+            });
+        }
+
+        results
+    }
+
+    // ── JSON-RPC transport ─────────────────────────────────────
+
+    /// Send a JSON-RPC request and read the response.
+    /// Returns the full response as a serde_json::Value.
+    fn send_request_raw(
+        writer: &mut BufWriter<ChildStdin>,
+        reader: &mut std::io::BufReader<ChildStdout>,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+
+        Self::write_message(writer, &request)?;
+        Self::read_response(reader, id)
+    }
+
+    /// Send a JSON-RPC notification (no id, no response expected).
+    fn send_notification(
+        writer: &mut BufWriter<ChildStdin>,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<(), String> {
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        Self::write_message(writer, &notification)
+    }
+
+    /// Write a JSON-RPC message using LSP Content-Length header.
+    fn write_message(
+        writer: &mut BufWriter<ChildStdin>,
+        msg: &serde_json::Value,
+    ) -> Result<(), String> {
+        let body = serde_json::to_string(msg)
+            .map_err(|e| format!("json serialize failed: {e}"))?;
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        writer.write_all(header.as_bytes())
+            .map_err(|e| format!("write header failed: {e}"))?;
+        writer.write_all(body.as_bytes())
+            .map_err(|e| format!("write body failed: {e}"))?;
+        writer.flush()
+            .map_err(|e| format!("flush failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Read a JSON-RPC response, matching by id.
+    /// Skips over notifications and responses for other ids.
+    fn read_response(
+        reader: &mut std::io::BufReader<ChildStdout>,
+        expected_id: u64,
+    ) -> Result<serde_json::Value, String> {
+        loop {
+            // Read Content-Length header
+            let mut header_line = String::new();
+            loop {
+                let mut byte = [0u8; 1];
+                reader.read_exact(&mut byte)
+                    .map_err(|e| format!("read header byte failed: {e}"))?;
+                let ch = byte[0] as char;
+                header_line.push(ch);
+                if header_line.ends_with("\r\n\r\n") {
+                    break;
+                }
+                // Safety: prevent infinite loop on malformed input
+                if header_line.len() > 4096 {
+                    return Err("header too long, possibly malformed LSP response".to_string());
+                }
+            }
+
+            // Parse Content-Length
+            let content_length: usize = header_line
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("Content-Length: ")
+                        .and_then(|v| v.trim().parse().ok())
+                })
+                .ok_or("missing Content-Length header")?;
+
+            // Read body
+            let mut body_buf = vec![0u8; content_length];
+            reader.read_exact(&mut body_buf)
+                .map_err(|e| format!("read body failed: {e}"))?;
+            let body: serde_json::Value = serde_json::from_slice(&body_buf)
+                .map_err(|e| format!("json parse failed: {e}"))?;
+
+            // Check if this is a response (has "id") or a notification (no "id")
+            if let Some(resp_id) = body.get("id").and_then(|v| v.as_u64()) {
+                if resp_id == expected_id {
+                    return Ok(body);
+                }
+                // Response for a different id — skip
+            }
+            // Notification or wrong-id response — skip and read next message
+        }
     }
 }
 
 impl Analyzer for LspAnalyzer {
-    /// Placeholder: returns empty, meaning "no LSP available".
-    /// When LSP integration is implemented, this will send
-    /// textDocument/references requests to the LSP server and
-    /// map results back to PropagationResult with source: Lsp
-    /// and lsp_references populated with precise locations.
+    /// For the Analyzer trait, we can't easily pass file/line info,
+    /// so this returns empty. Use `find_references_for_symbol` directly
+    /// which takes file path, line, and character.
     fn find_references(&self, _symbol_name: &str) -> Vec<PropagationResult> {
         vec![]
     }
+}
+
+impl Drop for LspAnalyzer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+// ── URI helpers ──────────────────────────────────────────────
+
+fn path_to_file_uri(path: &Path) -> String {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let s = abs.to_string_lossy();
+    format!("file://{s}")
+}
+
+fn uri_to_path(uri: &str) -> PathBuf {
+    let stripped = uri.strip_prefix("file://").unwrap_or(uri);
+    PathBuf::from(stripped)
 }

@@ -2,9 +2,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::treesitter::TreeSitterAnalyzer;
-use crate::analyzer::Analyzer;
 use crate::api::{PropagationResult, PropagationSource};
 use crate::lsp::LspAnalyzer;
+use std::sync::Mutex;
 
 /// A single hunk inside a stripped v4a patch.
 #[derive(Debug, Clone)]
@@ -237,6 +237,7 @@ pub fn edit_code_apply(
     selector_str: &str,
     patch: &str,
     project_root: &Path,
+    lsp_analyzer: &Mutex<Option<LspAnalyzer>>,
 ) -> Result<Vec<PropagationResult>, String> {
     let parsed = crate::selector::parse_selector(selector_str)
         .map_err(|e| format!("bad selector: {e}"))?;
@@ -278,6 +279,13 @@ pub fn edit_code_apply(
     std::fs::write(&full_path, &new_content)
         .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
 
+    // ── Notify LSP of the change ──
+    if let Ok(mut lsp_guard) = lsp_analyzer.lock() {
+        if let Some(ref mut lsp) = *lsp_guard {
+            lsp.notify_did_change(&full_path, 1, &new_content);
+        }
+    }
+
     // ── Propagation: map modified lines → symbol names → LSP or open-ended ──
     let hunks = parse_stripped_v4a_hunks(patch)?;
     let mut results: Vec<PropagationResult> = Vec::new();
@@ -301,9 +309,17 @@ pub fn edit_code_apply(
 
     // Step 2: for each modified symbol, query LSP for cross-file references
     //         If LSP returns nothing (not available), produce an open-ended result
-    let lsp = LspAnalyzer::new("", ""); // placeholder until LSP lifecycle is managed
     for sym_name in &modified_symbol_names {
-        let lsp_refs = lsp.find_references(sym_name);
+        // Try to use the real LSP analyzer
+        let mut lsp_refs: Vec<PropagationResult> = Vec::new();
+        if let Ok(mut lsp_guard) = lsp_analyzer.lock() {
+            if let Some(ref mut lsp) = *lsp_guard {
+                // Find the symbol's position in the file for LSP query
+                // Use the first hunk's line as a rough position hint
+                let hint_line = hunks.first().map(|h| h.old_start).unwrap_or(1);
+                lsp_refs = lsp.find_references_for_symbol(&full_path, hint_line, 0, project_root);
+            }
+        }
         if lsp_refs.is_empty() {
             // No LSP: generate an open-ended result so agent investigates on its own
             let selector = format!(
@@ -360,6 +376,7 @@ pub fn edit_code_apply(
 pub fn delete_code_apply(
     selector_str: &str,
     project_root: &Path,
+    lsp_analyzer: &Mutex<Option<LspAnalyzer>>,
 ) -> Result<Vec<PropagationResult>, String> {
     let parsed = crate::selector::parse_selector(selector_str)
         .map_err(|e| format!("bad selector: {e}"))?;
@@ -403,8 +420,21 @@ pub fn delete_code_apply(
     });
 
     // Query LSP for references of the deleted symbol
-    let lsp = LspAnalyzer::new("", ""); // placeholder
-    let lsp_refs = lsp.find_references(&parsed.name);
+    let mut lsp_refs: Vec<PropagationResult> = Vec::new();
+    if let Ok(mut lsp_guard) = lsp_analyzer.lock() {
+        if let Some(ref mut lsp) = *lsp_guard {
+            // Find the deleted symbol's position — use tree-sitter to locate it
+            let hint_line = ts.find_containing_symbol(&full_path, 1, project_root)
+                .and_then(|sel| {
+                    let _ = sel;
+                    // Try to find the line where this symbol is defined
+                    original.lines().position(|l| l.contains(&parsed.name))
+                })
+                .map(|idx| idx + 1)
+                .unwrap_or(1);
+            lsp_refs = lsp.find_references_for_symbol(&full_path, hint_line, 0, project_root);
+        }
+    }
     if lsp_refs.is_empty() {
         // No LSP: open-ended result for the deleted symbol already added above
     } else {
@@ -421,6 +451,13 @@ pub fn delete_code_apply(
 
     std::fs::write(&full_path, &new_content)
         .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
+
+    // ── Notify LSP of the close ──
+    if let Ok(mut lsp_guard) = lsp_analyzer.lock() {
+        if let Some(ref mut lsp) = *lsp_guard {
+            lsp.notify_did_close(&full_path);
+        }
+    }
 
     Ok(results)
 }
@@ -534,7 +571,8 @@ mod e2e_tests {
         let selector = "src/lib.rs::fn hello()";
         let patch = "@@ -2,1 +2,1 @@\n-    println!(\"hello\");\n+    println!(\"hello world\");\n";
 
-        let result = edit_code_apply(selector, patch, dir.path());
+        let lsp: Mutex<Option<LspAnalyzer>> = Mutex::new(None);
+        let result = edit_code_apply(selector, patch, dir.path(), &lsp);
         assert!(result.is_ok(), "edit_code_apply should succeed");
 
         let propagation = result.unwrap();
@@ -553,7 +591,8 @@ mod e2e_tests {
         let new_content = "pub fn new_fn() -> i32 {\n    42\n}\n";
 
         let selector = "src/new.rs::fn new_fn()";
-        let result = edit_code_apply(selector, new_content, dir.path());
+        let lsp: Mutex<Option<LspAnalyzer>> = Mutex::new(None);
+        let result = edit_code_apply(selector, new_content, dir.path(), &lsp);
         assert!(result.is_ok(), "Creating new file should succeed");
 
         let propagation = result.unwrap();
@@ -573,7 +612,8 @@ mod e2e_tests {
         let selector = "src/lib.rs::fn ok()";
         let bad_patch = "@@ -1,3 +1,1 @@\n-pub fn ok() {\n-    let x = 1;\n-}\n+pub fn BROKEN {\n";
 
-        let result = edit_code_apply(selector, bad_patch, dir.path());
+        let lsp: Mutex<Option<LspAnalyzer>> = Mutex::new(None);
+        let result = edit_code_apply(selector, bad_patch, dir.path(), &lsp);
         // tree-sitter may or may not catch this — it depends on the grammar.
         // The important thing is the function doesn't panic.
         // We just verify it returns either Ok or Err without crashing.
@@ -589,7 +629,8 @@ mod e2e_tests {
         let selector = "src/lib.rs::fn greet()";
         let patch = "@@ -2,1 +2,1 @@\n-    println!(\"hi\");\n+    println!(\"hello\");\n";
 
-        let result = edit_code_apply(selector, patch, dir.path()).unwrap();
+        let lsp: Mutex<Option<LspAnalyzer>> = Mutex::new(None);
+        let result = edit_code_apply(selector, patch, dir.path(), &lsp).unwrap();
         // Should have at least one OpenEnded result for the modified symbol
         let has_greet = result.iter().any(|r| r.selector.contains("greet") || r.reason.contains("greet"));
         assert!(has_greet, "Propagation should mention the modified symbol 'greet'");
@@ -602,7 +643,8 @@ mod e2e_tests {
         write_rust_file(dir.path(), "lib.rs", rust_code);
 
         let selector = "src/lib.rs::fn hello()";
-        let result = delete_code_apply(selector, dir.path());
+        let lsp: Mutex<Option<LspAnalyzer>> = Mutex::new(None);
+        let result = delete_code_apply(selector, dir.path(), &lsp);
         assert!(result.is_ok(), "delete_code_apply should succeed");
 
         let propagation = result.unwrap();

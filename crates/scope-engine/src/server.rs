@@ -7,14 +7,37 @@ use crate::api::*;
 use std::sync::Mutex;
 use crate::selector;
 use crate::treesitter::TreeSitterAnalyzer;
+use crate::lsp::LspAnalyzer;
 
-pub fn dispatch(req: &JsonRpcRequest, project_root: Option<&Path>, propagation_state: &Mutex<PropagationState>) -> JsonRpcResponse {
+pub fn dispatch(
+    req: &JsonRpcRequest,
+    project_root: Option<&Path>,
+    propagation_state: &Mutex<PropagationState>,
+    lsp_analyzer: &Mutex<Option<LspAnalyzer>>,
+) -> JsonRpcResponse {
     match req.method.as_str() {
         "open_project" => {
             let params: OpenProjectRequest = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
                 Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
             };
+
+            // Initialize LspAnalyzer for this project
+            let language = params.language.as_deref().unwrap_or("auto");
+            let lsp_lang = if language == "auto" || language == "rust" { "rust" } else { language };
+            if lsp_lang == "rust" {
+                let mut lsp_guard = match lsp_analyzer.lock() {
+                    Ok(g) => g,
+                    Err(_) => return JsonRpcResponse::err(req.id.clone(), -32603, "lock poisoned"),
+                };
+                // Shut down previous LSP if any
+                if let Some(ref mut old_lsp) = *lsp_guard {
+                    old_lsp.shutdown();
+                }
+                let new_lsp = LspAnalyzer::new(Path::new(&params.project_root), lsp_lang);
+                *lsp_guard = Some(new_lsp);
+            }
+
             JsonRpcResponse::ok(req.id.clone(), serde_json::json!({
                 "status": "opened",
                 "project_root": params.project_root,
@@ -40,14 +63,14 @@ pub fn dispatch(req: &JsonRpcRequest, project_root: Option<&Path>, propagation_s
                 Ok(p) => p,
                 Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
             };
-            handle_edit_code(req, &params, project_root, propagation_state)
+            handle_edit_code(req, &params, project_root, propagation_state, lsp_analyzer)
         }
         "delete_code" => {
             let params: DeleteCodeRequest = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
                 Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
             };
-            handle_delete_code(req, &params, project_root, propagation_state)
+            handle_delete_code(req, &params, project_root, propagation_state, lsp_analyzer)
         }
         "ack_next_event" => {
             let mut state = match propagation_state.lock() {
@@ -230,6 +253,7 @@ fn handle_edit_code(
     params: &EditCodeRequest,
     project_root: Option<&Path>,
     propagation_state: &Mutex<PropagationState>,
+    lsp_analyzer: &Mutex<Option<LspAnalyzer>>,
 ) -> JsonRpcResponse {
     let project_root = match project_root {
         Some(r) => r,
@@ -242,7 +266,7 @@ fn handle_edit_code(
         }
     };
 
-    match patch::edit_code_apply(&params.selector, &params.patch, project_root) {
+    match patch::edit_code_apply(&params.selector, &params.patch, project_root, lsp_analyzer) {
         Ok(results) => {
             if !results.is_empty() {
                 if let Ok(mut state) = propagation_state.lock() {
@@ -266,6 +290,7 @@ fn handle_delete_code(
     params: &DeleteCodeRequest,
     project_root: Option<&Path>,
     propagation_state: &Mutex<PropagationState>,
+    lsp_analyzer: &Mutex<Option<LspAnalyzer>>,
 ) -> JsonRpcResponse {
     let project_root = match project_root {
         Some(r) => r,
@@ -278,7 +303,7 @@ fn handle_delete_code(
         }
     };
 
-    match patch::delete_code_apply(&params.selector, project_root) {
+    match patch::delete_code_apply(&params.selector, project_root, lsp_analyzer) {
         Ok(results) => {
             if !results.is_empty() {
                 if let Ok(mut state) = propagation_state.lock() {

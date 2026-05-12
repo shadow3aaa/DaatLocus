@@ -11,12 +11,14 @@ mod treesitter;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use lsp::LspAnalyzer;
 
 fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut project_root: Option<PathBuf> = None;
     let propagation_state = Mutex::new(state::PropagationState::new());
+    let lsp_analyzer: Mutex<Option<LspAnalyzer>> = Mutex::new(None);
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -48,7 +50,7 @@ fn main() {
             }
         }
 
-        let resp = server::dispatch(&req, project_root.as_deref(), &propagation_state);
+        let resp = server::dispatch(&req, project_root.as_deref(), &propagation_state, &lsp_analyzer);
         let json = serde_json::to_string(&resp).unwrap_or_default();
         let _ = writeln!(stdout.lock(), "{json}");
     }
