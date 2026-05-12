@@ -2,16 +2,9 @@ pub mod rust;
 
 use tree_sitter::{Language, Parser};
 
-pub struct LanguageQueries {
-    pub definitions: &'static str,
-    pub references: &'static str,
-}
-
 pub trait LanguageAdapter: Send + Sync {
-    fn language_name(&self) -> &'static str;
     fn extensions(&self) -> &[&'static str];
     fn language(&self) -> Language;
-    fn queries(&self) -> LanguageQueries;
     fn parser(&self) -> Parser {
         let mut p = Parser::new();
         p.set_language(&self.language())

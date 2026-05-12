@@ -1,17 +1,16 @@
-mod language;
-mod analyzer;
 mod api;
-mod patch;
+mod language;
 mod lsp;
+mod patch;
 mod selector;
 mod server;
 mod state;
 mod treesitter;
 
+use lsp::LspAnalyzer;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use lsp::LspAnalyzer;
 
 fn main() {
     let stdin = io::stdin();
@@ -44,13 +43,19 @@ fn main() {
         };
 
         // Track project_root from open_project calls
-        if req.method == "open_project" {
-            if let Ok(params) = serde_json::from_value::<api::OpenProjectRequest>(req.params.clone()) {
-                project_root = Some(PathBuf::from(&params.project_root));
-            }
+        if req.method == "open_project"
+            && let Ok(params) =
+                serde_json::from_value::<api::OpenProjectRequest>(req.params.clone())
+        {
+            project_root = Some(PathBuf::from(&params.project_root));
         }
 
-        let resp = server::dispatch(&req, project_root.as_deref(), &propagation_state, &lsp_analyzer);
+        let resp = server::dispatch(
+            &req,
+            project_root.as_deref(),
+            &propagation_state,
+            &lsp_analyzer,
+        );
         let json = serde_json::to_string(&resp).unwrap_or_default();
         let _ = writeln!(stdout.lock(), "{json}");
     }

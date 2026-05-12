@@ -98,11 +98,7 @@ impl TreeSitterAnalyzer {
         // Check if this is a named definition
         let is_def = matches!(
             kind,
-            "function_item"
-                | "struct_item"
-                | "enum_item"
-                | "trait_item"
-                | "impl_item"
+            "function_item" | "struct_item" | "enum_item" | "trait_item" | "impl_item"
         );
 
         if is_def {
@@ -126,7 +122,10 @@ impl TreeSitterAnalyzer {
             let child = node.child(i)?;
             let kind = child.kind();
             if kind == "identifier" || kind == "type_identifier" {
-                return child.utf8_text(source.as_bytes()).ok().map(|s| s.to_string());
+                return child
+                    .utf8_text(source.as_bytes())
+                    .ok()
+                    .map(|s| s.to_string());
             }
         }
         None

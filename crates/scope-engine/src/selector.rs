@@ -39,18 +39,6 @@ impl SymbolKind {
             _ => SymbolKind::Unknown,
         }
     }
-
-    /// Heuristic: guess the kind from a tree-sitter node kind string.
-    pub fn from_ts_node_kind(kind: &str) -> Self {
-        match kind {
-            "function_item" => SymbolKind::Function,
-            "struct_item" => SymbolKind::Struct,
-            "enum_item" => SymbolKind::Enum,
-            "trait_item" => SymbolKind::Trait,
-            "impl_item" => SymbolKind::Impl,
-            _ => SymbolKind::Unknown,
-        }
-    }
 }
 
 impl std::fmt::Display for SymbolKind {
@@ -77,9 +65,9 @@ impl std::fmt::Display for SymbolKind {
 /// or has an empty symbol name.
 pub fn parse_selector(input: &str) -> Result<ParsedSelector, String> {
     // Split on the first `::`
-    let (file_part, symbol_part) = input
-        .split_once("::")
-        .ok_or_else(|| format!("selector must contain '::' separating file path from symbol: '{input}'"))?;
+    let (file_part, symbol_part) = input.split_once("::").ok_or_else(|| {
+        format!("selector must contain '::' separating file path from symbol: '{input}'")
+    })?;
 
     let file_path = PathBuf::from(file_part.trim());
     if file_path.as_os_str().is_empty() {
@@ -132,10 +120,10 @@ fn parse_symbol_expr(expr: &str) -> (SymbolKind, String) {
         let kind = SymbolKind::from_prefix(prefix);
         if !matches!(kind, SymbolKind::Unknown) {
             // For `impl Trait for Type`, take the trait name
-            if matches!(kind, SymbolKind::Impl) {
-                if let Some(trait_name) = remainder.split_whitespace().next() {
-                    return (kind, trait_name.to_string());
-                }
+            if matches!(kind, SymbolKind::Impl)
+                && let Some(trait_name) = remainder.split_whitespace().next()
+            {
+                return (kind, trait_name.to_string());
             }
             // Strip trailing parens from remainder too (e.g. "fn old()")
             let name = remainder.strip_suffix("()").unwrap_or(remainder);
@@ -149,7 +137,10 @@ fn parse_symbol_expr(expr: &str) -> (SymbolKind, String) {
 
 /// Resolve a selector's file path against a project root, and return the absolute path
 /// along with the file extension (for language detection).
-pub fn resolve_file(selector: &ParsedSelector, project_root: &Path) -> Result<(PathBuf, String), String> {
+pub fn resolve_file(
+    selector: &ParsedSelector,
+    project_root: &Path,
+) -> Result<(PathBuf, String), String> {
     let full_path = project_root.join(&selector.file_path);
     if !full_path.exists() {
         return Err(format!("file not found: {}", full_path.display()));
@@ -160,7 +151,10 @@ pub fn resolve_file(selector: &ParsedSelector, project_root: &Path) -> Result<(P
         .unwrap_or("")
         .to_string();
     if ext.is_empty() {
-        return Err(format!("cannot determine language from file: {}", full_path.display()));
+        return Err(format!(
+            "cannot determine language from file: {}",
+            full_path.display()
+        ));
     }
     Ok((full_path, ext))
 }

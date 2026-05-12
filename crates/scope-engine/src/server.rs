@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::patch;
-use crate::state::PropagationState;
 use crate::api::*;
-use std::sync::Mutex;
-use crate::selector;
-use crate::treesitter::TreeSitterAnalyzer;
 use crate::lsp::LspAnalyzer;
+use crate::patch;
+use crate::selector;
+use crate::state::PropagationState;
+use crate::treesitter::TreeSitterAnalyzer;
+use std::sync::Mutex;
 
 pub fn dispatch(
     req: &JsonRpcRequest,
@@ -19,12 +19,22 @@ pub fn dispatch(
         "open_project" => {
             let params: OpenProjectRequest = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
-                Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
+                Err(e) => {
+                    return JsonRpcResponse::err(
+                        req.id.clone(),
+                        -32602,
+                        format!("Invalid params: {e}"),
+                    );
+                }
             };
 
             // Initialize LspAnalyzer for this project
             let language = params.language.as_deref().unwrap_or("auto");
-            let lsp_lang = if language == "auto" || language == "rust" { "rust" } else { language };
+            let lsp_lang = if language == "auto" || language == "rust" {
+                "rust"
+            } else {
+                language
+            };
             if lsp_lang == "rust" {
                 let mut lsp_guard = match lsp_analyzer.lock() {
                     Ok(g) => g,
@@ -49,47 +59,74 @@ pub fn dispatch(
                     if let Ok(entries) = std::fs::read_dir(root.join("src")) {
                         for entry in entries.flatten() {
                             let path = entry.path();
-                            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                                if let Ok(content) = std::fs::read_to_string(&path) {
-                                    lsp.notify_did_open(&path, &content);
-                                }
+                            if path.extension().and_then(|e| e.to_str()) == Some("rs")
+                                && let Ok(content) = std::fs::read_to_string(&path)
+                            {
+                                lsp.notify_did_open(&path, &content);
                             }
                         }
                     }
                 }
             }
 
-            JsonRpcResponse::ok(req.id.clone(), serde_json::json!({
-                "status": "opened",
-                "project_root": params.project_root,
-                "language": params.language.unwrap_or_else(|| "auto".to_string()),
-            }))
+            JsonRpcResponse::ok(
+                req.id.clone(),
+                serde_json::json!({
+                    "status": "opened",
+                    "project_root": params.project_root,
+                    "language": params.language.unwrap_or_else(|| "auto".to_string()),
+                }),
+            )
         }
         "read_code" => {
             let params: ReadCodeRequest = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
-                Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
+                Err(e) => {
+                    return JsonRpcResponse::err(
+                        req.id.clone(),
+                        -32602,
+                        format!("Invalid params: {e}"),
+                    );
+                }
             };
             handle_read_code(req, &params, project_root)
         }
         "search_code" => {
             let params: SearchCodeRequest = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
-                Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
+                Err(e) => {
+                    return JsonRpcResponse::err(
+                        req.id.clone(),
+                        -32602,
+                        format!("Invalid params: {e}"),
+                    );
+                }
             };
             handle_search_code(req, &params, project_root)
         }
         "edit_code" => {
             let params: EditCodeRequest = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
-                Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
+                Err(e) => {
+                    return JsonRpcResponse::err(
+                        req.id.clone(),
+                        -32602,
+                        format!("Invalid params: {e}"),
+                    );
+                }
             };
             handle_edit_code(req, &params, project_root, propagation_state, lsp_analyzer)
         }
         "delete_code" => {
             let params: DeleteCodeRequest = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
-                Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Invalid params: {e}")),
+                Err(e) => {
+                    return JsonRpcResponse::err(
+                        req.id.clone(),
+                        -32602,
+                        format!("Invalid params: {e}"),
+                    );
+                }
             };
             handle_delete_code(req, &params, project_root, propagation_state, lsp_analyzer)
         }
@@ -104,7 +141,11 @@ pub fn dispatch(
                 serde_json::to_value(NextReviewResponse { review }).unwrap(),
             )
         }
-        _ => JsonRpcResponse::err(req.id.clone(), -32601, format!("Method not found: {}", req.method)),
+        _ => JsonRpcResponse::err(
+            req.id.clone(),
+            -32601,
+            format!("Method not found: {}", req.method),
+        ),
     }
 }
 
@@ -129,7 +170,8 @@ fn handle_search_code(
         .args([
             "--no-heading",
             "-n",
-            "--color", "never",
+            "--color",
+            "never",
             "--no-ignore-vcs",
             &params.query,
         ])
@@ -138,23 +180,16 @@ fn handle_search_code(
     {
         Ok(out) => out,
         Err(e) => {
-            return JsonRpcResponse::err(
-                req.id.clone(),
-                -32001,
-                format!("Failed to run rg: {e}"),
-            );
+            return JsonRpcResponse::err(req.id.clone(), -32001, format!("Failed to run rg: {e}"));
         }
     };
 
-    if !rg_output.status.success() && rg_output.status.code() != Some(1) {
-        if rg_output.status.code() == Some(2) {
-            let stderr = String::from_utf8_lossy(&rg_output.stderr);
-            return JsonRpcResponse::err(
-                req.id.clone(),
-                -32001,
-                format!("rg error: {stderr}"),
-            );
-        }
+    if !rg_output.status.success()
+        && rg_output.status.code() != Some(1)
+        && rg_output.status.code() == Some(2)
+    {
+        let stderr = String::from_utf8_lossy(&rg_output.stderr);
+        return JsonRpcResponse::err(req.id.clone(), -32001, format!("rg error: {stderr}"));
     }
 
     let stdout = String::from_utf8_lossy(&rg_output.stdout);
@@ -207,7 +242,9 @@ fn handle_read_code(
 ) -> JsonRpcResponse {
     let parsed = match selector::parse_selector(&params.selector) {
         Ok(s) => s,
-        Err(e) => return JsonRpcResponse::err(req.id.clone(), -32602, format!("Bad selector: {e}")),
+        Err(e) => {
+            return JsonRpcResponse::err(req.id.clone(), -32602, format!("Bad selector: {e}"));
+        }
     };
 
     let project_root = match project_root {
@@ -233,7 +270,7 @@ fn handle_read_code(
                 req.id.clone(),
                 -32001,
                 format!("Failed to read {}: {e}", full_path.display()),
-            )
+            );
         }
     };
 
@@ -268,7 +305,6 @@ fn guess_language(path: &Path) -> &'static str {
     }
 }
 
-
 fn handle_edit_code(
     req: &JsonRpcRequest,
     params: &EditCodeRequest,
@@ -289,10 +325,10 @@ fn handle_edit_code(
 
     match patch::edit_code_apply(&params.selector, &params.patch, project_root, lsp_analyzer) {
         Ok(results) => {
-            if !results.is_empty() {
-                if let Ok(mut state) = propagation_state.lock() {
-                    state.accumulate(results.clone());
-                }
+            if !results.is_empty()
+                && let Ok(mut state) = propagation_state.lock()
+            {
+                state.accumulate(results.clone());
             }
             JsonRpcResponse::ok(
                 req.id.clone(),
@@ -326,10 +362,10 @@ fn handle_delete_code(
 
     match patch::delete_code_apply(&params.selector, project_root, lsp_analyzer) {
         Ok(results) => {
-            if !results.is_empty() {
-                if let Ok(mut state) = propagation_state.lock() {
-                    state.accumulate(results.clone());
-                }
+            if !results.is_empty()
+                && let Ok(mut state) = propagation_state.lock()
+            {
+                state.accumulate(results.clone());
             }
             JsonRpcResponse::ok(
                 req.id.clone(),

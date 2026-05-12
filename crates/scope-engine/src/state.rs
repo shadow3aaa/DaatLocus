@@ -1,4 +1,4 @@
-use crate::api::{PropagationResult, PropagationSource, ReviewEvent, Reference};
+use crate::api::{PropagationResult, PropagationSource, Reference, ReviewEvent};
 use std::collections::HashSet;
 
 pub struct PropagationState {
@@ -27,9 +27,16 @@ impl PropagationState {
         match &r.source {
             PropagationSource::Lsp => {
                 // LSP found precise references — build KnownReferences event
-                let references: Vec<Reference> = r.lsp_references.clone().unwrap_or_default()
+                let references: Vec<Reference> = r
+                    .lsp_references
+                    .clone()
+                    .unwrap_or_default()
                     .into_iter()
-                    .map(|(selector, line, context)| Reference { selector, line, context })
+                    .map(|(selector, line, context)| Reference {
+                        selector,
+                        line,
+                        context,
+                    })
                     .collect();
                 Some(ReviewEvent::KnownReferences {
                     modified_symbol: r.selector,
@@ -112,7 +119,11 @@ mod tests {
         state.accumulate(vec![r]);
         let event = state.next_review().unwrap();
         match event {
-            ReviewEvent::KnownReferences { modified_symbol, references, .. } => {
+            ReviewEvent::KnownReferences {
+                modified_symbol,
+                references,
+                ..
+            } => {
                 assert_eq!(modified_symbol, "src/a.rs::fn foo");
                 assert_eq!(references.len(), 1);
                 assert_eq!(references[0].selector, "src/b.rs::fn bar");
@@ -127,7 +138,12 @@ mod tests {
         state.accumulate(vec![open_result("src/a.rs::fn foo", "modified")]);
         let event = state.next_review().unwrap();
         match event {
-            ReviewEvent::InvestigateImpact { modified_symbol, diff_summary, project_files, .. } => {
+            ReviewEvent::InvestigateImpact {
+                modified_symbol,
+                diff_summary,
+                project_files,
+                ..
+            } => {
                 assert_eq!(modified_symbol, "src/a.rs::fn foo");
                 assert_eq!(diff_summary, "test diff");
                 assert_eq!(project_files.len(), 1);
@@ -150,9 +166,19 @@ mod tests {
             lsp_result("src/b.rs::fn bar", "second"),
         ]);
         let e1 = state.next_review().unwrap();
-        match e1 { ReviewEvent::KnownReferences { modified_symbol, .. } => assert_eq!(modified_symbol, "src/b.rs::fn bar"), _ => panic!() };
+        match e1 {
+            ReviewEvent::KnownReferences {
+                modified_symbol, ..
+            } => assert_eq!(modified_symbol, "src/b.rs::fn bar"),
+            _ => panic!(),
+        };
         let e2 = state.next_review().unwrap();
-        match e2 { ReviewEvent::KnownReferences { modified_symbol, .. } => assert_eq!(modified_symbol, "src/a.rs::fn foo"), _ => panic!() };
+        match e2 {
+            ReviewEvent::KnownReferences {
+                modified_symbol, ..
+            } => assert_eq!(modified_symbol, "src/a.rs::fn foo"),
+            _ => panic!(),
+        };
     }
 
     #[test]

@@ -1,22 +1,22 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::treesitter::TreeSitterAnalyzer;
 use crate::api::{PropagationResult, PropagationSource};
 use crate::lsp::LspAnalyzer;
+use crate::treesitter::TreeSitterAnalyzer;
 use std::sync::Mutex;
 
 /// A single hunk inside a stripped v4a patch.
 #[derive(Debug, Clone)]
-struct Hunk {
+pub(crate) struct Hunk {
     /// Old file starting line (1-based).
     old_start: usize,
     /// Number of lines in old file hunk.
     old_count: usize,
     /// New file starting line (1-based).
-    new_start: usize,
+    _new_start: usize,
     /// Number of lines in new file hunk.
-    new_count: usize,
+    _new_count: usize,
     /// Lines: ` ` for context, `+` for added, `-` for removed.
     lines: Vec<HunkLine>,
 }
@@ -33,10 +33,7 @@ enum HunkLine {
 ///
 /// Returns `Some(new_content)` on success, or `None` if any hunk
 /// fails to apply (context mismatch).
-pub fn apply_stripped_v4a_patch(
-    original: &str,
-    patch: &str,
-) -> Result<String, String> {
+pub fn apply_stripped_v4a_patch(original: &str, patch: &str) -> Result<String, String> {
     let hunks = parse_stripped_v4a_hunks(patch)?;
     if hunks.is_empty() {
         return Err("no hunks found in patch".to_string());
@@ -45,7 +42,7 @@ pub fn apply_stripped_v4a_patch(
 }
 
 /// Parse the stripped v4a hunk-only format.
-pub fn parse_stripped_v4a_hunks(patch: &str) -> Result<Vec<Hunk>, String> {
+pub(crate) fn parse_stripped_v4a_hunks(patch: &str) -> Result<Vec<Hunk>, String> {
     let mut hunks: Vec<Hunk> = Vec::new();
     let mut current_lines: Vec<HunkLine> = Vec::new();
     let mut current_header: Option<(usize, usize, usize, usize)> = None;
@@ -55,15 +52,15 @@ pub fn parse_stripped_v4a_hunks(patch: &str) -> Result<Vec<Hunk>, String> {
 
         if trimmed.starts_with("@@") {
             // Flush previous hunk
-            if let Some((old_start, old_count, new_start, new_count)) = current_header.take() {
+            if let Some((old_start, old_count, _new_start, _new_count)) = current_header.take() {
                 if current_lines.is_empty() {
                     return Err("empty hunk body after @@ header".to_string());
                 }
                 hunks.push(Hunk {
                     old_start,
                     old_count,
-                    new_start,
-                    new_count,
+                    _new_start,
+                    _new_count,
                     lines: std::mem::take(&mut current_lines),
                 });
             }
@@ -75,27 +72,27 @@ pub fn parse_stripped_v4a_hunks(patch: &str) -> Result<Vec<Hunk>, String> {
             if line.is_empty() {
                 // Empty lines are context
                 current_lines.push(HunkLine::Context(String::new()));
-            } else if line.starts_with('+') {
-                current_lines.push(HunkLine::Added(line[1..].to_string()));
-            } else if line.starts_with('-') {
-                current_lines.push(HunkLine::Removed(line[1..].to_string()));
-            } else if line.starts_with(' ') {
-                current_lines.push(HunkLine::Context(line[1..].to_string()));
+            } else if let Some(stripped) = line.strip_prefix('+') {
+                current_lines.push(HunkLine::Added(stripped.to_string()));
+            } else if let Some(stripped) = line.strip_prefix('-') {
+                current_lines.push(HunkLine::Removed(stripped.to_string()));
+            } else if let Some(stripped) = line.strip_prefix(' ') {
+                current_lines.push(HunkLine::Context(stripped.to_string()));
             }
             // Ignore lines that don't start with +, -, or space outside hunks
         }
     }
 
     // Flush last hunk
-    if let Some((old_start, old_count, new_start, new_count)) = current_header.take() {
+    if let Some((old_start, old_count, _new_start, _new_count)) = current_header.take() {
         if current_lines.is_empty() {
             return Err("empty hunk body after @@ header".to_string());
         }
         hunks.push(Hunk {
             old_start,
             old_count,
-            new_start,
-            new_count,
+            _new_start,
+            _new_count,
             lines: current_lines,
         });
     }
@@ -110,10 +107,7 @@ pub fn parse_stripped_v4a_hunks(patch: &str) -> Result<Vec<Hunk>, String> {
 /// Parse `@@ -OldStart,OldCount +NewStart,NewCount @@` or `@@ -OldStart +NewStart @@`
 fn parse_hunk_header(line: &str) -> Result<(usize, usize, usize, usize), String> {
     // Remove @@ markers and split
-    let inner = line
-        .trim_start_matches("@@")
-        .trim_end_matches("@@")
-        .trim();
+    let inner = line.trim_start_matches("@@").trim_end_matches("@@").trim();
 
     let parts: Vec<&str> = inner.split_whitespace().collect();
     if parts.len() < 2 {
@@ -124,15 +118,19 @@ fn parse_hunk_header(line: &str) -> Result<(usize, usize, usize, usize), String>
     let new_part = parts[1].trim_start_matches('+');
 
     let (old_start, old_count) = parse_hunk_range(old_part)?;
-    let (new_start, new_count) = parse_hunk_range(new_part)?;
+    let (_new_start, _new_count) = parse_hunk_range(new_part)?;
 
-    Ok((old_start, old_count, new_start, new_count))
+    Ok((old_start, old_count, _new_start, _new_count))
 }
 
 fn parse_hunk_range(s: &str) -> Result<(usize, usize), String> {
     if let Some((start_str, count_str)) = s.split_once(',') {
-        let start = start_str.parse::<usize>().map_err(|_| format!("bad range: {s}"))?;
-        let count = count_str.parse::<usize>().map_err(|_| format!("bad count: {s}"))?;
+        let start = start_str
+            .parse::<usize>()
+            .map_err(|_| format!("bad range: {s}"))?;
+        let count = count_str
+            .parse::<usize>()
+            .map_err(|_| format!("bad count: {s}"))?;
         Ok((start, count))
     } else {
         let start = s.parse::<usize>().map_err(|_| format!("bad range: {s}"))?;
@@ -155,8 +153,7 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, String> {
         if w[1].old_start < prev_end {
             return Err(format!(
                 "overlapping hunks: first ends at line {}, second starts at line {}",
-                prev_end,
-                w[1].old_start
+                prev_end, w[1].old_start
             ));
         }
     }
@@ -201,7 +198,11 @@ fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String, String> {
                 actual_lines.len()
             ));
         }
-        for (i, (expected, actual)) in expected_context_lines.iter().zip(actual_lines.iter()).enumerate() {
+        for (i, (expected, actual)) in expected_context_lines
+            .iter()
+            .zip(actual_lines.iter())
+            .enumerate()
+        {
             if expected != actual {
                 return Err(format!(
                     "context mismatch at line {}: expected '{}', got '{}'",
@@ -239,8 +240,8 @@ pub fn edit_code_apply(
     project_root: &Path,
     lsp_analyzer: &Mutex<Option<LspAnalyzer>>,
 ) -> Result<Vec<PropagationResult>, String> {
-    let parsed = crate::selector::parse_selector(selector_str)
-        .map_err(|e| format!("bad selector: {e}"))?;
+    let parsed =
+        crate::selector::parse_selector(selector_str).map_err(|e| format!("bad selector: {e}"))?;
 
     let full_path = if parsed.file_path.is_absolute() {
         parsed.file_path.clone()
@@ -251,8 +252,9 @@ pub fn edit_code_apply(
     if !full_path.exists() {
         // Create new file: ensure parent dirs exist, write patch as full content
         if let Some(parent) = full_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create parent dirs for {}: {e}", full_path.display()))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!("cannot create parent dirs for {}: {e}", full_path.display())
+            })?;
         }
         std::fs::write(&full_path, patch)
             .map_err(|e| format!("cannot create {}: {e}", full_path.display()))?;
@@ -280,10 +282,10 @@ pub fn edit_code_apply(
         .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
 
     // ── Notify LSP of the change ──
-    if let Ok(mut lsp_guard) = lsp_analyzer.lock() {
-        if let Some(ref mut lsp) = *lsp_guard {
-            lsp.notify_did_change(&full_path, 1, &new_content);
-        }
+    if let Ok(mut lsp_guard) = lsp_analyzer.lock()
+        && let Some(ref mut lsp) = *lsp_guard
+    {
+        lsp.notify_did_change(&full_path, 1, &new_content);
     }
 
     // ── Propagation: map modified lines → symbol names → LSP or open-ended ──
@@ -294,11 +296,7 @@ pub fn edit_code_apply(
 
     // Step 1: collect all symbol names that were modified
     for hunk in &hunks {
-        let line = if hunk.old_count > 0 {
-            hunk.old_start
-        } else {
-            hunk.old_start
-        };
+        let line = hunk.old_start;
         if let Some(sel) = analyzer.find_containing_symbol(&full_path, line, project_root) {
             // Parse the selector to extract the symbol name
             if let Ok(parsed) = crate::selector::parse_selector(&sel) {
@@ -312,23 +310,24 @@ pub fn edit_code_apply(
     for sym_name in &modified_symbol_names {
         // Try to use the real LSP analyzer
         let mut lsp_refs: Vec<PropagationResult> = Vec::new();
-        if let Ok(mut lsp_guard) = lsp_analyzer.lock() {
-            if let Some(ref mut lsp) = *lsp_guard {
-                // Find the symbol's precise position in the file for LSP query
-                // Search for the symbol name in the modified content
-                let (line, character) = find_symbol_position(&new_content, sym_name)
-                    .unwrap_or_else(|| {
-                        let hint_line = hunks.first().map(|h| h.old_start).unwrap_or(1);
-                        (hint_line, 0)
-                    });
-                lsp_refs = lsp.find_references_for_symbol(&full_path, line, character, project_root);
-            }
+        if let Ok(mut lsp_guard) = lsp_analyzer.lock()
+            && let Some(ref mut lsp) = *lsp_guard
+        {
+            // Find the symbol's precise position in the file for LSP query
+            // Search for the symbol name in the modified content
+            let (line, character) =
+                find_symbol_position(&new_content, sym_name).unwrap_or_else(|| {
+                    let hint_line = hunks.first().map(|h| h.old_start).unwrap_or(1);
+                    (hint_line, 0)
+                });
+            lsp_refs = lsp.find_references_for_symbol(&full_path, line, character, project_root);
         }
         if lsp_refs.is_empty() {
             // No LSP: generate an open-ended result so agent investigates on its own
             let selector = format!(
                 "{}::{}",
-                full_path.strip_prefix(project_root)
+                full_path
+                    .strip_prefix(project_root)
                     .ok()
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|| full_path.to_string_lossy().to_string()),
@@ -338,7 +337,8 @@ pub fn edit_code_apply(
                 // Build a snippet of the modification context
                 // Use the first hunk's position to give context around the change
                 let first_line = hunks.first().map(|h| h.old_start).unwrap_or(1);
-                let file_snippet = original.lines()
+                let file_snippet = original
+                    .lines()
                     .skip(first_line.saturating_sub(3))
                     .take(7)
                     .collect::<Vec<_>>()
@@ -346,17 +346,32 @@ pub fn edit_code_apply(
                 // Collect project files for agent investigation
                 let project_files = std::fs::read_dir(project_root)
                     .ok()
-                    .map(|entries| entries
-                        .filter_map(|e| e.ok())
-                        .filter(|e| e.path().is_dir() && e.path().file_name().map_or(false, |n| n == "src"))
-                        .filter_map(|e| std::fs::read_dir(e.path()).ok())
-                        .flat_map(|entries| entries.filter_map(|e| e.ok()).filter_map(|e| e.path().strip_prefix(project_root).ok().map(|p| p.to_string_lossy().to_string())))
-                        .collect())
+                    .map(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .filter(|e| {
+                                e.path().is_dir()
+                                    && e.path().file_name().is_some_and(|n| n == "src")
+                            })
+                            .filter_map(|e| std::fs::read_dir(e.path()).ok())
+                            .flat_map(|entries| {
+                                entries.filter_map(|e| e.ok()).filter_map(|e| {
+                                    e.path()
+                                        .strip_prefix(project_root)
+                                        .ok()
+                                        .map(|p| p.to_string_lossy().to_string())
+                                })
+                            })
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 results.push(PropagationResult {
                     selector,
-                    reason: format!("symbol \"{}\" was modified; no LSP available to find references", sym_name),
+                    reason: format!(
+                        "symbol \"{}\" was modified; no LSP available to find references",
+                        sym_name
+                    ),
                     source: PropagationSource::OpenEnded,
                     lsp_references: None,
                     diff_summary: Some(patch.to_string()),
@@ -382,8 +397,8 @@ pub fn delete_code_apply(
     project_root: &Path,
     lsp_analyzer: &Mutex<Option<LspAnalyzer>>,
 ) -> Result<Vec<PropagationResult>, String> {
-    let parsed = crate::selector::parse_selector(selector_str)
-        .map_err(|e| format!("bad selector: {e}"))?;
+    let parsed =
+        crate::selector::parse_selector(selector_str).map_err(|e| format!("bad selector: {e}"))?;
 
     let (full_path, _ext) = crate::selector::resolve_file(&parsed, project_root)
         .map_err(|e| format!("cannot resolve file: {e}"))?;
@@ -392,30 +407,39 @@ pub fn delete_code_apply(
         .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?;
 
     // ── Propagation: map to symbol name BEFORE deletion (file is still valid) ──
-    let ts = TreeSitterAnalyzer::new();
     let mut results: Vec<PropagationResult> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
     // Record the deleted symbol itself
     seen.insert(selector_str.to_string());
     // Build context for the delete operation
-    let file_snippet = original.lines()
-        .take(10)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let file_snippet = original.lines().take(10).collect::<Vec<_>>().join("\n");
     let project_files = std::fs::read_dir(project_root)
         .ok()
-        .map(|entries| entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir() && e.path().file_name().map_or(false, |n| n == "src"))
-            .filter_map(|e| std::fs::read_dir(e.path()).ok())
-            .flat_map(|entries| entries.filter_map(|e| e.ok()).filter_map(|e| e.path().strip_prefix(project_root).ok().map(|p| p.to_string_lossy().to_string())))
-            .collect())
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir() && e.path().file_name().is_some_and(|n| n == "src"))
+                .filter_map(|e| std::fs::read_dir(e.path()).ok())
+                .flat_map(|entries| {
+                    entries.filter_map(|e| e.ok()).filter_map(|e| {
+                        e.path()
+                            .strip_prefix(project_root)
+                            .ok()
+                            .map(|p| p.to_string_lossy().to_string())
+                    })
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     results.push(PropagationResult {
         selector: selector_str.to_string(),
-        reason: format!("deleted symbol \"{}\" from {}", parsed.name, full_path.display()),
+        reason: format!(
+            "deleted symbol \"{}\" from {}",
+            parsed.name,
+            full_path.display()
+        ),
         source: PropagationSource::OpenEnded,
         lsp_references: None,
         diff_summary: Some(format!("deleted: {}", parsed.name)),
@@ -425,18 +449,20 @@ pub fn delete_code_apply(
 
     // Query LSP for references of the deleted symbol
     let mut lsp_refs: Vec<PropagationResult> = Vec::new();
-    if let Ok(mut lsp_guard) = lsp_analyzer.lock() {
-        if let Some(ref mut lsp) = *lsp_guard {
-            // Find the symbol's precise position in the file for LSP query
-            let (line, character) = find_symbol_position(&original, &parsed.name)
-                .unwrap_or_else(|| {
-                    let hint_line = original.lines().position(|l| l.contains(&parsed.name))
-                        .map(|idx| idx + 1)
-                        .unwrap_or(1);
-                    (hint_line, 0)
-                });
-            lsp_refs = lsp.find_references_for_symbol(&full_path, line, character, project_root);
-        }
+    if let Ok(mut lsp_guard) = lsp_analyzer.lock()
+        && let Some(ref mut lsp) = *lsp_guard
+    {
+        // Find the symbol's precise position in the file for LSP query
+        let (line, character) =
+            find_symbol_position(&original, &parsed.name).unwrap_or_else(|| {
+                let hint_line = original
+                    .lines()
+                    .position(|l| l.contains(&parsed.name))
+                    .map(|idx| idx + 1)
+                    .unwrap_or(1);
+                (hint_line, 0)
+            });
+        lsp_refs = lsp.find_references_for_symbol(&full_path, line, character, project_root);
     }
     if lsp_refs.is_empty() {
         // No LSP: open-ended result for the deleted symbol already added above
@@ -449,17 +475,22 @@ pub fn delete_code_apply(
     }
 
     // ── Execute the deletion ──
-    let new_content = remove_hunk_lines(&original, &parsed.name, 3)
-        .ok_or_else(|| format!("symbol '{}' not found in {}", parsed.name, full_path.display()))?;
+    let new_content = remove_hunk_lines(&original, &parsed.name, 3).ok_or_else(|| {
+        format!(
+            "symbol '{}' not found in {}",
+            parsed.name,
+            full_path.display()
+        )
+    })?;
 
     std::fs::write(&full_path, &new_content)
         .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
 
     // ── Notify LSP of the close ──
-    if let Ok(mut lsp_guard) = lsp_analyzer.lock() {
-        if let Some(ref mut lsp) = *lsp_guard {
-            lsp.notify_did_close(&full_path);
-        }
+    if let Ok(mut lsp_guard) = lsp_analyzer.lock()
+        && let Some(ref mut lsp) = *lsp_guard
+    {
+        lsp.notify_did_close(&full_path);
     }
 
     Ok(results)
@@ -549,8 +580,8 @@ mod tests {
 #[cfg(test)]
 mod e2e_tests {
     use super::*;
-    use std::path::PathBuf;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn setup_temp_rust_project() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -584,8 +615,14 @@ mod e2e_tests {
 
         // Verify the file was actually modified
         let modified = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
-        assert!(modified.contains("hello world"), "File should contain the new content");
-        assert!(!modified.contains("\"hello\""), "File should not contain old content");
+        assert!(
+            modified.contains("hello world"),
+            "File should contain the new content"
+        );
+        assert!(
+            !modified.contains("\"hello\""),
+            "File should not contain old content"
+        );
     }
 
     #[test]
@@ -599,7 +636,10 @@ mod e2e_tests {
         assert!(result.is_ok(), "Creating new file should succeed");
 
         let propagation = result.unwrap();
-        assert!(propagation.is_empty(), "New file should have no propagation");
+        assert!(
+            propagation.is_empty(),
+            "New file should have no propagation"
+        );
 
         let created = std::fs::read_to_string(dir.path().join("src/new.rs")).unwrap();
         assert!(created.contains("new_fn"));
@@ -635,8 +675,13 @@ mod e2e_tests {
         let lsp: Mutex<Option<LspAnalyzer>> = Mutex::new(None);
         let result = edit_code_apply(selector, patch, dir.path(), &lsp).unwrap();
         // Should have at least one OpenEnded result for the modified symbol
-        let has_greet = result.iter().any(|r| r.selector.contains("greet") || r.reason.contains("greet"));
-        assert!(has_greet, "Propagation should mention the modified symbol 'greet'");
+        let has_greet = result
+            .iter()
+            .any(|r| r.selector.contains("greet") || r.reason.contains("greet"));
+        assert!(
+            has_greet,
+            "Propagation should mention the modified symbol 'greet'"
+        );
     }
 
     #[test]
@@ -653,7 +698,10 @@ mod e2e_tests {
         let propagation = result.unwrap();
         assert!(!propagation.is_empty(), "Should have propagation results");
         // Should have an OpenEnded result for the deleted symbol
-        assert!(propagation.iter().any(|r| r.reason.contains("deleted")), "Should note deletion");
+        assert!(
+            propagation.iter().any(|r| r.reason.contains("deleted")),
+            "Should note deletion"
+        );
     }
 }
 
@@ -666,7 +714,8 @@ fn find_symbol_position(content: &str, sym_name: &str) -> Option<(usize, usize)>
             // Check that this is a word boundary match
             let before_ok = pos == 0 || !line.as_bytes()[pos - 1].is_ascii_alphanumeric();
             let after_idx = pos + sym_name.len();
-            let after_ok = after_idx >= line.len() || !line.as_bytes()[after_idx].is_ascii_alphanumeric();
+            let after_ok =
+                after_idx >= line.len() || !line.as_bytes()[after_idx].is_ascii_alphanumeric();
             if before_ok && after_ok {
                 return Some((line_idx + 1, pos)); // 1-based line, 0-based character
             }

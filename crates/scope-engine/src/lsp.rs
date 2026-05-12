@@ -2,7 +2,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use crate::analyzer::Analyzer;
 use crate::api::{PropagationResult, PropagationSource};
 use crate::treesitter::TreeSitterAnalyzer;
 
@@ -10,8 +9,7 @@ use crate::treesitter::TreeSitterAnalyzer;
 
 const RA_BINARY_NAME: &str = "rust-analyzer";
 const RA_VERSION: &str = "2025-05-05";
-const RA_GITHUB_RELEASE: &str =
-    "https://github.com/rust-lang/rust-analyzer/releases/download/2025-05-05/rust-analyzer-x86_64-apple-darwin";
+const RA_GITHUB_RELEASE: &str = "https://github.com/rust-lang/rust-analyzer/releases/download/2025-05-05/rust-analyzer-x86_64-apple-darwin";
 
 // ── LspAnalyzer ──────────────────────────────────────────────
 
@@ -26,7 +24,6 @@ pub struct LspAnalyzer {
     process: Option<Child>,
     stdin_writer: Option<BufWriter<ChildStdin>>,
     stdout_reader: Option<std::io::BufReader<ChildStdout>>,
-    project_root: PathBuf,
     next_id: u64,
     /// If true, LSP is fully initialized and ready to accept requests.
     initialized: bool,
@@ -55,12 +52,13 @@ impl LspAnalyzer {
 
         // Only support rust-analyzer for Rust projects
         if language != "rust" {
-            eprintln!("[scope-engine/lsp] language '{language}' not supported by LSP; only 'rust' is supported");
+            eprintln!(
+                "[scope-engine/lsp] language '{language}' not supported by LSP; only 'rust' is supported"
+            );
             return Self {
                 process: None,
                 stdin_writer: None,
                 stdout_reader: None,
-                project_root,
                 next_id: 0,
                 initialized: false,
             };
@@ -74,7 +72,6 @@ impl LspAnalyzer {
                     process: None,
                     stdin_writer: None,
                     stdout_reader: None,
-                    project_root,
                     next_id: 0,
                     initialized: false,
                 };
@@ -86,7 +83,6 @@ impl LspAnalyzer {
                 process: Some(process),
                 stdin_writer: Some(stdin_w),
                 stdout_reader: Some(stdout_r),
-                project_root,
                 next_id: 1, // id 0 was used for initialize
                 initialized: true,
             },
@@ -96,17 +92,11 @@ impl LspAnalyzer {
                     process: None,
                     stdin_writer: None,
                     stdout_reader: None,
-                    project_root,
                     next_id: 0,
                     initialized: false,
                 }
             }
         }
-    }
-
-    /// Whether the LSP server is available and initialized.
-    pub fn is_available(&self) -> bool {
-        self.initialized
     }
 
     // ── Binary location ───────────────────────────────────────
@@ -115,13 +105,13 @@ impl LspAnalyzer {
     /// attempt to download from GitHub.
     fn locate_or_download_ra() -> Result<PathBuf, String> {
         // 1. Check PATH
-        if let Ok(output) = Command::new("which").arg(RA_BINARY_NAME).output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    eprintln!("[scope-engine/lsp] found rust-analyzer on PATH: {path}");
-                    return Ok(PathBuf::from(path));
-                }
+        if let Ok(output) = Command::new("which").arg(RA_BINARY_NAME).output()
+            && output.status.success()
+        {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                eprintln!("[scope-engine/lsp] found rust-analyzer on PATH: {path}");
+                return Ok(PathBuf::from(path));
             }
         }
 
@@ -129,7 +119,10 @@ impl LspAnalyzer {
         let cache_dir = Self::cache_dir()?;
         let cached = cache_dir.join(format!("rust-analyzer-{RA_VERSION}"));
         if cached.is_file() {
-            eprintln!("[scope-engine/lsp] found cached rust-analyzer: {}", cached.display());
+            eprintln!(
+                "[scope-engine/lsp] found cached rust-analyzer: {}",
+                cached.display()
+            );
             return Ok(cached);
         }
 
@@ -138,8 +131,8 @@ impl LspAnalyzer {
     }
 
     fn cache_dir() -> Result<PathBuf, String> {
-        let base = dirs::cache_dir()
-            .ok_or_else(|| "cannot determine cache directory".to_string())?;
+        let base =
+            dirs::cache_dir().ok_or_else(|| "cannot determine cache directory".to_string())?;
         let dir = base.join("daat-locus").join("lsp-binaries");
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("cannot create cache dir {}: {e}", dir.display()))?;
@@ -162,8 +155,8 @@ impl LspAnalyzer {
             return Err(format!("download returned HTTP {}", resp.status()));
         }
 
-        let mut file = std::fs::File::create(&tmp)
-            .map_err(|e| format!("cannot create tmp file: {e}"))?;
+        let mut file =
+            std::fs::File::create(&tmp).map_err(|e| format!("cannot create tmp file: {e}"))?;
         resp.copy_to(&mut file)
             .map_err(|e| format!("download write failed: {e}"))?;
         drop(file);
@@ -179,7 +172,10 @@ impl LspAnalyzer {
                 .map_err(|e| format!("cannot chmod: {e}"))?;
         }
 
-        eprintln!("[scope-engine/lsp] downloaded rust-analyzer to {}", target.display());
+        eprintln!(
+            "[scope-engine/lsp] downloaded rust-analyzer to {}",
+            target.display()
+        );
         Ok(target.to_path_buf())
     }
 
@@ -193,7 +189,14 @@ impl LspAnalyzer {
     fn spawn_and_initialize(
         binary_path: &Path,
         project_root: &Path,
-    ) -> Result<(Child, BufWriter<ChildStdin>, std::io::BufReader<ChildStdout>), String> {
+    ) -> Result<
+        (
+            Child,
+            BufWriter<ChildStdin>,
+            std::io::BufReader<ChildStdout>,
+        ),
+        String,
+    > {
         let mut child = Command::new(binary_path)
             .current_dir(project_root)
             .stdin(Stdio::piped())
@@ -217,9 +220,9 @@ impl LspAnalyzer {
 
         let resp = Self::send_request_raw(&mut writer, &mut reader, 0, "initialize", init_params)
             .map_err(|e| {
-                let _ = child.kill();
-                format!("initialize failed: {e}")
-            })?;
+            let _ = child.kill();
+            format!("initialize failed: {e}")
+        })?;
 
         if let Some(err) = resp.get("error") {
             let _ = child.kill();
@@ -227,13 +230,17 @@ impl LspAnalyzer {
         }
 
         // ── initialized notification ───────────────────────────
-        Self::send_notification(&mut writer, "initialized", serde_json::json!({}))
-            .map_err(|e| {
+        Self::send_notification(&mut writer, "initialized", serde_json::json!({})).map_err(
+            |e| {
                 let _ = child.kill();
                 format!("initialized notification failed: {e}")
-            })?;
+            },
+        )?;
 
-        eprintln!("[scope-engine/lsp] rust-analyzer initialized for {}", project_root.display());
+        eprintln!(
+            "[scope-engine/lsp] rust-analyzer initialized for {}",
+            project_root.display()
+        );
         // Give RA some time to start indexing
         std::thread::sleep(std::time::Duration::from_secs(3));
         Ok((child, writer, reader))
@@ -244,10 +251,14 @@ impl LspAnalyzer {
         if !self.initialized {
             return;
         }
-        if let (Some(writer), Some(reader)) =
-            (&mut self.stdin_writer, &mut self.stdout_reader)
-        {
-            let _ = Self::send_request_raw(writer, reader, self.next_id, "shutdown", serde_json::json!(null));
+        if let (Some(writer), Some(reader)) = (&mut self.stdin_writer, &mut self.stdout_reader) {
+            let _ = Self::send_request_raw(
+                writer,
+                reader,
+                self.next_id,
+                "shutdown",
+                serde_json::json!(null),
+            );
             let _ = Self::send_notification(writer, "exit", serde_json::json!(null));
         }
         if let Some(ref mut child) = self.process {
@@ -265,7 +276,9 @@ impl LspAnalyzer {
 
     /// Notify LSP that a file was opened.
     pub fn notify_did_open(&mut self, file_path: &Path, text: &str) {
-        if !self.initialized { return; }
+        if !self.initialized {
+            return;
+        }
         let uri = path_to_file_uri(file_path);
         let params = serde_json::json!({
             "textDocument": {
@@ -282,7 +295,9 @@ impl LspAnalyzer {
 
     /// Notify LSP that a file was modified (full sync).
     pub fn notify_did_change(&mut self, file_path: &Path, version: i32, text: &str) {
-        if !self.initialized { return; }
+        if !self.initialized {
+            return;
+        }
         let uri = path_to_file_uri(file_path);
         let params = serde_json::json!({
             "textDocument": { "uri": uri, "version": version },
@@ -295,7 +310,9 @@ impl LspAnalyzer {
 
     /// Notify LSP that a file was closed.
     pub fn notify_did_close(&mut self, file_path: &Path) {
-        if !self.initialized { return; }
+        if !self.initialized {
+            return;
+        }
         let uri = path_to_file_uri(file_path);
         let params = serde_json::json!({
             "textDocument": { "uri": uri }
@@ -315,7 +332,9 @@ impl LspAnalyzer {
         character: usize,
         project_root: &Path,
     ) -> Vec<PropagationResult> {
-        if !self.initialized { return vec![]; }
+        if !self.initialized {
+            return vec![];
+        }
 
         let uri = path_to_file_uri(file_path);
         let params = serde_json::json!({
@@ -323,7 +342,6 @@ impl LspAnalyzer {
             "position": { "line": line.saturating_sub(1), "character": character },
             "context": { "includeDeclaration": false }
         });
-
 
         let (writer, reader) = match (&mut self.stdin_writer, &mut self.stdout_reader) {
             (Some(w), Some(r)) => (w, r),
@@ -334,14 +352,19 @@ impl LspAnalyzer {
         self.next_id += 1;
 
         let params = params.clone(); // clone for retry
-        let resp = match Self::send_request_raw(writer, reader, id, "textDocument/references", params.clone()) {
+        let resp = match Self::send_request_raw(
+            writer,
+            reader,
+            id,
+            "textDocument/references",
+            params.clone(),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("[scope-engine/lsp] textDocument/references failed: {e}");
                 return vec![];
             }
         };
-
 
         // Parse result — LSP returns Location[] or null
         let locations = match resp.get("result") {
@@ -352,14 +375,25 @@ impl LspAnalyzer {
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 let retry_id = self.next_id;
                 self.next_id += 1;
-                let retry_resp = match Self::send_request_raw(writer, reader, retry_id, "textDocument/references", params) {
+                let retry_resp = match Self::send_request_raw(
+                    writer,
+                    reader,
+                    retry_id,
+                    "textDocument/references",
+                    params,
+                ) {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("[scope-engine/lsp] retry textDocument/references also failed: {e}");
+                        eprintln!(
+                            "[scope-engine/lsp] retry textDocument/references also failed: {e}"
+                        );
                         return vec![];
                     }
                 };
-                eprintln!("[scope-engine/lsp] retry response: {}", serde_json::to_string(&retry_resp).unwrap_or_default());
+                eprintln!(
+                    "[scope-engine/lsp] retry response: {}",
+                    serde_json::to_string(&retry_resp).unwrap_or_default()
+                );
                 match retry_resp.get("result") {
                     Some(serde_json::Value::Array(arr)) => arr.clone(),
                     _ => return vec![],
@@ -368,14 +402,18 @@ impl LspAnalyzer {
             _ => return vec![],
         };
 
-        eprintln!("[scope-engine/lsp] found {} reference locations", locations.len());
+        eprintln!(
+            "[scope-engine/lsp] found {} reference locations",
+            locations.len()
+        );
 
         let ts = TreeSitterAnalyzer::new();
         let mut results = Vec::new();
 
         for loc in locations {
             let loc_uri = loc.get("uri").and_then(|v| v.as_str()).unwrap_or("");
-            let loc_line = loc.get("range")
+            let loc_line = loc
+                .get("range")
                 .and_then(|r| r.get("start"))
                 .and_then(|s| s.get("line"))
                 .and_then(|v| v.as_u64())
@@ -396,7 +434,8 @@ impl LspAnalyzer {
                 .unwrap_or_default();
 
             // Map to containing symbol selector
-            let selector = ts.find_containing_symbol(&loc_path, loc_line + 1, project_root)
+            let selector = ts
+                .find_containing_symbol(&loc_path, loc_line + 1, project_root)
                 .unwrap_or_else(|| format!("{rel_path}::line {}", loc_line + 1));
 
             // Build lsp_references tuple
@@ -404,8 +443,7 @@ impl LspAnalyzer {
 
             results.push(PropagationResult {
                 selector,
-                reason: format!("LSP reference found at {}:{}",
-                    rel_path, loc_line + 1),
+                reason: format!("LSP reference found at {}:{}", rel_path, loc_line + 1),
                 source: PropagationSource::Lsp,
                 lsp_references: Some(vec![lsp_ref]),
                 diff_summary: None,
@@ -458,15 +496,15 @@ impl LspAnalyzer {
         writer: &mut BufWriter<ChildStdin>,
         msg: &serde_json::Value,
     ) -> Result<(), String> {
-        let body = serde_json::to_string(msg)
-            .map_err(|e| format!("json serialize failed: {e}"))?;
+        let body = serde_json::to_string(msg).map_err(|e| format!("json serialize failed: {e}"))?;
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
-        writer.write_all(header.as_bytes())
+        writer
+            .write_all(header.as_bytes())
             .map_err(|e| format!("write header failed: {e}"))?;
-        writer.write_all(body.as_bytes())
+        writer
+            .write_all(body.as_bytes())
             .map_err(|e| format!("write body failed: {e}"))?;
-        writer.flush()
-            .map_err(|e| format!("flush failed: {e}"))?;
+        writer.flush().map_err(|e| format!("flush failed: {e}"))?;
         Ok(())
     }
 
@@ -481,7 +519,8 @@ impl LspAnalyzer {
             let mut header_line = String::new();
             loop {
                 let mut byte = [0u8; 1];
-                reader.read_exact(&mut byte)
+                reader
+                    .read_exact(&mut byte)
                     .map_err(|e| format!("read header byte failed: {e}"))?;
                 let ch = byte[0] as char;
                 header_line.push(ch);
@@ -505,10 +544,11 @@ impl LspAnalyzer {
 
             // Read body
             let mut body_buf = vec![0u8; content_length];
-            reader.read_exact(&mut body_buf)
+            reader
+                .read_exact(&mut body_buf)
                 .map_err(|e| format!("read body failed: {e}"))?;
-            let body: serde_json::Value = serde_json::from_slice(&body_buf)
-                .map_err(|e| format!("json parse failed: {e}"))?;
+            let body: serde_json::Value =
+                serde_json::from_slice(&body_buf).map_err(|e| format!("json parse failed: {e}"))?;
 
             // Check if this is a response (has "id") or a notification (no "id")
             if let Some(resp_id) = body.get("id").and_then(|v| v.as_u64()) {
@@ -521,15 +561,6 @@ impl LspAnalyzer {
             }
             // Notification or wrong-id response — skip and read next message
         }
-    }
-}
-
-impl Analyzer for LspAnalyzer {
-    /// For the Analyzer trait, we can't easily pass file/line info,
-    /// so this returns empty. Use `find_references_for_symbol` directly
-    /// which takes file path, line, and character.
-    fn find_references(&self, _symbol_name: &str) -> Vec<PropagationResult> {
-        vec![]
     }
 }
 
