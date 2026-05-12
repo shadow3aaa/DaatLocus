@@ -1,22 +1,22 @@
 use crate::analyzer::Analyzer;
-use crate::api::AffectedSelector;
+use crate::api::{PropagationResult, PropagationSource};
 
 pub struct LspAnalyzer;
 
 impl LspAnalyzer {
-    pub async fn new(_project_root: &str, _language: &str) -> Self {
+    /// Create a new LspAnalyzer. Currently a placeholder.
+    /// TODO: spawn and communicate with an actual LSP server (e.g. rust-analyzer).
+    pub fn new(_project_root: &str, _language: &str) -> Self {
         Self
     }
 }
 
 impl Analyzer for LspAnalyzer {
-    fn find_references(&self, _selector: &str) -> Vec<AffectedSelector> {
+    /// Placeholder: returns empty, meaning "no LSP available".
+    /// When LSP integration is implemented, this will send
+    /// textDocument/references requests to the LSP server and
+    /// map results back to PropagationResult with source: Lsp.
+    fn find_references(&self, _symbol_name: &str) -> Vec<PropagationResult> {
         vec![]
-    }
-    fn find_callers(&self, _selector: &str) -> Vec<AffectedSelector> {
-        vec![]
-    }
-    fn find_definition(&self, _selector: &str) -> Option<AffectedSelector> {
-        None
     }
 }

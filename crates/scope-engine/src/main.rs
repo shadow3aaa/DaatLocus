@@ -16,7 +16,7 @@ fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut project_root: Option<PathBuf> = None;
-    let affected_state = Mutex::new(state::AffectedState::new());
+    let propagation_state = Mutex::new(state::PropagationState::new());
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -48,7 +48,7 @@ fn main() {
             }
         }
 
-        let resp = server::dispatch(&req, project_root.as_deref(), &affected_state);
+        let resp = server::dispatch(&req, project_root.as_deref(), &propagation_state);
         let json = serde_json::to_string(&resp).unwrap_or_default();
         let _ = writeln!(stdout.lock(), "{json}");
     }

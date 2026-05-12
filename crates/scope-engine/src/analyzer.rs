@@ -1,7 +1,9 @@
-use crate::api::AffectedSelector;
+use crate::api::PropagationResult;
 
+/// Analyzer provides cross-file reference lookups.
+/// Implemented by LSP-backed analyzers; tree-sitter handles only
+/// line-number → symbol-name mapping (see `TreeSitterAnalyzer`).
 pub trait Analyzer: Send + Sync {
-    fn find_references(&self, selector: &str) -> Vec<AffectedSelector>;
-    fn find_callers(&self, selector: &str) -> Vec<AffectedSelector>;
-    fn find_definition(&self, selector: &str) -> Option<AffectedSelector>;
+    /// Find all references to the given symbol across the project.
+    fn find_references(&self, symbol_name: &str) -> Vec<PropagationResult>;
 }

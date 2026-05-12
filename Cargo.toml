@@ -41,7 +41,7 @@ bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
 disabled-strategies = ["quick-install", "compile"]
 
 [workspace]
-members = [".", "xtask"]
+members = [".", "xtask", "crates/scope-engine"]
 default-members = ["."]
 resolver = "3"
 

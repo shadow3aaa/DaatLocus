@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::api::AffectedSelector;
 use crate::treesitter::TreeSitterAnalyzer;
+use crate::analyzer::Analyzer;
+use crate::api::{PropagationResult, PropagationSource};
+use crate::lsp::LspAnalyzer;
 
 /// A single hunk inside a stripped v4a patch.
 #[derive(Debug, Clone)]
@@ -235,7 +237,7 @@ pub fn edit_code_apply(
     selector_str: &str,
     patch: &str,
     project_root: &Path,
-) -> Result<Vec<AffectedSelector>, String> {
+) -> Result<Vec<PropagationResult>, String> {
     let parsed = crate::selector::parse_selector(selector_str)
         .map_err(|e| format!("bad selector: {e}"))?;
 
@@ -259,10 +261,25 @@ pub fn edit_code_apply(
     let original = std::fs::read_to_string(&full_path)
         .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?;
 
-    // ── Propagation: find modified symbol → find its references ──
-    let hunks = parse_stripped_v4a_hunks(patch)?;
+    // ── Apply the patch first ──
+    let new_content = apply_stripped_v4a_patch(&original, patch)?;
+
+    // ── Validate: tree-sitter must be able to parse the new content ──
     let analyzer = TreeSitterAnalyzer::new();
-    let mut affected = Vec::new();
+    if !analyzer.can_parse(&full_path, &new_content) {
+        return Err(format!(
+            "edit rejected: tree-sitter cannot parse the result for {}",
+            full_path.display()
+        ));
+    }
+
+    // ── Write the file ──
+    std::fs::write(&full_path, &new_content)
+        .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
+
+    // ── Propagation: map modified lines → symbol names → LSP or open-ended ──
+    let hunks = parse_stripped_v4a_hunks(patch)?;
+    let mut results: Vec<PropagationResult> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut modified_symbol_names = HashSet::new();
 
@@ -281,29 +298,45 @@ pub fn edit_code_apply(
         }
     }
 
-    // Step 2: for each modified symbol, find referencing symbols in the same file
+    // Step 2: for each modified symbol, query LSP for cross-file references
+    //         If LSP returns nothing (not available), produce an open-ended result
+    let lsp = LspAnalyzer::new("", ""); // placeholder until LSP lifecycle is managed
     for sym_name in &modified_symbol_names {
-        let refs = analyzer.find_referencing_symbols(&full_path, sym_name, project_root);
-        for r in refs {
-            if seen.insert(r.selector.clone()) {
-                affected.push(r);
+        let lsp_refs = lsp.find_references(sym_name);
+        if lsp_refs.is_empty() {
+            // No LSP: generate an open-ended result so agent investigates on its own
+            let selector = format!(
+                "{}::{}",
+                full_path.strip_prefix(project_root)
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| full_path.to_string_lossy().to_string()),
+                sym_name
+            );
+            if seen.insert(selector.clone()) {
+                results.push(PropagationResult {
+                    selector,
+                    reason: format!("symbol \"{}\" was modified; no LSP available to find references", sym_name),
+                    source: PropagationSource::OpenEnded,
+                });
+            }
+        } else {
+            for r in lsp_refs {
+                if seen.insert(r.selector.clone()) {
+                    results.push(r);
+                }
             }
         }
     }
 
-    // ── Apply the patch ──
-    let new_content = apply_stripped_v4a_patch(&original, patch)?;
-    std::fs::write(&full_path, &new_content)
-        .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
-
-    Ok(affected)
+    Ok(results)
 }
 
 /// Apply a delete_code operation: parse selector, resolve file, remove the symbol.
 pub fn delete_code_apply(
     selector_str: &str,
     project_root: &Path,
-) -> Result<Vec<AffectedSelector>, String> {
+) -> Result<Vec<PropagationResult>, String> {
     let parsed = crate::selector::parse_selector(selector_str)
         .map_err(|e| format!("bad selector: {e}"))?;
 
@@ -313,44 +346,40 @@ pub fn delete_code_apply(
     let original = std::fs::read_to_string(&full_path)
         .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?;
 
-    // Find the affected line before deletion for propagation
-    let delete_line = original
-        .lines()
-        .position(|l| l.contains(&parsed.name))
-        .map(|idx| idx + 1); // 1-based
+    // ── Propagation: map to symbol name BEFORE deletion (file is still valid) ──
+    let ts = TreeSitterAnalyzer::new();
+    let mut results: Vec<PropagationResult> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
 
+    // Record the deleted symbol itself
+    seen.insert(selector_str.to_string());
+    results.push(PropagationResult {
+        selector: selector_str.to_string(),
+        reason: format!("deleted symbol \"{}\" from {}", parsed.name, full_path.display()),
+        source: PropagationSource::OpenEnded,
+    });
+
+    // Query LSP for references of the deleted symbol
+    let lsp = LspAnalyzer::new("", ""); // placeholder
+    let lsp_refs = lsp.find_references(&parsed.name);
+    if lsp_refs.is_empty() {
+        // No LSP: open-ended result for the deleted symbol already added above
+    } else {
+        for r in lsp_refs {
+            if seen.insert(r.selector.clone()) {
+                results.push(r);
+            }
+        }
+    }
+
+    // ── Execute the deletion ──
     let new_content = remove_hunk_lines(&original, &parsed.name, 3)
         .ok_or_else(|| format!("symbol '{}' not found in {}", parsed.name, full_path.display()))?;
 
     std::fs::write(&full_path, &new_content)
         .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
 
-    // Propagate: find referencing symbols of the deleted symbol
-    let analyzer = TreeSitterAnalyzer::new();
-    let mut affected = analyzer.find_referencing_symbols(&full_path, &parsed.name, project_root);
-    // Also include the deleted symbol itself so agent knows what was deleted
-    affected.push(AffectedSelector {
-        selector: selector_str.to_string(),
-        reason: format!("deleted symbol {} from {}", parsed.name, full_path.display()),
-    });
-
-    // Also find containing symbol for the deleted line
-    if let Some(line) = delete_line {
-        let analyzer = TreeSitterAnalyzer::new();
-        if let Some(sel) = analyzer.find_containing_symbol(&full_path, line, project_root) {
-            if sel != selector_str {
-                let mut seen: HashSet<String> = HashSet::from([selector_str.to_string()]);
-                if seen.insert(sel.clone()) {
-                    affected.push(AffectedSelector {
-                        selector: sel,
-                        reason: format!("contained deleted content at line {}", line),
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(affected)
+    Ok(results)
 }
 
 /// Remove lines matching a pattern with surrounding context (simple delete tool).

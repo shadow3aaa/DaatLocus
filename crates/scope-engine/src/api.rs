@@ -97,15 +97,28 @@ pub struct DeleteCodeRequest {
     pub selector: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct AffectedResponse {
-    pub affected_selectors: Vec<AffectedSelector>,
+// ── Propagation types ────────────────────────────────────────
+
+/// Source of a propagation result.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationSource {
+    /// Cross-file reference found by LSP.
+    Lsp,
+    /// No LSP available; agent should investigate on its own.
+    OpenEnded,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct AffectedSelector {
+pub struct PropagationResponse {
+    pub propagation_results: Vec<PropagationResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PropagationResult {
     pub selector: String,
     pub reason: String,
+    pub source: PropagationSource,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,4 +131,5 @@ pub struct ReviewEvent {
     pub selector: String,
     pub reason: String,
     pub suggested_action: String,
+    pub source: PropagationSource,
 }
