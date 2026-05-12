@@ -315,10 +315,33 @@ pub fn edit_code_apply(
                 sym_name
             );
             if seen.insert(selector.clone()) {
+                // Build a snippet of the modification context
+                // Use the first hunk's position to give context around the change
+                let first_line = hunks.first().map(|h| h.old_start).unwrap_or(1);
+                let file_snippet = original.lines()
+                    .skip(first_line.saturating_sub(3))
+                    .take(7)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // Collect project files for agent investigation
+                let project_files = std::fs::read_dir(project_root)
+                    .ok()
+                    .map(|entries| entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.path().is_dir() && e.path().file_name().map_or(false, |n| n == "src"))
+                        .filter_map(|e| std::fs::read_dir(e.path()).ok())
+                        .flat_map(|entries| entries.filter_map(|e| e.ok()).filter_map(|e| e.path().strip_prefix(project_root).ok().map(|p| p.to_string_lossy().to_string())))
+                        .collect())
+                    .unwrap_or_default();
+
                 results.push(PropagationResult {
                     selector,
                     reason: format!("symbol \"{}\" was modified; no LSP available to find references", sym_name),
                     source: PropagationSource::OpenEnded,
+                    lsp_references: None,
+                    diff_summary: Some(patch.to_string()),
+                    file_snippet: Some(file_snippet),
+                    project_files: Some(project_files),
                 });
             }
         } else {
@@ -354,10 +377,29 @@ pub fn delete_code_apply(
 
     // Record the deleted symbol itself
     seen.insert(selector_str.to_string());
+    // Build context for the delete operation
+    let file_snippet = original.lines()
+        .take(10)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let project_files = std::fs::read_dir(project_root)
+        .ok()
+        .map(|entries| entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir() && e.path().file_name().map_or(false, |n| n == "src"))
+            .filter_map(|e| std::fs::read_dir(e.path()).ok())
+            .flat_map(|entries| entries.filter_map(|e| e.ok()).filter_map(|e| e.path().strip_prefix(project_root).ok().map(|p| p.to_string_lossy().to_string())))
+            .collect())
+        .unwrap_or_default();
+
     results.push(PropagationResult {
         selector: selector_str.to_string(),
         reason: format!("deleted symbol \"{}\" from {}", parsed.name, full_path.display()),
         source: PropagationSource::OpenEnded,
+        lsp_references: None,
+        diff_summary: Some(format!("deleted: {}", parsed.name)),
+        file_snippet: Some(file_snippet),
+        project_files: Some(project_files),
     });
 
     // Query LSP for references of the deleted symbol

@@ -114,11 +114,31 @@ pub struct PropagationResponse {
     pub propagation_results: Vec<PropagationResult>,
 }
 
+/// Result of propagation analysis for a modified symbol.
+///
+/// When LSP is available, `lsp_references` contains precise cross-file
+/// references. When LSP is unavailable, `diff_summary`, `file_snippet`,
+/// and `project_files` carry context for the agent to investigate.
 #[derive(Debug, Clone, Serialize)]
 pub struct PropagationResult {
     pub selector: String,
     pub reason: String,
     pub source: PropagationSource,
+    /// LSP references: (selector, line, context) tuples.
+    /// Only set when source == Lsp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_references: Option<Vec<(String, usize, String)>>,
+    /// Diff summary of the change.
+    /// Only set when source == OpenEnded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_summary: Option<String>,
+    /// Code snippet around the modification site.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_snippet: Option<String>,
+    /// Project file list for agent investigation.
+    /// Only set when source == OpenEnded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,10 +146,50 @@ pub struct NextReviewResponse {
     pub review: Option<ReviewEvent>,
 }
 
+/// A reference found by LSP or other precise analysis.
 #[derive(Debug, Clone, Serialize)]
-pub struct ReviewEvent {
+pub struct Reference {
+    /// Selector of the referencing symbol (e.g. "src/routes.rs::fn login").
     pub selector: String,
-    pub reason: String,
-    pub suggested_action: String,
-    pub source: PropagationSource,
+    /// 1-based line number of the reference.
+    pub line: usize,
+    /// Code context around the reference.
+    pub context: String,
+}
+
+/// A review event produced by SCOPE propagation.
+///
+/// Two variants based on what the agent should do:
+/// - `KnownReferences`: LSP (or other precise tool) found exact cross-file
+///   references. Agent should verify each reference is compatible.
+/// - `InvestigateImpact`: No precise reference data available. Agent should
+///   use search_code and other tools to find and assess impact.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewEvent {
+    /// References are known precisely. Agent should verify compatibility.
+    KnownReferences {
+        /// The symbol that was modified.
+        modified_symbol: String,
+        /// Summary of what changed.
+        change_summary: String,
+        /// Precise reference locations found by LSP.
+        references: Vec<Reference>,
+        /// Code snippet around the modification site.
+        file_snippet: String,
+    },
+    /// References are unknown. Agent should investigate impact on its own.
+    InvestigateImpact {
+        /// The symbol that was modified.
+        modified_symbol: String,
+        /// Summary of what changed.
+        change_summary: String,
+        /// The diff hunks describing the change.
+        diff_summary: String,
+        /// Code snippet around the modification site.
+        file_snippet: String,
+        /// Project file list to help agent locate potential impact.
+        project_files: Vec<String>,
+    },
 }

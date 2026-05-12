@@ -1,4 +1,4 @@
-use crate::api::{PropagationResult, PropagationSource, ReviewEvent};
+use crate::api::{PropagationResult, PropagationSource, ReviewEvent, Reference};
 use std::collections::HashSet;
 
 pub struct PropagationState {
@@ -24,16 +24,31 @@ impl PropagationState {
 
     pub fn next_review(&mut self) -> Option<ReviewEvent> {
         let r = self.pending.pop()?;
-        let suggested_action = match &r.source {
-            PropagationSource::Lsp => "read_and_verify".to_string(),
-            PropagationSource::OpenEnded => "investigate_impact".to_string(),
-        };
-        Some(ReviewEvent {
-            selector: r.selector,
-            reason: r.reason,
-            suggested_action,
-            source: r.source,
-        })
+        match &r.source {
+            PropagationSource::Lsp => {
+                // LSP found precise references — build KnownReferences event
+                let references: Vec<Reference> = r.lsp_references.clone().unwrap_or_default()
+                    .into_iter()
+                    .map(|(selector, line, context)| Reference { selector, line, context })
+                    .collect();
+                Some(ReviewEvent::KnownReferences {
+                    modified_symbol: r.selector,
+                    change_summary: r.reason,
+                    references,
+                    file_snippet: r.file_snippet.clone().unwrap_or_default(),
+                })
+            }
+            PropagationSource::OpenEnded => {
+                // No LSP — build InvestigateImpact event
+                Some(ReviewEvent::InvestigateImpact {
+                    modified_symbol: r.selector,
+                    change_summary: r.reason,
+                    diff_summary: r.diff_summary.clone().unwrap_or_default(),
+                    file_snippet: r.file_snippet.clone().unwrap_or_default(),
+                    project_files: r.project_files.clone().unwrap_or_default(),
+                })
+            }
+        }
     }
 }
 
@@ -46,6 +61,10 @@ mod tests {
             selector: selector.to_string(),
             reason: reason.to_string(),
             source: PropagationSource::Lsp,
+            lsp_references: Some(vec![]),
+            diff_summary: None,
+            file_snippet: None,
+            project_files: None,
         }
     }
 
@@ -54,6 +73,10 @@ mod tests {
             selector: selector.to_string(),
             reason: reason.to_string(),
             source: PropagationSource::OpenEnded,
+            lsp_references: None,
+            diff_summary: Some("test diff".to_string()),
+            file_snippet: Some("fn foo() {}".to_string()),
+            project_files: Some(vec!["src/lib.rs".to_string()]),
         }
     }
 
@@ -78,24 +101,39 @@ mod tests {
     }
 
     #[test]
-    fn next_review_returns_lsp_event_with_read_and_verify() {
+    fn next_review_lsp_produces_known_references() {
         let mut state = PropagationState::new();
-        state.accumulate(vec![lsp_result("src/a.rs::fn foo", "referenced")]);
+        let mut r = lsp_result("src/a.rs::fn foo", "referenced");
+        r.lsp_references = Some(vec![(
+            "src/b.rs::fn bar".to_string(),
+            10,
+            "foo();".to_string(),
+        )]);
+        state.accumulate(vec![r]);
         let event = state.next_review().unwrap();
-        assert_eq!(event.selector, "src/a.rs::fn foo");
-        assert_eq!(event.reason, "referenced");
-        assert_eq!(event.suggested_action, "read_and_verify");
-        assert_eq!(event.source, PropagationSource::Lsp);
+        match event {
+            ReviewEvent::KnownReferences { modified_symbol, references, .. } => {
+                assert_eq!(modified_symbol, "src/a.rs::fn foo");
+                assert_eq!(references.len(), 1);
+                assert_eq!(references[0].selector, "src/b.rs::fn bar");
+            }
+            _ => panic!("Expected KnownReferences variant"),
+        }
     }
 
     #[test]
-    fn next_review_returns_open_ended_event_with_investigate_impact() {
+    fn next_review_open_ended_produces_investigate_impact() {
         let mut state = PropagationState::new();
         state.accumulate(vec![open_result("src/a.rs::fn foo", "modified")]);
         let event = state.next_review().unwrap();
-        assert_eq!(event.selector, "src/a.rs::fn foo");
-        assert_eq!(event.suggested_action, "investigate_impact");
-        assert_eq!(event.source, PropagationSource::OpenEnded);
+        match event {
+            ReviewEvent::InvestigateImpact { modified_symbol, diff_summary, project_files, .. } => {
+                assert_eq!(modified_symbol, "src/a.rs::fn foo");
+                assert_eq!(diff_summary, "test diff");
+                assert_eq!(project_files.len(), 1);
+            }
+            _ => panic!("Expected InvestigateImpact variant"),
+        }
     }
 
     #[test]
@@ -112,22 +150,23 @@ mod tests {
             lsp_result("src/b.rs::fn bar", "second"),
         ]);
         let e1 = state.next_review().unwrap();
-        assert_eq!(e1.selector, "src/b.rs::fn bar");
+        match e1 { ReviewEvent::KnownReferences { modified_symbol, .. } => assert_eq!(modified_symbol, "src/b.rs::fn bar"), _ => panic!() };
         let e2 = state.next_review().unwrap();
-        assert_eq!(e2.selector, "src/a.rs::fn foo");
+        match e2 { ReviewEvent::KnownReferences { modified_symbol, .. } => assert_eq!(modified_symbol, "src/a.rs::fn foo"), _ => panic!() };
     }
 
     #[test]
-    fn mixed_sources_accumulate_independently() {
+    fn mixed_sources_generate_correct_variants() {
         let mut state = PropagationState::new();
         state.accumulate(vec![
             lsp_result("src/a.rs::fn foo", "lsp ref"),
             open_result("src/b.rs::fn bar", "open ref"),
         ]);
         assert_eq!(state.pending.len(), 2);
+        // LIFO: first pop is the last pushed (OpenEnded)
         let e1 = state.next_review().unwrap();
-        assert_eq!(e1.source, PropagationSource::OpenEnded);
+        assert!(matches!(e1, ReviewEvent::InvestigateImpact { .. }));
         let e2 = state.next_review().unwrap();
-        assert_eq!(e2.source, PropagationSource::Lsp);
+        assert!(matches!(e2, ReviewEvent::KnownReferences { .. }));
     }
 }

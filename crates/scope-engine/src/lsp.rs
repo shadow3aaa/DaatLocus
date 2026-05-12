@@ -15,7 +15,8 @@ impl Analyzer for LspAnalyzer {
     /// Placeholder: returns empty, meaning "no LSP available".
     /// When LSP integration is implemented, this will send
     /// textDocument/references requests to the LSP server and
-    /// map results back to PropagationResult with source: Lsp.
+    /// map results back to PropagationResult with source: Lsp
+    /// and lsp_references populated with precise locations.
     fn find_references(&self, _symbol_name: &str) -> Vec<PropagationResult> {
         vec![]
     }
