@@ -6,18 +6,15 @@ use tree_sitter::{Language, Parser};
 /// Each language provides patterns for finding definitions and references.
 /// Language-specific queries for tree-sitter symbol extraction.
 /// Each language provides patterns for finding definitions and references.
-#[allow(dead_code)]
 pub struct LanguageQueries {
     pub definitions: &'static str,
     pub references: &'static str,
 }
 
 pub trait LanguageAdapter: Send + Sync {
-    #[allow(dead_code)]
     fn language_name(&self) -> &'static str;
     fn extensions(&self) -> &[&'static str];
     fn language(&self) -> Language;
-    #[allow(dead_code)]
     fn queries(&self) -> LanguageQueries;
     fn parser(&self) -> Parser {
         let mut p = Parser::new();

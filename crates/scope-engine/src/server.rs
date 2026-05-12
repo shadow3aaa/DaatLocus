@@ -8,12 +8,13 @@ use crate::selector;
 use crate::state::PropagationState;
 use crate::treesitter::TreeSitterAnalyzer;
 use std::sync::Mutex;
+use crate::analyzer::Analyzer;
 
 pub fn dispatch(
     req: &JsonRpcRequest,
     project_root: Option<&Path>,
     propagation_state: &Mutex<PropagationState>,
-    lsp_analyzer: &Mutex<Option<LspAnalyzer>>,
+    lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
 ) -> JsonRpcResponse {
     match req.method.as_str() {
         "open_project" => {
@@ -36,25 +37,24 @@ pub fn dispatch(
                 language
             };
             if lsp_lang == "rust" {
-                let mut lsp_guard = match lsp_analyzer.lock() {
+                let lsp_guard = match lsp_analyzer.lock() {
                     Ok(g) => g,
                     Err(_) => return JsonRpcResponse::err(req.id.clone(), -32603, "lock poisoned"),
                 };
                 // Shut down previous LSP if any
-                if let Some(ref mut old_lsp) = *lsp_guard {
-                    old_lsp.shutdown();
-                }
+                // Drop previous LSP analyzer — its Drop impl sends shutdown
+                *lsp_guard = None;
                 let new_lsp = LspAnalyzer::new(Path::new(&params.project_root), lsp_lang);
-                *lsp_guard = Some(new_lsp);
+                *lsp_guard = Some(Box::new(new_lsp));
             }
 
             // Open all existing .rs files in LSP so that references work
             if lsp_lang == "rust" {
-                let mut lsp_guard = match lsp_analyzer.lock() {
+                let lsp_guard = match lsp_analyzer.lock() {
                     Ok(g) => g,
                     Err(_) => return JsonRpcResponse::err(req.id.clone(), -32603, "lock poisoned"),
                 };
-                if let Some(ref mut lsp) = *lsp_guard {
+                if let Some(ref lsp) = *lsp_guard {
                     let root = Path::new(&params.project_root);
                     if let Ok(entries) = std::fs::read_dir(root.join("src")) {
                         for entry in entries.flatten() {
@@ -310,7 +310,7 @@ fn handle_edit_code(
     params: &EditCodeRequest,
     project_root: Option<&Path>,
     propagation_state: &Mutex<PropagationState>,
-    lsp_analyzer: &Mutex<Option<LspAnalyzer>>,
+    lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
 ) -> JsonRpcResponse {
     let project_root = match project_root {
         Some(r) => r,
@@ -347,7 +347,7 @@ fn handle_delete_code(
     params: &DeleteCodeRequest,
     project_root: Option<&Path>,
     propagation_state: &Mutex<PropagationState>,
-    lsp_analyzer: &Mutex<Option<LspAnalyzer>>,
+    lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
 ) -> JsonRpcResponse {
     let project_root = match project_root {
         Some(r) => r,

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use crate::analyzer::Analyzer;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,20 +15,28 @@ const RA_GITHUB_RELEASE: &str = "https://github.com/rust-lang/rust-analyzer/rele
 
 // ── LspAnalyzer ──────────────────────────────────────────────
 
-/// Manages a rust-analyzer subprocess and communicates via LSP JSON-RPC 2.0.
-///
-/// Lifecycle:
-/// 1. `new()` — locate or download rust-analyzer, spawn it, perform LSP `initialize`.
-/// 2. `notify_did_open()` / `notify_did_change()` / `notify_did_close()` — keep LSP in sync.
-/// 3. `find_references()` — query cross-file references via `textDocument/references`.
-/// 4. `shutdown()` — send `shutdown`, then kill the subprocess.
-pub struct LspAnalyzer {
+/// Internal mutable state for LspAnalyzer, wrapped in RefCell for interior mutability.
+struct LspAnalyzerInner {
     process: Option<Child>,
     stdin_writer: Option<BufWriter<ChildStdin>>,
     stdout_reader: Option<std::io::BufReader<ChildStdout>>,
     next_id: u64,
-    /// If true, LSP is fully initialized and ready to accept requests.
     initialized: bool,
+}
+
+/// Manages a rust-analyzer subprocess and communicates via LSP JSON-RPC 2.0.
+///
+/// Uses `RefCell<LspAnalyzerInner>` for interior mutability so that the
+/// `Analyzer` trait's `&self` methods can perform LSP I/O without needing
+/// `&mut self`.
+///
+/// Lifecycle:
+/// 1. `new()` — locate or download rust-analyzer, spawn it, perform LSP `initialize`.
+/// 2. `notify_did_open()` / `notify_did_change()` / `notify_did_close()` — keep LSP in sync.
+/// 3. `find_references_for_symbol()` — query cross-file references via `textDocument/references`.
+/// 4. `Drop` — send `shutdown`, then kill the subprocess.
+pub struct LspAnalyzer {
+    inner: RefCell<LspAnalyzerInner>,
 }
 
 // Newtype wrappers so we can implement Read/Write on the inner types
@@ -43,25 +52,23 @@ impl<W: Write> Write for BufWriter<W> {
 }
 
 impl LspAnalyzer {
-    /// Create a new LspAnalyzer: locate/download rust-analyzer, spawn it,
-    /// perform LSP initialize handshake.
-    ///
-    /// If rust-analyzer is not found and cannot be downloaded, returns an
-    /// LspAnalyzer in "not available" mode (find_references returns empty).
     pub fn new(project_root: &Path, language: &str) -> Self {
         let project_root = project_root.to_path_buf();
 
         // Only support rust-analyzer for Rust projects
         if language != "rust" {
             eprintln!(
-                "[scope-engine/lsp] language '{language}' not supported by LSP; only 'rust' is supported"
+                "[scope-engine/lsp] language '{}' not supported by LSP; only 'rust' is supported",
+                language
             );
             return Self {
-                process: None,
-                stdin_writer: None,
-                stdout_reader: None,
-                next_id: 0,
-                initialized: false,
+                inner: RefCell::new(LspAnalyzerInner {
+                    process: None,
+                    stdin_writer: None,
+                    stdout_reader: None,
+                    next_id: 0,
+                    initialized: false,
+                }),
             };
         }
 
@@ -70,31 +77,37 @@ impl LspAnalyzer {
             Err(e) => {
                 eprintln!("[scope-engine/lsp] cannot locate or download rust-analyzer: {e}");
                 return Self {
-                    process: None,
-                    stdin_writer: None,
-                    stdout_reader: None,
-                    next_id: 0,
-                    initialized: false,
+                    inner: RefCell::new(LspAnalyzerInner {
+                        process: None,
+                        stdin_writer: None,
+                        stdout_reader: None,
+                        next_id: 0,
+                        initialized: false,
+                    }),
                 };
             }
         };
 
         match Self::spawn_and_initialize(&binary_path, &project_root) {
             Ok((process, stdin_w, stdout_r)) => Self {
-                process: Some(process),
-                stdin_writer: Some(stdin_w),
-                stdout_reader: Some(stdout_r),
-                next_id: 1, // id 0 was used for initialize
-                initialized: true,
+                inner: RefCell::new(LspAnalyzerInner {
+                    process: Some(process),
+                    stdin_writer: Some(stdin_w),
+                    stdout_reader: Some(stdout_r),
+                    next_id: 1, // id 0 was used for initialize
+                    initialized: true,
+                }),
             },
             Err(e) => {
                 eprintln!("[scope-engine/lsp] failed to spawn/initialize rust-analyzer: {e}");
                 Self {
-                    process: None,
-                    stdin_writer: None,
-                    stdout_reader: None,
-                    next_id: 0,
-                    initialized: false,
+                    inner: RefCell::new(LspAnalyzerInner {
+                        process: None,
+                        stdin_writer: None,
+                        stdout_reader: None,
+                        next_id: 0,
+                        initialized: false,
+                    }),
                 }
             }
         }
@@ -247,37 +260,12 @@ impl LspAnalyzer {
         Ok((child, writer, reader))
     }
 
-    /// Shut down the LSP server gracefully.
-    pub fn shutdown(&mut self) {
-        if !self.initialized {
-            return;
-        }
-        if let (Some(writer), Some(reader)) = (&mut self.stdin_writer, &mut self.stdout_reader) {
-            let _ = Self::send_request_raw(
-                writer,
-                reader,
-                self.next_id,
-                "shutdown",
-                serde_json::json!(null),
-            );
-            let _ = Self::send_notification(writer, "exit", serde_json::json!(null));
-        }
-        if let Some(ref mut child) = self.process {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        self.initialized = false;
-        self.process = None;
-        self.stdin_writer = None;
-        self.stdout_reader = None;
-        eprintln!("[scope-engine/lsp] rust-analyzer shut down");
-    }
-
     // ── LSP file synchronization ────────────────────────────────
 
     /// Notify LSP that a file was opened.
-    pub fn notify_did_open(&mut self, file_path: &Path, text: &str) {
-        if !self.initialized {
+    pub fn notify_did_open(&self, file_path: &Path, text: &str) {
+        let mut inner = self.inner.borrow_mut();
+        if !inner.initialized {
             return;
         }
         let uri = path_to_file_uri(file_path);
@@ -289,14 +277,15 @@ impl LspAnalyzer {
                 "text": text,
             }
         });
-        if let Some(ref mut writer) = self.stdin_writer {
+        if let Some(ref mut writer) = inner.stdin_writer {
             let _ = Self::send_notification(writer, "textDocument/didOpen", params);
         }
     }
 
     /// Notify LSP that a file was modified (full sync).
-    pub fn notify_did_change(&mut self, file_path: &Path, version: i32, text: &str) {
-        if !self.initialized {
+    pub fn notify_did_change(&self, file_path: &Path, version: i32, text: &str) {
+        let mut inner = self.inner.borrow_mut();
+        if !inner.initialized {
             return;
         }
         let uri = path_to_file_uri(file_path);
@@ -304,21 +293,22 @@ impl LspAnalyzer {
             "textDocument": { "uri": uri, "version": version },
             "contentChanges": [{ "text": text }]
         });
-        if let Some(ref mut writer) = self.stdin_writer {
+        if let Some(ref mut writer) = inner.stdin_writer {
             let _ = Self::send_notification(writer, "textDocument/didChange", params);
         }
     }
 
     /// Notify LSP that a file was closed.
-    pub fn notify_did_close(&mut self, file_path: &Path) {
-        if !self.initialized {
+    pub fn notify_did_close(&self, file_path: &Path) {
+        let mut inner = self.inner.borrow_mut();
+        if !inner.initialized {
             return;
         }
         let uri = path_to_file_uri(file_path);
         let params = serde_json::json!({
             "textDocument": { "uri": uri }
         });
-        if let Some(ref mut writer) = self.stdin_writer {
+        if let Some(ref mut writer) = inner.stdin_writer {
             let _ = Self::send_notification(writer, "textDocument/didClose", params);
         }
     }
@@ -327,13 +317,16 @@ impl LspAnalyzer {
 
     /// Send `textDocument/references` and map results to PropagationResult.
     pub fn find_references_for_symbol(
-        &mut self,
+        &self,
         file_path: &Path,
         line: usize,
         character: usize,
         project_root: &Path,
     ) -> Vec<PropagationResult> {
-        if !self.initialized {
+        let mut guard = self.inner.borrow_mut();
+        let inner = &mut *guard;
+
+        if !inner.initialized {
             return vec![];
         }
 
@@ -344,13 +337,13 @@ impl LspAnalyzer {
             "context": { "includeDeclaration": false }
         });
 
-        let (writer, reader) = match (&mut self.stdin_writer, &mut self.stdout_reader) {
+        let (writer, reader) = match (&mut inner.stdin_writer, &mut inner.stdout_reader) {
             (Some(w), Some(r)) => (w, r),
             _ => return vec![],
         };
 
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = inner.next_id;
+        inner.next_id += 1;
 
         let params = params.clone(); // clone for retry
         let resp = match Self::send_request_raw(
@@ -367,15 +360,15 @@ impl LspAnalyzer {
             }
         };
 
-        // Parse result — LSP returns Location[] or null
+        // Parse result \u2014 LSP returns Location[] or null
         let locations = match resp.get("result") {
             Some(serde_json::Value::Array(arr)) => arr.clone(),
             Some(serde_json::Value::Null) | None => {
-                // RA might still be indexing — retry after a delay
+                // RA might still be indexing \u2014 retry after a delay
                 eprintln!("[scope-engine/lsp] references returned null, waiting and retrying...");
                 std::thread::sleep(std::time::Duration::from_secs(2));
-                let retry_id = self.next_id;
-                self.next_id += 1;
+                let retry_id = inner.next_id;
+                inner.next_id += 1;
                 let retry_resp = match Self::send_request_raw(
                     writer,
                     reader,
@@ -558,20 +551,42 @@ impl LspAnalyzer {
                 if resp_id == expected_id && is_response {
                     return Ok(body);
                 }
-                // Response for a different id — skip
+                // Response for a different id \u2014 skip
             }
-            // Notification or wrong-id response — skip and read next message
+            // Notification or wrong-id response \u2014 skip and read next message
         }
     }
 }
 
 impl Drop for LspAnalyzer {
     fn drop(&mut self) {
-        self.shutdown();
+        let inner = self.inner.get_mut();
+        if !inner.initialized {
+            return;
+        }
+        if let (Some(writer), Some(reader)) = (&mut inner.stdin_writer, &mut inner.stdout_reader) {
+            let _ = Self::send_request_raw(
+                writer,
+                reader,
+                inner.next_id,
+                "shutdown",
+                serde_json::json!(null),
+            );
+            let _ = Self::send_notification(writer, "exit", serde_json::json!(null));
+        }
+        if let Some(ref mut child) = inner.process {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        inner.initialized = false;
+        inner.process = None;
+        inner.stdin_writer = None;
+        inner.stdout_reader = None;
+        eprintln!("[scope-engine/lsp] rust-analyzer shut down");
     }
 }
 
-// ── URI helpers ──────────────────────────────────────────────
+// \u2500\u2500 URI helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 fn path_to_file_uri(path: &Path) -> String {
     let abs = if path.is_absolute() {
@@ -591,30 +606,27 @@ fn uri_to_path(uri: &str) -> PathBuf {
 impl Analyzer for LspAnalyzer {
     fn find_references_for_symbol(
         &self,
-        _file_path: &Path,
-        _line: usize,
-        _character: usize,
-        _project_root: &Path,
+        file_path: &Path,
+        line: usize,
+        character: usize,
+        project_root: &Path,
     ) -> Vec<PropagationResult> {
-        // The Analyzer trait uses &self, but find_references_for_symbol
-        // needs mutable access to stdin/stdout for the LSP protocol.
-        // Use the concrete LspAnalyzer directly for full functionality.
-        vec![]
+        LspAnalyzer::find_references_for_symbol(self, file_path, line, character, project_root)
     }
 
-    fn notify_did_open(&mut self, file_path: &Path, text: &str) {
+    fn notify_did_open(&self, file_path: &Path, text: &str) {
         LspAnalyzer::notify_did_open(self, file_path, text);
     }
 
-    fn notify_did_change(&mut self, file_path: &Path, version: i32, text: &str) {
+    fn notify_did_change(&self, file_path: &Path, version: i32, text: &str) {
         LspAnalyzer::notify_did_change(self, file_path, version, text);
     }
 
-    fn notify_did_close(&mut self, file_path: &Path) {
+    fn notify_did_close(&self, file_path: &Path) {
         LspAnalyzer::notify_did_close(self, file_path);
     }
 
     fn is_initialized(&self) -> bool {
-        self.initialized
+        self.inner.borrow().initialized
     }
 }

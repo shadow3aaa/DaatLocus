@@ -42,7 +42,6 @@ impl SymbolKind {
 
     /// Heuristic: guess the kind from a tree-sitter node kind string.
     /// Used to map tree-sitter parse results back to SymbolKind.
-    #[allow(dead_code)]
     pub fn from_ts_node_kind(kind: &str) -> Self {
         match kind {
             "function_item" => SymbolKind::Function,

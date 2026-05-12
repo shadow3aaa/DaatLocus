@@ -8,7 +8,7 @@ mod server;
 mod state;
 mod treesitter;
 
-use lsp::LspAnalyzer;
+use analyzer::Analyzer;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -18,7 +18,7 @@ fn main() {
     let stdout = io::stdout();
     let mut project_root: Option<PathBuf> = None;
     let propagation_state = Mutex::new(state::PropagationState::new());
-    let lsp_analyzer: Mutex<Option<LspAnalyzer>> = Mutex::new(None);
+    let lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
 
     for line in stdin.lock().lines() {
         let line = match line {
