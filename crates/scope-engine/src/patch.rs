@@ -259,34 +259,34 @@ pub fn edit_code_apply(
     let original = std::fs::read_to_string(&full_path)
         .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?;
 
-    // ── Propagation: extract affected symbols from hunk line ranges ──
+    // ── Propagation: find modified symbol → find its references ──
     let hunks = parse_stripped_v4a_hunks(patch)?;
     let analyzer = TreeSitterAnalyzer::new();
     let mut affected = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut modified_symbol_names = HashSet::new();
 
+    // Step 1: collect all symbol names that were modified
     for hunk in &hunks {
-        if hunk.old_count > 0 {
-            let end = hunk.old_start + hunk.old_count;
-            for line in hunk.old_start..end {
-                if let Some(sel) = analyzer.find_containing_symbol(&full_path, line, project_root) {
-                    if seen.insert(sel.clone()) {
-                        affected.push(AffectedSelector {
-                            selector: sel,
-                            reason: format!("hunk modified original line {}", line),
-                        });
-                    }
-                }
-            }
+        let line = if hunk.old_count > 0 {
+            hunk.old_start
         } else {
-            // addition-only hunk: use the insertion point
-            if let Some(sel) = analyzer.find_containing_symbol(&full_path, hunk.old_start, project_root) {
-                if seen.insert(sel.clone()) {
-                    affected.push(AffectedSelector {
-                        selector: sel,
-                        reason: format!("hunk added content at original line {}", hunk.old_start),
-                    });
-                }
+            hunk.old_start
+        };
+        if let Some(sel) = analyzer.find_containing_symbol(&full_path, line, project_root) {
+            // Parse the selector to extract the symbol name
+            if let Ok(parsed) = crate::selector::parse_selector(&sel) {
+                modified_symbol_names.insert(parsed.name);
+            }
+        }
+    }
+
+    // Step 2: for each modified symbol, find referencing symbols in the same file
+    for sym_name in &modified_symbol_names {
+        let refs = analyzer.find_referencing_symbols(&full_path, sym_name, project_root);
+        for r in refs {
+            if seen.insert(r.selector.clone()) {
+                affected.push(r);
             }
         }
     }
@@ -325,11 +325,14 @@ pub fn delete_code_apply(
     std::fs::write(&full_path, &new_content)
         .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
 
-    // Propagate: delete affected is the deleted symbol itself
-    let mut affected = vec![AffectedSelector {
+    // Propagate: find referencing symbols of the deleted symbol
+    let analyzer = TreeSitterAnalyzer::new();
+    let mut affected = analyzer.find_referencing_symbols(&full_path, &parsed.name, project_root);
+    // Also include the deleted symbol itself so agent knows what was deleted
+    affected.push(AffectedSelector {
         selector: selector_str.to_string(),
         reason: format!("deleted symbol {} from {}", parsed.name, full_path.display()),
-    }];
+    });
 
     // Also find containing symbol for the deleted line
     if let Some(line) = delete_line {

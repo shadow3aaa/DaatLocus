@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::analyzer::Analyzer;
 use crate::api::AffectedSelector;
+use std::collections::HashSet;
 
 use crate::language::LanguageRegistry;
 
@@ -122,6 +123,95 @@ impl TreeSitterAnalyzer {
         }
         None
     }
+
+    /// Find all selectors in the same file that reference a given symbol name.
+    ///
+    /// Walk the CST for identifiers / type_identifiers matching `symbol_name`.
+    /// For each match, determine its containing definition via find_containing_symbol,
+    /// producing selectors like `src/foo.rs::fn startup()`.
+    ///
+    /// Excludes definition nodes (function_item, struct_item, etc.) to avoid
+    /// self-referencing.
+    pub fn find_referencing_symbols(
+        &self,
+        file_path: &Path,
+        symbol_name: &str,
+        project_root: &Path,
+    ) -> Vec<AffectedSelector> {
+        let ext = match file_path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e,
+            None => return vec![],
+        };
+        let adapter = match self.registry.get(ext) {
+            Some(a) => a,
+            None => return vec![],
+        };
+        let content = match std::fs::read_to_string(file_path) {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+        let mut parser = adapter.parser();
+        let tree = match parser.parse(&content, None) {
+            Some(t) => t,
+            None => return vec![],
+        };
+
+        let mut results: Vec<AffectedSelector> = Vec::new();
+        let mut seen = HashSet::new();
+        self.collect_refs(
+            tree.root_node(),
+            &content,
+            symbol_name,
+            file_path,
+            project_root,
+            &mut results,
+            &mut seen,
+        );
+        results
+    }
+
+    fn collect_refs(
+        &self,
+        node: tree_sitter::Node,
+        source: &str,
+        target_name: &str,
+        file_path: &Path,
+        project_root: &Path,
+        results: &mut Vec<AffectedSelector>,
+        seen: &mut HashSet<String>,
+    ) {
+        if (node.kind() == "identifier" || node.kind() == "type_identifier")
+            && node.utf8_text(source.as_bytes()).map_or(false, |s| s == target_name)
+        {
+            if let Some(parent) = node.parent() {
+                let parent_kind = parent.kind();
+                let is_def = matches!(
+                    parent_kind,
+                    "function_item" | "struct_item" | "enum_item" | "trait_item" | "impl_item"
+                );
+                if !is_def {
+                    let line = node.start_position().row + 1;
+                    if let Some(sel) = self.find_containing_symbol(file_path, line, project_root) {
+                        if seen.insert(sel.clone()) {
+                            results.push(AffectedSelector {
+                                selector: sel,
+                                reason: format!("references \"{}\" at line {}", target_name, line),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                self.collect_refs(
+                    child, source, target_name, file_path, project_root, results, seen,
+                );
+            }
+        }
+    }
+
 }
 
 impl Analyzer for TreeSitterAnalyzer {
