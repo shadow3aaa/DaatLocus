@@ -1,5 +1,6 @@
 pub mod rust;
 pub mod python;
+pub mod go;
 pub mod typescript;
 
 use tree_sitter::{Language, Parser};
@@ -41,6 +42,7 @@ impl LanguageRegistry {
         };
         r.register(Box::new(rust::RustAdapter::new()));
         r.register(Box::new(python::PythonAdapter::new()));
+        r.register(Box::new(go::GoAdapter::new()));
         r.register(Box::new(typescript::TypeScriptAdapter::new()));
         r.register(Box::new(typescript::JavaScriptAdapter::new()));
         r

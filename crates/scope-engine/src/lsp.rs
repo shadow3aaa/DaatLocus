@@ -92,6 +92,20 @@ impl LspServerConfig for TsJsConfig {
     fn post_init_delay_secs(&self) -> u64 { 3 }
 }
 
+// ── Go LSP config ──────────────────────────────────────────────
+
+pub struct GoplsConfig;
+
+impl LspServerConfig for GoplsConfig {
+    fn server_name(&self) -> &str { "gopls" }
+    fn binary_name(&self) -> &str { "gopls" }
+    fn language_id(&self) -> &str { "go" }
+    fn cached_binary_name(&self) -> String { "gopls".to_string() }
+    fn download_url(&self) -> Option<String> { None }
+    fn spawn_args(&self) -> Vec<String> { vec!["serve".to_string()] }
+    fn post_init_delay_secs(&self) -> u64 { 4 }
+}
+
 // ── LspClient (was LspAnalyzer) ───────────────────────────────
 
 /// Internal mutable state for LspClient, wrapped in RefCell for interior mutability.

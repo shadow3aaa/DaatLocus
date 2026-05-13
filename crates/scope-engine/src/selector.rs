@@ -39,10 +39,14 @@ impl SymbolKind {
             "impl" => SymbolKind::Impl,
             "class" => SymbolKind::Class,
             "interface" => SymbolKind::Trait,
-            "enum" => SymbolKind::Enum,
             "const" => SymbolKind::Unknown,
             "let" => SymbolKind::Unknown,
             "var" => SymbolKind::Unknown,
+            // Go-style prefixes
+            "func" => SymbolKind::Function,
+            "type" => SymbolKind::Struct,
+            "method" => SymbolKind::Function,
+            "package" => SymbolKind::Unknown,
             _ => SymbolKind::Unknown,
         }
     }
@@ -69,6 +73,10 @@ impl SymbolKind {
             "arrow_function" => SymbolKind::Function,
             "variable_declarator" => SymbolKind::Function,
             "type_alias_declaration" => SymbolKind::Struct,
+            // Go tree-sitter node types
+            "method_declaration" => SymbolKind::Function,
+            "type_declaration" => SymbolKind::Struct,
+            "type_identifier" => SymbolKind::Struct,
             _ => SymbolKind::Unknown,
         }
     }
