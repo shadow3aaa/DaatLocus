@@ -180,4 +180,11 @@ mod tests {
         let analyzer = TreeSitterAnalyzer::new();
         assert!(!analyzer.can_parse("unknown_ext", "fn main() {}"));
     }
+
+    #[test]
+    fn test_can_parse_valid_python() {
+        let analyzer = TreeSitterAnalyzer::new();
+        let py_code = "def greet(name):\n    return f\"Hello, {name}!\"\n";
+        assert!(analyzer.can_parse("py", py_code));
+    }
 }

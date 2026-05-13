@@ -74,7 +74,7 @@ impl LspServerConfig for PyrightConfig {
     fn language_id(&self) -> &str { "python" }
     fn cached_binary_name(&self) -> String { "pyright-langserver".to_string() }
     fn download_url(&self) -> Option<String> { None } // installed via npm/pip
-    fn spawn_args(&self) -> Vec<String> { vec!["--node-ipc".to_string()] }
+    fn spawn_args(&self) -> Vec<String> { vec!["--stdio".to_string()] }
     fn post_init_delay_secs(&self) -> u64 { 2 }
 }
 

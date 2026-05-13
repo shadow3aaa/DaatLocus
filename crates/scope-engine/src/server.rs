@@ -53,7 +53,7 @@ pub fn dispatch(
                 }
             };
             {
-                let lsp_guard = match lsp_analyzer.lock() {
+                let mut lsp_guard = match lsp_analyzer.lock() {
                     Ok(g) => g,
                     Err(_) => return JsonRpcResponse::err(req.id.clone(), -32603, "lock poisoned"),
                 };
