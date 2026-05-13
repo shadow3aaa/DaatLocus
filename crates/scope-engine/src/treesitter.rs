@@ -196,4 +196,92 @@ mod tests {
         let py_code = "def greet(name):\n    return f\"Hello, {name}!\"\n";
         assert!(analyzer.can_parse("py", py_code));
     }
+
+    #[test]
+    fn test_can_parse_valid_go() {
+        let analyzer = TreeSitterAnalyzer::new();
+        let go_code = "package main\nfunc greet(name string) string { return \"Hello\" }\n";
+        assert!(analyzer.can_parse("go", go_code));
+    }
+
+    #[test]
+    fn test_can_parse_valid_java() {
+        let analyzer = TreeSitterAnalyzer::new();
+        let java_code = "public class Hello { public static void main(String[] args) {} }\n";
+        assert!(analyzer.can_parse("java", java_code));
+    }
+
+    #[test]
+    fn test_can_parse_valid_typescript() {
+        let analyzer = TreeSitterAnalyzer::new();
+        let ts_code = "function greet(name: string): string { return \"Hello\"; }\n";
+        assert!(analyzer.can_parse("ts", ts_code));
+    }
+
+    #[test]
+    fn test_can_parse_valid_javascript() {
+        let analyzer = TreeSitterAnalyzer::new();
+        let js_code = "function greet(name) { return \"Hello\"; }\n";
+        assert!(analyzer.can_parse("js", js_code));
+    }
+
+    #[test]
+    fn test_can_parse_valid_c() {
+        let analyzer = TreeSitterAnalyzer::new();
+        let c_code = "int main() { return 0; }\n";
+        assert!(analyzer.can_parse("c", c_code));
+    }
+
+    #[test]
+    fn test_can_parse_valid_cpp() {
+        let analyzer = TreeSitterAnalyzer::new();
+        let cpp_code = "class Hello { public: void greet() {} };\n";
+        assert!(analyzer.can_parse("cpp", cpp_code));
+    }
+
+    #[test]
+    fn test_can_parse_valid_ruby() {
+        let analyzer = TreeSitterAnalyzer::new();
+        let ruby_code = "def greet(name)\n  \"Hello, #{name}!\"\nend\n";
+        assert!(analyzer.can_parse("rb", ruby_code));
+    }
+
+    #[test]
+    fn test_can_parse_valid_php() {
+        let analyzer = TreeSitterAnalyzer::new();
+        let php_code = "<?php\nfunction greet($name) { return \"Hello\"; }\n";
+        assert!(analyzer.can_parse("php", php_code));
+    }
+
+    #[test]
+    fn test_language_registry_has_all_languages() {
+        let registry = LanguageRegistry::new();
+        assert!(registry.get("rs").is_some(), "Rust should be registered");
+        assert!(registry.get("py").is_some(), "Python should be registered");
+        assert!(registry.get("go").is_some(), "Go should be registered");
+        assert!(registry.get("java").is_some(), "Java should be registered");
+        assert!(registry.get("ts").is_some(), "TypeScript should be registered");
+        assert!(registry.get("js").is_some(), "JavaScript should be registered");
+        assert!(registry.get("c").is_some(), "C should be registered");
+        assert!(registry.get("cpp").is_some(), "C++ should be registered");
+        assert!(registry.get("rb").is_some(), "Ruby should be registered");
+        assert!(registry.get("php").is_some(), "PHP should be registered");
+    }
+
+    #[test]
+    fn test_language_registry_all_names() {
+        let registry = LanguageRegistry::new();
+        let langs = registry.list_languages();
+        let names: Vec<&str> = langs.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"rust"), "rust in {:?}", names);
+        assert!(names.contains(&"python"), "python in {:?}", names);
+        assert!(names.contains(&"go"), "go in {:?}", names);
+        assert!(names.contains(&"java"), "java in {:?}", names);
+        assert!(names.contains(&"typescript"), "typescript in {:?}", names);
+        assert!(names.contains(&"javascript"), "javascript in {:?}", names);
+        assert!(names.contains(&"c"), "c in {:?}", names);
+        assert!(names.contains(&"cpp"), "cpp in {:?}", names);
+        assert!(names.contains(&"ruby"), "ruby in {:?}", names);
+        assert!(names.contains(&"php"), "php in {:?}", names);
+    }
 }
