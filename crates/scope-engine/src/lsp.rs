@@ -44,6 +44,13 @@ pub trait LspServerConfig: Send + Sync {
     fn spawn_args(&self) -> Vec<String> {
         vec![]
     }
+
+    /// Optional command to install the server when not found on PATH or cache.
+    /// Returns `(command, args)` — e.g. `("go", vec!["install", "golang.org/x/tools/gopls@v0.21.1"])`.
+    /// The locate_or_download logic will run this and then re-check PATH.
+    fn install_command(&self) -> Option<(String, Vec<String>)> {
+        None
+    }
 }
 
 // ── Rust LSP config ────────────────────────────────────────────
@@ -94,16 +101,21 @@ impl LspServerConfig for TsJsConfig {
 
 // ── Go LSP config ──────────────────────────────────────────────
 
+const GOPLS_VERSION: &str = "v0.21.1";
+
 pub struct GoplsConfig;
 
 impl LspServerConfig for GoplsConfig {
     fn server_name(&self) -> &str { "gopls" }
     fn binary_name(&self) -> &str { "gopls" }
     fn language_id(&self) -> &str { "go" }
-    fn cached_binary_name(&self) -> String { "gopls".to_string() }
+    fn cached_binary_name(&self) -> String { format!("gopls-{GOPLS_VERSION}") }
     fn download_url(&self) -> Option<String> { None }
     fn spawn_args(&self) -> Vec<String> { vec!["serve".to_string()] }
     fn post_init_delay_secs(&self) -> u64 { 4 }
+    fn install_command(&self) -> Option<(String, Vec<String>)> {
+        Some(("go".to_string(), vec!["install".to_string(), format!("golang.org/x/tools/gopls@{GOPLS_VERSION}")]))
+    }
 }
 
 // ── LspClient (was LspAnalyzer) ───────────────────────────────
@@ -224,10 +236,62 @@ impl LspClient {
         // 3. Download (if available)
         match config.download_url() {
             Some(url) => Self::download_binary(&cache_dir, &cached, &url, config.server_name()),
-            None => Err(format!(
-                "{} not found on PATH and no download URL configured",
-                config.server_name()
-            )),
+            None => {
+                // 3b. Try install command (e.g. "go install golang.org/x/tools/gopls@v0.x")
+                if let Some((cmd, args)) = config.install_command() {
+                    eprintln!("[scope-engine/lsp] attempting to install {} via: {} {}", config.server_name(), cmd, args.join(" "));
+                    let install_output = Command::new(&cmd)
+                        .args(&args)
+                        .output()
+                        .map_err(|e| format!("failed to run install command '{} {}': {e}", cmd, args.join(" ")))?;
+                    if !install_output.status.success() {
+                        let stderr = String::from_utf8_lossy(&install_output.stderr);
+                        return Err(format!(
+                            "install command for {} failed: {stderr}",
+                            config.server_name()
+                        ));
+                    }
+                    // Re-check PATH after installation
+                    if let Ok(output) = Command::new("which").arg(config.binary_name()).output()
+                        && output.status.success()
+                    {
+                        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !path.is_empty() {
+                            eprintln!("[scope-engine/lsp] installed {} and found on PATH: {path}", config.server_name());
+                            return Ok(PathBuf::from(path));
+                        }
+                    }
+                    // If not on PATH, check GOPATH/bin and GOBIN (go install puts binaries there)
+                    let go_bin_dirs: Vec<PathBuf> = [
+                        std::env::var("GOBIN").ok().map(PathBuf::from),
+                        std::env::var("GOPATH").ok().map(|g| PathBuf::from(g).join("bin")),
+                        Command::new("go").args(["env", "GOPATH"]).output().ok().map(|o| {
+                            PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("bin")
+                        }),
+                        Command::new("go").args(["env", "GOBIN"]).output().ok().map(|o| {
+                            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+                        }).flatten(),
+                    ].into_iter().filter_map(|x| x).collect();
+                    for dir in go_bin_dirs {
+                        let candidate = dir.join(config.binary_name());
+                        if candidate.is_file() {
+                            eprintln!("[scope-engine/lsp] installed {} and found at: {}", config.server_name(), candidate.display());
+                            return Ok(candidate);
+                        }
+                    }
+                    Err(format!(
+                        "{} was installed via '{}' but could not be found on PATH, GOPATH/bin, or GOBIN",
+                        config.server_name(),
+                        cmd
+                    ))
+                } else {
+                    Err(format!(
+                        "{} not found on PATH and no download URL or install command configured",
+                        config.server_name()
+                    ))
+                }
+            }
         }
     }
 
