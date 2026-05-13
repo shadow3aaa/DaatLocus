@@ -86,6 +86,10 @@ pub fn dispatch(
                             "typescript" | "javascript" => &["ts", "tsx", "js", "jsx"],
                             "go" => &["go"],
                             "java" => &["java"],
+                            "c" | "h" => &["c", "h"],
+                            "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh" => &["cpp", "cxx", "cc", "hpp", "hxx", "hh"],
+                            "rb" => &["rb"],
+                            "php" => &["php"],
                             _ => &["rs"],
                         };
                         for entry in entries.flatten() {

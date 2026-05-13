@@ -32,25 +32,26 @@ impl SymbolKind {
     /// Parse a symbol-kind prefix like "fn", "struct", "enum", "trait", "impl".
     fn from_prefix(prefix: &str) -> Self {
         match prefix {
+            // Rust
             "fn" => SymbolKind::Function,
             "struct" => SymbolKind::Struct,
             "enum" => SymbolKind::Enum,
             "trait" => SymbolKind::Trait,
             "impl" => SymbolKind::Impl,
-            "class" => SymbolKind::Class,
-            "interface" => SymbolKind::Trait,
             "const" => SymbolKind::Unknown,
             "let" => SymbolKind::Unknown,
             "var" => SymbolKind::Unknown,
-            // Go-style prefixes
+            // Go
             "func" => SymbolKind::Function,
             "type" => SymbolKind::Struct,
             "method" => SymbolKind::Function,
             "package" => SymbolKind::Unknown,
-            // Java-style prefixes
+            // Java/C++/C#/Ruby/PHP
             "class" => SymbolKind::Class,
             "interface" => SymbolKind::Trait,
             "constructor" => SymbolKind::Function,
+            "def" => SymbolKind::Function,
+            "module" => SymbolKind::Unknown,
             _ => SymbolKind::Unknown,
         }
     }
@@ -82,11 +83,14 @@ impl SymbolKind {
             "type_declaration" => SymbolKind::Struct,
             "type_identifier" => SymbolKind::Struct,
             // Java tree-sitter node types
-            "class_declaration" => SymbolKind::Class,
-            "interface_declaration" => SymbolKind::Trait,
             "constructor_declaration" => SymbolKind::Function,
             "field_declaration" => SymbolKind::Unknown,
             "local_variable_declaration" => SymbolKind::Unknown,
+            // C/C++ tree-sitter node types
+            "class_specifier" => SymbolKind::Class,
+            "struct_specifier" => SymbolKind::Struct,
+            // Ruby tree-sitter node types
+            "singleton_method" => SymbolKind::Function,
             _ => SymbolKind::Unknown,
         }
     }

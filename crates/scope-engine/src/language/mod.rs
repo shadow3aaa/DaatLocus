@@ -3,6 +3,10 @@ pub mod python;
 pub mod go;
 pub mod typescript;
 pub mod java;
+pub mod c;
+pub mod cpp;
+pub mod ruby;
+pub mod php;
 
 use tree_sitter::{Language, Parser};
 
@@ -47,6 +51,10 @@ impl LanguageRegistry {
         r.register(Box::new(typescript::TypeScriptAdapter::new()));
         r.register(Box::new(typescript::JavaScriptAdapter::new()));
         r.register(Box::new(java::JavaAdapter::new()));
+        r.register(Box::new(c::CAdapter::new()));
+        r.register(Box::new(cpp::CppAdapter::new()));
+        r.register(Box::new(ruby::RubyAdapter::new()));
+        r.register(Box::new(php::PhpAdapter::new()));
         r
     }
 
