@@ -114,10 +114,20 @@ impl TreeSitterAnalyzer {
         // Check if this is a named definition
         let is_def = matches!(
             kind,
-            "function_item" | "struct_item" | "enum_item" | "trait_item" | "impl_item"
-            | "function_definition" | "class_definition" | "decorated_definition"
-            | "function_declaration" | "class_declaration" | "interface_declaration"
-            | "enum_declaration" | "method_definition" | "type_alias_declaration"
+            "function_item"
+                | "struct_item"
+                | "enum_item"
+                | "trait_item"
+                | "impl_item"
+                | "function_definition"
+                | "class_definition"
+                | "decorated_definition"
+                | "function_declaration"
+                | "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "method_definition"
+                | "type_alias_declaration"
         );
 
         if is_def {
@@ -266,8 +276,14 @@ mod tests {
         assert!(registry.get("py").is_some(), "Python should be registered");
         assert!(registry.get("go").is_some(), "Go should be registered");
         assert!(registry.get("java").is_some(), "Java should be registered");
-        assert!(registry.get("ts").is_some(), "TypeScript should be registered");
-        assert!(registry.get("js").is_some(), "JavaScript should be registered");
+        assert!(
+            registry.get("ts").is_some(),
+            "TypeScript should be registered"
+        );
+        assert!(
+            registry.get("js").is_some(),
+            "JavaScript should be registered"
+        );
         assert!(registry.get("c").is_some(), "C should be registered");
         assert!(registry.get("cpp").is_some(), "C++ should be registered");
         assert!(registry.get("rb").is_some(), "Ruby should be registered");

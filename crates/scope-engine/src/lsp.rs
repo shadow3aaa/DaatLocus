@@ -1,5 +1,5 @@
-use std::cell::RefCell;
 use crate::analyzer::Analyzer;
+use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -71,10 +71,18 @@ pub struct RustAnalyzerConfig;
 const RA_VERSION: &str = "2025-05-05";
 
 impl LspServerConfig for RustAnalyzerConfig {
-    fn server_name(&self) -> &str { "rust-analyzer" }
-    fn binary_name(&self) -> &str { "rust-analyzer" }
-    fn language_id(&self) -> &str { "rust" }
-    fn cached_binary_name(&self) -> String { format!("rust-analyzer-{RA_VERSION}") }
+    fn server_name(&self) -> &str {
+        "rust-analyzer"
+    }
+    fn binary_name(&self) -> &str {
+        "rust-analyzer"
+    }
+    fn language_id(&self) -> &str {
+        "rust"
+    }
+    fn cached_binary_name(&self) -> String {
+        format!("rust-analyzer-{RA_VERSION}")
+    }
     fn download_url(&self) -> Option<String> {
         Some(format!(
             "https://github.com/rust-lang/rust-analyzer/releases/download/{RA_VERSION}/rust-analyzer-x86_64-apple-darwin"
@@ -82,7 +90,8 @@ impl LspServerConfig for RustAnalyzerConfig {
     }
 
     fn setup_hints(&self) -> String {
-        "For Rust: rust-analyzer is auto-downloaded by scope-engine. No manual setup needed.".to_string()
+        "For Rust: rust-analyzer is auto-downloaded by scope-engine. No manual setup needed."
+            .to_string()
     }
 }
 
@@ -91,13 +100,27 @@ impl LspServerConfig for RustAnalyzerConfig {
 pub struct PyrightConfig;
 
 impl LspServerConfig for PyrightConfig {
-    fn server_name(&self) -> &str { "pyright-langserver" }
-    fn binary_name(&self) -> &str { "pyright-langserver" }
-    fn language_id(&self) -> &str { "python" }
-    fn cached_binary_name(&self) -> String { "pyright-langserver".to_string() }
-    fn download_url(&self) -> Option<String> { None } // installed via npm/pip
-    fn spawn_args(&self) -> Vec<String> { vec!["--stdio".to_string()] }
-    fn post_init_delay_secs(&self) -> u64 { 2 }
+    fn server_name(&self) -> &str {
+        "pyright-langserver"
+    }
+    fn binary_name(&self) -> &str {
+        "pyright-langserver"
+    }
+    fn language_id(&self) -> &str {
+        "python"
+    }
+    fn cached_binary_name(&self) -> String {
+        "pyright-langserver".to_string()
+    }
+    fn download_url(&self) -> Option<String> {
+        None
+    } // installed via npm/pip
+    fn spawn_args(&self) -> Vec<String> {
+        vec!["--stdio".to_string()]
+    }
+    fn post_init_delay_secs(&self) -> u64 {
+        2
+    }
 
     fn setup_hints(&self) -> String {
         "For Python: install pyright-langserver via 'npm install -g pyright' or 'pip install pyright'.".to_string()
@@ -109,13 +132,27 @@ impl LspServerConfig for PyrightConfig {
 pub struct TsJsConfig;
 
 impl LspServerConfig for TsJsConfig {
-    fn server_name(&self) -> &str { "typescript-language-server" }
-    fn binary_name(&self) -> &str { "typescript-language-server" }
-    fn language_id(&self) -> &str { "typescript" }
-    fn cached_binary_name(&self) -> String { "typescript-language-server".to_string() }
-    fn download_url(&self) -> Option<String> { None } // installed via npm
-    fn spawn_args(&self) -> Vec<String> { vec!["--stdio".to_string()] }
-    fn post_init_delay_secs(&self) -> u64 { 3 }
+    fn server_name(&self) -> &str {
+        "typescript-language-server"
+    }
+    fn binary_name(&self) -> &str {
+        "typescript-language-server"
+    }
+    fn language_id(&self) -> &str {
+        "typescript"
+    }
+    fn cached_binary_name(&self) -> String {
+        "typescript-language-server".to_string()
+    }
+    fn download_url(&self) -> Option<String> {
+        None
+    } // installed via npm
+    fn spawn_args(&self) -> Vec<String> {
+        vec!["--stdio".to_string()]
+    }
+    fn post_init_delay_secs(&self) -> u64 {
+        3
+    }
 
     fn setup_hints(&self) -> String {
         "For TypeScript/JavaScript: install typescript-language-server via 'npm install -g typescript-language-server typescript'.".to_string()
@@ -129,32 +166,64 @@ const GOPLS_VERSION: &str = "v0.21.1";
 pub struct GoplsConfig;
 
 impl LspServerConfig for GoplsConfig {
-    fn server_name(&self) -> &str { "gopls" }
-    fn binary_name(&self) -> &str { "gopls" }
-    fn language_id(&self) -> &str { "go" }
-    fn cached_binary_name(&self) -> String { format!("gopls-{GOPLS_VERSION}") }
-    fn download_url(&self) -> Option<String> { None }
-    fn spawn_args(&self) -> Vec<String> { vec!["serve".to_string()] }
-    fn post_init_delay_secs(&self) -> u64 { 4 }
+    fn server_name(&self) -> &str {
+        "gopls"
+    }
+    fn binary_name(&self) -> &str {
+        "gopls"
+    }
+    fn language_id(&self) -> &str {
+        "go"
+    }
+    fn cached_binary_name(&self) -> String {
+        format!("gopls-{GOPLS_VERSION}")
+    }
+    fn download_url(&self) -> Option<String> {
+        None
+    }
+    fn spawn_args(&self) -> Vec<String> {
+        vec!["serve".to_string()]
+    }
+    fn post_init_delay_secs(&self) -> u64 {
+        4
+    }
     fn install_command(&self) -> Option<(String, Vec<String>)> {
-        Some(("go".to_string(), vec!["install".to_string(), format!("golang.org/x/tools/gopls@{GOPLS_VERSION}")]))
+        Some((
+            "go".to_string(),
+            vec![
+                "install".to_string(),
+                format!("golang.org/x/tools/gopls@{GOPLS_VERSION}"),
+            ],
+        ))
     }
 }
-
-
 
 // ── Java LSP config (Eclipse JDT Language Server) ──────────────
 
 pub struct JdtlsConfig;
 
 impl LspServerConfig for JdtlsConfig {
-    fn server_name(&self) -> &str { "jdtls" }
-    fn binary_name(&self) -> &str { "jdtls" }
-    fn language_id(&self) -> &str { "java" }
-    fn cached_binary_name(&self) -> String { "jdtls".to_string() }
-    fn download_url(&self) -> Option<String> { None }
-    fn spawn_args(&self) -> Vec<String> { vec![] }
-    fn post_init_delay_secs(&self) -> u64 { 5 }
+    fn server_name(&self) -> &str {
+        "jdtls"
+    }
+    fn binary_name(&self) -> &str {
+        "jdtls"
+    }
+    fn language_id(&self) -> &str {
+        "java"
+    }
+    fn cached_binary_name(&self) -> String {
+        "jdtls".to_string()
+    }
+    fn download_url(&self) -> Option<String> {
+        None
+    }
+    fn spawn_args(&self) -> Vec<String> {
+        vec![]
+    }
+    fn post_init_delay_secs(&self) -> u64 {
+        5
+    }
 
     fn setup_hints(&self) -> String {
         "For Java: install Eclipse JDT Language Server (jdtls). On macOS: 'brew install eclipse-jdtls'. On Linux: download from https://download.eclipse.org/jdtls/snapshots/ and add 'jdtls' to PATH. Requires JDK 17+.".to_string()
@@ -209,7 +278,10 @@ impl LspClient {
         let binary_path = match Self::locate_or_download(config) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[scope-engine/lsp] cannot locate {}: {e}", config.server_name());
+                eprintln!(
+                    "[scope-engine/lsp] cannot locate {}: {e}",
+                    config.server_name()
+                );
                 return Self {
                     inner: RefCell::new(LspClientInner {
                         process: None,
@@ -235,7 +307,10 @@ impl LspClient {
                 }),
             },
             Err(e) => {
-                eprintln!("[scope-engine/lsp] failed to spawn/initialize {}: {e}", config.server_name());
+                eprintln!(
+                    "[scope-engine/lsp] failed to spawn/initialize {}: {e}",
+                    config.server_name()
+                );
                 Self {
                     inner: RefCell::new(LspClientInner {
                         process: None,
@@ -259,7 +334,10 @@ impl LspClient {
         {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {
-                eprintln!("[scope-engine/lsp] found {} on PATH: {path}", config.server_name());
+                eprintln!(
+                    "[scope-engine/lsp] found {} on PATH: {path}",
+                    config.server_name()
+                );
                 return Ok(PathBuf::from(path));
             }
         }
@@ -282,11 +360,19 @@ impl LspClient {
             None => {
                 // 3b. Try install command (e.g. "go install golang.org/x/tools/gopls@v0.x")
                 if let Some((cmd, args)) = config.install_command() {
-                    eprintln!("[scope-engine/lsp] attempting to install {} via: {} {}", config.server_name(), cmd, args.join(" "));
-                    let install_output = Command::new(&cmd)
-                        .args(&args)
-                        .output()
-                        .map_err(|e| format!("failed to run install command '{} {}': {e}", cmd, args.join(" ")))?;
+                    eprintln!(
+                        "[scope-engine/lsp] attempting to install {} via: {} {}",
+                        config.server_name(),
+                        cmd,
+                        args.join(" ")
+                    );
+                    let install_output = Command::new(&cmd).args(&args).output().map_err(|e| {
+                        format!(
+                            "failed to run install command '{} {}': {e}",
+                            cmd,
+                            args.join(" ")
+                        )
+                    })?;
                     if !install_output.status.success() {
                         let stderr = String::from_utf8_lossy(&install_output.stderr);
                         return Err(format!(
@@ -300,26 +386,50 @@ impl LspClient {
                     {
                         let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                         if !path.is_empty() {
-                            eprintln!("[scope-engine/lsp] installed {} and found on PATH: {path}", config.server_name());
+                            eprintln!(
+                                "[scope-engine/lsp] installed {} and found on PATH: {path}",
+                                config.server_name()
+                            );
                             return Ok(PathBuf::from(path));
                         }
                     }
                     // If not on PATH, check GOPATH/bin and GOBIN (go install puts binaries there)
                     let go_bin_dirs: Vec<PathBuf> = [
                         std::env::var("GOBIN").ok().map(PathBuf::from),
-                        std::env::var("GOPATH").ok().map(|g| PathBuf::from(g).join("bin")),
-                        Command::new("go").args(["env", "GOPATH"]).output().ok().map(|o| {
-                            PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("bin")
-                        }),
-                        Command::new("go").args(["env", "GOBIN"]).output().ok().and_then(|o| {
-                            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                            if s.is_empty() { None } else { Some(PathBuf::from(s)) }
-                        }),
-                    ].into_iter().flatten().collect();
+                        std::env::var("GOPATH")
+                            .ok()
+                            .map(|g| PathBuf::from(g).join("bin")),
+                        Command::new("go")
+                            .args(["env", "GOPATH"])
+                            .output()
+                            .ok()
+                            .map(|o| {
+                                PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("bin")
+                            }),
+                        Command::new("go")
+                            .args(["env", "GOBIN"])
+                            .output()
+                            .ok()
+                            .and_then(|o| {
+                                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                                if s.is_empty() {
+                                    None
+                                } else {
+                                    Some(PathBuf::from(s))
+                                }
+                            }),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
                     for dir in go_bin_dirs {
                         let candidate = dir.join(config.binary_name());
                         if candidate.is_file() {
-                            eprintln!("[scope-engine/lsp] installed {} and found at: {}", config.server_name(), candidate.display());
+                            eprintln!(
+                                "[scope-engine/lsp] installed {} and found at: {}",
+                                config.server_name(),
+                                candidate.display()
+                            );
                             return Ok(candidate);
                         }
                     }
@@ -348,7 +458,12 @@ impl LspClient {
     }
 
     #[cfg(feature = "download-ra")]
-    fn download_binary(cache_dir: &Path, target: &Path, url: &str, name: &str) -> Result<PathBuf, String> {
+    fn download_binary(
+        cache_dir: &Path,
+        target: &Path,
+        url: &str,
+        name: &str,
+    ) -> Result<PathBuf, String> {
         eprintln!("[scope-engine/lsp] downloading {name}...");
         let tmp = cache_dir.join("download.tmp");
         let mut resp = reqwest::blocking::Client::builder()
@@ -379,13 +494,24 @@ impl LspClient {
                 .map_err(|e| format!("cannot chmod: {e}"))?;
         }
 
-        eprintln!("[scope-engine/lsp] downloaded {} to {}", name, target.display());
+        eprintln!(
+            "[scope-engine/lsp] downloaded {} to {}",
+            name,
+            target.display()
+        );
         Ok(target.to_path_buf())
     }
 
     #[cfg(not(feature = "download-ra"))]
-    fn download_binary(_cache_dir: &Path, _target: &Path, _url: &str, name: &str) -> Result<PathBuf, String> {
-        Err(format!("{name} download not available (feature 'download-ra' disabled)"))
+    fn download_binary(
+        _cache_dir: &Path,
+        _target: &Path,
+        _url: &str,
+        name: &str,
+    ) -> Result<PathBuf, String> {
+        Err(format!(
+            "{name} download not available (feature 'download-ra' disabled)"
+        ))
     }
 
     // ── Subprocess management ──────────────────────────────────
@@ -457,7 +583,9 @@ impl LspClient {
             config.server_name(),
             project_root.display()
         );
-        std::thread::sleep(std::time::Duration::from_secs(config.post_init_delay_secs()));
+        std::thread::sleep(std::time::Duration::from_secs(
+            config.post_init_delay_secs(),
+        ));
         Ok((child, writer, reader))
     }
 
@@ -574,7 +702,9 @@ impl LspClient {
                 ) {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("[scope-engine/lsp] retry textDocument/references also failed: {e}");
+                        eprintln!(
+                            "[scope-engine/lsp] retry textDocument/references also failed: {e}"
+                        );
                         return vec![];
                     }
                 };

@@ -4,7 +4,9 @@ use tree_sitter::Language;
 pub struct CAdapter;
 
 impl CAdapter {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for CAdapter {
@@ -14,9 +16,15 @@ impl Default for CAdapter {
 }
 
 impl LanguageAdapter for CAdapter {
-    fn language_name(&self) -> &'static str { "c" }
-    fn extensions(&self) -> &[&'static str] { &["c", "h"] }
-    fn language(&self) -> Language { tree_sitter_c::LANGUAGE.into() }
+    fn language_name(&self) -> &'static str {
+        "c"
+    }
+    fn extensions(&self) -> &[&'static str] {
+        &["c", "h"]
+    }
+    fn language(&self) -> Language {
+        tree_sitter_c::LANGUAGE.into()
+    }
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
             definitions: r#"

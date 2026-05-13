@@ -1,15 +1,17 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::analyzer::Analyzer;
 use crate::api::*;
-use crate::lsp::{LspAnalyzer, LspServerConfig, RustAnalyzerConfig, PyrightConfig, GoplsConfig, JdtlsConfig};
 use crate::lsp::TsJsConfig;
+use crate::lsp::{
+    GoplsConfig, JdtlsConfig, LspAnalyzer, LspServerConfig, PyrightConfig, RustAnalyzerConfig,
+};
 use crate::patch;
 use crate::selector;
 use crate::state::PropagationState;
 use crate::treesitter::TreeSitterAnalyzer;
 use std::sync::Mutex;
-use crate::analyzer::Analyzer;
 
 pub fn dispatch(
     req: &JsonRpcRequest,
@@ -78,7 +80,11 @@ pub fn dispatch(
                 if let Some(ref lsp) = *lsp_guard {
                     let root = Path::new(&params.project_root);
                     let src_dir = root.join("src");
-                    let scan_dir = if src_dir.exists() { src_dir.as_path() } else { root };
+                    let scan_dir = if src_dir.exists() {
+                        src_dir.as_path()
+                    } else {
+                        root
+                    };
                     if let Ok(entries) = std::fs::read_dir(scan_dir) {
                         let exts: &[&str] = match lsp_lang {
                             "rust" => &["rs"],
@@ -87,7 +93,9 @@ pub fn dispatch(
                             "go" => &["go"],
                             "java" => &["java"],
                             "c" | "h" => &["c", "h"],
-                            "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh" => &["cpp", "cxx", "cc", "hpp", "hxx", "hh"],
+                            "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh" => {
+                                &["cpp", "cxx", "cc", "hpp", "hxx", "hh"]
+                            }
                             "rb" => &["rb"],
                             "php" => &["php"],
                             _ => &["rs"],
@@ -416,16 +424,17 @@ fn handle_delete_code(
     }
 }
 
-
 pub fn handle_get_config_hints(req: &JsonRpcRequest) -> JsonRpcResponse {
     use crate::language::LanguageRegistry;
-    use crate::lsp::{LspServerConfig, RustAnalyzerConfig, PyrightConfig, TsJsConfig, GoplsConfig, JdtlsConfig};
+    use crate::lsp::{
+        GoplsConfig, JdtlsConfig, LspServerConfig, PyrightConfig, RustAnalyzerConfig, TsJsConfig,
+    };
 
     let registry = LanguageRegistry::new();
     let configs: Vec<Box<dyn LspServerConfig>> = vec![
         Box::new(RustAnalyzerConfig),
         Box::new(PyrightConfig),
-        Box::new(TsJsConfig),   // covers both TS and JS
+        Box::new(TsJsConfig), // covers both TS and JS
         Box::new(GoplsConfig),
         Box::new(JdtlsConfig),
     ];
@@ -433,12 +442,16 @@ pub fn handle_get_config_hints(req: &JsonRpcRequest) -> JsonRpcResponse {
     let mut languages = Vec::new();
 
     // Tree-sitter languages from registry
-    let ts_langs: Vec<serde_json::Value> = registry.list_languages().into_iter().map(|(name, exts)| {
-        serde_json::json!({
-            "name": name,
-            "extensions": exts,
+    let ts_langs: Vec<serde_json::Value> = registry
+        .list_languages()
+        .into_iter()
+        .map(|(name, exts)| {
+            serde_json::json!({
+                "name": name,
+                "extensions": exts,
+            })
         })
-    }).collect();
+        .collect();
 
     // LSP configs
     for cfg in &configs {

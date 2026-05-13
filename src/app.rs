@@ -28,6 +28,10 @@ impl AppId {
         Self("Terminal".to_string())
     }
 
+    pub fn coding() -> Self {
+        Self("Coding".to_string())
+    }
+
     pub fn from_workspace_folder(name: impl Into<String>) -> Result<Self> {
         let name = name.into();
         let trimmed = name.trim();
@@ -45,7 +49,10 @@ impl AppId {
                 "workspace app folder name `{trimmed}` must use only ASCII letters, numbers, `_`, or `-`"
             ));
         }
-        if trimmed == Self::browser().as_str() || trimmed == Self::terminal().as_str() {
+        if trimmed == Self::browser().as_str()
+            || trimmed == Self::terminal().as_str()
+            || trimmed == Self::coding().as_str()
+        {
             return Err(miette!("workspace app id `{trimmed}` is reserved"));
         }
         Ok(Self(trimmed.to_string()))
@@ -70,6 +77,7 @@ impl Display for AppId {
 pub enum AppToolScope {
     Browser,
     Terminal,
+    Coding,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

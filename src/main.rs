@@ -5,6 +5,7 @@ mod apply_patch;
 mod browser_app;
 mod browser_install;
 mod cli;
+mod coding_app;
 mod commands;
 mod config;
 mod config_wizard;

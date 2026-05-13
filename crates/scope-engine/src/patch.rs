@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::analyzer::Analyzer;
 use crate::api::{PropagationResult, PropagationSource};
 use crate::treesitter::TreeSitterAnalyzer;
 use std::sync::Mutex;
-use crate::analyzer::Analyzer;
 
 /// A single hunk inside a stripped v4a patch.
 #[derive(Debug, Clone)]

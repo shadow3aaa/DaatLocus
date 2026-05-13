@@ -70,7 +70,7 @@ pub struct ReadCodeResponse {
     pub language: String,
 }
 /// Each match from a search_code query.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SearchMatch {
     /// Relative file path from project root.
     pub file: String,
@@ -82,7 +82,7 @@ pub struct SearchMatch {
     pub selector: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SearchCodeResponse {
     pub matches: Vec<SearchMatch>,
 }

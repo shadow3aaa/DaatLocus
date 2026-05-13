@@ -7,6 +7,7 @@ use std::{
 use crate::{
     app::{AppId, AppManager},
     browser_app::BrowserApp,
+    coding_app::CodingApp,
     context::Context,
     context_budget::TokenEstimateBaseline,
     daat_locus_paths::daat_locus_paths,
@@ -192,8 +193,11 @@ pub(crate) fn build_runtime_apps(
     execution_cwd: &Path,
     sandbox_policy: &RuntimeSandboxPolicy,
 ) -> RuntimeAppsBootstrap {
-    let mut apps: Vec<Box<dyn crate::app::App>> =
-        vec![Box::new(BrowserApp::new()), Box::new(TerminalApp::new())];
+    let mut apps: Vec<Box<dyn crate::app::App>> = vec![
+        Box::new(BrowserApp::new()),
+        Box::new(TerminalApp::new()),
+        Box::new(CodingApp::new()),
+    ];
     let bootstrap = bootstrap_workspace_apps(execution_cwd, sandbox_policy);
     for error in &bootstrap.errors {
         tracing::warn!("{error}");

@@ -4,7 +4,9 @@ use tree_sitter::Language;
 pub struct PhpAdapter;
 
 impl PhpAdapter {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for PhpAdapter {
@@ -14,9 +16,15 @@ impl Default for PhpAdapter {
 }
 
 impl LanguageAdapter for PhpAdapter {
-    fn language_name(&self) -> &'static str { "php" }
-    fn extensions(&self) -> &[&'static str] { &["php"] }
-    fn language(&self) -> Language { tree_sitter_php::LANGUAGE_PHP.into() }
+    fn language_name(&self) -> &'static str {
+        "php"
+    }
+    fn extensions(&self) -> &[&'static str] {
+        &["php"]
+    }
+    fn language(&self) -> Language {
+        tree_sitter_php::LANGUAGE_PHP.into()
+    }
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
             definitions: r#"

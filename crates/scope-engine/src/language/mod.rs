@@ -1,12 +1,12 @@
-pub mod rust;
-pub mod python;
-pub mod go;
-pub mod typescript;
-pub mod java;
 pub mod c;
 pub mod cpp;
-pub mod ruby;
+pub mod go;
+pub mod java;
 pub mod php;
+pub mod python;
+pub mod ruby;
+pub mod rust;
+pub mod typescript;
 
 use tree_sitter::{Language, Parser};
 
@@ -73,7 +73,10 @@ impl LanguageRegistry {
 
     /// Return a list of (language_name, extensions) for all registered adapters.
     pub fn list_languages(&self) -> Vec<(&str, &[&str])> {
-        self.adapters.iter().map(|a| (a.language_name(), a.extensions())).collect()
+        self.adapters
+            .iter()
+            .map(|a| (a.language_name(), a.extensions()))
+            .collect()
     }
 }
 

@@ -1,7 +1,7 @@
-use scope_engine::server;
-use scope_engine::api;
-use scope_engine::state::PropagationState;
 use scope_engine::analyzer::Analyzer;
+use scope_engine::api;
+use scope_engine::server;
+use scope_engine::state::PropagationState;
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;

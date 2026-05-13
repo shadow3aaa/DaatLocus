@@ -4,7 +4,9 @@ use tree_sitter::Language;
 pub struct RubyAdapter;
 
 impl RubyAdapter {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for RubyAdapter {
@@ -14,9 +16,15 @@ impl Default for RubyAdapter {
 }
 
 impl LanguageAdapter for RubyAdapter {
-    fn language_name(&self) -> &'static str { "ruby" }
-    fn extensions(&self) -> &[&'static str] { &["rb"] }
-    fn language(&self) -> Language { tree_sitter_ruby::LANGUAGE.into() }
+    fn language_name(&self) -> &'static str {
+        "ruby"
+    }
+    fn extensions(&self) -> &[&'static str] {
+        &["rb"]
+    }
+    fn language(&self) -> Language {
+        tree_sitter_ruby::LANGUAGE.into()
+    }
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
             definitions: r#"

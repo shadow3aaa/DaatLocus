@@ -28,6 +28,10 @@ impl PropagationState {
         }
     }
 
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
     pub fn next_review(&mut self) -> Option<ReviewEvent> {
         let r = self.pending.pop()?;
         match &r.source {

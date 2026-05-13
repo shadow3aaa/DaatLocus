@@ -4,7 +4,9 @@ use tree_sitter::Language;
 pub struct CppAdapter;
 
 impl CppAdapter {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
 }
 
 impl Default for CppAdapter {
@@ -14,9 +16,15 @@ impl Default for CppAdapter {
 }
 
 impl LanguageAdapter for CppAdapter {
-    fn language_name(&self) -> &'static str { "cpp" }
-    fn extensions(&self) -> &[&'static str] { &["cpp", "cxx", "cc", "hpp", "hxx", "hh"] }
-    fn language(&self) -> Language { tree_sitter_cpp::LANGUAGE.into() }
+    fn language_name(&self) -> &'static str {
+        "cpp"
+    }
+    fn extensions(&self) -> &[&'static str] {
+        &["cpp", "cxx", "cc", "hpp", "hxx", "hh"]
+    }
+    fn language(&self) -> Language {
+        tree_sitter_cpp::LANGUAGE.into()
+    }
     fn queries(&self) -> LanguageQueries {
         LanguageQueries {
             definitions: r#"
