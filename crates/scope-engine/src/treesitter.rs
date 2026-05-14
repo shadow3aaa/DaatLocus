@@ -164,7 +164,9 @@ impl TreeSitterAnalyzer {
             None => return false,
         };
         let mut parser = adapter.parser();
-        parser.parse(content, None).is_some()
+        parser
+            .parse(content, None)
+            .is_some_and(|tree| !node_has_parse_error(tree.root_node()))
     }
 
     fn collect_symbols(
@@ -251,6 +253,15 @@ fn kind_prefix(kind: &str) -> &'static str {
         "type_alias_declaration" => "type ",
         _ => "",
     }
+}
+
+fn node_has_parse_error(node: tree_sitter::Node<'_>) -> bool {
+    if node.has_error() || node.is_error() || node.is_missing() {
+        return true;
+    }
+
+    let mut cursor = node.walk();
+    node.children(&mut cursor).any(node_has_parse_error)
 }
 
 #[cfg(test)]
@@ -363,6 +374,13 @@ impl Hints for Beta {
         let analyzer = TreeSitterAnalyzer::new();
         let valid = "fn main() { println!(\"hello\"); }";
         assert!(analyzer.can_parse("rs", valid));
+    }
+
+    #[test]
+    fn test_can_parse_rejects_rust_error_nodes() {
+        let analyzer = TreeSitterAnalyzer::new();
+        let invalid = "fn main( {\n";
+        assert!(!analyzer.can_parse("rs", invalid));
     }
 
     #[test]

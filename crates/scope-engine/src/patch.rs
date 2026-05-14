@@ -206,6 +206,12 @@ fn old_lines_for_hunk(lines: &[HunkLine]) -> Vec<String> {
         .collect()
 }
 
+fn has_old_side_anchor(lines: &[HunkLine]) -> bool {
+    lines
+        .iter()
+        .any(|line| matches!(line, HunkLine::Context(_) | HunkLine::Removed(_)))
+}
+
 fn resolve_hunks(
     original: &str,
     hunks: &[Hunk],
@@ -231,6 +237,12 @@ fn resolve_hunks(
         let old_start = if let Some(relative_old_start) = hunk.old_start {
             selector_start_line + relative_old_start.saturating_sub(1)
         } else {
+            if !has_old_side_anchor(&hunk.lines) {
+                return Err(
+                    "cannot infer insertion point for add-only hunk without context or explicit selector-relative line"
+                        .to_string(),
+                );
+            }
             let old_lines = old_lines_for_hunk(&hunk.lines);
             let found = find_hunk_start_in_range(
                 &original_lines,
@@ -243,6 +255,22 @@ fn resolve_hunks(
             search_offset = found + old_count.max(1);
             found + 1
         };
+
+        if old_start < selector_start_line || old_start.saturating_sub(1) > selector_end_idx {
+            return Err(format!(
+                "hunk start line {} is outside selector range {}-{}",
+                old_start, selector_start_line, selector_end_idx
+            ));
+        }
+        if old_count > 0 && old_start + old_count - 1 > selector_end_idx {
+            return Err(format!(
+                "hunk old range {}-{} exceeds selector range {}-{}",
+                old_start,
+                old_start + old_count - 1,
+                selector_start_line,
+                selector_end_idx
+            ));
+        }
 
         resolved.push(ResolvedHunk {
             old_start,
@@ -757,6 +785,22 @@ mod tests {
     }
 
     #[test]
+    fn bare_add_only_hunk_without_anchor_is_rejected() {
+        let patch = "@@\n+    let z = 99;\n";
+        let err = apply_stripped_v4a_patch(SAMPLE_ORIGINAL, patch).unwrap_err();
+
+        assert!(err.contains("cannot infer insertion point for add-only hunk"));
+    }
+
+    #[test]
+    fn headerless_add_only_hunk_without_anchor_is_rejected() {
+        let patch = "+    let z = 99;\n";
+        let err = apply_stripped_v4a_patch(SAMPLE_ORIGINAL, patch).unwrap_err();
+
+        assert!(err.contains("cannot infer insertion point for add-only hunk"));
+    }
+
+    #[test]
     fn remove_symbol_range_works() {
         let content = "line 1\nline 2\ntarget line here\nline 4\nline 5\n";
         let result = remove_symbol_range(content, 2, 4);
@@ -865,6 +909,74 @@ mod e2e_tests {
     }
 
     #[test]
+    fn edit_code_apply_rejects_bare_add_only_hunk_without_anchor() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn alpha() -> i32 {\n    let base = 10;\n    base\n}\n";
+        write_rust_file(dir.path(), "lib.rs", rust_code);
+
+        let selector = "src/lib.rs::fn alpha()";
+        let patch = "@@\n+    let inserted = 123;\n";
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        let err = edit_code_apply(selector, patch, dir.path(), &lsp).unwrap_err();
+
+        assert!(err.contains("cannot infer insertion point for add-only hunk"));
+        let unchanged = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert_eq!(unchanged, rust_code);
+    }
+
+    #[test]
+    fn edit_code_apply_rejects_headerless_add_only_hunk_without_anchor() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn alpha() -> i32 {\n    let base = 10;\n    base\n}\n";
+        write_rust_file(dir.path(), "lib.rs", rust_code);
+
+        let selector = "src/lib.rs::fn alpha()";
+        let patch = "+    let inserted = 123;\n";
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        let err = edit_code_apply(selector, patch, dir.path(), &lsp).unwrap_err();
+
+        assert!(err.contains("cannot infer insertion point for add-only hunk"));
+        let unchanged = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert_eq!(unchanged, rust_code);
+    }
+
+    #[test]
+    fn edit_code_apply_accepts_explicit_add_only_hunk() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn alpha() -> i32 {\n    let base = 10;\n    base\n}\n";
+        write_rust_file(dir.path(), "lib.rs", rust_code);
+
+        let selector = "src/lib.rs::fn alpha()";
+        let patch = "@@ -2,0 +2,1 @@\n+    let inserted = 123;\n";
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        edit_code_apply(selector, patch, dir.path(), &lsp).unwrap();
+
+        let modified = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert!(
+            modified
+                .contains("pub fn alpha() -> i32 {\n    let inserted = 123;\n    let base = 10;")
+        );
+    }
+
+    #[test]
+    fn edit_code_apply_accepts_bare_add_only_hunk_with_context() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn alpha() -> i32 {\n    let base = 10;\n    base\n}\n";
+        write_rust_file(dir.path(), "lib.rs", rust_code);
+
+        let selector = "src/lib.rs::fn alpha()";
+        let patch = "@@\n pub fn alpha() -> i32 {\n+    let inserted = 123;\n     let base = 10;\n";
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        edit_code_apply(selector, patch, dir.path(), &lsp).unwrap();
+
+        let modified = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert!(
+            modified
+                .contains("pub fn alpha() -> i32 {\n    let inserted = 123;\n    let base = 10;")
+        );
+    }
+
+    #[test]
     fn edit_code_apply_creates_new_file_when_not_exists() {
         let dir = setup_temp_rust_project();
         let new_content = "pub fn new_fn() -> i32 {\n    42\n}\n";
@@ -900,6 +1012,22 @@ mod e2e_tests {
         // The important thing is the function doesn't panic.
         // We just verify it returns either Ok or Err without crashing.
         let _ = result;
+    }
+
+    #[test]
+    fn edit_code_apply_rejects_tree_sitter_error_nodes_without_writing() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn ok() {\n    let x = 1;\n}\n";
+        write_rust_file(dir.path(), "lib.rs", rust_code);
+
+        let selector = "src/lib.rs::fn ok()";
+        let bad_patch = "@@ -1,3 +1,1 @@\n-pub fn ok() {\n-    let x = 1;\n-}\n+pub fn BROKEN {\n";
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        let err = edit_code_apply(selector, bad_patch, dir.path(), &lsp).unwrap_err();
+
+        assert!(err.contains("tree-sitter cannot parse"));
+        let unchanged = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert_eq!(unchanged, rust_code);
     }
 
     #[test]
