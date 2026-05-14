@@ -42,7 +42,6 @@ const CODING_TOOL_SCOPES: &[AppToolScope] = &[AppToolScope::Coding, AppToolScope
 const MAX_RENDERED_LSP_SETUP_HINTS: usize = 5;
 const PROJECT_INSTRUCTION_FILENAMES: &[&str] =
     &["AGENTS.override.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"];
-const MAX_PROJECT_INSTRUCTION_BYTES: u64 = 32 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct CodingOpenProjectArgs {
@@ -232,20 +231,6 @@ fn load_instruction_documents_in_dir(dir: &Path) -> Result<Vec<ProjectInstructio
         let path = dir.join(name);
         if !path.is_file() {
             continue;
-        }
-        let metadata = fs::metadata(&path).map_err(|err| {
-            miette!(
-                "failed to read project instruction metadata {}: {err}",
-                path.display()
-            )
-        })?;
-        if metadata.len() > MAX_PROJECT_INSTRUCTION_BYTES {
-            return Err(miette!(
-                "project instruction file is too large: {} ({} bytes; max {} bytes)",
-                path.display(),
-                metadata.len(),
-                MAX_PROJECT_INSTRUCTION_BYTES
-            ));
         }
         let content = fs::read_to_string(&path).map_err(|err| {
             miette!(
@@ -1034,6 +1019,20 @@ mod tests {
             render_project_instructions("root_project_instructions", &instructions)
                 .contains("Root rule")
         );
+    }
+
+    #[test]
+    fn loads_large_project_instruction_documents() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let content = "A".repeat(40 * 1024);
+        std::fs::write(temp.path().join("AGENTS.md"), &content).expect("write agents");
+
+        let instructions =
+            load_instruction_documents_in_dir(temp.path()).expect("load large instructions");
+
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions[0].name, "AGENTS.md");
+        assert_eq!(instructions[0].content, content);
     }
 
     #[test]
