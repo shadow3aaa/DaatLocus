@@ -37,7 +37,9 @@ When editing source code, always prefer Coding app tools such as `coding_edit_co
 
 After each edit, the tool automatically evaluates the impact of your changes and accumulates pending review events. You can also see the current number of pending review events in Coding app state. You do not need to handle them immediately. However, after you finish a series of edits (usually when a plan step is complete, or when you judge that too many review events have accumulated), call `coding_next_review` to acknowledge and claim review events, then follow their instructions to inspect the impact of your changes. This must always be done before reporting back to the user.
 
-SCOPE engine configuration hints are returned by `coding_open_project` and retained in Coding app state, including available tree-sitter languages plus visible per-language `lsp_setup_hint` lines for LSP language/server setup guidance."#;
+SCOPE engine configuration hints are returned by `coding_open_project` and retained in Coding app state, including available tree-sitter languages plus visible per-language `lsp_setup_hint` lines for LSP language/server setup guidance.
+
+Coding app keeps app-level usage rules here. Selector grammar, selector operation support, grep bridge expectations, and structured selector result fields are owned by SCOPE and appended below from SCOPE's compiled usage interface."#;
 const CODING_TOOL_SCOPES: &[AppToolScope] = &[AppToolScope::Coding, AppToolScope::Terminal];
 const MAX_RENDERED_LSP_SETUP_HINTS: usize = 5;
 const PROJECT_INSTRUCTION_FILENAMES: &[&str] =
@@ -284,10 +286,9 @@ fn render_project_instructions(label: &str, instructions: &[ProjectInstructionDo
 }
 
 fn selector_path(selector: &str) -> &str {
-    selector
-        .split_once("::")
-        .map(|(path, _)| path)
-        .unwrap_or(selector)
+    let symbol_path = selector.split_once("::").map(|(path, _)| path);
+    let hash_path = selector.split_once('#').map(|(path, _)| path);
+    symbol_path.or(hash_path).unwrap_or(selector)
 }
 
 fn format_install_command(value: Option<&Value>) -> Option<String> {
@@ -592,9 +593,13 @@ impl App for CodingApp {
     }
 
     fn how_to_use(&self) -> AppHowToUse {
+        let scope_usage = ScopeClient::usage();
         AppHowToUse {
             lines: Vec::new(),
-            body_markdown: Some(CODING_HOW_TO_USE.to_string()),
+            body_markdown: Some(format!(
+                "{}\n\n---\n\n{}",
+                CODING_HOW_TO_USE, scope_usage.usage_markdown
+            )),
         }
     }
 
@@ -714,9 +719,12 @@ impl App for CodingApp {
                 let args: CodingReadCodeArgs = parse_coding_tool_args(call)?;
                 let result = self.scope.read_code(&args.selector)?;
                 self.last_action = Some(format!("read {}", args.selector));
+                let selector_info = serde_json::to_string_pretty(&result.selector_info)
+                    .unwrap_or_else(|_| "{}".to_string());
                 let model_content = format!(
-                    "selector={}\nlanguage={}\ncontent=\n{}",
+                    "selector={}\nselector_info={}\nlanguage={}\ncontent=\n{}",
                     result.selector,
+                    selector_info,
                     result.language,
                     truncate_text_to_token_budget(&result.content, context.tool_output_max_tokens)
                 );

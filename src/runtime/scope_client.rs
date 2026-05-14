@@ -279,6 +279,12 @@ impl ScopeClient {
         scope_engine::server::dispatch_get_config_hints(&fake_req)
     }
 
+    /// Return SCOPE-owned usage documentation and selector schema.
+    #[allow(dead_code)]
+    pub fn usage() -> api::ScopeUsageResponse {
+        scope_engine::usage::usage_response()
+    }
+
     /// Get the list of supported tree-sitter languages.
     #[allow(dead_code)]
     pub fn supported_languages() -> Vec<(String, Vec<String>)> {

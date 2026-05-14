@@ -409,6 +409,75 @@ fn apply_hunks(original: &str, hunks: &[ResolvedHunk]) -> Result<String, String>
     Ok(result_lines.join("\n") + "\n")
 }
 
+fn resolve_edit_selector(
+    parsed: &crate::selector::ParsedSelector,
+    project_root: &Path,
+) -> Result<crate::selector::ParsedSelector, String> {
+    match &parsed.target {
+        crate::selector::SelectorTarget::Symbol(_) => Ok(parsed.clone()),
+        crate::selector::SelectorTarget::Enclosing { line } => {
+            let (full_path, _) = crate::selector::resolve_file(parsed, project_root)
+                .map_err(|e| format!("cannot resolve file: {e}"))?;
+            let symbol = TreeSitterAnalyzer::new()
+                .find_containing_symbol_match(&full_path, *line)
+                .ok_or_else(|| {
+                    format!(
+                        "no enclosing symbol found at {} line {}",
+                        full_path.display(),
+                        line
+                    )
+                })?;
+            crate::selector::parse_selector(&symbol.canonical_selector(&full_path, project_root))
+                .map_err(|e| format!("bad resolved enclosing selector: {e}"))
+        }
+        crate::selector::SelectorTarget::Match { pattern, around: None } => {
+            let (full_path, _) = crate::selector::resolve_file(parsed, project_root)
+                .map_err(|e| format!("cannot resolve file: {e}"))?;
+            let content = std::fs::read_to_string(&full_path)
+                .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?;
+            let regex = regex::Regex::new(pattern).map_err(|e| format!("regex error: {e}"))?;
+            let hits = content
+                .lines()
+                .enumerate()
+                .filter_map(|(idx, line)| regex.is_match(line).then_some(idx + 1))
+                .collect::<Vec<_>>();
+            match hits.as_slice() {
+                [line] => {
+                    let symbol = TreeSitterAnalyzer::new()
+                        .find_containing_symbol_match(&full_path, *line)
+                        .ok_or_else(|| {
+                            format!(
+                                "unique match at {} line {} has no enclosing symbol",
+                                full_path.display(),
+                                line
+                            )
+                        })?;
+                    crate::selector::parse_selector(&symbol.canonical_selector(&full_path, project_root))
+                        .map_err(|e| format!("bad resolved match selector: {e}"))
+                }
+                [] => Err(format!("match selector found no matches for /{pattern}/")),
+                _ => Err(format!(
+                    "match selector is ambiguous for /{pattern}/; candidate lines: {}",
+                    hits.iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            }
+        }
+        crate::selector::SelectorTarget::LineRange { .. } => Err(
+            "edit_code file-range patch with affected-symbol analysis is documented but not implemented yet"
+                .to_string(),
+        ),
+        crate::selector::SelectorTarget::AroundLine { .. }
+        | crate::selector::SelectorTarget::Match { around: Some(_), .. }
+        | crate::selector::SelectorTarget::Outline => Err(
+            "edit_code only accepts symbol, enclosing, or unique match selectors; outline/context selectors are read-only"
+                .to_string(),
+        ),
+    }
+}
+
 /// Apply an edit_code operation: parse selector, resolve file, apply patch, write back.
 pub fn edit_code_apply(
     selector_str: &str,
@@ -437,8 +506,10 @@ pub fn edit_code_apply(
         return Ok(vec![]);
     }
 
+    let edit_selector = resolve_edit_selector(&parsed, project_root)?;
+
     let selector_match = TreeSitterAnalyzer::new()
-        .resolve_selector(&full_path, &parsed)
+        .resolve_selector(&full_path, &edit_selector)
         .map_err(|e| format!("cannot resolve selector: {e}"))?;
 
     let original = std::fs::read_to_string(&full_path)
@@ -486,8 +557,10 @@ pub fn edit_code_apply(
         let line = hunk.old_start;
         if let Some(sel) = analyzer.find_containing_symbol(&full_path, line, project_root) {
             // Parse the selector to extract the symbol name
-            if let Ok(parsed) = crate::selector::parse_selector(&sel) {
-                modified_symbol_names.insert(parsed.name);
+            if let Ok(parsed) = crate::selector::parse_selector(&sel)
+                && let Some(name) = parsed.name()
+            {
+                modified_symbol_names.insert(name.to_string());
             }
         }
     }
@@ -586,6 +659,9 @@ pub fn delete_code_apply(
 ) -> Result<Vec<PropagationResult>, String> {
     let parsed =
         crate::selector::parse_selector(selector_str).map_err(|e| format!("bad selector: {e}"))?;
+    if !matches!(parsed.target, crate::selector::SelectorTarget::Symbol(_)) {
+        return Err("delete_code only accepts symbol selectors".to_string());
+    }
 
     let (full_path, _ext) = crate::selector::resolve_file(&parsed, project_root)
         .map_err(|e| format!("cannot resolve file: {e}"))?;
@@ -628,12 +704,12 @@ pub fn delete_code_apply(
         selector: selector_str.to_string(),
         reason: format!(
             "deleted symbol \"{}\" from {}",
-            parsed.name,
+            parsed.name().unwrap_or("<unknown>"),
             full_path.display()
         ),
         source: PropagationSource::OpenEnded,
         lsp_references: None,
-        diff_summary: Some(format!("deleted: {}", parsed.name)),
+        diff_summary: Some(format!("deleted: {}", parsed.name().unwrap_or("<unknown>"))),
         file_snippet: Some(file_snippet),
         project_files: Some(project_files),
     });
@@ -645,14 +721,16 @@ pub fn delete_code_apply(
     {
         // Find the symbol's precise position in the file for LSP query
         let (line, character) =
-            find_symbol_position(&original, &parsed.name).unwrap_or_else(|| {
-                let hint_line = original
-                    .lines()
-                    .position(|l| l.contains(&parsed.name))
-                    .map(|idx| idx + 1)
-                    .unwrap_or(1);
-                (hint_line, 0)
-            });
+            find_symbol_position(&original, parsed.name().unwrap_or("<unknown>")).unwrap_or_else(
+                || {
+                    let hint_line = original
+                        .lines()
+                        .position(|l| l.contains(parsed.name().unwrap_or("<unknown>")))
+                        .map(|idx| idx + 1)
+                        .unwrap_or(1);
+                    (hint_line, 0)
+                },
+            );
         lsp_refs = lsp.find_references_for_symbol(&full_path, line, character, project_root);
     }
     if lsp_refs.is_empty() {
@@ -674,7 +752,7 @@ pub fn delete_code_apply(
     .ok_or_else(|| {
         format!(
             "symbol '{}' not found in {}",
-            parsed.name,
+            parsed.name().unwrap_or("<unknown>"),
             full_path.display()
         )
     })?;
@@ -1069,6 +1147,36 @@ mod e2e_tests {
             propagation.iter().any(|r| r.reason.contains("deleted")),
             "Should note deletion"
         );
+    }
+    #[test]
+    fn edit_code_apply_accepts_enclosing_selector() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn hello() {\n    println!(\"hello\");\n}\n\npub fn world() {\n    println!(\"world\");\n}\n";
+        write_rust_file(dir.path(), "lib.rs", rust_code);
+
+        let selector = "src/lib.rs#enclosing:L2";
+        let patch = "@@ -2,1 +2,1 @@\n-    println!(\"hello\");\n+    println!(\"hi\");\n";
+
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        edit_code_apply(selector, patch, dir.path(), &lsp).unwrap();
+        let updated = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert!(updated.contains("println!(\"hi\");"));
+        assert!(updated.contains("pub fn world()"));
+    }
+
+    #[test]
+    fn edit_code_apply_rejects_ambiguous_match_selector() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn hello() {\n    println!(\"same\");\n}\n\npub fn world() {\n    println!(\"same\");\n}\n";
+        write_rust_file(dir.path(), "lib.rs", rust_code);
+
+        let selector = "src/lib.rs#match:/same/";
+        let patch = "@@ -2,1 +2,1 @@\n-    println!(\"same\");\n+    println!(\"other\");\n";
+
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        let err = edit_code_apply(selector, patch, dir.path(), &lsp).unwrap_err();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("candidate lines"));
     }
 }
 

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::language::LanguageRegistry;
-use crate::selector::{ParsedSelector, SymbolKind};
+use crate::selector::{ParsedSelector, SelectorTarget, SymbolKind, SymbolSelector};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolMatch {
@@ -97,14 +97,24 @@ impl TreeSitterAnalyzer {
             .filter(|m| symbol_matches_selector(m, parsed))
             .collect();
 
-        if let Some((start, end)) = parsed.line_range {
+        let symbol = match &parsed.target {
+            SelectorTarget::Symbol(symbol) => symbol,
+            _ => {
+                return Err(format!(
+                    "selector target is not a symbol and cannot be resolved as a symbol: {}",
+                    file_path.display()
+                ));
+            }
+        };
+
+        if let Some((start, end)) = symbol.line_range {
             matches.retain(|m| m.start_line == start && m.end_line == end);
         }
 
         match matches.len() {
             0 => Err(format!(
                 "symbol '{}' not found in {}",
-                parsed.name,
+                symbol.name,
                 file_path.display()
             )),
             1 => Ok(matches.remove(0)),
@@ -121,7 +131,7 @@ impl TreeSitterAnalyzer {
                     .join(", ");
                 Err(format!(
                     "ambiguous selector for '{}' in {}; candidates: {}",
-                    parsed.name,
+                    symbol.name,
                     file_path.display(),
                     candidates
                 ))
@@ -213,7 +223,15 @@ impl TreeSitterAnalyzer {
 }
 
 fn symbol_matches_selector(symbol: &SymbolMatch, parsed: &ParsedSelector) -> bool {
-    symbol.name == parsed.name && (parsed.kind == SymbolKind::Unknown || symbol.kind == parsed.kind)
+    let Some(selector) = parsed.as_symbol() else {
+        return false;
+    };
+    symbol_matches_symbol_selector(symbol, selector)
+}
+
+fn symbol_matches_symbol_selector(symbol: &SymbolMatch, selector: &SymbolSelector) -> bool {
+    symbol.name == selector.name
+        && (selector.kind == SymbolKind::Unknown || symbol.kind == selector.kind)
 }
 
 fn is_definition_kind(kind: &str) -> bool {

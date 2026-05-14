@@ -9,7 +9,7 @@ use crate::lsp::{
     GoplsConfig, JdtlsConfig, LspAnalyzer, LspServerConfig, PyrightConfig, RustAnalyzerConfig,
 };
 use crate::patch;
-use crate::selector;
+use crate::selector::{self, SelectorTarget};
 use crate::state::PropagationState;
 use crate::treesitter::TreeSitterAnalyzer;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -220,6 +220,10 @@ pub fn dispatch(
             )
         }
         "get_config_hints" => handle_get_config_hints(req),
+        "get_usage" | "scope_usage" => JsonRpcResponse::ok(
+            req.id.clone(),
+            serde_json::to_value(crate::usage::usage_response()).unwrap(),
+        ),
         _ => JsonRpcResponse::err(
             req.id.clone(),
             -32601,
@@ -389,12 +393,21 @@ fn search_project(
                 continue;
             }
             let line = line_index + 1;
-            let selector = analyzer.find_containing_symbol(path, line, project_root);
+            let symbol_match = analyzer.find_containing_symbol_match(path, line);
+            let selector = symbol_match
+                .as_ref()
+                .map(|symbol| symbol.canonical_selector(path, project_root));
+            let selector_info = symbol_match.as_ref().map(|symbol| {
+                selector_info_for_symbol(path, project_root, symbol, "enclosing_symbol")
+            });
             matches.push(SearchMatch {
                 file: relative.clone(),
                 line,
+                match_id: format!("{relative}:{line}:{}", matches.len() + 1),
                 text: text.to_string(),
+                enclosing_selector: selector.clone(),
                 selector,
+                selector_info,
             });
             if matches.len() >= limit {
                 return Ok(matches);
@@ -556,6 +569,277 @@ fn normalize_relative_path(path: &str) -> String {
     path.replace('\\', "/")
 }
 
+struct ResolvedReadSelection {
+    selector: String,
+    start_line: usize,
+    end_line: usize,
+    selector_info: SelectorInfo,
+    content_override: Option<String>,
+}
+
+fn resolve_read_selection(
+    analyzer: &TreeSitterAnalyzer,
+    full_path: &Path,
+    project_root: &Path,
+    file_content: &str,
+    parsed: &selector::ParsedSelector,
+) -> Result<ResolvedReadSelection, String> {
+    let line_count = file_content.lines().count().max(1);
+    match &parsed.target {
+        SelectorTarget::Symbol(_) => {
+            let symbol = analyzer.resolve_selector(full_path, parsed)?;
+            let selector = symbol.canonical_selector(full_path, project_root);
+            Ok(ResolvedReadSelection {
+                selector: selector.clone(),
+                start_line: symbol.start_line,
+                end_line: symbol.end_line,
+                selector_info: selector_info_for_symbol(full_path, project_root, &symbol, "symbol"),
+                content_override: None,
+            })
+        }
+        SelectorTarget::LineRange {
+            start_line,
+            end_line,
+        } => {
+            let (start_line, end_line) = clamp_range(*start_line, *end_line, line_count)?;
+            Ok(ResolvedReadSelection {
+                selector: format!(
+                    "{}#L{}-L{}",
+                    relative_file_path(project_root, full_path),
+                    start_line,
+                    end_line
+                ),
+                start_line,
+                end_line,
+                selector_info: selector_info_for_range(
+                    full_path,
+                    project_root,
+                    "line_range",
+                    start_line,
+                    end_line,
+                    None,
+                ),
+                content_override: None,
+            })
+        }
+        SelectorTarget::AroundLine { line, context } => {
+            let start_line = line.saturating_sub(*context).max(1);
+            let end_line = (*line + *context).min(line_count);
+            Ok(ResolvedReadSelection {
+                selector: format!(
+                    "{}#around:L{}±{}",
+                    relative_file_path(project_root, full_path),
+                    line,
+                    context
+                ),
+                start_line,
+                end_line,
+                selector_info: selector_info_for_range(
+                    full_path,
+                    project_root,
+                    "around_line",
+                    start_line,
+                    end_line,
+                    analyzer.find_containing_symbol_match(full_path, *line),
+                ),
+                content_override: None,
+            })
+        }
+        SelectorTarget::Match { pattern, around } => {
+            let regex = Regex::new(pattern).map_err(|e| format!("regex error: {e}"))?;
+            let mut hits = file_content
+                .lines()
+                .enumerate()
+                .filter_map(|(idx, line)| regex.is_match(line).then_some(idx + 1))
+                .collect::<Vec<_>>();
+            match hits.len() {
+                0 => Err(format!("match selector found no matches for /{pattern}/")),
+                1 => {
+                    let line = hits.remove(0);
+                    let (start_line, end_line, kind) = if let Some(context) = around {
+                        (
+                            line.saturating_sub(*context).max(1),
+                            (line + *context).min(line_count),
+                            "match_around",
+                        )
+                    } else {
+                        (line, line, "match")
+                    };
+                    Ok(ResolvedReadSelection {
+                        selector: if let Some(context) = around {
+                            format!(
+                                "{}#match:/{}/#around:{}",
+                                relative_file_path(project_root, full_path),
+                                pattern,
+                                context
+                            )
+                        } else {
+                            format!(
+                                "{}#match:/{}/",
+                                relative_file_path(project_root, full_path),
+                                pattern
+                            )
+                        },
+                        start_line,
+                        end_line,
+                        selector_info: selector_info_for_range(
+                            full_path,
+                            project_root,
+                            kind,
+                            start_line,
+                            end_line,
+                            analyzer.find_containing_symbol_match(full_path, line),
+                        ),
+                        content_override: None,
+                    })
+                }
+                _ => Err(format!(
+                    "match selector is ambiguous for /{pattern}/; candidate lines: {}",
+                    hits.iter()
+                        .map(|line| line.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            }
+        }
+        SelectorTarget::Enclosing { line } => {
+            let symbol = analyzer
+                .find_containing_symbol_match(full_path, *line)
+                .ok_or_else(|| {
+                    format!(
+                        "no enclosing symbol found at {} line {}",
+                        full_path.display(),
+                        line
+                    )
+                })?;
+            let selector = symbol.canonical_selector(full_path, project_root);
+            Ok(ResolvedReadSelection {
+                selector: selector.clone(),
+                start_line: symbol.start_line,
+                end_line: symbol.end_line,
+                selector_info: selector_info_for_symbol(
+                    full_path,
+                    project_root,
+                    &symbol,
+                    "enclosing_symbol",
+                ),
+                content_override: None,
+            })
+        }
+        SelectorTarget::Outline => {
+            let symbols = analyzer.symbols_in_file(full_path)?;
+            let content = symbols
+                .iter()
+                .map(|symbol| {
+                    format!(
+                        "{}{} #L{}-L{}",
+                        symbol.kind_prefix, symbol.name, symbol.start_line, symbol.end_line
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let end_line = content.lines().count().max(1);
+            Ok(ResolvedReadSelection {
+                selector: format!("{}#outline", relative_file_path(project_root, full_path)),
+                start_line: 1,
+                end_line,
+                selector_info: SelectorInfo {
+                    file: relative_file_path(project_root, full_path),
+                    kind: "outline".to_string(),
+                    range: None,
+                    symbol_selector: None,
+                    symbol_start_line: None,
+                    symbol_end_line: None,
+                    definition_line: None,
+                },
+                content_override: Some(if content.is_empty() {
+                    String::new()
+                } else {
+                    format!("{content}\n")
+                }),
+            })
+        }
+    }
+}
+
+fn clamp_range(
+    start_line: usize,
+    end_line: usize,
+    line_count: usize,
+) -> Result<(usize, usize), String> {
+    if start_line == 0 || end_line == 0 || start_line > end_line {
+        return Err(format!("invalid line range {start_line}-{end_line}"));
+    }
+    if start_line > line_count {
+        return Err(format!(
+            "line range starts after end of file: {start_line} > {line_count}"
+        ));
+    }
+    Ok((start_line, end_line.min(line_count)))
+}
+
+fn read_line_range(content: &str, start_line: usize, end_line: usize) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    if start_line == 0 || end_line < start_line || start_line > lines.len() {
+        return String::new();
+    }
+    let mut snippet = lines[(start_line - 1)..end_line.min(lines.len())].join("\n");
+    if content.ends_with('\n') || end_line < lines.len() {
+        snippet.push('\n');
+    }
+    snippet
+}
+
+fn selector_info_for_symbol(
+    full_path: &Path,
+    project_root: &Path,
+    symbol: &crate::treesitter::SymbolMatch,
+    kind: &str,
+) -> SelectorInfo {
+    let selector = symbol.canonical_selector(full_path, project_root);
+    SelectorInfo {
+        file: relative_file_path(project_root, full_path),
+        kind: kind.to_string(),
+        range: Some(LineRange {
+            start_line: symbol.start_line,
+            end_line: symbol.end_line,
+        }),
+        symbol_selector: Some(selector),
+        symbol_start_line: Some(symbol.start_line),
+        symbol_end_line: Some(symbol.end_line),
+        definition_line: Some(symbol.start_line),
+    }
+}
+
+fn selector_info_for_range(
+    full_path: &Path,
+    project_root: &Path,
+    kind: &str,
+    start_line: usize,
+    end_line: usize,
+    symbol: Option<crate::treesitter::SymbolMatch>,
+) -> SelectorInfo {
+    let mut info = SelectorInfo {
+        file: relative_file_path(project_root, full_path),
+        kind: kind.to_string(),
+        range: Some(LineRange {
+            start_line,
+            end_line,
+        }),
+        symbol_selector: None,
+        symbol_start_line: None,
+        symbol_end_line: None,
+        definition_line: None,
+    };
+    if let Some(symbol) = symbol {
+        info.symbol_selector = Some(symbol.canonical_selector(full_path, project_root));
+        info.symbol_start_line = Some(symbol.start_line);
+        info.symbol_end_line = Some(symbol.end_line);
+        info.definition_line = Some(symbol.start_line);
+    }
+    info
+}
+
 fn handle_read_code(
     req: &JsonRpcRequest,
     params: &ReadCodeRequest,
@@ -584,12 +868,6 @@ fn handle_read_code(
         Err(e) => return JsonRpcResponse::err(req.id.clone(), -32001, e),
     };
 
-    let analyzer = TreeSitterAnalyzer::new();
-    let symbol_match = match analyzer.resolve_selector(&full_path, &parsed) {
-        Ok(m) => m,
-        Err(e) => return JsonRpcResponse::err(req.id.clone(), -32002, e),
-    };
-
     let file_content = match std::fs::read_to_string(&full_path) {
         Ok(c) => c,
         Err(e) => {
@@ -602,16 +880,26 @@ fn handle_read_code(
     };
 
     let language = guess_language(&full_path);
-    let content = symbol_match.source_from(&file_content);
+    let analyzer = TreeSitterAnalyzer::new();
+    let resolved =
+        match resolve_read_selection(&analyzer, &full_path, project_root, &file_content, &parsed) {
+            Ok(resolved) => resolved,
+            Err(e) => return JsonRpcResponse::err(req.id.clone(), -32002, e),
+        };
+    let content = resolved
+        .content_override
+        .clone()
+        .unwrap_or_else(|| read_line_range(&file_content, resolved.start_line, resolved.end_line));
 
     JsonRpcResponse::ok(
         req.id.clone(),
         serde_json::to_value(ReadCodeResponse {
-            selector: symbol_match.canonical_selector(&full_path, project_root),
+            selector: resolved.selector,
             content,
             language: language.to_string(),
-            start_line: symbol_match.start_line,
-            end_line: symbol_match.end_line,
+            start_line: resolved.start_line,
+            end_line: resolved.end_line,
+            selector_info: resolved.selector_info,
         })
         .unwrap(),
     )
@@ -793,20 +1081,29 @@ mod tests {
             SearchMatch {
                 file: "src/coding_app.rs".to_string(),
                 line: 10,
+                match_id: "src/coding_app.rs:10:1".to_string(),
                 text: "fn build_usage() {".to_string(),
                 selector: Some("src/coding_app.rs::fn build_usage #L10-L20".to_string()),
+                enclosing_selector: Some("src/coding_app.rs::fn build_usage #L10-L20".to_string()),
+                selector_info: None,
             },
             SearchMatch {
                 file: "src/coding_app.rs".to_string(),
                 line: 12,
+                match_id: "src/coding_app.rs:12:2".to_string(),
                 text: "usage.push_str(\"grep\");".to_string(),
                 selector: Some("src/coding_app.rs::fn build_usage #L10-L20".to_string()),
+                enclosing_selector: Some("src/coding_app.rs::fn build_usage #L10-L20".to_string()),
+                selector_info: None,
             },
             SearchMatch {
                 file: "src/coding_app.rs".to_string(),
                 line: 3,
+                match_id: "src/coding_app.rs:3:3".to_string(),
                 text: "use std::path::PathBuf;".to_string(),
                 selector: None,
+                enclosing_selector: None,
+                selector_info: None,
             },
         ];
 
@@ -977,5 +1274,120 @@ mod tests {
         assert_eq!(result["end_line"], 7);
         assert_eq!(result["selector"], "lib.rs::fn second #L5-L7");
         assert!(!result["content"].as_str().unwrap().contains("first"));
+    }
+    #[test]
+    fn read_code_supports_line_range_enclosing_outline_and_structured_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = "pub fn first() {\n    println!(\"first\");\n}\n\npub fn second() {\n    println!(\"second\");\n}\n";
+        std::fs::write(dir.path().join("lib.rs"), source).unwrap();
+        let propagation_state = Mutex::new(PropagationState::new());
+        let lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+
+        let range_req = JsonRpcRequest {
+            _jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(1),
+            method: "read_code".to_string(),
+            params: serde_json::json!({"selector": "lib.rs#L5-L7"}),
+        };
+        let response = dispatch(
+            &range_req,
+            Some(dir.path()),
+            &propagation_state,
+            &lsp_analyzer,
+        );
+        assert!(
+            response.error.is_none(),
+            "unexpected error: {:?}",
+            response.error
+        );
+        let result = response.result.unwrap();
+        assert_eq!(result["selector_info"]["kind"], "line_range");
+        assert_eq!(result["selector_info"]["range"]["start_line"], 5);
+        assert_eq!(
+            result["content"],
+            "pub fn second() {\n    println!(\"second\");\n}\n"
+        );
+
+        let enclosing_req = JsonRpcRequest {
+            _jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(2),
+            method: "read_code".to_string(),
+            params: serde_json::json!({"selector": "lib.rs#enclosing:L6"}),
+        };
+        let response = dispatch(
+            &enclosing_req,
+            Some(dir.path()),
+            &propagation_state,
+            &lsp_analyzer,
+        );
+        assert!(
+            response.error.is_none(),
+            "unexpected error: {:?}",
+            response.error
+        );
+        let result = response.result.unwrap();
+        assert_eq!(result["selector_info"]["kind"], "enclosing_symbol");
+        assert_eq!(result["selector_info"]["symbol_start_line"], 5);
+        assert_eq!(result["selector_info"]["symbol_end_line"], 7);
+
+        let outline_req = JsonRpcRequest {
+            _jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(3),
+            method: "read_code".to_string(),
+            params: serde_json::json!({"selector": "lib.rs#outline"}),
+        };
+        let response = dispatch(
+            &outline_req,
+            Some(dir.path()),
+            &propagation_state,
+            &lsp_analyzer,
+        );
+        assert!(
+            response.error.is_none(),
+            "unexpected error: {:?}",
+            response.error
+        );
+        let result = response.result.unwrap();
+        assert_eq!(result["selector"], "lib.rs#outline");
+        assert_eq!(result["selector_info"]["kind"], "outline");
+        assert!(
+            result["content"]
+                .as_str()
+                .unwrap()
+                .contains("fn second #L5-L7")
+        );
+    }
+
+    #[test]
+    fn scope_usage_is_available_over_dispatch() {
+        let req = JsonRpcRequest {
+            _jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(1),
+            method: "get_usage".to_string(),
+            params: serde_json::json!({}),
+        };
+        let propagation_state = Mutex::new(PropagationState::new());
+        let lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+
+        let response = dispatch(&req, None, &propagation_state, &lsp_analyzer);
+        assert!(
+            response.error.is_none(),
+            "unexpected error: {:?}",
+            response.error
+        );
+        let result = response.result.unwrap();
+        assert!(
+            result["usage_markdown"]
+                .as_str()
+                .unwrap()
+                .contains("positioning DSL")
+        );
+        assert!(
+            result["selector_kinds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|kind| kind["kind"] == "outline" && kind["edit"] == false)
+        );
     }
 }

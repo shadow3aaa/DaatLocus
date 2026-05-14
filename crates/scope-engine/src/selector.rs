@@ -1,21 +1,70 @@
 use std::path::{Path, PathBuf};
 
-/// A parsed CodeStruct-style selector: `file_path::kind symbol`
-///
-/// Examples:
-/// - `src/foo.rs::fn old()`  → file="src/foo.rs", kind=Function, name="old"
-/// - `src/lib.rs::struct Foo` → file="src/lib.rs", kind=Struct, name="Foo"
-/// - `src/bar.rs::auth`      → file="src/bar.rs", kind=Unknown, name="auth"
+use regex::Regex;
+
+/// A parsed SCOPE selector. The selector is a positioning DSL: it locates
+/// targets/ranges, but it does not encode operation semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSelector {
     /// File path relative to project root.
     pub file_path: PathBuf,
+    /// Parsed selector target.
+    pub target: SelectorTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectorTarget {
+    Symbol(SymbolSelector),
+    LineRange {
+        start_line: usize,
+        end_line: usize,
+    },
+    AroundLine {
+        line: usize,
+        context: usize,
+    },
+    Match {
+        pattern: String,
+        around: Option<usize>,
+    },
+    Enclosing {
+        line: usize,
+    },
+    Outline,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolSelector {
     /// The kind of symbol (function, struct, etc.) or Unknown for bare names.
     pub kind: SymbolKind,
     /// The symbol name to match against AST nodes.
     pub name: String,
     /// Optional 1-based line range disambiguator: `#Lstart-Lend`.
     pub line_range: Option<(usize, usize)>,
+}
+
+impl ParsedSelector {
+    pub fn as_symbol(&self) -> Option<&SymbolSelector> {
+        match &self.target {
+            SelectorTarget::Symbol(symbol) => Some(symbol),
+            _ => None,
+        }
+    }
+
+    /// Legacy accessor for callers/tests that still operate on symbol selectors.
+    pub fn kind(&self) -> Option<&SymbolKind> {
+        self.as_symbol().map(|symbol| &symbol.kind)
+    }
+
+    /// Legacy accessor for callers/tests that still operate on symbol selectors.
+    pub fn name(&self) -> Option<&str> {
+        self.as_symbol().map(|symbol| symbol.name.as_str())
+    }
+
+    /// Legacy accessor for callers/tests that still operate on symbol selectors.
+    pub fn line_range(&self) -> Option<(usize, usize)> {
+        self.as_symbol().and_then(|symbol| symbol.line_range)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,15 +171,18 @@ impl std::fmt::Display for SymbolKind {
 /// Returns an error string if the input is missing `::`, has an empty file path,
 /// or has an empty symbol name.
 pub fn parse_selector(input: &str) -> Result<ParsedSelector, String> {
+    if !input.contains("::") {
+        if let Some((file_part, suffix)) = input.split_once('#') {
+            return parse_hash_selector(file_part, suffix, input);
+        }
+    }
+
     // Split on the first `::`
     let (file_part, symbol_part) = input.split_once("::").ok_or_else(|| {
         format!("selector must contain '::' separating file path from symbol: '{input}'")
     })?;
 
-    let file_path = PathBuf::from(file_part.trim());
-    if file_path.as_os_str().is_empty() {
-        return Err("selector file path is empty".to_string());
-    }
+    let file_path = parse_file_path(file_part)?;
 
     let symbol_part = symbol_part.trim();
     if symbol_part.is_empty() {
@@ -146,15 +198,51 @@ pub fn parse_selector(input: &str) -> Result<ParsedSelector, String> {
         return Err(format!("selector symbol name is empty: '{symbol_part}'"));
     }
 
-    // Normalise: if file_path has no extension, try to guess from project context?
-    // For now we keep the path as-is; the caller resolves it against project_root.
-
     Ok(ParsedSelector {
         file_path,
-        kind,
-        name,
-        line_range,
+        target: SelectorTarget::Symbol(SymbolSelector {
+            kind,
+            name,
+            line_range,
+        }),
     })
+}
+
+fn parse_file_path(file_part: &str) -> Result<PathBuf, String> {
+    let file_path = PathBuf::from(file_part.trim());
+    if file_path.as_os_str().is_empty() {
+        return Err("selector file path is empty".to_string());
+    }
+    Ok(file_path)
+}
+
+fn parse_hash_selector(
+    file_part: &str,
+    suffix: &str,
+    input: &str,
+) -> Result<ParsedSelector, String> {
+    let file_path = parse_file_path(file_part)?;
+    let target = if let Some(range_expr) = suffix.strip_prefix('L') {
+        let (start_line, end_line) = parse_line_range_expr(range_expr)?;
+        SelectorTarget::LineRange {
+            start_line,
+            end_line,
+        }
+    } else if let Some(expr) = suffix.strip_prefix("around:L") {
+        let (line, context) = parse_around_line_expr(expr)?;
+        SelectorTarget::AroundLine { line, context }
+    } else if let Some(expr) = suffix.strip_prefix("match:/") {
+        parse_match_target(expr)?
+    } else if let Some(expr) = suffix.strip_prefix("enclosing:L") {
+        let line = parse_positive_usize(expr, "enclosing line")?;
+        SelectorTarget::Enclosing { line }
+    } else if suffix == "outline" {
+        SelectorTarget::Outline
+    } else {
+        return Err(format!("unsupported selector suffix in '{input}'"));
+    };
+
+    Ok(ParsedSelector { file_path, target })
 }
 
 /// Parse an optional `#Lstart-Lend` line-range disambiguator suffix.
@@ -185,6 +273,62 @@ fn parse_line_range_suffix(expr: &str) -> Result<(&str, Option<(usize, usize)>),
     }
 
     Ok((symbol_expr, Some((start, end))))
+}
+
+fn parse_line_range_expr(expr: &str) -> Result<(usize, usize), String> {
+    let (start_str, end_str) = expr
+        .split_once("-L")
+        .or_else(|| expr.split_once('-'))
+        .ok_or_else(|| format!("bad selector line range '#L{expr}'"))?;
+    let start = parse_positive_usize(start_str, "line range start")?;
+    let end = parse_positive_usize(end_str, "line range end")?;
+    if start > end {
+        return Err(format!("bad selector line range '#L{expr}'"));
+    }
+    Ok((start, end))
+}
+
+fn parse_around_line_expr(expr: &str) -> Result<(usize, usize), String> {
+    let (line_str, context_str) = expr
+        .split_once('±')
+        .or_else(|| expr.split_once("+-"))
+        .or_else(|| expr.split_once("+/-"))
+        .ok_or_else(|| format!("bad around selector '#around:L{expr}'"))?;
+    Ok((
+        parse_positive_usize(line_str, "around line")?,
+        parse_positive_usize(context_str, "around context")?,
+    ))
+}
+
+fn parse_match_target(expr: &str) -> Result<SelectorTarget, String> {
+    let (pattern, rest) = expr
+        .split_once('/')
+        .ok_or_else(|| "bad match selector; expected #match:/pattern/".to_string())?;
+    if pattern.is_empty() {
+        return Err("match selector pattern is empty".to_string());
+    }
+    Regex::new(pattern).map_err(|e| format!("bad match selector regex: {e}"))?;
+    let around = if rest.is_empty() {
+        None
+    } else if let Some(around_expr) = rest.strip_prefix("#around:") {
+        Some(parse_positive_usize(around_expr, "match around context")?)
+    } else {
+        return Err(format!("unsupported match selector suffix: '{rest}'"));
+    };
+    Ok(SelectorTarget::Match {
+        pattern: pattern.to_string(),
+        around,
+    })
+}
+
+fn parse_positive_usize(input: &str, label: &str) -> Result<usize, String> {
+    let value = input
+        .parse::<usize>()
+        .map_err(|_| format!("bad {label}: '{input}'"))?;
+    if value == 0 {
+        return Err(format!("bad {label}: '{input}'"));
+    }
+    Ok(value)
 }
 
 /// Parse the symbol expression (everything after `::`).
@@ -258,21 +402,21 @@ mod tests {
     fn parse_fn_selector() {
         let sel = parse_selector("src/foo.rs::fn authenticate").unwrap();
         assert_eq!(sel.file_path, PathBuf::from("src/foo.rs"));
-        assert_eq!(sel.kind, SymbolKind::Function);
-        assert_eq!(sel.name, "authenticate");
+        assert_eq!(sel.kind(), Some(&SymbolKind::Function));
+        assert_eq!(sel.name(), Some("authenticate"));
     }
 
     #[test]
     fn parse_fn_with_parens() {
         let sel = parse_selector("src/foo.rs::fn authenticate()").unwrap();
-        assert_eq!(sel.name, "authenticate");
+        assert_eq!(sel.name(), Some("authenticate"));
     }
 
     #[test]
     fn parse_line_range_disambiguator() {
         let sel = parse_selector("src/foo.rs::fn authenticate #L10-L20").unwrap();
-        assert_eq!(sel.name, "authenticate");
-        assert_eq!(sel.line_range, Some((10, 20)));
+        assert_eq!(sel.name(), Some("authenticate"));
+        assert_eq!(sel.line_range(), Some((10, 20)));
     }
 
     #[test]
@@ -284,43 +428,43 @@ mod tests {
     #[test]
     fn parse_struct_selector() {
         let sel = parse_selector("src/lib.rs::struct Config").unwrap();
-        assert_eq!(sel.kind, SymbolKind::Struct);
-        assert_eq!(sel.name, "Config");
+        assert_eq!(sel.kind(), Some(&SymbolKind::Struct));
+        assert_eq!(sel.name(), Some("Config"));
     }
 
     #[test]
     fn parse_enum_selector() {
         let sel = parse_selector("src/types.rs::enum Color").unwrap();
-        assert_eq!(sel.kind, SymbolKind::Enum);
-        assert_eq!(sel.name, "Color");
+        assert_eq!(sel.kind(), Some(&SymbolKind::Enum));
+        assert_eq!(sel.name(), Some("Color"));
     }
 
     #[test]
     fn parse_trait_selector() {
         let sel = parse_selector("src/lib.rs::trait Serialize").unwrap();
-        assert_eq!(sel.kind, SymbolKind::Trait);
-        assert_eq!(sel.name, "Serialize");
+        assert_eq!(sel.kind(), Some(&SymbolKind::Trait));
+        assert_eq!(sel.name(), Some("Serialize"));
     }
 
     #[test]
     fn parse_impl_selector() {
         let sel = parse_selector("src/foo.rs::impl MyStruct").unwrap();
-        assert_eq!(sel.kind, SymbolKind::Impl);
-        assert_eq!(sel.name, "MyStruct");
+        assert_eq!(sel.kind(), Some(&SymbolKind::Impl));
+        assert_eq!(sel.name(), Some("MyStruct"));
     }
 
     #[test]
     fn parse_impl_for_selector() {
         let sel = parse_selector("src/foo.rs::impl Display for MyStruct").unwrap();
-        assert_eq!(sel.kind, SymbolKind::Impl);
-        assert_eq!(sel.name, "Display");
+        assert_eq!(sel.kind(), Some(&SymbolKind::Impl));
+        assert_eq!(sel.name(), Some("Display"));
     }
 
     #[test]
     fn parse_bare_name() {
         let sel = parse_selector("src/foo.rs::authenticate").unwrap();
-        assert_eq!(sel.kind, SymbolKind::Unknown);
-        assert_eq!(sel.name, "authenticate");
+        assert_eq!(sel.kind(), Some(&SymbolKind::Unknown));
+        assert_eq!(sel.name(), Some("authenticate"));
     }
 
     #[test]
@@ -328,7 +472,7 @@ mod tests {
         // File paths with spaces are unusual but valid
         let sel = parse_selector("some dir/file.rs::fn hello").unwrap();
         assert_eq!(sel.file_path, PathBuf::from("some dir/file.rs"));
-        assert_eq!(sel.name, "hello");
+        assert_eq!(sel.name(), Some("hello"));
     }
 
     #[test]
@@ -344,5 +488,53 @@ mod tests {
     #[test]
     fn empty_symbol_is_error() {
         assert!(parse_selector("src/foo.rs::").is_err());
+    }
+    #[test]
+    fn parse_scope_range_and_context_selectors() {
+        let sel = parse_selector("src/foo.rs#L120-L180").unwrap();
+        assert_eq!(sel.file_path, PathBuf::from("src/foo.rs"));
+        assert_eq!(
+            sel.target,
+            SelectorTarget::LineRange {
+                start_line: 120,
+                end_line: 180
+            }
+        );
+
+        let sel = parse_selector("src/foo.rs#around:L150±40").unwrap();
+        assert_eq!(
+            sel.target,
+            SelectorTarget::AroundLine {
+                line: 150,
+                context: 40
+            }
+        );
+
+        let sel = parse_selector("src/foo.rs#enclosing:L150").unwrap();
+        assert_eq!(sel.target, SelectorTarget::Enclosing { line: 150 });
+
+        let sel = parse_selector("src/foo.rs#outline").unwrap();
+        assert_eq!(sel.target, SelectorTarget::Outline);
+    }
+
+    #[test]
+    fn parse_scope_match_selectors() {
+        let sel = parse_selector("src/foo.rs#match:/ProjectInstructions/").unwrap();
+        assert_eq!(
+            sel.target,
+            SelectorTarget::Match {
+                pattern: "ProjectInstructions".to_string(),
+                around: None
+            }
+        );
+
+        let sel = parse_selector("src/foo.rs#match:/ProjectInstructions/#around:40").unwrap();
+        assert_eq!(
+            sel.target,
+            SelectorTarget::Match {
+                pattern: "ProjectInstructions".to_string(),
+                around: Some(40)
+            }
+        );
     }
 }

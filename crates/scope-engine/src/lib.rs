@@ -13,3 +13,4 @@ pub mod selector;
 pub mod server;
 pub mod state;
 pub mod treesitter;
+pub mod usage;

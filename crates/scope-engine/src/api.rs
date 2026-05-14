@@ -70,7 +70,39 @@ pub struct ReadCodeResponse {
     pub language: String,
     pub start_line: usize,
     pub end_line: usize,
+    pub selector_info: SelectorInfo,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LineRange {
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SelectorInfo {
+    /// Relative file path from project root.
+    pub file: String,
+    /// Selector kind, such as `symbol`, `line_range`, `around_line`,
+    /// `match`, `match_around`, `enclosing_symbol`, or `outline`.
+    pub kind: String,
+    /// Resolved range when the selector maps to concrete file lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<LineRange>,
+    /// Canonical symbol selector when the target is or is inside a symbol.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_selector: Option<String>,
+    /// Symbol start line, included whenever known to remove ambiguity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_start_line: Option<usize>,
+    /// Symbol end line, included whenever known to remove ambiguity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_end_line: Option<usize>,
+    /// Definition/name line for the symbol, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition_line: Option<usize>,
+}
+
 /// Each match from a search_code query.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SearchMatch {
@@ -78,10 +110,17 @@ pub struct SearchMatch {
     pub file: String,
     /// 1-based line number.
     pub line: usize,
+    /// Stable match id within a grep/search response.
+    pub match_id: String,
     /// The matching line text.
     pub text: String,
     /// The selector of the containing symbol (e.g. "src/net.rs::fn connect()").
     pub selector: Option<String>,
+    /// Alias for `selector`, making grep-to-selector bridging explicit.
+    pub enclosing_selector: Option<String>,
+    /// Structured selector metadata for the match/enclosing symbol.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector_info: Option<SelectorInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -135,6 +174,22 @@ pub struct EditCodeRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeleteCodeRequest {
     pub selector: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ScopeUsageResponse {
+    pub usage_markdown: String,
+    pub selector_kinds: Vec<ScopeSelectorKindSchema>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ScopeSelectorKindSchema {
+    pub kind: String,
+    pub syntax: String,
+    pub read: bool,
+    pub edit: bool,
+    pub delete: bool,
+    pub notes: String,
 }
 
 // ── Propagation types ────────────────────────────────────────
