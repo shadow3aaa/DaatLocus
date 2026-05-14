@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::analyzer::Analyzer;
 use crate::api::{PropagationResult, PropagationSource};
-use crate::treesitter::TreeSitterAnalyzer;
+use crate::treesitter::{SymbolMatch, TreeSitterAnalyzer};
 use std::sync::Mutex;
 
 /// A single hunk inside a stripped v4a patch.
@@ -409,16 +409,33 @@ fn apply_hunks(original: &str, hunks: &[ResolvedHunk]) -> Result<String, String>
     Ok(result_lines.join("\n") + "\n")
 }
 
-fn resolve_edit_selector(
+#[derive(Debug, Clone)]
+struct EditTarget {
+    start_line: usize,
+    end_line: usize,
+    primary_symbol: Option<SymbolMatch>,
+}
+
+fn resolve_edit_target(
     parsed: &crate::selector::ParsedSelector,
     project_root: &Path,
-) -> Result<crate::selector::ParsedSelector, String> {
+    analyzer: &TreeSitterAnalyzer,
+) -> Result<EditTarget, String> {
+    let (full_path, _) = crate::selector::resolve_file(parsed, project_root)
+        .map_err(|e| format!("cannot resolve file: {e}"))?;
     match &parsed.target {
-        crate::selector::SelectorTarget::Symbol(_) => Ok(parsed.clone()),
+        crate::selector::SelectorTarget::Symbol(_) => {
+            let symbol = analyzer
+                .resolve_selector(&full_path, parsed)
+                .map_err(|e| format!("cannot resolve selector: {e}"))?;
+            Ok(EditTarget {
+                start_line: symbol.start_line,
+                end_line: symbol.end_line,
+                primary_symbol: Some(symbol),
+            })
+        }
         crate::selector::SelectorTarget::Enclosing { line } => {
-            let (full_path, _) = crate::selector::resolve_file(parsed, project_root)
-                .map_err(|e| format!("cannot resolve file: {e}"))?;
-            let symbol = TreeSitterAnalyzer::new()
+            let symbol = analyzer
                 .find_containing_symbol_match(&full_path, *line)
                 .ok_or_else(|| {
                     format!(
@@ -427,12 +444,13 @@ fn resolve_edit_selector(
                         line
                     )
                 })?;
-            crate::selector::parse_selector(&symbol.canonical_selector(&full_path, project_root))
-                .map_err(|e| format!("bad resolved enclosing selector: {e}"))
+            Ok(EditTarget {
+                start_line: symbol.start_line,
+                end_line: symbol.end_line,
+                primary_symbol: Some(symbol),
+            })
         }
         crate::selector::SelectorTarget::Match { pattern, around: None } => {
-            let (full_path, _) = crate::selector::resolve_file(parsed, project_root)
-                .map_err(|e| format!("cannot resolve file: {e}"))?;
             let content = std::fs::read_to_string(&full_path)
                 .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?;
             let regex = regex::Regex::new(pattern).map_err(|e| format!("regex error: {e}"))?;
@@ -443,7 +461,7 @@ fn resolve_edit_selector(
                 .collect::<Vec<_>>();
             match hits.as_slice() {
                 [line] => {
-                    let symbol = TreeSitterAnalyzer::new()
+                    let symbol = analyzer
                         .find_containing_symbol_match(&full_path, *line)
                         .ok_or_else(|| {
                             format!(
@@ -452,8 +470,11 @@ fn resolve_edit_selector(
                                 line
                             )
                         })?;
-                    crate::selector::parse_selector(&symbol.canonical_selector(&full_path, project_root))
-                        .map_err(|e| format!("bad resolved match selector: {e}"))
+                    Ok(EditTarget {
+                        start_line: symbol.start_line,
+                        end_line: symbol.end_line,
+                        primary_symbol: Some(symbol),
+                    })
                 }
                 [] => Err(format!("match selector found no matches for /{pattern}/")),
                 _ => Err(format!(
@@ -465,17 +486,45 @@ fn resolve_edit_selector(
                 )),
             }
         }
-        crate::selector::SelectorTarget::LineRange { .. } => Err(
-            "edit_code file-range patch with affected-symbol analysis is documented but not implemented yet"
-                .to_string(),
-        ),
+        crate::selector::SelectorTarget::LineRange {
+            start_line,
+            end_line,
+        } => {
+            let line_count = std::fs::read_to_string(&full_path)
+                .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?
+                .lines()
+                .count()
+                .max(1);
+            let (start_line, end_line) = clamp_edit_range(*start_line, *end_line, line_count)?;
+            Ok(EditTarget {
+                start_line,
+                end_line,
+                primary_symbol: analyzer.find_containing_symbol_match(&full_path, start_line),
+            })
+        }
         crate::selector::SelectorTarget::AroundLine { .. }
         | crate::selector::SelectorTarget::Match { around: Some(_), .. }
         | crate::selector::SelectorTarget::Outline => Err(
-            "edit_code only accepts symbol, enclosing, or unique match selectors; outline/context selectors are read-only"
+            "edit_code only accepts symbol, file-range, enclosing, or unique match selectors; outline/context selectors are read-only"
                 .to_string(),
         ),
     }
+}
+
+fn clamp_edit_range(
+    start_line: usize,
+    end_line: usize,
+    line_count: usize,
+) -> Result<(usize, usize), String> {
+    if start_line == 0 || end_line == 0 || start_line > end_line {
+        return Err(format!("invalid line range {start_line}-{end_line}"));
+    }
+    if start_line > line_count {
+        return Err(format!(
+            "line range starts after end of file: {start_line} > {line_count}"
+        ));
+    }
+    Ok((start_line, end_line.min(line_count)))
 }
 
 /// Apply an edit_code operation: parse selector, resolve file, apply patch, write back.
@@ -506,11 +555,8 @@ pub fn edit_code_apply(
         return Ok(vec![]);
     }
 
-    let edit_selector = resolve_edit_selector(&parsed, project_root)?;
-
-    let selector_match = TreeSitterAnalyzer::new()
-        .resolve_selector(&full_path, &edit_selector)
-        .map_err(|e| format!("cannot resolve selector: {e}"))?;
+    let analyzer = TreeSitterAnalyzer::new();
+    let edit_target = resolve_edit_target(&parsed, project_root, &analyzer)?;
 
     let original = std::fs::read_to_string(&full_path)
         .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?;
@@ -520,13 +566,12 @@ pub fn edit_code_apply(
     let resolved_hunks = resolve_hunks(
         &original,
         &hunks,
-        selector_match.start_line,
-        Some(selector_match.end_line),
+        edit_target.start_line,
+        Some(edit_target.end_line),
     )?;
     let new_content = apply_hunks(&original, &resolved_hunks)?;
 
     // ── Validate: tree-sitter must be able to parse the new content ──
-    let analyzer = TreeSitterAnalyzer::new();
     let ext = full_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if !analyzer.can_parse(ext, &new_content) {
         return Err(format!(
@@ -550,7 +595,9 @@ pub fn edit_code_apply(
     let mut results: Vec<PropagationResult> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut modified_symbol_names = HashSet::new();
-    modified_symbol_names.insert(selector_match.name.clone());
+    if let Some(symbol) = edit_target.primary_symbol.as_ref() {
+        modified_symbol_names.insert(symbol.name.clone());
+    }
 
     // Step 1: collect all symbol names that were modified
     for hunk in &resolved_hunks {
@@ -1052,6 +1099,45 @@ mod e2e_tests {
             modified
                 .contains("pub fn alpha() -> i32 {\n    let inserted = 123;\n    let base = 10;")
         );
+    }
+
+    #[test]
+    fn edit_code_apply_accepts_file_range_selector_with_relative_hunk() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn before() {\n    println!(\"before\");\n}\n\npub fn target() {\n    let value = 1;\n    println!(\"{}\", value);\n}\n\npub fn after() {\n    println!(\"after\");\n}\n";
+        write_rust_file(dir.path(), "lib.rs", rust_code);
+
+        let selector = "src/lib.rs#L5-L8";
+        let patch = "@@ -2,1 +2,1 @@\n-    let value = 1;\n+    let value = 42;\n";
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        let propagation = edit_code_apply(selector, patch, dir.path(), &lsp).unwrap();
+
+        let modified = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert!(modified.contains("let value = 42;"));
+        assert!(modified.contains("println!(\"before\")"));
+        assert!(modified.contains("println!(\"after\")"));
+        assert!(
+            propagation
+                .iter()
+                .any(|result| result.selector.contains("target")),
+            "file-range edit should report the affected containing symbol"
+        );
+    }
+
+    #[test]
+    fn edit_code_apply_rejects_file_range_hunk_outside_range() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn target() {\n    let value = 1;\n    println!(\"{}\", value);\n}\n";
+        write_rust_file(dir.path(), "lib.rs", rust_code);
+
+        let selector = "src/lib.rs#L2-L3";
+        let patch = "@@ -3,1 +3,1 @@\n-    println!(\"{}\", value);\n+    println!(\"changed {}\", value);\n";
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        let err = edit_code_apply(selector, patch, dir.path(), &lsp).unwrap_err();
+
+        assert!(err.contains("outside selector range") || err.contains("exceeds selector range"));
+        let unchanged = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert_eq!(unchanged, rust_code);
     }
 
     #[test]
