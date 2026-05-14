@@ -69,6 +69,11 @@ impl ScopeClient {
             &self.lsp_analyzer,
         );
         if response.error.is_none() {
+            let mut state = self
+                .propagation_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *state = PropagationState::new();
             self.project_root = Some(project_root);
         }
         response
@@ -294,5 +299,62 @@ impl ScopeClient {
 impl Default for ScopeClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_result(selector: &str) -> api::PropagationResult {
+        api::PropagationResult {
+            selector: selector.to_string(),
+            reason: "changed".to_string(),
+            source: api::PropagationSource::OpenEnded,
+            lsp_references: None,
+            diff_summary: Some("diff".to_string()),
+            file_snippet: Some("fn main() {}".to_string()),
+            project_files: Some(vec!["src/main.rs".to_string()]),
+        }
+    }
+
+    #[test]
+    fn open_project_resets_pending_review_state() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp_dir.path().join("Cargo.toml"),
+            "[package]\nname = \"tmp\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+
+        let mut client = ScopeClient::new();
+        assert!(
+            client
+                .next_review_event(vec![open_result("src/main.rs::fn main")])
+                .is_some()
+        );
+        assert_eq!(client.pending_review_count(), 0);
+        assert!(
+            client
+                .next_review_event(vec![open_result("src/main.rs::fn main")])
+                .is_some()
+        );
+        assert_eq!(client.pending_review_count(), 0);
+
+        client
+            .propagation_state
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .accumulate(vec![open_result("src/main.rs::fn main")]);
+        assert_eq!(client.pending_review_count(), 1);
+
+        let response = client.open_project(temp_dir.path(), Some("rust"));
+        assert!(response.error.is_none());
+        assert_eq!(client.pending_review_count(), 0);
+        assert!(
+            client
+                .next_review_event(vec![open_result("src/main.rs::fn main")])
+                .is_some()
+        );
     }
 }

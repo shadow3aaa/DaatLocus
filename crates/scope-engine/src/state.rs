@@ -34,6 +34,7 @@ impl PropagationState {
 
     pub fn next_review(&mut self) -> Option<ReviewEvent> {
         let r = self.pending.pop()?;
+        self.seen.remove(&r.selector);
         match &r.source {
             PropagationSource::Lsp => {
                 // LSP found precise references — build KnownReferences event
@@ -189,6 +190,41 @@ mod tests {
             } => assert_eq!(modified_symbol, "src/a.rs::fn foo"),
             _ => panic!(),
         };
+    }
+
+    #[test]
+    fn acknowledged_selector_can_be_queued_again() {
+        let mut state = PropagationState::new();
+
+        state.accumulate(vec![lsp_result("src/a.rs::fn foo", "first")]);
+        assert_eq!(state.pending_count(), 1);
+        let first = state.next_review().unwrap();
+        match first {
+            ReviewEvent::KnownReferences {
+                modified_symbol,
+                change_summary,
+                ..
+            } => {
+                assert_eq!(modified_symbol, "src/a.rs::fn foo");
+                assert_eq!(change_summary, "first");
+            }
+            _ => panic!("Expected KnownReferences variant"),
+        }
+
+        state.accumulate(vec![lsp_result("src/a.rs::fn foo", "second")]);
+        assert_eq!(state.pending_count(), 1);
+        let second = state.next_review().unwrap();
+        match second {
+            ReviewEvent::KnownReferences {
+                modified_symbol,
+                change_summary,
+                ..
+            } => {
+                assert_eq!(modified_symbol, "src/a.rs::fn foo");
+                assert_eq!(change_summary, "second");
+            }
+            _ => panic!("Expected KnownReferences variant"),
+        }
     }
 
     #[test]
