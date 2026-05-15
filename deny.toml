@@ -22,6 +22,7 @@ allow = [
     "Zlib",
 ]
 exceptions = [
+    { crate = "option-ext", allow = ["MPL-2.0"] },
     { crate = "smartstring", allow = ["MPL-2.0"] },
 ]
 

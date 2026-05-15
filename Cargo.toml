@@ -92,7 +92,7 @@ zstd = "0.13"
 rust-i18n = "4.0.0"
 regex = "1.12.3"
 tokio-stream = "0.1.18"
-scope-engine = { path = "crates/scope-engine" }
+scope-engine = { version = "0.1.0", path = "crates/scope-engine" }
 
 [dev-dependencies]
 tempfile = "3.23.0"
