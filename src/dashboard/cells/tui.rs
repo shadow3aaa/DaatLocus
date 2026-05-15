@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use ratatui::{
     buffer::Buffer,
@@ -13,8 +13,9 @@ use super::{
     ActivityCell, LiveActivityCell,
     apps::{AppAttentionActivityCell, BrowserActivityCell, LiveBrowserActivityCell},
     common::{
-        AssistantActivityCell, ErrorActivityCell, GenericAppActivityCell, TerminalWaitActivityCell,
-        ThinkingActivityCell, UserActivityCell,
+        AssistantActivityCell, CodingEditActivityCell, CodingOpenProjectActivityCell,
+        CodingToolGroupActivityCell, ErrorActivityCell, GenericAppActivityCell,
+        TerminalWaitActivityCell, ThinkingActivityCell, UserActivityCell,
     },
     exec::{ExecResultActivityCell, LiveExecActivityCell},
     highlight::{DiffScopeBackgrounds, diff_scope_backgrounds, highlight_patch_lines},
@@ -254,6 +255,19 @@ impl Renderable for ActivityCell {
             ActivityCell::Assistant(c) => 3 + (c.body_lines.len() as u16).min(40),
             ActivityCell::User(c) => 3 + (c.body_lines.len() as u16).min(20),
             ActivityCell::Thinking(c) => 3 + (c.body_lines.len() as u16).min(20),
+            ActivityCell::CodingOpenProject(c) => 3 + (c.detail_lines.len() as u16).min(8),
+            ActivityCell::CodingToolGroup(c) => {
+                let detail_count = c
+                    .calls
+                    .iter()
+                    .take(12)
+                    .map(|call| 1 + (call.detail_lines.len() as u16).min(2))
+                    .sum::<u16>();
+                4 + detail_count + u16::from(c.calls.len() > 12)
+            }
+            ActivityCell::CodingEdit(c) => {
+                6 + (c.impact_lines.len() as u16).min(8) + (c.diff_files.len() as u16).min(4) * 4
+            }
             ActivityCell::GenericApp(c) => 3 + (c.body_lines.len() as u16).min(10),
             ActivityCell::TerminalWait(c) => 3 + (c.body_lines.len() as u16).min(10),
             ActivityCell::Error(c) => 3 + (c.body_lines.len() as u16).min(10),
@@ -283,6 +297,9 @@ fn render_activity_cell_lines(cell: &ActivityCell, max_width: u16) -> Vec<Line<'
         ActivityCell::AppAttention(cell) => render_app_attention_cell_lines(cell),
         ActivityCell::Browser(cell) => render_browser_cell_lines(cell),
         ActivityCell::LiveBrowser(cell) => render_live_browser_cell_lines(cell),
+        ActivityCell::CodingOpenProject(cell) => render_coding_open_project_cell_lines(cell),
+        ActivityCell::CodingToolGroup(cell) => render_coding_tool_group_cell_lines(cell),
+        ActivityCell::CodingEdit(cell) => render_coding_edit_cell_lines(cell),
         ActivityCell::GenericApp(cell) => render_generic_app_cell_lines(cell),
         ActivityCell::PlanResult(cell) => render_plan_cell_lines(cell),
         ActivityCell::CreateWorkflowResult(cell) => render_create_workflow_cell_lines(cell),
@@ -427,6 +444,197 @@ fn render_generic_app_cell_lines(cell: &GenericAppActivityCell) -> Vec<Line<'sta
         None,
         false,
     )
+}
+
+fn render_coding_open_project_cell_lines(
+    cell: &CodingOpenProjectActivityCell,
+) -> Vec<Line<'static>> {
+    let title = if let Some(language) = cell.language.as_deref() {
+        format!("Opened Project: {} ({language})", cell.project_root)
+    } else {
+        format!("Opened Project: {}", cell.project_root)
+    };
+    render_text_activity_lines(
+        glyph::APP_ATTENTION,
+        Color::Cyan,
+        &title,
+        &cell.detail_lines,
+        6,
+        Some("↳ "),
+        false,
+    )
+}
+
+fn render_coding_tool_group_cell_lines(cell: &CodingToolGroupActivityCell) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            glyph::CODING.to_string(),
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            cell.title.clone(),
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+
+    let mut action_counts = BTreeMap::new();
+    for call in &cell.calls {
+        *action_counts
+            .entry(call.tool_name.as_str())
+            .or_insert(0usize) += 1;
+    }
+    let action_summary = action_counts
+        .iter()
+        .map(|(action, count)| {
+            if *count == 1 {
+                (*action).to_string()
+            } else {
+                format!("{action}×{count}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if !action_summary.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(action_summary, Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    for (index, call) in cell.calls.iter().take(12).enumerate() {
+        let branch = if index == 0 { "└ " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(branch, Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{} ", call.tool_name),
+                Style::default().fg(Color::LightCyan),
+            ),
+            Span::styled(call.summary.clone(), Style::default().fg(Color::Gray)),
+        ]));
+        for detail in call.detail_lines.iter().take(2) {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(detail.clone(), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+
+    if cell.calls.len() > 12 {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                format!("… +{} more calls", cell.calls.len() - 12),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+
+    lines
+}
+
+fn render_coding_edit_cell_lines(cell: &CodingEditActivityCell) -> Vec<Line<'static>> {
+    let visible_files = limit_patch_files(&cell.diff_files, 3);
+    let diff_backgrounds = diff_scope_backgrounds();
+    let old_lineno_width = visible_files
+        .iter()
+        .flat_map(|file| file.diff_lines.iter().filter_map(|line| line.old_lineno))
+        .max()
+        .unwrap_or(0)
+        .to_string()
+        .len()
+        .max(1);
+    let new_lineno_width = visible_files
+        .iter()
+        .flat_map(|file| file.diff_lines.iter().filter_map(|line| line.new_lineno))
+        .max()
+        .unwrap_or(0)
+        .to_string()
+        .len()
+        .max(1);
+
+    let title = if cell.title.trim().is_empty() {
+        "Edited Code".to_string()
+    } else {
+        cell.title.clone()
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            glyph::CODING.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+
+    lines.push(Line::from(vec![
+        Span::raw("   "),
+        Span::styled(cell.selector.clone(), Style::default().fg(Color::Gray)),
+    ]));
+
+    let mut stats = Vec::new();
+    if let Some(file) = cell.file.as_deref() {
+        stats.push(format!("file {file}"));
+    }
+    stats.push(format!("+{} -{}", cell.added_lines, cell.removed_lines));
+    stats.push(format!("{} propagation review(s)", cell.propagation_count));
+    lines.push(Line::from(vec![
+        Span::raw("   "),
+        Span::styled(stats.join(" · "), Style::default().fg(Color::DarkGray)),
+    ]));
+
+    if !cell.impact_lines.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled("Impact", Style::default().fg(Color::DarkGray)),
+        ]));
+        for impact in cell.impact_lines.iter().take(4) {
+            lines.push(Line::from(vec![
+                Span::raw("     "),
+                Span::styled(impact.clone(), Style::default().fg(Color::Gray)),
+            ]));
+        }
+    }
+
+    for (index, file) in visible_files.iter().enumerate() {
+        if index > 0 || !cell.impact_lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines.push(render_patch_file_header(file));
+        lines.extend(render_patch_file_diff_lines(
+            file,
+            diff_backgrounds,
+            old_lineno_width,
+            new_lineno_width,
+            12,
+        ));
+    }
+    if cell.diff_files.len() > visible_files.len() {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                format!(
+                    "… {} more files",
+                    cell.diff_files.len() - visible_files.len()
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+
+    lines
 }
 
 fn render_terminal_wait_cell_lines(cell: &TerminalWaitActivityCell) -> Vec<Line<'static>> {

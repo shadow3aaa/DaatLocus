@@ -1272,7 +1272,11 @@ fn append_committed_activity_cells(
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
     cells: Vec<crate::dashboard::ActivityCell>,
 ) {
-    append_committed_activity_cells_with_ids(context, tx, cells, None);
+    let stable_ids = cells
+        .iter()
+        .map(stable_dashboard_activity_id_for_cell)
+        .collect::<Option<Vec<_>>>();
+    append_committed_activity_cells_with_ids(context, tx, cells, stable_ids);
 }
 
 fn append_committed_activity_cells_with_ids(
@@ -1352,6 +1356,18 @@ fn dashboard_activity_items_from_cells(
             })
             .collect(),
     )
+}
+
+fn stable_dashboard_activity_id_for_cell(cell: &crate::dashboard::ActivityCell) -> Option<String> {
+    match cell {
+        crate::dashboard::ActivityCell::CodingToolGroup(group) => {
+            Some(format!("activity-{}", group.stable_id))
+        }
+        crate::dashboard::ActivityCell::CodingEdit(edit) => {
+            Some(format!("activity-{}", edit.stable_id))
+        }
+        _ => None,
+    }
 }
 
 fn dashboard_activity_items_from_cells_with_ids(

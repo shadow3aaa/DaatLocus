@@ -1251,6 +1251,24 @@ fn summarize_tool_ui_event(event: &ToolUiEvent) -> String {
         ToolUiEvent::Exec(data) | ToolUiEvent::App(data) | ToolUiEvent::Error(data) => {
             summarize_runtime_inline_text(&data.title)
         }
+        ToolUiEvent::CodingOpenProject(data) => {
+            format!(
+                "opened coding project {}",
+                summarize_runtime_inline_text(&data.project_root)
+            )
+        }
+        ToolUiEvent::CodingToolGroup(data) => format!(
+            "{} with {} coding call(s)",
+            summarize_runtime_inline_text(&data.title),
+            data.calls.len()
+        ),
+        ToolUiEvent::CodingEdit(data) => format!(
+            "edited code {} (+{} -{}, {} propagation review(s))",
+            summarize_runtime_inline_text(&data.selector),
+            data.added_lines,
+            data.removed_lines,
+            data.propagation_count
+        ),
         ToolUiEvent::Browser(crate::tool_ui::BrowserUiData { title, .. }) => {
             summarize_runtime_inline_text(title)
         }
@@ -1576,6 +1594,9 @@ fn tool_event_is_workspace_signal(event: &ToolUiEvent) -> bool {
         event,
         ToolUiEvent::Exec(_)
             | ToolUiEvent::Terminal(_)
+            | ToolUiEvent::CodingOpenProject(_)
+            | ToolUiEvent::CodingToolGroup(_)
+            | ToolUiEvent::CodingEdit(_)
             | ToolUiEvent::Browser(_)
             | ToolUiEvent::Patch(_)
             | ToolUiEvent::App(_)

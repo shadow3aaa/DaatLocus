@@ -19,12 +19,15 @@ use crate::{
 
 use super::DashboardState;
 use apps::{AppAttentionActivityCell, BrowserActivityCell, LiveBrowserActivityCell};
-use common::ThinkingActivityCell;
 use common::thinking_cell;
 use common::{
     AssistantActivityCell, ErrorActivityCell, GenericAppActivityCell, MessageImageAttachment,
     TerminalWaitActivityCell, UserActivityCell, assistant_cell_with_body, error_cell,
     terminal_wait_cell, user_cell,
+};
+use common::{
+    CodingEditActivityCell, CodingOpenProjectActivityCell, CodingToolGroupActivityCell,
+    ThinkingActivityCell,
 };
 use exec::{ExecResultActivityCell, LiveExecActivityCell, live_exec_cell};
 use messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell};
@@ -53,6 +56,9 @@ pub enum ActivityCell {
     AppAttention(AppAttentionActivityCell),
     Browser(BrowserActivityCell),
     LiveBrowser(LiveBrowserActivityCell),
+    CodingOpenProject(CodingOpenProjectActivityCell),
+    CodingToolGroup(CodingToolGroupActivityCell),
+    CodingEdit(CodingEditActivityCell),
     #[serde(alias = "ToolResult")]
     GenericApp(GenericAppActivityCell),
     PlanResult(PlanActivityCell),
@@ -241,6 +247,11 @@ pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> Option<Activit
             | crate::tool_ui::BrowserUiAction::Reload
             | crate::tool_ui::BrowserUiAction::ClosePage => None,
         },
+        ToolUiEvent::CodingOpenProject(event) => {
+            Some(ActivityCell::CodingOpenProject(event.into()))
+        }
+        ToolUiEvent::CodingToolGroup(event) => Some(ActivityCell::CodingToolGroup(event.into())),
+        ToolUiEvent::CodingEdit(event) => Some(ActivityCell::CodingEdit(event.into())),
         ToolUiEvent::Patch(event) => Some(ActivityCell::Patch(event.into())),
         ToolUiEvent::Telegram(event) => Some(ActivityCell::Telegram(event.into())),
         ToolUiEvent::Reply(event) => Some(ActivityCell::Reply(event.into())),
@@ -473,6 +484,21 @@ fn upsert_live_activity_cell(cells: &mut Vec<LiveActivityCell>, incoming: LiveAc
 fn coalesce_activity_cells(cells: Vec<ActivityCell>) -> Vec<ActivityCell> {
     let mut merged: Vec<ActivityCell> = Vec::new();
     for cell in cells {
+        if let ActivityCell::CodingToolGroup(new_group) = &cell
+            && let Some(ActivityCell::CodingToolGroup(existing_group)) =
+                merged.iter_mut().find(|existing| {
+                    matches!(
+                        existing,
+                        ActivityCell::CodingToolGroup(existing_group)
+                            if existing_group.stable_id == new_group.stable_id
+                    )
+                })
+        {
+            existing_group.title = new_group.title.clone();
+            existing_group.calls = new_group.calls.clone();
+            continue;
+        }
+
         if let Some(last) = merged.last_mut() {
             let same_exact = *last == cell;
             let same_exec_pair = matches!(

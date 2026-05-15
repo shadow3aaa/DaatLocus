@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::tool_ui::ToolUiData;
+use crate::tool_ui::{CodingEditUiData, CodingToolGroupUiData, PatchFileUiData, ToolUiData};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AssistantActivityCell {
@@ -63,6 +63,41 @@ pub struct MessageImageAttachment {
 pub struct GenericAppActivityCell {
     pub title: String,
     pub body_lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodingOpenProjectActivityCell {
+    pub project_root: String,
+    pub language: Option<String>,
+    pub detail_lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodingToolGroupActivityCell {
+    pub stable_id: String,
+    pub title: String,
+    pub calls: Vec<CodingToolCallActivityCell>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodingEditActivityCell {
+    pub stable_id: String,
+    pub title: String,
+    pub selector: String,
+    pub file: Option<String>,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+    pub propagation_count: usize,
+    pub impact_lines: Vec<String>,
+    pub diff_files: Vec<PatchFileUiData>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodingToolCallActivityCell {
+    pub tool_name: String,
+    pub summary: String,
+    pub detail_lines: Vec<String>,
+    pub detail_title: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,6 +176,51 @@ pub fn thinking_cell(
 impl From<ToolUiData> for GenericAppActivityCell {
     fn from(data: ToolUiData) -> Self {
         generic_app_cell(data.title, data.body_lines)
+    }
+}
+
+impl From<crate::tool_ui::CodingOpenProjectUiData> for CodingOpenProjectActivityCell {
+    fn from(data: crate::tool_ui::CodingOpenProjectUiData) -> Self {
+        Self {
+            project_root: data.project_root,
+            language: data.language,
+            detail_lines: data.detail_lines,
+        }
+    }
+}
+
+impl From<CodingToolGroupUiData> for CodingToolGroupActivityCell {
+    fn from(data: CodingToolGroupUiData) -> Self {
+        Self {
+            stable_id: data.stable_id,
+            title: data.title,
+            calls: data
+                .calls
+                .into_iter()
+                .map(|call| CodingToolCallActivityCell {
+                    tool_name: call.tool_name,
+                    summary: call.summary,
+                    detail_lines: call.detail_lines,
+                    detail_title: None,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<CodingEditUiData> for CodingEditActivityCell {
+    fn from(data: CodingEditUiData) -> Self {
+        Self {
+            stable_id: data.stable_id,
+            title: data.title,
+            selector: data.selector,
+            file: data.file,
+            added_lines: data.added_lines,
+            removed_lines: data.removed_lines,
+            propagation_count: data.propagation_count,
+            impact_lines: data.impact_lines,
+            diff_files: data.diff_files,
+        }
     }
 }
 

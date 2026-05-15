@@ -19,7 +19,10 @@ use crate::{
     context_budget::truncate_text_to_token_budget,
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     runtime::scope_client::ScopeClient,
-    tool_ui::{ToolCallUiEvent, ToolUiEvent, compact_body_lines},
+    tool_ui::{
+        CodingEditUiData, CodingToolCallUiData, PatchDiffLineKind, PatchDiffLineUiData,
+        PatchFileOperation, PatchFileUiData, ToolCallUiEvent, ToolUiEvent, compact_body_lines,
+    },
 };
 
 const CODING_USAGE_PURPOSE: &str = "Coding is the app to use for repository-level project editing, backed by scope-engine semantic code operations.";
@@ -73,11 +76,6 @@ pub struct CodingGlobArgs {
 pub struct CodingEditCodeArgs {
     pub selector: String,
     pub patch: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct CodingDeleteCodeArgs {
-    pub selector: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -317,6 +315,7 @@ pub struct CodingApp {
     config_hint_summary: Option<CodingConfigHintSummary>,
     root_instructions: Vec<ProjectInstructionDocument>,
     delivered_scoped_instructions: HashSet<DeliveredProjectInstructionKey>,
+    coding_tool_group_calls: Vec<CodingToolCallUiData>,
     last_action: Option<String>,
 }
 
@@ -329,6 +328,7 @@ impl CodingApp {
             config_hint_summary: None,
             root_instructions: Vec::new(),
             delivered_scoped_instructions: HashSet::new(),
+            coding_tool_group_calls: Vec::new(),
             last_action: None,
         }
     }
@@ -386,6 +386,7 @@ impl CodingApp {
         self.config_hint_summary = Some(config_hint_summary.clone());
         self.root_instructions = root_instructions.clone();
         self.delivered_scoped_instructions.clear();
+        self.coding_tool_group_calls.clear();
         self.last_action = Some("opened project".to_string());
 
         let mut model_parts = vec![config_hint_summary.model_content()];
@@ -419,7 +420,11 @@ impl CodingApp {
                 "root_project_instructions": root_instructions.iter().map(instruction_payload).collect::<Vec<_>>(),
             }),
             model_content: Some(model_content),
-            ui_event: ToolUiEvent::app("coding_open_project", ui_lines),
+            ui_event: ToolUiEvent::coding_open_project(
+                project_root.display().to_string(),
+                args.language,
+                ui_lines,
+            ),
             turn_boundary_reason: None,
         })
     }
@@ -536,6 +541,49 @@ impl CodingApp {
         }
         Ok(())
     }
+
+    fn coding_tool_group_event(
+        &mut self,
+        tool_name: impl Into<String>,
+        summary: impl Into<String>,
+        detail_lines: Vec<String>,
+    ) -> ToolUiEvent {
+        const MAX_GROUPED_CODING_CALLS: usize = 24;
+
+        self.coding_tool_group_calls.push(CodingToolCallUiData {
+            tool_name: tool_name.into(),
+            summary: summary.into(),
+            detail_lines,
+        });
+        if self.coding_tool_group_calls.len() > MAX_GROUPED_CODING_CALLS {
+            let drop_count = self.coding_tool_group_calls.len() - MAX_GROUPED_CODING_CALLS;
+            self.coding_tool_group_calls.drain(0..drop_count);
+        }
+
+        ToolUiEvent::coding_tool_group(
+            self.coding_tool_group_stable_id(),
+            "Explored",
+            self.coding_tool_group_calls.clone(),
+        )
+    }
+
+    fn coding_tool_group_stable_id(&self) -> String {
+        let project_root = self.project_root_display();
+        let mut hasher = Sha256::new();
+        hasher.update(project_root.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        format!("coding-tools-{}", short_hash(&hash))
+    }
+
+    fn coding_edit_stable_id(&self, selector: &str, patch: &str) -> String {
+        let project_root = self.project_root_display();
+        let mut hasher = Sha256::new();
+        hasher.update(project_root.as_bytes());
+        hasher.update(selector.as_bytes());
+        hasher.update(patch.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        format!("coding-edit-{}", short_hash(&hash))
+    }
 }
 
 impl Default for CodingApp {
@@ -640,12 +688,6 @@ impl App for CodingApp {
                 input_schema: serde_json::to_value(schema_for!(CodingEditCodeArgs)).unwrap(),
             },
             AppToolSpec {
-                name: "coding_delete_code".to_string(),
-                description: "Delete selector-resolved code and return propagation results.".to_string(),
-                scope: AppToolScope::Coding,
-                input_schema: serde_json::to_value(schema_for!(CodingDeleteCodeArgs)).unwrap(),
-            },
-            AppToolSpec {
                 name: "coding_next_review".to_string(),
                 description: "Acknowledge and return the next accumulated scope-engine propagation review event, if any.".to_string(),
                 scope: AppToolScope::Coding,
@@ -683,10 +725,6 @@ impl App for CodingApp {
                     summarize_coding_inline_text(&args.selector),
                     args.patch.len()
                 )
-            }
-            "coding_delete_code" => {
-                let args: CodingDeleteCodeArgs = parse_coding_tool_args(call)?;
-                format!("selector={}", summarize_coding_inline_text(&args.selector))
             }
             "coding_next_review" => "next propagation review".to_string(),
             _ => return Err(miette!("unknown coding tool `{}`", call.name)),
@@ -732,12 +770,14 @@ impl App for CodingApp {
                     summary: format!("read code {}", result.selector),
                     payload: serde_json::to_value(&result).unwrap(),
                     model_content: Some(model_content),
-                    ui_event: ToolUiEvent::app(
-                        "coding_read_code",
-                        vec![
-                            format!("selector={}", result.selector),
-                            format!("language={}", result.language),
-                        ],
+                    ui_event: self.coding_tool_group_event(
+                        "Read",
+                        coding_target_summary(&result.selector),
+                        vec![format!(
+                            "{} · {}",
+                            result.language,
+                            coding_count_label(result.content.lines().count(), "line", "lines")
+                        )],
                     ),
                     turn_boundary_reason: None,
                 };
@@ -757,6 +797,10 @@ impl App for CodingApp {
                     args.include.as_deref(),
                 )?;
                 self.last_action = Some(format!("searched {}", args.pattern));
+                let mut detail_lines = Vec::new();
+                if let Some(include) = args.include.as_deref() {
+                    detail_lines.push(format!("include {}", summarize_coding_inline_text(include)));
+                }
                 let mut output = AppToolExecutionResult {
                     summary: format!("found {} matches", result.matches.len()),
                     payload: serde_json::to_value(&result).unwrap(),
@@ -764,9 +808,16 @@ impl App for CodingApp {
                         &result.output,
                         context.tool_output_max_tokens,
                     )),
-                    ui_event: ToolUiEvent::app(
-                        "grep",
-                        vec![format!("matches={}", result.matches.len())],
+                    ui_event: self.coding_tool_group_event(
+                        "Search",
+                        coding_pattern_result_summary(
+                            &args.pattern,
+                            args.path.as_deref(),
+                            result.matches.len(),
+                            "match",
+                            "matches",
+                        ),
+                        detail_lines,
                     ),
                     turn_boundary_reason: None,
                 };
@@ -780,6 +831,10 @@ impl App for CodingApp {
                 let args: CodingGlobArgs = parse_coding_tool_args(call)?;
                 let result = self.scope.glob_files(&args.pattern, args.path.as_deref())?;
                 self.last_action = Some(format!("globbed {}", args.pattern));
+                let mut detail_lines = Vec::new();
+                if let Some(path) = args.path.as_deref() {
+                    detail_lines.push(format!("under {}", summarize_coding_inline_text(path)));
+                }
                 let mut output = AppToolExecutionResult {
                     summary: format!("found {} files", result.files.len()),
                     payload: serde_json::to_value(&result).unwrap(),
@@ -787,9 +842,16 @@ impl App for CodingApp {
                         &result.output,
                         context.tool_output_max_tokens,
                     )),
-                    ui_event: ToolUiEvent::app(
-                        "glob",
-                        vec![format!("files={}", result.files.len())],
+                    ui_event: self.coding_tool_group_event(
+                        "List",
+                        coding_pattern_result_summary(
+                            &args.pattern,
+                            args.path.as_deref(),
+                            result.files.len(),
+                            "file",
+                            "files",
+                        ),
+                        detail_lines,
                     ),
                     turn_boundary_reason: None,
                 };
@@ -803,6 +865,16 @@ impl App for CodingApp {
                 let args: CodingEditCodeArgs = parse_coding_tool_args(call)?;
                 let results = self.scope.edit_code(&args.selector, &args.patch)?;
                 self.last_action = Some(format!("edited {}", args.selector));
+                let diff_files = patch_ui_files_from_results(&results, &args.selector);
+                let added_lines = diff_files
+                    .iter()
+                    .map(|file| file.added_lines)
+                    .sum::<usize>();
+                let removed_lines = diff_files
+                    .iter()
+                    .map(|file| file.removed_lines)
+                    .sum::<usize>();
+                let impact_lines = build_coding_edit_impact_lines(&results);
                 let summary = format!(
                     "edited code {}; propagation_results={}",
                     args.selector,
@@ -812,42 +884,17 @@ impl App for CodingApp {
                     summary: summary.clone(),
                     payload: json!({ "propagation_results": results }),
                     model_content: None,
-                    ui_event: ToolUiEvent::app(
-                        "coding_edit_code",
-                        vec![
-                            format!("selector={}", args.selector),
-                            format!("propagation_results={}", results.len()),
-                        ],
-                    ),
-                    turn_boundary_reason: None,
-                };
-                self.append_scoped_instructions_to_result(
-                    &mut output,
-                    selector_path(&args.selector),
-                    context,
-                )?;
-                Ok(output)
-            }
-            "coding_delete_code" => {
-                self.require_project()?;
-                let args: CodingDeleteCodeArgs = parse_coding_tool_args(call)?;
-                let results = self.scope.delete_code(&args.selector)?;
-                self.last_action = Some(format!("deleted {}", args.selector));
-                let mut output = AppToolExecutionResult {
-                    summary: format!(
-                        "deleted code {}; propagation_results={}",
-                        args.selector,
-                        results.len()
-                    ),
-                    payload: json!({ "propagation_results": results }),
-                    model_content: None,
-                    ui_event: ToolUiEvent::app(
-                        "coding_delete_code",
-                        vec![
-                            format!("selector={}", args.selector),
-                            format!("propagation_results={}", results.len()),
-                        ],
-                    ),
+                    ui_event: ToolUiEvent::coding_edit(CodingEditUiData {
+                        stable_id: self.coding_edit_stable_id(&args.selector, &args.patch),
+                        title: "Edited Code".to_string(),
+                        selector: args.selector.clone(),
+                        file: Some(selector_path(&args.selector).to_string()),
+                        added_lines,
+                        removed_lines,
+                        propagation_count: results.len(),
+                        impact_lines,
+                        diff_files,
+                    }),
                     turn_boundary_reason: None,
                 };
                 self.append_scoped_instructions_to_result(
@@ -862,21 +909,35 @@ impl App for CodingApp {
                 let _args: CodingNextReviewArgs = parse_coding_tool_args(call)?;
                 let review = self.scope.ack_next_event();
                 self.last_action = Some("acknowledged next review".to_string());
+                let review_present = review.is_some();
+                let review_title = match review.as_ref() {
+                    Some(scope_engine::api::ReviewEvent::KnownReferences {
+                        modified_symbol,
+                        ..
+                    })
+                    | Some(scope_engine::api::ReviewEvent::InvestigateImpact {
+                        modified_symbol,
+                        ..
+                    }) => format!(
+                        "Reviewing impact of {}",
+                        coding_target_summary(modified_symbol)
+                    ),
+                    None => "No review pending".to_string(),
+                };
+                let review_summary = if review_present {
+                    "change impact target acquired"
+                } else {
+                    "no pending propagation review"
+                };
                 Ok(AppToolExecutionResult {
-                    summary: if review.is_some() {
-                        "acknowledged coding review event".to_string()
+                    summary: if review_present {
+                        "acknowledged coding impact review target".to_string()
                     } else {
                         "no coding review event pending".to_string()
                     },
                     payload: json!({ "review": review }),
                     model_content: None,
-                    ui_event: ToolUiEvent::app(
-                        "coding_next_review",
-                        vec![format!(
-                            "review={}",
-                            if review.is_some() { "present" } else { "none" }
-                        )],
-                    ),
+                    ui_event: ToolUiEvent::app(review_title, vec![review_summary.to_string()]),
                     turn_boundary_reason: None,
                 })
             }
@@ -906,6 +967,105 @@ fn summarize_coding_inline_text(text: &str) -> String {
     } else {
         summary
     }
+}
+
+fn coding_count_label(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
+fn coding_target_summary(selector: &str) -> String {
+    summarize_coding_inline_text(selector)
+}
+
+fn build_coding_edit_impact_lines(results: &[scope_engine::api::PropagationResult]) -> Vec<String> {
+    results
+        .iter()
+        .take(8)
+        .map(|result| {
+            let mut line = format!(
+                "{} — {}",
+                summarize_coding_inline_text(&result.selector),
+                summarize_coding_inline_text(&result.reason)
+            );
+            if let Some(snippet) = result.file_snippet.as_deref() {
+                let compact = summarize_coding_inline_text(snippet);
+                if !compact.is_empty() {
+                    line.push_str(" · ");
+                    line.push_str(&compact);
+                }
+            }
+            line
+        })
+        .collect()
+}
+
+fn patch_ui_files_from_results(
+    results: &[scope_engine::api::PropagationResult],
+    selector: &str,
+) -> Vec<PatchFileUiData> {
+    results
+        .iter()
+        .map(|result| {
+            let path = selector_path(&result.selector).to_string();
+            let added_lines = result
+                .diff_summary
+                .as_deref()
+                .map(count_change_lines)
+                .unwrap_or(0);
+            PatchFileUiData {
+                path: if path.is_empty() {
+                    selector_path(selector).to_string()
+                } else {
+                    path
+                },
+                operation: PatchFileOperation::Update,
+                added_lines,
+                removed_lines: 0,
+                diff_lines: result
+                    .file_snippet
+                    .as_deref()
+                    .map(|snippet| {
+                        snippet
+                            .lines()
+                            .map(|line| PatchDiffLineUiData {
+                                kind: PatchDiffLineKind::Context,
+                                old_lineno: None,
+                                new_lineno: None,
+                                text: line.to_string(),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+fn count_change_lines(text: &str) -> usize {
+    text.lines().filter(|line| !line.trim().is_empty()).count()
+}
+
+fn coding_pattern_result_summary(
+    pattern: &str,
+    path: Option<&str>,
+    count: usize,
+    singular: &str,
+    plural: &str,
+) -> String {
+    let mut summary = format!(
+        "{} — {}",
+        summarize_coding_inline_text(pattern),
+        coding_count_label(count, singular, plural)
+    );
+    if let Some(path) = path {
+        summary.push_str(" in ");
+        summary.push_str(&summarize_coding_inline_text(path));
+    }
+    summary
 }
 
 fn compact_coding_argument_lines(arguments: &Value) -> Vec<String> {

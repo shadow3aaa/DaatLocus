@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod glyph {
     pub const APP_ATTENTION: &str = "◉";
     pub const BROWSER: &str = "↗";
+    pub const CODING: &str = "◎";
     pub const ERROR: &str = "!";
     pub const EXEC: &str = "•";
     pub const MEMORY: &str = "⟲";
@@ -18,6 +19,9 @@ pub mod glyph {
 pub enum ToolUiEvent {
     Exec(ToolUiData),
     Terminal(TerminalUiData),
+    CodingOpenProject(CodingOpenProjectUiData),
+    CodingToolGroup(CodingToolGroupUiData),
+    CodingEdit(CodingEditUiData),
     Browser(BrowserUiData),
     Patch(PatchUiData),
     Telegram(TelegramUiData),
@@ -76,6 +80,47 @@ pub struct BrowserUiData {
     pub line_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ref_count: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodingOpenProjectUiData {
+    pub project_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub detail_lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodingToolGroupUiData {
+    pub stable_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub calls: Vec<CodingToolCallUiData>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodingToolCallUiData {
+    pub tool_name: String,
+    pub summary: String,
+    #[serde(default)]
+    pub detail_lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodingEditUiData {
+    pub stable_id: String,
+    pub title: String,
+    pub selector: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+    pub propagation_count: usize,
+    #[serde(default)]
+    pub impact_lines: Vec<String>,
+    #[serde(default)]
+    pub diff_files: Vec<PatchFileUiData>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -252,6 +297,34 @@ impl ToolUiEvent {
             title: title.into(),
             body_lines,
         })
+    }
+
+    pub fn coding_open_project(
+        project_root: impl Into<String>,
+        language: Option<String>,
+        detail_lines: Vec<String>,
+    ) -> Self {
+        Self::CodingOpenProject(CodingOpenProjectUiData {
+            project_root: project_root.into(),
+            language,
+            detail_lines,
+        })
+    }
+
+    pub fn coding_tool_group(
+        stable_id: impl Into<String>,
+        title: impl Into<String>,
+        calls: Vec<CodingToolCallUiData>,
+    ) -> Self {
+        Self::CodingToolGroup(CodingToolGroupUiData {
+            stable_id: stable_id.into(),
+            title: title.into(),
+            calls,
+        })
+    }
+
+    pub fn coding_edit(data: CodingEditUiData) -> Self {
+        Self::CodingEdit(data)
     }
 
     pub fn plan(steps: Vec<PlanStepUiData>) -> Self {

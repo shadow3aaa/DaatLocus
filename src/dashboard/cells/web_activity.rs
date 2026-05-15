@@ -9,8 +9,9 @@ use super::{
     ActivityCell, LiveActivityCell,
     apps::{BrowserActivityCell, LiveBrowserActivityCell},
     common::{
-        AssistantActivityCell, ErrorActivityCell, GenericAppActivityCell, TerminalWaitActivityCell,
-        ThinkingActivityCell, UserActivityCell,
+        AssistantActivityCell, CodingEditActivityCell, CodingOpenProjectActivityCell,
+        CodingToolGroupActivityCell, ErrorActivityCell, GenericAppActivityCell,
+        TerminalWaitActivityCell, ThinkingActivityCell, UserActivityCell,
     },
     exec::{ExecResultActivityCell, LiveExecActivityCell},
     messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell},
@@ -258,6 +259,9 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
         ),
         ActivityCell::Browser(cell) => apply_browser_cell(&mut item, cell),
         ActivityCell::LiveBrowser(cell) => apply_live_browser_cell(&mut item, cell),
+        ActivityCell::CodingOpenProject(cell) => apply_coding_open_project_cell(&mut item, cell),
+        ActivityCell::CodingToolGroup(cell) => apply_coding_tool_group_cell(&mut item, cell),
+        ActivityCell::CodingEdit(cell) => apply_coding_edit_cell(&mut item, cell),
         ActivityCell::GenericApp(cell) => apply_generic_app_cell(&mut item, cell),
         ActivityCell::PlanResult(cell) => apply_plan_cell(&mut item, cell),
         ActivityCell::CreateWorkflowResult(cell) => apply_create_workflow_cell(&mut item, cell),
@@ -287,6 +291,9 @@ fn activity_cell_variant_name(cell: &ActivityCell) -> &'static str {
         ActivityCell::AppAttention(_) => "AppAttention",
         ActivityCell::Browser(_) => "Browser",
         ActivityCell::LiveBrowser(_) => "LiveBrowser",
+        ActivityCell::CodingOpenProject(_) => "CodingOpenProject",
+        ActivityCell::CodingToolGroup(_) => "CodingToolGroup",
+        ActivityCell::CodingEdit(_) => "CodingEdit",
         ActivityCell::GenericApp(_) => "GenericApp",
         ActivityCell::PlanResult(_) => "PlanResult",
         ActivityCell::CreateWorkflowResult(_) => "CreateWorkflowResult",
@@ -551,6 +558,137 @@ fn apply_generic_app_cell(item: &mut WebActivityItem, cell: &GenericAppActivityC
         cell.title.clone(),
         cell.body_lines.clone(),
     );
+}
+
+fn apply_coding_tool_group_cell(item: &mut WebActivityItem, cell: &CodingToolGroupActivityCell) {
+    item.kind = WebActivityKind::Tool;
+    item.actor = Some(WebActivityActor::Tool);
+    item.title = cell.title.clone();
+    let call_lines = cell
+        .calls
+        .iter()
+        .map(|call| format!("{} {}", call.tool_name, call.summary))
+        .collect::<Vec<_>>();
+    item.tool = Some(WebActivityTool {
+        name: "coding_tool_group".to_string(),
+        app: Some("Coding".to_string()),
+        input_preview: Some(format!("{} call(s)", cell.calls.len())),
+        output_preview: compact_preview(&call_lines),
+        output_ref: Some(cell.stable_id.clone()),
+        duration_ms: None,
+        exit_code: None,
+        affected_files: Vec::new(),
+    });
+    item.blocks = if call_lines.is_empty() {
+        text_blocks(vec!["No Coding tool calls yet".to_string()])
+    } else {
+        vec![WebActivityBlock::List { items: call_lines }]
+    };
+    item.detail_blocks = text_blocks(
+        cell.calls
+            .iter()
+            .flat_map(|call| {
+                let mut lines = vec![format!("{} {}", call.tool_name, call.summary)];
+                lines.extend(call.detail_lines.iter().map(|line| format!("  {line}")));
+                lines
+            })
+            .collect(),
+    );
+}
+
+fn apply_coding_edit_cell(item: &mut WebActivityItem, cell: &CodingEditActivityCell) {
+    item.kind = WebActivityKind::Tool;
+    item.actor = Some(WebActivityActor::Tool);
+    item.ui_hint = Some("coding-edit code-change".to_string());
+    item.title = "Code Edit".to_string();
+    item.metadata = Some(serde_json::json!({
+        "kind": "coding-edit",
+        "category": "code-change",
+    }));
+    let affected_files = cell
+        .diff_files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    item.tool = Some(WebActivityTool {
+        name: "coding_edit_code".to_string(),
+        app: Some("Coding".to_string()),
+        input_preview: Some(cell.selector.clone()),
+        output_preview: Some(format!(
+            "+{} -{} · {} propagation review(s)",
+            cell.added_lines, cell.removed_lines, cell.propagation_count
+        )),
+        output_ref: Some(cell.stable_id.clone()),
+        duration_ms: None,
+        exit_code: None,
+        affected_files,
+    });
+
+    let mut entries = vec![WebActivityKvEntry {
+        key: "Target".to_string(),
+        value: cell.selector.clone(),
+    }];
+    if let Some(file) = cell.file.as_deref() {
+        entries.push(WebActivityKvEntry {
+            key: "File".to_string(),
+            value: file.to_string(),
+        });
+    }
+    entries.push(WebActivityKvEntry {
+        key: "Changes".to_string(),
+        value: format!("+{} -{}", cell.added_lines, cell.removed_lines),
+    });
+    entries.push(WebActivityKvEntry {
+        key: "Impact".to_string(),
+        value: format!("{} propagation review(s)", cell.propagation_count),
+    });
+    item.blocks = vec![WebActivityBlock::Kv { entries }];
+    if !cell.diff_files.is_empty() {
+        item.blocks.push(WebActivityBlock::Diff {
+            files: cell
+                .diff_files
+                .iter()
+                .map(web_diff_file_from_patch_file)
+                .collect(),
+        });
+    }
+    item.detail_blocks = if cell.impact_lines.is_empty() {
+        Vec::new()
+    } else {
+        vec![WebActivityBlock::List {
+            items: cell.impact_lines.clone(),
+        }]
+    };
+}
+
+fn apply_coding_open_project_cell(
+    item: &mut WebActivityItem,
+    cell: &CodingOpenProjectActivityCell,
+) {
+    item.kind = WebActivityKind::App;
+    item.actor = Some(WebActivityActor::Tool);
+    item.title = "Opened Coding Project".to_string();
+    item.tool = Some(WebActivityTool {
+        name: "coding_open_project".to_string(),
+        app: Some("Coding".to_string()),
+        input_preview: Some(cell.project_root.clone()),
+        output_preview: compact_preview(&cell.detail_lines),
+        output_ref: None,
+        duration_ms: None,
+        exit_code: None,
+        affected_files: Vec::new(),
+    });
+    item.blocks = kv_block(vec![
+        WebActivityKvEntry {
+            key: "project_root".to_string(),
+            value: cell.project_root.clone(),
+        },
+        WebActivityKvEntry {
+            key: "language".to_string(),
+            value: cell.language.clone().unwrap_or_else(|| "auto".to_string()),
+        },
+    ]);
+    item.detail_blocks = text_blocks(cell.detail_lines.clone());
 }
 
 fn apply_simple_tool_item(
