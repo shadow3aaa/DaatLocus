@@ -14,6 +14,7 @@
 //!   installers. It owns profile create/delete/start/stop semantics locally.
 
 use std::{
+    ffi::OsStr,
     fs,
     fs::File,
     io::{Read, Seek},
@@ -26,6 +27,7 @@ use futures_util::StreamExt;
 use miette::{Context as _, IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -49,6 +51,11 @@ const SIDECAR_TARGET: &str = env!("DAAT_LOCUS_BUILD_TARGET");
 const SIDECAR_DOWNLOAD_RELEASE_TAG: &str = "hindsight-sidecars-v0.6.2-1";
 const SIDECAR_DOWNLOAD_MANIFEST_URL: &str = "https://github.com/shadow3aaa/DaatLocus/releases/download/hindsight-sidecars-v0.6.2-1/manifest.toml";
 const SIDECAR_DOWNLOAD_USER_AGENT: &str = concat!("daat-locus/", env!("CARGO_PKG_VERSION"));
+const SIDECAR_DAEMON_EXECUTABLE: &str = if cfg!(windows) {
+    "hindsight-api.exe"
+} else {
+    "hindsight-api"
+};
 
 #[cfg(all(test, windows))]
 const HINDSIGHT_EMBED_EXE: &str = "hindsight-embed.exe";
@@ -251,6 +258,13 @@ impl HindsightSidecar {
         let mut command = Command::new(&self.executable);
         configure_sidecar_process_env(&mut command);
         command
+    }
+
+    fn expected_daemon_executable(&self) -> PathBuf {
+        self.executable
+            .parent()
+            .map(|parent| parent.join(SIDECAR_DAEMON_EXECUTABLE))
+            .unwrap_or_else(|| self.root.join("bin").join(SIDECAR_DAEMON_EXECUTABLE))
     }
 }
 
@@ -641,6 +655,7 @@ impl HindsightManagedServer {
     }
 
     async fn start_with_sidecar(&self, sidecar: &HindsightSidecar) -> Result<()> {
+        self.stop_stale_managed_daemon(sidecar).await?;
         self.configure_profile(sidecar).await?;
         if let Err(err) = self.start_daemon(sidecar).await {
             tracing::warn!(
@@ -688,6 +703,46 @@ impl HindsightManagedServer {
                 ))
             }
         }
+    }
+
+    async fn stop_stale_managed_daemon(&self, sidecar: &HindsightSidecar) -> Result<()> {
+        let expected_executable = sidecar.expected_daemon_executable();
+        let stale = find_stale_managed_sidecar_daemons(&expected_executable, self.config.port);
+        if stale.is_empty() {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            expected_executable = %expected_executable.display(),
+            port = self.config.port,
+            stale_count = stale.len(),
+            "[hindsight:managed] found stale managed sidecar daemon(s); stopping before restart"
+        );
+
+        let graceful_stop_failed = if let Err(err) =
+            self.stop_with_sidecar(sidecar, "daemon.stop_stale").await
+        {
+            tracing::warn!(
+                "[hindsight:managed] stale daemon graceful stop failed; killing managed sidecar process(es): {err:?}"
+            );
+            true
+        } else {
+            false
+        };
+        if graceful_stop_failed {
+            kill_processes(&stale)?;
+        }
+        if let Err(err) = wait_for_processes_to_exit(&stale).await {
+            if !graceful_stop_failed {
+                tracing::warn!(
+                    "[hindsight:managed] stale daemon graceful stop did not terminate all managed sidecar process(es); killing: {err:?}"
+                );
+                kill_processes(&stale)?;
+                return wait_for_processes_to_exit(&stale).await;
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// Stop the daemon gracefully.
@@ -891,6 +946,121 @@ impl HindsightManagedServer {
     }
 }
 
+fn find_stale_managed_sidecar_daemons(expected_executable: &Path, port: u16) -> Vec<u32> {
+    let expected_executable = normalize_process_path(expected_executable);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_exe(UpdateKind::Always)
+            .with_cmd(UpdateKind::Always),
+    );
+
+    system
+        .processes()
+        .values()
+        .filter(|process| is_stale_managed_sidecar_daemon(process, &expected_executable, port))
+        .map(|process| process.pid().as_u32())
+        .collect()
+}
+
+fn is_stale_managed_sidecar_daemon(
+    process: &sysinfo::Process,
+    expected_executable: &Path,
+    port: u16,
+) -> bool {
+    let Some(executable) = process.exe() else {
+        return false;
+    };
+    let executable = normalize_process_path(executable);
+    executable != expected_executable
+        && executable.file_name() == Some(OsStr::new(SIDECAR_DAEMON_EXECUTABLE))
+        && executable_has_managed_sidecar_metadata(&executable)
+        && process_cmd_has_daemon_port(process.cmd(), port)
+}
+
+fn normalize_process_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn executable_has_managed_sidecar_metadata(executable: &Path) -> bool {
+    executable
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join(SIDECAR_METADATA_FILE).is_file())
+        .unwrap_or(false)
+}
+
+fn process_cmd_has_daemon_port(cmd: &[std::ffi::OsString], port: u16) -> bool {
+    let port = port.to_string();
+    let mut has_daemon = false;
+    let mut has_port = false;
+    let mut args = cmd.iter();
+    while let Some(arg) = args.next() {
+        let Some(arg) = arg.to_str() else {
+            continue;
+        };
+        if arg == "--daemon" {
+            has_daemon = true;
+        } else if arg == "--port" {
+            has_port = args
+                .next()
+                .and_then(|next| next.to_str())
+                .map(|next| next == port)
+                .unwrap_or(false);
+        } else if arg == format!("--port={port}") {
+            has_port = true;
+        }
+    }
+    has_daemon && has_port
+}
+
+fn kill_processes(pids: &[u32]) -> Result<()> {
+    if pids.is_empty() {
+        return Ok(());
+    }
+    let system = System::new_all();
+    for pid in pids {
+        let Some(process) = system.process(sysinfo::Pid::from_u32(*pid)) else {
+            continue;
+        };
+        if !process.kill() {
+            return Err(miette!(
+                "[hindsight:managed] failed to kill stale sidecar process pid={pid}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn wait_for_processes_to_exit(pids: &[u32]) -> Result<()> {
+    if pids.is_empty() {
+        return Ok(());
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(DAEMON_STOP_TIMEOUT_SECS);
+    loop {
+        let system = System::new_all();
+        let running = pids
+            .iter()
+            .filter(|pid| system.process(sysinfo::Pid::from_u32(**pid)).is_some())
+            .copied()
+            .collect::<Vec<_>>();
+        if running.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(miette!(
+                "[hindsight:managed] stale sidecar process(es) did not exit after {}s: {:?}",
+                DAEMON_STOP_TIMEOUT_SECS,
+                running
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn truncate_error(text: &str) -> String {
     const MAX_CHARS: usize = 2_000;
     let trimmed = text.trim();
@@ -1085,6 +1255,47 @@ exit 2
             .await
             .expect("bind unused port");
         listener.local_addr().expect("unused port addr").port()
+    }
+
+    #[test]
+    fn detects_daemon_command_port_forms() {
+        let cmd = vec![
+            "hindsight-api".into(),
+            "--daemon".into(),
+            "--idle-timeout".into(),
+            "0".into(),
+            "--port".into(),
+            "8888".into(),
+        ];
+        assert!(process_cmd_has_daemon_port(&cmd, 8888));
+
+        let equals_cmd = vec![
+            "hindsight-api".into(),
+            "--daemon".into(),
+            "--port=8888".into(),
+        ];
+        assert!(process_cmd_has_daemon_port(&equals_cmd, 8888));
+
+        let wrong_port = vec![
+            "hindsight-api".into(),
+            "--daemon".into(),
+            "--port".into(),
+            "9999".into(),
+        ];
+        assert!(!process_cmd_has_daemon_port(&wrong_port, 8888));
+
+        let idle_timeout_value_is_not_port = vec![
+            "hindsight-api".into(),
+            "--daemon".into(),
+            "--idle-timeout".into(),
+            "8888".into(),
+            "--port".into(),
+            "9999".into(),
+        ];
+        assert!(!process_cmd_has_daemon_port(
+            &idle_timeout_value_is_not_port,
+            8888
+        ));
     }
 
     #[test]
