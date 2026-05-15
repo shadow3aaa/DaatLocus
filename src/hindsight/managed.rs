@@ -654,6 +654,17 @@ impl HindsightManagedServer {
         self.start_with_sidecar(&sidecar).await
     }
 
+    /// Stop outdated Daat Locus managed sidecar daemons before health-based reuse.
+    ///
+    /// A healthy `/health` response only proves that something is listening on the
+    /// Hindsight port. After a sidecar version bump, an older managed daemon can
+    /// still be healthy and would otherwise short-circuit startup before
+    /// `start_with_sidecar` gets a chance to replace it.
+    pub async fn stop_stale_managed_daemon_for_current_sidecar(&self) -> Result<bool> {
+        let sidecar = HindsightSidecar::ensure_installed().await?;
+        self.stop_stale_managed_daemon(&sidecar).await
+    }
+
     async fn start_with_sidecar(&self, sidecar: &HindsightSidecar) -> Result<()> {
         self.stop_stale_managed_daemon(sidecar).await?;
         self.configure_profile(sidecar).await?;
@@ -705,11 +716,11 @@ impl HindsightManagedServer {
         }
     }
 
-    async fn stop_stale_managed_daemon(&self, sidecar: &HindsightSidecar) -> Result<()> {
+    async fn stop_stale_managed_daemon(&self, sidecar: &HindsightSidecar) -> Result<bool> {
         let expected_executable = sidecar.expected_daemon_executable();
         let stale = find_stale_managed_sidecar_daemons(&expected_executable, self.config.port);
         if stale.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         tracing::warn!(
@@ -738,11 +749,12 @@ impl HindsightManagedServer {
                     "[hindsight:managed] stale daemon graceful stop did not terminate all managed sidecar process(es); killing: {err:?}"
                 );
                 kill_processes(&stale)?;
-                return wait_for_processes_to_exit(&stale).await;
+                wait_for_processes_to_exit(&stale).await?;
+                return Ok(true);
             }
             return Err(err);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Stop the daemon gracefully.
