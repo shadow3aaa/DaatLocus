@@ -697,146 +697,6 @@ pub fn edit_code_apply(
     Ok(results)
 }
 
-/// Apply a delete_code operation: parse selector, resolve file, remove the symbol.
-pub fn delete_code_apply(
-    selector_str: &str,
-    project_root: &Path,
-    lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
-) -> Result<Vec<PropagationResult>, String> {
-    let parsed =
-        crate::selector::parse_selector(selector_str).map_err(|e| format!("bad selector: {e}"))?;
-    if !matches!(parsed.target, crate::selector::SelectorTarget::Symbol(_)) {
-        return Err("delete_code only accepts symbol selectors".to_string());
-    }
-
-    let (full_path, _ext) = crate::selector::resolve_file(&parsed, project_root)
-        .map_err(|e| format!("cannot resolve file: {e}"))?;
-
-    let selector_match = TreeSitterAnalyzer::new()
-        .resolve_selector(&full_path, &parsed)
-        .map_err(|e| format!("cannot resolve selector: {e}"))?;
-
-    let original = std::fs::read_to_string(&full_path)
-        .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?;
-
-    // ── Propagation: map to symbol name BEFORE deletion (file is still valid) ──
-    let mut results: Vec<PropagationResult> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-
-    // Record the deleted symbol itself
-    seen.insert(selector_str.to_string());
-    // Build context for the delete operation
-    let file_snippet = original.lines().take(10).collect::<Vec<_>>().join("\n");
-    let project_files = std::fs::read_dir(project_root)
-        .ok()
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().is_dir() && e.path().file_name().is_some_and(|n| n == "src"))
-                .filter_map(|e| std::fs::read_dir(e.path()).ok())
-                .flat_map(|entries| {
-                    entries.filter_map(|e| e.ok()).filter_map(|e| {
-                        e.path()
-                            .strip_prefix(project_root)
-                            .ok()
-                            .map(|p| p.to_string_lossy().to_string())
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    results.push(PropagationResult {
-        selector: selector_str.to_string(),
-        reason: format!(
-            "deleted symbol \"{}\" from {}",
-            parsed.name().unwrap_or("<unknown>"),
-            full_path.display()
-        ),
-        source: PropagationSource::OpenEnded,
-        lsp_references: None,
-        diff_summary: Some(format!("deleted: {}", parsed.name().unwrap_or("<unknown>"))),
-        file_snippet: Some(file_snippet),
-        project_files: Some(project_files),
-    });
-
-    // Query LSP for references of the deleted symbol
-    let mut lsp_refs: Vec<PropagationResult> = Vec::new();
-    if let Ok(lsp_guard) = lsp_analyzer.lock()
-        && let Some(ref lsp) = *lsp_guard
-    {
-        // Find the symbol's precise position in the file for LSP query
-        let (line, character) =
-            find_symbol_position(&original, parsed.name().unwrap_or("<unknown>")).unwrap_or_else(
-                || {
-                    let hint_line = original
-                        .lines()
-                        .position(|l| l.contains(parsed.name().unwrap_or("<unknown>")))
-                        .map(|idx| idx + 1)
-                        .unwrap_or(1);
-                    (hint_line, 0)
-                },
-            );
-        lsp_refs = lsp.find_references_for_symbol(&full_path, line, character, project_root);
-    }
-    if lsp_refs.is_empty() {
-        // No LSP: open-ended result for the deleted symbol already added above
-    } else {
-        for r in lsp_refs {
-            if seen.insert(r.selector.clone()) {
-                results.push(r);
-            }
-        }
-    }
-
-    // ── Execute the deletion ──
-    let new_content = remove_symbol_range(
-        &original,
-        selector_match.start_line,
-        selector_match.end_line,
-    )
-    .ok_or_else(|| {
-        format!(
-            "symbol '{}' not found in {}",
-            parsed.name().unwrap_or("<unknown>"),
-            full_path.display()
-        )
-    })?;
-
-    std::fs::write(&full_path, &new_content)
-        .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
-
-    // ── Notify LSP of the close ──
-    if let Ok(lsp_guard) = lsp_analyzer.lock()
-        && let Some(ref lsp) = *lsp_guard
-    {
-        lsp.notify_did_close(&full_path);
-    }
-
-    Ok(results)
-}
-
-/// Remove a 1-based inclusive line range.
-fn remove_symbol_range(source: &str, start_line: usize, end_line: usize) -> Option<String> {
-    let lines: Vec<&str> = source.lines().collect();
-    if start_line == 0 || end_line < start_line || end_line > lines.len() {
-        return None;
-    }
-
-    let start = start_line - 1;
-    let result: Vec<&str> = lines[..start]
-        .iter()
-        .chain(lines[end_line..].iter())
-        .copied()
-        .collect();
-
-    if result.is_empty() {
-        Some(String::new())
-    } else {
-        Some(result.join("\n") + "\n")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,13 +782,6 @@ mod tests {
         let err = apply_stripped_v4a_patch(SAMPLE_ORIGINAL, patch).unwrap_err();
 
         assert!(err.contains("cannot infer insertion point for add-only hunk"));
-    }
-
-    #[test]
-    fn remove_symbol_range_works() {
-        let content = "line 1\nline 2\ntarget line here\nline 4\nline 5\n";
-        let result = remove_symbol_range(content, 2, 4);
-        assert_eq!(result, Some("line 1\nline 5\n".to_string()));
     }
 }
 
@@ -1215,24 +1068,6 @@ mod e2e_tests {
     }
 
     #[test]
-    fn delete_code_apply_removes_symbol_and_returns_propagation() {
-        let dir = setup_temp_rust_project();
-        let rust_code = "pub fn hello() {\n    println!(\"hello\");\n}\n\npub fn world() {\n    println!(\"world\");\n}\n";
-        write_rust_file(dir.path(), "lib.rs", rust_code);
-
-        let selector = "src/lib.rs::fn hello()";
-        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
-        let result = delete_code_apply(selector, dir.path(), &lsp);
-        assert!(result.is_ok(), "delete_code_apply should succeed");
-
-        let propagation = result.unwrap();
-        assert!(!propagation.is_empty(), "Should have propagation results");
-        // Should have an OpenEnded result for the deleted symbol
-        assert!(
-            propagation.iter().any(|r| r.reason.contains("deleted")),
-            "Should note deletion"
-        );
-    }
     #[test]
     fn edit_code_apply_accepts_enclosing_selector() {
         let dir = setup_temp_rust_project();

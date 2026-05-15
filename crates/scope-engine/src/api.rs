@@ -170,12 +170,6 @@ pub struct EditCodeRequest {
     pub patch: String,
 }
 
-/// delete_code parameters
-#[derive(Debug, Clone, Deserialize)]
-pub struct DeleteCodeRequest {
-    pub selector: String,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScopeUsageResponse {
     pub usage_markdown: String,
@@ -188,7 +182,6 @@ pub struct ScopeSelectorKindSchema {
     pub syntax: String,
     pub read: bool,
     pub edit: bool,
-    pub delete: bool,
     pub notes: String,
 }
 

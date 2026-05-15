@@ -315,12 +315,12 @@ It is an `App` because:
 Coding app must render its key state into `AppStateRender` so that:
 
 1. **Turn re-entry sees critical state immediately** — after context compression or turn interruption, the model can read the current project, LSP status, and pending propagation events from `<preturn_context>` or `<afterclaim_context>` without relying on conversation history.
-2. **Tool return values carry immediate feedback** — `edit_code`, `delete_code`, `search_code`, and `read_code` return `PropagationResult` lists in their tool result so the model sees impact scope mid-turn.
+2. **Tool return values carry immediate feedback** — `edit_code`, `search_code`, and `read_code` return `PropagationResult` lists in their tool result so the model sees impact scope mid-turn.
 3. **Notice is NOT for propagation review** — Coding app uses `notice_reason()` only for background events like "LSP server crashed" or "project index ready". Propagation review is handled through tool return values and state rendering, not through notice-triggered turn interrupts.
 
 Operational constraints:
 
-- Coding tools (`read_code`, `edit_code`, `delete_code`, `search_code`, `find_references`) must go through the Coding app, requiring `focus_app("Coding")` first.
+- Coding tools (`read_code`, `edit_code`, `search_code`, `find_references`) must go through the Coding app, requiring `focus_app("Coding")` first.
 - `apply_patch` remains a Terminal app tool for raw file edits; Coding app handles semantic (selector-based) operations.
 - Coding app `render_state()` must include: project_root, open_languages, lsp_status, propagation_pending_count, and up to N recent propagation events.
 - LSP process lifecycle (start, crash recovery, shutdown) belongs to Coding app internals, not to tool return values.
@@ -331,7 +331,7 @@ An app may declare that it *contains* other apps, making their tools available w
 
 When `Coding` is focused, the tool scope includes:
 
-- Coding's own tools: `read_code`, `edit_code`, `delete_code`, `search_code`, `find_references`
+- Coding's own tools: `read_code`, `edit_code`, `search_code`, `find_references`
 - Terminal's tools: `terminal_exec`, `terminal_write_stdin`, `terminal_terminate`, `apply_patch`
 - Browser's tools: **not** available unless the model explicitly focuses Browser
 
@@ -353,7 +353,6 @@ SCOPE (scope-engine) provides semantic code operations, but its modification cap
 | Read code | ✅ `read_code` (selector-based) | — |
 | Search code | ✅ `search_code` (ripgrep + symbol) | — |
 | Edit code | ⚠️ `edit_code` (stripped v4a patch) | Single-symbol hunks only; no cross-symbol refactoring |
-| Delete code | ⚠️ `delete_code` | Deletes symbol body; does not trace callers |
 | Rename | ❌ | Not implemented |
 | Extract/inline | ❌ | Not implemented |
 | File-level structure | ❌ | Cannot add imports, move files |

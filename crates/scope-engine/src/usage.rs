@@ -15,15 +15,13 @@ pub fn selector_schema() -> Vec<ScopeSelectorKindSchema> {
             syntax: "src/foo.rs::Bar::new".to_string(),
             read: true,
             edit: true,
-            delete: true,
-            notes: "Symbol selectors resolve one AST definition and support semantic edit/delete with normal propagation analysis.".to_string(),
+            notes: "Symbol selectors resolve one AST definition and support semantic edits with normal propagation analysis.".to_string(),
         },
         ScopeSelectorKindSchema {
             kind: "line_range".to_string(),
             syntax: "src/foo.rs#L120-L180".to_string(),
             read: true,
             edit: true,
-            delete: false,
             notes: "File ranges locate explicit line spans. Edits are patch-only and must be followed by affected-symbol analysis.".to_string(),
         },
         ScopeSelectorKindSchema {
@@ -31,7 +29,6 @@ pub fn selector_schema() -> Vec<ScopeSelectorKindSchema> {
             syntax: "src/foo.rs#around:L150±40".to_string(),
             read: true,
             edit: false,
-            delete: false,
             notes: "Around selectors are context windows for reading; resolve to a bounded file range.".to_string(),
         },
         ScopeSelectorKindSchema {
@@ -39,7 +36,6 @@ pub fn selector_schema() -> Vec<ScopeSelectorKindSchema> {
             syntax: "src/foo.rs#match:/ProjectInstructions/".to_string(),
             read: true,
             edit: true,
-            delete: false,
             notes: "Match selectors locate regex hits. Edits require exactly one match; multiple matches must return candidates.".to_string(),
         },
         ScopeSelectorKindSchema {
@@ -47,7 +43,6 @@ pub fn selector_schema() -> Vec<ScopeSelectorKindSchema> {
             syntax: "src/foo.rs#match:/ProjectInstructions/#around:40".to_string(),
             read: true,
             edit: false,
-            delete: false,
             notes: "Match-around selectors read context around a unique regex match.".to_string(),
         },
         ScopeSelectorKindSchema {
@@ -55,7 +50,6 @@ pub fn selector_schema() -> Vec<ScopeSelectorKindSchema> {
             syntax: "src/foo.rs#enclosing:L150".to_string(),
             read: true,
             edit: true,
-            delete: false,
             notes: "Enclosing selectors resolve the innermost symbol containing a line, then use symbol semantics.".to_string(),
         },
         ScopeSelectorKindSchema {
@@ -63,7 +57,6 @@ pub fn selector_schema() -> Vec<ScopeSelectorKindSchema> {
             syntax: "src/foo.rs#outline".to_string(),
             read: true,
             edit: false,
-            delete: false,
             notes: "Outline selectors return file structure only and are read-only.".to_string(),
         },
     ]

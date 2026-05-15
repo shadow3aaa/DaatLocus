@@ -195,19 +195,6 @@ pub fn dispatch(
             };
             handle_edit_code(req, &params, project_root, propagation_state, lsp_analyzer)
         }
-        "delete_code" => {
-            let params: DeleteCodeRequest = match serde_json::from_value(req.params.clone()) {
-                Ok(p) => p,
-                Err(e) => {
-                    return JsonRpcResponse::err(
-                        req.id.clone(),
-                        -32602,
-                        format!("Invalid params: {e}"),
-                    );
-                }
-            };
-            handle_delete_code(req, &params, project_root, propagation_state, lsp_analyzer)
-        }
         "ack_next_event" => {
             let mut state = match propagation_state.lock() {
                 Ok(s) => s,
@@ -942,43 +929,6 @@ fn handle_edit_code(
     };
 
     match patch::edit_code_apply(&params.selector, &params.patch, project_root, lsp_analyzer) {
-        Ok(results) => {
-            if !results.is_empty()
-                && let Ok(mut state) = propagation_state.lock()
-            {
-                state.accumulate(results.clone());
-            }
-            JsonRpcResponse::ok(
-                req.id.clone(),
-                serde_json::to_value(PropagationResponse {
-                    propagation_results: results,
-                })
-                .unwrap(),
-            )
-        }
-        Err(e) => JsonRpcResponse::err(req.id.clone(), -32001, e),
-    }
-}
-
-fn handle_delete_code(
-    req: &JsonRpcRequest,
-    params: &DeleteCodeRequest,
-    project_root: Option<&Path>,
-    propagation_state: &Mutex<PropagationState>,
-    lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
-) -> JsonRpcResponse {
-    let project_root = match project_root {
-        Some(r) => r,
-        None => {
-            return JsonRpcResponse::err(
-                req.id.clone(),
-                -32000,
-                "No project open; call open_project first",
-            );
-        }
-    };
-
-    match patch::delete_code_apply(&params.selector, project_root, lsp_analyzer) {
         Ok(results) => {
             if !results.is_empty()
                 && let Ok(mut state) = propagation_state.lock()

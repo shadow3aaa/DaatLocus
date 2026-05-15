@@ -202,25 +202,6 @@ impl ScopeClient {
         Ok(results)
     }
 
-    /// Delete a selector via scope-engine.
-    #[allow(dead_code)]
-    pub fn delete_code(&self, selector_str: &str) -> Result<Vec<api::PropagationResult>> {
-        let root = self
-            .project_root
-            .as_deref()
-            .ok_or_else(|| miette!("no project opened"))?;
-        let results = patch::delete_code_apply(selector_str, root, &self.lsp_analyzer)
-            .map_err(|err| miette!("{err}"))?;
-        if !results.is_empty() {
-            let mut state = self
-                .propagation_state
-                .lock()
-                .unwrap_or_else(|err| err.into_inner());
-            state.accumulate(results.clone());
-        }
-        Ok(results)
-    }
-
     /// Count accumulated propagation review events.
     #[allow(dead_code)]
     pub fn pending_review_count(&self) -> usize {
