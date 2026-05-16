@@ -7,6 +7,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthChar;
 
 use super::markdown::render_markdown;
 use super::{
@@ -384,7 +385,10 @@ fn render_thinking_cell_lines(cell: &ThinkingActivityCell, max_width: u16) -> Ve
             let mut chunk_width = 0usize;
 
             for ch in span.content.chars() {
-                if current_width + chunk_width >= content_width {
+                let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if current_width + chunk_width > 0
+                    && current_width + chunk_width + ch_width > content_width
+                {
                     if !chunk.is_empty() {
                         current_spans.push(Span::styled(std::mem::take(&mut chunk), style));
                         chunk_width = 0;
@@ -397,7 +401,7 @@ fn render_thinking_cell_lines(cell: &ThinkingActivityCell, max_width: u16) -> Ve
                 }
 
                 chunk.push(ch);
-                chunk_width += 1;
+                chunk_width += ch_width;
                 has_content = true;
             }
 
@@ -1638,8 +1642,42 @@ That's it.";
             rendered
                 .iter()
                 .skip(1)
-                .all(|line| line.chars().count() <= 34),
+                .all(|line| line_display_width(line) <= 34),
             "pre-wrapped thinking lines should fit the requested width: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn thinking_cell_wraps_wide_unicode_with_aligned_prefix() {
+        let cell = ThinkingActivityCell {
+            title: "Thinking".to_string(),
+            body_lines: vec![
+                "处理中文对齐问题需要按终端显示宽度换行，否则左侧边线会错位".to_string(),
+                "English text followed by 中文字符 should still align".to_string(),
+            ],
+            full_body: None,
+            expanded: false,
+        };
+
+        let rendered = render_thinking_cell_lines(&cell, 34)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert!(
+            rendered.len() > 3,
+            "wide unicode thinking body should be wrapped: {rendered:?}"
+        );
+        assert!(
+            rendered.iter().skip(1).all(|line| line.starts_with("│ ")),
+            "every wide-unicode continuation line should keep the thinking bar prefix: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .skip(1)
+                .all(|line| line_display_width(line) <= 34),
+            "wide-unicode thinking lines should fit the requested terminal width: {rendered:?}"
         );
     }
 
@@ -1648,6 +1686,12 @@ That's it.";
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    fn line_display_width(line: &str) -> usize {
+        line.chars()
+            .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+            .sum()
     }
 
     #[test]

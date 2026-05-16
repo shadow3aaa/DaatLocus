@@ -852,6 +852,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-markdown",
  "two-face",
+ "unicode-width 0.2.2",
  "uuid",
  "viewpoint-core",
  "windows-sys 0.61.2",
