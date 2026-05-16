@@ -810,6 +810,20 @@ impl PromptUi {
         items: &[T],
         default: usize,
     ) -> Result<usize> {
+        self.select_inner(prompt, items, default, false)
+    }
+
+    fn select_compact<T: AsRef<str>>(&mut self, items: &[T], default: usize) -> Result<usize> {
+        self.select_inner("", items, default, true)
+    }
+
+    fn select_inner<T: AsRef<str>>(
+        &mut self,
+        prompt: &str,
+        items: &[T],
+        default: usize,
+        compact: bool,
+    ) -> Result<usize> {
         if items.is_empty() {
             return Err(miette!(
                 "{}",
@@ -822,7 +836,9 @@ impl PromptUi {
         loop {
             let locale = self.locale;
             self.terminal_mut()?
-                .draw(|frame| render_select_prompt(frame, locale, prompt, items, &mut state))
+                .draw(|frame| {
+                    render_select_prompt(frame, locale, prompt, items, &mut state, compact)
+                })
                 .map_err(|e| {
                     miette!(
                         "{}",
@@ -1068,42 +1084,51 @@ fn render_select_prompt<T: AsRef<str>>(
     prompt: &str,
     items: &[T],
     state: &mut ListState,
+    compact: bool,
 ) {
     let block = prompt_panel_block(locale);
     let inner = block.inner(frame.area());
     frame.render_widget(block, frame.area());
 
-    let layout = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ]);
-    let [kind_area, prompt_area, list_area, help_area] = inner.layout(&layout);
+    let (list_area, help_area) = if compact {
+        let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]);
+        let [list_area, help_area] = inner.layout(&layout);
+        (list_area, help_area)
+    } else {
+        let layout = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ]);
+        let [kind_area, prompt_area, list_area, help_area] = inner.layout(&layout);
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                crate::tr!(locale, "prompt_ui.select"),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                prompt.to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        kind_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            crate::tr!(locale, "prompt_ui.option_count", count = items.len()),
-            Style::default().fg(Color::Gray),
-        ))),
-        prompt_area,
-    );
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    crate::tr!(locale, "prompt_ui.select"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    prompt.to_string(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            kind_area,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                crate::tr!(locale, "prompt_ui.option_count", count = items.len()),
+                Style::default().fg(Color::Gray),
+            ))),
+            prompt_area,
+        );
+
+        (list_area, help_area)
+    };
 
     let list_items: Vec<ListItem> = items
         .iter()
@@ -1128,6 +1153,42 @@ fn render_select_prompt<T: AsRef<str>>(
             .style(Style::default().fg(Color::DarkGray)),
         help_area,
     );
+}
+
+#[cfg(test)]
+fn render_select_prompt_to_text<T: AsRef<str>>(
+    locale: Locale,
+    prompt: &str,
+    items: &[T],
+    compact: bool,
+) -> String {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let backend = TestBackend::new(80, PROMPT_VIEWPORT_HEIGHT);
+    let mut terminal = Terminal::new(backend).expect("test terminal initializes");
+    let mut state = ListState::default().with_selected(Some(0));
+    terminal
+        .draw(|frame| render_select_prompt(frame, locale, prompt, items, &mut state, compact))
+        .expect("test select prompt renders");
+
+    buffer_to_text(terminal.backend().buffer())
+}
+
+#[cfg(test)]
+fn buffer_to_text(buffer: &ratatui::buffer::Buffer) -> String {
+    let width = buffer.area.width as usize;
+    buffer
+        .content()
+        .chunks(width)
+        .map(|row| {
+            row.iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn render_text_prompt(
@@ -2743,25 +2804,15 @@ pub async fn run_config_menu() -> Result<()> {
     loop {
         let mut locale = ui.locale();
         let has_config = crate::config::config_file_exists().await;
-        let status = if has_config {
+        if has_config {
             match crate::config::load_config().await {
                 Ok(cfg) => {
                     locale = cfg.locale;
                     ui.set_locale(locale);
-                    crate::tr!(
-                        locale,
-                        "config.status_configured",
-                        main_model = cfg.main_model,
-                        providers = cfg.providers.len(),
-                        models = cfg.models.len(),
-                        locale_name = cfg.locale.display_name()
-                    )
                 }
-                Err(e) => crate::tr!(locale, "config.status_load_error", error = e),
+                Err(_) => {}
             }
-        } else {
-            crate::tr!(locale, "config.status_unconfigured")
-        };
+        }
 
         let items = [
             crate::tr!(locale, "config.show_details"),
@@ -2773,11 +2824,7 @@ pub async fn run_config_menu() -> Result<()> {
             crate::tr!(locale, "config.exit"),
         ];
 
-        let idx = match ui.select(
-            &crate::tr!(locale, "config.menu_title", status = status),
-            &items,
-            0,
-        ) {
+        let idx = match ui.select_compact(&items, 0) {
             Ok(idx) => idx,
             Err(err) => match config_menu_navigation_from_prompt_error(&err, true) {
                 Some(ConfigMenuPromptNavigation::ExitMenu) => break,
@@ -3324,6 +3371,27 @@ mod tests {
             config_menu_navigation_from_prompt_error(&err, true),
             Some(ConfigMenuPromptNavigation::ExitMenu)
         );
+    }
+
+    #[test]
+    fn compact_select_prompt_hides_heading_and_option_count() {
+        let items = [
+            crate::tr!(Locale::EnUs, "config.show_details"),
+            crate::tr!(Locale::EnUs, "config.add_provider"),
+            crate::tr!(Locale::EnUs, "config.exit"),
+        ];
+        let text = render_select_prompt_to_text(
+            Locale::EnUs,
+            "Config management main_model=gpt-5.5 | providers=6 | models=12 | locale=English",
+            &items,
+            true,
+        );
+
+        assert!(!text.contains("Config management main_model"));
+        assert!(!text.contains("3 option"));
+        assert!(!text.contains("Select  Config management"));
+        assert!(text.contains(&items[0]));
+        assert!(text.contains(&crate::tr!(Locale::EnUs, "prompt_ui.help_select")));
     }
 
     #[test]
