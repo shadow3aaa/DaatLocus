@@ -29,6 +29,12 @@ pub enum SelectorTarget {
         pattern: String,
         around: Option<usize>,
     },
+    BeforeLine {
+        line: usize,
+    },
+    AfterLine {
+        line: usize,
+    },
     Enclosing {
         line: usize,
     },
@@ -235,6 +241,12 @@ fn parse_hash_selector(
         SelectorTarget::AroundLine { line, context }
     } else if let Some(expr) = suffix.strip_prefix("match:/") {
         parse_match_target(expr)?
+    } else if let Some(expr) = suffix.strip_prefix("before:L") {
+        let line = parse_positive_usize(expr, "before line")?;
+        SelectorTarget::BeforeLine { line }
+    } else if let Some(expr) = suffix.strip_prefix("after:L") {
+        let line = parse_positive_usize(expr, "after line")?;
+        SelectorTarget::AfterLine { line }
     } else if let Some(expr) = suffix.strip_prefix("enclosing:L") {
         let line = parse_positive_usize(expr, "enclosing line")?;
         SelectorTarget::Enclosing { line }
@@ -514,6 +526,12 @@ mod tests {
 
         let sel = parse_selector("src/foo.rs#enclosing:L150").unwrap();
         assert_eq!(sel.target, SelectorTarget::Enclosing { line: 150 });
+
+        let sel = parse_selector("src/foo.rs#before:L150").unwrap();
+        assert_eq!(sel.target, SelectorTarget::BeforeLine { line: 150 });
+
+        let sel = parse_selector("src/foo.rs#after:L150").unwrap();
+        assert_eq!(sel.target, SelectorTarget::AfterLine { line: 150 });
 
         let sel = parse_selector("src/foo.rs#outline").unwrap();
         assert_eq!(sel.target, SelectorTarget::Outline);

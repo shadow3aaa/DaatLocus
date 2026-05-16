@@ -763,6 +763,28 @@ fn resolve_read_selection(
                 )),
             }
         }
+        SelectorTarget::BeforeLine { line } | SelectorTarget::AfterLine { line } => {
+            let (start_line, end_line) = clamp_range(*line, *line, line_count)?;
+            Ok(ResolvedReadSelection {
+                selector: format!(
+                    "{}#L{}-L{}",
+                    relative_file_path(project_root, full_path),
+                    start_line,
+                    end_line
+                ),
+                start_line,
+                end_line,
+                selector_info: selector_info_for_range(
+                    full_path,
+                    project_root,
+                    "insertion_line",
+                    start_line,
+                    end_line,
+                    analyzer.find_containing_symbol_match(full_path, *line),
+                ),
+                content_override: None,
+            })
+        }
         SelectorTarget::Enclosing { line } => {
             let symbol = analyzer
                 .find_containing_symbol_match(full_path, *line)

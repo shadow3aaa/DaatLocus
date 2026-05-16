@@ -627,6 +627,11 @@ fn resolve_edit_target(
                 primary_symbol: analyzer.find_containing_symbol_match(&full_path, start_line),
             })
         }
+        crate::selector::SelectorTarget::BeforeLine { .. }
+        | crate::selector::SelectorTarget::AfterLine { .. } => Err(
+            "edit_code Update/Delete actions do not accept insertion selectors; use Add with #before:L or #after:L"
+                .to_string(),
+        ),
         crate::selector::SelectorTarget::AroundLine { .. }
         | crate::selector::SelectorTarget::Match { around: Some(_), .. }
         | crate::selector::SelectorTarget::Outline => Err(
@@ -781,6 +786,30 @@ fn resolve_add_insertion(
                 None
             };
             Ok((*start_line, primary_symbol))
+        }
+        crate::selector::SelectorTarget::BeforeLine { line } => {
+            let line_count = std::fs::read_to_string(full_path)
+                .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?
+                .lines()
+                .count()
+                .max(1);
+            if *line == 0 || *line > line_count + 1 {
+                return Err(format!("add insertion line {} is outside file bounds", line));
+            }
+            let primary_symbol = analyzer.find_containing_symbol_match(full_path, *line);
+            Ok((*line, primary_symbol))
+        }
+        crate::selector::SelectorTarget::AfterLine { line } => {
+            let line_count = std::fs::read_to_string(full_path)
+                .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?
+                .lines()
+                .count()
+                .max(1);
+            if *line == 0 || *line > line_count {
+                return Err(format!("add insertion line {} is outside file bounds", line));
+            }
+            let primary_symbol = analyzer.find_containing_symbol_match(full_path, *line);
+            Ok((line + 1, primary_symbol))
         }
         crate::selector::SelectorTarget::Symbol(_)
         | crate::selector::SelectorTarget::Enclosing { .. }
@@ -1202,6 +1231,23 @@ mod e2e_tests {
         assert!(modified.contains("pub fn added()"));
         assert!(modified.contains("pub fn keep()"));
         assert!(!modified.contains("remove_me"));
+    }
+
+    #[test]
+    fn edit_code_apply_adds_after_line_in_tsx() {
+        let dir = setup_temp_rust_project();
+        let tsx_code = "function AgentChatActivityHeader() {\n  return <div />;\n}\n\nfunction agentChatActivityGlyph(bubble: { kind: string; toolName?: string; appName?: string }) {\n  if (bubble.kind === \"tool\") {\n    if (bubble.toolName === \"terminal\") {\n      return \"$\";\n    }\n    if (bubble.toolName === \"browser\") {\n      return \"↗\";\n    }\n    return \"⌁\";\n  }\n\n  return \"·\";\n}\n";
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/status-page.tsx"), tsx_code).unwrap();
+
+        let diff = "*** Begin Patch\n*** Add: src/status-page.tsx#after:L12\n+    if (bubble.appName === \"Coding\" || bubble.toolName === \"coding_tool_group\") {\n+      return \"◎\";\n+    }\n*** End Patch\n";
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        edit_code_apply(diff, dir.path(), &lsp).unwrap();
+
+        let modified = std::fs::read_to_string(dir.path().join("src/status-page.tsx")).unwrap();
+        assert!(modified.contains("bubble.toolName === \"browser\")"));
+        assert!(modified.contains("bubble.toolName === \"coding_tool_group\""));
+        assert!(modified.contains("return \"◎\";"));
     }
 
     #[test]

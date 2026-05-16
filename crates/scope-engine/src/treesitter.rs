@@ -387,6 +387,29 @@ mod tests {
     }
 
     #[test]
+    fn tsx_files_use_tsx_parser_and_expose_top_level_functions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status-page.tsx");
+        std::fs::write(
+            &path,
+            "function AgentChatActivityHeader() {\n  return <div />;\n}\n\nfunction agentChatActivityGlyph(bubble: { kind: string }) {\n  return bubble.kind;\n}\n",
+        )
+        .unwrap();
+        let analyzer = TreeSitterAnalyzer::new();
+
+        assert!(analyzer.can_parse("tsx", &std::fs::read_to_string(&path).unwrap()));
+        let symbol = analyzer
+            .resolve_selector(
+                &path,
+                &crate::selector::parse_selector("status-page.tsx::fn agentChatActivityGlyph")
+                    .unwrap(),
+            )
+            .expect("TSX top-level function should resolve");
+        assert_eq!(symbol.name, "agentChatActivityGlyph");
+        assert_eq!(symbol.start_line, 5);
+    }
+
+    #[test]
     fn canonical_selector_disambiguates_duplicate_method_names() {
         let dir = tempfile::tempdir().unwrap();
         let code = r#"trait Hints {

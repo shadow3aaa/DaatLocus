@@ -49,6 +49,7 @@ impl LanguageRegistry {
         r.register(Box::new(python::PythonAdapter::new()));
         r.register(Box::new(go::GoAdapter::new()));
         r.register(Box::new(typescript::TypeScriptAdapter::new()));
+        r.register(Box::new(typescript::TsxAdapter::new()));
         r.register(Box::new(typescript::JavaScriptAdapter::new()));
         r.register(Box::new(java::JavaAdapter::new()));
         r.register(Box::new(c::CAdapter::new()));

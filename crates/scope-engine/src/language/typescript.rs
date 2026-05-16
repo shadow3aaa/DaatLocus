@@ -15,7 +15,7 @@ impl LanguageAdapter for TypeScriptAdapter {
     }
 
     fn extensions(&self) -> &[&'static str] {
-        &["ts", "tsx"]
+        &["ts"]
     }
 
     fn language(&self) -> Language {
@@ -24,6 +24,32 @@ impl LanguageAdapter for TypeScriptAdapter {
 
     fn queries(&self) -> LanguageQueries {
         Self::ts_queries()
+    }
+}
+
+pub struct TsxAdapter;
+
+impl TsxAdapter {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl LanguageAdapter for TsxAdapter {
+    fn language_name(&self) -> &'static str {
+        "typescript"
+    }
+
+    fn extensions(&self) -> &[&'static str] {
+        &["tsx"]
+    }
+
+    fn language(&self) -> Language {
+        tree_sitter_typescript::LANGUAGE_TSX.into()
+    }
+
+    fn queries(&self) -> LanguageQueries {
+        TypeScriptAdapter::ts_queries()
     }
 }
 
@@ -84,6 +110,12 @@ impl TypeScriptAdapter {
 }
 
 impl Default for TypeScriptAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for TsxAdapter {
     fn default() -> Self {
         Self::new()
     }
