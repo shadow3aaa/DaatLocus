@@ -714,6 +714,40 @@ fn prompt_cancelled(locale: Locale) -> miette::Report {
     miette!("{}", crate::tr!(locale, "common.cancelled"))
 }
 
+#[derive(Debug, thiserror::Error, miette::Diagnostic)]
+#[error("config prompt requested parent navigation")]
+#[diagnostic(code(config_wizard::navigate_parent))]
+struct PromptNavigateParent;
+
+fn prompt_navigate_parent() -> miette::Report {
+    PromptNavigateParent.into()
+}
+
+fn is_prompt_navigate_parent(err: &miette::Report) -> bool {
+    err.downcast_ref::<PromptNavigateParent>().is_some()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfigMenuPromptNavigation {
+    ExitMenu,
+    ReturnToMenu,
+}
+
+fn config_menu_navigation_from_prompt_error(
+    err: &miette::Report,
+    at_root: bool,
+) -> Option<ConfigMenuPromptNavigation> {
+    if !is_prompt_navigate_parent(err) {
+        return None;
+    }
+
+    Some(if at_root {
+        ConfigMenuPromptNavigation::ExitMenu
+    } else {
+        ConfigMenuPromptNavigation::ReturnToMenu
+    })
+}
+
 const PROMPT_VIEWPORT_HEIGHT: u16 = 14;
 
 struct PromptUi {
@@ -814,7 +848,7 @@ impl PromptUi {
                     state.select(Some(next));
                 }
                 KeyCode::Enter => return Ok(state.selected().unwrap_or(0)),
-                KeyCode::Esc => return Err(prompt_cancelled(self.locale)),
+                KeyCode::Esc => return Err(prompt_navigate_parent()),
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Err(prompt_cancelled(self.locale));
                 }
@@ -882,7 +916,7 @@ impl PromptUi {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Err(prompt_cancelled(self.locale));
                 }
-                KeyCode::Esc => return Err(prompt_cancelled(self.locale)),
+                KeyCode::Esc => return Err(prompt_navigate_parent()),
                 KeyCode::Enter => return Ok(value),
                 KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     value.insert(cursor, ch);
@@ -2548,143 +2582,177 @@ pub async fn run_config_menu() -> Result<()> {
             crate::tr!(locale, "config.exit"),
         ];
 
-        let idx = ui.select(
+        let idx = match ui.select(
             &crate::tr!(locale, "config.menu_title", status = status),
             &items,
             0,
-        )?;
-
-        match idx {
-            0 => match crate::config::load_config().await {
-                Ok(cfg) => ui.detail(
-                    &crate::tr!(locale, "config.details_title"),
-                    &render_config_summary_lines(&cfg, locale),
-                )?,
-                Err(e) => ui.detail(
-                    &crate::tr!(locale, "config.details_title"),
-                    &[crate::tr!(locale, "common.config_load_failed", error = e)],
-                )?,
+        ) {
+            Ok(idx) => idx,
+            Err(err) => match config_menu_navigation_from_prompt_error(&err, true) {
+                Some(ConfigMenuPromptNavigation::ExitMenu) => break,
+                Some(ConfigMenuPromptNavigation::ReturnToMenu) => continue,
+                None => return Err(err),
             },
-            1 => {
-                let mut config = crate::config::load_config().await.map_err(|e| {
-                    miette!(
-                        "{}",
-                        crate::tr!(locale, "common.config_load_failed", error = e)
-                    )
-                })?;
-                let existing: Vec<String> = config.providers.keys().cloned().collect();
-                let (name, provider) = prompt_provider(&mut ui, &existing).await?;
-                if config.providers.contains_key(&name)
-                    && !ui.confirm(
-                        &crate::tr!(locale, "common.overwrite_provider", name = name.clone()),
-                        false,
-                    )?
-                {
-                    continue;
+        };
+
+        if idx == items.len() - 1 {
+            break;
+        }
+
+        let action_result: Result<()> = async {
+            match idx {
+                0 => {
+                    match crate::config::load_config().await {
+                        Ok(cfg) => ui.detail(
+                            &crate::tr!(locale, "config.details_title"),
+                            &render_config_summary_lines(&cfg, locale),
+                        )?,
+                        Err(e) => ui.detail(
+                            &crate::tr!(locale, "config.details_title"),
+                            &[crate::tr!(locale, "common.config_load_failed", error = e)],
+                        )?,
+                    }
+                    Ok(())
                 }
-                config.providers.insert(name, provider);
-                write_config(&config).await?;
+                1 => {
+                    let mut config = crate::config::load_config().await.map_err(|e| {
+                        miette!(
+                            "{}",
+                            crate::tr!(locale, "common.config_load_failed", error = e)
+                        )
+                    })?;
+                    let existing: Vec<String> = config.providers.keys().cloned().collect();
+                    let (name, provider) = prompt_provider(&mut ui, &existing).await?;
+                    if config.providers.contains_key(&name)
+                        && !ui.confirm(
+                            &crate::tr!(locale, "common.overwrite_provider", name = name.clone()),
+                            false,
+                        )?
+                    {
+                        Ok(())
+                    } else {
+                        config.providers.insert(name, provider);
+                        write_config(&config).await?;
+                        Ok(())
+                    }
+                }
+                2 => {
+                    let mut config = crate::config::load_config().await.map_err(|e| {
+                        miette!(
+                            "{}",
+                            crate::tr!(locale, "common.config_load_failed", error = e)
+                        )
+                    })?;
+                    let provider_names: Vec<String> = config.providers.keys().cloned().collect();
+                    if provider_names.is_empty() {
+                        ui.suspend();
+                        return Err(miette!("{}", crate::tr!(locale, "common.no_providers")));
+                    }
+                    let provider_idx = if provider_names.len() == 1 {
+                        0
+                    } else {
+                        ui.select(
+                            &crate::tr!(locale, "config.bind_provider"),
+                            &provider_names,
+                            0,
+                        )?
+                    };
+                    let provider_name = &provider_names[provider_idx];
+                    let provider_config = config.providers.get(provider_name).unwrap();
+                    let (name, model) =
+                        prompt_model(&mut ui, provider_name, provider_config).await?;
+                    if config.models.contains_key(&name)
+                        && !ui.confirm(
+                            &crate::tr!(locale, "common.overwrite_model", name = name.clone()),
+                            false,
+                        )?
+                    {
+                        Ok(())
+                    } else {
+                        config.models.insert(name.clone(), model);
+                        if ui.confirm(
+                            &crate::tr!(locale, "config.set_as_main", name = name.clone()),
+                            false,
+                        )? {
+                            config.main_model = name;
+                        }
+                        write_config(&config).await?;
+                        Ok(())
+                    }
+                }
+                3 => {
+                    let mut config = crate::config::load_config().await.map_err(|e| {
+                        miette!(
+                            "{}",
+                            crate::tr!(locale, "common.config_load_failed", error = e)
+                        )
+                    })?;
+                    let model_names: Vec<String> = config.models.keys().cloned().collect();
+                    if model_names.is_empty() {
+                        ui.suspend();
+                        return Err(miette!("{}", crate::tr!(locale, "common.no_models")));
+                    }
+                    let current_idx = model_names
+                        .iter()
+                        .position(|n| n == &config.main_model)
+                        .unwrap_or(0);
+                    let idx = ui.select(
+                        &crate::tr!(locale, "config.select_main_model"),
+                        &model_names,
+                        current_idx,
+                    )?;
+                    config.main_model = model_names[idx].clone();
+                    write_config(&config).await?;
+                    Ok(())
+                }
+                4 => {
+                    let mut config = crate::config::load_config().await.map_err(|e| {
+                        miette!(
+                            "{}",
+                            crate::tr!(locale, "common.config_load_failed", error = e)
+                        )
+                    })?;
+                    let model_names: Vec<String> = config.models.keys().cloned().collect();
+                    if model_names.is_empty() {
+                        ui.suspend();
+                        return Err(miette!("{}", crate::tr!(locale, "common.no_models")));
+                    }
+                    let current_idx = model_names
+                        .iter()
+                        .position(|n| n == &config.efficient_model)
+                        .unwrap_or(0);
+                    let idx = ui.select(
+                        &crate::tr!(locale, "config.select_efficient_model"),
+                        &model_names,
+                        current_idx,
+                    )?;
+                    config.efficient_model = model_names[idx].clone();
+                    write_config(&config).await?;
+                    Ok(())
+                }
+                5 => {
+                    let mut config = crate::config::load_config().await.map_err(|e| {
+                        miette!(
+                            "{}",
+                            crate::tr!(locale, "common.config_load_failed", error = e)
+                        )
+                    })?;
+                    config.telegram = prompt_telegram_config(&mut ui, Some(&config.telegram))?;
+                    write_config(&config).await?;
+                    Ok(())
+                }
+                _ => Ok(()),
             }
-            2 => {
-                let mut config = crate::config::load_config().await.map_err(|e| {
-                    miette!(
-                        "{}",
-                        crate::tr!(locale, "common.config_load_failed", error = e)
-                    )
-                })?;
-                let provider_names: Vec<String> = config.providers.keys().cloned().collect();
-                if provider_names.is_empty() {
-                    ui.suspend();
-                    return Err(miette!("{}", crate::tr!(locale, "common.no_providers")));
-                }
-                let provider_idx = if provider_names.len() == 1 {
-                    0
-                } else {
-                    ui.select(
-                        &crate::tr!(locale, "config.bind_provider"),
-                        &provider_names,
-                        0,
-                    )?
-                };
-                let provider_name = &provider_names[provider_idx];
-                let provider_config = config.providers.get(provider_name).unwrap();
-                let (name, model) = prompt_model(&mut ui, provider_name, provider_config).await?;
-                if config.models.contains_key(&name)
-                    && !ui.confirm(
-                        &crate::tr!(locale, "common.overwrite_model", name = name.clone()),
-                        false,
-                    )?
-                {
-                    continue;
-                }
-                config.models.insert(name.clone(), model);
-                if ui.confirm(
-                    &crate::tr!(locale, "config.set_as_main", name = name.clone()),
-                    false,
-                )? {
-                    config.main_model = name;
-                }
-                write_config(&config).await?;
-            }
-            3 => {
-                let mut config = crate::config::load_config().await.map_err(|e| {
-                    miette!(
-                        "{}",
-                        crate::tr!(locale, "common.config_load_failed", error = e)
-                    )
-                })?;
-                let model_names: Vec<String> = config.models.keys().cloned().collect();
-                if model_names.is_empty() {
-                    ui.suspend();
-                    return Err(miette!("{}", crate::tr!(locale, "common.no_models")));
-                }
-                let current_idx = model_names
-                    .iter()
-                    .position(|n| n == &config.main_model)
-                    .unwrap_or(0);
-                let idx = ui.select(
-                    &crate::tr!(locale, "config.select_main_model"),
-                    &model_names,
-                    current_idx,
-                )?;
-                config.main_model = model_names[idx].clone();
-                write_config(&config).await?;
-            }
-            4 => {
-                let mut config = crate::config::load_config().await.map_err(|e| {
-                    miette!(
-                        "{}",
-                        crate::tr!(locale, "common.config_load_failed", error = e)
-                    )
-                })?;
-                let model_names: Vec<String> = config.models.keys().cloned().collect();
-                if model_names.is_empty() {
-                    ui.suspend();
-                    return Err(miette!("{}", crate::tr!(locale, "common.no_models")));
-                }
-                let current_idx = model_names
-                    .iter()
-                    .position(|n| n == &config.efficient_model)
-                    .unwrap_or(0);
-                let idx = ui.select(
-                    &crate::tr!(locale, "config.select_efficient_model"),
-                    &model_names,
-                    current_idx,
-                )?;
-                config.efficient_model = model_names[idx].clone();
-                write_config(&config).await?;
-            }
-            5 => {
-                let mut config = crate::config::load_config().await.map_err(|e| {
-                    miette!(
-                        "{}",
-                        crate::tr!(locale, "common.config_load_failed", error = e)
-                    )
-                })?;
-                config.telegram = prompt_telegram_config(&mut ui, Some(&config.telegram))?;
-                write_config(&config).await?;
-            }
-            _ => break,
+        }
+        .await;
+
+        match action_result {
+            Ok(()) => {}
+            Err(err) => match config_menu_navigation_from_prompt_error(&err, false) {
+                Some(ConfigMenuPromptNavigation::ExitMenu) => break,
+                Some(ConfigMenuPromptNavigation::ReturnToMenu) => continue,
+                None => return Err(err),
+            },
         }
     }
     Ok(())
@@ -3003,5 +3071,33 @@ mod tests {
         assert!(summary.contains("enabled=true"));
         assert!(summary.contains("poll_timeout_secs=45"));
         assert!(summary.contains("${TE...KEN}"));
+    }
+
+    #[test]
+    fn config_menu_esc_exits_at_root() {
+        let err = prompt_navigate_parent();
+
+        assert_eq!(
+            config_menu_navigation_from_prompt_error(&err, true),
+            Some(ConfigMenuPromptNavigation::ExitMenu)
+        );
+    }
+
+    #[test]
+    fn config_menu_esc_returns_to_menu_below_root() {
+        let err = prompt_navigate_parent();
+
+        assert_eq!(
+            config_menu_navigation_from_prompt_error(&err, false),
+            Some(ConfigMenuPromptNavigation::ReturnToMenu)
+        );
+    }
+
+    #[test]
+    fn config_menu_ctrl_c_is_not_parent_navigation() {
+        let err = prompt_cancelled(Locale::EnUs);
+
+        assert_eq!(config_menu_navigation_from_prompt_error(&err, false), None);
+        assert_eq!(config_menu_navigation_from_prompt_error(&err, true), None);
     }
 }
