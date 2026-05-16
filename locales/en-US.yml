@@ -25,7 +25,7 @@ prompt_ui:
   line_count: "%{count} line(s)"
   help_select: "↑↓ / j k move  Enter confirm  Esc cancel"
   help_text: "←→ move  Home/End jump  Backspace/Delete edit  Esc cancel"
-  help_detail: "Enter / Esc back"
+  help_detail: "↑↓ / j k scroll  PgUp/PgDn page  Home/End jump  Enter / Esc back"
   enter_confirm: "Enter to confirm"
   value: "Value"
   masked: "input is masked"

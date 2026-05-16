@@ -10,7 +10,10 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
 };
 
 use crate::{
@@ -971,10 +974,11 @@ impl PromptUi {
     }
 
     fn detail(&mut self, prompt: &str, lines: &[String]) -> Result<()> {
+        let mut scroll: u16 = 0;
         loop {
             let locale = self.locale;
             self.terminal_mut()?
-                .draw(|frame| render_detail_prompt(frame, locale, prompt, lines))
+                .draw(|frame| render_detail_prompt(frame, locale, prompt, lines, scroll))
                 .map_err(|e| {
                     miette!(
                         "{}",
@@ -985,12 +989,41 @@ impl PromptUi {
             let key = read_prompt_key()?;
             match key.code {
                 KeyCode::Esc | KeyCode::Enter => return Ok(()),
+                KeyCode::Up
+                | KeyCode::Char('k')
+                | KeyCode::Down
+                | KeyCode::Char('j')
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End => {
+                    scroll = detail_scroll_offset(scroll, key.code, lines.len(), detail_body_rows())
+                }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Err(prompt_cancelled(self.locale));
                 }
                 _ => {}
             }
         }
+    }
+}
+
+fn detail_body_rows() -> u16 {
+    // Inline viewport minus panel borders, header, range line, and help line.
+    PROMPT_VIEWPORT_HEIGHT.saturating_sub(5).max(1)
+}
+
+fn detail_scroll_offset(current: u16, key: KeyCode, line_count: usize, visible_rows: u16) -> u16 {
+    let max_scroll = line_count.saturating_sub(visible_rows.max(1) as usize) as u16;
+    let page_step = visible_rows.max(1);
+    match key {
+        KeyCode::Up | KeyCode::Char('k') => current.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => current.saturating_add(1).min(max_scroll),
+        KeyCode::PageUp => current.saturating_sub(page_step),
+        KeyCode::PageDown => current.saturating_add(page_step).min(max_scroll),
+        KeyCode::Home => 0,
+        KeyCode::End => max_scroll,
+        _ => current.min(max_scroll),
     }
 }
 
@@ -1257,7 +1290,13 @@ fn render_loading_prompt(frame: &mut Frame, locale: Locale, prompt: &str, note: 
     );
 }
 
-fn render_detail_prompt(frame: &mut Frame, locale: Locale, prompt: &str, lines: &[String]) {
+fn render_detail_prompt(
+    frame: &mut Frame,
+    locale: Locale,
+    prompt: &str,
+    lines: &[String],
+    scroll: u16,
+) {
     let block = prompt_panel_block(locale);
     let inner = block.inner(frame.area());
     frame.render_widget(block, frame.area());
@@ -1286,9 +1325,21 @@ fn render_detail_prompt(frame: &mut Frame, locale: Locale, prompt: &str, lines: 
         ])),
         kind_area,
     );
+    let visible_rows = body_area.height.max(1) as usize;
+    let total_rows = lines.len().max(1);
+    let visible_end = (scroll as usize)
+        .saturating_add(visible_rows)
+        .min(total_rows);
+
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            crate::tr!(locale, "prompt_ui.line_count", count = lines.len()),
+            format!(
+                "{}  ·  {}-{} / {}",
+                crate::tr!(locale, "prompt_ui.line_count", count = lines.len()),
+                (scroll as usize).min(total_rows).saturating_add(1),
+                visible_end,
+                total_rows
+            ),
             Style::default().fg(Color::Gray),
         ))),
         prompt_area,
@@ -1302,9 +1353,20 @@ fn render_detail_prompt(frame: &mut Frame, locale: Locale, prompt: &str, lines: 
                 })
                 .collect::<Vec<_>>(),
         )
+        .scroll((scroll, 0))
         .wrap(Wrap { trim: false }),
         body_area,
     );
+
+    if lines.len() > visible_rows {
+        let mut scrollbar = ScrollbarState::new(lines.len()).position(scroll as usize);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight),
+            body_area,
+            &mut scrollbar,
+        );
+    }
+
     frame.render_widget(
         Paragraph::new(crate::tr!(locale, "prompt_ui.help_detail"))
             .style(Style::default().fg(Color::DarkGray)),
@@ -2427,30 +2489,67 @@ pub async fn show_config() -> Result<()> {
     Ok(())
 }
 
+fn push_config_section(lines: &mut Vec<String>, title: impl Into<String>) {
+    if !lines.is_empty() {
+        lines.push(String::new());
+    }
+    let title = title.into();
+    lines.push(format!("▸ {title}"));
+    lines.push("  ─────────────────────────────".to_string());
+}
+
+fn push_config_field(lines: &mut Vec<String>, label: &str, value: impl Into<String>) {
+    lines.push(format!("  {label:<24} {}", value.into()));
+}
+
+fn push_config_subfield(lines: &mut Vec<String>, label: &str, value: impl Into<String>) {
+    lines.push(format!("      {label:<20} {}", value.into()));
+}
+
 fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
     let mut lines = Vec::new();
 
-    lines.push(crate::tr!(locale, "config.locale_heading"));
-    lines.push("──────".to_string());
-    lines.push(format!(
-        "  {} ({})",
-        config.locale.as_str(),
-        config.locale.display_name()
-    ));
-    lines.push(String::new());
+    push_config_section(&mut lines, crate::tr!(locale, "config.locale_heading"));
+    push_config_field(
+        &mut lines,
+        "locale",
+        format!(
+            "{} ({})",
+            config.locale.as_str(),
+            config.locale.display_name()
+        ),
+    );
+    push_config_field(&mut lines, "daemon.port", config.daemon.port.to_string());
+    push_config_field(
+        &mut lines,
+        "sandbox.enabled",
+        config.sandbox.enabled.to_string(),
+    );
+    push_config_field(
+        &mut lines,
+        "sandbox.filesystem",
+        format!("{:?}", config.sandbox.strong_filesystem).to_lowercase(),
+    );
 
-    lines.push(crate::tr!(locale, "config.providers_heading"));
-    lines.push("─────────".to_string());
+    push_config_section(&mut lines, crate::tr!(locale, "config.providers_heading"));
+    push_config_field(
+        &mut lines,
+        "provider_count",
+        config.providers.len().to_string(),
+    );
     for (name, provider) in &config.providers {
-        let desc = match provider {
+        let (kind, fields): (&str, Vec<(&str, String)>) = match provider {
             ProviderConfig::Openai { api_key, base_url } => {
                 let masked = mask_secret(api_key);
                 let url = base_url.as_deref().unwrap_or("https://api.openai.com/v1");
-                format!("openai  url={url}  key={masked}")
+                (
+                    "openai",
+                    vec![("base_url", url.to_string()), ("api_key", masked)],
+                )
             }
             ProviderConfig::GithubCopilot { github_token } => {
                 let masked = mask_secret(github_token);
-                format!("github-copilot  token={masked}")
+                ("github-copilot", vec![("github_token", masked)])
             }
             ProviderConfig::OpenaiCodexOauth {
                 auth_file,
@@ -2460,11 +2559,20 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
                     .as_deref()
                     .unwrap_or(codex_oauth_default_base_url());
                 let auth_file = auth_file.as_deref().unwrap_or("<default>");
-                format!("openai-codex-oauth  url={url}  auth_file={auth_file}")
+                (
+                    "openai-codex-oauth",
+                    vec![
+                        ("base_url", url.to_string()),
+                        ("auth_file", auth_file.to_string()),
+                    ],
+                )
             }
             ProviderConfig::OpenaiCompatible { base_url, api_key } => {
                 let masked = mask_secret(api_key);
-                format!("openai-compatible  url={base_url}  key={masked}")
+                (
+                    "openai-compatible",
+                    vec![("base_url", base_url.clone()), ("api_key", masked)],
+                )
             }
             ProviderConfig::Ollama {
                 host,
@@ -2472,55 +2580,134 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
                 keep_alive,
             } => {
                 let host = host.as_deref().unwrap_or("http://127.0.0.1:11434");
-                let cloud_mark = if api_key.is_some() { " [cloud]" } else { "" };
-                match keep_alive {
-                    Some(v) => format!("ollama{cloud_mark}  url={host}  keep_alive={v}"),
-                    None => format!("ollama{cloud_mark}  url={host}"),
+                let mut fields = vec![("host", host.to_string())];
+                if let Some(api_key) = api_key {
+                    fields.push(("api_key", mask_secret(api_key)));
                 }
+                if let Some(keep_alive) = keep_alive {
+                    fields.push(("keep_alive", keep_alive.clone()));
+                }
+                ("ollama", fields)
             }
         };
-        lines.push(format!("  [{name}]  {desc}"));
+
+        lines.push(format!("  • {name}"));
+        push_config_subfield(&mut lines, "type", kind);
+        for (label, value) in fields {
+            push_config_subfield(&mut lines, label, value);
+        }
     }
 
-    lines.push(String::new());
-    lines.push(crate::tr!(locale, "config.models_heading"));
-    lines.push("──────".to_string());
+    push_config_section(&mut lines, crate::tr!(locale, "config.models_heading"));
+    push_config_field(&mut lines, "model_count", config.models.len().to_string());
+    push_config_field(&mut lines, "main_model", config.main_model.clone());
+    push_config_field(
+        &mut lines,
+        "efficient_model",
+        config.efficient_model.clone(),
+    );
     for (name, model) in &config.models {
-        let mut marks = String::new();
+        let mut roles = Vec::new();
         if name == &config.main_model {
-            marks.push_str(" ← main");
+            roles.push("main");
         }
-        if name == &config.efficient_model && name != &config.main_model {
-            marks.push_str(" ← efficient");
+        if name == &config.efficient_model {
+            roles.push("efficient");
         }
-        lines.push(format!(
-            "  [{name}]{marks}  provider={}  model_id={}  ctx={}  max_out={}",
-            model.provider,
-            model.model_id,
-            model.context_window_tokens,
-            model.max_completion_tokens
-        ));
+        let role_suffix = if roles.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", roles.join(", "))
+        };
+        lines.push(format!("  • {name}{role_suffix}"));
+        push_config_subfield(&mut lines, "provider", model.provider.clone());
+        push_config_subfield(&mut lines, "model_id", model.model_id.clone());
+        push_config_subfield(&mut lines, "temperature", model.temperature.to_string());
+        push_config_subfield(
+            &mut lines,
+            "thinking_budget",
+            model
+                .thinking_budget
+                .map(|budget| format!("{budget:?}").to_lowercase())
+                .unwrap_or_else(|| "default".to_string()),
+        );
+        push_config_subfield(
+            &mut lines,
+            "rpm",
+            model
+                .rpm
+                .map(|rpm| rpm.to_string())
+                .unwrap_or_else(|| "unlimited".to_string()),
+        );
+        push_config_subfield(
+            &mut lines,
+            "request_timeout",
+            format!("{}s", model.request_timeout_secs),
+        );
+        push_config_subfield(
+            &mut lines,
+            "stream_idle_timeout",
+            format!("{}s", model.stream_idle_timeout_secs),
+        );
+        push_config_subfield(
+            &mut lines,
+            "context_window",
+            model.context_window_tokens.to_string(),
+        );
+        push_config_subfield(
+            &mut lines,
+            "effective_window",
+            format!(
+                "{} tokens ({}%)",
+                model.effective_context_window_tokens(),
+                model.effective_context_window_percent()
+            ),
+        );
+        push_config_subfield(
+            &mut lines,
+            "auto_compact_limit",
+            model.auto_compact_token_limit().to_string(),
+        );
+        push_config_subfield(
+            &mut lines,
+            "max_completion",
+            model.max_completion_tokens.to_string(),
+        );
+        push_config_subfield(
+            &mut lines,
+            "tool_output_max",
+            model.tool_output_max_tokens.to_string(),
+        );
+        push_config_subfield(
+            &mut lines,
+            "supports_vision",
+            model
+                .supports_vision
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
+        );
     }
 
-    lines.push(String::new());
-    lines.push(crate::tr!(locale, "config.judge_heading"));
-    lines.push("─────".to_string());
+    push_config_section(&mut lines, crate::tr!(locale, "config.judge_heading"));
     let judge_model = config
         .judge
         .model
         .as_deref()
         .unwrap_or(&config.efficient_model);
-    lines.push(format!(
-        "  enabled={}  model={}  candidates={}  cases={}",
-        config.judge.enabled,
-        judge_model,
-        config.judge.max_pairwise_candidates,
-        config.judge.max_pairwise_cases
-    ));
+    push_config_field(&mut lines, "enabled", config.judge.enabled.to_string());
+    push_config_field(&mut lines, "model", judge_model.to_string());
+    push_config_field(
+        &mut lines,
+        "pairwise_candidates",
+        config.judge.max_pairwise_candidates.to_string(),
+    );
+    push_config_field(
+        &mut lines,
+        "pairwise_cases",
+        config.judge.max_pairwise_cases.to_string(),
+    );
 
-    lines.push(String::new());
-    lines.push(crate::tr!(locale, "config.telegram_heading"));
-    lines.push("────────".to_string());
+    push_config_section(&mut lines, crate::tr!(locale, "config.telegram_heading"));
     let token_status = if config.telegram.has_real_credentials() {
         mask_secret(&config.telegram.bot_token)
     } else {
@@ -2533,10 +2720,14 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
     } else {
         crate::tr!(locale, "config.telegram_disabled")
     };
-    lines.push(format!(
-        "  {}  enabled={}  token={}  poll_timeout_secs={}",
-        active_status, config.telegram.enabled, token_status, config.telegram.poll_timeout_secs
-    ));
+    push_config_field(&mut lines, "status", active_status);
+    push_config_field(&mut lines, "enabled", config.telegram.enabled.to_string());
+    push_config_field(&mut lines, "token", token_status);
+    push_config_field(
+        &mut lines,
+        "poll_timeout_secs",
+        config.telegram.poll_timeout_secs.to_string(),
+    );
 
     lines
 }
@@ -3068,9 +3259,61 @@ mod tests {
         let summary = render_config_summary_lines(&config, Locale::EnUs).join("\n");
 
         assert!(summary.contains("Telegram"));
-        assert!(summary.contains("enabled=true"));
-        assert!(summary.contains("poll_timeout_secs=45"));
+        assert!(summary.contains("enabled                  true"));
+        assert!(summary.contains("poll_timeout_secs        45"));
         assert!(summary.contains("${TE...KEN}"));
+    }
+
+    #[test]
+    fn config_summary_expands_model_details_and_masks_secrets() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "custom".to_string(),
+            ProviderConfig::OpenaiCompatible {
+                base_url: "https://example.test/v1".to_string(),
+                api_key: "sk-secret-token".to_string(),
+            },
+        );
+        config.models.insert(
+            "coder".to_string(),
+            ModelConfig {
+                provider: "custom".to_string(),
+                model_id: "example-coder".to_string(),
+                temperature: 0.2,
+                thinking_budget: None,
+                rpm: Some(60),
+                request_timeout_secs: 120,
+                stream_idle_timeout_secs: 30,
+                context_window_tokens: 200_000,
+                auto_compact_token_limit: None,
+                effective_context_window_percent: 50,
+                max_completion_tokens: 16_000,
+                tool_output_max_tokens: 32_000,
+                supports_vision: Some(false),
+            },
+        );
+        config.main_model = "coder".to_string();
+
+        let summary = render_config_summary_lines(&config, Locale::EnUs).join("\n");
+
+        assert!(summary.contains("▸ Providers"));
+        assert!(summary.contains("base_url             https://example.test/v1"));
+        assert!(summary.contains("api_key              sk-s...oken"));
+        assert!(!summary.contains("sk-secret-token"));
+        assert!(summary.contains("• coder (main)"));
+        assert!(summary.contains("temperature          0.2"));
+        assert!(summary.contains("effective_window     100000 tokens (50%)"));
+        assert!(summary.contains("supports_vision      false"));
+    }
+
+    #[test]
+    fn detail_scroll_offset_keeps_last_page_full() {
+        let rows = detail_body_rows();
+
+        assert_eq!(detail_scroll_offset(0, KeyCode::End, 30, rows), 30 - rows);
+        assert_eq!(detail_scroll_offset(0, KeyCode::PageDown, 30, rows), rows);
+        assert_eq!(detail_scroll_offset(0, KeyCode::PageUp, 30, rows), 0);
+        assert_eq!(detail_scroll_offset(0, KeyCode::End, 2, rows), 0);
     }
 
     #[test]
