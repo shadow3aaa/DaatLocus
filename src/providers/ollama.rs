@@ -817,45 +817,6 @@ impl OllamaClient {
             last_reasoning_content: non_empty_string(cleaned_thinking),
         })
     }
-
-    pub(crate) async fn post_compatible_chat_completion(&self, payload: Value) -> Result<Value> {
-        let messages = payload
-            .get("messages")
-            .cloned()
-            .unwrap_or_else(|| json!([]));
-        let incoming_temperature = payload.get("temperature").and_then(Value::as_f64);
-        let temperature = incoming_temperature.unwrap_or(self.temperature);
-        let mut ollama_payload = json!({
-            "model": self.model,
-            "messages": messages,
-            "stream": false,
-        });
-        if let Some(keep_alive) = &self.keep_alive {
-            ollama_payload["keep_alive"] = json!(keep_alive);
-        }
-        ollama_payload["options"] =
-            build_ollama_options(temperature, self.effective_context_window_tokens);
-
-        let request_context = vec![format!(
-            "hindsight LLM proxy ollama chat completion: model={}",
-            self.model
-        )];
-        let (response, usage) = self
-            .post_ollama_chat(&ollama_payload, &request_context)
-            .await?;
-        self.record_usage(usage);
-
-        let message = &response["message"];
-        let content = message["content"].as_str().unwrap_or("");
-        Ok(json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": content,
-                }
-            }]
-        }))
-    }
 }
 
 #[async_trait]

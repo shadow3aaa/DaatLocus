@@ -15,11 +15,9 @@ include = [
     "/LICENSE",
     "/README.md",
     "/README_zh-CN.md",
-    "/assets/hindsight-sidecars/README.md",
     "/assets/logo.svg",
     "/build.rs",
     "/docs/**",
-    "/hindsight-sidecar/**",
     "/locales/**",
     "/src/**",
     "/webui/.yarnrc.yml",
@@ -85,10 +83,7 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
 uuid = { version = "1.22.0", features = ["serde", "v4"] }
 viewpoint-core = "0.4"
-flate2 = "1"
-tar = "0.4"
 zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
-zstd = "0.13"
 rust-i18n = "4.0.0"
 regex = "1.12.3"
 tokio-stream = "0.1.18"

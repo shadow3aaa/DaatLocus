@@ -21,13 +21,11 @@ use crate::{
         activity_cells_from_history_items, dashboard_agent_name, sync_web_activity_state,
     },
     events::EventStore,
-    hindsight::managed::HindsightManagedServer,
     memory::Memory,
     pending_work::PendingWorkQueue,
     plan::Plan,
     preturn_state::PreTurnState,
     providers::build_llm,
-    reasoning::runtime::PromptMemoryContext,
     runtime::bootstrap::load_token_estimate_baseline,
     runtime_context::build_preturn_context_text,
     sleep_status::{SleepStatusSnapshot, load_sleep_status_snapshot},
@@ -42,9 +40,8 @@ use miette::{Result, miette};
 
 use crate::browser_install::maybe_setup_browser_runtime;
 use crate::runtime::bootstrap::{
-    bootstrap_telegram_transport_state_from_acl, build_runtime_apps,
-    connect_bootstrapped_hindsight, emit_startup_progress, load_compiled_prompts_only,
-    sandbox_policy_for_runtime,
+    bootstrap_telegram_transport_state_from_acl, build_runtime_apps, emit_startup_progress,
+    load_compiled_prompts_only, sandbox_policy_for_runtime,
 };
 use crate::runtime::runtime_loop::{
     SleepTaskResult, daat_locus_loop, handle_dashboard_control_command, handle_sleep_task_result,
@@ -152,29 +149,6 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         )
         .await;
     }
-    // Run expensive initialization after the server is already listening.
-    let hindsight = connect_bootstrapped_hindsight(&config, true).await?;
-    let hindsight_retain = hindsight.spawn_retain_worker();
-    let hindsight_config_for_early_shutdown = config.hindsight.clone();
-
-    // Check for restart/shutdown after hindsight connection.
-    if daemon_lifecycle.get() != DaemonLifecycleState::Initializing {
-        tracing::info!(
-            "daemon restart/shutdown requested during init (after hindsight), aborting startup"
-        );
-        return shutdown_early(
-            lock,
-            daemon_lifecycle,
-            shutdown_notify,
-            tx,
-            server_shutdown_tx,
-            daemon_server,
-            &mut daemon_control_rx,
-            Some(hindsight_config_for_early_shutdown),
-        )
-        .await;
-    }
-
     emit_startup_progress("[prompt-compile] loading compiled prompts before daemon startup...");
     let compiled_prompts = match load_compiled_prompts_only(&config).await {
         Ok(store) => store,
@@ -197,7 +171,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             server_shutdown_tx,
             daemon_server,
             &mut daemon_control_rx,
-            Some(hindsight_config_for_early_shutdown),
+            None,
         )
         .await;
     }
@@ -240,10 +214,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         llm: client,
         judge_llm: judge_client,
         config,
-        hindsight,
-        hindsight_retain,
         memory,
-        prompt_memory: PromptMemoryContext::default(),
         plan,
         events,
         pending_work,
@@ -299,7 +270,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             server_shutdown_tx,
             daemon_server,
             &mut daemon_control_rx,
-            Some(hindsight_config_for_early_shutdown),
+            None,
         )
         .await;
     }
@@ -461,21 +432,10 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     if let Some(handle) = telegram_transport {
         handle.abort();
     }
-    let hindsight_config = context.config.hindsight.clone();
     // Clear the dashboard watch sender clone in context so it doesn't
     // keep the channel alive during shutdown.
     context.dashboard_tx = None;
     context.shutdown().await;
-    let managed = HindsightManagedServer::new(hindsight_config, Vec::new());
-    match tokio::time::timeout(Duration::from_secs(10), managed.stop()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            tracing::warn!("[hindsight] stop failed: {err}");
-        }
-        Err(_) => {
-            tracing::warn!("[hindsight] stop timed out during daemon shutdown");
-        }
-    }
     lock.release();
     if let Some(completion_tx) = shutdown_completion_tx.take() {
         let _ = completion_tx.send(());
@@ -497,8 +457,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
 }
 
 /// Early shutdown path used when a restart/shutdown is requested during daemon
-/// initialization, before the main loop starts.  Skips cleanup steps that
-/// require a fully-built Context or active Hindsight connection.
+/// initialization, before the main loop starts.
 #[allow(clippy::too_many_arguments)]
 async fn shutdown_early(
     mut lock: DaemonLock,
@@ -508,7 +467,7 @@ async fn shutdown_early(
     server_shutdown_tx: tokio::sync::oneshot::Sender<()>,
     daemon_server: DaemonServerHandle,
     daemon_control_rx: &mut tokio::sync::mpsc::UnboundedReceiver<RuntimeDaemonControlCommand>,
-    hindsight_config: Option<crate::config::HindsightConfig>,
+    _unused_cleanup: Option<()>,
 ) -> Result<()> {
     let mut restart_requested = false;
     while let Ok(command) = daemon_control_rx.try_recv() {
@@ -518,20 +477,6 @@ async fn shutdown_early(
     }
 
     daemon_lifecycle.mark_stopping();
-
-    // If hindsight was already connected, try to stop it gracefully.
-    if let Some(hs_config) = hindsight_config {
-        let managed = HindsightManagedServer::new(hs_config, Vec::new());
-        match tokio::time::timeout(Duration::from_secs(10), managed.stop()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                tracing::warn!("[hindsight] stop failed during early shutdown: {err}");
-            }
-            Err(_) => {
-                tracing::warn!("[hindsight] stop timed out during early shutdown");
-            }
-        }
-    }
 
     lock.release();
     shutdown_notify.notify_waiters();

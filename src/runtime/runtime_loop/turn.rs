@@ -214,61 +214,6 @@ pub(crate) async fn execute_agent_loop_step(
     append_claimed_input_activity_cells(context, tx, &claimed_inputs);
 
     let preflight_timeout = Duration::from_secs(RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS);
-    enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightMemory);
-    let preflight_started_at = std::time::Instant::now();
-    tracing::info!(
-        "runtime preflight stage started: {}",
-        RuntimeTurnPhase::PreflightMemory.label()
-    );
-    let prompt_memory = match tokio::time::timeout(
-        preflight_timeout,
-        build_hindsight_memory_context(context, &claimed_inputs),
-    )
-    .await
-    {
-        Ok(prompt_memory) => {
-            tracing::info!(
-                elapsed_ms = preflight_started_at.elapsed().as_millis(),
-                "runtime preflight stage completed: {}",
-                RuntimeTurnPhase::PreflightMemory.label()
-            );
-            prompt_memory
-        }
-        Err(_) => {
-            let err = miette!(
-                "runtime preflight stage `{}` timed out after {}s",
-                RuntimeTurnPhase::PreflightMemory.label(),
-                preflight_timeout.as_secs()
-            );
-            set_runtime_status(
-                tx,
-                RuntimeStatusLevel::Error,
-                format!(
-                    "runtime turn preflight timeout: {}",
-                    RuntimeTurnPhase::PreflightMemory.label()
-                ),
-            );
-            tracing::error!(
-                elapsed_ms = preflight_started_at.elapsed().as_millis(),
-                timeout_secs = preflight_timeout.as_secs(),
-                "runtime preflight stage timed out: {}",
-                RuntimeTurnPhase::PreflightMemory.label()
-            );
-            return abort_runtime_turn_before_model(
-                context,
-                RuntimeTurnAbort {
-                    live_draft_session: None,
-                    claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
-                    claimed_event_ids: &claimed_event_ids,
-                    claimed_app_notices: &claimed_app_notice_entries,
-                    observation: format!("runtime preflight failed: {err}"),
-                    description: "Failed to build hindsight memory context.".to_string(),
-                },
-            )
-            .await;
-        }
-    };
-    context.prompt_memory = prompt_memory;
     let afterclaim_context_input = afterclaim_context_input_for_claimed_inputs(&claimed_inputs);
     let claimed_event_views = claimed_inputs
         .iter()

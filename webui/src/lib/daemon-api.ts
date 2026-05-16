@@ -327,10 +327,6 @@ export type ActivityCellWorkflow = {
   workflow_id: string;
 };
 
-export type ActivityCellDeepRecall = {
-  memory_count: number;
-};
-
 export type ActivityCellVariant =
   | { Assistant: ActivityCellCommon }
   | { User: ActivityCellUser }
@@ -342,7 +338,6 @@ export type ActivityCellVariant =
   | { PlanResult: ActivityCellPlan }
   | { CreateWorkflowResult: ActivityCellWorkflow }
   | { ActivateWorkflowResult: ActivityCellWorkflow }
-  | { DeepRecallResult: ActivityCellDeepRecall }
   | { ExecResult: ActivityCellExecResult }
   | { LiveExec: ActivityCellLiveExec }
   | { Patch: ActivityCellPatch }
@@ -476,7 +471,6 @@ export type SettingsModelSummary = {
   model_id: string;
   is_main: boolean;
   is_judge: boolean;
-  is_hindsight: boolean;
   temperature: number;
   thinking_budget: string | null;
   rpm: number | null;
@@ -500,7 +494,6 @@ export type SettingsSummary = {
   locale_label: string;
   main_model: string;
   judge_model: string;
-  hindsight_model: string;
   providers: SettingsProviderSummary[];
   models: SettingsModelSummary[];
   daemon: {
@@ -518,15 +511,6 @@ export type SettingsSummary = {
   sandbox: {
     enabled: boolean;
     strong_filesystem: string;
-  };
-  hindsight: {
-    namespace: string;
-    bank_id: string;
-    request_timeout_secs: number;
-    profile: string;
-    port: number;
-    model: string | null;
-    effective_model: string;
   };
   telegram: {
     enabled: boolean;

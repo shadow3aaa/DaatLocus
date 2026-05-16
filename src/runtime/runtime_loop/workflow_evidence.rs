@@ -16,26 +16,7 @@ pub(super) async fn record_runtime_history_messages(
     context: &mut Context,
     draft: RuntimeTurnDraft,
 ) {
-    let retain_plan = context.memory.commit_runtime_turn(draft).await;
-    for job in retain_plan.jobs {
-        if let Err(err) = context.hindsight_retain.enqueue(job) {
-            tracing::error!("failed to enqueue hindsight retain job: {err:?}");
-            return;
-        }
-    }
-    if retain_plan.must_flush_before_continue {
-        match context.hindsight_retain.flush().await {
-            Ok(submitted_handoffs) => {
-                context
-                    .memory
-                    .mark_handoffs_submitted(&submitted_handoffs)
-                    .await;
-            }
-            Err(err) => {
-                tracing::error!("failed to flush hindsight handoff queue: {err:?}");
-            }
-        }
-    }
+    context.memory.commit_runtime_turn(draft).await;
 }
 
 fn detect_runtime_rollback(output: &AgentLoopStepOutput) -> bool {

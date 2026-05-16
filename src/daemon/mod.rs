@@ -68,9 +68,8 @@ pub use auth::{
 pub const DAEMON_BIND_HOST: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 pub const DAEMON_CLIENT_HOST: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 pub const DAEMON_HOST_DISPLAY: &str = "0.0.0.0";
-/// Daemon cold start can include browser runtime install plus hindsight/uv
-/// first-run setup. Hindsight itself allows 10 minutes for daemon start, so the
-/// outer readiness window must be longer than that inner startup budget.
+/// Daemon cold start can include browser runtime install and workspace app
+/// initialization, so keep the outer readiness window generous.
 const READY_TIMEOUT: Duration = Duration::from_secs(900);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -219,13 +218,11 @@ pub struct SettingsSummaryResponse {
     pub locale_label: String,
     pub main_model: String,
     pub judge_model: String,
-    pub hindsight_model: String,
     pub providers: Vec<SettingsProviderSummary>,
     pub models: Vec<SettingsModelSummary>,
     pub daemon: SettingsDaemonSummary,
     pub judge: SettingsJudgeSummary,
     pub sandbox: SettingsSandboxSummary,
-    pub hindsight: SettingsHindsightSummary,
     pub telegram: SettingsTelegramSummary,
 }
 
@@ -262,7 +259,6 @@ pub struct SettingsModelSummary {
     pub model_id: String,
     pub is_main: bool,
     pub is_judge: bool,
-    pub is_hindsight: bool,
     pub temperature: f64,
     pub thinking_budget: Option<&'static str>,
     pub rpm: Option<u32>,
@@ -298,17 +294,6 @@ pub struct SettingsJudgeSummary {
 pub struct SettingsSandboxSummary {
     pub enabled: bool,
     pub strong_filesystem: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SettingsHindsightSummary {
-    pub namespace: String,
-    pub bank_id: String,
-    pub request_timeout_secs: u64,
-    pub profile: String,
-    pub port: u16,
-    pub model: Option<String>,
-    pub effective_model: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1054,12 +1039,6 @@ fn settings_summary_response(
         .model
         .clone()
         .unwrap_or_else(|| config.main_model.clone());
-    let hindsight_effective_model = config
-        .hindsight
-        .model
-        .clone()
-        .unwrap_or_else(|| config.main_model.clone());
-
     let mut providers = config
         .providers
         .iter()
@@ -1071,13 +1050,7 @@ fn settings_summary_response(
         .models
         .iter()
         .map(|(name, model)| {
-            settings_model_summary(
-                name,
-                model,
-                &config.main_model,
-                &judge_effective_model,
-                &hindsight_effective_model,
-            )
+            settings_model_summary(name, model, &config.main_model, &judge_effective_model)
         })
         .collect::<Vec<_>>();
     models.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1090,7 +1063,6 @@ fn settings_summary_response(
         locale_label: config.locale.display_name().to_string(),
         main_model: config.main_model.clone(),
         judge_model: judge_effective_model.clone(),
-        hindsight_model: hindsight_effective_model.clone(),
         providers,
         models,
         daemon: SettingsDaemonSummary {
@@ -1108,15 +1080,6 @@ fn settings_summary_response(
         sandbox: SettingsSandboxSummary {
             enabled: config.sandbox.enabled,
             strong_filesystem: strong_filesystem_mode_label(config.sandbox.strong_filesystem),
-        },
-        hindsight: SettingsHindsightSummary {
-            namespace: config.hindsight.namespace.clone(),
-            bank_id: config.hindsight.bank_id.clone(),
-            request_timeout_secs: config.hindsight.request_timeout_secs,
-            profile: config.hindsight.profile.clone(),
-            port: config.hindsight.port,
-            model: config.hindsight.model.clone(),
-            effective_model: hindsight_effective_model,
         },
         telegram: SettingsTelegramSummary {
             enabled: config.telegram.enabled,
@@ -1208,7 +1171,6 @@ fn settings_model_summary(
     model: &ModelConfig,
     main_model: &str,
     judge_model: &str,
-    hindsight_model: &str,
 ) -> SettingsModelSummary {
     SettingsModelSummary {
         name: name.to_string(),
@@ -1216,7 +1178,6 @@ fn settings_model_summary(
         model_id: model.model_id.clone(),
         is_main: name == main_model,
         is_judge: name == judge_model,
-        is_hindsight: name == hindsight_model,
         temperature: model.temperature,
         thinking_budget: model.thinking_budget().map(thinking_budget_label),
         rpm: model.rpm,

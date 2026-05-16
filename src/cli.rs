@@ -84,9 +84,6 @@ enum ConfigTarget {
     /// Change the main model.
     #[command(name = "set-main-model")]
     SetMainModel,
-    /// Change the model used by hindsight.
-    #[command(name = "set-hindsight-model")]
-    SetHindsightModel,
     /// Change the efficient model.
     #[command(name = "set-efficient-model")]
     SetEfficientModel,
@@ -102,7 +99,7 @@ enum ResetTarget {
     Compile,
     /// Clear runtime state such as daemon locks and sockets.
     State,
-    /// Clear conversation history, hindsight records, and reasoning traces.
+    /// Clear conversation history, runtime memory records, and reasoning traces.
     Memory,
     /// Clear state, memory, and compile data.
     All,
@@ -282,8 +279,6 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-/// Tail `~/.hindsight/profiles/<profile>.log` and forward new lines to stdout/tracing.
-/// Designed to run concurrently with `HindsightManagedServer::start()` so the user
 async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
     match target {
         None => config_wizard::run_config_menu().await,
@@ -291,7 +286,6 @@ async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
         Some(ConfigTarget::AddProvider) => config_wizard::run_add_provider().await,
         Some(ConfigTarget::AddModel) => config_wizard::run_add_model().await,
         Some(ConfigTarget::SetMainModel) => config_wizard::run_set_main_model().await,
-        Some(ConfigTarget::SetHindsightModel) => config_wizard::run_set_hindsight_model().await,
         Some(ConfigTarget::SetEfficientModel) => config_wizard::run_set_efficient_model().await,
         Some(ConfigTarget::SetTelegram) => config_wizard::run_set_telegram().await,
     }

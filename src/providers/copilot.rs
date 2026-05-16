@@ -91,18 +91,6 @@ impl CopilotClient {
     async fn exchange_session_token(&self) -> Result<(String, String, u64)> {
         exchange_copilot_session_token_with_client(&self.auth_client, &self.github_token).await
     }
-
-    pub(crate) async fn post_compatible_chat_completion(
-        &self,
-        payload: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        self.ensure_auth().await?;
-        self.inner
-            .lock()
-            .await
-            .post_compatible_chat_completion(payload)
-            .await
-    }
 }
 
 async fn exchange_copilot_session_token_with_client(

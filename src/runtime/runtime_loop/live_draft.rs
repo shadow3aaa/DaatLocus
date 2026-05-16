@@ -401,12 +401,12 @@ mod tests {
     fn live_draft_generation_started_preserves_last_status() {
         let mut state = TelegramLiveDraftState::working();
         state.apply(LiveProgressEvent::TelegramStatus(status(
-            crate::tool_ui::glyph::MEMORY,
-            "Recalled 3 Memories",
+            crate::tool_ui::glyph::APP_ATTENTION,
+            "Focused App",
         )));
         assert!(!state.apply(LiveProgressEvent::GenerationStarted));
 
-        assert_eq!(state.render_markdown_v2(), "⟲ Recalled 3 Memories");
+        assert_eq!(state.render_markdown_v2(), "◉ Focused App");
     }
 
     #[test]
@@ -473,14 +473,11 @@ mod tests {
             "Plan Updated",
         )));
         state.apply(LiveProgressEvent::TelegramStatus(status(
-            crate::tool_ui::glyph::MEMORY,
-            "Recalled 1 Memory",
+            crate::tool_ui::glyph::APP_ATTENTION,
+            "Focused App",
         )));
 
-        assert_eq!(
-            state.render_markdown_v2(),
-            "∷ Plan Updated\n⟲ Recalled 1 Memory"
-        );
+        assert_eq!(state.render_markdown_v2(), "∷ Plan Updated\n◉ Focused App");
     }
 
     #[test]

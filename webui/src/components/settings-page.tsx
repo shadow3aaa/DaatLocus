@@ -169,11 +169,6 @@ function CoreCard({
               ),
             },
             {
-              label: "Hindsight",
-              value: summary.hindsight.effective_model,
-              meta: `${summary.hindsight.profile} · :${summary.hindsight.port}`,
-            },
-            {
               label: "Telegram",
               value: `${summary.telegram.poll_timeout_secs}s poll`,
               action: (
@@ -398,7 +393,6 @@ function modelRoles(summary: SettingsSummary, modelName: string) {
   return [
     summary.main_model === modelName ? "main" : null,
     summary.judge_model === modelName ? "judge" : null,
-    summary.hindsight_model === modelName ? "hindsight" : null,
   ].filter((role): role is string => Boolean(role));
 }
 
@@ -406,7 +400,6 @@ function modelRolesFromFlags(model: SettingsModelSummary) {
   return [
     model.is_main ? "main" : null,
     model.is_judge ? "judge" : null,
-    model.is_hindsight ? "hindsight" : null,
   ].filter((role): role is string => Boolean(role));
 }
 

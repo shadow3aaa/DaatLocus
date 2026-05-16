@@ -578,17 +578,6 @@ pub fn render_telegram_tool_result_status(
 
     match call.name.as_str() {
         "update_plan" => Some(telegram_status(glyph::PLAN, "Plan Updated")),
-        "deep_recall" => match &result.ui_event {
-            ToolUiEvent::DeepRecall(event) => Some(telegram_status(
-                glyph::MEMORY,
-                format!(
-                    "Recalled {} {}",
-                    event.memory_count,
-                    plural_noun(event.memory_count, "Memory", "Memories")
-                ),
-            )),
-            _ => Some(telegram_status(glyph::MEMORY, "Recalled Memories")),
-        },
         "apply_patch" => match &result.ui_event {
             ToolUiEvent::Patch(event) => Some(telegram_status(
                 glyph::PATCH,
@@ -689,7 +678,6 @@ fn telegram_tool_failure_status(tool_name: &str) -> Option<TelegramLiveStatus> {
     match tool_name {
         "finish_and_send" | "notice_resolved" | "put_away_app" => None,
         "update_plan" => Some(telegram_status(glyph::ERROR, "Plan Update Failed")),
-        "deep_recall" => Some(telegram_status(glyph::ERROR, "Memory Recall Failed")),
         "apply_patch" => Some(telegram_status(glyph::ERROR, "File Edit Failed")),
         "terminal_exec" => Some(telegram_status(glyph::ERROR, "Command Failed")),
         "terminal_write_stdin" => Some(telegram_status(glyph::ERROR, "Terminal Write Failed")),
@@ -796,16 +784,13 @@ mod tests {
         context_budget::TokenEstimateBaseline,
         core::Llm,
         events::EventStore,
-        hindsight::HindsightClient,
         memory::Memory,
         pending_work::PendingWorkQueue,
         plan::Plan,
         preturn_state::PreTurnState,
         reasoning::{
             compiled::CompiledPromptStore,
-            runtime::{
-                AgentTurnRequest, AgentTurnStreamResult, PromptMemoryContext, PromptRequest,
-            },
+            runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
         },
         runtime::bootstrap::DaatLocusHomeOverride,
         runtime_context::build_preturn_context_text,
@@ -851,8 +836,6 @@ mod tests {
             let execution = tempfile::tempdir().expect("test execution cwd");
             let home_override = DaatLocusHomeOverride::set(home.path().to_path_buf());
             let config = Config::default();
-            let hindsight = HindsightClient::test_client(&config.hindsight);
-            let hindsight_retain = hindsight.spawn_retain_worker();
             let telegram = TelegramTransportState::new();
             let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();
             let apps: Vec<Box<dyn App>> = vec![
@@ -865,10 +848,7 @@ mod tests {
                 llm: Box::new(UnusedLlm),
                 judge_llm: Box::new(UnusedLlm),
                 config,
-                hindsight,
-                hindsight_retain,
                 memory: Memory::new().await,
-                prompt_memory: PromptMemoryContext::default(),
                 plan: Plan::new().await,
                 events: EventStore::new().await,
                 pending_work: PendingWorkQueue::new().await,
@@ -956,25 +936,6 @@ mod tests {
 
         assert_eq!(status.icon, glyph::PLAN);
         assert_eq!(status.text, "Plan Updated");
-    }
-
-    #[test]
-    fn telegram_tool_status_renders_deep_recall_count() {
-        let call = AgentToolCall {
-            id: "call_1".to_string(),
-            name: "deep_recall".to_string(),
-            arguments: serde_json::json!({}),
-        };
-        let result = tool_result(
-            "deep_recall",
-            serde_json::json!({}),
-            ToolUiEvent::deep_recall(4),
-        );
-
-        let status = render_telegram_tool_result_status(&call, &result).unwrap();
-
-        assert_eq!(status.icon, glyph::MEMORY);
-        assert_eq!(status.text, "Recalled 4 Memories");
     }
 
     #[test]

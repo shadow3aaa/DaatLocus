@@ -817,7 +817,6 @@ dependencies = [
  "clap",
  "crossterm",
  "diffy",
- "flate2",
  "futures-util",
  "include_dir",
  "libc",
@@ -841,7 +840,6 @@ dependencies = [
  "sha2",
  "syntect",
  "sysinfo",
- "tar",
  "tempfile",
  "textwrap",
  "thiserror 2.0.18",
@@ -858,7 +856,6 @@ dependencies = [
  "viewpoint-core",
  "windows-sys 0.61.2",
  "zip 4.6.1",
- "zstd",
 ]
 
 [[package]]
@@ -6059,12 +6056,9 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "flate2",
  "serde",
- "sha2",
  "tar",
  "toml 1.0.6+spec-1.1.0",
- "zip 4.6.1",
  "zstd",
 ]
 

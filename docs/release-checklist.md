@@ -24,7 +24,6 @@ Use this checklist before tagging a Daat Locus release.
   - events
   - pending work
   - plan
-  - Hindsight retain handoff queue
   - workflow run records
 - Confirm config files are written with private permissions on Unix-like
   systems.
@@ -37,9 +36,7 @@ Use this checklist before tagging a Daat Locus release.
   default.
 - Run the `Release Binaries` workflow for the release tag and confirm Linux,
   macOS, and Windows artifacts are uploaded to the GitHub Release.
-- Confirm release binaries embed the WebUI assets but do not embed Hindsight
-  sidecars; runtime sidecar downloads should continue to resolve from the
-  pinned sidecar release.
+- Confirm release binaries embed the WebUI assets.
 - Confirm `cargo-binstall` resolves the release asset and does not fall back to
   source compilation.
 - Confirm browser runtime download behavior is expected for the release.

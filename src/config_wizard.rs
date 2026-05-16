@@ -2485,24 +2485,6 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
     ));
 
     lines.push(String::new());
-    lines.push(crate::tr!(locale, "config.hindsight_heading"));
-    lines.push("─────────".to_string());
-    let hindsight_model = config
-        .hindsight
-        .model
-        .as_deref()
-        .unwrap_or(&config.efficient_model);
-    let fallback_mark = if config.hindsight.model.is_none() {
-        crate::tr!(locale, "config.fallback_to_main")
-    } else {
-        String::new()
-    };
-    lines.push(format!(
-        "  model={}{}  port={}  profile={}",
-        hindsight_model, fallback_mark, config.hindsight.port, config.hindsight.profile,
-    ));
-
-    lines.push(String::new());
     lines.push(crate::tr!(locale, "config.telegram_heading"));
     lines.push("────────".to_string());
     let token_status = if config.telegram.has_real_credentials() {
@@ -2561,7 +2543,6 @@ pub async fn run_config_menu() -> Result<()> {
             crate::tr!(locale, "config.add_provider"),
             crate::tr!(locale, "config.add_model"),
             crate::tr!(locale, "config.change_main_model"),
-            crate::tr!(locale, "config.change_hindsight_model"),
             crate::tr!(locale, "config.change_efficient_model"),
             crate::tr!(locale, "config.configure_telegram"),
             crate::tr!(locale, "config.exit"),
@@ -2681,39 +2662,6 @@ pub async fn run_config_menu() -> Result<()> {
                     ui.suspend();
                     return Err(miette!("{}", crate::tr!(locale, "common.no_models")));
                 }
-                let mut items: Vec<String> = model_names.clone();
-                let use_main = crate::tr!(locale, "config.use_main_model");
-                items.push(use_main.clone());
-                let current_idx = config
-                    .hindsight
-                    .model
-                    .as_ref()
-                    .and_then(|m| model_names.iter().position(|n| n == m))
-                    .unwrap_or(items.len() - 1);
-                let idx = ui.select(
-                    &crate::tr!(locale, "config.select_hindsight_model"),
-                    &items,
-                    current_idx,
-                )?;
-                config.hindsight.model = if items[idx] == use_main {
-                    None
-                } else {
-                    Some(model_names[idx].clone())
-                };
-                write_config(&config).await?;
-            }
-            5 => {
-                let mut config = crate::config::load_config().await.map_err(|e| {
-                    miette!(
-                        "{}",
-                        crate::tr!(locale, "common.config_load_failed", error = e)
-                    )
-                })?;
-                let model_names: Vec<String> = config.models.keys().cloned().collect();
-                if model_names.is_empty() {
-                    ui.suspend();
-                    return Err(miette!("{}", crate::tr!(locale, "common.no_models")));
-                }
                 let current_idx = model_names
                     .iter()
                     .position(|n| n == &config.efficient_model)
@@ -2726,7 +2674,7 @@ pub async fn run_config_menu() -> Result<()> {
                 config.efficient_model = model_names[idx].clone();
                 write_config(&config).await?;
             }
-            6 => {
+            5 => {
                 let mut config = crate::config::load_config().await.map_err(|e| {
                     miette!(
                         "{}",
@@ -2817,62 +2765,6 @@ fn prompt_telegram_config(
         bot_token,
         poll_timeout_secs,
     })
-}
-
-/// `config set-hindsight-model` subcommand.
-pub async fn run_set_hindsight_model() -> Result<()> {
-    let mut config = crate::config::load_config().await.map_err(|e| {
-        miette!(
-            "{}",
-            crate::tr!(Locale::default(), "common.config_load_failed", error = e)
-        )
-    })?;
-    let locale = config.locale;
-    let mut ui = PromptUi::new(locale)?;
-
-    let model_names: Vec<String> = config.models.keys().cloned().collect();
-    if model_names.is_empty() {
-        return Err(miette!("{}", crate::tr!(locale, "common.no_models")));
-    }
-
-    let mut items: Vec<String> = model_names.clone();
-    let use_main = crate::tr!(locale, "config.use_main_model");
-    items.push(use_main.clone());
-
-    let current_idx = config
-        .hindsight
-        .model
-        .as_ref()
-        .and_then(|m| model_names.iter().position(|n| n == m))
-        .unwrap_or(items.len() - 1);
-
-    let idx = ui.select(
-        &crate::tr!(locale, "config.select_hindsight_model"),
-        &items,
-        current_idx,
-    )?;
-
-    config.hindsight.model = if items[idx] == use_main {
-        None
-    } else {
-        Some(model_names[idx].clone())
-    };
-
-    write_config(&config).await?;
-    let display = config
-        .hindsight
-        .model
-        .as_deref()
-        .unwrap_or(&config.main_model);
-    ui.detail(
-        &crate::tr!(locale, "config.select_hindsight_model"),
-        &[crate::tr!(
-            locale,
-            "config.hindsight_model_set",
-            name = display
-        )],
-    )?;
-    Ok(())
 }
 
 /// `config set-efficient-model` subcommand.

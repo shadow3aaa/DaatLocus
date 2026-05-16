@@ -3,17 +3,15 @@ use crate::{
     context::Context,
     events::{EventPayload, EventView},
     preturn_state::PreTurnState,
-    reasoning::runtime::{PromptMemoryCitation, PromptMemoryFact},
 };
 
 use super::{
     prompt_doc::{PromptBlock, PromptGroupDoc, PromptNode, PromptStateDoc, PromptUnitDoc},
     prompts::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
-        MEMORIES_UNIT_HOW, MEMORIES_UNIT_WHAT, MEMORIES_UNIT_WHEN, PLAN_UNIT_HOW, PLAN_UNIT_WHAT,
-        PLAN_UNIT_WHEN, WORKFLOW_UNIT_HOW, WORKFLOW_UNIT_WHAT, WORKFLOW_UNIT_WHEN,
-        WORKSPACE_UNIT_HOW, WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY, build_app_usage_prompt,
-        build_runtime_app_how_to_use_prompt, build_runtime_app_usages,
+        PLAN_UNIT_HOW, PLAN_UNIT_WHAT, PLAN_UNIT_WHEN, WORKFLOW_UNIT_HOW, WORKFLOW_UNIT_WHAT,
+        WORKFLOW_UNIT_WHEN, WORKSPACE_UNIT_HOW, WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY,
+        build_app_usage_prompt, build_runtime_app_how_to_use_prompt, build_runtime_app_usages,
         build_runtime_background_hint_items, build_runtime_focused_app_how_to_use_prompt,
         build_workspace_unit_what,
     },
@@ -50,13 +48,11 @@ impl AfterClaimContextInput {
 pub struct EventSystemPart;
 pub struct AppsSystemPart;
 pub struct WorkspaceSystemPart;
-pub struct MemoriesSystemPart;
 pub struct PlanSystemPart;
 pub struct WorkflowSystemPart;
 pub struct PersonaSystemPart;
 pub struct CompiledAdditionsSystemPart;
 
-pub struct PreTurnMemoriesPart;
 pub struct PreTurnSensoryPart;
 pub struct PreTurnPlanPart;
 pub struct PreTurnWorkflowStatePart;
@@ -108,22 +104,6 @@ impl SystemPromptPart for WorkspaceSystemPart {
             vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHY.to_string())],
             vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHEN.to_string())],
             vec![PromptBlock::Paragraph(WORKSPACE_UNIT_HOW.to_string())],
-        ))
-    }
-}
-
-impl SystemPromptPart for MemoriesSystemPart {
-    fn key(&self) -> &'static str {
-        "memories"
-    }
-
-    fn build(&self, _ctx: &Context) -> Option<PromptUnitDoc> {
-        Some(PromptUnitDoc::new(
-            self.key(),
-            vec![PromptBlock::Paragraph(MEMORIES_UNIT_WHAT.to_string())],
-            Vec::new(),
-            vec![PromptBlock::Paragraph(MEMORIES_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(MEMORIES_UNIT_HOW.to_string())],
         ))
     }
 }
@@ -211,46 +191,6 @@ impl SystemPromptPart for CompiledAdditionsSystemPart {
             Vec::new(),
             vec![PromptBlock::BulletList(additions)],
         ))
-    }
-}
-
-impl PreTurnContextPart for PreTurnMemoriesPart {
-    fn key(&self) -> &'static str {
-        "recall_memories"
-    }
-
-    fn build(&self, ctx: &Context, _state: &PreTurnState) -> Option<PromptNode> {
-        if ctx.prompt_memory.is_empty() {
-            return None;
-        }
-        let mut children = Vec::new();
-
-        if !ctx.prompt_memory.observations.is_empty() {
-            children.push(PromptNode::State(PromptStateDoc::new(
-                "observations",
-                render_prompt_memory_facts(&ctx.prompt_memory.observations),
-            )));
-        }
-        if !ctx.prompt_memory.raw_memories.is_empty() {
-            children.push(PromptNode::State(PromptStateDoc::new(
-                "raw_memories",
-                render_prompt_memory_facts(&ctx.prompt_memory.raw_memories),
-            )));
-        }
-        if !ctx.prompt_memory.citations.is_empty() {
-            children.push(PromptNode::State(PromptStateDoc::new(
-                "citations",
-                vec![PromptBlock::BulletList(render_prompt_memory_citations(
-                    &ctx.prompt_memory.citations,
-                ))],
-            )));
-        }
-
-        if children.is_empty() {
-            None
-        } else {
-            Some(PromptNode::Group(PromptGroupDoc::new(self.key(), children)))
-        }
     }
 }
 
@@ -683,36 +623,4 @@ pub(crate) fn compact_horizontal_whitespace(text: &str) -> String {
         }
     }
     result
-}
-
-fn render_prompt_memory_facts(facts: &[PromptMemoryFact]) -> Vec<PromptBlock> {
-    facts
-        .iter()
-        .map(|fact| {
-            let kind = fact
-                .memory_type
-                .clone()
-                .unwrap_or_else(|| "memory".to_string());
-            let context = fact
-                .context
-                .clone()
-                .filter(|value| !value.trim().is_empty())
-                .map(|value| format!("\ncontext: {value}"))
-                .unwrap_or_default();
-            PromptBlock::Paragraph(format!(
-                "id: {}\ntype: {}\ntext: {}{}",
-                fact.id,
-                kind,
-                fact.text.trim(),
-                context
-            ))
-        })
-        .collect()
-}
-
-fn render_prompt_memory_citations(citations: &[PromptMemoryCitation]) -> Vec<String> {
-    citations
-        .iter()
-        .map(|citation| format!("[{}] {}: {}", citation.kind, citation.id, citation.summary))
-        .collect()
 }

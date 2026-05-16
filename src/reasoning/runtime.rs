@@ -1,17 +1,14 @@
+use crate::{
+    context::Context,
+    core::Llm,
+    logging::{RuntimeStatusLevel, set_runtime_status},
+    tool_ui::{ToolCallUiEvent, ToolUiEvent},
+};
 use miette::{Result, miette};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned, ser::SerializeStruct,
 };
 use serde_json::{Value, json};
-use std::collections::HashMap;
-
-use crate::{
-    context::Context,
-    core::Llm,
-    hindsight::HindsightRecallResult,
-    logging::{RuntimeStatusLevel, set_runtime_status},
-    tool_ui::{ToolCallUiEvent, ToolUiEvent},
-};
 
 use super::{
     compiled::seed_compiled_program_from_tuning_for_model,
@@ -239,51 +236,6 @@ pub struct AgentTurnStreamResult {
     pub last_assistant_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reasoning_content: Option<String>,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct PromptMemoryContext {
-    pub observations: Vec<PromptMemoryFact>,
-    pub raw_memories: Vec<PromptMemoryFact>,
-    pub citations: Vec<PromptMemoryCitation>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PromptMemoryFact {
-    pub id: String,
-    pub text: String,
-    pub memory_type: Option<String>,
-    pub document_id: Option<String>,
-    pub context: Option<String>,
-    pub metadata: Option<HashMap<String, String>>,
-    pub tags: Vec<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PromptMemoryCitation {
-    pub kind: String,
-    pub id: String,
-    pub summary: String,
-}
-
-impl PromptMemoryContext {
-    pub fn is_empty(&self) -> bool {
-        self.observations.is_empty() && self.raw_memories.is_empty() && self.citations.is_empty()
-    }
-}
-
-impl From<HindsightRecallResult> for PromptMemoryFact {
-    fn from(value: HindsightRecallResult) -> Self {
-        Self {
-            id: value.id,
-            text: value.text,
-            memory_type: value.r#type,
-            document_id: value.document_id,
-            context: value.context,
-            metadata: value.metadata,
-            tags: value.tags,
-        }
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

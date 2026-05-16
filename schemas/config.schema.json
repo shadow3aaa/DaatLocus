@@ -9,17 +9,6 @@
         "port": 53825
       }
     },
-    "hindsight": {
-      "$ref": "#/$defs/HindsightConfig",
-      "default": {
-        "bank_id": "daat-locus",
-        "model": null,
-        "namespace": "default",
-        "port": 8888,
-        "profile": "daat-locus",
-        "request_timeout_secs": 180
-      }
-    },
     "judge": {
       "$ref": "#/$defs/JudgeConfig",
       "default": {
@@ -100,46 +89,6 @@
           "format": "uint16",
           "default": 53825,
           "maximum": 65535,
-          "minimum": 0
-        }
-      }
-    },
-    "HindsightConfig": {
-      "type": "object",
-      "properties": {
-        "bank_id": {
-          "type": "string",
-          "default": "daat-locus"
-        },
-        "model": {
-          "description": "Model used for hindsight LLM operations (reflect/retain).\nNone = use main_model.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
-        },
-        "namespace": {
-          "type": "string",
-          "default": "default"
-        },
-        "port": {
-          "description": "Port the managed daemon listens on.",
-          "type": "integer",
-          "format": "uint16",
-          "default": 8888,
-          "maximum": 65535,
-          "minimum": 0
-        },
-        "profile": {
-          "description": "Profile name used by hindsight-embed. Defaults to \"daat-locus\".",
-          "type": "string",
-          "default": "daat-locus"
-        },
-        "request_timeout_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 180,
           "minimum": 0
         }
       }

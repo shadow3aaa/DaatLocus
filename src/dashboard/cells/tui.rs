@@ -21,7 +21,7 @@ use super::{
     highlight::{DiffScopeBackgrounds, diff_scope_backgrounds, highlight_patch_lines},
     messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell},
     plan::{PlanActivityCell, PlanStepDisplayStatus},
-    workflow::{ActivateWorkflowActivityCell, CreateWorkflowActivityCell, DeepRecallActivityCell},
+    workflow::{ActivateWorkflowActivityCell, CreateWorkflowActivityCell},
 };
 use crate::dashboard::renderable::{FlexRenderable, Renderable, ViewportCulledColumn};
 use crate::tool_ui::{PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, glyph};
@@ -286,7 +286,6 @@ impl Renderable for ActivityCell {
             ActivityCell::PlanResult(c) => 3 + (c.steps.len() as u16).min(20),
             ActivityCell::CreateWorkflowResult(_) => 3,
             ActivityCell::ActivateWorkflowResult(_) => 3,
-            ActivityCell::DeepRecallResult(_) => 3,
         }
     }
 }
@@ -306,7 +305,6 @@ fn render_activity_cell_lines(cell: &ActivityCell, max_width: u16) -> Vec<Line<'
         ActivityCell::PlanResult(cell) => render_plan_cell_lines(cell),
         ActivityCell::CreateWorkflowResult(cell) => render_create_workflow_cell_lines(cell),
         ActivityCell::ActivateWorkflowResult(cell) => render_activate_workflow_cell_lines(cell),
-        ActivityCell::DeepRecallResult(cell) => render_deep_recall_cell_lines(cell),
         ActivityCell::ExecResult(cell) => render_exec_cell_lines(cell),
         ActivityCell::LiveExec(cell) => render_live_exec_cell_lines(cell),
         ActivityCell::Patch(cell) => render_patch_cell_lines(cell),
@@ -1004,13 +1002,6 @@ fn render_activate_workflow_cell_lines(cell: &ActivateWorkflowActivityCell) -> V
     render_workflow_line(
         format!("Activated Workflow: {}", cell.workflow_id),
         glyph::WORKFLOW,
-    )
-}
-
-fn render_deep_recall_cell_lines(cell: &DeepRecallActivityCell) -> Vec<Line<'static>> {
-    render_workflow_line(
-        format!("Recalled {} Memories", cell.memory_count),
-        glyph::MEMORY,
     )
 }
 

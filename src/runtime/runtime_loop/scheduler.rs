@@ -1,8 +1,6 @@
 use super::sleep_driver::{maybe_start_forced_sleep, maybe_start_idle_sleep};
 use super::*;
 
-const HINDSIGHT_HANDOFF_FLUSH_TIMEOUT_SECS: u64 = 8;
-
 pub(crate) async fn daat_locus_loop(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
@@ -70,55 +68,6 @@ pub(crate) async fn daat_locus_loop(
             return;
         }
     }
-    let submitted_handoffs = context.hindsight_retain.drain_submitted().await;
-    context
-        .memory
-        .mark_handoffs_submitted(&submitted_handoffs)
-        .await;
-    if context.memory.should_block_new_turns_on_handoff_backlog() {
-        let handoff_backlog = context.memory.handoff_backlog_count();
-        set_runtime_status(
-            Some(tx),
-            RuntimeStatusLevel::Info,
-            format!(
-                "processing: waiting for hindsight handoff backlog ({handoff_backlog} turn(s))"
-            ),
-        );
-        sync_dashboard_state(
-            context,
-            tx,
-            sleep_status,
-            Some(cycle_started_at.elapsed().as_millis()),
-        );
-        match tokio::time::timeout(
-            Duration::from_secs(HINDSIGHT_HANDOFF_FLUSH_TIMEOUT_SECS),
-            context.hindsight_retain.flush(),
-        )
-        .await
-        {
-            Ok(Ok(submitted_handoffs)) => {
-                context
-                    .memory
-                    .mark_handoffs_submitted(&submitted_handoffs)
-                    .await;
-            }
-            Ok(Err(err)) => {
-                tracing::error!("failed to flush hindsight handoff queue before new turn: {err:?}");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Err(_) => {
-                let abandoned = context.hindsight_retain.abandon_pending();
-                let discarded = context.memory.discard_hindsight_handoff_backlog().await;
-                tracing::error!(
-                    abandoned,
-                    discarded,
-                    timeout_secs = HINDSIGHT_HANDOFF_FLUSH_TIMEOUT_SECS,
-                    "timed out flushing hindsight handoff queue before new turn; abandoning retain handoffs and discarding queued memory so foreground work can continue"
-                );
-            }
-        }
-        return;
-    }
     let pending_work_count = context.pending_work.pending_count();
     if pending_work_count == 0 {
         if context.idle_since.is_none() {
@@ -156,7 +105,7 @@ pub(crate) async fn daat_locus_loop(
     context.active_runtime_turn = true;
     context.runtime_turn_epoch = context.runtime_turn_epoch.wrapping_add(1);
     context.runtime_turn_started_at = Some(std::time::Instant::now());
-    context.set_runtime_phase(Some(RuntimeTurnPhase::PreflightMemory));
+    context.set_runtime_phase(Some(RuntimeTurnPhase::PreflightPreTurnContext));
     sync_dashboard_state(
         context,
         tx,

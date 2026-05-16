@@ -1,14 +1,5 @@
-//! Runtime conversation state and the hindsight handoff queue.
-use std::{
-    collections::{HashSet, VecDeque},
-    fmt::Display,
-    future::Future,
-};
-
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use uuid::Uuid;
+//! Runtime conversation state.
+use std::{collections::VecDeque, future::Future};
 
 use crate::{
     context_budget::{
@@ -17,32 +8,25 @@ use crate::{
         estimate_runtime_request_envelope, truncate_text_to_token_budget,
         truncate_text_to_token_budget_with_notice,
     },
-    hindsight::{HINDSIGHT_RUNTIME_DOCUMENT_ID, HindsightRetainItem, HindsightRetainJob},
     persistence::PersistenceStore,
     reasoning::runtime::{AgentMessage, AgentToolSpec, HistoryMessage},
     tool_ui::{
-        ActivateWorkflowUiData, CreateWorkflowUiData, DeepRecallUiData, PatchUiData, PlanUiData,
-        TelegramUiData, TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent,
+        ActivateWorkflowUiData, CreateWorkflowUiData, PatchUiData, PlanUiData, TelegramUiData,
+        TerminalUiData, ToolCallUiEvent, ToolUiData, ToolUiEvent,
     },
 };
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
 const RUNTIME_HISTORY_SUMMARY_PREFIX: &str = "Earlier runtime history summary:";
 const MID_TURN_SUMMARY_PREFIX: &str = "Earlier tool/context progress summary:";
 const RUNTIME_CONVERSATION_FILE_NAME: &str = "runtime_conversation.json";
 const RUNTIME_CONVERSATION_LEGACY_FILE_NAME: &str = "runtime_conversation";
-const HINDSIGHT_QUEUE_FILE_NAME: &str = "hindsight_queue.json";
-const HINDSIGHT_QUEUE_LEGACY_FILE_NAME: &str = "hindsight_queue";
 const RUNTIME_HISTORY_TOOL_MESSAGE_MAX_TOKENS: usize = 600;
 const RUNTIME_COMPACTION_RECORD_LIMIT: usize = 32;
 
 pub struct Memory {
     runtime_conversation: RuntimeConversation,
-    hindsight_queue: HindsightQueue,
-}
-
-pub struct MemoryRetainPlan {
-    pub jobs: Vec<HindsightRetainJob>,
-    pub must_flush_before_continue: bool,
 }
 
 pub struct RuntimeTurnDraft {
@@ -114,25 +98,12 @@ pub struct RuntimeStepCompactionPolicy {
     pub max_recoveries: usize,
 }
 
-const HINDSIGHT_HANDOFF_BACKLOG_LIMIT: usize = 3;
-
 impl Memory {
     pub async fn new() -> Self {
-        let mut hindsight_queue = HindsightQueue::new().await;
-        let reset_inflight = hindsight_queue.reset_inflight_retain_state();
-        let runtime_conversation = RuntimeConversation::new(
-            hindsight_queue.current_focus(),
-            hindsight_queue.bootstrap_messages(),
-        )
-        .await;
-        let memory = Self {
+        let runtime_conversation = RuntimeConversation::new(None, Vec::new()).await;
+        Self {
             runtime_conversation,
-            hindsight_queue,
-        };
-        if reset_inflight {
-            memory.hindsight_queue.sync_to_disk().await;
         }
-        memory
     }
 
     pub async fn record_agent_turn(
@@ -140,27 +111,14 @@ impl Memory {
         current_doing: String,
         messages: Vec<HistoryMessage>,
         compaction_records: Vec<RuntimeCompactionRecord>,
-    ) -> MemoryRetainPlan {
-        self.runtime_conversation_mut().append_turn(
-            current_doing.clone(),
-            messages.clone(),
-            compaction_records,
-        );
-        self.hindsight_queue.push_turn(current_doing, messages);
-        let jobs = self.collect_pending_retain_jobs();
-        let must_flush_before_continue =
-            self.hindsight_queue.handoff_backlog_count() >= HINDSIGHT_HANDOFF_BACKLOG_LIMIT;
+    ) {
+        self.runtime_conversation_mut()
+            .append_turn(current_doing, messages, compaction_records);
         self.sync_to_disk().await;
-        MemoryRetainPlan {
-            jobs,
-            must_flush_before_continue,
-        }
     }
 
     pub fn current_thread_focus(&self) -> Option<String> {
-        self.runtime_conversation()
-            .current_focus()
-            .or_else(|| self.hindsight_queue.current_focus())
+        self.runtime_conversation().current_focus()
     }
 
     pub fn runtime_conversation_messages(&self) -> Vec<HistoryMessage> {
@@ -186,10 +144,10 @@ impl Memory {
         self.begin_runtime_step(envelope.into_agent_messages(conversation_messages))
     }
 
-    pub async fn commit_runtime_turn(&mut self, draft: RuntimeTurnDraft) -> MemoryRetainPlan {
+    pub async fn commit_runtime_turn(&mut self, draft: RuntimeTurnDraft) {
         let (current_doing, messages, compaction_records) = draft.into_parts();
         self.record_agent_turn(current_doing, messages, compaction_records)
-            .await
+            .await;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -268,61 +226,17 @@ impl Memory {
         trimmed
     }
 
-    pub fn handoff_backlog_count(&self) -> usize {
-        self.hindsight_queue.handoff_backlog_count()
-    }
-
-    pub fn should_block_new_turns_on_handoff_backlog(&self) -> bool {
-        self.handoff_backlog_count() >= HINDSIGHT_HANDOFF_BACKLOG_LIMIT
-    }
-
-    pub async fn mark_handoffs_submitted(&mut self, handoff_ids: &[Uuid]) {
-        if self.hindsight_queue.mark_handoffs_submitted(handoff_ids) {
-            self.hindsight_queue.sync_to_disk().await;
-        }
-    }
-
-    pub async fn discard_hindsight_handoff_backlog(&mut self) -> usize {
-        let discarded = self.hindsight_queue.discard_unsubmitted();
-        if discarded > 0 {
-            self.hindsight_queue.sync_to_disk().await;
-        }
-        discarded
-    }
-
-    pub async fn clear_runtime_conversation(&mut self) -> MemoryRetainPlan {
-        let retain_plan = self.runtime_conversation.take_for_hindsight().map_or(
-            MemoryRetainPlan {
-                jobs: Vec::new(),
-                must_flush_before_continue: false,
-            },
-            |(current_doing, messages)| {
-                self.hindsight_queue.push_turn(current_doing, messages);
-                let jobs = self.collect_pending_retain_jobs();
-                let must_flush_before_continue =
-                    self.hindsight_queue.handoff_backlog_count() >= HINDSIGHT_HANDOFF_BACKLOG_LIMIT;
-                MemoryRetainPlan {
-                    jobs,
-                    must_flush_before_continue,
-                }
-            },
-        );
+    pub async fn clear_runtime_conversation(&mut self) {
+        let _ = self.runtime_conversation.take_for_memory();
         self.runtime_conversation.sync_to_disk().await;
-        self.hindsight_queue.sync_to_disk().await;
-        retain_plan
     }
 
     pub async fn shutdown(self) {
         self.sync_to_disk().await;
     }
 
-    fn collect_pending_retain_jobs(&mut self) -> Vec<HindsightRetainJob> {
-        self.hindsight_queue.collect_pending_retain_jobs()
-    }
-
     async fn sync_to_disk(&self) {
         self.runtime_conversation.sync_to_disk().await;
-        self.hindsight_queue.sync_to_disk().await;
     }
 }
 
@@ -332,22 +246,6 @@ pub struct RuntimeConversation {
     messages: Vec<HistoryMessage>,
     #[serde(default)]
     compaction_records: VecDeque<RuntimeCompactionRecord>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct HindsightQueueItem {
-    id: Uuid,
-    current_doing: String,
-    messages: Vec<HistoryMessage>,
-    #[serde(default)]
-    inflight: bool,
-    #[serde(default)]
-    submitted: bool,
-}
-
-#[derive(Clone, Serialize, Deserialize, Default)]
-pub struct HindsightQueue {
-    trail: VecDeque<HindsightQueueItem>,
 }
 
 impl RuntimeTurnDraft {
@@ -690,7 +588,7 @@ impl RuntimeConversation {
         self.compaction_records.clear();
     }
 
-    pub fn take_for_hindsight(&mut self) -> Option<(String, Vec<HistoryMessage>)> {
+    pub fn take_for_memory(&mut self) -> Option<(String, Vec<HistoryMessage>)> {
         let messages = self.messages();
         if messages.is_empty() {
             self.clear();
@@ -871,218 +769,6 @@ impl RuntimeConversation {
         {
             tracing::error!("persist runtime conversation failed: {err}");
         }
-    }
-}
-
-impl Display for HindsightQueueItem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.render_for_memory())
-    }
-}
-
-impl HindsightQueueItem {
-    fn render_for_memory(&self) -> String {
-        self.messages
-            .iter()
-            .map(format_message_for_memory)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    fn bootstrap_messages(&self) -> Vec<HistoryMessage> {
-        self.messages.clone()
-    }
-
-    fn to_hindsight_item(&self) -> HindsightRetainItem {
-        let tags = self.classification_tags();
-        let mut metadata = std::collections::HashMap::from([
-            ("current_doing".to_string(), self.current_doing.clone()),
-            ("entry_id".to_string(), self.id.to_string()),
-            ("origin".to_string(), "runtime_step".to_string()),
-        ]);
-        if let Some(primary_scope) = tags
-            .iter()
-            .find_map(|tag| tag.strip_prefix("scope:").map(str::to_string))
-        {
-            metadata.insert("primary_scope".to_string(), primary_scope);
-        }
-        if let Some(primary_kind) = tags
-            .iter()
-            .find_map(|tag| tag.strip_prefix("kind:").map(str::to_string))
-        {
-            metadata.insert("primary_kind".to_string(), primary_kind);
-        }
-        HindsightRetainItem {
-            content: self.render_for_retain(),
-            timestamp: None,
-            context: Some("runtime hindsight step".to_string()),
-            metadata: Some(metadata),
-            document_id: Some(HINDSIGHT_RUNTIME_DOCUMENT_ID.to_string()),
-            tags: Some(tags),
-            update_mode: Some("append".to_string()),
-        }
-    }
-
-    fn classification_tags(&self) -> Vec<String> {
-        let mut tags = vec![
-            "daat-locus".to_string(),
-            "hindsight-step".to_string(),
-            "origin:runtime_step".to_string(),
-            "source:runtime_step".to_string(),
-            "scope:runtime".to_string(),
-        ];
-
-        if self.has_telegram_activity() {
-            tags.push("scope:telegram".to_string());
-        }
-        if self.has_workspace_activity() {
-            tags.push("scope:workspace".to_string());
-            tags.push("kind:project_fact".to_string());
-        }
-        if self.has_failure_signal() {
-            tags.push("kind:failure_pattern".to_string());
-        }
-        if self.has_user_preference_signal() {
-            tags.push("kind:user_preference".to_string());
-        }
-        if !tags.iter().any(|tag| tag.starts_with("kind:")) {
-            tags.push("kind:strategy_lesson".to_string());
-        }
-
-        tags.sort();
-        tags.dedup();
-        tags
-    }
-
-    fn has_workspace_activity(&self) -> bool {
-        self.messages.iter().any(message_has_workspace_signal)
-    }
-
-    fn has_telegram_activity(&self) -> bool {
-        self.messages.iter().any(message_has_telegram_signal)
-    }
-
-    fn has_failure_signal(&self) -> bool {
-        self.messages.iter().any(message_has_failure_signal)
-    }
-
-    fn has_user_preference_signal(&self) -> bool {
-        self.messages.iter().any(message_has_preference_signal)
-    }
-}
-
-impl HindsightQueue {
-    async fn new() -> Self {
-        let persistence = PersistenceStore::runtime().await;
-        if let Some(queue) = persistence
-            .read_json_memory(HINDSIGHT_QUEUE_FILE_NAME, "hindsight queue")
-            .await
-        {
-            return queue;
-        }
-        if let Some(queue) = persistence
-            .read_postcard_memory(HINDSIGHT_QUEUE_LEGACY_FILE_NAME, "legacy hindsight queue")
-            .await
-        {
-            if let Err(err) = persistence
-                .write_json_memory(HINDSIGHT_QUEUE_FILE_NAME, &queue)
-                .await
-            {
-                tracing::error!("migrate legacy hindsight queue to json failed: {err}");
-            }
-            return queue;
-        }
-        Self::default()
-    }
-
-    fn reset_inflight_retain_state(&mut self) -> bool {
-        let mut changed = false;
-        for item in &mut self.trail {
-            if !item.submitted {
-                changed |= item.inflight;
-                item.inflight = false;
-            }
-        }
-        changed
-    }
-
-    fn current_focus(&self) -> Option<String> {
-        self.trail.back().map(|item| item.current_doing.clone())
-    }
-
-    fn bootstrap_messages(&self) -> Vec<HistoryMessage> {
-        self.trail
-            .iter()
-            .flat_map(|item| item.bootstrap_messages())
-            .collect()
-    }
-
-    fn push_turn(&mut self, current_doing: String, messages: Vec<HistoryMessage>) {
-        self.trail.push_back(HindsightQueueItem {
-            id: Uuid::new_v4(),
-            current_doing,
-            messages,
-            inflight: false,
-            submitted: false,
-        });
-    }
-
-    async fn sync_to_disk(&self) {
-        let persistence = PersistenceStore::runtime().await;
-        if let Err(err) = persistence
-            .write_json_memory(HINDSIGHT_QUEUE_FILE_NAME, self)
-            .await
-        {
-            tracing::error!("persist hindsight queue failed: {err}");
-        }
-    }
-
-    fn collect_pending_retain_jobs(&mut self) -> Vec<HindsightRetainJob> {
-        let mut jobs = Vec::new();
-        for item in &mut self.trail {
-            if item.submitted || item.inflight {
-                continue;
-            }
-            item.inflight = true;
-            jobs.push(HindsightRetainJob {
-                handoff_id: item.id,
-                items: vec![item.to_hindsight_item()],
-                document_id: Some(HINDSIGHT_RUNTIME_DOCUMENT_ID.to_string()),
-            });
-        }
-        jobs
-    }
-
-    fn handoff_backlog_count(&self) -> usize {
-        self.trail.iter().filter(|item| !item.submitted).count()
-    }
-
-    fn mark_handoffs_submitted(&mut self, handoff_ids: &[Uuid]) -> bool {
-        let handoff_ids = handoff_ids.iter().copied().collect::<HashSet<_>>();
-        let mut changed = false;
-        for item in &mut self.trail {
-            if handoff_ids.contains(&item.id) && !item.submitted {
-                item.inflight = false;
-                item.submitted = true;
-                changed = true;
-            }
-        }
-        while self
-            .trail
-            .front()
-            .map(|item| item.submitted)
-            .unwrap_or(false)
-        {
-            self.trail.pop_front();
-            changed = true;
-        }
-        changed
-    }
-
-    fn discard_unsubmitted(&mut self) -> usize {
-        let before = self.trail.len();
-        self.trail.retain(|item| item.submitted);
-        before.saturating_sub(self.trail.len())
     }
 }
 
@@ -1288,9 +974,6 @@ fn summarize_tool_ui_event(event: &ToolUiEvent) -> String {
         ToolUiEvent::ActivateWorkflow(ActivateWorkflowUiData { workflow_id }) => {
             format!("activated workflow {workflow_id}")
         }
-        ToolUiEvent::DeepRecall(DeepRecallUiData { memory_count }) => {
-            format!("recalled {memory_count} memories")
-        }
         ToolUiEvent::Terminal(data) => summarize_runtime_inline_text(&data.title),
         ToolUiEvent::Patch(data) => summarize_runtime_inline_text(&data.summary_line),
         ToolUiEvent::Telegram(data) => summarize_runtime_inline_text(&data.title),
@@ -1309,7 +992,6 @@ fn tool_call_ui_event_title(event: &ToolCallUiEvent) -> &str {
         | ToolCallUiEvent::Plan(ToolUiData { title, .. })
         | ToolCallUiEvent::CreateWorkflow(ToolUiData { title, .. })
         | ToolCallUiEvent::ActivateWorkflow(ToolUiData { title, .. })
-        | ToolCallUiEvent::DeepRecall(ToolUiData { title, .. })
         | ToolCallUiEvent::App(ToolUiData { title, .. })
         | ToolCallUiEvent::Error(ToolUiData { title, .. }) => title,
         ToolCallUiEvent::Terminal(TerminalUiData { title, .. }) => title,
@@ -1395,264 +1077,6 @@ fn build_runtime_prompt_history_summary(
         &lines.join("\n"),
         max_tokens.max(1),
     )))
-}
-
-fn format_message_for_memory(message: &HistoryMessage) -> String {
-    let role = message.role_name();
-    let mut parts = Vec::new();
-    if !history_message_content(message).trim().is_empty() {
-        parts.push(history_message_content(message).to_string());
-    }
-    if !message.tool_call_ui_events.is_empty() {
-        let rendered = message
-            .tool_call_ui_events
-            .iter()
-            .map(format_tool_call_ui_event_for_memory)
-            .collect::<Vec<_>>()
-            .join("\n");
-        parts.push(rendered);
-    }
-    format!("{role}:\n{}", parts.join("\n"))
-}
-
-impl HindsightQueueItem {
-    fn render_for_retain(&self) -> String {
-        let transcript = build_hindsight_retain_transcript(&self.messages);
-        serde_json::to_string(&transcript).unwrap_or_else(|_| "[]".to_string())
-    }
-}
-
-fn build_hindsight_retain_transcript(messages: &[HistoryMessage]) -> Vec<serde_json::Value> {
-    let mut transcript = Vec::new();
-    let mut skipped_tool_call_ids = HashSet::new();
-
-    for message in messages {
-        match &message.message {
-            AgentMessage::User { .. } => {
-                let text = history_message_content(message).trim();
-                if !text.is_empty() {
-                    transcript.push(json!({
-                        "role": "user",
-                        "content": [{ "type": "text", "text": text }],
-                    }));
-                }
-            }
-            AgentMessage::Assistant { .. } => {
-                let text = history_message_content(message).trim();
-                if !text.is_empty() {
-                    transcript.push(json!({
-                        "role": "assistant",
-                        "content": [{ "type": "text", "text": text }],
-                    }));
-                }
-            }
-            AgentMessage::AssistantToolCallProtocol { content, calls, .. } => {
-                let mut blocks = Vec::new();
-                if let Some(text) = content.as_deref().map(str::trim)
-                    && !text.is_empty()
-                {
-                    blocks.push(json!({
-                        "type": "text",
-                        "text": text,
-                    }));
-                }
-                blocks.extend(calls.iter().filter_map(|call| {
-                    if is_hindsight_operational_tool(&call.name) {
-                        skipped_tool_call_ids.insert(call.id.clone());
-                        return None;
-                    }
-                    Some(json!({
-                        "type": "tool_use",
-                        "id": call.id,
-                        "name": call.name,
-                        "input": call.arguments,
-                    }))
-                }));
-                if !blocks.is_empty() {
-                    transcript.push(json!({
-                        "role": "assistant",
-                        "content": blocks,
-                    }));
-                }
-            }
-            AgentMessage::Tool { tool_call_id, .. } => {
-                if skipped_tool_call_ids.contains(tool_call_id) {
-                    continue;
-                }
-                let result = strip_tool_history_envelope(history_message_content(message));
-                if result.trim().is_empty() {
-                    continue;
-                }
-                let block = json!({
-                    "type": "tool_result",
-                    "tool_use_id": tool_call_id,
-                    "content": result,
-                });
-                if let Some(last) = transcript.last_mut()
-                    && last.get("role").and_then(serde_json::Value::as_str) == Some("user")
-                    && last
-                        .get("content")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|items| {
-                            items.iter().all(|item| {
-                                item.get("type").and_then(serde_json::Value::as_str)
-                                    == Some("tool_result")
-                            })
-                        })
-                    && let Some(items) = last
-                        .get_mut("content")
-                        .and_then(serde_json::Value::as_array_mut)
-                {
-                    items.push(block);
-                    continue;
-                }
-                transcript.push(json!({
-                    "role": "user",
-                    "content": [block],
-                }));
-            }
-            AgentMessage::System { .. } => {}
-        }
-    }
-
-    transcript
-}
-
-fn is_hindsight_operational_tool(name: &str) -> bool {
-    matches!(name.trim(), "deep_recall")
-}
-
-fn strip_tool_history_envelope(content: &str) -> String {
-    let mut lines = content.lines();
-    let first = lines.next().unwrap_or_default();
-    let second = lines.next().unwrap_or_default();
-    if first.starts_with("tool_call_id=") && second.starts_with("name=") {
-        return lines.collect::<Vec<_>>().join("\n").trim().to_string();
-    }
-    content.trim().to_string()
-}
-
-fn message_has_workspace_signal(message: &HistoryMessage) -> bool {
-    if message
-        .tool_call_ui_events
-        .iter()
-        .any(tool_call_event_is_workspace_signal)
-    {
-        return true;
-    }
-    match &message.tool_ui_event {
-        Some(event) => tool_event_is_workspace_signal(event),
-        None => false,
-    }
-}
-
-fn message_has_telegram_signal(message: &HistoryMessage) -> bool {
-    if message
-        .tool_call_ui_events
-        .iter()
-        .any(|event| matches!(event, ToolCallUiEvent::Telegram(_)))
-    {
-        return true;
-    }
-    matches!(message.tool_ui_event, Some(ToolUiEvent::Telegram(_)))
-}
-
-fn message_has_failure_signal(message: &HistoryMessage) -> bool {
-    if history_message_content(message)
-        .to_ascii_lowercase()
-        .contains("failed")
-    {
-        return true;
-    }
-    if message
-        .tool_call_ui_events
-        .iter()
-        .any(|event| matches!(event, ToolCallUiEvent::Error(_)))
-    {
-        return true;
-    }
-    matches!(message.tool_ui_event, Some(ToolUiEvent::Error(_)))
-}
-
-fn message_has_preference_signal(message: &HistoryMessage) -> bool {
-    let content = history_message_content(message).to_ascii_lowercase();
-    content.contains("prefer") || matches!(message.tool_ui_event, Some(ToolUiEvent::Telegram(_)))
-}
-
-fn tool_call_event_is_workspace_signal(event: &ToolCallUiEvent) -> bool {
-    matches!(
-        event,
-        ToolCallUiEvent::Exec(_)
-            | ToolCallUiEvent::Terminal(_)
-            | ToolCallUiEvent::Browser(_)
-            | ToolCallUiEvent::Patch(_)
-            | ToolCallUiEvent::App(_)
-    )
-}
-
-fn tool_event_is_workspace_signal(event: &ToolUiEvent) -> bool {
-    matches!(
-        event,
-        ToolUiEvent::Exec(_)
-            | ToolUiEvent::Terminal(_)
-            | ToolUiEvent::CodingOpenProject(_)
-            | ToolUiEvent::CodingToolGroup(_)
-            | ToolUiEvent::CodingEdit(_)
-            | ToolUiEvent::CodingReview(_)
-            | ToolUiEvent::Browser(_)
-            | ToolUiEvent::Patch(_)
-            | ToolUiEvent::App(_)
-    )
-}
-
-fn format_tool_call_ui_event_for_memory(event: &crate::tool_ui::ToolCallUiEvent) -> String {
-    match event {
-        crate::tool_ui::ToolCallUiEvent::Exec(data)
-        | crate::tool_ui::ToolCallUiEvent::Plan(data)
-        | crate::tool_ui::ToolCallUiEvent::CreateWorkflow(data)
-        | crate::tool_ui::ToolCallUiEvent::ActivateWorkflow(data)
-        | crate::tool_ui::ToolCallUiEvent::DeepRecall(data)
-        | crate::tool_ui::ToolCallUiEvent::App(data)
-        | crate::tool_ui::ToolCallUiEvent::Error(data) => {
-            let mut lines = vec![format!("tool_call: {}", data.title)];
-            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
-            lines.join("\n")
-        }
-        crate::tool_ui::ToolCallUiEvent::Browser(data) => {
-            let mut lines = vec![format!("tool_call: {}", data.title)];
-            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
-            lines.join("\n")
-        }
-        crate::tool_ui::ToolCallUiEvent::Telegram(data) => {
-            let mut lines = vec![format!("tool_call: {}", data.title)];
-            lines.extend(data.detail_lines.iter().map(|line| format!("  {line}")));
-            lines.extend(data.message_lines.iter().map(|line| format!("  {line}")));
-            lines.join("\n")
-        }
-        crate::tool_ui::ToolCallUiEvent::Terminal(data) => {
-            let mut lines = vec![format!("tool_call: {}", data.title)];
-            lines.extend(data.body_lines.iter().map(|line| format!("  {line}")));
-            lines.join("\n")
-        }
-        crate::tool_ui::ToolCallUiEvent::Patch(data) => {
-            let mut lines = vec![
-                "tool_call: apply_patch".to_string(),
-                format!("  {}", data.summary_line),
-            ];
-            lines.extend(data.files.iter().map(|file| {
-                let marker = match file.operation {
-                    crate::tool_ui::PatchFileOperation::Add => "+",
-                    crate::tool_ui::PatchFileOperation::Delete => "-",
-                    crate::tool_ui::PatchFileOperation::Update => "~",
-                };
-                format!(
-                    "  {marker} {} (+{} -{})",
-                    file.path, file.added_lines, file.removed_lines
-                )
-            }));
-            lines.join("\n")
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1855,249 +1279,5 @@ mod tests {
             }
             _ => panic!("expected assistant tool-call protocol"),
         }
-
-        let mut queue = HindsightQueue::default();
-        queue.push_turn("json persistence".to_string(), restored.messages.clone());
-        let bytes = serde_json::to_vec_pretty(&queue).expect("serialize hindsight queue");
-        let restored_queue: HindsightQueue =
-            serde_json::from_slice(&bytes).expect("deserialize hindsight queue");
-        match &restored_queue.trail[0].messages[0].message {
-            AgentMessage::AssistantToolCallProtocol { calls, .. } => {
-                assert_eq!(calls[0].arguments, tool_call.arguments);
-            }
-            _ => panic!("expected assistant tool-call protocol"),
-        }
-    }
-
-    #[test]
-    fn hindsight_queue_tracks_handoff_inflight_and_submitted_ids() {
-        let mut queue = HindsightQueue::default();
-        queue.push_turn(
-            "testing handoff".to_string(),
-            vec![HistoryMessage::user("remember this")],
-        );
-
-        let jobs = queue.collect_pending_retain_jobs();
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(queue.handoff_backlog_count(), 1);
-        assert_eq!(queue.trail.len(), 1);
-        assert!(queue.trail[0].inflight);
-        assert!(!queue.trail[0].submitted);
-
-        let handoff_id = jobs[0].handoff_id;
-        assert!(!queue.mark_handoffs_submitted(&[]));
-        assert!(queue.mark_handoffs_submitted(&[handoff_id]));
-        assert_eq!(queue.handoff_backlog_count(), 0);
-        assert!(queue.trail.is_empty());
-    }
-
-    #[test]
-    fn hindsight_queue_discards_only_unsubmitted_handoffs() {
-        let mut queue = HindsightQueue::default();
-        queue.push_turn(
-            "pending handoff".to_string(),
-            vec![HistoryMessage::user("not yet submitted")],
-        );
-        queue.push_turn(
-            "submitted handoff".to_string(),
-            vec![HistoryMessage::user("already submitted")],
-        );
-
-        let jobs = queue.collect_pending_retain_jobs();
-        assert_eq!(jobs.len(), 2);
-        assert!(queue.mark_handoffs_submitted(&[jobs[1].handoff_id]));
-
-        assert_eq!(queue.discard_unsubmitted(), 1);
-        assert_eq!(queue.trail.len(), 1);
-        assert_eq!(queue.trail[0].current_doing, "submitted handoff");
-        assert!(queue.trail[0].submitted);
-    }
-
-    #[test]
-    fn hindsight_queue_resets_inflight_handoff_state_on_startup() {
-        let mut queue = HindsightQueue::default();
-        queue.push_turn(
-            "testing retry".to_string(),
-            vec![HistoryMessage::user("retry this")],
-        );
-
-        let jobs = queue.collect_pending_retain_jobs();
-        assert_eq!(jobs.len(), 1);
-        assert!(queue.trail[0].inflight);
-
-        queue.reset_inflight_retain_state();
-        assert!(!queue.trail[0].inflight);
-        assert!(!queue.trail[0].submitted);
-
-        let retry_jobs = queue.collect_pending_retain_jobs();
-        assert_eq!(retry_jobs.len(), 1);
-        assert_eq!(retry_jobs[0].handoff_id, queue.trail[0].id);
-    }
-
-    #[test]
-    fn hindsight_retain_transcript_keeps_structured_tool_blocks() {
-        let transcript = build_hindsight_retain_transcript(&[
-            HistoryMessage::user("user input"),
-            HistoryMessage {
-                message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
-                    Some("checking state".to_string()),
-                    None,
-                    vec![crate::reasoning::runtime::AgentToolCall {
-                        id: "call_1".to_string(),
-                        name: "terminal_exec".to_string(),
-                        arguments: serde_json::json!({ "cmd": "pwd" }),
-                    }],
-                ),
-                tool_ui_event: None,
-                tool_call_ui_events: Vec::new(),
-            },
-            HistoryMessage::tool(
-                "call_1",
-                "terminal_exec",
-                "tool_call_id=call_1\nname=terminal_exec\nsummary=ok\npayload=\n{\"cwd\":\"/tmp\"}",
-                ToolUiEvent::Exec(ToolUiData {
-                    title: "terminal_exec".to_string(),
-                    body_lines: vec!["pwd".to_string()],
-                }),
-            ),
-        ]);
-
-        assert_eq!(transcript.len(), 3);
-        assert_eq!(transcript[0]["role"], "user");
-        assert_eq!(transcript[1]["role"], "assistant");
-        assert_eq!(transcript[1]["content"][1]["type"], "tool_use");
-        assert_eq!(transcript[1]["content"][1]["name"], "terminal_exec");
-        assert_eq!(transcript[2]["role"], "user");
-        assert_eq!(transcript[2]["content"][0]["type"], "tool_result");
-        assert_eq!(transcript[2]["content"][0]["tool_use_id"], "call_1");
-        assert_eq!(
-            transcript[2]["content"][0]["content"],
-            "summary=ok\npayload=\n{\"cwd\":\"/tmp\"}"
-        );
-    }
-
-    #[test]
-    fn hindsight_retain_transcript_skips_deep_recall_blocks() {
-        let transcript = build_hindsight_retain_transcript(&[
-            HistoryMessage::user("what changed?"),
-            HistoryMessage {
-                message: AgentMessage::assistant_tool_call_protocol_with_reasoning(
-                    Some("checking memory".to_string()),
-                    None,
-                    vec![crate::reasoning::runtime::AgentToolCall {
-                        id: "call_h1".to_string(),
-                        name: "deep_recall".to_string(),
-                        arguments: serde_json::json!({ "query": "recent changes" }),
-                    }],
-                ),
-                tool_ui_event: None,
-                tool_call_ui_events: Vec::new(),
-            },
-            HistoryMessage::tool(
-                "call_h1",
-                "deep_recall",
-                "summary=found prior notes",
-                ToolUiEvent::DeepRecall(DeepRecallUiData { memory_count: 1 }),
-            ),
-        ]);
-
-        assert_eq!(transcript.len(), 2);
-        assert_eq!(transcript[0]["role"], "user");
-        assert_eq!(transcript[1]["role"], "assistant");
-        assert_eq!(transcript[1]["content"].as_array().map(Vec::len), Some(1));
-        assert_eq!(transcript[1]["content"][0]["type"], "text");
-        assert!(transcript.iter().all(|message| {
-            message["content"].as_array().is_none_or(|blocks| {
-                blocks.iter().all(|block| {
-                    block.get("type").and_then(serde_json::Value::as_str) != Some("tool_result")
-                })
-            })
-        }));
-    }
-
-    #[test]
-    fn force_trim_drops_oldest_non_system_messages_until_within_budget() {
-        let limits = RequestBudgetLimits {
-            context_window_tokens: 50,
-            auto_compact_threshold_tokens: 40,
-            reserved_output_tokens: 10,
-        };
-        let baseline = TokenEstimateBaseline::default();
-        let long_message: String = "x".repeat(500);
-        let mut step = RuntimeStepConversation::new(
-            RuntimeTurnDraft::new("test".to_string()),
-            vec![
-                AgentMessage::system("s"),
-                AgentMessage::user(long_message.clone()),
-                AgentMessage::assistant("a1"),
-                AgentMessage::user(long_message.clone()),
-                AgentMessage::assistant("a2"),
-            ],
-        );
-        let tools: Vec<AgentToolSpec> = vec![];
-        let before_count = step.agent_messages().len();
-        let trimmed = step.force_trim_to_fit_budget(&tools, limits, &baseline);
-        assert!(trimmed, "force_trim should succeed by removing messages");
-        assert!(
-            step.agent_messages().len() < before_count,
-            "force_trim should have removed at least one message, had {} before and {} after",
-            before_count,
-            step.agent_messages().len(),
-        );
-        assert!(
-            step.agent_messages()
-                .first()
-                .map(|m| matches!(m, AgentMessage::System { .. }))
-                .unwrap_or(false),
-            "system message should be preserved"
-        );
-        let budget = estimate_agent_turn_request(step.agent_messages(), &tools, limits)
-            .with_calibrated_input_tokens(&baseline);
-        assert!(
-            budget.within_context_window(),
-            "after force_trim, budget should be within context window"
-        );
-    }
-
-    #[test]
-    fn force_trim_drops_enough_messages_to_cover_excess() {
-        let limits = RequestBudgetLimits {
-            context_window_tokens: 100,
-            auto_compact_threshold_tokens: 80,
-            reserved_output_tokens: 10,
-        };
-        let baseline = TokenEstimateBaseline::default();
-        let long_a: String = "abcdefghij".repeat(50);
-        let long_b: String = "abcdefghij".repeat(40);
-        let mut step = RuntimeStepConversation::new(
-            RuntimeTurnDraft::new("test".to_string()),
-            vec![
-                AgentMessage::system("sys"),
-                AgentMessage::user(long_a.clone()),
-                AgentMessage::assistant(long_b.clone()),
-                AgentMessage::user(long_a.clone()),
-                AgentMessage::assistant(long_b.clone()),
-                AgentMessage::user("short"),
-                AgentMessage::assistant("ok"),
-            ],
-        );
-        let tools: Vec<AgentToolSpec> = vec![];
-        let before_count = step.agent_messages().len();
-        let trimmed = step.force_trim_to_fit_budget(&tools, limits, &baseline);
-        assert!(trimmed, "force_trim should succeed");
-        assert!(
-            step.agent_messages().len() < before_count,
-            "should have removed messages"
-        );
-        assert!(
-            step.agent_messages()
-                .first()
-                .map(|m| matches!(m, AgentMessage::System { .. }))
-                .unwrap_or(false),
-            "system message must be preserved"
-        );
-        let budget = estimate_agent_turn_request(step.agent_messages(), &tools, limits)
-            .with_calibrated_input_tokens(&baseline);
-        assert!(budget.within_context_window());
     }
 }

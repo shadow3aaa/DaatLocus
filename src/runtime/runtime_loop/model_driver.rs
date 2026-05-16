@@ -280,8 +280,6 @@ fn context_composition_message_name(message: &AgentMessage) -> String {
                 "afterclaim_context".to_string()
             } else if text.contains("<preturn_context>") {
                 "preturn_context".to_string()
-            } else if text.contains("<recall_memories>") {
-                "memory_recall".to_string()
             } else if text.contains("<focused_app>") || text.contains("<other_apps>") {
                 "app_state".to_string()
             } else if text.contains("<claimed_input>") {

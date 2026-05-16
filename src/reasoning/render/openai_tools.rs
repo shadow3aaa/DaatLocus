@@ -6,10 +6,8 @@ use crate::reasoning::{
     ir::PromptIR,
     optimizer::PromptTuningConfig,
     program::Program,
-    prompt_doc::{PromptBlock, PromptDocument, PromptNode, PromptStateDoc},
-    prompt_renderer::LlmPromptRenderer,
     prompt_text::{PromptTextBuilder, render_bullet_list},
-    runtime::{HistoryMessage, PromptRequest},
+    runtime::PromptRequest,
     signature::Signature,
 };
 use crate::schema_utils::normalize_openai_json_schema;
@@ -57,11 +55,7 @@ impl Renderer for OpenAIToolRenderer {
                 serde_json::to_value(schema_for!(P::Output)).unwrap(),
             ),
             system_messages: ir.system,
-            long_term_memory_messages: if program.include_long_term_memory_messages() {
-                build_long_term_memory_messages(context)
-            } else {
-                Vec::new()
-            },
+            long_term_memory_messages: Vec::new(),
             history_messages: if program.include_history_messages() {
                 context.memory.runtime_conversation_messages()
             } else {
@@ -71,78 +65,6 @@ impl Renderer for OpenAIToolRenderer {
             retry_messages: Vec::new(),
         }
     }
-}
-
-fn build_long_term_memory_messages(context: &Context) -> Vec<HistoryMessage> {
-    if context.prompt_memory.is_empty() {
-        return Vec::new();
-    }
-
-    let mut children = Vec::new();
-    if !context.prompt_memory.observations.is_empty() {
-        children.push(PromptNode::State(PromptStateDoc::new(
-            "observations",
-            context
-                .prompt_memory
-                .observations
-                .iter()
-                .map(|fact| {
-                    PromptBlock::Paragraph(format!(
-                        "id: {}\ntype: {}\ntext: {}",
-                        fact.id,
-                        fact.memory_type
-                            .clone()
-                            .unwrap_or_else(|| "observation".to_string()),
-                        fact.text.trim()
-                    ))
-                })
-                .collect(),
-        )));
-    }
-    if !context.prompt_memory.raw_memories.is_empty() {
-        children.push(PromptNode::State(PromptStateDoc::new(
-            "raw_memories",
-            context
-                .prompt_memory
-                .raw_memories
-                .iter()
-                .map(|fact| {
-                    PromptBlock::Paragraph(format!(
-                        "id: {}\ntype: {}\ntext: {}",
-                        fact.id,
-                        fact.memory_type
-                            .clone()
-                            .unwrap_or_else(|| "memory".to_string()),
-                        fact.text.trim()
-                    ))
-                })
-                .collect(),
-        )));
-    }
-    if !context.prompt_memory.citations.is_empty() {
-        children.push(PromptNode::State(PromptStateDoc::new(
-            "citations",
-            vec![PromptBlock::BulletList(
-                context
-                    .prompt_memory
-                    .citations
-                    .iter()
-                    .map(|citation| {
-                        format!("[{}] {}: {}", citation.kind, citation.id, citation.summary)
-                    })
-                    .collect(),
-            )],
-        )));
-    }
-
-    let doc = PromptDocument::new(vec![PromptNode::Group(
-        super::super::prompt_doc::PromptGroupDoc::new("recall_memories", children),
-    )]);
-
-    LlmPromptRenderer::render_system_messages(&doc)
-        .into_iter()
-        .map(HistoryMessage::system)
-        .collect()
 }
 
 fn render_signature_block(signature: &Signature) -> String {

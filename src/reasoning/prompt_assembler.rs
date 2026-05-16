@@ -5,16 +5,14 @@ use super::{
     prompt_parts::{
         AfterClaimContextInput, AfterClaimContextPart, AfterClaimInputPart,
         AfterClaimWorkflowRoutingPart, AppsSystemPart, CompiledAdditionsSystemPart,
-        EventSystemPart, MemoriesSystemPart, PersonaSystemPart, PlanSystemPart,
-        PreTurnAppSurfacePart, PreTurnContextPart, PreTurnMemoriesPart, PreTurnPlanPart,
-        PreTurnSensoryPart, PreTurnWorkflowStatePart, SystemPromptPart, WorkflowSystemPart,
-        WorkspaceSystemPart,
+        EventSystemPart, PersonaSystemPart, PlanSystemPart, PreTurnAppSurfacePart,
+        PreTurnContextPart, PreTurnPlanPart, PreTurnSensoryPart, PreTurnWorkflowStatePart,
+        SystemPromptPart, WorkflowSystemPart, WorkspaceSystemPart,
     },
     prompts::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
-        MEMORIES_UNIT_HOW, MEMORIES_UNIT_WHAT, MEMORIES_UNIT_WHEN, PLAN_UNIT_HOW, PLAN_UNIT_WHAT,
-        PLAN_UNIT_WHEN, WORKFLOW_UNIT_HOW, WORKFLOW_UNIT_WHAT, WORKFLOW_UNIT_WHEN,
-        WORKSPACE_UNIT_HOW, WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY,
+        PLAN_UNIT_HOW, PLAN_UNIT_WHAT, PLAN_UNIT_WHEN, WORKFLOW_UNIT_HOW, WORKFLOW_UNIT_WHAT,
+        WORKFLOW_UNIT_WHEN, WORKSPACE_UNIT_HOW, WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY,
     },
     turn_compile::load_prompt_persona_spec_sync,
 };
@@ -41,7 +39,6 @@ impl SystemPromptAssembler {
             Box::new(EventSystemPart),
             Box::new(AppsSystemPart),
             Box::new(WorkspaceSystemPart),
-            Box::new(MemoriesSystemPart),
             Box::new(PlanSystemPart),
             Box::new(WorkflowSystemPart),
             Box::new(PersonaSystemPart),
@@ -66,7 +63,6 @@ impl PreTurnContextAssembler {
 
     pub fn default_runtime() -> Self {
         Self::new(vec![
-            Box::new(PreTurnMemoriesPart),
             Box::new(PreTurnSensoryPart),
             Box::new(PreTurnPlanPart),
             Box::new(PreTurnWorkflowStatePart),
@@ -132,13 +128,6 @@ pub fn runtime_system_prompt_doc_from_additions(additions: &[String]) -> PromptD
             vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHY.to_string())],
             vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHEN.to_string())],
             vec![PromptBlock::Paragraph(WORKSPACE_UNIT_HOW.to_string())],
-        )),
-        PromptNode::Unit(PromptUnitDoc::new(
-            "memories",
-            vec![PromptBlock::Paragraph(MEMORIES_UNIT_WHAT.to_string())],
-            Vec::new(),
-            vec![PromptBlock::Paragraph(MEMORIES_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(MEMORIES_UNIT_HOW.to_string())],
         )),
         PromptNode::Unit(PromptUnitDoc::new(
             "plan",

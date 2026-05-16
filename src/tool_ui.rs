@@ -6,7 +6,6 @@ pub mod glyph {
     pub const CODING: &str = "◎";
     pub const ERROR: &str = "!";
     pub const EXEC: &str = "•";
-    pub const MEMORY: &str = "⟲";
     pub const PATCH: &str = "∂";
     pub const PLAN: &str = "∷";
     pub const REPLY: &str = "✣";
@@ -31,7 +30,6 @@ pub enum ToolUiEvent {
     Plan(PlanUiData),
     CreateWorkflow(CreateWorkflowUiData),
     ActivateWorkflow(ActivateWorkflowUiData),
-    DeepRecall(DeepRecallUiData),
     #[serde(alias = "Finish", alias = "Work")]
     App(ToolUiData),
     Error(ToolUiData),
@@ -48,7 +46,6 @@ pub enum ToolCallUiEvent {
     Plan(ToolUiData),
     CreateWorkflow(ToolUiData),
     ActivateWorkflow(ToolUiData),
-    DeepRecall(ToolUiData),
     #[serde(alias = "Finish", alias = "Work")]
     App(ToolUiData),
     Error(ToolUiData),
@@ -250,11 +247,6 @@ pub struct ActivateWorkflowUiData {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DeepRecallUiData {
-    pub memory_count: usize,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyDisposition {
     Resolved,
@@ -363,10 +355,6 @@ impl ToolUiEvent {
         })
     }
 
-    pub fn deep_recall(memory_count: usize) -> Self {
-        Self::DeepRecall(DeepRecallUiData { memory_count })
-    }
-
     pub fn reply(disposition: ReplyDisposition, message_lines: Vec<String>) -> Self {
         Self::Reply(ReplyUiData {
             disposition,
@@ -448,13 +436,6 @@ impl ToolCallUiEvent {
 
     pub fn activate_workflow(title: impl Into<String>, body_lines: Vec<String>) -> Self {
         Self::ActivateWorkflow(ToolUiData {
-            title: title.into(),
-            body_lines,
-        })
-    }
-
-    pub fn deep_recall(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::DeepRecall(ToolUiData {
             title: title.into(),
             body_lines,
         })

@@ -198,19 +198,11 @@ fn migrate_legacy_layout_sync(paths: &DaatLocusPaths) {
         paths.root.join("runtime_conversation"),
         paths.memory_file("runtime_conversation"),
     );
-    migrate_legacy_path_sync(
-        paths.root.join("hindsight_queue"),
-        paths.memory_file("hindsight_queue"),
-    );
     migrate_legacy_path_sync(paths.root.join("todo_board"), paths.memory_file("plan"));
     migrate_legacy_path_sync(paths.root.join("plan"), paths.memory_file("plan"));
     migrate_legacy_path_sync(
         paths.state_file("runtime_conversation"),
         paths.memory_file("runtime_conversation"),
-    );
-    migrate_legacy_path_sync(
-        paths.state_file("hindsight_queue"),
-        paths.memory_file("hindsight_queue"),
     );
     migrate_legacy_path_sync(paths.state_file("plan"), paths.memory_file("plan"));
     migrate_legacy_path_sync(paths.root.join("events"), paths.state_file("events"));

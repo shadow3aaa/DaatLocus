@@ -17,13 +17,11 @@ use crate::{
     daemon::DaemonControlCommand,
     dashboard::{DashboardActivityHistoryStore, DashboardState},
     events::EventStore,
-    hindsight::{HindsightClient, HindsightRetainHandle},
     live_progress::{LiveProgressEvent, TelegramLiveStatus},
     memory::Memory,
     pending_work::PendingWorkQueue,
     plan::Plan,
     preturn_state::PreTurnState,
-    reasoning::runtime::PromptMemoryContext,
     reasoning::{
         compiled::CompiledPromptStore,
         prompt_assembler::{PreTurnContextAssembler, SystemPromptAssembler},
@@ -38,7 +36,6 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeTurnPhase {
-    PreflightMemory,
     PreflightPreTurnContext,
     PreflightCompaction,
     ModelRequest,
@@ -48,7 +45,6 @@ pub enum RuntimeTurnPhase {
 impl RuntimeTurnPhase {
     pub fn label(self) -> &'static str {
         match self {
-            Self::PreflightMemory => "preflight: hindsight memory",
             Self::PreflightPreTurnContext => "preflight: preturn context",
             Self::PreflightCompaction => "preflight: compaction",
             Self::ModelRequest => "model request",
@@ -61,10 +57,7 @@ pub struct Context {
     pub llm: Box<dyn Llm + Send + Sync>,
     pub judge_llm: Box<dyn Llm + Send + Sync>,
     pub config: Config,
-    pub hindsight: HindsightClient,
-    pub hindsight_retain: HindsightRetainHandle,
     pub memory: Memory,
-    pub prompt_memory: PromptMemoryContext,
     pub plan: Plan,
     pub events: EventStore,
     pub pending_work: PendingWorkQueue,
@@ -369,11 +362,7 @@ impl Context {
                 .all(|notice| self.app_notice_is_resolved(notice))
     }
 
-    pub async fn shutdown(mut self) {
-        let submitted_handoffs = self.hindsight_retain.shutdown().await;
-        self.memory
-            .mark_handoffs_submitted(&submitted_handoffs)
-            .await;
+    pub async fn shutdown(self) {
         self.workflows.shutdown().await;
         self.memory.shutdown().await;
         self.plan.shutdown().await;

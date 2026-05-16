@@ -558,12 +558,6 @@ type AgentChatActivityCellRender =
       workflowId: string;
     }
   | {
-      kind: "deepRecall";
-      marker: string;
-      title: string;
-      memoryCount: number;
-    }
-  | {
       kind: "exec";
       marker: string;
       title: string;
@@ -1599,18 +1593,6 @@ function AgentChatActivityCellView({
         label={render.title}
         value={render.workflowId}
         valueClassName="font-mono break-all"
-      />
-    );
-  }
-
-  if (render.kind === "deepRecall") {
-    return (
-      <AgentChatStatusLineCell
-        marker={render.marker}
-        label={render.title}
-        value={String(render.memoryCount)}
-        suffix=" Memories"
-        valueClassName="tabular-nums"
       />
     );
   }
@@ -3112,16 +3094,6 @@ function agentChatActivityCellRenderForBubble(
       marker: "⌘",
       title: "Activated Workflow:",
       workflowId: stringValue(activateWorkflow.workflow_id, "unknown"),
-    };
-  }
-
-  const deepRecall = agentChatActivityCellPayload(cell, "DeepRecallResult");
-  if (deepRecall) {
-    return {
-      kind: "deepRecall",
-      marker: "⟲",
-      title: "Recalled",
-      memoryCount: numberValue(deepRecall.memory_count, 0),
     };
   }
 

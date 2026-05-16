@@ -15,11 +15,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
 };
 
-use crate::{config::load_config, daat_locus_paths::daat_locus_paths};
+use crate::daat_locus_paths::daat_locus_paths;
 
 use super::{DAEMON_MAIN_LOG, DAEMON_STDERR_LOG, ServerState};
 
-const DEFAULT_HINDSIGHT_PROFILE: &str = "daat-locus";
 const DEFAULT_LOG_LINE_LIMIT: usize = 500;
 const MAX_LOG_LINE_LIMIT: usize = 2_000;
 const LOG_READ_CHUNK_SIZE: usize = 64 * 1024;
@@ -145,12 +144,7 @@ pub(super) async fn read_handler(
 
 async fn log_sources() -> Vec<LogSourceEntry> {
     let paths = daat_locus_paths().await;
-    let hindsight_profile = load_config()
-        .await
-        .map(|config| config.hindsight.profile)
-        .unwrap_or_else(|_| DEFAULT_HINDSIGHT_PROFILE.to_string());
-
-    let mut sources = vec![
+    vec![
         log_source_entry(
             "daemon-main",
             "Daemon main log",
@@ -165,24 +159,7 @@ async fn log_sources() -> Vec<LogSourceEntry> {
             paths.logs_file(DAEMON_STDERR_LOG),
         )
         .await,
-    ];
-
-    if let Some(home_dir) = home_dir() {
-        sources.push(
-            log_source_entry(
-                "hindsight-profile",
-                format!("Hindsight profile `{hindsight_profile}`"),
-                "Managed hindsight sidecar log.",
-                home_dir
-                    .join(".hindsight")
-                    .join("profiles")
-                    .join(format!("{hindsight_profile}.log")),
-            )
-            .await,
-        );
-    }
-
-    sources
+    ]
 }
 
 async fn log_source_entry(
@@ -371,10 +348,4 @@ fn lines_from_bytes(buffer: &[u8], starts_mid_line: bool) -> Vec<String> {
     };
 
     text.lines().map(|line| line.to_string()).collect()
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
 }

@@ -3,10 +3,8 @@ use std::path::{Path, PathBuf};
 use miette::{Result, miette};
 
 use crate::{
-    config::load_config,
     daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
     daemon::connect_daemon_status,
-    hindsight::{HindsightClient, llm_proxy::HindsightLlmProxy, managed::HindsightManagedServer},
     reasoning::compiled::COMPILED_DIR_NAME,
 };
 
@@ -23,33 +21,6 @@ async fn reject_if_daemon_running(reset_name: &str) -> Result<()> {
     Ok(())
 }
 
-async fn clear_hindsight_bank(config: &crate::config::Config) -> Result<()> {
-    let llm_proxy = HindsightLlmProxy::start(config)
-        .await
-        .map_err(|err| miette!("failed to start hindsight LLM proxy for memory-reset: {err}"))?;
-    let llm_env_vars = llm_proxy.env_vars();
-    let server = HindsightManagedServer::new(config.hindsight.clone(), llm_env_vars.clone());
-    let was_running = server.check_health().await;
-    if !was_running {
-        server.start().await?;
-    }
-
-    let delete_result = async {
-        let hindsight = HindsightClient::connect(&config.hindsight)
-            .await?
-            .with_restart_support(llm_env_vars)
-            .with_llm_proxy(llm_proxy);
-        hindsight.delete_bank().await
-    }
-    .await;
-
-    if !was_running && let Err(err) = server.stop().await {
-        tracing::warn!("[memory-reset] failed to stop temporary hindsight daemon: {err}");
-    }
-
-    delete_result
-}
-
 pub async fn run_memory_reset() -> Result<()> {
     let home = get_daat_locus_home().await;
     reject_if_daemon_running("memory reset").await?;
@@ -59,9 +30,8 @@ pub async fn run_memory_reset() -> Result<()> {
         "[memory-reset] reset memory persistence under {}",
         home.display()
     );
-    println!("[memory-reset] cleared: runtime_conversation, hindsight_queue");
+    println!("[memory-reset] cleared: runtime_conversation");
     println!("[memory-reset] cleared: runtime_error_cases.jsonl, reasoning_traces.jsonl");
-    println!("[memory-reset] cleared: hindsight bank, observations");
     println!("[memory-reset] cleared: current plan");
     println!("[memory-reset] preserved: config/, state/, artifacts/, logs/");
 
@@ -69,16 +39,10 @@ pub async fn run_memory_reset() -> Result<()> {
 }
 
 async fn clear_memory_state(home: &Path) -> Result<()> {
-    let config = load_config()
-        .await
-        .map_err(|err| miette!("failed to load config for memory-reset: {err}"))?;
-    clear_hindsight_bank(&config).await?;
     let paths = DaatLocusPaths::from_root(home.to_path_buf());
     clear_files(&[
         paths.memory_file("runtime_conversation.json"),
         paths.memory_file("runtime_conversation"),
-        paths.memory_file("hindsight_queue.json"),
-        paths.memory_file("hindsight_queue"),
         paths.memory_file("plan"),
         paths.journal_file("runtime_error_cases.jsonl"),
         paths.journal_file("reasoning_traces.jsonl"),
@@ -154,11 +118,10 @@ async fn clear_compiled_artifacts(home: &Path) -> Result<Vec<String>> {
 pub async fn run_reset_all() -> Result<()> {
     let home = get_daat_locus_home().await;
     reject_if_daemon_running("reset all").await?;
-    let memory_cleared = clear_memory_state(&home).await;
+    clear_memory_state(&home).await?;
     let state_cleared = clear_state_files(&home).await?;
     let artifact_cleared = clear_compiled_artifacts(&home).await?;
     let log_cleared = clear_log_dirs(&home).await?;
-    memory_cleared?;
 
     println!("[reset] reset all state under {}", home.display());
     if state_cleared.is_empty() {
@@ -167,7 +130,7 @@ pub async fn run_reset_all() -> Result<()> {
         println!("[reset] cleared state: {}", state_cleared.join(", "));
     }
     println!(
-        "[reset] cleared memory: runtime_conversation, hindsight_queue, runtime_error_cases.jsonl, reasoning_traces.jsonl, hindsight bank, observations"
+        "[reset] cleared memory: runtime_conversation, runtime_error_cases.jsonl, reasoning_traces.jsonl"
     );
     if artifact_cleared.is_empty() {
         println!("[reset] cleared compile artifacts: none");

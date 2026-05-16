@@ -159,16 +159,6 @@ pub struct UpdateWorkflowArgs {
     pub recovery: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct DeepRecallArgs {
-    /// Natural-language question sent to the long-term memory backend for deeper recall/reflection.
-    pub query: String,
-    /// Optional budget; omitted uses the configured default.
-    pub budget: Option<String>,
-    /// Maximum number of tokens allowed in the response.
-    pub max_tokens: Option<usize>,
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct TokenUsage {
     pub input_tokens: i64,

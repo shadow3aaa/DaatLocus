@@ -34,7 +34,7 @@ use common::{
 use exec::{ExecResultActivityCell, LiveExecActivityCell, live_exec_cell};
 use messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell};
 use plan::PlanActivityCell;
-use workflow::{ActivateWorkflowActivityCell, CreateWorkflowActivityCell, DeepRecallActivityCell};
+use workflow::{ActivateWorkflowActivityCell, CreateWorkflowActivityCell};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LiveActivityCell {
@@ -67,7 +67,6 @@ pub enum ActivityCell {
     PlanResult(PlanActivityCell),
     CreateWorkflowResult(CreateWorkflowActivityCell),
     ActivateWorkflowResult(ActivateWorkflowActivityCell),
-    DeepRecallResult(DeepRecallActivityCell),
     ExecResult(ExecResultActivityCell),
     LiveExec(LiveExecActivityCell),
     Patch(PatchActivityCell),
@@ -271,7 +270,6 @@ pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> Option<Activit
         ToolUiEvent::ActivateWorkflow(event) => {
             Some(ActivityCell::ActivateWorkflowResult(event.into()))
         }
-        ToolUiEvent::DeepRecall(event) => Some(ActivityCell::DeepRecallResult(event.into())),
         ToolUiEvent::App(event) => Some(ActivityCell::GenericApp(event.into())),
         ToolUiEvent::Error(event) => Some(ActivityCell::Error(event.into())),
     }
@@ -600,7 +598,7 @@ mod tests {
         let mut messages = vec![HistoryMessage::user("real user message")];
         for _ in 0..20 {
             messages.push(HistoryMessage::user(
-                "<preturn_context>\n<recall_memories>...</recall_memories>\n</preturn_context>",
+                "<preturn_context>\n<sensory>...</sensory>\n</preturn_context>",
             ));
         }
         messages.push(HistoryMessage::user(

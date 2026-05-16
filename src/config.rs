@@ -267,13 +267,12 @@ pub struct Config {
     /// Main model name; key reference into models.
     pub main_model: String,
     /// Efficient model name; key reference into models.
-    /// Default for all non-main-loop operations (judge, hindsight, compaction).
+    /// Default for non-main-loop operations such as judge and compaction.
     /// When not set explicitly, defaults to the same value as main_model for backward compatibility.
     pub efficient_model: String,
     pub daemon: DaemonConfig,
     pub judge: JudgeConfig,
     pub sandbox: SandboxConfig,
-    pub hindsight: HindsightConfig,
     pub telegram: TelegramConfig,
 }
 
@@ -300,7 +299,6 @@ impl Default for Config {
             daemon: DaemonConfig::default(),
             judge: JudgeConfig::default(),
             sandbox: SandboxConfig::default(),
-            hindsight: HindsightConfig::default(),
             telegram: TelegramConfig::default(),
         }
     }
@@ -322,18 +320,6 @@ impl Config {
             .unwrap_or_else(|| panic!("judge model '{}' not found in models", key))
     }
 
-    /// Return the hindsight model config, falling back through efficient model then to main model.
-    pub fn hindsight_model_config(&self) -> &ModelConfig {
-        let key = self
-            .hindsight
-            .model
-            .as_deref()
-            .unwrap_or(&self.efficient_model);
-        self.models
-            .get(key)
-            .unwrap_or_else(|| panic!("hindsight model '{}' not found in models", key))
-    }
-
     /// Return the efficient model config. Missing keys panic because startup validation should catch them.
     pub fn efficient_model_config(&self) -> &ModelConfig {
         self.models.get(&self.efficient_model).unwrap_or_else(|| {
@@ -342,14 +328,6 @@ impl Config {
                 self.efficient_model
             )
         })
-    }
-
-    /// Return the provider config used by hindsight.
-    pub fn hindsight_provider_config(&self) -> &ProviderConfig {
-        let provider_key = &self.hindsight_model_config().provider;
-        self.providers
-            .get(provider_key)
-            .unwrap_or_else(|| panic!("provider '{}' not found in providers", provider_key))
     }
 
     pub fn protected_secret_env_vars(&self) -> Vec<String> {
@@ -402,21 +380,6 @@ impl Config {
                 format!(
                     "judge.model '{}' references unknown provider '{}'",
                     judge_model_key, judge.provider
-                )
-            })?;
-        }
-
-        if let Some(hindsight_model_key) = &self.hindsight.model {
-            let h = self.models.get(hindsight_model_key).ok_or_else(|| {
-                format!(
-                    "hindsight.model '{}' not found in [models]",
-                    hindsight_model_key
-                )
-            })?;
-            self.providers.get(&h.provider).ok_or_else(|| {
-                format!(
-                    "hindsight.model '{}' references unknown provider '{}'",
-                    hindsight_model_key, h.provider
                 )
             })?;
         }
@@ -501,34 +464,6 @@ impl Default for SandboxConfig {
         Self {
             enabled: true,
             strong_filesystem: StrongFilesystemSandboxMode::Off,
-        }
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct HindsightConfig {
-    pub namespace: String,
-    pub bank_id: String,
-    pub request_timeout_secs: u64,
-    /// Profile name used by hindsight-embed. Defaults to "daat-locus".
-    pub profile: String,
-    /// Port the managed daemon listens on.
-    pub port: u16,
-    /// Model used for hindsight LLM operations (reflect/retain).
-    /// None = use main_model.
-    pub model: Option<String>,
-}
-
-impl Default for HindsightConfig {
-    fn default() -> Self {
-        Self {
-            namespace: "default".to_string(),
-            bank_id: "daat-locus".to_string(),
-            request_timeout_secs: 180,
-            profile: "daat-locus".to_string(),
-            port: 8888,
-            model: None,
         }
     }
 }

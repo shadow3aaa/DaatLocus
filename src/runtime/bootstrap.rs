@@ -12,18 +12,14 @@ use crate::{
     context_budget::TokenEstimateBaseline,
     daat_locus_paths::daat_locus_paths,
     events::EventStore,
-    hindsight::{HindsightClient, llm_proxy::HindsightLlmProxy, managed::HindsightManagedServer},
     memory::Memory,
     pending_work::PendingWorkQueue,
     persistence::PersistenceStore,
     plan::Plan,
     providers::build_llm,
-    reasoning::{
-        compiled::{
-            CompiledPromptStore, load_all_compiled_programs_for_model,
-            load_compiled_runtime_system_prompt_for_model,
-        },
-        runtime::PromptMemoryContext,
+    reasoning::compiled::{
+        CompiledPromptStore, load_all_compiled_programs_for_model,
+        load_compiled_runtime_system_prompt_for_model,
     },
     sandbox::RuntimeSandboxPolicy,
     telegram_acl::TelegramAclHandle,
@@ -33,7 +29,6 @@ use crate::{
     workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir},
     workspace_app::{WorkspaceAppRegistry, bootstrap_workspace_apps},
 };
-use miette::Result;
 
 pub(crate) struct RuntimeAppsBootstrap {
     pub(crate) apps: Vec<Box<dyn crate::app::App>>,
@@ -42,66 +37,6 @@ pub(crate) struct RuntimeAppsBootstrap {
 
 pub(crate) fn emit_startup_progress(message: impl AsRef<str>) {
     tracing::info!("{}", message.as_ref());
-}
-
-async fn tail_hindsight_log(profile: &str) {
-    use tokio::io::{AsyncBufReadExt, AsyncSeekExt};
-
-    let log_path = match std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-    {
-        Some(home) => home
-            .join(".hindsight")
-            .join("profiles")
-            .join(format!("{profile}.log")),
-        None => return,
-    };
-
-    // Wait up to 8 s for the log file to appear (daemon creates it on first run).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-    while !log_path.exists() {
-        if std::time::Instant::now() >= deadline {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
-
-    let mut file = match tokio::fs::File::open(&log_path).await {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    // Start from the end so we only show new output from this run.
-    let _ = file.seek(std::io::SeekFrom::End(0)).await;
-
-    let mut reader = tokio::io::BufReader::new(file);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => tokio::time::sleep(std::time::Duration::from_millis(150)).await,
-            Ok(_) => {
-                let t = line.trim();
-                if !t.is_empty() {
-                    emit_startup_progress(format!("[hindsight] {t}"));
-                }
-            }
-            Err(_) => break,
-        }
-    }
-}
-
-async fn start_hindsight_managed_server(
-    server: &HindsightManagedServer,
-    profile: &str,
-) -> Result<()> {
-    let profile = profile.to_string();
-    let log_tail = tokio::spawn(async move { tail_hindsight_log(&profile).await });
-    let result = server.start().await;
-    log_tail.abort();
-    result?;
-    emit_startup_progress("[hindsight] daemon ready");
-    Ok(())
 }
 
 const TOKEN_ESTIMATE_BASELINE_FILE: &str = "token_estimate_baseline.json";
@@ -121,71 +56,6 @@ pub async fn save_token_estimate_baseline(baseline: &TokenEstimateBaseline) {
     {
         tracing::warn!("failed to persist token estimate baseline: {err}");
     }
-}
-
-/// Connect to the hindsight daemon, optionally ensuring a fresh start.
-///
-/// `ensure_fresh = true`: always reconfigure the profile and restart any
-/// already-running daemon so that config changes (e.g. a new model) take
-/// effect immediately.  Use this only at daemon startup.
-///
-/// `ensure_fresh = false`: connect to a running daemon as-is (used by
-/// background tasks that just need a client handle).
-pub(crate) async fn connect_bootstrapped_hindsight(
-    config: &crate::config::Config,
-    ensure_fresh: bool,
-) -> Result<HindsightClient> {
-    let hindsight_config = config.hindsight.clone();
-    emit_startup_progress(format!(
-        "[hindsight] initializing daemon (profile={}, port={}, bank={}/{})",
-        hindsight_config.profile,
-        hindsight_config.port,
-        hindsight_config.namespace,
-        hindsight_config.bank_id,
-    ));
-    emit_startup_progress("[hindsight] starting local LLM proxy...");
-    let llm_proxy = HindsightLlmProxy::start(config).await?;
-    emit_startup_progress("[hindsight] local LLM proxy ready");
-    let llm_env_vars = llm_proxy.env_vars();
-    let server = HindsightManagedServer::new(hindsight_config.clone(), llm_env_vars.clone());
-    let stopped_stale_sidecar = if ensure_fresh {
-        server
-            .stop_stale_managed_daemon_for_current_sidecar()
-            .await?
-    } else {
-        false
-    };
-    if ensure_fresh && !server.check_health().await {
-        // Daemon health is not a reliable signal when the worker is wedged by
-        // retained async jobs. Stop best-effort before a fresh start so stale
-        // wrapper processes do not keep the port or pg0 instance half-owned.
-        emit_startup_progress("[hindsight] force stopping unhealthy daemon before start...");
-        if let Err(err) = server.force_stop().await {
-            tracing::warn!("[hindsight] force stop before startup failed: {err:?}");
-        }
-    }
-    if server.check_health().await {
-        emit_startup_progress("[hindsight] daemon already healthy, reusing");
-    } else if stopped_stale_sidecar {
-        emit_startup_progress(
-            "[hindsight] stale managed sidecar stopped; starting current sidecar...",
-        );
-        start_hindsight_managed_server(&server, &hindsight_config.profile).await?;
-    } else {
-        emit_startup_progress("[hindsight] preparing sidecar and starting daemon...");
-        start_hindsight_managed_server(&server, &hindsight_config.profile).await?;
-    }
-    emit_startup_progress(format!(
-        "[hindsight] connecting to bank '{}/{}'",
-        hindsight_config.namespace, hindsight_config.bank_id,
-    ));
-    let hindsight = HindsightClient::connect(&hindsight_config)
-        .await?
-        .with_restart_support(llm_env_vars)
-        .with_llm_proxy(llm_proxy);
-    hindsight.bootstrap_bank().await?;
-    emit_startup_progress("[hindsight] bank ready");
-    Ok(hindsight)
 }
 
 pub(crate) async fn sandbox_policy_for_runtime(
@@ -271,20 +141,13 @@ pub(crate) async fn build_eval_context_with_compiled(
         .to_string();
     let judge_client = build_llm(&judge_model_key, &config)
         .unwrap_or_else(|err| panic!("failed to construct judge LLM client: {err:?}"));
-    let hindsight = connect_bootstrapped_hindsight(&config, false)
-        .await
-        .unwrap_or_else(|err| panic!("failed to construct hindsight client: {err:?}"));
-    let hindsight_retain = hindsight.spawn_retain_worker();
     let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();
 
     Context {
         llm: client,
         judge_llm: judge_client,
         config,
-        hindsight,
-        hindsight_retain,
         memory,
-        prompt_memory: PromptMemoryContext::default(),
         plan,
         events,
         pending_work,

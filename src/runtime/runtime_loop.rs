@@ -7,8 +7,7 @@ use crate::{
         ActiveWorkflowRunSession, AppNoticeKey, Context, PendingWorkflowRunFlush, RuntimeTurnPhase,
     },
     context_budget::{
-        TokenEstimateBaseline, approx_token_count, estimate_agent_turn_request,
-        is_context_budget_exceeded, truncate_text_to_token_budget,
+        TokenEstimateBaseline, estimate_agent_turn_request, is_context_budget_exceeded,
     },
     dashboard::render::{
         AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, FORCE_SLEEP_ERROR_BACKLOG_THRESHOLD,
@@ -21,7 +20,6 @@ use crate::{
         thinking_activity_cell, user_activity_cell_from_event, web_activity_item_from_cell,
     },
     events::{EventPayload, EventStatus, EventView},
-    hindsight::HindsightRecallOptions,
     logging::{
         RuntimeStatusLevel, clear_runtime_status, set_runtime_status,
         write_current_turn_messages_dump, write_current_turn_response_dump,
@@ -35,7 +33,7 @@ use crate::{
         prompt_parts::AfterClaimContextInput,
         runtime::{
             AgentContent, AgentContentPart, AgentMessage, AgentTurnItem, AgentTurnRequest,
-            AgentTurnStreamResult, HistoryMessage, PromptMemoryCitation, PromptMemoryContext,
+            AgentTurnStreamResult, HistoryMessage,
         },
         runtime_error::{
             RuntimeErrorActionContext, RuntimeErrorCase, RuntimeErrorCaseParts, RuntimeErrorKind,
@@ -73,7 +71,6 @@ use crate::runtime::bootstrap::{
 };
 mod claimed_input;
 mod dashboard_control;
-mod hindsight_recall;
 mod live_draft;
 mod model_driver;
 mod scheduler;
@@ -89,7 +86,6 @@ pub(crate) use turn::execute_agent_loop_step;
 pub(crate) use workflow_evidence::{AgentLoopStepExecution, AgentLoopStepOutput};
 
 use claimed_input::*;
-use hindsight_recall::build_hindsight_memory_context;
 use live_draft::{TelegramLiveDraftSession, maybe_start_telegram_live_draft_session};
 use workflow_evidence::{record_runtime_history_messages, record_workflow_run_evidence};
 use workspace_apps::{drain_workspace_app_invalidations, sync_workspace_apps_from_invalidation};
@@ -100,7 +96,6 @@ const APP_NOTICE_UNRESOLVED_SUPPRESSION_THRESHOLD: usize = 3;
 const APP_NOTICE_OVERFLOW_SUPPRESSION: Duration = Duration::from_secs(300);
 const RUNTIME_HISTORY_MIN_MESSAGES: usize = 0;
 const RUNTIME_HISTORY_SUMMARY_MAX_TOKENS: usize = 800;
-const HINDSIGHT_RECALL_QUERY_MAX_TOKENS: usize = 420;
 const RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS: u64 = 60;
 
 #[cfg(test)]

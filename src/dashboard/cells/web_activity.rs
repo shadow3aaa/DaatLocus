@@ -16,7 +16,7 @@ use super::{
     exec::{ExecResultActivityCell, LiveExecActivityCell},
     messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell},
     plan::{PlanActivityCell, PlanStepDisplayStatus},
-    workflow::{ActivateWorkflowActivityCell, CreateWorkflowActivityCell, DeepRecallActivityCell},
+    workflow::{ActivateWorkflowActivityCell, CreateWorkflowActivityCell},
 };
 
 pub const WEB_ACTIVITY_VERSION: u8 = 2;
@@ -267,7 +267,6 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
         ActivityCell::PlanResult(cell) => apply_plan_cell(&mut item, cell),
         ActivityCell::CreateWorkflowResult(cell) => apply_create_workflow_cell(&mut item, cell),
         ActivityCell::ActivateWorkflowResult(cell) => apply_activate_workflow_cell(&mut item, cell),
-        ActivityCell::DeepRecallResult(cell) => apply_deep_recall_cell(&mut item, cell),
         ActivityCell::ExecResult(cell) => apply_exec_cell(&mut item, cell),
         ActivityCell::LiveExec(cell) => apply_live_exec_cell(&mut item, cell),
         ActivityCell::Patch(cell) => apply_patch_cell(&mut item, cell),
@@ -300,7 +299,6 @@ fn activity_cell_variant_name(cell: &ActivityCell) -> &'static str {
         ActivityCell::PlanResult(_) => "PlanResult",
         ActivityCell::CreateWorkflowResult(_) => "CreateWorkflowResult",
         ActivityCell::ActivateWorkflowResult(_) => "ActivateWorkflowResult",
-        ActivityCell::DeepRecallResult(_) => "DeepRecallResult",
         ActivityCell::ExecResult(_) => "ExecResult",
         ActivityCell::LiveExec(_) => "LiveExec",
         ActivityCell::Patch(_) => "Patch",
@@ -778,16 +776,6 @@ fn apply_activate_workflow_cell(item: &mut WebActivityItem, cell: &ActivateWorkf
     item.blocks = kv_block(vec![WebActivityKvEntry {
         key: "workflow_id".to_string(),
         value: cell.workflow_id.clone(),
-    }]);
-}
-
-fn apply_deep_recall_cell(item: &mut WebActivityItem, cell: &DeepRecallActivityCell) {
-    item.kind = WebActivityKind::Memory;
-    item.actor = Some(WebActivityActor::System);
-    item.title = format!("Recalled {} Memories", cell.memory_count);
-    item.blocks = kv_block(vec![WebActivityKvEntry {
-        key: "memory_count".to_string(),
-        value: cell.memory_count.to_string(),
     }]);
 }
 

@@ -34,12 +34,6 @@ pub const WORKSPACE_UNIT_WHY: &str =
 
 pub const WORKSPACE_UNIT_HOW: &str = "When using relative paths, do not include the workspace directory name again. The workspace unit already gives the absolute workspace path; relative paths are relative to that directory.";
 
-pub const MEMORIES_UNIT_WHAT: &str = "Automatic memory recall, rendered under `<recall_memories>`, prioritizes long-term consolidated knowledge such as observations and may include raw memories and citations when useful. `deep_recall` explicitly triggers a deeper recall pass.";
-
-pub const MEMORIES_UNIT_WHEN: &str = "Use `deep_recall` when automatically recalled consolidated knowledge is insufficient, or when you need stronger evidence chains, sources, or historical preference synthesis. Only fall back to other methods if deep recall is still insufficient.";
-
-pub const MEMORIES_UNIT_HOW: &str = "When reading `<recall_memories>`, distinguish observations, raw memories, and citations. Prefer consolidated knowledge for high-level judgment, then use raw evidence to verify details. When calling `deep_recall`, write the query as a natural-language question and include the subject, fact, time range, task context, and clues when possible; more specific queries recall more relevant memories.";
-
 pub const PLAN_UNIT_WHAT: &str = "A plan is the latest step-by-step plan for the current task. It records the sequence of steps needed to finish the task and the current progress of each step.";
 
 pub const PLAN_UNIT_WHEN: &str = "Maintain a plan when the task is non-trivial, multi-step, or requires ongoing progress tracking, so current progress, the next step, and remaining work stay clear.";

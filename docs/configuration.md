@@ -6,8 +6,8 @@ specific config change.
 
 ## Files
 
-- `~/.daat-locus/config.toml`: provider, model, daemon, sandbox, Hindsight, and
-  Telegram configuration.
+- `~/.daat-locus/config.toml`: provider, model, daemon, sandbox, and Telegram
+  configuration.
 - `~/.daat-locus/persona.md`: local persona text used by the runtime.
 
 ## Interactive Commands
@@ -18,7 +18,6 @@ cargo run -- config show
 cargo run -- config add-provider
 cargo run -- config add-model
 cargo run -- config set-main-model
-cargo run -- config set-hindsight-model
 cargo run -- config set-telegram
 cargo run -- config-schema
 ```
@@ -42,7 +41,6 @@ Editors can reference it through GitHub raw, for example:
 - `[daemon]`: daemon port. The daemon listens on all IPv4 interfaces (`0.0.0.0`) for LAN access; protect remote dashboard/API access with daemon tokens.
 - `[judge]`: judge / pairwise evaluation config.
 - `[sandbox]`: runtime sandbox controls.
-- `[hindsight]`: Daat Locus-managed `hindsight-embed` config.
 - `[telegram]`: Telegram transport config.
 
 ## Minimal Example
@@ -76,12 +74,6 @@ port = 53825
 enabled = true
 strong_filesystem = "off"
 
-[hindsight]
-namespace = "default"
-bank_id = "daat-locus"
-request_timeout_secs = 180
-profile = "daat-locus"
-port = 8888
 
 [telegram]
 enabled = true
@@ -117,18 +109,6 @@ provider's supported request shape. For OpenAI Codex OAuth, `max` is sent as
 Codex's `xhigh` reasoning effort. Providers that reject thinking controls are
 retried without them.
 
-`hindsight-embed` currently does not support the ChatGPT Codex Responses
-backend. If the main model uses OpenAI Codex OAuth, set `hindsight.model` to a
-model backed by another provider.
-
-## Hindsight
-
-Daat Locus manages `hindsight-embed` automatically from a pinned sidecar
-release. Runtime startup downloads the matching archive when it is not already
-cached locally, then runs the cached executable directly.
-
-`hindsight.model = "model-key"` is optional. If unset, Hindsight falls back to
-`main_model`.
 
 ## Judge
 

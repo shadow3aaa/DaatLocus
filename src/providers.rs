@@ -542,50 +542,6 @@ impl OpenAIClient {
         })
     }
 
-    pub(crate) async fn post_compatible_chat_completion(
-        &self,
-        mut payload: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let url = self.url();
-        if payload
-            .get("model")
-            .and_then(serde_json::Value::as_str)
-            .is_none()
-        {
-            payload["model"] = json!(self.model);
-        }
-        let request_context = vec![format!(
-            "hindsight LLM proxy chat completion: model={}, url={url}",
-            payload
-                .get("model")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(&self.model)
-        )];
-        let response = self
-            .post_json_with_rate_limit_retry(&url, &payload, &request_context)
-            .await?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|err| miette!("llm response body read failed: {err}"))?;
-        if !status.is_success() {
-            return Err(miette!(
-                "llm api returned HTTP {}: {}",
-                status,
-                truncate_for_error(&body)
-            ));
-        }
-        let response_json: serde_json::Value = serde_json::from_str(&body).map_err(|err| {
-            miette!(
-                "llm response is not valid JSON: {err}; body={}",
-                truncate_for_error(&body)
-            )
-        })?;
-        self.record_usage_from_response(&response_json);
-        Ok(response_json)
-    }
-
     async fn call_agent_turn(
         &self,
         context: &Context,

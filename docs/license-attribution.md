@@ -51,7 +51,6 @@ separately:
 
 - managed `uv` downloads
 - browser runtime downloads
-- Hindsight-managed Python packages and their transitive dependencies
 
 The supply-chain pinning TODOs cover version and integrity verification. This
 document covers only license and attribution tracking.

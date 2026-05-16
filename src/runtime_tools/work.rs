@@ -5,12 +5,11 @@ use crate::{
     apply_patch::{PatchOperationKind, parse_apply_patch, summarize_patch_ops},
     context::Context,
     core::{
-        ActivateWorkflowArgs, CreateWorkflowArgs, DeepRecallArgs, EventResolveArgs, FocusAppArgs,
+        ActivateWorkflowArgs, CreateWorkflowArgs, EventResolveArgs, FocusAppArgs,
         NoticeResolvedArgs, PutAwayAppArgs, ReadWorkflowArgs, UpdatePlanArgs, UpdateWorkflowArgs,
     },
     dashboard::render::current_plan_step_for_dashboard,
     events::{EventDisposition, EventPayload, EventStatus},
-    hindsight::HindsightReflectOptions,
     plan::{Plan, PlanStatus, PlanStep},
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     tool_ui::{PlanStepUiData, PlanStepUiStatus, ReplyDisposition, ToolCallUiEvent, ToolUiEvent},
@@ -120,14 +119,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             summarize_update_workflow_tool,
             render_update_workflow_call_ui,
             execute_update_workflow_tool,
-        )),
-        Box::new(StaticRuntimeTool::new::<DeepRecallArgs>(
-            "deep_recall",
-            "Run a slower but deeper reflect query over long-term memory for thread recovery, project-state judgment, user-preference inference, and high-level advice or risk analysis that needs evidence.",
-            None,
-            summarize_deep_recall_tool,
-            render_deep_recall_call_ui,
-            execute_deep_recall_tool,
         )),
     ]
 }
@@ -711,70 +702,6 @@ fn execute_update_workflow_tool<'a>(
             ),
         )
         .with_turn_boundary("workflow spec updated; re-render world state in a new turn"))
-    })
-}
-
-fn summarize_deep_recall_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: DeepRecallArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "deep_recall".to_string(),
-        summary: summarize_inline_text(&args.query),
-    })
-}
-
-fn render_deep_recall_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: DeepRecallArgs = parse_tool_args(call)?;
-    let mut lines = vec![summarize_inline_text(&args.query)];
-    if let Some(budget) = args.budget.as_deref()
-        && !budget.trim().is_empty()
-    {
-        lines.push(format!("budget={budget}"));
-    }
-    if let Some(max_tokens) = args.max_tokens {
-        lines.push(format!("max_tokens={max_tokens}"));
-    }
-    Ok(ToolCallUiEvent::deep_recall("deep_recall", lines))
-}
-
-fn execute_deep_recall_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: DeepRecallArgs = parse_tool_args(call)?;
-        let response = context
-            .hindsight
-            .reflect(
-                &args.query,
-                HindsightReflectOptions {
-                    budget: args.budget.clone(),
-                    max_tokens: args.max_tokens,
-                    include_facts: true,
-                    include_tool_calls: true,
-                    include_tool_call_output: false,
-                    ..Default::default()
-                },
-            )
-            .await?;
-        let memory_count = response
-            .based_on
-            .as_ref()
-            .map(|based_on| based_on.memories.len())
-            .unwrap_or(0);
-        let title = format!("Recalled {memory_count} Memories");
-        Ok(ToolExecutionResult::new(
-            title.clone(),
-            json!({
-                "query": args.query,
-                "budget": args.budget,
-                "max_tokens": args.max_tokens,
-                "text": response.text,
-                "based_on": response.based_on,
-                "usage": response.usage,
-                "trace": response.trace,
-            }),
-            ToolUiEvent::deep_recall(memory_count),
-        ))
     })
 }
 
