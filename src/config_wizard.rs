@@ -1060,22 +1060,16 @@ fn read_prompt_key() -> Result<crossterm::event::KeyEvent> {
     }
 }
 
-fn prompt_panel_block(locale: Locale) -> Block<'static> {
+fn prompt_panel_block() -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(Line::from(vec![
-            Span::styled(
-                "Config",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {}", crate::tr!(locale, "prompt_ui.inline")),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]))
+        .title(Line::from(vec![Span::styled(
+            "Config",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]))
 }
 
 fn render_select_prompt<T: AsRef<str>>(
@@ -1086,7 +1080,7 @@ fn render_select_prompt<T: AsRef<str>>(
     state: &mut ListState,
     compact: bool,
 ) {
-    let block = prompt_panel_block(locale);
+    let block = prompt_panel_block();
     let inner = block.inner(frame.area());
     frame.render_widget(block, frame.area());
 
@@ -1200,7 +1194,7 @@ fn render_text_prompt(
     secret: bool,
     error: Option<&str>,
 ) {
-    let block = prompt_panel_block(locale);
+    let block = prompt_panel_block();
     let inner = block.inner(frame.area());
     frame.render_widget(block, frame.area());
 
@@ -1298,7 +1292,7 @@ fn render_text_prompt(
 }
 
 fn render_loading_prompt(frame: &mut Frame, locale: Locale, prompt: &str, note: &str) {
-    let block = prompt_panel_block(locale);
+    let block = prompt_panel_block();
     let inner = block.inner(frame.area());
     frame.render_widget(block, frame.area());
 
@@ -1358,7 +1352,7 @@ fn render_detail_prompt(
     lines: &[String],
     scroll: u16,
 ) {
-    let block = prompt_panel_block(locale);
+    let block = prompt_panel_block();
     let inner = block.inner(frame.area());
     frame.render_widget(block, frame.area());
 
@@ -1436,7 +1430,7 @@ fn render_detail_prompt(
 }
 
 fn render_status_prompt(frame: &mut Frame, locale: Locale, prompt: &str, lines: &[String]) {
-    let block = prompt_panel_block(locale);
+    let block = prompt_panel_block();
     let inner = block.inner(frame.area());
     frame.render_widget(block, frame.area());
 
@@ -3388,6 +3382,7 @@ mod tests {
         );
 
         assert!(!text.contains("Config management main_model"));
+        assert!(!text.contains("Config inline"));
         assert!(!text.contains("3 option"));
         assert!(!text.contains("Select  Config management"));
         assert!(text.contains(&items[0]));

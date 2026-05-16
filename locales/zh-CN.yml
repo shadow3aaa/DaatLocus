@@ -20,7 +20,6 @@ prompt_ui:
   secret: "密文"
   loading: "加载中"
   detail: "详情"
-  inline: "inline"
   option_count: "%{count} option(s)"
   line_count: "%{count} 行"
   help_select: "↑↓ / j k 移动  Enter 确认  Esc 取消"
