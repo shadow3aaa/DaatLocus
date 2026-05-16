@@ -2912,6 +2912,9 @@ function agentChatActivityGlyph(bubble: AgentChatBubble) {
     if (bubble.toolName === "browser") {
       return "↗";
     }
+    if (bubble.appName === "Coding" || bubble.toolName === "coding_tool_group") {
+      return "◎";
+    }
     return "⌁";
   }
 
