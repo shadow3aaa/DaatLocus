@@ -21,7 +21,6 @@ use super::DashboardState;
 use apps::{AppAttentionActivityCell, BrowserActivityCell, LiveBrowserActivityCell};
 #[cfg(test)]
 pub(crate) use common::CodingToolCallActivityCell;
-use common::thinking_cell;
 use common::{
     AssistantActivityCell, ErrorActivityCell, GenericAppActivityCell, MessageImageAttachment,
     TerminalWaitActivityCell, UserActivityCell, assistant_cell_with_body, error_cell,
@@ -31,6 +30,7 @@ use common::{
     CodingEditActivityCell, CodingOpenProjectActivityCell, CodingReviewActivityCell,
     CodingToolGroupActivityCell, ThinkingActivityCell,
 };
+use common::{render_exposed_tool_names, render_exposed_tool_names_in_lines, thinking_cell};
 use exec::{ExecResultActivityCell, LiveExecActivityCell, live_exec_cell};
 use messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell};
 use plan::PlanActivityCell;
@@ -192,9 +192,11 @@ pub fn assistant_activity_cell(content: &str) -> Option<ActivityCell> {
         return None;
     }
     if trimmed.starts_with("tool invocation failed") || trimmed.starts_with("tool loop failed") {
+        let title =
+            render_exposed_tool_names(first_line_or_fallback(trimmed, "tool invocation error"));
         return Some(ActivityCell::Error(error_cell(
-            first_line_or_fallback(trimmed, "tool invocation error"),
-            remaining_lines_with_limit(trimmed, 24),
+            title,
+            render_exposed_tool_names_in_lines(remaining_lines_with_limit(trimmed, 24)),
         )));
     }
     Some(ActivityCell::Assistant(assistant_cell_with_body(
@@ -336,9 +338,13 @@ fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<ActivityCe
             if content.starts_with("tool invocation failed")
                 || content.starts_with("tool loop failed")
             {
+                let title = render_exposed_tool_names(first_line_or_fallback(
+                    content,
+                    "tool invocation error",
+                ));
                 return vec![ActivityCell::Error(error_cell(
-                    first_line_or_fallback(content, "tool invocation error"),
-                    remaining_lines_with_limit(content, 24),
+                    title,
+                    render_exposed_tool_names_in_lines(remaining_lines_with_limit(content, 24)),
                 ))];
             }
             cells
@@ -691,6 +697,39 @@ mod tests {
 
         let separated = coalesce_activity_cells(vec![first_group, boundary, updated_group]);
         assert_eq!(separated.len(), 3);
+    }
+
+    #[test]
+    fn dashboard_error_cells_render_exposed_tool_names_as_app_scoped_display_names() {
+        let cell = activity_cell_from_tool_ui_event(ToolUiEvent::error(
+            "coding__edit_code failed",
+            vec!["retry with coding__read_code first".to_string()],
+        ))
+        .expect("error cell");
+
+        match cell {
+            ActivityCell::Error(cell) => {
+                assert_eq!(cell.title, "coding::edit_code failed");
+                assert_eq!(cell.body_lines, vec!["retry with coding::read_code first"]);
+            }
+            _ => panic!("expected error activity cell"),
+        }
+    }
+
+    #[test]
+    fn assistant_tool_failures_render_exposed_tool_names_as_app_scoped_display_names() {
+        let cell = assistant_activity_cell(
+            "tool invocation failed: coding__edit_code\nhunk old text not found",
+        )
+        .expect("assistant error cell");
+
+        match cell {
+            ActivityCell::Error(cell) => {
+                assert_eq!(cell.title, "tool invocation failed: coding::edit_code");
+                assert_eq!(cell.body_lines, vec!["hunk old text not found"]);
+            }
+            _ => panic!("expected error activity cell"),
+        }
     }
 
     #[test]

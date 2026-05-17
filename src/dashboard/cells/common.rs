@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::app::AppId;
 use crate::tool_ui::{
     CodingEditUiData, CodingReviewUiData, CodingToolGroupUiData, PatchFileUiData, ToolUiData,
 };
@@ -188,7 +189,10 @@ pub fn thinking_cell(
 
 impl From<ToolUiData> for GenericAppActivityCell {
     fn from(data: ToolUiData) -> Self {
-        generic_app_cell(data.title, data.body_lines)
+        generic_app_cell(
+            render_exposed_tool_names(&data.title),
+            render_exposed_tool_names_in_lines(data.body_lines),
+        )
     }
 }
 
@@ -211,7 +215,7 @@ impl From<CodingToolGroupUiData> for CodingToolGroupActivityCell {
                 .calls
                 .into_iter()
                 .map(|call| CodingToolCallActivityCell {
-                    tool_name: call.tool_name,
+                    tool_name: AppId::render_exposed_tool_name(&call.tool_name),
                     summary: call.summary,
                     detail_lines: call.detail_lines,
                     detail_title: None,
@@ -249,6 +253,61 @@ impl From<CodingReviewUiData> for CodingReviewActivityCell {
 
 impl From<ToolUiData> for ErrorActivityCell {
     fn from(data: ToolUiData) -> Self {
-        error_cell(data.title, data.body_lines)
+        error_cell(
+            render_exposed_tool_names(&data.title),
+            render_exposed_tool_names_in_lines(data.body_lines),
+        )
+    }
+}
+
+pub fn render_exposed_tool_names(text: &str) -> String {
+    let mut rendered = String::with_capacity(text.len());
+    let mut token = String::new();
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !token.is_empty() {
+                rendered.push_str(&render_exposed_tool_name_token(&token));
+                token.clear();
+            }
+            rendered.push(ch);
+        } else {
+            token.push(ch);
+        }
+    }
+    if !token.is_empty() {
+        rendered.push_str(&render_exposed_tool_name_token(&token));
+    }
+    rendered
+}
+
+pub fn render_exposed_tool_names_in_lines(lines: Vec<String>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| render_exposed_tool_names(&line))
+        .collect()
+}
+
+fn render_exposed_tool_name_token(token: &str) -> String {
+    let start = token
+        .char_indices()
+        .find(|(_, ch)| ch.is_ascii_alphanumeric() || *ch == '_')
+        .map(|(index, _)| index)
+        .unwrap_or(token.len());
+    let end = token
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_ascii_alphanumeric() || *ch == '_')
+        .map(|(index, ch)| index + ch.len_utf8())
+        .unwrap_or(start);
+    if start >= end {
+        return token.to_string();
+    }
+
+    let candidate = &token[start..end];
+    let rendered = AppId::render_exposed_tool_name(candidate);
+    if rendered == candidate {
+        token.to_string()
+    } else {
+        format!("{}{}{}", &token[..start], rendered, &token[end..])
     }
 }

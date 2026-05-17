@@ -747,13 +747,15 @@ pub(crate) async fn execute_agent_loop_step(
                         } else {
                             error_text.clone()
                         };
+                        let display_tool_name =
+                            crate::app::AppId::render_exposed_tool_name(&call.name);
                         ToolExecutionResult::new(
-                            format!("{} failed", call.name),
+                            format!("{display_tool_name} failed"),
                             json!({
                                 "error": error_text,
                             }),
                             ToolUiEvent::error(
-                                format!("{} failed", call.name),
+                                format!("{display_tool_name} failed"),
                                 compact_body_lines(&ui_error_text, 6),
                             ),
                         )

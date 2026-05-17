@@ -99,6 +99,16 @@ impl AppId {
             .strip_prefix(Self::TOOL_NAME_SEPARATOR)
     }
 
+    pub fn render_exposed_tool_name(tool_name: &str) -> String {
+        let Some((app_id, app_tool_name)) = tool_name.split_once(Self::TOOL_NAME_SEPARATOR) else {
+            return tool_name.to_string();
+        };
+        if !Self::is_valid_name(app_id) || app_tool_name.trim().is_empty() {
+            return tool_name.to_string();
+        }
+        format!("{app_id}::{app_tool_name}")
+    }
+
     pub fn is_terminal(&self) -> bool {
         self.as_str() == Self::terminal().as_str()
     }
@@ -719,23 +729,24 @@ fn app_tool_unavailable_result(
     focused: Option<&AppId>,
     call: &AgentToolCall,
 ) -> AppToolExecutionResult {
+    let display_tool_name = AppId::render_exposed_tool_name(&call.name);
     let focused_text = focused
         .map(|id| id.to_string())
         .unwrap_or_else(|| "<none>".to_string());
     let reason = format!(
         "`{}` is owned by app `{app_id}` and requires `{required_scope}` tools, but the focused app is `{focused_text}`.",
-        call.name
+        display_tool_name
     );
     let allowed_next_action = format!(
         "Focus an app that exposes `{required_scope}` tools before using `{}` if the task requires this tool.",
-        call.name
+        display_tool_name
     );
     let model_content = format!(
         "Tool unavailable: `{}`\nReason: {reason}\nAllowed next action: {allowed_next_action}",
-        call.name
+        display_tool_name
     );
     AppToolExecutionResult {
-        summary: format!("{} unavailable", call.name),
+        summary: format!("{display_tool_name} unavailable"),
         payload: json!({
             "available": false,
             "tool": call.name,
@@ -747,7 +758,7 @@ fn app_tool_unavailable_result(
         }),
         model_content: Some(model_content),
         ui_event: ToolUiEvent::error(
-            format!("{} unavailable", call.name),
+            format!("{display_tool_name} unavailable"),
             vec![reason, allowed_next_action],
         ),
         turn_boundary_reason: None,
@@ -784,6 +795,14 @@ mod tests {
         assert_eq!(
             AppId::terminal().demangle_tool_name(&exposed),
             Some("terminal_exec")
+        );
+        assert_eq!(
+            AppId::render_exposed_tool_name("terminal__terminal_exec"),
+            "terminal::terminal_exec"
+        );
+        assert_eq!(
+            AppId::render_exposed_tool_name("terminal_exec"),
+            "terminal_exec"
         );
     }
 }

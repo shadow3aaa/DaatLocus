@@ -534,12 +534,13 @@ fn unavailable_tool_result(
     reason: String,
     allowed_next_action: String,
 ) -> ToolExecutionResult {
+    let display_tool_name = AppId::render_exposed_tool_name(&call.name);
     let model_content = format!(
         "Tool unavailable: `{}`\nReason: {reason}\nAllowed next action: {allowed_next_action}",
-        call.name
+        display_tool_name
     );
     ToolExecutionResult::new(
-        format!("{} unavailable", call.name),
+        format!("{display_tool_name} unavailable"),
         json!({
             "available": false,
             "tool": call.name,
@@ -547,7 +548,7 @@ fn unavailable_tool_result(
             "allowed_next_action": allowed_next_action,
         }),
         ToolUiEvent::error(
-            format!("{} unavailable", call.name),
+            format!("{display_tool_name} unavailable"),
             vec![reason, allowed_next_action],
         ),
     )
