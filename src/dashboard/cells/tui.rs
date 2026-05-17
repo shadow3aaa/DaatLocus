@@ -1487,9 +1487,8 @@ mod tests {
     use super::*;
     use crate::tool_ui::{PatchDiffLineKind, PatchFileOperation, ReplyDisposition, ReplySubject};
 
-    /// Verify that fenced code blocks inside an assistant cell produce
-    /// syntax-highlighted spans (syntect per-token colours) and fence
-    /// markers styled as DarkGray delimiters.
+    /// Verify that fenced code blocks inside an assistant cell hide their
+    /// delimiters while preserving syntax-highlighted code spans.
     #[test]
     fn assistant_cell_renders_code_block_with_code_style() {
         let body = "\
@@ -1515,36 +1514,16 @@ That's it.";
         };
         let lines = render_assistant_cell_lines(&cell);
 
-        // ── Fence line(s) are DarkGray ──────────────────────────
-        // Callers prepend "   " indentation, so check past that
-        // and also verify the line-level style.
+        // ── Fence line(s) are hidden ───────────────────────────
         let fence_lines: Vec<_> = lines
             .iter()
-            .filter(|line| line.spans.iter().any(|s| s.content.starts_with("```")))
+            .filter(|line| line_text(line).trim_start().starts_with("```"))
             .collect();
         assert!(
-            !fence_lines.is_empty(),
-            "expected at least one fence line (```)"
+            fence_lines.is_empty(),
+            "expected fence delimiter lines to be hidden, got {:?}",
+            fence_lines
         );
-        for fl in &fence_lines {
-            let fence_span = fl
-                .spans
-                .iter()
-                .find(|s| s.content.starts_with("```"))
-                .unwrap();
-            assert_eq!(
-                fence_span.style.fg,
-                Some(Color::DarkGray),
-                "fence span should be DarkGray, got {:?}",
-                fence_span.style
-            );
-            assert_eq!(
-                fl.style.fg,
-                Some(Color::DarkGray),
-                "fence LINE style should be DarkGray, got {:?}",
-                fl.style
-            );
-        }
 
         // ── Code content is syntax‑highlighted ─────────────────
         let code_line = lines
