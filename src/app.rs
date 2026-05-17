@@ -19,17 +19,18 @@ pub struct AppId(String);
 
 impl AppId {
     pub const DEFAULT_WORKSPACE_ENTRY: &str = "runtime/app.lua";
+    pub const TOOL_NAME_SEPARATOR: &str = "__";
 
     pub fn browser() -> Self {
-        Self("Browser".to_string())
+        Self("browser".to_string())
     }
 
     pub fn terminal() -> Self {
-        Self("Terminal".to_string())
+        Self("terminal".to_string())
     }
 
     pub fn coding() -> Self {
-        Self("Coding".to_string())
+        Self("coding".to_string())
     }
 
     pub fn from_workspace_folder(name: impl Into<String>) -> Result<Self> {
@@ -41,12 +42,9 @@ impl AppId {
         if trimmed.contains(std::path::MAIN_SEPARATOR) || trimmed.contains('/') || trimmed == "." {
             return Err(miette!("invalid workspace app folder name `{trimmed}`"));
         }
-        if !trimmed
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-        {
+        if !Self::is_valid_name(trimmed) {
             return Err(miette!(
-                "workspace app folder name `{trimmed}` must use only ASCII letters, numbers, `_`, or `-`"
+                "workspace app folder name `{trimmed}` must be snake_case: start with a lowercase ASCII letter and use only lowercase letters, numbers, and single `_` separators"
             ));
         }
         if trimmed == Self::browser().as_str()
@@ -58,8 +56,47 @@ impl AppId {
         Ok(Self(trimmed.to_string()))
     }
 
+    pub fn is_valid_name(name: &str) -> bool {
+        let Some(first) = name.chars().next() else {
+            return false;
+        };
+        if !first.is_ascii_lowercase() {
+            return false;
+        }
+
+        let mut previous_underscore = false;
+        for ch in name.chars().skip(1) {
+            if ch == '_' {
+                if previous_underscore {
+                    return false;
+                }
+                previous_underscore = true;
+            } else if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+                previous_underscore = false;
+            } else {
+                return false;
+            }
+        }
+
+        !previous_underscore
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn mangle_tool_name(&self, tool_name: &str) -> String {
+        format!(
+            "{}{separator}{tool_name}",
+            self.as_str(),
+            separator = Self::TOOL_NAME_SEPARATOR
+        )
+    }
+
+    pub fn demangle_tool_name<'a>(&self, tool_name: &'a str) -> Option<&'a str> {
+        tool_name
+            .strip_prefix(self.as_str())?
+            .strip_prefix(Self::TOOL_NAME_SEPARATOR)
     }
 
     pub fn is_terminal(&self) -> bool {
@@ -84,9 +121,9 @@ pub enum AppToolScope {
 impl Display for AppToolScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = match self {
-            Self::Browser => "Browser",
-            Self::Terminal => "Terminal",
-            Self::Coding => "Coding",
+            Self::Browser => "browser",
+            Self::Terminal => "terminal",
+            Self::Coding => "coding",
         };
         write!(f, "{name}")
     }
@@ -410,7 +447,7 @@ impl AppManager {
                     if !exposed_scopes.contains(&tool.scope) {
                         exposed_scopes.push(tool.scope);
                     }
-                    exposed_tools.push(tool.name);
+                    exposed_tools.push(id.mangle_tool_name(&tool.name));
                 }
 
                 (!exposed_tools.is_empty()).then(|| AppComposedSurface {
@@ -479,25 +516,28 @@ impl AppManager {
         let Some(app) = self.apps.get(focused) else {
             return Ok(());
         };
-        app.before_runtime_tool_call(call, context)
+        let focused_call = self.demangle_call_for_app(focused, call);
+        app.before_runtime_tool_call(&focused_call, context)
     }
 
     pub fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-        let app_id = self.app_id_for_tool_name(&call.name)?;
+        let (app_id, app_tool_name) = self.app_tool_name_from_exposed(&call.name)?;
         let app = self
             .apps
             .get(&app_id)
             .ok_or_else(|| miette!("app missing for tool `{}`: {app_id}", call.name))?;
-        app.summarize_tool_call(call)
+        let app_call = call.with_name(app_tool_name);
+        app.summarize_tool_call(&app_call)
     }
 
     pub fn render_tool_call_ui(&self, call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-        let app_id = self.app_id_for_tool_name(&call.name)?;
+        let (app_id, app_tool_name) = self.app_tool_name_from_exposed(&call.name)?;
         let app = self
             .apps
             .get(&app_id)
             .ok_or_else(|| miette!("app missing for tool `{}`: {app_id}", call.name))?;
-        app.render_tool_call_ui(call)
+        let app_call = call.with_name(app_tool_name);
+        app.render_tool_call_ui(&app_call)
     }
 
     pub async fn execute_tool_for_app(
@@ -506,6 +546,11 @@ impl AppManager {
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
     ) -> Result<AppToolExecutionResult> {
+        let app_tool_name = app_id
+            .demangle_tool_name(&call.name)
+            .unwrap_or(&call.name)
+            .to_string();
+        let app_call = call.with_name(app_tool_name.clone());
         let owner = self
             .apps
             .get(app_id)
@@ -513,7 +558,7 @@ impl AppManager {
         let tool_spec = owner
             .tool_specs()?
             .into_iter()
-            .find(|tool| tool.name == call.name)
+            .find(|tool| tool.name == app_tool_name)
             .ok_or_else(|| miette!("app `{app_id}` does not own tool `{}`", call.name))?;
         let focused_scopes = self.focused_tool_scopes();
         if !focused_scopes.contains(&tool_spec.scope) {
@@ -521,14 +566,14 @@ impl AppManager {
                 app_id,
                 tool_spec.scope,
                 self.focused.as_ref(),
-                call,
+                &app_call,
             ));
         }
         let app = self
             .apps
             .get_mut(app_id)
             .ok_or_else(|| miette!("app missing for tool `{}`: {app_id}", call.name))?;
-        app.execute_tool(call, context).await
+        app.execute_tool(&app_call, context).await
     }
 
     pub async fn focus(&mut self, id: AppId) -> Result<()> {
@@ -619,15 +664,18 @@ impl AppManager {
             .ok_or_else(|| miette!("focused app missing: {focused}"))
     }
 
-    fn app_id_for_tool_name(&self, tool_name: &str) -> Result<AppId> {
+    fn app_tool_name_from_exposed(&self, exposed_tool_name: &str) -> Result<(AppId, String)> {
         for id in &self.order {
             let Some(app) = self.apps.get(id) else {
                 continue;
             };
+            let Some(app_tool_name) = id.demangle_tool_name(exposed_tool_name) else {
+                continue;
+            };
             match app.tool_specs() {
                 Ok(app_tools) => {
-                    if app_tools.iter().any(|tool| tool.name == tool_name) {
-                        return Ok(id.clone());
+                    if app_tools.iter().any(|tool| tool.name == app_tool_name) {
+                        return Ok((id.clone(), app_tool_name.to_string()));
                     }
                 }
                 Err(err) => {
@@ -635,7 +683,14 @@ impl AppManager {
                 }
             }
         }
-        Err(miette!("unknown app tool `{tool_name}`"))
+        Err(miette!("unknown app tool `{exposed_tool_name}`"))
+    }
+
+    fn demangle_call_for_app(&self, app_id: &AppId, call: &AgentToolCall) -> AgentToolCall {
+        app_id
+            .demangle_tool_name(&call.name)
+            .map(|name| call.with_name(name))
+            .unwrap_or_else(|| call.clone())
     }
 
     #[cfg(test)]
@@ -696,5 +751,39 @@ fn app_tool_unavailable_result(
             vec![reason, allowed_next_action],
         ),
         turn_boundary_reason: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_app_id_rejects_separator_and_non_ascii_names() {
+        assert!(AppId::from_workspace_folder("notes").is_ok());
+        assert!(AppId::from_workspace_folder("my_app").is_ok());
+        assert!(AppId::from_workspace_folder("my app").is_err());
+        assert!(AppId::from_workspace_folder("应用").is_err());
+        assert!(AppId::from_workspace_folder("MyApp").is_err());
+        assert!(AppId::from_workspace_folder("my-app").is_err());
+        assert!(AppId::from_workspace_folder("my__app").is_err());
+        assert!(AppId::from_workspace_folder("my_app_").is_err());
+        assert!(AppId::from_workspace_folder("2app").is_err());
+    }
+
+    #[test]
+    fn app_tool_names_use_openai_safe_separator() {
+        let exposed = AppId::terminal().mangle_tool_name("terminal_exec");
+
+        assert_eq!(exposed, "terminal__terminal_exec");
+        assert!(
+            exposed
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        );
+        assert_eq!(
+            AppId::terminal().demangle_tool_name(&exposed),
+            Some("terminal_exec")
+        );
     }
 }

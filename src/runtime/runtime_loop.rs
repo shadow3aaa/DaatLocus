@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(
             claimed_runtime_input_fingerprint(&inputs).as_deref(),
             Some(
-                "events=[00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000002]|app_notices=[Terminal:busy]"
+                "events=[00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000002]|app_notices=[terminal:busy]"
             )
         );
     }

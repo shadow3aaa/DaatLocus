@@ -158,6 +158,10 @@ pub trait RuntimeTool: Send + Sync {
     fn description(&self) -> &str;
     fn input_spec(&self) -> AgentToolInputSpec;
 
+    fn app_tool_name(&self) -> Option<&str> {
+        None
+    }
+
     fn is_available(&self, _: &Context) -> bool {
         true
     }
@@ -341,7 +345,8 @@ LF: /\n/"#
 struct AppRuntimeTool {
     owner_app_id: AppId,
     scope: AppToolScope,
-    name: String,
+    exposed_name: String,
+    app_tool_name: String,
     description: String,
     input_spec: AgentToolInputSpec,
 }
@@ -349,7 +354,11 @@ struct AppRuntimeTool {
 #[async_trait]
 impl RuntimeTool for AppRuntimeTool {
     fn name(&self) -> &str {
-        &self.name
+        &self.exposed_name
+    }
+
+    fn app_tool_name(&self) -> Option<&str> {
+        Some(&self.app_tool_name)
     }
 
     fn description(&self) -> &str {
@@ -390,9 +399,10 @@ impl RuntimeTool for AppRuntimeTool {
                 .max(1),
             turn_epoch: context.runtime_turn_epoch,
         };
+        let app_call = call.with_name(self.app_tool_name.clone());
         let result = context
             .apps
-            .execute_tool_for_app(&self.owner_app_id, call, &app_context)
+            .execute_tool_for_app(&self.owner_app_id, &app_call, &app_context)
             .await?;
         let mut output =
             ToolExecutionResult::new(result.summary.clone(), result.payload, result.ui_event);
@@ -432,18 +442,21 @@ fn build_app_runtime_tools(
         if !context.apps.tool_scope_is_focused(tool.scope) {
             continue;
         }
-        if !seen_names.insert(tool.name.clone()) {
+        let exposed_name = owner_app_id.mangle_tool_name(&tool.name);
+        if !seen_names.insert(exposed_name.clone()) {
             tracing::warn!(
-                "skipping app tool `{}` from app `{}` because its name conflicts with another runtime tool",
+                "skipping app tool `{}` from app `{}` because exposed name `{}` conflicts with another runtime tool",
                 tool.name,
-                owner_app_id
+                owner_app_id,
+                exposed_name
             );
             continue;
         }
         tools.push(Box::new(AppRuntimeTool {
             owner_app_id,
             scope: tool.scope,
-            name: tool.name,
+            exposed_name,
+            app_tool_name: tool.name,
             description: tool.description,
             input_spec: AgentToolInputSpec::JsonSchema {
                 schema: normalize_tool_input_schema(tool.input_schema),
@@ -503,9 +516,9 @@ fn runtime_availability_denial(
 
     match tool.name() {
         "apply_patch" => Some((
-            "`apply_patch` is scoped to the Terminal app, but Terminal is not the focused app."
+            "`apply_patch` is scoped to the terminal app, but terminal is not the focused app."
                 .to_string(),
-            "Call focus_app with app=\"Terminal\" before editing files with apply_patch."
+            "Call focus_app with app=\"terminal\" before editing files with apply_patch."
                 .to_string(),
         )),
         name => Some((
@@ -547,7 +560,8 @@ pub fn summarize_action_from_tool_call(
 ) -> Result<EpisodeActionRecord> {
     let tools = build_runtime_tools(context);
     let tool = find_runtime_tool(&tools, &call.name)?;
-    match tool.summarize_action(call) {
+    let tool_call = tool_call_for_runtime_tool(tool, call);
+    match tool.summarize_action(&tool_call) {
         Ok(summary) => Ok(summary),
         Err(_) => context.apps.summarize_tool_call(call),
     }
@@ -559,24 +573,32 @@ pub fn render_tool_call_ui_event(
 ) -> Result<ToolCallUiEvent> {
     let tools = build_runtime_tools(context);
     let tool = find_runtime_tool(&tools, &call.name)?;
-    match tool.call_ui_event(call) {
+    let tool_call = tool_call_for_runtime_tool(tool, call);
+    match tool.call_ui_event(&tool_call) {
         Ok(event) => Ok(event),
         Err(_) => context.apps.render_tool_call_ui(call),
     }
+}
+
+fn tool_call_for_runtime_tool(tool: &dyn RuntimeTool, call: &AgentToolCall) -> AgentToolCall {
+    tool.app_tool_name()
+        .map(|app_tool_name| call.with_name(app_tool_name))
+        .unwrap_or_else(|| call.clone())
 }
 
 pub fn render_telegram_tool_result_status(
     call: &AgentToolCall,
     result: &ToolExecutionResult,
 ) -> Option<TelegramLiveStatus> {
-    if telegram_status_ignored_tool(&call.name) {
+    let tool_name = demangle_known_app_tool_name(&call.name);
+    if telegram_status_ignored_tool(tool_name) {
         return None;
     }
     if matches!(result.ui_event, ToolUiEvent::Error(_)) {
-        return telegram_tool_failure_status(&call.name);
+        return telegram_tool_failure_status(tool_name);
     }
 
-    match call.name.as_str() {
+    match tool_name {
         "update_plan" => Some(telegram_status(glyph::PLAN, "Plan Updated")),
         "apply_patch" => match &result.ui_event {
             ToolUiEvent::Patch(event) => Some(telegram_status(
@@ -665,6 +687,15 @@ pub fn render_telegram_tool_result_status(
         )),
         _ => Some(telegram_status(glyph::EXEC, "App Updated")),
     }
+}
+
+fn demangle_known_app_tool_name(tool_name: &str) -> &str {
+    if let Some((app_id, app_tool_name)) = tool_name.split_once(AppId::TOOL_NAME_SEPARATOR) {
+        if AppId::is_valid_name(app_id) {
+            return app_tool_name;
+        }
+    }
+    tool_name
 }
 
 fn telegram_status_ignored_tool(tool_name: &str) -> bool {
@@ -973,7 +1004,7 @@ mod tests {
     fn telegram_tool_status_renders_terminal_running_and_finished() {
         let call = AgentToolCall {
             id: "call_1".to_string(),
-            name: "terminal_exec".to_string(),
+            name: "terminal__terminal_exec".to_string(),
             arguments: serde_json::json!({}),
         };
         let running = tool_result(
@@ -1045,11 +1076,14 @@ mod tests {
             .map(|tool| tool.name)
             .collect::<HashSet<_>>();
 
-        assert!(names.contains("coding_open_project"));
-        assert!(names.contains("terminal_exec"));
-        assert!(names.contains("terminal_write_stdin"));
-        assert!(names.contains("terminal_terminate"));
+        assert!(names.contains("coding__coding_open_project"));
+        assert!(names.contains("terminal__terminal_exec"));
+        assert!(names.contains("terminal__terminal_write_stdin"));
+        assert!(names.contains("terminal__terminal_terminate"));
         assert!(names.contains("apply_patch"));
+        assert!(!names.contains("coding_open_project"));
+        assert!(!names.contains("terminal_exec"));
+        assert!(!names.contains("browser__browser_open_page"));
         assert!(!names.contains("browser_open_page"));
     }
 
@@ -1058,7 +1092,7 @@ mod tests {
         let mut isolated = IsolatedTestContext::new(AppId::coding()).await;
         let call = AgentToolCall {
             id: "call_1".to_string(),
-            name: "terminal_exec".to_string(),
+            name: "terminal__terminal_exec".to_string(),
             arguments: json!({
                 "command": "printf '%s\\n' delegated-terminal",
                 "yield_time_ms": 100,
@@ -1086,7 +1120,7 @@ mod tests {
 
         let open_call = AgentToolCall {
             id: "call_open".to_string(),
-            name: "coding_open_project".to_string(),
+            name: "coding__coding_open_project".to_string(),
             arguments: json!({
                 "project_root": root,
                 "language": "rust",
@@ -1127,7 +1161,7 @@ mod tests {
 
         let open_call = AgentToolCall {
             id: "call_open".to_string(),
-            name: "coding_open_project".to_string(),
+            name: "coding__coding_open_project".to_string(),
             arguments: json!({
                 "project_root": root,
                 "language": "rust",
@@ -1160,7 +1194,7 @@ mod tests {
         let mut isolated = IsolatedTestContext::new(AppId::coding()).await;
         let call = AgentToolCall {
             id: "call_1".to_string(),
-            name: "terminal_exec".to_string(),
+            name: "terminal__terminal_exec".to_string(),
             arguments: json!({
                 "command": "printf '%s\\n' segmented-terminal-context",
                 "yield_time_ms": 100,
@@ -1174,17 +1208,17 @@ mod tests {
         let rendered = build_preturn_context_text(&isolated.context, &state);
 
         assert!(rendered.contains("<focused_app>"), "{rendered}");
-        assert!(rendered.contains("<Coding>"), "{rendered}");
+        assert!(rendered.contains("<coding>"), "{rendered}");
         assert!(rendered.contains("<composed_apps>"), "{rendered}");
-        assert!(rendered.contains("<Terminal>"), "{rendered}");
+        assert!(rendered.contains("<terminal>"), "{rendered}");
         assert!(rendered.contains("role: delegated_tools"), "{rendered}");
         assert!(
-            rendered.contains("exposed_scopes: [Terminal]"),
+            rendered.contains("exposed_scopes: [terminal]"),
             "{rendered}"
         );
         assert!(
             rendered.contains(
-                "exposed_tools: [terminal_exec, terminal_write_stdin, terminal_terminate]"
+                "exposed_tools: [terminal__terminal_exec, terminal__terminal_write_stdin, terminal__terminal_terminate]"
             ),
             "{rendered}"
         );
@@ -1195,7 +1229,7 @@ mod tests {
         );
         assert!(
             rendered
-                .contains("Use only `terminal_exec / terminal_write_stdin / terminal_terminate`"),
+                .contains("terminal__terminal_exec / terminal__terminal_write_stdin / terminal__terminal_terminate"),
             "{rendered}"
         );
     }
@@ -1209,8 +1243,12 @@ mod tests {
             .map(|tool| tool.name)
             .collect::<HashSet<_>>();
 
-        assert!(names.contains("terminal_exec"));
+        assert!(names.contains("terminal__terminal_exec"));
+        assert!(names.contains("apply_patch"));
+        assert!(!names.contains("terminal_exec"));
+        assert!(!names.contains("coding__coding_open_project"));
         assert!(!names.contains("coding_open_project"));
+        assert!(!names.contains("browser__browser_open_page"));
         assert!(!names.contains("browser_open_page"));
     }
 }

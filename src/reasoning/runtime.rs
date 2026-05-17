@@ -86,6 +86,16 @@ pub struct AgentToolCall {
     pub arguments: Value,
 }
 
+impl AgentToolCall {
+    pub fn with_name(&self, name: impl Into<String>) -> Self {
+        Self {
+            id: self.id.clone(),
+            name: name.into(),
+            arguments: self.arguments.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentContent {
     text: String,

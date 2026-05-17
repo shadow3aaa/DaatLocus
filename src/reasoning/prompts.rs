@@ -133,7 +133,7 @@ fn background_app_attention_hint(app_id: AppId, state: &AppStateRender) -> Optio
             "The background terminal needs attention.".to_string()
         };
         return Some(format!(
-            "{} If you decide to handle the terminal, call `focus_app` to bring `Terminal` to the foreground first.",
+            "{} If you decide to handle the terminal, call `focus_app` with app=\"terminal\" first.",
             summary
         ));
     }

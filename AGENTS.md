@@ -320,7 +320,7 @@ Coding app must render its key state into `AppStateRender` so that:
 
 Operational constraints:
 
-- Coding tools (`read_code`, `edit_code`, `search_code`, `find_references`) must go through the Coding app, requiring `focus_app("Coding")` first.
+- Coding tools (`read_code`, `edit_code`, `search_code`, `find_references`) must go through the Coding app, requiring `focus_app("coding")` first.
 - `apply_patch` remains a Terminal app tool for raw file edits; Coding app handles semantic (selector-based) operations.
 - Coding app `render_state()` must include: project_root, open_languages, lsp_status, propagation_pending_count, and up to N recent propagation events.
 - LSP process lifecycle (start, crash recovery, shutdown) belongs to Coding app internals, not to tool return values.
@@ -340,8 +340,8 @@ Implementation: each `App` can optionally expose `fn composed_apps() -> Vec<AppI
 Rationale:
 
 - "I am coding" inherently includes "I need to run commands and edit raw files."
-- Forcing `focus_app("Terminal")` back-and-forth would be an unnecessary interruption.
-- Composition preserves the attention model: `focus_app("Coding")` means "I am in coding mode," and all tools needed for that mode are available.
+- Forcing `focus_app("terminal")` back-and-forth would be an unnecessary interruption.
+- Composition preserves the attention model: `focus_app("coding")` means "I am in coding mode," and all tools needed for that mode are available.
 
 ### SCOPE Capability Gap and Propagation Bridge
 
@@ -376,9 +376,9 @@ Future third-party `App` extensions use a source-first design. Do not copy Codex
 
 ### Directory Placement
 
-- Third-party app source directories are fixed under the runtime workspace: `~/daat-locus-workspace/apps/<app-name>/`.
+- Third-party app source directories are fixed under the runtime workspace: `~/daat-locus-workspace/apps/<app_id_snake_case>/`.
 - The current runtime workspace is resolved by `resolve_runtime_workspace_dir()`, which defaults to `~/daat-locus-workspace`.
-- `app_id` is exactly the folder name `<app-name>`.
+- `app_id` is exactly the folder name `<app_id_snake_case>`.
 - `~/.daat-locus` is a protected runtime directory and must not store third-party app source code.
 - This design exists because `~/.daat-locus` is treated as a protected runtime path inside the sandbox, while the workspace is the default editable area.
 
@@ -387,7 +387,7 @@ Future third-party `App` extensions use a source-first design. Do not copy Codex
 Minimal directory structure:
 
 ```text
-~/daat-locus-workspace/apps/<app-name>/
+~/daat-locus-workspace/apps/<app_id_snake_case>/
   app.toml
   runtime/
     app.lua
@@ -476,7 +476,7 @@ Recommended strategy:
 - Perform one full scan of `~/daat-locus-workspace/apps` at startup.
 - Scan and watch the workflow directory `~/daat-locus-workspace/workflows` separately.
 - Use `notify` at runtime to watch supported directory changes.
-- Map file events to the affected `<app-name>`.
+- Map file events to the affected `<app_id_snake_case>`.
 - Mark only that app as dirty and reload it incrementally.
 - When workflow files change, mark only the affected workflow as dirty and reload it incrementally.
 - If the watcher fails or directory state becomes untrusted, fall back to one full rescan.
@@ -493,7 +493,7 @@ Current conclusions:
 - Define workflow source separately as `~/daat-locus-workspace/workflows`.
 - Do not define `cache/apps`.
 - Do not define `cache/workflows`.
-- If the host later truly needs to persist app runtime state, use the protected runtime state system, for example `~/.daat-locus/state/apps/<app-name>/`.
+- If the host later truly needs to persist app runtime state, use the protected runtime state system, for example `~/.daat-locus/state/apps/<app_id_snake_case>/`.
 - If workflow telemetry later needs host persistence, use the protected runtime state system, for example `~/.daat-locus/state/workflows/`.
 
 Third-party apps and workflow specs are agent-editable assets, but they are not runtime state owned directly by the agent.

@@ -1439,7 +1439,7 @@ return app
         let state_root = TempDir::new().expect("create temp workspace state root");
         write_workspace_app(
             root.path(),
-            "cold-init",
+            "cold_init",
             r#"local app = {}
 
 function app.init(ctx, state)
@@ -1459,16 +1459,16 @@ return app
 "#,
         );
 
-        let app_dir = root.path().join("apps").join("cold-init");
+        let app_dir = root.path().join("apps").join("cold_init");
         let mut app = WorkspaceApp::load_from_dir(
             &app_dir,
             state_root.path(),
-            "cold-init",
+            "cold_init",
             &[],
             StrongFilesystemSandboxMode::Off,
             false,
         )
-        .expect("load cold-init app");
+        .expect("load cold_init app");
 
         assert!(
             app.render_state()
@@ -1495,7 +1495,7 @@ return app
         let state_root = TempDir::new().expect("create temp workspace state root");
         write_workspace_app(
             root.path(),
-            "configured-timeout",
+            "configured_timeout",
             r#"local app = {}
 local configured = false
 local ok_calls = 0
@@ -1559,16 +1559,16 @@ return app
 "#,
         );
 
-        let app_dir = root.path().join("apps").join("configured-timeout");
+        let app_dir = root.path().join("apps").join("configured_timeout");
         let mut app = WorkspaceApp::load_from_dir(
             &app_dir,
             state_root.path(),
-            "configured-timeout",
+            "configured_timeout",
             &[],
             StrongFilesystemSandboxMode::Off,
             false,
         )
-        .expect("load configured-timeout app");
+        .expect("load configured_timeout app");
 
         assert!(
             app.render_state()
@@ -1595,7 +1595,7 @@ return app
         let state_root = TempDir::new().expect("create temp workspace state root");
         write_workspace_app(
             root.path(),
-            "timeout-app",
+            "timeout_app",
             r#"local app = {}
 local ok_calls = 0
 
@@ -1638,11 +1638,11 @@ return app
 "#,
         );
 
-        let app_dir = root.path().join("apps").join("timeout-app");
+        let app_dir = root.path().join("apps").join("timeout_app");
         let mut app = WorkspaceApp::load_from_dir(
             &app_dir,
             state_root.path(),
-            "timeout-app",
+            "timeout_app",
             &[],
             StrongFilesystemSandboxMode::Off,
             false,
@@ -2020,7 +2020,7 @@ return M
         let state_root = TempDir::new().expect("create temp workspace state root");
         write_workspace_app(
             root.path(),
-            "schema-input",
+            "schema_input",
             r#"local app = {}
 
 function app.list_tools(ctx, state)
@@ -2058,7 +2058,7 @@ return app
             bootstrap.errors
         );
         let mut apps = AppManager::new(
-            Some(AppId::from_workspace_folder("schema-input").expect("valid app id")),
+            Some(AppId::from_workspace_folder("schema_input").expect("valid app id")),
             bootstrap.apps,
         )
         .await
@@ -2079,7 +2079,7 @@ return app
         let state_root = TempDir::new().expect("create temp workspace state root");
         write_workspace_app(
             root.path(),
-            "schema-output",
+            "schema_output",
             r#"local app = {}
 
 function app.list_tools(ctx, state)
@@ -2121,7 +2121,7 @@ return app
             bootstrap.errors
         );
         let mut apps = AppManager::new(
-            Some(AppId::from_workspace_folder("schema-output").expect("valid app id")),
+            Some(AppId::from_workspace_folder("schema_output").expect("valid app id")),
             bootstrap.apps,
         )
         .await

@@ -3,7 +3,7 @@ id: author-workspace-app
 ---
 
 ## When To Use
-- A third-party app needs to be created under `~/daat-locus-workspace/apps/<app-name>/`.
+- A third-party app needs to be created under `~/daat-locus-workspace/apps/<app_id_snake_case>/`.
 - An app needs its minimal runnable package structure, prompt docs, and Lua runtime entrypoint.
 - The task goal is to author an app that the runtime can recognize, load, and render, not only to fix a tiny local bug.
 
@@ -15,7 +15,7 @@ id: author-workspace-app
 
 ## Workflow
 1. Clarify the app goal, boundaries, inputs, outputs, and whether it truly should be modeled as an `App`.
-2. Check whether `~/daat-locus-workspace/apps/<app-name>/` already exists and decide whether to create it or complete an existing package.
+2. Check whether `~/daat-locus-workspace/apps/<app_id_snake_case>/` already exists and decide whether to create it or complete an existing package.
 3. Create the minimal package structure and first ensure `app.toml` points to `runtime/app.lua`.
 4. Implement the minimal runnable loop in `runtime/app.lua`, covering at least the state/render path and the tool call or notice/poll path actually needed by the task.
 5. Write `prompt/usage.md` to explain what the app is and when it is worth focusing.

@@ -1102,6 +1102,10 @@ fn runtime_follow_up_error_kind(reason: RuntimeFollowUpReason) -> Option<Runtime
 }
 
 fn classify_tool_runtime_error(tool_name: &str, error_text: &str) -> RuntimeErrorKind {
+    let tool_name = tool_name
+        .split_once(crate::app::AppId::TOOL_NAME_SEPARATOR)
+        .map(|(_, app_tool_name)| app_tool_name)
+        .unwrap_or(tool_name);
     let lower = error_text.to_ascii_lowercase();
     if tool_name == "update_plan"
         || lower.contains("update_plan must contain")

@@ -918,7 +918,7 @@ mod tests {
     fn focus_app_tool_declares_turn_boundary_reason() {
         assert_eq!(
             focus_app_turn_boundary_reason(&crate::app::AppId::terminal()),
-            "focused app changed to Terminal; re-render world state in a new turn"
+            "focused app changed to terminal; re-render world state in a new turn"
         );
     }
 
