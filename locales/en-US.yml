@@ -50,15 +50,15 @@ setup:
 
 config:
   provider_kind: "Provider type"
-  provider_openai_compatible: "OpenAI-compatible (Ollama / LM Studio / local)"
+  provider_openai_compatible: "OpenAI-compatible"
   provider_ollama_local: "Ollama (local)"
   provider_ollama_cloud: "Ollama Cloud (ollama.com)"
   provider_name: "Provider name (key in config.toml)"
   openai_api_key: "OpenAI API key (sk-...)"
   custom_base_url: "Use a custom base URL? (default: api.openai.com)"
   base_url_openai: "Base URL (API root, for example https://api.openai.com/v1)"
-  base_url_local: "Base URL (API root, for example http://localhost:11434/v1)"
-  local_api_key: "API key (for Ollama or local services, use ollama or any value)"
+  base_url_local: "Base URL (API root, for example https://api.openai.com/v1)"
+  local_api_key: "API key"
   ollama_host: "Ollama host (e.g. http://127.0.0.1:11434)"
   ollama_cloud_api_key: "Ollama API key (obtain from ollama.com/settings/api-keys)"
   ollama_keep_alive_enable: "Set keep_alive duration? (keep model loaded in memory)"

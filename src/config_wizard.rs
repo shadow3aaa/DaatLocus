@@ -1558,7 +1558,7 @@ async fn prompt_provider(
         ProviderKind::OpenAI => "openai",
         ProviderKind::OpenAICodexOauth => "codex-oauth",
         ProviderKind::GithubCopilot => "copilot",
-        ProviderKind::OpenAICompatible => "local",
+        ProviderKind::OpenAICompatible => "openai",
         ProviderKind::Ollama => "ollama",
         ProviderKind::OllamaCloud => "ollama-cloud",
     };
@@ -1660,9 +1660,9 @@ async fn prompt_provider(
         ProviderKind::OpenAICompatible => {
             let base_url = ui.text(
                 &crate::tr!(locale, "config.base_url_local"),
-                Some("http://localhost:11434/v1"),
+                Some("https://api.openai.com/v1"),
             )?;
-            let api_key = ui.text(&crate::tr!(locale, "config.local_api_key"), Some("ollama"))?;
+            let api_key = ui.text(&crate::tr!(locale, "config.local_api_key"), None)?;
             ProviderConfig::OpenaiCompatible {
                 base_url: normalize_provider_base_url(&base_url),
                 api_key,

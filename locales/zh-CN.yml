@@ -50,15 +50,15 @@ setup:
 
 config:
   provider_kind: "Provider 类型"
-  provider_openai_compatible: "OpenAI-compatible（Ollama / LM Studio / 本地）"
+  provider_openai_compatible: "OpenAI-compatible"
   provider_ollama_local: "Ollama（本地）"
   provider_ollama_cloud: "Ollama Cloud（ollama.com）"
   provider_name: "Provider 名称（在 config.toml 中的 key）"
   openai_api_key: "OpenAI API key（sk-...）"
   custom_base_url: "使用自定义 base URL？（默认 api.openai.com）"
   base_url_openai: "Base URL（API 根路径，例如 https://api.openai.com/v1）"
-  base_url_local: "Base URL（API 根路径，例如 http://localhost:11434/v1）"
-  local_api_key: "API key（Ollama 等本地服务可填 ollama 或任意值）"
+  base_url_local: "Base URL（API 根路径，例如 https://api.openai.com/v1）"
+  local_api_key: "API key"
   ollama_host: "Ollama 主机地址（例如 http://127.0.0.1:11434）"
   ollama_cloud_api_key: "Ollama API key（从 ollama.com/settings/api-keys 获取）"
   ollama_keep_alive_enable: "设置 keep_alive 时长？（保持模型加载在内存中）"
