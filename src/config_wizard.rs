@@ -1200,12 +1200,11 @@ fn render_text_prompt(
 
     let layout = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
         Constraint::Length(3),
         Constraint::Length(1),
         Constraint::Length(1),
     ]);
-    let [kind_area, prompt_area, input_area, help_area, note_area] = inner.layout(&layout);
+    let [prompt_area, input_area, help_area, note_area] = inner.layout(&layout);
 
     let display = if secret {
         "*".repeat(value.chars().count())
@@ -1223,13 +1222,6 @@ fn render_text_prompt(
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )])),
-        kind_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            crate::tr!(locale, "prompt_ui.enter_confirm"),
-            Style::default().fg(Color::Gray),
-        ))),
         prompt_area,
     );
 
