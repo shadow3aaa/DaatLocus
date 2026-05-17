@@ -1217,23 +1217,12 @@ fn render_text_prompt(
         Span::raw(display),
     ]);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                if secret {
-                    crate::tr!(locale, "prompt_ui.secret")
-                } else {
-                    crate::tr!(locale, "prompt_ui.input")
-                },
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                prompt.to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
+        Paragraph::new(Line::from(vec![Span::styled(
+            prompt.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )])),
         kind_area,
     );
     frame.render_widget(
@@ -1277,10 +1266,6 @@ fn render_text_prompt(
             Some(error) => Line::from(Span::styled(
                 error.to_string(),
                 Style::default().fg(Color::Red),
-            )),
-            None if secret => Line::from(Span::styled(
-                crate::tr!(locale, "prompt_ui.masked"),
-                Style::default().fg(Color::DarkGray),
             )),
             None => Line::raw(""),
         }),
