@@ -1282,10 +1282,7 @@ fn render_text_prompt(
                 crate::tr!(locale, "prompt_ui.masked"),
                 Style::default().fg(Color::DarkGray),
             )),
-            None => Line::from(Span::styled(
-                crate::tr!(locale, "prompt_ui.plain"),
-                Style::default().fg(Color::DarkGray),
-            )),
+            None => Line::raw(""),
         }),
         note_area,
     );

@@ -28,7 +28,6 @@ prompt_ui:
   enter_confirm: "Enter 确认"
   value: "值"
   masked: "输入已隐藏"
-  plain: "明文输入"
   loading_body: "请稍候..."
   loading_help: "等待远端响应"
   non_negative_integer: "请输入非负整数"

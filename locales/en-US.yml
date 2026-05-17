@@ -28,7 +28,6 @@ prompt_ui:
   enter_confirm: "Enter to confirm"
   value: "Value"
   masked: "input is masked"
-  plain: "plain text input"
   loading_body: "Please wait..."
   loading_help: "Waiting for remote response"
   non_negative_integer: "Enter a non-negative integer"
