@@ -1076,11 +1076,13 @@ mod tests {
             .map(|tool| tool.name)
             .collect::<HashSet<_>>();
 
-        assert!(names.contains("coding__coding_open_project"));
+        assert!(names.contains("coding__open_project"));
         assert!(names.contains("terminal__terminal_exec"));
         assert!(names.contains("terminal__terminal_write_stdin"));
         assert!(names.contains("terminal__terminal_terminate"));
         assert!(names.contains("apply_patch"));
+        assert!(!names.contains("open_project"));
+        assert!(!names.contains("coding__coding_open_project"));
         assert!(!names.contains("coding_open_project"));
         assert!(!names.contains("terminal_exec"));
         assert!(!names.contains("browser__browser_open_page"));
@@ -1120,7 +1122,7 @@ mod tests {
 
         let open_call = AgentToolCall {
             id: "call_open".to_string(),
-            name: "coding__coding_open_project".to_string(),
+            name: "coding__open_project".to_string(),
             arguments: json!({
                 "project_root": root,
                 "language": "rust",
@@ -1161,7 +1163,7 @@ mod tests {
 
         let open_call = AgentToolCall {
             id: "call_open".to_string(),
-            name: "coding__coding_open_project".to_string(),
+            name: "coding__open_project".to_string(),
             arguments: json!({
                 "project_root": root,
                 "language": "rust",
@@ -1246,6 +1248,8 @@ mod tests {
         assert!(names.contains("terminal__terminal_exec"));
         assert!(names.contains("apply_patch"));
         assert!(!names.contains("terminal_exec"));
+        assert!(!names.contains("coding__open_project"));
+        assert!(!names.contains("open_project"));
         assert!(!names.contains("coding__coding_open_project"));
         assert!(!names.contains("coding_open_project"));
         assert!(!names.contains("browser__browser_open_page"));

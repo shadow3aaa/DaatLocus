@@ -16,7 +16,7 @@ SCOPE is the semantic code positioning and propagation engine behind the Coding 
 
 Read operations may accept broad selectors. `read_code` and future `read_selection`-style operations may support symbols, files, ranges, around contexts, matches, outlines, and enclosing symbols.
 
-Edit operations use `coding_edit_code` with a single `diff` argument containing a complete SCOPE Diff document. Do not pass separate selector or patch fields to `coding_edit_code`.
+Edit operations use `edit_code` with a single `diff` argument containing a complete SCOPE Diff document. Do not pass separate selector or patch fields to `edit_code`.
 
 Selector support for SCOPE Diff actions:
 
@@ -26,9 +26,9 @@ Selector support for SCOPE Diff actions:
 - Enclosing selector: resolve to the enclosing symbol first, then use symbol edit semantics.
 - Outline selector: read-only; never edit an outline.
 
-## SCOPE Diff format for `coding_edit_code`
+## SCOPE Diff format for `edit_code`
 
-`coding_edit_code` takes exactly one argument:
+`edit_code` takes exactly one argument:
 
 ```json
 { "diff": "*** Begin Patch\n*** Update: src/foo.rs::fn old()\n@@\n-old()\n+new()\n*** End Patch\n" }

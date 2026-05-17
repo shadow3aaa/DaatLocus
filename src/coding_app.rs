@@ -36,13 +36,13 @@ const CODING_WHEN_TO_FOCUS: &[&str] = &[
 ];
 const CODING_HOW_TO_USE: &str = r#"Coding app is used to modify projects; think of it as a Coding Studio for the Agent.
 
-First, if the project you need to edit is not open yet, use the currently exposed Coding open-project tool; app scope mangling exposes it as `coding__coding_open_project`.
+First, if the project you need to edit is not open yet, use the currently exposed Coding open-project tool; app scope mangling exposes it as `coding__open_project`.
 
-When editing source code, always prefer the currently exposed Coding app tools, such as `coding__coding_edit_code`, `coding__coding_read_code`, `coding__grep`, and `coding__glob`, instead of substituting terminal commands. Important: except for configuration, generated assets, or other non-source areas outside SCOPE engine responsibility, or cases where these tools genuinely cannot complete the task, do not use other tools or shell commands to edit source code. When Coding is focused, `apply_patch` is rejected for source files that SCOPE says it is responsible for; use `coding__coding_edit_code`/SCOPE Diff for those files when that mangled name is exposed.
+When editing source code, always prefer the currently exposed Coding app tools, such as `coding__edit_code`, `coding__read_code`, `coding__grep`, and `coding__glob`, instead of substituting terminal commands. Important: except for configuration, generated assets, or other non-source areas outside SCOPE engine responsibility, or cases where these tools genuinely cannot complete the task, do not use other tools or shell commands to edit source code. When Coding is focused, `apply_patch` is rejected for source files that SCOPE says it is responsible for; use `coding__edit_code`/SCOPE Diff for those files when that mangled name is exposed.
 
-After each edit, the tool automatically evaluates the impact of your changes and accumulates pending review events. You can also see the current number of pending review events in Coding app state. You do not need to handle them immediately. However, after you finish a series of edits (usually when a plan step is complete, or when you judge that too many review events have accumulated), call the currently exposed Coding review tool, such as `coding__coding_next_review`, to acknowledge and claim review events, then follow their instructions to inspect the impact of your changes. This must always be done before reporting back to the user.
+After each edit, the tool automatically evaluates the impact of your changes and accumulates pending review events. You can also see the current number of pending review events in Coding app state. You do not need to handle them immediately. However, after you finish a series of edits (usually when a plan step is complete, or when you judge that too many review events have accumulated), call the currently exposed Coding review tool, such as `coding__next_review`, to acknowledge and claim review events, then follow their instructions to inspect the impact of your changes. This must always be done before reporting back to the user.
 
-SCOPE engine configuration hints are returned by `coding__coding_open_project` when that mangled name is exposed and retained in Coding app state, including available tree-sitter languages plus visible per-language `lsp_setup_hint` lines for LSP language/server setup guidance.
+SCOPE engine configuration hints are returned by `coding__open_project` when that mangled name is exposed and retained in Coding app state, including available tree-sitter languages plus visible per-language `lsp_setup_hint` lines for LSP language/server setup guidance.
 
 Coding app keeps app-level usage rules here. Selector grammar, selector operation support, grep bridge expectations, and structured selector result fields are owned by SCOPE and appended below from SCOPE's compiled usage interface."#;
 const CODING_TOOL_SCOPES: &[AppToolScope] = &[AppToolScope::Coding, AppToolScope::Terminal];
@@ -536,9 +536,7 @@ impl CodingApp {
 
     fn require_project(&self) -> Result<()> {
         if self.project_root.is_none() {
-            return Err(miette!(
-                "no coding project opened; call coding_open_project first"
-            ));
+            return Err(miette!("no coding project opened; call open_project first"));
         }
         Ok(())
     }
@@ -613,7 +611,7 @@ impl CodingApp {
             return Ok(());
         }
         Err(miette!(
-            "apply_patch is forbidden for SCOPE-owned source files while Coding is focused. Use coding_edit_code/SCOPE Diff instead. Blocked file(s): {}",
+            "apply_patch is forbidden for SCOPE-owned source files while Coding is focused. Use edit_code/SCOPE Diff instead. Blocked file(s): {}",
             blocked.join(", ")
         ))
     }
@@ -685,13 +683,13 @@ impl App for CodingApp {
     fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
         Ok(vec![
             AppToolSpec {
-                name: "coding_open_project".to_string(),
+                name: "open_project".to_string(),
                 description: "Open a project for semantic code operations using scope-engine.".to_string(),
                 scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingOpenProjectArgs)).unwrap(),
             },
             AppToolSpec {
-                name: "coding_read_code".to_string(),
+                name: "read_code".to_string(),
                 description: "Read selector-resolved code content and language metadata.".to_string(),
                 scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingReadCodeArgs)).unwrap(),
@@ -709,13 +707,13 @@ impl App for CodingApp {
                 input_schema: serde_json::to_value(schema_for!(CodingGlobArgs)).unwrap(),
             },
             AppToolSpec {
-                name: "coding_edit_code".to_string(),
+                name: "edit_code".to_string(),
                 description: "Apply a complete SCOPE Diff patch document and return propagation results.".to_string(),
                 scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingEditCodeArgs)).unwrap(),
             },
             AppToolSpec {
-                name: "coding_next_review".to_string(),
+                name: "next_review".to_string(),
                 description: "Acknowledge and return the next accumulated scope-engine propagation review event, if any.".to_string(),
                 scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingNextReviewArgs)).unwrap(),
@@ -725,7 +723,7 @@ impl App for CodingApp {
 
     fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {
         let summary = match call.name.as_str() {
-            "coding_open_project" => {
+            "open_project" => {
                 let args: CodingOpenProjectArgs = parse_coding_tool_args(call)?;
                 format!(
                     "project_root={} language={}",
@@ -733,7 +731,7 @@ impl App for CodingApp {
                     args.language.unwrap_or_else(|| "auto".to_string())
                 )
             }
-            "coding_read_code" => {
+            "read_code" => {
                 let args: CodingReadCodeArgs = parse_coding_tool_args(call)?;
                 format!("selector={}", summarize_coding_inline_text(&args.selector))
             }
@@ -745,11 +743,11 @@ impl App for CodingApp {
                 let args: CodingGlobArgs = parse_coding_tool_args(call)?;
                 format!("pattern={}", summarize_coding_inline_text(&args.pattern))
             }
-            "coding_edit_code" => {
+            "edit_code" => {
                 let args: CodingEditCodeArgs = parse_coding_tool_args(call)?;
                 format!("scope_diff_chars={}", args.diff.len())
             }
-            "coding_next_review" => "next propagation review".to_string(),
+            "next_review" => "next propagation review".to_string(),
             _ => return Err(miette!("unknown coding tool `{}`", call.name)),
         };
         Ok(EpisodeActionRecord {
@@ -782,11 +780,11 @@ impl App for CodingApp {
         context: &AppToolExecutionContext,
     ) -> Result<AppToolExecutionResult> {
         match call.name.as_str() {
-            "coding_open_project" => {
+            "open_project" => {
                 let args: CodingOpenProjectArgs = parse_coding_tool_args(call)?;
                 self.open_project(args, context)
             }
-            "coding_read_code" => {
+            "read_code" => {
                 self.require_project()?;
                 let args: CodingReadCodeArgs = parse_coding_tool_args(call)?;
                 let result = self.scope.read_code(&args.selector)?;
@@ -894,7 +892,7 @@ impl App for CodingApp {
                 }
                 Ok(output)
             }
-            "coding_edit_code" => {
+            "edit_code" => {
                 self.require_project()?;
                 let args: CodingEditCodeArgs = parse_coding_tool_args(call)?;
                 let results = self.scope.edit_code(&args.diff)?;
@@ -937,7 +935,7 @@ impl App for CodingApp {
                 )?;
                 Ok(output)
             }
-            "coding_next_review" => {
+            "next_review" => {
                 self.require_project()?;
                 let _args: CodingNextReviewArgs = parse_coding_tool_args(call)?;
                 let review = self.scope.ack_next_event();

@@ -616,7 +616,7 @@ fn apply_coding_edit_cell(item: &mut WebActivityItem, cell: &CodingEditActivityC
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
     item.tool = Some(WebActivityTool {
-        name: "coding_edit_code".to_string(),
+        name: "edit_code".to_string(),
         app: Some("Coding".to_string()),
         input_preview: Some(cell.selector.clone()),
         output_preview: Some(format!(
@@ -677,7 +677,7 @@ fn apply_coding_review_cell(item: &mut WebActivityItem, cell: &CodingReviewActiv
         "review_pending": cell.review_pending,
     }));
     item.tool = Some(WebActivityTool {
-        name: "coding_next_review".to_string(),
+        name: "next_review".to_string(),
         app: Some("Coding".to_string()),
         input_preview: None,
         output_preview: Some(cell.summary.clone()),
@@ -696,7 +696,7 @@ fn apply_coding_open_project_cell(
     item.actor = Some(WebActivityActor::Tool);
     item.title = "Opened Coding Project".to_string();
     item.tool = Some(WebActivityTool {
-        name: "coding_open_project".to_string(),
+        name: "open_project".to_string(),
         app: Some("Coding".to_string()),
         input_preview: Some(cell.project_root.clone()),
         output_preview: compact_preview(&cell.detail_lines),

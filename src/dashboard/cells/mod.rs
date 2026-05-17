@@ -669,7 +669,7 @@ mod tests {
             stable_id: "coding-tools-project".to_string(),
             title: "Explored".to_string(),
             calls: vec![CodingToolCallActivityCell {
-                tool_name: "coding_read_code".to_string(),
+                tool_name: "read_code".to_string(),
                 summary: "second".to_string(),
                 detail_lines: Vec::new(),
                 detail_title: None,
