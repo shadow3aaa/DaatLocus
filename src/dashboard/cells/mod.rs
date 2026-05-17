@@ -357,10 +357,14 @@ fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<ActivityCe
 }
 
 fn user_cell_from_agent_content(content: &AgentContent) -> UserActivityCell {
+    let full_body = content.as_text().trim().to_string();
     let mut cell = user_cell(
         first_line_or_fallback(content.as_text(), "user"),
-        remaining_lines_with_limit(content.as_text(), 8),
+        remaining_lines(content.as_text()),
     );
+    if !full_body.is_empty() {
+        cell.full_body = Some(full_body);
+    }
     cell.image_attachments = content
         .parts()
         .iter()
@@ -429,6 +433,10 @@ fn first_line_or_fallback<'a>(content: &'a str, fallback: &'a str) -> &'a str {
 }
 
 fn remaining_lines_with_limit(content: &str, limit: usize) -> Vec<String> {
+    remaining_lines(content).into_iter().take(limit).collect()
+}
+
+fn remaining_lines(content: &str) -> Vec<String> {
     let mut lines: Vec<&str> = content.lines().collect();
     // drop first line (used as title)
     if !lines.is_empty() {
@@ -444,7 +452,6 @@ fn remaining_lines_with_limit(content: &str, limit: usize) -> Vec<String> {
     }
     lines
         .into_iter()
-        .take(limit)
         .map(str::trim)
         .map(ToString::to_string)
         .collect()
@@ -620,6 +627,30 @@ mod tests {
             activity_cell_from_tool_ui_event(ToolUiEvent::Plan(PlanUiData { steps: Vec::new() }));
 
         assert!(cell.is_none());
+    }
+
+    #[test]
+    fn user_activity_cell_preserves_long_multiline_input() {
+        let message = (1..=12)
+            .map(|index| format!("[定位段 {index:03}] marker-{index:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let cells = render_activity_from_messages(vec![HistoryMessage::user(message.clone())]);
+
+        assert_eq!(cells.len(), 1);
+        match &cells[0] {
+            ActivityCell::User(cell) => {
+                assert_eq!(cell.body_lines.len(), 11);
+                assert!(
+                    cell.body_lines
+                        .iter()
+                        .any(|line| line.contains("marker-012"))
+                );
+                assert_eq!(cell.full_body.as_deref(), Some(message.as_str()));
+            }
+            _ => panic!("expected user activity cell"),
+        }
     }
 
     #[test]

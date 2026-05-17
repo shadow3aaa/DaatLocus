@@ -334,7 +334,12 @@ fn apply_user_cell(item: &mut WebActivityItem, cell: &UserActivityCell) {
     item.kind = WebActivityKind::Message;
     item.actor = Some(WebActivityActor::User);
     item.title = "User".to_string();
-    item.blocks = text_blocks(cell.body_lines.clone());
+    item.blocks = text_blocks(
+        cell.full_body
+            .clone()
+            .map(|full| vec![full])
+            .unwrap_or_else(|| primary_lines(&cell.title, &cell.body_lines)),
+    );
     item.blocks
         .extend(
             cell.image_attachments

@@ -48,6 +48,9 @@ pub struct ThinkingActivityCell {
 pub struct UserActivityCell {
     pub title: String,
     pub body_lines: Vec<String>,
+    /// Full user message body. Used by TUI/WebUI to render long inputs without truncation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_body: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_attachments: Vec<MessageImageAttachment>,
 }
@@ -138,6 +141,7 @@ pub fn user_cell(title: impl Into<String>, body_lines: Vec<String>) -> UserActiv
     UserActivityCell {
         title: title.into(),
         body_lines,
+        full_body: None,
         image_attachments: Vec::new(),
     }
 }

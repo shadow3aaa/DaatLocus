@@ -1641,9 +1641,14 @@ pub async fn run_tui_dashboard(
         } else {
             0
         };
-        let term_width = terminal.size().map(|s| s.width).unwrap_or(80);
-        let mut input_lines = wrapped_input_height(command_input.as_str(), term_width);
-        input_lines = input_lines.min(10);
+        let term_size = terminal.size().ok();
+        let term_width = term_size.map(|size| size.width).unwrap_or(80);
+        let term_height = term_size.map(|size| size.height).unwrap_or(24);
+        let input_lines = command_input_display_height(
+            wrapped_input_height(command_input.as_str(), term_width),
+            term_height,
+            popup_rows,
+        );
 
         // Decrement load cooldown each tick
         load_cooldown = load_cooldown.saturating_sub(1);
@@ -2179,6 +2184,14 @@ struct CommandBarRenderState<'a> {
 fn should_insert_newline_on_enter(modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::ALT)
 }
+fn command_input_display_height(input_height: u16, terminal_height: u16, popup_rows: u16) -> u16 {
+    let reserved_rows = 2u16.saturating_add(popup_rows);
+    let max_rows = terminal_height
+        .saturating_sub(8)
+        .saturating_sub(reserved_rows)
+        .max(1);
+    input_height.max(1).min(max_rows)
+}
 
 fn wrapped_input_height(text: &str, term_width: u16) -> u16 {
     let available = term_width.saturating_sub(2).max(1) as usize;
@@ -2249,12 +2262,33 @@ fn expand_paste_placeholders(text: &str, pending: &[(String, String)]) -> String
 /// Compute (x, y) display position for a byte cursor position within the input text.
 /// Accounts for multi-line input and terminal wrapping at `available_width`.
 /// `prompt_width` is the display width of the leading prompt (e.g. "› " = 2).
+fn cursor_display_row(text: &str, byte_pos: usize, available_width: usize) -> u16 {
+    let byte_pos = byte_pos.min(text.len());
+    let before = &text[..byte_pos];
+    let mut total_rows: u16 = 0;
+    let mut lines = before.split('\n').peekable();
+    while let Some(line) = lines.next() {
+        let dw: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
+        if lines.peek().is_some() {
+            if dw == 0 {
+                total_rows += 1;
+            } else {
+                total_rows += dw.div_ceil(available_width) as u16;
+            }
+        } else {
+            total_rows += (dw / available_width) as u16;
+        }
+    }
+    total_rows
+}
+
 fn cursor_display_xy(
     text: &str,
     byte_pos: usize,
     available_width: usize,
     prompt_width: u16,
     area: Rect,
+    scroll: u16,
 ) -> (u16, u16) {
     let byte_pos = byte_pos.min(text.len());
     let before = &text[..byte_pos];
@@ -2277,7 +2311,7 @@ fn cursor_display_xy(
         }
     }
     let x = area.x + prompt_width + col;
-    let y = area.y + total_rows;
+    let y = area.y + total_rows.saturating_sub(scroll);
     (x, y)
 }
 
@@ -2342,9 +2376,12 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
     } else {
         Style::default().fg(Color::White)
     };
+    let cursor_total_row = cursor_display_row(input, cursor_pos, available_width);
+    let input_scroll = cursor_total_row.saturating_sub(rows[1].height.saturating_sub(1));
     let input_para = Paragraph::new(display_text)
         .style(input_style)
-        .wrap(ratatui::widgets::Wrap { trim: false });
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .scroll((input_scroll, 0));
     f.render_widget(input_para, rows[1]);
 
     // Compute cursor position from tracked cursor_pos, accounting for wrapping
@@ -2354,6 +2391,7 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
         available_width,
         2, // prompt "› " width
         rows[1],
+        input_scroll,
     );
     f.set_cursor_position(Position {
         x: cursor_x,
@@ -2673,10 +2711,15 @@ mod tests {
     }
 
     #[test]
+    fn command_input_display_height_expands_past_ten_lines() {
+        assert_eq!(command_input_display_height(18, 40, 0), 18);
+    }
+
+    #[test]
     fn cursor_display_xy_moves_after_trailing_newline() {
         let area = Rect::new(0, 0, 80, 10);
         assert_eq!(
-            cursor_display_xy("hello\n", "hello\n".len(), 78, 2, area),
+            cursor_display_xy("hello\n", "hello\n".len(), 78, 2, area, 0),
             (2, 1)
         );
     }

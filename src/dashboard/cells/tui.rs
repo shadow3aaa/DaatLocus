@@ -468,12 +468,43 @@ fn render_thinking_cell_lines(cell: &ThinkingActivityCell, max_width: u16) -> Ve
 }
 
 fn render_user_cell_lines(cell: &UserActivityCell) -> Vec<Line<'static>> {
+    if let Some(ref full) = cell.full_body {
+        let body_text = full
+            .lines()
+            .skip(1) // first line is the title, already rendered above
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut lines = vec![Line::from(vec![
+            Span::styled(
+                glyph::EXEC,
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                cell.title.clone(),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])];
+        let md_lines = render_markdown(&body_text, Color::Gray);
+        for md_line in md_lines {
+            let mut spans = vec![Span::raw("   ")];
+            spans.extend(md_line.spans);
+            let mut line = Line::from(spans);
+            line.style = md_line.style;
+            lines.push(line);
+        }
+        return lines;
+    }
     render_text_activity_lines(
         glyph::EXEC,
         Color::Green,
         &cell.title,
         &cell.body_lines,
-        6,
+        usize::MAX,
         None,
         true,
     )
@@ -1749,6 +1780,28 @@ That's it.";
         .map(|line| line_text(&line))
         .collect::<Vec<_>>();
         assert!(notice.iter().any(|line| line.contains("Resolved Notice")));
+    }
+
+    #[test]
+    fn user_activity_cell_renders_full_message() {
+        let body = (1..=12)
+            .map(|index| format!("[定位段 {index:03}] marker-{index:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let full_body = format!("Title\n{body}");
+        let cell = UserActivityCell {
+            title: "Title".to_string(),
+            body_lines: body.lines().take(6).map(ToString::to_string).collect(),
+            full_body: Some(full_body),
+            image_attachments: Vec::new(),
+        };
+
+        let rendered = render_user_cell_lines(&cell)
+            .into_iter()
+            .map(|line| line_text(&line))
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("marker-012")));
     }
 
     #[test]

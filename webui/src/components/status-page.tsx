@@ -534,6 +534,7 @@ type AgentChatActivityCellRender =
       marker: string;
       title: string;
       bodyLines: string[];
+      fullBody?: string | null;
       imageAttachments?: AgentChatImageAttachmentData[];
       bodyLimit?: number;
       tone?: "default" | "error" | "muted";
@@ -1544,6 +1545,7 @@ function AgentChatActivityCellView({
         marker={render.marker}
         title={render.title}
         bodyLines={render.bodyLines}
+        fullBody={render.fullBody}
         imageAttachments={render.imageAttachments}
         bodyLimit={render.bodyLimit}
         tone={render.tone}
@@ -1671,6 +1673,7 @@ function AgentChatActivityTextCell({
   marker,
   title,
   bodyLines,
+  fullBody,
   imageAttachments = [],
   bodyLimit,
   tone = "default",
@@ -1679,16 +1682,15 @@ function AgentChatActivityTextCell({
   marker: string;
   title: string;
   bodyLines: string[];
+  fullBody?: string | null;
   imageAttachments?: AgentChatImageAttachmentData[];
   bodyLimit?: number;
   tone?: "default" | "error" | "muted";
 }) {
-  const visibleLines = typeof bodyLimit === "number"
-    ? bodyLines.slice(0, bodyLimit)
-    : bodyLines;
-  const hiddenLineCount = typeof bodyLimit === "number"
-    ? Math.max(0, bodyLines.length - visibleLines.length)
-    : 0;
+  const renderedText = fullBody
+    ? fullBody.split("\n").slice(1).join("\n")
+    : bodyLines.join("\n");
+  const renderedLineCount = renderedText ? renderedText.split("\n").length : 0;
 
   return (
     <div
@@ -1713,7 +1715,7 @@ function AgentChatActivityTextCell({
           <AgentChatMarkdownInline text={title} />
         </p>
       </div>
-      {visibleLines.length > 0 ? (
+      {renderedLineCount > 0 ? (
         <div
           className={cn(
             "space-y-0.5 px-3 text-muted-foreground",
@@ -1721,19 +1723,11 @@ function AgentChatActivityTextCell({
             tone === "muted" && "text-muted-foreground",
           )}
         >
-          {visibleLines.map((line, index) => (
-            <p
-              key={`${id}-activity-line-${index}`}
-              className="min-w-0 break-words"
-            >
-              <AgentChatMarkdownInline text={line} />
-            </p>
-          ))}
-          {hiddenLineCount > 0 ? (
-            <p className="text-xs text-muted-foreground">
-              … {hiddenLineCount} more line(s)
-            </p>
-          ) : null}
+          <AgentChatMarkdownText
+            text={renderedText}
+            limit={bodyLimit ?? AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT}
+            tone={tone === "error" ? "error" : "default"}
+          />
         </div>
       ) : null}
       {imageAttachments.length > 0 ? (
@@ -2342,9 +2336,9 @@ function FragmentPair({ left, right }: { left: string; right: string }) {
 
 function limitMarkdownInput(text: string, limit: number): string {
   if (limit >= Number.MAX_SAFE_INTEGER) return text;
-  const chunks = text.split(/\n{2,}/);
-  if (chunks.length <= limit) return chunks.join("\n\n");
-  return chunks.slice(0, limit).join("\n\n");
+  const lines = text.split("\n");
+  if (lines.length <= limit) return text;
+  return lines.slice(0, limit).join("\n");
 }
 
 const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
@@ -3206,6 +3200,7 @@ function agentChatTextActivityRender(
     marker,
     title: stringValue(cell.title, fallbackTitle),
     bodyLines: stringArrayValue(cell.body_lines),
+    fullBody: nullableStringValue(cell.full_body),
   };
 }
 

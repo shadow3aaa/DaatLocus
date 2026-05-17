@@ -258,6 +258,7 @@ export type WebActivityBlock =
 export type ActivityCellCommon = {
   title: string;
   body_lines?: string[];
+  full_body?: string | null;
 };
 
 export type ActivityCellUser = ActivityCellCommon & {
