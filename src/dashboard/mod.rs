@@ -24,7 +24,10 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use crossterm::cursor::SetCursorStyle;
-use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use futures_util::StreamExt;
 use ratatui::{
     prelude::*,
@@ -1191,6 +1194,11 @@ pub async fn run_tui_dashboard(
         terminal.backend_mut(),
         crossterm::event::EnableBracketedPaste
     )?;
+    let keyboard_enhancement_enabled = crossterm::execute!(
+        terminal.backend_mut(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+    )
+    .is_ok();
     let mut command_input = InputState::new();
     // Large/multi-line pastes stored as (placeholder, full_text) pairs.
     let mut pending_pastes: Vec<(String, String)> = Vec::new();
@@ -1500,7 +1508,7 @@ pub async fn run_tui_dashboard(
                             command_popup_scroll = 0;
                         }
                         KeyCode::Enter => {
-                            if key.modifiers.contains(KeyModifiers::ALT) {
+                            if should_insert_newline_on_enter(key.modifiers) {
                                 command_input.insert_char('\n');
                                 command_popup_selection = 0;
                                 command_popup_scroll = 0;
@@ -1766,6 +1774,9 @@ pub async fn run_tui_dashboard(
     }
 
     crossterm::terminal::disable_raw_mode()?;
+    if keyboard_enhancement_enabled {
+        let _ = crossterm::execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags,);
+    }
     crossterm::execute!(
         terminal.backend_mut(),
         SetCursorStyle::DefaultUserShape,
@@ -2165,13 +2176,17 @@ struct CommandBarRenderState<'a> {
     input_lines: u16,
 }
 
+fn should_insert_newline_on_enter(modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::ALT)
+}
+
 fn wrapped_input_height(text: &str, term_width: u16) -> u16 {
     let available = term_width.saturating_sub(2).max(1) as usize;
     if text.is_empty() {
         return 1;
     }
     let mut total: u16 = 0;
-    for line in text.lines() {
+    for line in text.split('\n') {
         if line.is_empty() {
             total += 1;
             continue;
@@ -2312,9 +2327,9 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
     let display_text = if input.is_empty() {
         "› type a message, or /command".to_string()
     } else {
-        let mut s = String::with_capacity(input.len() + 2);
+        let mut s = String::with_capacity(input.len() + 2 + input.matches('\n').count() * 2);
         s.push_str("› ");
-        s.push_str(input);
+        push_command_input_display_text(&mut s, input);
         if let Some(completion) = completion
             && completion != input
         {
@@ -2371,6 +2386,16 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
         ]),
     });
     f.render_widget(footer, footer_row);
+}
+
+fn push_command_input_display_text(output: &mut String, input: &str) {
+    for (line_index, line) in input.split('\n').enumerate() {
+        if line_index > 0 {
+            output.push('\n');
+            output.push_str("  ");
+        }
+        output.push_str(line);
+    }
 }
 
 fn render_working_status_line() -> Line<'static> {
@@ -2557,9 +2582,10 @@ fn adjusted_popup_scroll(current_scroll: usize, selected_index: usize, total: us
 fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
     if !is_dashboard_command_input(input) {
         if input.trim().is_empty() {
-            return "Enter send. Prefix / for commands. Esc clear.".to_string();
+            return "Enter send. Shift+Enter newline. Prefix / for commands. Esc clear."
+                .to_string();
         }
-        return "Enter send. Prefix / for commands.".to_string();
+        return "Enter send. Shift+Enter newline. Prefix / for commands.".to_string();
     }
     let matches = matching_commands(input, context);
     if command_completion_body(input)
@@ -2567,7 +2593,8 @@ fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
         .unwrap_or_default()
         .is_empty()
     {
-        return "Up/Down select. Tab accept. Enter run. Esc clear.".to_string();
+        return "Up/Down select. Tab accept. Enter run. Shift+Enter newline. Esc clear."
+            .to_string();
     }
     if matches.len() == 1 {
         let suggestion = &matches[0];
@@ -2625,6 +2652,41 @@ mod tests {
                 .iter()
                 .all(|suggestion| suggestion.completion.starts_with('/'))
         );
+    }
+
+    #[test]
+    fn shift_or_alt_enter_insert_newline() {
+        assert!(should_insert_newline_on_enter(KeyModifiers::SHIFT));
+        assert!(should_insert_newline_on_enter(KeyModifiers::ALT));
+        assert!(should_insert_newline_on_enter(
+            KeyModifiers::SHIFT | KeyModifiers::ALT
+        ));
+        assert!(!should_insert_newline_on_enter(KeyModifiers::NONE));
+        assert!(!should_insert_newline_on_enter(KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn wrapped_input_height_counts_trailing_newline() {
+        assert_eq!(wrapped_input_height("hello", 80), 1);
+        assert_eq!(wrapped_input_height("hello\n", 80), 2);
+        assert_eq!(wrapped_input_height("hello\nworld", 80), 2);
+    }
+
+    #[test]
+    fn cursor_display_xy_moves_after_trailing_newline() {
+        let area = Rect::new(0, 0, 80, 10);
+        assert_eq!(
+            cursor_display_xy("hello\n", "hello\n".len(), 78, 2, area),
+            (2, 1)
+        );
+    }
+
+    #[test]
+    fn command_input_display_text_indents_multiline_continuations() {
+        let mut display = String::from("› ");
+        push_command_input_display_text(&mut display, "hello\nworld\n");
+
+        assert_eq!(display, "› hello\n  world\n  ");
     }
 
     #[test]
