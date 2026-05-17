@@ -1091,33 +1091,25 @@ fn render_select_prompt<T: AsRef<str>>(
     } else {
         let layout = Layout::vertical([
             Constraint::Length(1),
-            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
         ]);
-        let [kind_area, prompt_area, list_area, help_area] = inner.layout(&layout);
+        let [prompt_area, list_area, help_area] = inner.layout(&layout);
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(
-                    crate::tr!(locale, "prompt_ui.select"),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::raw("  "),
                 Span::styled(
                     prompt.to_string(),
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ),
+                Span::raw("  ·  "),
+                Span::styled(
+                    crate::tr!(locale, "prompt_ui.option_count", count = items.len()),
+                    Style::default().fg(Color::Gray),
+                ),
             ])),
-            kind_area,
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                crate::tr!(locale, "prompt_ui.option_count", count = items.len()),
-                Style::default().fg(Color::Gray),
-            ))),
             prompt_area,
         );
 
@@ -1274,33 +1266,24 @@ fn render_loading_prompt(frame: &mut Frame, locale: Locale, prompt: &str, note: 
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Length(1),
     ]);
-    let [kind_area, prompt_area, body_area, help_area] = inner.layout(&layout);
+    let [prompt_area, body_area, help_area] = inner.layout(&layout);
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                crate::tr!(locale, "prompt_ui.loading"),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                prompt.to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        kind_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
+    let mut prompt_spans = vec![Span::styled(
+        prompt.to_string(),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if !note.trim().is_empty() {
+        prompt_spans.push(Span::raw("  ·  "));
+        prompt_spans.push(Span::styled(
             note.to_string(),
             Style::default().fg(Color::Gray),
-        ))),
-        prompt_area,
-    );
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(prompt_spans)), prompt_area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("•", Style::default().fg(Color::Cyan)),
@@ -1332,28 +1315,11 @@ fn render_detail_prompt(
 
     let layout = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ]);
-    let [kind_area, prompt_area, body_area, help_area] = inner.layout(&layout);
+    let [prompt_area, body_area, help_area] = inner.layout(&layout);
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                crate::tr!(locale, "prompt_ui.detail"),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                prompt.to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        kind_area,
-    );
     let visible_rows = body_area.height.max(1) as usize;
     let total_rows = lines.len().max(1);
     let visible_end = (scroll as usize)
@@ -1361,16 +1327,25 @@ fn render_detail_prompt(
         .min(total_rows);
 
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!(
-                "{}  ·  {}-{} / {}",
-                crate::tr!(locale, "prompt_ui.line_count", count = lines.len()),
-                (scroll as usize).min(total_rows).saturating_add(1),
-                visible_end,
-                total_rows
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                prompt.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Style::default().fg(Color::Gray),
-        ))),
+            Span::raw("  ·  "),
+            Span::styled(
+                format!(
+                    "{}  ·  {}-{} / {}",
+                    crate::tr!(locale, "prompt_ui.line_count", count = lines.len()),
+                    (scroll as usize).min(total_rows).saturating_add(1),
+                    visible_end,
+                    total_rows
+                ),
+                Style::default().fg(Color::Gray),
+            ),
+        ])),
         prompt_area,
     );
     frame.render_widget(
@@ -1410,33 +1385,25 @@ fn render_status_prompt(frame: &mut Frame, locale: Locale, prompt: &str, lines: 
 
     let layout = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ]);
-    let [kind_area, prompt_area, body_area, help_area] = inner.layout(&layout);
+    let [prompt_area, body_area, help_area] = inner.layout(&layout);
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                crate::tr!(locale, "prompt_ui.loading"),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw("  "),
             Span::styled(
                 prompt.to_string(),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::raw("  ·  "),
+            Span::styled(
+                crate::tr!(locale, "prompt_ui.line_count", count = lines.len()),
+                Style::default().fg(Color::Gray),
+            ),
         ])),
-        kind_area,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            crate::tr!(locale, "prompt_ui.line_count", count = lines.len()),
-            Style::default().fg(Color::Gray),
-        ))),
         prompt_area,
     );
     frame.render_widget(
@@ -3345,6 +3312,7 @@ mod tests {
         assert!(!text.contains("Config inline"));
         assert!(!text.contains("3 option"));
         assert!(!text.contains("Select  Config management"));
+        assert!(!text.lines().any(|line| line.trim() == "Select"));
         assert!(text.contains(&items[0]));
         assert!(text.contains(&crate::tr!(Locale::EnUs, "prompt_ui.help_select")));
     }
