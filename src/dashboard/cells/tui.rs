@@ -960,13 +960,7 @@ fn render_reply_cell_lines(cell: &ReplyActivityCell) -> Vec<Line<'static>> {
         ),
     ])];
     if !cell.message_lines.is_empty() {
-        let joined = cell
-            .message_lines
-            .iter()
-            .take(8)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
+        let joined = cell.message_lines.join("\n");
         let md_lines = render_markdown(&joined, Color::White);
         for md_line in md_lines {
             let mut spans = vec![Span::raw("   ")];
@@ -1755,5 +1749,23 @@ That's it.";
         .map(|line| line_text(&line))
         .collect::<Vec<_>>();
         assert!(notice.iter().any(|line| line.contains("Resolved Notice")));
+    }
+
+    #[test]
+    fn reply_activity_cell_renders_full_message() {
+        let message_lines = (1..=12)
+            .map(|index| format!("[定位段 {index:03}] marker-{index:03}"))
+            .collect::<Vec<_>>();
+
+        let rendered = render_reply_cell_lines(&ReplyActivityCell {
+            disposition: ReplyDisposition::Resolved,
+            subject: ReplySubject::Message,
+            message_lines,
+        })
+        .into_iter()
+        .map(|line| line_text(&line))
+        .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("marker-012")));
     }
 }
