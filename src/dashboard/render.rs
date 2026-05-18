@@ -12,9 +12,11 @@ use crate::{
 };
 
 use super::{
-    DashboardContextCompositionSnapshot, DashboardPlanStep, DashboardRuntimeOptimizationSnapshot,
-    DashboardState, DashboardTokenUsageSnapshot, DashboardWorkflowOptimizationSnapshot,
-    activity_cells_from_history_items, dashboard_agent_name, render_activity_from_messages,
+    DashboardContextCompositionSnapshot, DashboardPlanStep, DashboardRuntimeActivity,
+    DashboardRuntimeActivityStatus, DashboardRuntimeOptimizationSnapshot,
+    DashboardRuntimeStatusLevel, DashboardState, DashboardTokenUsageSnapshot,
+    DashboardWorkflowOptimizationSnapshot, activity_cells_from_history_items, dashboard_agent_name,
+    render_activity_from_messages,
 };
 
 /// Sleep-related constants used in dashboard rendering.
@@ -45,6 +47,12 @@ pub fn sync_dashboard_state(
         };
         crate::dashboard::sync_web_activity_state(state);
         state.last_cycle_elapsed_ms = last_cycle_elapsed_ms;
+        state.runtime_activity = runtime_activity_for_dashboard(
+            context,
+            sleep_status,
+            state.runtime_status.as_deref(),
+            state.runtime_status_level,
+        );
         state.footer_context =
             render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
         state.current_plan_step = current_plan_step_for_dashboard(context);
@@ -496,6 +504,72 @@ fn format_duration(duration: Duration) -> String {
     } else {
         format!("{seconds}s")
     }
+}
+
+pub fn runtime_activity_for_dashboard(
+    context: &Context,
+    sleep_status: &SleepStatusSnapshot,
+    runtime_status: Option<&str>,
+    runtime_status_level: Option<DashboardRuntimeStatusLevel>,
+) -> DashboardRuntimeActivity {
+    if runtime_status_level == Some(DashboardRuntimeStatusLevel::Error) {
+        return DashboardRuntimeActivity::new(
+            DashboardRuntimeActivityStatus::Error,
+            "Error",
+            runtime_status.map(str::to_string),
+        );
+    }
+
+    let active_runtime_phase = context
+        .active_runtime_phase
+        .map(|phase| phase.label().to_string());
+
+    if context.active_runtime_turn {
+        let status = match context.active_runtime_phase {
+            Some(crate::context::RuntimeTurnPhase::PreflightPreTurnContext)
+            | Some(crate::context::RuntimeTurnPhase::PreflightCompaction)
+            | Some(crate::context::RuntimeTurnPhase::ModelRequest) => {
+                DashboardRuntimeActivityStatus::Thinking
+            }
+            Some(crate::context::RuntimeTurnPhase::ToolExecution) => {
+                DashboardRuntimeActivityStatus::Tooling
+            }
+            None => DashboardRuntimeActivityStatus::Running,
+        };
+        let label = match status {
+            DashboardRuntimeActivityStatus::Thinking => "Thinking",
+            DashboardRuntimeActivityStatus::Tooling => "Using tools",
+            _ => "Running",
+        };
+        return DashboardRuntimeActivity::new(status, label, runtime_status.map(str::to_string))
+            .with_runtime_turn(active_runtime_phase);
+    }
+
+    if sleep_status.running {
+        return DashboardRuntimeActivity::new(
+            DashboardRuntimeActivityStatus::Waiting,
+            "Waiting",
+            runtime_status
+                .or(Some("Sleep is running"))
+                .map(str::to_string),
+        );
+    }
+
+    match runtime_status_level {
+        Some(DashboardRuntimeStatusLevel::Debug)
+        | Some(DashboardRuntimeStatusLevel::Info)
+        | Some(DashboardRuntimeStatusLevel::Warn) => DashboardRuntimeActivity::new(
+            DashboardRuntimeActivityStatus::Running,
+            "Running",
+            runtime_status.and_then(trimmed_runtime_status_detail),
+        ),
+        _ => DashboardRuntimeActivity::default(),
+    }
+}
+
+fn trimmed_runtime_status_detail(status: &str) -> Option<String> {
+    let status = status.trim();
+    (!status.is_empty()).then(|| status.to_string())
 }
 
 pub fn render_status_command_output_for_dashboard(

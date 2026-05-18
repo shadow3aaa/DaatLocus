@@ -13,11 +13,12 @@ use crate::{
         render_app_status_outputs_for_dashboard, render_dashboard_footer_context,
         render_sleep_status_output_for_dashboard, render_status_command_output_for_dashboard,
         render_system_prompt_output_for_dashboard, render_telegram_status_for_dashboard,
-        runtime_optimization_snapshot_for_dashboard, token_usage_snapshot_for_dashboard,
-        workflow_optimization_snapshot_for_dashboard,
+        runtime_activity_for_dashboard, runtime_optimization_snapshot_for_dashboard,
+        token_usage_snapshot_for_dashboard, workflow_optimization_snapshot_for_dashboard,
     },
     dashboard::{
-        DashboardActivityHistoryStore, DashboardControlCommand, DashboardState, ReducedMotion,
+        DashboardActivityHistoryStore, DashboardControlCommand, DashboardRuntimeActivity,
+        DashboardRuntimeActivityStatus, DashboardRuntimeStatusLevel, DashboardState, ReducedMotion,
         activity_cells_from_history_items, dashboard_agent_name, sync_web_activity_state,
     },
     events::EventStore,
@@ -65,6 +66,12 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     let (tx, _rx) = tokio::sync::watch::channel(DashboardState {
         agent_name: dashboard_agent_name(),
         runtime_status: Some("Daemon initializing".to_string()),
+        runtime_status_level: Some(DashboardRuntimeStatusLevel::Info),
+        runtime_activity: DashboardRuntimeActivity::new(
+            DashboardRuntimeActivityStatus::Running,
+            "Running",
+            Some("Daemon initializing".to_string()),
+        ),
         footer_context: "Daemon is initializing; runtime commands are disabled until ready."
             .to_string(),
         activity_history: initial_activity_history,
@@ -302,6 +309,8 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
             activity_history,
             last_cycle_elapsed_ms: None,
             runtime_status: None,
+            runtime_status_level: None,
+            runtime_activity: runtime_activity_for_dashboard(&context, &sleep_status, None, None),
             current_plan_step: current_plan_step_for_dashboard(&context),
             token_usage: token_usage_snapshot_for_dashboard(&context),
             runtime_optimization: runtime_optimization_snapshot_for_dashboard(&sleep_status),

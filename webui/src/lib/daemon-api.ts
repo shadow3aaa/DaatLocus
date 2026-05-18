@@ -412,6 +412,8 @@ export type DashboardSnapshot = {
   activity_history?: DashboardActivityHistoryWindow;
   last_cycle_elapsed_ms: number | null;
   runtime_status: string | null;
+  runtime_status_level?: DashboardRuntimeStatusLevel | null;
+  runtime_activity?: DashboardRuntimeActivity;
   current_plan_step: DashboardPlanStep | null;
   token_usage?: DashboardTokenUsageSnapshot;
   workflow_optimization?: DashboardWorkflowOptimizationSnapshot;
@@ -419,6 +421,28 @@ export type DashboardSnapshot = {
   context_composition?: DashboardContextCompositionSnapshot | null;
   footer_context: string;
   footer_estimated_input_tokens: number | null;
+};
+
+export type DashboardRuntimeStatusLevel =
+  | "debug"
+  | "info"
+  | "warn"
+  | "error";
+
+export type DashboardRuntimeActivityStatus =
+  | "idle"
+  | "thinking"
+  | "running"
+  | "tooling"
+  | "waiting"
+  | "error";
+
+export type DashboardRuntimeActivity = {
+  status: DashboardRuntimeActivityStatus;
+  label: string;
+  detail?: string | null;
+  active_runtime_turn: boolean;
+  active_runtime_phase?: string | null;
 };
 
 export type LogSource = {

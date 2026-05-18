@@ -115,6 +115,7 @@ pub(crate) async fn daat_locus_loop(
     context.active_runtime_turn = false;
     context.runtime_turn_started_at = None;
     context.set_runtime_phase(None);
+    clear_runtime_status(Some(tx));
     refresh_sleep_status_queues(sleep_status).await;
     sync_dashboard_state(
         context,

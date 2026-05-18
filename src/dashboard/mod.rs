@@ -145,6 +145,66 @@ pub struct DashboardContextCompositionSnapshot {
     pub prefix_units: Vec<DashboardContextCompositionPrefixUnit>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardRuntimeActivityStatus {
+    #[default]
+    Idle,
+    Thinking,
+    Running,
+    Tooling,
+    Waiting,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardRuntimeStatusLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardRuntimeActivity {
+    pub status: DashboardRuntimeActivityStatus,
+    pub label: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    pub active_runtime_turn: bool,
+    #[serde(default)]
+    pub active_runtime_phase: Option<String>,
+}
+
+impl DashboardRuntimeActivity {
+    pub fn new(
+        status: DashboardRuntimeActivityStatus,
+        label: impl Into<String>,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            status,
+            label: label.into(),
+            detail,
+            active_runtime_turn: false,
+            active_runtime_phase: None,
+        }
+    }
+
+    pub fn with_runtime_turn(mut self, active_runtime_phase: Option<String>) -> Self {
+        self.active_runtime_turn = true;
+        self.active_runtime_phase = active_runtime_phase;
+        self
+    }
+}
+
+impl Default for DashboardRuntimeActivity {
+    fn default() -> Self {
+        Self::new(DashboardRuntimeActivityStatus::Idle, "Idle", None)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardState {
     #[serde(default = "default_agent_name")]
@@ -170,6 +230,10 @@ pub struct DashboardState {
     pub activity_history: DashboardActivityHistoryWindow,
     pub last_cycle_elapsed_ms: Option<u128>,
     pub runtime_status: Option<String>,
+    #[serde(default)]
+    pub runtime_status_level: Option<DashboardRuntimeStatusLevel>,
+    #[serde(default)]
+    pub runtime_activity: DashboardRuntimeActivity,
     #[serde(default)]
     pub current_plan_step: Option<DashboardPlanStep>,
     #[serde(default)]

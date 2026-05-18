@@ -6,7 +6,7 @@ use tracing_subscriber::EnvFilter;
 use crate::{
     context_budget::RequestBudgetBreakdown,
     daat_locus_paths::daat_locus_paths,
-    dashboard::DashboardState,
+    dashboard::{DashboardRuntimeStatusLevel, DashboardState},
     reasoning::runtime::{
         AgentContentPart, AgentMessage, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult,
         render_assistant_tool_call_protocol_dump,
@@ -15,10 +15,19 @@ use crate::{
 
 #[derive(Clone, Copy)]
 pub enum RuntimeStatusLevel {
-    Debug,
     Info,
     Warn,
     Error,
+}
+
+impl RuntimeStatusLevel {
+    fn dashboard_level(self) -> DashboardRuntimeStatusLevel {
+        match self {
+            Self::Info => DashboardRuntimeStatusLevel::Info,
+            Self::Warn => DashboardRuntimeStatusLevel::Warn,
+            Self::Error => DashboardRuntimeStatusLevel::Error,
+        }
+    }
 }
 
 /// Initialize file logging and return the guard that must be held until process exit.
@@ -73,25 +82,31 @@ pub fn set_runtime_status(
 ) {
     let message = message.into();
     match level {
-        RuntimeStatusLevel::Debug => tracing::debug!("{message}"),
         RuntimeStatusLevel::Info => tracing::info!("{message}"),
         RuntimeStatusLevel::Warn => tracing::warn!("{message}"),
         RuntimeStatusLevel::Error => tracing::error!("{message}"),
     }
-    set_dashboard_runtime_status(tx, message);
+    set_dashboard_runtime_status(tx, message, Some(level.dashboard_level()));
 }
 
 pub fn set_runtime_status_only(tx: Option<&Sender<DashboardState>>, message: impl Into<String>) {
-    set_dashboard_runtime_status(tx, message.into());
+    set_dashboard_runtime_status(tx, message.into(), None);
 }
 
-fn set_dashboard_runtime_status(tx: Option<&Sender<DashboardState>>, message: String) {
+fn set_dashboard_runtime_status(
+    tx: Option<&Sender<DashboardState>>,
+    message: String,
+    level: Option<DashboardRuntimeStatusLevel>,
+) {
     if let Some(tx) = tx {
         tx.send_if_modified(|state| {
-            if state.runtime_status.as_deref() == Some(message.as_str()) {
+            if state.runtime_status.as_deref() == Some(message.as_str())
+                && state.runtime_status_level == level
+            {
                 false
             } else {
                 state.runtime_status = Some(message.clone());
+                state.runtime_status_level = level;
                 true
             }
         });
@@ -101,10 +116,11 @@ fn set_dashboard_runtime_status(tx: Option<&Sender<DashboardState>>, message: St
 pub fn clear_runtime_status(tx: Option<&Sender<DashboardState>>) {
     if let Some(tx) = tx {
         tx.send_if_modified(|state| {
-            if state.runtime_status.is_none() {
+            if state.runtime_status.is_none() && state.runtime_status_level.is_none() {
                 false
             } else {
                 state.runtime_status = None;
+                state.runtime_status_level = None;
                 true
             }
         });
