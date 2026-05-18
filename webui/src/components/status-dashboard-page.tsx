@@ -35,9 +35,7 @@ import {
   formatCompactNumber,
   formatPercent,
   formatPercentAxisTick,
-  runtimeOptimizationDonutData,
   runtimeOptimizationProgressData,
-  workflowOptimizationDonutData,
   workflowOptimizationProgressData,
   type ContextCompositionPrefixSummaryDatum,
   type ContextCompositionSegmentChartDatum,
@@ -82,6 +80,16 @@ type ContextCompositionTooltipPayloadItem = {
 
 type ContextPrefixTooltipPayloadItem = {
   payload?: ContextCompositionPrefixSummaryDatum;
+};
+
+type OptimizationChartConfig = Record<string, { color: string }>;
+
+type OptimizationProgressDatum = {
+  key: string;
+  label: string;
+  value: number;
+  colorKey: string;
+  detail: string;
 };
 
 const STATUS_CARD_DEFINITIONS: Record<StatusCardId, StatusCardDefinition> = {
@@ -711,15 +719,11 @@ function WorkflowOptimizationCard({
     () => workflowOptimizationProgressData(snapshot),
     [snapshot],
   );
-  const chartData = useMemo(
-    () => workflowOptimizationDonutData(progressData),
-    [progressData],
-  );
   const total = progressData.reduce((sum, item) => sum + item.value, 0);
 
   if (total === 0) {
     return (
-      <Card className="w-full overflow-visible">
+      <Card className="w-full">
         <CardHeader>
           <CardTitle>Workflow Optimization</CardTitle>
           <CardAction>{dragHandle}</CardAction>
@@ -734,48 +738,18 @@ function WorkflowOptimizationCard({
   }
 
   return (
-    <Card className="w-full overflow-visible">
+    <Card className="w-full">
       <CardHeader>
         <CardTitle>Workflow Optimization</CardTitle>
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
         <div className="space-y-3">
-          <ChartContainer
+          <OptimizationProgressBar
+            data={progressData}
+            total={total}
             config={WORKFLOW_OPTIMIZATION_CHART_CONFIG}
-            className="h-10 w-full"
-          >
-            <BarChart
-              accessibilityLayer
-              data={[
-                Object.fromEntries(chartData.map((d) => [d.key, d.chartValue])),
-              ]}
-              layout="vertical"
-              margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
-            >
-              <ChartTooltip
-                cursor={false}
-                content={<WorkflowOptimizationBarTooltip />}
-              />
-              <XAxis type="number" hide />
-              {chartData.map((item, index) => (
-                <Bar
-                  key={item.key}
-                  dataKey={item.key}
-                  stackId="pipeline"
-                  fill={`var(--color-${item.colorKey})`}
-                  radius={
-                    index === 0
-                      ? [4, 0, 0, 4]
-                      : index === chartData.length - 1
-                        ? [0, 4, 4, 0]
-                        : 0
-                  }
-                  isAnimationActive={false}
-                />
-              ))}
-            </BarChart>
-          </ChartContainer>
+          />
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <div className="flex items-center gap-1.5">
               <span>Queued</span>
@@ -803,15 +777,11 @@ function RuntimeOptimizationCard({
     () => runtimeOptimizationProgressData(snapshot),
     [snapshot],
   );
-  const chartData = useMemo(
-    () => runtimeOptimizationDonutData(progressData),
-    [progressData],
-  );
   const total = progressData.reduce((sum, item) => sum + item.value, 0);
 
   if (total === 0) {
     return (
-      <Card className="w-full overflow-visible">
+      <Card className="w-full">
         <CardHeader>
           <CardTitle>Runtime Optimization</CardTitle>
           <CardAction>{dragHandle}</CardAction>
@@ -826,48 +796,18 @@ function RuntimeOptimizationCard({
   }
 
   return (
-    <Card className="w-full overflow-visible">
+    <Card className="w-full">
       <CardHeader>
         <CardTitle>Runtime Optimization</CardTitle>
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
         <div className="space-y-3">
-          <ChartContainer
+          <OptimizationProgressBar
+            data={progressData}
+            total={total}
             config={RUNTIME_OPTIMIZATION_CHART_CONFIG}
-            className="h-10 w-full"
-          >
-            <BarChart
-              accessibilityLayer
-              data={[
-                Object.fromEntries(chartData.map((d) => [d.key, d.chartValue])),
-              ]}
-              layout="vertical"
-              margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
-            >
-              <ChartTooltip
-                cursor={false}
-                content={<RuntimeOptimizationBarTooltip />}
-              />
-              <XAxis type="number" hide />
-              {chartData.map((item, index) => (
-                <Bar
-                  key={item.key}
-                  dataKey={item.key}
-                  stackId="pipeline"
-                  fill={`var(--color-${item.colorKey})`}
-                  radius={
-                    index === 0
-                      ? [4, 0, 0, 4]
-                      : index === chartData.length - 1
-                        ? [0, 4, 4, 0]
-                        : 0
-                  }
-                  isAnimationActive={false}
-                />
-              ))}
-            </BarChart>
-          </ChartContainer>
+          />
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <div className="flex items-center gap-1.5">
               <span>Queued</span>
@@ -1008,76 +948,66 @@ function statusCardIdFromValue(value: unknown): StatusCardId | null {
     : null;
 }
 
-function WorkflowOptimizationBarTooltip({
-  active,
-  payload,
+function OptimizationProgressBar({
+  data,
+  total,
+  config,
 }: {
-  active?: boolean;
-  payload?: Array<{
-    name: string;
-    value: number;
-    payload: Record<string, number>;
-  }>;
+  data: OptimizationProgressDatum[];
+  total: number;
+  config: OptimizationChartConfig;
 }) {
-  if (!active || !payload || payload.length === 0) {
-    return null;
-  }
-  const entry = payload[0]?.payload;
-  if (!entry) return null;
-  const items = Object.entries(entry)
-    .filter(([_, v]) => v > 0)
-    .map(([key, value]) => {
-      const configKey = key as keyof typeof WORKFLOW_OPTIMIZATION_CHART_CONFIG;
-      const config = WORKFLOW_OPTIMIZATION_CHART_CONFIG[configKey];
-      return { key, value, label: config?.label ?? key };
-    });
-  return (
-    <div className="rounded-md border bg-popover p-2 text-xs shadow-md">
-      {items.map((item) => (
-        <div key={item.key} className="flex justify-between gap-4 py-0.5">
-          <span>{item.label}</span>
-          <span className="font-mono tabular-nums font-medium">
-            {formatCompactNumber(item.value)}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
+  const visibleItems = data.filter((item) => item.value > 0);
 
-function RuntimeOptimizationBarTooltip({
-  active,
-  payload,
-}: {
-  active?: boolean;
-  payload?: Array<{
-    name: string;
-    value: number;
-    payload: Record<string, number>;
-  }>;
-}) {
-  if (!active || !payload || payload.length === 0) {
+  if (total <= 0 || visibleItems.length === 0) {
     return null;
   }
-  const entry = payload[0]?.payload;
-  if (!entry) return null;
-  const items = Object.entries(entry)
-    .filter(([_, v]) => v > 0)
-    .map(([key, value]) => {
-      const configKey = key as keyof typeof RUNTIME_OPTIMIZATION_CHART_CONFIG;
-      const config = RUNTIME_OPTIMIZATION_CHART_CONFIG[configKey];
-      return { key, value, label: config?.label ?? key };
-    });
+
   return (
-    <div className="rounded-md border bg-popover p-2 text-xs shadow-md">
-      {items.map((item) => (
-        <div key={item.key} className="flex justify-between gap-4 py-0.5">
-          <span>{item.label}</span>
-          <span className="font-mono tabular-nums font-medium">
-            {formatCompactNumber(item.value)}
-          </span>
-        </div>
-      ))}
+    <div className="space-y-2">
+      <div
+        className="flex h-10 w-full overflow-hidden rounded-md border bg-muted/30"
+        role="img"
+        aria-label={visibleItems
+          .map(
+            (item) =>
+              `${item.label} ${formatCompactNumber(item.value)}: ${item.detail}`,
+          )
+          .join("; ")}
+      >
+        {visibleItems.map((item) => {
+          const color = config[item.colorKey]?.color ?? "var(--muted)";
+          const width = `${(item.value / total) * 100}%`;
+
+          return (
+            <div
+              key={item.key}
+              aria-hidden="true"
+              className="min-w-[2px]"
+              style={{ width, backgroundColor: color }}
+            />
+          );
+        })}
+      </div>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        {visibleItems.map((item) => {
+          const color = config[item.colorKey]?.color ?? "var(--muted)";
+
+          return (
+            <div key={item.key} className="flex min-w-0 items-center gap-1.5">
+              <span
+                aria-hidden="true"
+                className="h-2 w-2 flex-none rounded-full"
+                style={{ backgroundColor: color }}
+              />
+              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+              <span className="font-mono tabular-nums text-foreground">
+                {formatCompactNumber(item.value)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
