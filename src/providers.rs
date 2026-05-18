@@ -1215,6 +1215,10 @@ mod tests {
     use crate::reasoning::runtime::{AgentToolCall, HistoryMessage};
     use serde_json::json;
 
+    fn thinking_budget(value: &str) -> ThinkingBudget {
+        serde_json::from_value(json!(value)).expect("thinking budget deserializes")
+    }
+
     #[test]
     fn compatible_agent_messages_flatten_unmatched_tool_results() {
         let messages = agent_turn_request_to_openai_messages(
@@ -1398,7 +1402,7 @@ mod tests {
     #[test]
     fn thinking_budget_is_injected_as_reasoning_effort_by_default() {
         let model_config = ModelConfig {
-            thinking_budget: Some(ThinkingBudget::new("medium")),
+            thinking_budget: Some(thinking_budget("medium")),
             ..Default::default()
         };
         let client = OpenAIClient::from_parts("test-key", "https://api.openai.com", &model_config);
@@ -1420,7 +1424,7 @@ mod tests {
     fn deepseek_thinking_budget_uses_thinking_and_reasoning_effort_parameters() {
         let model_config = ModelConfig {
             model_id: "deepseek-reasoner".to_string(),
-            thinking_budget: Some(ThinkingBudget::new("medium")),
+            thinking_budget: Some(thinking_budget("medium")),
             max_completion_tokens: 393_216,
             ..Default::default()
         };

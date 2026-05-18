@@ -1383,6 +1383,10 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn thinking_budget(value: &str) -> ThinkingBudget {
+        serde_json::from_value(serde_json::json!(value)).expect("thinking budget deserializes")
+    }
     use crate::config::{ModelConfig, ThinkingBudget};
 
     fn jwt(payload: serde_json::Value) -> String {
@@ -1465,7 +1469,7 @@ mod tests {
             &ModelConfig {
                 model_id: "gpt-5.4".to_string(),
                 provider: "codex-oauth".to_string(),
-                thinking_budget: Some(ThinkingBudget::new("max")),
+                thinking_budget: Some(thinking_budget("max")),
                 ..ModelConfig::default()
             },
         );

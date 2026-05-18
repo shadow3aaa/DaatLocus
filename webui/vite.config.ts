@@ -48,5 +48,6 @@ export default defineConfig({
   build: {
     outDir: process.env.DAAT_LOCUS_WEBUI_OUT_DIR ?? "dist",
     emptyOutDir: true,
+    chunkSizeWarningLimit: 1_100,
   },
 });

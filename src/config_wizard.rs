@@ -922,16 +922,16 @@ impl PromptUi {
             let locale = self.locale;
             self.terminal_mut()?
                 .draw(|frame| {
-                    render_text_prompt(
-                        frame,
+                    let render_state = TextPromptRenderState {
                         locale,
                         prompt,
-                        &field_title,
-                        &value,
+                        field_title: &field_title,
+                        value: &value,
                         cursor,
                         secret,
                         error,
-                    )
+                    };
+                    render_text_prompt(frame, &render_state);
                 })
                 .map_err(|e| {
                     miette!(
@@ -1175,19 +1175,17 @@ fn render_text_prompt_to_text(
     let backend = TestBackend::new(80, PROMPT_VIEWPORT_HEIGHT);
     let mut terminal = Terminal::new(backend).expect("test terminal initializes");
     let field_title = text_prompt_field_title(locale, prompt, secret, error.is_some());
+    let render_state = TextPromptRenderState {
+        locale,
+        prompt,
+        field_title: &field_title,
+        value,
+        cursor: value.len(),
+        secret,
+        error,
+    };
     terminal
-        .draw(|frame| {
-            render_text_prompt(
-                frame,
-                locale,
-                prompt,
-                &field_title,
-                value,
-                value.len(),
-                secret,
-                error,
-            )
-        })
+        .draw(|frame| render_text_prompt(frame, &render_state))
         .expect("test text prompt renders");
 
     buffer_to_text(terminal.backend().buffer())
@@ -1283,16 +1281,17 @@ fn text_prompt_field_title(locale: Locale, prompt: &str, secret: bool, numeric: 
     }
 }
 
-fn render_text_prompt(
-    frame: &mut Frame,
+struct TextPromptRenderState<'a> {
     locale: Locale,
-    prompt: &str,
-    field_title: &str,
-    value: &str,
+    prompt: &'a str,
+    field_title: &'a str,
+    value: &'a str,
     cursor: usize,
     secret: bool,
-    error: Option<&str>,
-) {
+    error: Option<&'a str>,
+}
+
+fn render_text_prompt(frame: &mut Frame, state: &TextPromptRenderState<'_>) {
     let block = prompt_panel_block();
     let inner = block.inner(frame.area());
     frame.render_widget(block, frame.area());
@@ -1305,10 +1304,10 @@ fn render_text_prompt(
     ]);
     let [prompt_area, input_area, help_area, note_area] = inner.layout(&layout);
 
-    let display = if secret {
-        "*".repeat(value.chars().count())
+    let display = if state.secret {
+        "*".repeat(state.value.chars().count())
     } else {
-        value.to_string()
+        state.value.to_string()
     };
     let input = Line::from(vec![
         Span::styled("> ", Style::default().fg(Color::Cyan)),
@@ -1316,7 +1315,7 @@ fn render_text_prompt(
     ]);
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            prompt.to_string(),
+            state.prompt.to_string(),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -1326,13 +1325,13 @@ fn render_text_prompt(
 
     let field_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(if error.is_some() {
+        .border_style(if state.error.is_some() {
             Style::default().fg(Color::Red)
         } else {
             Style::default().fg(Color::Cyan)
         })
         .title(Line::from(Span::styled(
-            field_title.to_string(),
+            state.field_title.to_string(),
             Style::default().fg(Color::DarkGray),
         )));
     let field_inner = field_block.inner(input_area);
@@ -1343,17 +1342,17 @@ fn render_text_prompt(
         input_area,
     );
     frame.set_cursor_position((
-        field_inner.x + 2 + value[..cursor].chars().count() as u16,
+        field_inner.x + 2 + state.value[..state.cursor].chars().count() as u16,
         field_inner.y,
     ));
 
     frame.render_widget(
-        Paragraph::new(crate::tr!(locale, "prompt_ui.help_text"))
+        Paragraph::new(crate::tr!(state.locale, "prompt_ui.help_text"))
             .style(Style::default().fg(Color::DarkGray)),
         help_area,
     );
     frame.render_widget(
-        Paragraph::new(match error {
+        Paragraph::new(match state.error {
             Some(error) => Line::from(Span::styled(
                 error.to_string(),
                 Style::default().fg(Color::Red),
@@ -2847,14 +2846,9 @@ pub async fn run_config_menu() -> Result<()> {
     loop {
         let mut locale = ui.locale();
         let has_config = crate::config::config_file_exists().await;
-        if has_config {
-            match crate::config::load_config().await {
-                Ok(cfg) => {
-                    locale = cfg.locale;
-                    ui.set_locale(locale);
-                }
-                Err(_) => {}
-            }
+        if has_config && let Ok(cfg) = crate::config::load_config().await {
+            locale = cfg.locale;
+            ui.set_locale(locale);
         }
 
         let items = [

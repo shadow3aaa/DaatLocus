@@ -691,10 +691,10 @@ pub fn render_telegram_tool_result_status(
 }
 
 fn demangle_known_app_tool_name(tool_name: &str) -> &str {
-    if let Some((app_id, app_tool_name)) = tool_name.split_once(AppId::TOOL_NAME_SEPARATOR) {
-        if AppId::is_valid_name(app_id) {
-            return app_tool_name;
-        }
+    if let Some((app_id, app_tool_name)) = tool_name.split_once(AppId::TOOL_NAME_SEPARATOR)
+        && AppId::is_valid_name(app_id)
+    {
+        return app_tool_name;
     }
     tool_name
 }
