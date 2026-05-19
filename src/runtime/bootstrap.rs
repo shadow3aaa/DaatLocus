@@ -184,25 +184,6 @@ pub(crate) async fn build_eval_context_with_compiled(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn eval_context_starts_without_focused_app() {
-        let home = tempfile::tempdir().expect("test home");
-        let _home_override = DaatLocusHomeOverride::set(home.path().to_path_buf());
-
-        let context = build_eval_context_with_compiled(
-            crate::config::Config::default(),
-            CompiledPromptStore::from_entries(Vec::new()),
-        )
-        .await;
-
-        assert_eq!(context.apps.focused(), None);
-    }
-}
-
 pub(crate) fn bootstrap_telegram_transport_state_from_acl(
     telegram_handle: &crate::telegram_transport::state::TelegramTransportStateHandle,
     telegram_acl: &TelegramAclHandle,
@@ -273,5 +254,24 @@ impl Drop for DaatLocusHomeOverride {
                 env::remove_var("DAAT_LOCUS_HOME");
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn eval_context_starts_without_focused_app() {
+        let home = tempfile::tempdir().expect("test home");
+        let _home_override = DaatLocusHomeOverride::set(home.path().to_path_buf());
+
+        let context = build_eval_context_with_compiled(
+            crate::config::Config::default(),
+            CompiledPromptStore::from_entries(Vec::new()),
+        )
+        .await;
+
+        assert_eq!(context.apps.focused(), None);
     }
 }
