@@ -4,7 +4,7 @@ use super::{
     prompt_doc::{PromptBlock, PromptDocument, PromptNode, PromptUnitDoc},
     prompt_parts::{
         AfterClaimContextInput, AfterClaimContextPart, AfterClaimInputPart,
-        AfterClaimWorkflowRoutingPart, AppsSystemPart, CompiledAdditionsSystemPart,
+        AfterClaimWorkflowPrimitiveRoutingPart, AppsSystemPart, CompiledAdditionsSystemPart,
         EventSystemPart, PersonaSystemPart, PlanSystemPart, PreTurnAppSurfacePart,
         PreTurnContextPart, PreTurnPlanPart, PreTurnSensoryPart, PreTurnWorkflowStatePart,
         SystemPromptPart, WorkflowSystemPart, WorkspaceSystemPart,
@@ -88,7 +88,7 @@ impl AfterClaimContextAssembler {
     pub fn default_runtime() -> Self {
         Self::new(vec![
             Box::new(AfterClaimInputPart),
-            Box::new(AfterClaimWorkflowRoutingPart),
+            Box::new(AfterClaimWorkflowPrimitiveRoutingPart),
         ])
     }
 

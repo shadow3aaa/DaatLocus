@@ -21,6 +21,7 @@ use crate::{
 };
 
 const MAX_SUMMARY_ITEMS: usize = 12;
+const MAX_COMPACT_SUMMARY_CHARS: usize = 180;
 const WORKFLOWS_DIR_NAME: &str = "workflows";
 const WORKFLOW_RUN_RECORDS_FILE_NAME: &str = "run_records.jsonl";
 static WORKFLOW_RUN_RECORDS_IO_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -66,20 +67,44 @@ impl WorkflowSpec {
         Ok(self)
     }
 
-    pub fn compact_summary(&self) -> WorkflowSummary {
-        WorkflowSummary {
+    pub fn primitive_summary(&self) -> WorkflowPrimitiveSummary {
+        WorkflowPrimitiveSummary {
             id: self.id.clone(),
             origin: WorkflowOrigin::Workspace,
-            when_to_use_summary: self.when_to_use.first().cloned().unwrap_or_default(),
+            capability_summary: compact_list_summary(&self.workflow_steps, 2),
+            inputs_summary: compact_list_summary(&self.preconditions, 2),
+            outputs_summary: compact_list_summary(&self.done_criteria, 2),
+            when_to_use_summary: compact_list_summary(&self.when_to_use, 1),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct WorkflowSummary {
+pub struct WorkflowPrimitiveSummary {
     pub id: String,
     pub origin: WorkflowOrigin,
+    #[serde(default)]
+    pub capability_summary: String,
+    #[serde(default)]
+    pub inputs_summary: String,
+    #[serde(default)]
+    pub outputs_summary: String,
+    #[serde(default)]
     pub when_to_use_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowPrimitiveRoutingCatalog {
+    pub primitive_ids: Vec<WorkflowPrimitiveId>,
+    pub relevant_primitives: Vec<WorkflowPrimitiveSummary>,
+    pub total_count: usize,
+    pub relevant_omitted_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowPrimitiveId {
+    pub id: String,
+    pub origin: WorkflowOrigin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -208,19 +233,67 @@ impl WorkflowStore {
             .collect()
     }
 
-    pub fn summaries(&self, limit: usize) -> Vec<WorkflowSummary> {
-        let mut items = self
+    pub fn primitive_routing_catalog(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> WorkflowPrimitiveRoutingCatalog {
+        let query_terms = workflow_relevance_terms(query);
+        let mut primitive_ids = self
             .workflows
             .values()
-            .map(|stored| {
-                let mut summary = stored.spec.compact_summary();
-                summary.origin = stored.origin;
-                summary
+            .map(|stored| WorkflowPrimitiveId {
+                id: stored.spec.id.clone(),
+                origin: stored.origin,
             })
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| left.id.cmp(&right.id));
-        items.truncate(limit.min(MAX_SUMMARY_ITEMS));
-        items
+        primitive_ids.sort_by(|left, right| {
+            workflow_origin_sort_key(left.origin)
+                .cmp(&workflow_origin_sort_key(right.origin))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        let mut scored = self
+            .workflows
+            .values()
+            .filter_map(|stored| {
+                if query_terms.is_empty() {
+                    return None;
+                }
+                let score = workflow_route_score(&stored.spec, &query_terms);
+                if score == 0 {
+                    return None;
+                }
+                let mut summary = stored.spec.primitive_summary();
+                summary.origin = stored.origin;
+                Some((score, summary))
+            })
+            .collect::<Vec<_>>();
+        scored.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| {
+                    workflow_origin_sort_key(left.origin)
+                        .cmp(&workflow_origin_sort_key(right.origin))
+                })
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        let total_count = self.workflows.len();
+        let take_limit = limit.min(MAX_SUMMARY_ITEMS);
+        let scored_count = scored.len();
+        let relevant_primitives = scored
+            .into_iter()
+            .take(take_limit)
+            .map(|(_, summary)| summary)
+            .collect::<Vec<_>>();
+        let relevant_omitted_count = scored_count.saturating_sub(relevant_primitives.len());
+        WorkflowPrimitiveRoutingCatalog {
+            primitive_ids,
+            relevant_primitives,
+            total_count,
+            relevant_omitted_count,
+        }
     }
 
     pub async fn create_workflow(&mut self, draft: NewWorkflowSpec) -> Result<WorkflowSpec> {
@@ -850,6 +923,152 @@ fn workflow_content_equal(left: &WorkflowSpec, right: &WorkflowSpec) -> bool {
         && left.recovery == right.recovery
 }
 
+fn compact_list_summary(items: &[String], limit: usize) -> String {
+    if items.is_empty() || limit == 0 {
+        return String::new();
+    }
+    let mut parts = items
+        .iter()
+        .take(limit)
+        .map(|item| compact_summary_text(item))
+        .collect::<Vec<_>>();
+    if items.len() > limit {
+        parts.push(format!("+{} more", items.len() - limit));
+    }
+    parts.join("; ")
+}
+
+fn compact_summary_text(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_COMPACT_SUMMARY_CHARS {
+        return compact;
+    }
+    let head = compact
+        .chars()
+        .take(MAX_COMPACT_SUMMARY_CHARS)
+        .collect::<String>();
+    format!("{head}...")
+}
+
+fn workflow_route_score(spec: &WorkflowSpec, query_terms: &[String]) -> usize {
+    if query_terms.is_empty() {
+        return 0;
+    }
+    let candidate = workflow_relevance_text(spec);
+    query_terms
+        .iter()
+        .filter(|term| candidate.contains(term.as_str()))
+        .count()
+}
+
+fn workflow_relevance_text(spec: &WorkflowSpec) -> String {
+    let mut parts = vec![spec.id.replace(['-', '_'], " ")];
+    parts.extend(spec.when_to_use.iter().cloned());
+    parts.extend(spec.preconditions.iter().cloned());
+    parts.extend(spec.workflow_steps.iter().cloned());
+    parts.extend(spec.done_criteria.iter().cloned());
+    parts.extend(spec.recovery.iter().cloned());
+    parts.join("\n").to_lowercase()
+}
+
+fn workflow_relevance_terms(query: &str) -> Vec<String> {
+    let mut terms = HashSet::new();
+    let mut ascii_run = String::new();
+    let mut cjk_run = String::new();
+
+    for ch in query.to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            flush_cjk_terms(&mut terms, &mut cjk_run);
+            ascii_run.push(ch);
+        } else if is_cjk_char(ch) {
+            flush_ascii_term(&mut terms, &mut ascii_run);
+            cjk_run.push(ch);
+        } else {
+            flush_ascii_term(&mut terms, &mut ascii_run);
+            flush_cjk_terms(&mut terms, &mut cjk_run);
+        }
+    }
+    flush_ascii_term(&mut terms, &mut ascii_run);
+    flush_cjk_terms(&mut terms, &mut cjk_run);
+
+    let mut terms = terms.into_iter().collect::<Vec<_>>();
+    terms.sort();
+    terms
+}
+
+fn flush_ascii_term(terms: &mut HashSet<String>, current: &mut String) {
+    if current.chars().count() >= 2 && !is_stop_term(current) {
+        terms.insert(current.clone());
+    }
+    current.clear();
+}
+
+fn flush_cjk_terms(terms: &mut HashSet<String>, current: &mut String) {
+    let chars = current.chars().collect::<Vec<_>>();
+    match chars.len() {
+        0 => {}
+        1 => {
+            let term = chars[0].to_string();
+            if !is_stop_term(&term) {
+                terms.insert(term);
+            }
+        }
+        _ => {
+            let full = chars.iter().collect::<String>();
+            if !is_stop_term(&full) {
+                terms.insert(full);
+            }
+            for pair in chars.windows(2) {
+                let term = pair.iter().collect::<String>();
+                if !is_stop_term(&term) {
+                    terms.insert(term);
+                }
+            }
+        }
+    }
+    current.clear();
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&ch)
+        || ('\u{3400}'..='\u{4DBF}').contains(&ch)
+        || ('\u{F900}'..='\u{FAFF}').contains(&ch)
+}
+
+fn is_stop_term(term: &str) -> bool {
+    matches!(
+        term,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "for"
+            | "in"
+            | "is"
+            | "it"
+            | "of"
+            | "on"
+            | "or"
+            | "the"
+            | "to"
+            | "user"
+            | "with"
+            | "好"
+            | "的"
+            | "了"
+            | "就"
+            | "按"
+            | "此"
+    )
+}
+
+fn workflow_origin_sort_key(origin: WorkflowOrigin) -> u8 {
+    match origin {
+        WorkflowOrigin::Builtin => 0,
+        WorkflowOrigin::Workspace => 1,
+    }
+}
+
 fn normalize_identifier(value: &str) -> String {
     value
         .trim()
@@ -936,6 +1155,78 @@ mod tests {
             .get("repair-flaky-test-pipeline")
             .expect("reloaded workflow");
         assert_eq!(loaded.workflow_steps.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn primitive_routing_catalog_includes_all_ids_and_ranks_relevant_primitives() {
+        let temp_dir = TempDir::new().expect("create workflow temp dir");
+        let primary = temp_dir.path().join("workflows");
+        let mut store = WorkflowStore::open_scoped(primary).await;
+        store
+            .create_workflow(NewWorkflowSpec {
+                id: "zephyr-quartz-inspection".to_string(),
+                when_to_use: vec!["inspect zephyr quartz artifacts".to_string()],
+                preconditions: vec!["artifact path is known".to_string()],
+                workflow_steps: vec!["inspect artifact metadata".to_string()],
+                done_criteria: vec!["artifact findings are summarized".to_string()],
+                recovery: vec![],
+            })
+            .await
+            .expect("create matching workflow");
+        store
+            .create_workflow(NewWorkflowSpec {
+                id: "unrelated-ritual".to_string(),
+                when_to_use: vec!["handle unrelated ritual tasks".to_string()],
+                preconditions: vec![],
+                workflow_steps: vec!["perform unrelated step".to_string()],
+                done_criteria: vec!["unrelated result exists".to_string()],
+                recovery: vec![],
+            })
+            .await
+            .expect("create unrelated workflow");
+
+        let catalog = store.primitive_routing_catalog("please inspect zephyr quartz", 8);
+        let primitive_ids = catalog
+            .primitive_ids
+            .iter()
+            .map(|summary| summary.id.as_str())
+            .collect::<Vec<_>>();
+        let relevant_ids = catalog
+            .relevant_primitives
+            .iter()
+            .map(|summary| summary.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(primitive_ids.contains(&"zephyr-quartz-inspection"));
+        assert!(primitive_ids.contains(&"unrelated-ritual"));
+        assert!(relevant_ids.contains(&"zephyr-quartz-inspection"));
+        assert!(!relevant_ids.contains(&"unrelated-ritual"));
+        assert_eq!(catalog.total_count, catalog.primitive_ids.len());
+    }
+
+    #[test]
+    fn primitive_summary_exposes_primitive_io_contract() {
+        let summary = WorkflowSpec {
+            id: "modify-local-project".to_string(),
+            when_to_use: vec!["local project needs edits".to_string()],
+            preconditions: vec!["project path is known".to_string()],
+            workflow_steps: vec![
+                "inspect relevant code".to_string(),
+                "apply targeted edits".to_string(),
+                "avoid unrelated files".to_string(),
+            ],
+            done_criteria: vec!["requested change is implemented".to_string()],
+            recovery: vec![],
+        }
+        .primitive_summary();
+
+        assert_eq!(
+            summary.capability_summary,
+            "inspect relevant code; apply targeted edits; +1 more"
+        );
+        assert_eq!(summary.inputs_summary, "project path is known");
+        assert_eq!(summary.outputs_summary, "requested change is implemented");
+        assert_eq!(summary.when_to_use_summary, "local project needs edits");
     }
 
     #[tokio::test]

@@ -47,7 +47,7 @@ A runtime turn usually contains these layers:
 
 Runtime context is split by lifetime:
 
-- `afterclaim_context`: claimed event/app-notice input and workflow routing candidates
+- `afterclaim_context`: claimed event/app-notice input and workflow primitive routing catalog
 - `preturn_context`: memory recall, sensory state, plan, bound workflow state, and app surface state
 
 Therefore, when adding an agent-facing interface, first decide which layer it belongs to. Do not directly pile it into some app state.
@@ -83,7 +83,7 @@ Do not mix these layers.
 
 In the current code, this separation mainly appears in `App::render_state`, `usage()`, and `how_to_use()`.
 
-Do not put self-optimizable task execution procedures into an app's supplemental instruction layer. Reusable methods across tasks should be modeled as `Workflow`, not as app-local explanatory text.
+Do not put self-optimizable task execution procedures into an app's supplemental instruction layer. Reusable methods across tasks should be modeled as `Workflow` SOP primitives, not as app-local explanatory text.
 
 ### Event
 
@@ -136,36 +136,62 @@ Do not use the plan as:
 
 ### Workflow
 
-`Workflow` is a reusable execution specification for a class of tasks. It is not an innate model capability and not app-local supplemental instruction.
+`Workflow` is the self-optimizable SOP layer. Persisted workflow specs are SOP primitives, not composite task templates, not innate model capability, and not app-local supplemental instruction.
 
-It answers these questions:
+A persisted `WorkflowSpec` answers these questions:
 
-- When is this class of task worth handling through a stable reusable process?
-- In what order does that process usually proceed?
-- What counts as completion?
-- How should it recover from failures or blockers?
+- What stable procedure can be reused as a primitive?
+- What inputs, artifacts, capabilities, or preconditions does the primitive need?
+- What outputs, artifacts, completion evidence, or handoff does it produce?
+- How should this primitive recover from failures or blockers?
+- What boundary prevents it from absorbing neighboring work?
+
+The runtime may temporarily compose several primitives into an execution graph for one task. That graph is runtime state, similar to a structured plan with explicit artifact handoff between steps. It must not be written back as a new persisted workflow just because it succeeded once.
 
 `Workflow` must be split into three layers:
 
-- `WorkflowSpec`: the workflow itself; an agent-facing specification asset
-- `WorkflowBinding`: whether the current task is bound to a workflow; runtime state only
+- `WorkflowSpec`: a persisted SOP primitive asset exposed to the agent through a concise name, capability summary, and thin input/output contract
+- `WorkflowBinding` / runtime composition: which primitive or temporary primitive graph the current task is using; runtime state only
 - `WorkflowRunRecord`: evidence automatically accumulated after daytime execution for sleep; the current implementation writes it directly at the work-completion boundary instead of generating it later by replaying sleep
 
 Rules:
 
+- All persisted workflow specs are primitives. Do not add a `kind` field just to distinguish primitive versus composite workflows; composite workflows should not be persisted in the workflow library.
 - `WorkflowSpec` must not carry runtime selection state or transient state such as "active".
-- `WorkflowBinding` only means the current task is using a workflow. It must not write back to the workflow itself.
+- `WorkflowBinding` only means the current task is using a primitive or a temporary composition. It must not write back to the workflow itself.
 - `WorkflowRunRecord` is recorded by code. The model must not manually write a daytime outcome log.
 - The main workflow evolution actions are `patch` and `merge`.
 - v1 does not introduce `deprecate`.
-- v1 does not require semantic search. Candidate workflows are shown directly in `afterclaim_context`.
+- Agent-facing workflow primitive routing catalogs should present the full loaded primitive ID vocabulary, plus thin IO/capability contracts only for the top relevant primitives. `when_to_use` may remain as metadata for filtering, sleep-time analysis, and human documentation, but it must not be the primary runtime surface.
+- Do not show only the first N workflows by lexicographic id or only a filtered subset as if that were the whole primitive vocabulary. If the workspace contains many workflows, code should still expose all primitive IDs for composition awareness while expanding only relevant primitive details to avoid context explosion.
 - Workflow evolution must depend only on workflow-bound execution evidence. It must not depend on error demos, failure patterns, or prompt evaluation artifacts.
+- Use sleep to manufacture better primitives from successful reusable experience and merge duplicates. Do not manufacture composite task templates such as `modify-local-project-then-commit-and-push`.
+
+Example primitive vocabulary:
+
+- `inspect-local-project`
+- `inspect-repository-status`
+- `modify-local-project`
+- `run-required-checks`
+- `commit-and-push`
+- `report-result`
+- `ask-clarifying-question`
+- `summarize-findings`
+
+Example temporary graph for "modify, commit, and push":
+
+1. `inspect-repository-status`
+2. `modify-local-project`
+3. `run-required-checks`
+4. `commit-and-push`
+5. `report-result`
 
 Do not use workflow as:
 
 - a long-term mirror of the plan
 - an implicit runtime state slot
 - a set of auto-generated default templates for blind model use
+- a persisted composite template for every multi-step request
 - a performance ledger that the model has to maintain manually
 
 ### Memory
@@ -243,8 +269,8 @@ Do not feed ordinary task quality problems into runtime error correction, such a
 
 The `Workflow Improvement Pipeline` is responsible for:
 
-- fixing workspace workflow specs based only on workspace `WorkflowRunRecord`
-- producing workflow patches and workflow merges
+- fixing workspace SOP primitive workflow specs based only on workspace `WorkflowRunRecord`
+- producing primitive workflow patches and workflow merges
 
 Builtin workflows belong to the base capability layer:
 
@@ -260,7 +286,7 @@ Explicitly forbidden:
 Keep these two object classes separate:
 
 - Runtime error correction compile changes global tool/protocol constraints.
-- Workflow evolution changes the normal process for a class of tasks.
+- Workflow evolution changes the primitive SOP library used during task-time composition.
 
 ## Current App Semantics
 
@@ -454,7 +480,7 @@ This means the behavioral body of a third-party app is an object model, not a co
 
 ### Workflow Assets
 
-Self-optimizable workflows do not belong to the app package. They are runtime-level assets.
+Self-optimizable workflows do not belong to the app package. They are runtime-level SOP primitive assets.
 
 Rules:
 
@@ -463,7 +489,8 @@ Rules:
 - Evolvable workspace workflows live in `~/daat-locus-workspace/workflows/*.md`.
 - Each workflow is one Markdown file, and the filename is the workflow id.
 - Workflows use a frontmatter plus Markdown body schema.
-- A workflow is a reusable execution specification across tasks, not app-local instruction.
+- A workflow file should describe one reusable SOP primitive, not a composite task class.
+- Composite task execution is a temporary runtime graph assembled from primitives; it is not a workflow asset to save by default.
 - `prompt/*.md` is for app descriptions; `workflows/*.md` is for self-optimizable execution processes. Do not mix them.
 - Builtin workflows do not fall into a writable runtime directory and are not touched by optimization pipelines.
 
@@ -592,15 +619,16 @@ Do not add tools such as `append_plan_step` or `select_plan_step` that introduce
 
 ### Workflow Tools
 
-Workflow's responsibility is to provide reusable execution specifications across tasks, not to carry dynamic world state.
+Workflow's responsibility is to expose a reusable SOP primitive library for task-time composition, not to carry dynamic world state.
 
 Current rules:
 
-- The workflow list appears directly in `afterclaim_context` as summaries.
-- The currently bound workflow is exposed to the model in fuller form.
+- The workflow primitive routing catalog appears directly in `afterclaim_context` as a full `primitive_ids` vocabulary plus `relevant_primitives` details for the top task-relevant primitives.
+- `primitive_ids` should include every loaded primitive ID so runtime composition can see the available vocabulary; `relevant_primitives` entries should emphasize primitive name, capability, inputs, outputs, and constraints. `when_to_use` is supporting metadata, not the main interface.
+- The currently bound workflow or temporary primitive graph is exposed to the model in fuller form.
 - v1 only needs `create_workflow` and `activate_workflow`, or an equivalent bind tool.
 - `create_workflow` may only create workspace workflows. It must not overwrite builtin workflows.
-- Do not introduce `select_workflow` semantic search. Candidate workflows should be displayed directly in `afterclaim_context`.
+- Do not make the model perform workflow semantic search or browse an expanded lexicographic workflow dump before continuing. The full ID vocabulary and relevant primitive details should be displayed directly in `afterclaim_context`.
 - Do not introduce explicit `log_workflow_outcome`. Daytime evidence should be written automatically by code into `WorkflowRunRecord`.
 - Whether to bind a workflow is driven by task complexity and reusability, not by `focus_app`.
 
@@ -667,7 +695,7 @@ It contains one-shot context for the currently claimed work:
 - claimed event input
 - claimed app notice input
 - event/app notice source metadata needed to handle the claimed work
-- workflow catalog / routing candidates needed to choose or create a workflow for this claimed work
+- workflow primitive routing catalog needed to choose or create primitives and compose a temporary execution graph for this claimed work
 
 It is not a per-turn status dump.
 
@@ -677,7 +705,7 @@ Rules:
 - Runtime history compaction is a turn boundary. If compaction happens while claimed work is still in progress, release/reclaim the work and inject `AfterClaim Context` in the new turn instead of trying to restore it inside the old turn.
 - Do not repeat it every turn unless compaction made reinjection necessary.
 - Event input belongs here, not in a generic world snapshot.
-- Workflow list / candidate routing belongs here, not in per-turn execution state.
+- Workflow primitive routing catalog belongs here, not in per-turn execution state.
 - It should enter runtime history as structured context so later tool calls and assistant messages can build on a stable prefix.
 
 ### PreTurn Context
@@ -690,7 +718,7 @@ It contains current execution state that may change after tools run:
 - sensory state such as current time and machine status
 - current plan state
 - current app surface state, focused app state, and background app hints
-- current bound workflow execution context, including workflow id, origin, and concise execution excerpt
+- current bound primitive or temporary primitive graph execution context, including workflow id/origin when applicable and concise execution excerpt
 
 Rules:
 
@@ -708,15 +736,15 @@ Examples:
 
 - event completion rules belong in system/tool contract or a small event contract block
 - app usage and `how_to_use` are capability docs, not app state
-- workflow routing rules belong in workflow contract / AfterClaim routing context
+- workflow primitive routing catalog rules belong in workflow contract / AfterClaim routing context
 
 ### Workflow Context Split
 
 Workflow context has three distinct roles:
 
-- `WorkflowRouting`: workflow catalog and choose/create guidance for the currently claimed work; belongs in `AfterClaim Context`
-- `WorkflowState`: the currently bound workflow execution context; belongs in `PreTurn Context`
-- `WorkflowHistoryMetadata`: which workflow a past task used; belongs in turn metadata/history, not in the workflow catalog
+- `WorkflowRouting`: workflow primitive routing catalog plus choose/create/compose guidance for the currently claimed work; belongs in `AfterClaim Context`
+- `WorkflowState`: the currently bound primitive or temporary primitive graph execution context; belongs in `PreTurn Context`
+- `WorkflowHistoryMetadata`: which workflow a past task used; belongs in turn metadata/history, not in the primitive routing catalog
 
 Do not make the model infer past task workflow ownership from adjacent tool logs if code can record it directly.
 
@@ -750,14 +778,14 @@ When refactoring old snapshot parts, use this mapping:
 - old claimed events -> `AfterClaim.ClaimedInput`
 - old event queue summary -> `AfterClaim.EventQueueContext`
 - old delivery reminder -> `EventContract`
-- old workflow list and selection hint -> `AfterClaim.WorkflowRouting`
+- old workflow list and selection hint -> `AfterClaim.WorkflowRouting` workflow primitive routing catalog and composition hint
 - old bound workflow id, origin, steps, done criteria, and recovery -> `PreTurn.WorkflowState`
 
 Avoid these designs:
 
 - persisting the full old snapshot on every turn
 - using one context blob to carry state, routing, manuals, memory recall, and history metadata
-- repeatedly injecting event input or workflow catalog every turn when no compaction occurred
+- repeatedly injecting event input or the workflow primitive routing catalog every turn when no compaction occurred
 - dropping structured rendering in favor of hand-built strings
 
 ## Anti-Patterns
@@ -772,6 +800,9 @@ Avoid these designs:
 - Designing workflow as app-local supplemental instruction or innate model capability.
 - Forcing the model to perform workflow semantic search before continuing.
 - Auto-generating generic default workflow templates for blind model use.
+- Persisting composite workflows for every recurring combination of primitives.
+- Treating `when_to_use` text as the primary workflow runtime interface instead of exposing primitive capabilities and IO contracts.
+- Showing only the first few lexicographically sorted workflow ids, or only filtered relevant ids, when task-time composition needs the full primitive ID vocabulary plus relevant details.
 - Writing the current workflow binding back into the workflow spec itself.
 - Making the model manually submit workflow result logs.
 - Treating long-term memory as an immediate state cache.
@@ -800,7 +831,7 @@ If the answer leans toward driving the next round of processing, it usually belo
 - `App` decides where attention goes and how to operate after focus.
 - `Event` decides what happened, whether to respond, and how to complete it.
 - `PendingWork` decides what should drive the next turn.
-- `Workflow` decides what reusable process should advance a class of tasks and how sleep should keep it corrected.
+- `Workflow` supplies SOP primitives that runtime can compose for the current task and sleep can keep corrected.
 - `Plan` decides how the current task continues.
 - `Memory` provides thread continuity and long-term experience.
 - `Sleep` improves behavior from runtime mistakes.

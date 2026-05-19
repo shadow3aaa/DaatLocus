@@ -58,7 +58,7 @@ pub struct PreTurnPlanPart;
 pub struct PreTurnWorkflowStatePart;
 pub struct PreTurnAppSurfacePart;
 pub struct AfterClaimInputPart;
-pub struct AfterClaimWorkflowRoutingPart;
+pub struct AfterClaimWorkflowPrimitiveRoutingPart;
 
 impl SystemPromptPart for EventSystemPart {
     fn key(&self) -> &'static str {
@@ -482,16 +482,16 @@ impl AfterClaimContextPart for AfterClaimInputPart {
     }
 }
 
-impl AfterClaimContextPart for AfterClaimWorkflowRoutingPart {
+impl AfterClaimContextPart for AfterClaimWorkflowPrimitiveRoutingPart {
     fn key(&self) -> &'static str {
         "workflow_routing"
     }
 
-    fn build(&self, ctx: &Context, _input: &AfterClaimContextInput) -> Option<PromptNode> {
+    fn build(&self, ctx: &Context, input: &AfterClaimContextInput) -> Option<PromptNode> {
         let mut blocks = Vec::new();
         if ctx.bound_workflow_id.is_none() {
             blocks.push(PromptBlock::Paragraph(
-                "Before executing claimed work, call `activate_workflow` to choose the best candidate workflow, or call `create_workflow` if none fits. Binding a workflow early gives the runtime structured execution tracking and recovery paths; consider binding now before proceeding with other tools."
+                "Workflow primitive routing catalog exposes the full reusable SOP primitive ID vocabulary plus expanded details for only the most relevant primitives. If a primitive fits the claimed work, call `activate_workflow` before executing it. If no primitive fits, continue with a normal plan; call `create_workflow` only when the task truly needs a new stable primitive, not to persist a one-off composite task graph."
                     .to_string(),
             ));
         } else if let Some(workflow_id) = ctx.bound_workflow_id.as_deref() {
@@ -501,27 +501,36 @@ impl AfterClaimContextPart for AfterClaimWorkflowRoutingPart {
             )]));
         }
 
-        let summaries = ctx.workflows.summaries(8);
-        if !summaries.is_empty() {
+        let routing = ctx
+            .workflows
+            .primitive_routing_catalog(&claimed_work_query(input), 8);
+        if routing.total_count > 0 {
+            blocks.push(PromptBlock::KeyValueList(vec![(
+                "primitive_ids".to_string(),
+                render_workflow_primitive_ids(&routing.primitive_ids),
+            )]));
+        }
+        if !routing.relevant_primitives.is_empty() {
+            let shown_count = routing.relevant_primitives.len();
+            blocks.push(PromptBlock::Paragraph("relevant_primitives:".to_string()));
             blocks.push(PromptBlock::BulletList(
-                summaries
-                    .into_iter()
-                    .map(|summary| {
-                        let prefix = match summary.origin {
-                            crate::workflow::WorkflowOrigin::Builtin => "[builtin] ",
-                            crate::workflow::WorkflowOrigin::Workspace => "[workspace] ",
-                        };
-                        if summary.when_to_use_summary.is_empty() {
-                            format!("{prefix}{}", summary.id)
-                        } else {
-                            format!(
-                                "{prefix}{} | when={}",
-                                summary.id, summary.when_to_use_summary
-                            )
-                        }
-                    })
+                routing
+                    .relevant_primitives
+                    .iter()
+                    .map(render_workflow_primitive_summary)
                     .collect(),
             ));
+            if routing.relevant_omitted_count > 0 {
+                blocks.push(PromptBlock::Paragraph(format!(
+                    "Showing {shown_count} relevant primitive details from {} loaded workflows; {} additional relevant matches are not expanded. The primitive_ids line is the full loaded primitive vocabulary; do not browse it mechanically before continuing.",
+                    routing.total_count, routing.relevant_omitted_count
+                )));
+            }
+        } else if routing.total_count > 0 {
+            blocks.push(PromptBlock::Paragraph(format!(
+                "No relevant primitive details matched the claimed input among {} loaded workflows. Use primitive_ids as vocabulary for possible composition, but do not create a composite workflow merely to satisfy routing; continue with a plan unless a new stable primitive is genuinely needed.",
+                routing.total_count
+            )));
         }
 
         if blocks.is_empty() {
@@ -530,6 +539,69 @@ impl AfterClaimContextPart for AfterClaimWorkflowRoutingPart {
             Some(PromptNode::State(PromptStateDoc::new(self.key(), blocks)))
         }
     }
+}
+
+fn claimed_work_query(input: &AfterClaimContextInput) -> String {
+    let mut parts = Vec::new();
+    for event in &input.events {
+        match &event.payload {
+            EventPayload::TelegramIncoming(payload) => {
+                parts.push(payload.incoming_text.as_str());
+                for attachment in &payload.attachments {
+                    if let Some(description) = attachment.description.as_deref() {
+                        parts.push(description);
+                    }
+                }
+            }
+            EventPayload::TerminalIncoming(payload) => {
+                parts.push(payload.incoming_text.as_str());
+                for attachment in &payload.attachments {
+                    if let Some(description) = attachment.description.as_deref() {
+                        parts.push(description);
+                    }
+                }
+            }
+        }
+    }
+    for (_app, reason) in &input.app_notices {
+        parts.push(reason.as_str());
+    }
+    parts.join("\n")
+}
+
+fn render_workflow_primitive_summary(
+    summary: &crate::workflow::WorkflowPrimitiveSummary,
+) -> String {
+    let prefix = match summary.origin {
+        crate::workflow::WorkflowOrigin::Builtin => "[builtin] ",
+        crate::workflow::WorkflowOrigin::Workspace => "[workspace] ",
+    };
+    let mut parts = vec![format!("{prefix}{}", summary.id)];
+    if !summary.capability_summary.is_empty() {
+        parts.push(format!("does={}", summary.capability_summary));
+    }
+    if !summary.inputs_summary.is_empty() {
+        parts.push(format!("inputs={}", summary.inputs_summary));
+    }
+    if !summary.outputs_summary.is_empty() {
+        parts.push(format!("outputs={}", summary.outputs_summary));
+    }
+    if !summary.when_to_use_summary.is_empty() {
+        parts.push(format!("when={}", summary.when_to_use_summary));
+    }
+    parts.join(" | ")
+}
+fn render_workflow_primitive_ids(ids: &[crate::workflow::WorkflowPrimitiveId]) -> String {
+    ids.iter()
+        .map(|primitive| {
+            let prefix = match primitive.origin {
+                crate::workflow::WorkflowOrigin::Builtin => "[builtin] ",
+                crate::workflow::WorkflowOrigin::Workspace => "[workspace] ",
+            };
+            format!("{prefix}{}", primitive.id)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_afterclaim_events(events: &[EventView]) -> String {

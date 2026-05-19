@@ -16,7 +16,7 @@ id: edit-workspace-workflow
 - The edit is intended to change reusable future behavior, not only to complete the current one-off task.
 
 ## Workflow
-1. Identify the target workflow from `afterclaim_context` workflow routing summaries, user wording, recent conversation context, the currently discussed workflow, and workflow ids.
+1. Identify the target workflow from the `afterclaim_context` workflow primitive routing catalog, user wording, recent conversation context, the currently discussed workflow, and workflow ids.
 2. Activate this meta workflow as the current workflow; do not activate the target workflow being edited.
 3. Call `read_workflow` for the target workflow before deciding edits.
 4. Map the user's intent to the correct spec sections: `When To Use`, `Preconditions`, `Workflow`, `Done Criteria`, and `Recovery`.
