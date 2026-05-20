@@ -61,6 +61,18 @@ pub(crate) fn should_retry_request_without_thinking_budget(body: &str) -> bool {
         || body.contains("unknown parameter: \"reasoning.effort\"")
 }
 
+pub(crate) fn should_retry_request_without_reasoning_content(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    body.contains("reasoning_content")
+        && (body.contains("unknown parameter")
+            || body.contains("unknown field")
+            || body.contains("extra_forbidden")
+            || body.contains("extra inputs are not permitted")
+            || body.contains("unrecognized parameter")
+            || body.contains("unrecognized field")
+            || body.contains("invalid message field"))
+}
+
 /// Returns `true` when the provider error indicates the model does not accept
 /// `image_url` (or `input_image`) content blocks.
 pub(crate) fn looks_like_vision_unsupported_error(body: &str) -> bool {

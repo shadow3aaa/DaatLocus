@@ -7,12 +7,13 @@ pub(super) fn build_agent_turn_payload_common(
     request: AgentTurnRequest,
     stream: bool,
     flatten_orphan_tool_messages: bool,
+    include_reasoning_content: bool,
 ) -> serde_json::Value {
     let strip_images = client.adapter_state_guard().vision_mode == VisionMode::Disabled;
     let messages = agent_turn_request_to_openai_messages(
         request.messages,
         flatten_orphan_tool_messages,
-        is_deepseek_api_base_url(&client.base_url),
+        include_reasoning_content,
         strip_images,
     );
     let tools = request

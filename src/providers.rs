@@ -94,10 +94,19 @@ enum VisionMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReasoningContentMode {
+    /// Try forwarding non-empty provider `reasoning_content` in historical assistant messages.
+    Enabled,
+    /// Provider rejected `reasoning_content` message fields; strip them when serializing.
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ChatCompletionsAdapterState {
     prompt_tool_choice_mode: PromptToolChoiceMode,
     thinking_budget_mode: ThinkingBudgetMode,
     vision_mode: VisionMode,
+    reasoning_content_mode: ReasoningContentMode,
 }
 
 impl Default for ChatCompletionsAdapterState {
@@ -106,6 +115,7 @@ impl Default for ChatCompletionsAdapterState {
             prompt_tool_choice_mode: PromptToolChoiceMode::NamedFunction,
             thinking_budget_mode: ThinkingBudgetMode::ReasoningEffortString,
             vision_mode: VisionMode::Enabled,
+            reasoning_content_mode: ReasoningContentMode::Enabled,
         }
     }
 }
@@ -565,6 +575,15 @@ impl OpenAIClient {
             .into());
         }
         let request_context = summarize_agent_turn_request(&request, Some(&budget));
+        let request_has_reasoning_content = request.messages.iter().any(|message| {
+            matches!(
+                message,
+                AgentMessage::AssistantToolCallProtocol {
+                    reasoning_content: Some(reasoning_content),
+                    ..
+                } if !reasoning_content.trim().is_empty()
+            )
+        });
         let mut adapter_state = self.adapter_state_guard();
         let (response, content_type) = loop {
             let payload =
@@ -600,6 +619,19 @@ impl OpenAIClient {
                     )),
                 )
                 .into());
+            }
+
+            if request_has_reasoning_content
+                && adapter_state.reasoning_content_mode == ReasoningContentMode::Enabled
+                && should_retry_request_without_reasoning_content(&body)
+            {
+                adapter_state.reasoning_content_mode = ReasoningContentMode::Disabled;
+                self.update_adapter_state(adapter_state);
+                warn!(
+                    "llm provider rejected reasoning_content message fields; retrying agent turn without them\n{}",
+                    request_context.join("\n")
+                );
+                continue;
             }
 
             if self.thinking_budget.is_some()
@@ -927,7 +959,7 @@ impl ChatCompletionsAdapter for StandardChatCompletionsAdapter {
         request: AgentTurnRequest,
         stream: bool,
     ) -> serde_json::Value {
-        build_agent_turn_payload_common(client, request, stream, false)
+        build_agent_turn_payload_common(client, request, stream, false, false)
     }
 }
 
@@ -983,7 +1015,13 @@ impl ChatCompletionsAdapter for CompatibleChatCompletionsAdapter {
         request: AgentTurnRequest,
         stream: bool,
     ) -> serde_json::Value {
-        build_agent_turn_payload_common(client, request, stream, true)
+        build_agent_turn_payload_common(
+            client,
+            request,
+            stream,
+            true,
+            self.state.reasoning_content_mode == ReasoningContentMode::Enabled,
+        )
     }
 }
 
@@ -1365,7 +1403,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_reasoning_content_is_forwarded_for_native_tool_protocol() {
+    fn reasoning_content_can_be_forwarded_for_native_tool_protocol() {
         let historical_call = AgentToolCall {
             id: "call_old".to_string(),
             name: "update_plan".to_string(),
@@ -1400,6 +1438,30 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_content_can_be_stripped_after_provider_rejection() {
+        let call = AgentToolCall {
+            id: "call_old".to_string(),
+            name: "update_plan".to_string(),
+            arguments: json!({"plan": []}),
+        };
+        let messages = agent_turn_request_to_openai_messages(
+            vec![AgentMessage::assistant_tool_call_protocol_with_reasoning(
+                None,
+                Some("provider reasoning".to_string()),
+                vec![call],
+            )],
+            false,
+            false,
+            false,
+        );
+
+        assert!(messages[0].get("reasoning_content").is_none());
+        assert!(should_retry_request_without_reasoning_content(
+            "Bad request: unknown field `reasoning_content` in messages[0]"
+        ));
+    }
+
+    #[test]
     fn thinking_budget_is_injected_as_reasoning_effort_by_default() {
         let model_config = ModelConfig {
             thinking_budget: Some(thinking_budget("medium")),
@@ -1414,6 +1476,7 @@ mod tests {
                 tools: vec![],
             },
             true,
+            false,
             false,
         );
 
@@ -1438,6 +1501,7 @@ mod tests {
                 tools: vec![],
             },
             true,
+            false,
             false,
         );
 
