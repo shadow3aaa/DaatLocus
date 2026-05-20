@@ -70,25 +70,25 @@ pub struct DashboardTokenUsageSnapshot {
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
-pub struct DashboardWorkflowOptimizationSnapshot {
+pub struct DashboardPrimitiveOptimizationSnapshot {
     pub running: bool,
     pub current_trigger: Option<String>,
     pub last_result: Option<String>,
     pub last_completed_at_ms: Option<i64>,
-    pub workflow_evidence_records: usize,
-    pub total_workflow_evidence_run_records: usize,
-    pub total_workflow_reflections: usize,
-    pub total_workflow_patch_candidates: usize,
-    pub total_workflow_merge_candidates: usize,
-    pub total_workflow_candidate_evaluations: usize,
-    pub total_workflow_frontier_entries: usize,
-    pub latest_workflow_frontier_root_entries: usize,
-    pub latest_workflow_frontier_branched_entries: usize,
-    pub latest_workflow_frontier_max_generation: usize,
-    pub total_workflow_patch_applied: usize,
-    pub total_workflow_merge_applied: usize,
-    pub total_workflow_update_rollbacks: usize,
-    pub total_workflow_optimization_rounds: usize,
+    pub primitive_evidence_records: usize,
+    pub total_primitive_evidence_run_records: usize,
+    pub total_primitive_reflections: usize,
+    pub total_primitive_patch_candidates: usize,
+    pub total_primitive_merge_candidates: usize,
+    pub total_primitive_candidate_evaluations: usize,
+    pub total_primitive_frontier_entries: usize,
+    pub latest_primitive_frontier_root_entries: usize,
+    pub latest_primitive_frontier_branched_entries: usize,
+    pub latest_primitive_frontier_max_generation: usize,
+    pub total_primitive_patch_applied: usize,
+    pub total_primitive_merge_applied: usize,
+    pub total_primitive_update_rollbacks: usize,
+    pub total_primitive_optimization_rounds: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -239,7 +239,7 @@ pub struct DashboardState {
     #[serde(default)]
     pub token_usage: DashboardTokenUsageSnapshot,
     #[serde(default)]
-    pub workflow_optimization: DashboardWorkflowOptimizationSnapshot,
+    pub primitive_optimization: DashboardPrimitiveOptimizationSnapshot,
     #[serde(default)]
     pub runtime_optimization: DashboardRuntimeOptimizationSnapshot,
     #[serde(default)]

@@ -4,18 +4,18 @@ use crate::tool_ui::{ActivatePrimitiveUiData, CreatePrimitiveSpecUiData};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivatePrimitiveActivityCell {
-    pub workflow_id: String,
+    pub primitive_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreatePrimitiveSpecActivityCell {
-    pub workflow_id: String,
+    pub primitive_id: String,
 }
 
 impl From<ActivatePrimitiveUiData> for ActivatePrimitiveActivityCell {
     fn from(data: ActivatePrimitiveUiData) -> Self {
         ActivatePrimitiveActivityCell {
-            workflow_id: data.workflow_id,
+            primitive_id: data.primitive_id,
         }
     }
 }
@@ -23,7 +23,7 @@ impl From<ActivatePrimitiveUiData> for ActivatePrimitiveActivityCell {
 impl From<CreatePrimitiveSpecUiData> for CreatePrimitiveSpecActivityCell {
     fn from(data: CreatePrimitiveSpecUiData) -> Self {
         CreatePrimitiveSpecActivityCell {
-            workflow_id: data.workflow_id,
+            primitive_id: data.primitive_id,
         }
     }
 }

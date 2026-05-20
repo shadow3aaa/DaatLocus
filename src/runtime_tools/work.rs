@@ -93,17 +93,17 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             "create_primitive_spec",
             "Create an initial reusable SOP primitive draft when no reusable primitive fits.",
             None,
-            summarize_create_workflow_tool,
-            render_create_workflow_call_ui,
-            execute_create_workflow_tool,
+            summarize_create_primitive_spec_tool,
+            render_create_primitive_spec_call_ui,
+            execute_create_primitive_spec_tool,
         )),
         Box::new(StaticRuntimeTool::new::<ActivateComposedPrimitiveArgs>(
             "activate_composed_primitive",
             "Bind one existing SOP primitive or a temporary composition of existing primitives to the current task.",
             None,
-            summarize_activate_workflow_tool,
-            render_activate_workflow_call_ui,
-            execute_activate_workflow_tool,
+            summarize_activate_primitive_tool,
+            render_activate_primitive_call_ui,
+            execute_activate_primitive_tool,
         )),
         Box::new(StaticRuntimeTool::new::<ReadPrimitiveSpecArgs>(
             "read_primitive_spec",
@@ -489,7 +489,7 @@ fn execute_update_plan_tool<'a>(
     })
 }
 
-fn summarize_create_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+fn summarize_create_primitive_spec_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
     let args: CreatePrimitiveSpecArgs = parse_tool_args(call)?;
     Ok(EpisodeActionRecord {
         kind: "create_primitive_spec".to_string(),
@@ -497,20 +497,20 @@ fn summarize_create_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActionR
     })
 }
 
-fn render_create_workflow_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+fn render_create_primitive_spec_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: CreatePrimitiveSpecArgs = parse_tool_args(call)?;
     let lines = vec![
         format!("id={}", args.id),
         format!("when_to_use={}", args.when_to_use.len()),
         format!("primitive_steps={}", args.primitive_steps.len()),
     ];
-    Ok(ToolCallUiEvent::create_workflow(
+    Ok(ToolCallUiEvent::create_primitive_spec(
         "create_primitive_spec",
         lines,
     ))
 }
 
-fn execute_create_workflow_tool<'a>(
+fn execute_create_primitive_spec_tool<'a>(
     context: &'a mut Context,
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
@@ -534,12 +534,12 @@ fn execute_create_workflow_tool<'a>(
                 "created": created,
                 "bound_primitive_id": context.bound_primitive_id,
             }),
-            ToolUiEvent::create_workflow(created.id),
+            ToolUiEvent::create_primitive_spec(created.id),
         ))
     })
 }
 
-fn summarize_activate_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
+fn summarize_activate_primitive_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
     let args: ActivateComposedPrimitiveArgs = parse_tool_args(call)?;
     Ok(EpisodeActionRecord {
         kind: "activate_composed_primitive".to_string(),
@@ -547,15 +547,15 @@ fn summarize_activate_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActio
     })
 }
 
-fn render_activate_workflow_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
+fn render_activate_primitive_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
     let args: ActivateComposedPrimitiveArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::activate_workflow(
+    Ok(ToolCallUiEvent::activate_primitive(
         "activate_composed_primitive",
         vec![format!("primitive_id={}", args.workflow_id)],
     ))
 }
 
-fn execute_activate_workflow_tool<'a>(
+fn execute_activate_primitive_tool<'a>(
     context: &'a mut Context,
     call: &'a AgentToolCall,
 ) -> ToolFuture<'a> {
@@ -602,7 +602,7 @@ fn execute_activate_workflow_tool<'a>(
                     "is_composition": is_composition,
                     "already_active": true,
                 }),
-                ToolUiEvent::activate_workflow(workflow_id),
+                ToolUiEvent::activate_primitive(workflow_id),
             )
             .with_model_content(format!(
                 "summary={summary}\nalready_active=true\nbound_primitive_id={bound_id}\nprimitive_ids={}\nContinue the task using the currently bound primitive or composition; do not call activate_composed_primitive again for this binding.",
@@ -633,13 +633,13 @@ fn execute_activate_workflow_tool<'a>(
                 "activated": activated_value,
                 "is_composition": is_composition,
             }),
-            ToolUiEvent::activate_workflow(workflow_id),
+            ToolUiEvent::activate_primitive(workflow_id),
         )
-        .with_turn_boundary(activate_workflow_turn_boundary_reason()))
+        .with_turn_boundary(activate_primitive_turn_boundary_reason()))
     })
 }
 
-fn activate_workflow_turn_boundary_reason() -> &'static str {
+fn activate_primitive_turn_boundary_reason() -> &'static str {
     "primitive binding changed; re-render world state in a new turn before continuing"
 }
 
@@ -974,7 +974,7 @@ mod tests {
     #[test]
     fn activate_composed_primitive_declares_turn_boundary_reason() {
         assert_eq!(
-            activate_workflow_turn_boundary_reason(),
+            activate_primitive_turn_boundary_reason(),
             "primitive binding changed; re-render world state in a new turn before continuing"
         );
     }

@@ -22,7 +22,7 @@ use super::{
     highlight::{DiffScopeBackgrounds, diff_scope_backgrounds, highlight_patch_lines},
     messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell},
     plan::{PlanActivityCell, PlanStepDisplayStatus},
-    workflow::{ActivatePrimitiveActivityCell, CreatePrimitiveSpecActivityCell},
+    primitive::{ActivatePrimitiveActivityCell, CreatePrimitiveSpecActivityCell},
 };
 use crate::dashboard::renderable::{FlexRenderable, Renderable, ViewportCulledColumn};
 use crate::tool_ui::{PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, glyph};
@@ -285,8 +285,8 @@ impl Renderable for ActivityCell {
             ActivityCell::Telegram(c) => 3 + (c.message_lines.len() as u16).min(20),
             ActivityCell::Reply(c) => 3 + (c.message_lines.len() as u16).min(20),
             ActivityCell::PlanResult(c) => 3 + (c.steps.len() as u16).min(20),
-            ActivityCell::CreateWorkflowResult(_) => 3,
-            ActivityCell::ActivateWorkflowResult(_) => 3,
+            ActivityCell::CreatePrimitiveSpecResult(_) => 3,
+            ActivityCell::ActivatePrimitiveResult(_) => 3,
         }
     }
 }
@@ -304,8 +304,10 @@ fn render_activity_cell_lines(cell: &ActivityCell, max_width: u16) -> Vec<Line<'
         ActivityCell::CodingReview(cell) => render_coding_review_cell_lines(cell),
         ActivityCell::GenericApp(cell) => render_generic_app_cell_lines(cell),
         ActivityCell::PlanResult(cell) => render_plan_cell_lines(cell),
-        ActivityCell::CreateWorkflowResult(cell) => render_create_workflow_cell_lines(cell),
-        ActivityCell::ActivateWorkflowResult(cell) => render_activate_workflow_cell_lines(cell),
+        ActivityCell::CreatePrimitiveSpecResult(cell) => {
+            render_create_primitive_spec_cell_lines(cell)
+        }
+        ActivityCell::ActivatePrimitiveResult(cell) => render_activate_primitive_cell_lines(cell),
         ActivityCell::ExecResult(cell) => render_exec_cell_lines(cell),
         ActivityCell::LiveExec(cell) => render_live_exec_cell_lines(cell),
         ActivityCell::Patch(cell) => render_patch_cell_lines(cell),
@@ -1061,21 +1063,25 @@ fn render_plan_cell_lines(cell: &PlanActivityCell) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_create_workflow_cell_lines(cell: &CreatePrimitiveSpecActivityCell) -> Vec<Line<'static>> {
-    render_workflow_line(
-        format!("Created Primitive Spec: {}", cell.workflow_id),
+fn render_create_primitive_spec_cell_lines(
+    cell: &CreatePrimitiveSpecActivityCell,
+) -> Vec<Line<'static>> {
+    render_primitive_line(
+        format!("Created Primitive Spec: {}", cell.primitive_id),
         glyph::WORKFLOW,
     )
 }
 
-fn render_activate_workflow_cell_lines(cell: &ActivatePrimitiveActivityCell) -> Vec<Line<'static>> {
-    render_workflow_line(
-        format!("Activated Primitive: {}", cell.workflow_id),
+fn render_activate_primitive_cell_lines(
+    cell: &ActivatePrimitiveActivityCell,
+) -> Vec<Line<'static>> {
+    render_primitive_line(
+        format!("Activated Primitive: {}", cell.primitive_id),
         glyph::WORKFLOW,
     )
 }
 
-fn render_workflow_line(title: String, marker: &str) -> Vec<Line<'static>> {
+fn render_primitive_line(title: String, marker: &str) -> Vec<Line<'static>> {
     vec![Line::from(vec![
         Span::styled(
             marker.to_string(),

@@ -5,9 +5,9 @@ mod highlight;
 pub(crate) mod markdown;
 mod messages;
 mod plan;
+mod primitive;
 mod tui;
 mod web_activity;
-mod workflow;
 
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +34,7 @@ use common::{render_exposed_tool_names, render_exposed_tool_names_in_lines, thin
 use exec::{ExecResultActivityCell, LiveExecActivityCell, live_exec_cell};
 use messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell};
 use plan::PlanActivityCell;
-use workflow::{ActivatePrimitiveActivityCell, CreatePrimitiveSpecActivityCell};
+use primitive::{ActivatePrimitiveActivityCell, CreatePrimitiveSpecActivityCell};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LiveActivityCell {
@@ -65,8 +65,8 @@ pub enum ActivityCell {
     #[serde(alias = "ToolResult")]
     GenericApp(GenericAppActivityCell),
     PlanResult(PlanActivityCell),
-    CreateWorkflowResult(CreatePrimitiveSpecActivityCell),
-    ActivateWorkflowResult(ActivatePrimitiveActivityCell),
+    CreatePrimitiveSpecResult(CreatePrimitiveSpecActivityCell),
+    ActivatePrimitiveResult(ActivatePrimitiveActivityCell),
     ExecResult(ExecResultActivityCell),
     LiveExec(LiveExecActivityCell),
     Patch(PatchActivityCell),
@@ -266,11 +266,11 @@ pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> Option<Activit
         },
         ToolUiEvent::Plan(event) if event.steps.is_empty() => None,
         ToolUiEvent::Plan(event) => Some(ActivityCell::PlanResult(event.into())),
-        ToolUiEvent::CreateWorkflow(event) => {
-            Some(ActivityCell::CreateWorkflowResult(event.into()))
+        ToolUiEvent::CreatePrimitiveSpec(event) => {
+            Some(ActivityCell::CreatePrimitiveSpecResult(event.into()))
         }
-        ToolUiEvent::ActivateWorkflow(event) => {
-            Some(ActivityCell::ActivateWorkflowResult(event.into()))
+        ToolUiEvent::ActivatePrimitive(event) => {
+            Some(ActivityCell::ActivatePrimitiveResult(event.into()))
         }
         ToolUiEvent::App(event) => Some(ActivityCell::GenericApp(event.into())),
         ToolUiEvent::Error(event) => Some(ActivityCell::Error(event.into())),

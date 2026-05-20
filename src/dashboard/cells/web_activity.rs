@@ -16,7 +16,7 @@ use super::{
     exec::{ExecResultActivityCell, LiveExecActivityCell},
     messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell},
     plan::{PlanActivityCell, PlanStepDisplayStatus},
-    workflow::{ActivatePrimitiveActivityCell, CreatePrimitiveSpecActivityCell},
+    primitive::{ActivatePrimitiveActivityCell, CreatePrimitiveSpecActivityCell},
 };
 
 pub const WEB_ACTIVITY_VERSION: u8 = 2;
@@ -78,7 +78,7 @@ pub enum WebActivityKind {
     Tool,
     App,
     Plan,
-    Workflow,
+    Primitive,
     Memory,
     Patch,
     Error,
@@ -265,8 +265,12 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
         ActivityCell::CodingReview(cell) => apply_coding_review_cell(&mut item, cell),
         ActivityCell::GenericApp(cell) => apply_generic_app_cell(&mut item, cell),
         ActivityCell::PlanResult(cell) => apply_plan_cell(&mut item, cell),
-        ActivityCell::CreateWorkflowResult(cell) => apply_create_workflow_cell(&mut item, cell),
-        ActivityCell::ActivateWorkflowResult(cell) => apply_activate_workflow_cell(&mut item, cell),
+        ActivityCell::CreatePrimitiveSpecResult(cell) => {
+            apply_create_primitive_spec_cell(&mut item, cell)
+        }
+        ActivityCell::ActivatePrimitiveResult(cell) => {
+            apply_activate_primitive_cell(&mut item, cell)
+        }
         ActivityCell::ExecResult(cell) => apply_exec_cell(&mut item, cell),
         ActivityCell::LiveExec(cell) => apply_live_exec_cell(&mut item, cell),
         ActivityCell::Patch(cell) => apply_patch_cell(&mut item, cell),
@@ -297,8 +301,8 @@ fn activity_cell_variant_name(cell: &ActivityCell) -> &'static str {
         ActivityCell::CodingReview(_) => "CodingReview",
         ActivityCell::GenericApp(_) => "GenericApp",
         ActivityCell::PlanResult(_) => "PlanResult",
-        ActivityCell::CreateWorkflowResult(_) => "CreateWorkflowResult",
-        ActivityCell::ActivateWorkflowResult(_) => "ActivateWorkflowResult",
+        ActivityCell::CreatePrimitiveSpecResult(_) => "CreatePrimitiveSpecResult",
+        ActivityCell::ActivatePrimitiveResult(_) => "ActivatePrimitiveResult",
         ActivityCell::ExecResult(_) => "ExecResult",
         ActivityCell::LiveExec(_) => "LiveExec",
         ActivityCell::Patch(_) => "Patch",
@@ -764,23 +768,26 @@ fn apply_plan_cell(item: &mut WebActivityItem, cell: &PlanActivityCell) {
     }));
 }
 
-fn apply_create_workflow_cell(item: &mut WebActivityItem, cell: &CreatePrimitiveSpecActivityCell) {
-    item.kind = WebActivityKind::Workflow;
+fn apply_create_primitive_spec_cell(
+    item: &mut WebActivityItem,
+    cell: &CreatePrimitiveSpecActivityCell,
+) {
+    item.kind = WebActivityKind::Primitive;
     item.actor = Some(WebActivityActor::System);
-    item.title = format!("Created Primitive Spec: {}", cell.workflow_id);
+    item.title = format!("Created Primitive Spec: {}", cell.primitive_id);
     item.blocks = kv_block(vec![WebActivityKvEntry {
         key: "primitive_id".to_string(),
-        value: cell.workflow_id.clone(),
+        value: cell.primitive_id.clone(),
     }]);
 }
 
-fn apply_activate_workflow_cell(item: &mut WebActivityItem, cell: &ActivatePrimitiveActivityCell) {
-    item.kind = WebActivityKind::Workflow;
+fn apply_activate_primitive_cell(item: &mut WebActivityItem, cell: &ActivatePrimitiveActivityCell) {
+    item.kind = WebActivityKind::Primitive;
     item.actor = Some(WebActivityActor::System);
-    item.title = format!("Activated Primitive: {}", cell.workflow_id);
+    item.title = format!("Activated Primitive: {}", cell.primitive_id);
     item.blocks = kv_block(vec![WebActivityKvEntry {
         key: "primitive_id".to_string(),
-        value: cell.workflow_id.clone(),
+        value: cell.primitive_id.clone(),
     }]);
 }
 

@@ -307,10 +307,10 @@ type AgentChatActivityCellRender =
       steps: AgentChatPlanStep[];
     }
   | {
-      kind: "workflow";
+      kind: "primitive";
       marker: string;
       title: string;
-      workflowId: string;
+      primitiveId: string;
     }
   | {
       kind: "exec";
@@ -1364,12 +1364,12 @@ function AgentChatActivityCellView({
     ) : null;
   }
 
-  if (render.kind === "workflow") {
+  if (render.kind === "primitive") {
     return (
       <AgentChatStatusLineCell
         marker={render.marker}
         label={render.title}
-        value={render.workflowId}
+        value={render.primitiveId}
         valueClassName="font-mono break-all"
       />
     );
@@ -2695,7 +2695,7 @@ function agentChatRoleFromWebActivity(
     return "telegram";
   }
 
-  if (["plan", "workflow", "memory"].includes(kind) || actor === "system") {
+  if (["plan", "primitive", "memory"].includes(kind) || actor === "system") {
     return "system";
   }
 
@@ -2719,8 +2719,8 @@ function agentChatFallbackTitle(actor: string, kind: string) {
     return "Plan";
   }
 
-  if (kind === "workflow") {
-    return "Workflow";
+  if (kind === "primitive") {
+    return "Primitive";
   }
 
   return "Activity";
@@ -2747,7 +2747,7 @@ function agentChatActivityGlyph(bubble: AgentChatBubble) {
     return "±";
   }
 
-  if (bubble.kind === "workflow") {
+  if (bubble.kind === "primitive") {
     return "◇";
   }
 
@@ -2903,29 +2903,29 @@ function agentChatActivityCellRenderForBubble(
     };
   }
 
-  const createWorkflow = agentChatActivityCellPayload(
+  const createPrimitive = agentChatActivityCellPayload(
     cell,
-    "CreateWorkflowResult",
+    "CreatePrimitiveSpecResult",
   );
-  if (createWorkflow) {
+  if (createPrimitive) {
     return {
-      kind: "workflow",
+      kind: "primitive",
       marker: "⌘",
-      title: "Created Workflow:",
-      workflowId: stringValue(createWorkflow.workflow_id, "unknown"),
+      title: "Created Primitive Spec:",
+      primitiveId: stringValue(createPrimitive.workflow_id, "unknown"),
     };
   }
 
-  const activateWorkflow = agentChatActivityCellPayload(
+  const activatePrimitive = agentChatActivityCellPayload(
     cell,
-    "ActivateWorkflowResult",
+    "ActivatePrimitiveResult",
   );
-  if (activateWorkflow) {
+  if (activatePrimitive) {
     return {
-      kind: "workflow",
+      kind: "primitive",
       marker: "⌘",
-      title: "Activated Workflow:",
-      workflowId: stringValue(activateWorkflow.workflow_id, "unknown"),
+      title: "Activated Primitive:",
+      primitiveId: stringValue(activatePrimitive.workflow_id, "unknown"),
     };
   }
 

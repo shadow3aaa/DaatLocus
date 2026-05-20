@@ -28,8 +28,8 @@ pub enum ToolUiEvent {
     Reply(ReplyUiData),
     AppAttention(AppAttentionUiData),
     Plan(PlanUiData),
-    CreateWorkflow(CreatePrimitiveSpecUiData),
-    ActivateWorkflow(ActivatePrimitiveUiData),
+    CreatePrimitiveSpec(CreatePrimitiveSpecUiData),
+    ActivatePrimitive(ActivatePrimitiveUiData),
     #[serde(alias = "Finish", alias = "Work")]
     App(ToolUiData),
     Error(ToolUiData),
@@ -44,8 +44,8 @@ pub enum ToolCallUiEvent {
     Patch(PatchUiData),
     Telegram(TelegramUiData),
     Plan(ToolUiData),
-    CreateWorkflow(ToolUiData),
-    ActivateWorkflow(ToolUiData),
+    CreatePrimitiveSpec(ToolUiData),
+    ActivatePrimitive(ToolUiData),
     #[serde(alias = "Finish", alias = "Work")]
     App(ToolUiData),
     Error(ToolUiData),
@@ -238,12 +238,12 @@ pub enum PlanStepUiStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreatePrimitiveSpecUiData {
-    pub workflow_id: String,
+    pub primitive_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivatePrimitiveUiData {
-    pub workflow_id: String,
+    pub primitive_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -343,15 +343,15 @@ impl ToolUiEvent {
         Self::Plan(PlanUiData { steps })
     }
 
-    pub fn create_workflow(workflow_id: impl Into<String>) -> Self {
-        Self::CreateWorkflow(CreatePrimitiveSpecUiData {
-            workflow_id: workflow_id.into(),
+    pub fn create_primitive_spec(primitive_id: impl Into<String>) -> Self {
+        Self::CreatePrimitiveSpec(CreatePrimitiveSpecUiData {
+            primitive_id: primitive_id.into(),
         })
     }
 
-    pub fn activate_workflow(workflow_id: impl Into<String>) -> Self {
-        Self::ActivateWorkflow(ActivatePrimitiveUiData {
-            workflow_id: workflow_id.into(),
+    pub fn activate_primitive(primitive_id: impl Into<String>) -> Self {
+        Self::ActivatePrimitive(ActivatePrimitiveUiData {
+            primitive_id: primitive_id.into(),
         })
     }
 
@@ -427,15 +427,15 @@ impl ToolCallUiEvent {
         })
     }
 
-    pub fn create_workflow(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::CreateWorkflow(ToolUiData {
+    pub fn create_primitive_spec(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::CreatePrimitiveSpec(ToolUiData {
             title: title.into(),
             body_lines,
         })
     }
 
-    pub fn activate_workflow(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::ActivateWorkflow(ToolUiData {
+    pub fn activate_primitive(title: impl Into<String>, body_lines: Vec<String>) -> Self {
+        Self::ActivatePrimitive(ToolUiData {
             title: title.into(),
             body_lines,
         })

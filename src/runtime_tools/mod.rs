@@ -770,8 +770,8 @@ fn call_arg_string(call: &AgentToolCall, name: &str) -> Option<String> {
 
 fn workflow_id_from_result(event: &ToolUiEvent) -> Option<String> {
     match event {
-        ToolUiEvent::CreateWorkflow(event) => Some(event.workflow_id.clone()),
-        ToolUiEvent::ActivateWorkflow(event) => Some(event.workflow_id.clone()),
+        ToolUiEvent::CreatePrimitiveSpec(event) => Some(event.primitive_id.clone()),
+        ToolUiEvent::ActivatePrimitive(event) => Some(event.primitive_id.clone()),
         _ => None,
     }
 }

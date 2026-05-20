@@ -12,11 +12,10 @@ use crate::{
 };
 
 use super::{
-    DashboardContextCompositionSnapshot, DashboardPlanStep, DashboardRuntimeActivity,
-    DashboardRuntimeActivityStatus, DashboardRuntimeOptimizationSnapshot,
+    DashboardContextCompositionSnapshot, DashboardPlanStep, DashboardPrimitiveOptimizationSnapshot,
+    DashboardRuntimeActivity, DashboardRuntimeActivityStatus, DashboardRuntimeOptimizationSnapshot,
     DashboardRuntimeStatusLevel, DashboardState, DashboardTokenUsageSnapshot,
-    DashboardWorkflowOptimizationSnapshot, activity_cells_from_history_items, dashboard_agent_name,
-    render_activity_from_messages,
+    activity_cells_from_history_items, dashboard_agent_name, render_activity_from_messages,
 };
 
 /// Sleep-related constants used in dashboard rendering.
@@ -58,7 +57,7 @@ pub fn sync_dashboard_state(
         state.current_plan_step = current_plan_step_for_dashboard(context);
         state.token_usage = token_usage_snapshot_for_dashboard(context);
         state.runtime_optimization = runtime_optimization_snapshot_for_dashboard(sleep_status);
-        state.workflow_optimization = workflow_optimization_snapshot_for_dashboard(sleep_status);
+        state.primitive_optimization = primitive_optimization_snapshot_for_dashboard(sleep_status);
         state.context_composition = context_composition_snapshot_for_dashboard(context);
     });
 }
@@ -143,30 +142,30 @@ pub fn runtime_optimization_snapshot_for_dashboard(
     }
 }
 
-pub fn workflow_optimization_snapshot_for_dashboard(
+pub fn primitive_optimization_snapshot_for_dashboard(
     sleep_status: &SleepStatusSnapshot,
-) -> DashboardWorkflowOptimizationSnapshot {
-    DashboardWorkflowOptimizationSnapshot {
+) -> DashboardPrimitiveOptimizationSnapshot {
+    DashboardPrimitiveOptimizationSnapshot {
         running: sleep_status.running,
         current_trigger: sleep_status.current_trigger.map(str::to_string),
         last_result: sleep_status.last_result.clone(),
         last_completed_at_ms: sleep_status.last_completed_at_ms,
-        workflow_evidence_records: sleep_status.workflow_evidence_records,
-        total_workflow_evidence_run_records: sleep_status.total_workflow_evidence_run_records,
-        total_workflow_reflections: sleep_status.total_workflow_reflections,
-        total_workflow_patch_candidates: sleep_status.total_workflow_patch_candidates,
-        total_workflow_merge_candidates: sleep_status.total_workflow_merge_candidates,
-        total_workflow_candidate_evaluations: sleep_status.total_workflow_candidate_evaluations,
-        total_workflow_frontier_entries: sleep_status.total_workflow_frontier_entries,
-        latest_workflow_frontier_root_entries: sleep_status.latest_workflow_frontier_root_entries,
-        latest_workflow_frontier_branched_entries: sleep_status
-            .latest_workflow_frontier_branched_entries,
-        latest_workflow_frontier_max_generation: sleep_status
-            .latest_workflow_frontier_max_generation,
-        total_workflow_patch_applied: sleep_status.total_workflow_patch_applied,
-        total_workflow_merge_applied: sleep_status.total_workflow_merge_applied,
-        total_workflow_update_rollbacks: sleep_status.total_workflow_update_rollbacks,
-        total_workflow_optimization_rounds: sleep_status.total_workflow_optimization_rounds,
+        primitive_evidence_records: sleep_status.primitive_evidence_records,
+        total_primitive_evidence_run_records: sleep_status.total_primitive_evidence_run_records,
+        total_primitive_reflections: sleep_status.total_primitive_reflections,
+        total_primitive_patch_candidates: sleep_status.total_primitive_patch_candidates,
+        total_primitive_merge_candidates: sleep_status.total_primitive_merge_candidates,
+        total_primitive_candidate_evaluations: sleep_status.total_primitive_candidate_evaluations,
+        total_primitive_frontier_entries: sleep_status.total_primitive_frontier_entries,
+        latest_primitive_frontier_root_entries: sleep_status.latest_primitive_frontier_root_entries,
+        latest_primitive_frontier_branched_entries: sleep_status
+            .latest_primitive_frontier_branched_entries,
+        latest_primitive_frontier_max_generation: sleep_status
+            .latest_primitive_frontier_max_generation,
+        total_primitive_patch_applied: sleep_status.total_primitive_patch_applied,
+        total_primitive_merge_applied: sleep_status.total_primitive_merge_applied,
+        total_primitive_update_rollbacks: sleep_status.total_primitive_update_rollbacks,
+        total_primitive_optimization_rounds: sleep_status.total_primitive_optimization_rounds,
     }
 }
 
@@ -353,7 +352,7 @@ pub fn render_sleep_status_output_for_dashboard(
         ),
         format!(
             "• Workflow evidence records: {}",
-            sleep_status.workflow_evidence_records
+            sleep_status.primitive_evidence_records
         ),
     ];
     sections.push(format!("Queues\n{}", queue_lines.join("\n")));
@@ -394,57 +393,57 @@ pub fn render_sleep_status_output_for_dashboard(
         runtime_error_lines.join("\n")
     ));
 
-    let workflow_lines = [
+    let primitive_lines = [
         format!(
-            "• Total workflow evidence run records: {}",
-            sleep_status.total_workflow_evidence_run_records
+            "• Total primitive evidence run records: {}",
+            sleep_status.total_primitive_evidence_run_records
         ),
         format!(
-            "• Total workflow reflections: {}",
-            sleep_status.total_workflow_reflections
+            "• Total primitive reflections: {}",
+            sleep_status.total_primitive_reflections
         ),
         format!(
-            "• Total workflow patch candidates: {}",
-            sleep_status.total_workflow_patch_candidates
+            "• Total primitive patch candidates: {}",
+            sleep_status.total_primitive_patch_candidates
         ),
         format!(
-            "• Total workflow merge candidates: {}",
-            sleep_status.total_workflow_merge_candidates
+            "• Total primitive merge candidates: {}",
+            sleep_status.total_primitive_merge_candidates
         ),
         format!(
-            "• Total workflow candidate evaluations: {}",
-            sleep_status.total_workflow_candidate_evaluations
+            "• Total primitive candidate evaluations: {}",
+            sleep_status.total_primitive_candidate_evaluations
         ),
         format!(
-            "• Total workflow frontier entries: {}",
-            sleep_status.total_workflow_frontier_entries
+            "• Total primitive frontier entries: {}",
+            sleep_status.total_primitive_frontier_entries
         ),
         format!(
-            "• Latest workflow frontier roots/branched/max_generation: {}/{}/{}",
-            sleep_status.latest_workflow_frontier_root_entries,
-            sleep_status.latest_workflow_frontier_branched_entries,
-            sleep_status.latest_workflow_frontier_max_generation
+            "• Latest primitive frontier roots/branched/max_generation: {}/{}/{}",
+            sleep_status.latest_primitive_frontier_root_entries,
+            sleep_status.latest_primitive_frontier_branched_entries,
+            sleep_status.latest_primitive_frontier_max_generation
         ),
         format!(
-            "• Total workflow patch applied: {}",
-            sleep_status.total_workflow_patch_applied
+            "• Total primitive patch applied: {}",
+            sleep_status.total_primitive_patch_applied
         ),
         format!(
-            "• Total workflow merge applied: {}",
-            sleep_status.total_workflow_merge_applied
+            "• Total primitive merge applied: {}",
+            sleep_status.total_primitive_merge_applied
         ),
         format!(
-            "• Total workflow update rollbacks: {}",
-            sleep_status.total_workflow_update_rollbacks
+            "• Total primitive update rollbacks: {}",
+            sleep_status.total_primitive_update_rollbacks
         ),
         format!(
-            "• Total workflow optimization rounds: {}",
-            sleep_status.total_workflow_optimization_rounds
+            "• Total primitive optimization rounds: {}",
+            sleep_status.total_primitive_optimization_rounds
         ),
     ];
     sections.push(format!(
         "Workflow Improvement Totals\n{}",
-        workflow_lines.join("\n")
+        primitive_lines.join("\n")
     ));
 
     let mut trigger_lines = vec![

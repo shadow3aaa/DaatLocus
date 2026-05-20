@@ -22,7 +22,7 @@ pub struct SleepStatusSnapshot {
     pub last_started_at_ms: Option<i64>,
     pub last_completed_at_ms: Option<i64>,
     pub unread_runtime_error_backlog: usize,
-    pub workflow_evidence_records: usize,
+    pub primitive_evidence_records: usize,
     pub total_runs: usize,
     pub total_runtime_error_cases_consumed: usize,
     pub total_runtime_error_cases: usize,
@@ -31,19 +31,19 @@ pub struct SleepStatusSnapshot {
     pub total_runtime_contract_candidate_evaluations: usize,
     pub total_runtime_contract_system_additions: usize,
     pub total_runtime_contract_updates: usize,
-    pub total_workflow_evidence_run_records: usize,
-    pub total_workflow_reflections: usize,
-    pub total_workflow_patch_candidates: usize,
-    pub total_workflow_merge_candidates: usize,
-    pub total_workflow_candidate_evaluations: usize,
-    pub total_workflow_frontier_entries: usize,
-    pub latest_workflow_frontier_root_entries: usize,
-    pub latest_workflow_frontier_branched_entries: usize,
-    pub latest_workflow_frontier_max_generation: usize,
-    pub total_workflow_patch_applied: usize,
-    pub total_workflow_merge_applied: usize,
-    pub total_workflow_update_rollbacks: usize,
-    pub total_workflow_optimization_rounds: usize,
+    pub total_primitive_evidence_run_records: usize,
+    pub total_primitive_reflections: usize,
+    pub total_primitive_patch_candidates: usize,
+    pub total_primitive_merge_candidates: usize,
+    pub total_primitive_candidate_evaluations: usize,
+    pub total_primitive_frontier_entries: usize,
+    pub latest_primitive_frontier_root_entries: usize,
+    pub latest_primitive_frontier_branched_entries: usize,
+    pub latest_primitive_frontier_max_generation: usize,
+    pub total_primitive_patch_applied: usize,
+    pub total_primitive_merge_applied: usize,
+    pub total_primitive_update_rollbacks: usize,
+    pub total_primitive_optimization_rounds: usize,
 }
 
 impl SleepStatusSnapshot {
@@ -72,19 +72,19 @@ impl SleepStatusSnapshot {
         self.total_runtime_contract_system_additions += correction.applied_system_additions;
         self.total_runtime_contract_updates +=
             usize::from(correction.compiled_runtime_contract_updated);
-        self.total_workflow_evidence_run_records += workflow.evidence_run_records;
-        self.total_workflow_reflections += workflow.workflow_reflections;
-        self.total_workflow_patch_candidates += workflow.patch_candidates;
-        self.total_workflow_merge_candidates += workflow.merge_candidates;
-        self.total_workflow_candidate_evaluations += workflow.candidate_evaluations;
-        self.total_workflow_frontier_entries += workflow.frontier_entries;
-        self.latest_workflow_frontier_root_entries = workflow.frontier_root_entries;
-        self.latest_workflow_frontier_branched_entries = workflow.frontier_branched_entries;
-        self.latest_workflow_frontier_max_generation = workflow.frontier_max_generation;
-        self.total_workflow_patch_applied += workflow.patch_applied;
-        self.total_workflow_merge_applied += workflow.merge_applied;
-        self.total_workflow_update_rollbacks += workflow.update_rollbacks;
-        self.total_workflow_optimization_rounds += workflow.optimization_rounds;
+        self.total_primitive_evidence_run_records += workflow.evidence_run_records;
+        self.total_primitive_reflections += workflow.workflow_reflections;
+        self.total_primitive_patch_candidates += workflow.patch_candidates;
+        self.total_primitive_merge_candidates += workflow.merge_candidates;
+        self.total_primitive_candidate_evaluations += workflow.candidate_evaluations;
+        self.total_primitive_frontier_entries += workflow.frontier_entries;
+        self.latest_primitive_frontier_root_entries = workflow.frontier_root_entries;
+        self.latest_primitive_frontier_branched_entries = workflow.frontier_branched_entries;
+        self.latest_primitive_frontier_max_generation = workflow.frontier_max_generation;
+        self.total_primitive_patch_applied += workflow.patch_applied;
+        self.total_primitive_merge_applied += workflow.merge_applied;
+        self.total_primitive_update_rollbacks += workflow.update_rollbacks;
+        self.total_primitive_optimization_rounds += workflow.optimization_rounds;
     }
 }
 
@@ -102,19 +102,19 @@ struct PersistedSleepStatusSnapshot {
     total_runtime_contract_candidate_evaluations: usize,
     total_runtime_contract_system_additions: usize,
     total_runtime_contract_updates: usize,
-    total_workflow_evidence_run_records: usize,
-    total_workflow_reflections: usize,
-    total_workflow_patch_candidates: usize,
-    total_workflow_merge_candidates: usize,
-    total_workflow_candidate_evaluations: usize,
-    total_workflow_frontier_entries: usize,
-    latest_workflow_frontier_root_entries: usize,
-    latest_workflow_frontier_branched_entries: usize,
-    latest_workflow_frontier_max_generation: usize,
-    total_workflow_patch_applied: usize,
-    total_workflow_merge_applied: usize,
-    total_workflow_update_rollbacks: usize,
-    total_workflow_optimization_rounds: usize,
+    total_primitive_evidence_run_records: usize,
+    total_primitive_reflections: usize,
+    total_primitive_patch_candidates: usize,
+    total_primitive_merge_candidates: usize,
+    total_primitive_candidate_evaluations: usize,
+    total_primitive_frontier_entries: usize,
+    latest_primitive_frontier_root_entries: usize,
+    latest_primitive_frontier_branched_entries: usize,
+    latest_primitive_frontier_max_generation: usize,
+    total_primitive_patch_applied: usize,
+    total_primitive_merge_applied: usize,
+    total_primitive_update_rollbacks: usize,
+    total_primitive_optimization_rounds: usize,
 }
 
 impl From<PersistedSleepStatusSnapshot> for SleepStatusSnapshot {
@@ -126,7 +126,7 @@ impl From<PersistedSleepStatusSnapshot> for SleepStatusSnapshot {
             last_started_at_ms: value.last_started_at_ms,
             last_completed_at_ms: value.last_completed_at_ms,
             unread_runtime_error_backlog: 0,
-            workflow_evidence_records: 0,
+            primitive_evidence_records: 0,
             total_runs: value.total_runs,
             total_runtime_error_cases_consumed: value.total_runtime_error_cases_consumed,
             total_runtime_error_cases: value.total_runtime_error_cases,
@@ -136,20 +136,21 @@ impl From<PersistedSleepStatusSnapshot> for SleepStatusSnapshot {
                 .total_runtime_contract_candidate_evaluations,
             total_runtime_contract_system_additions: value.total_runtime_contract_system_additions,
             total_runtime_contract_updates: value.total_runtime_contract_updates,
-            total_workflow_evidence_run_records: value.total_workflow_evidence_run_records,
-            total_workflow_reflections: value.total_workflow_reflections,
-            total_workflow_patch_candidates: value.total_workflow_patch_candidates,
-            total_workflow_merge_candidates: value.total_workflow_merge_candidates,
-            total_workflow_candidate_evaluations: value.total_workflow_candidate_evaluations,
-            total_workflow_frontier_entries: value.total_workflow_frontier_entries,
-            latest_workflow_frontier_root_entries: value.latest_workflow_frontier_root_entries,
-            latest_workflow_frontier_branched_entries: value
-                .latest_workflow_frontier_branched_entries,
-            latest_workflow_frontier_max_generation: value.latest_workflow_frontier_max_generation,
-            total_workflow_patch_applied: value.total_workflow_patch_applied,
-            total_workflow_merge_applied: value.total_workflow_merge_applied,
-            total_workflow_update_rollbacks: value.total_workflow_update_rollbacks,
-            total_workflow_optimization_rounds: value.total_workflow_optimization_rounds,
+            total_primitive_evidence_run_records: value.total_primitive_evidence_run_records,
+            total_primitive_reflections: value.total_primitive_reflections,
+            total_primitive_patch_candidates: value.total_primitive_patch_candidates,
+            total_primitive_merge_candidates: value.total_primitive_merge_candidates,
+            total_primitive_candidate_evaluations: value.total_primitive_candidate_evaluations,
+            total_primitive_frontier_entries: value.total_primitive_frontier_entries,
+            latest_primitive_frontier_root_entries: value.latest_primitive_frontier_root_entries,
+            latest_primitive_frontier_branched_entries: value
+                .latest_primitive_frontier_branched_entries,
+            latest_primitive_frontier_max_generation: value
+                .latest_primitive_frontier_max_generation,
+            total_primitive_patch_applied: value.total_primitive_patch_applied,
+            total_primitive_merge_applied: value.total_primitive_merge_applied,
+            total_primitive_update_rollbacks: value.total_primitive_update_rollbacks,
+            total_primitive_optimization_rounds: value.total_primitive_optimization_rounds,
         }
     }
 }
@@ -169,20 +170,21 @@ impl From<&SleepStatusSnapshot> for PersistedSleepStatusSnapshot {
                 .total_runtime_contract_candidate_evaluations,
             total_runtime_contract_system_additions: value.total_runtime_contract_system_additions,
             total_runtime_contract_updates: value.total_runtime_contract_updates,
-            total_workflow_evidence_run_records: value.total_workflow_evidence_run_records,
-            total_workflow_reflections: value.total_workflow_reflections,
-            total_workflow_patch_candidates: value.total_workflow_patch_candidates,
-            total_workflow_merge_candidates: value.total_workflow_merge_candidates,
-            total_workflow_candidate_evaluations: value.total_workflow_candidate_evaluations,
-            total_workflow_frontier_entries: value.total_workflow_frontier_entries,
-            latest_workflow_frontier_root_entries: value.latest_workflow_frontier_root_entries,
-            latest_workflow_frontier_branched_entries: value
-                .latest_workflow_frontier_branched_entries,
-            latest_workflow_frontier_max_generation: value.latest_workflow_frontier_max_generation,
-            total_workflow_patch_applied: value.total_workflow_patch_applied,
-            total_workflow_merge_applied: value.total_workflow_merge_applied,
-            total_workflow_update_rollbacks: value.total_workflow_update_rollbacks,
-            total_workflow_optimization_rounds: value.total_workflow_optimization_rounds,
+            total_primitive_evidence_run_records: value.total_primitive_evidence_run_records,
+            total_primitive_reflections: value.total_primitive_reflections,
+            total_primitive_patch_candidates: value.total_primitive_patch_candidates,
+            total_primitive_merge_candidates: value.total_primitive_merge_candidates,
+            total_primitive_candidate_evaluations: value.total_primitive_candidate_evaluations,
+            total_primitive_frontier_entries: value.total_primitive_frontier_entries,
+            latest_primitive_frontier_root_entries: value.latest_primitive_frontier_root_entries,
+            latest_primitive_frontier_branched_entries: value
+                .latest_primitive_frontier_branched_entries,
+            latest_primitive_frontier_max_generation: value
+                .latest_primitive_frontier_max_generation,
+            total_primitive_patch_applied: value.total_primitive_patch_applied,
+            total_primitive_merge_applied: value.total_primitive_merge_applied,
+            total_primitive_update_rollbacks: value.total_primitive_update_rollbacks,
+            total_primitive_optimization_rounds: value.total_primitive_optimization_rounds,
         }
     }
 }
@@ -214,7 +216,7 @@ pub async fn refresh_sleep_status_queues(status: &mut SleepStatusSnapshot) {
         status.unread_runtime_error_backlog = backlog;
     }
     if let Ok(records) = primitive_run_record_count().await {
-        status.workflow_evidence_records = records;
+        status.primitive_evidence_records = records;
     }
 }
 
@@ -258,10 +260,10 @@ mod tests {
         assert_eq!(status.total_runtime_contract_candidate_evaluations, 2);
         assert_eq!(status.total_runtime_contract_system_additions, 2);
         assert_eq!(status.total_runtime_contract_updates, 2);
-        assert_eq!(status.total_workflow_evidence_run_records, 14);
-        assert_eq!(status.total_workflow_patch_applied, 2);
-        assert_eq!(status.latest_workflow_frontier_root_entries, 8);
-        assert_eq!(status.latest_workflow_frontier_branched_entries, 9);
-        assert_eq!(status.latest_workflow_frontier_max_generation, 10);
+        assert_eq!(status.total_primitive_evidence_run_records, 14);
+        assert_eq!(status.total_primitive_patch_applied, 2);
+        assert_eq!(status.latest_primitive_frontier_root_entries, 8);
+        assert_eq!(status.latest_primitive_frontier_branched_entries, 9);
+        assert_eq!(status.latest_primitive_frontier_max_generation, 10);
     }
 }

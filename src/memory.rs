@@ -968,11 +968,11 @@ fn summarize_tool_ui_event(event: &ToolUiEvent) -> String {
             crate::tool_ui::AppAttentionUiAction::PutAway => "put away focused app".to_string(),
         },
         ToolUiEvent::Plan(PlanUiData { steps }) => format!("plan with {} step(s)", steps.len()),
-        ToolUiEvent::CreateWorkflow(CreatePrimitiveSpecUiData { workflow_id }) => {
-            format!("created primitive spec {workflow_id}")
+        ToolUiEvent::CreatePrimitiveSpec(CreatePrimitiveSpecUiData { primitive_id }) => {
+            format!("created primitive spec {primitive_id}")
         }
-        ToolUiEvent::ActivateWorkflow(ActivatePrimitiveUiData { workflow_id }) => {
-            format!("activated primitive {workflow_id}")
+        ToolUiEvent::ActivatePrimitive(ActivatePrimitiveUiData { primitive_id }) => {
+            format!("activated primitive {primitive_id}")
         }
         ToolUiEvent::Terminal(data) => summarize_runtime_inline_text(&data.title),
         ToolUiEvent::Patch(data) => summarize_runtime_inline_text(&data.summary_line),
@@ -990,8 +990,8 @@ fn tool_call_ui_event_title(event: &ToolCallUiEvent) -> &str {
     match event {
         ToolCallUiEvent::Exec(ToolUiData { title, .. })
         | ToolCallUiEvent::Plan(ToolUiData { title, .. })
-        | ToolCallUiEvent::CreateWorkflow(ToolUiData { title, .. })
-        | ToolCallUiEvent::ActivateWorkflow(ToolUiData { title, .. })
+        | ToolCallUiEvent::CreatePrimitiveSpec(ToolUiData { title, .. })
+        | ToolCallUiEvent::ActivatePrimitive(ToolUiData { title, .. })
         | ToolCallUiEvent::App(ToolUiData { title, .. })
         | ToolCallUiEvent::Error(ToolUiData { title, .. }) => title,
         ToolCallUiEvent::Terminal(TerminalUiData { title, .. }) => title,

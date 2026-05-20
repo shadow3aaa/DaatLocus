@@ -29,14 +29,14 @@ import {
   CONTEXT_COMPOSITION_CHART_CONFIG,
   RUNTIME_OPTIMIZATION_CHART_CONFIG,
   TOKEN_USAGE_CHART_CONFIG,
-  WORKFLOW_OPTIMIZATION_CHART_CONFIG,
+  PRIMITIVE_OPTIMIZATION_CHART_CONFIG,
   contextCompositionCardData,
   dailyTokenUsageChartData,
   formatCompactNumber,
   formatPercent,
   formatPercentAxisTick,
   runtimeOptimizationProgressData,
-  workflowOptimizationProgressData,
+  primitiveOptimizationProgressData,
   type ContextCompositionPrefixSummaryDatum,
   type ContextCompositionSegmentChartDatum,
   type DailyTokenUsageChartDatum,
@@ -49,7 +49,7 @@ const DEFAULT_STATUS_CARD_ORDER = [
   "runtime-optimization",
   "context-composition",
   "daily-token-usage",
-  "workflow-optimization",
+  "primitive-optimization",
 ] as const;
 
 type StatusCardId = (typeof DEFAULT_STATUS_CARD_ORDER)[number];
@@ -109,9 +109,9 @@ const STATUS_CARD_DEFINITIONS: Record<StatusCardId, StatusCardDefinition> = {
     label: "Token Usage",
     render: (props) => <DailyTokenUsageCard {...props} />,
   },
-  "workflow-optimization": {
-    label: "Workflow Optimization",
-    render: (props) => <WorkflowOptimizationCard {...props} />,
+  "primitive-optimization": {
+    label: "Primitive Optimization",
+    render: (props) => <PrimitiveOptimizationCard {...props} />,
   },
 };
 
@@ -708,7 +708,7 @@ function ContextCompositionDetailRow({
   );
 }
 
-function WorkflowOptimizationCard({
+function PrimitiveOptimizationCard({
   snapshot,
   dragHandle,
 }: {
@@ -716,7 +716,7 @@ function WorkflowOptimizationCard({
   dragHandle: ReactNode;
 }) {
   const progressData = useMemo(
-    () => workflowOptimizationProgressData(snapshot),
+    () => primitiveOptimizationProgressData(snapshot),
     [snapshot],
   );
   const total = progressData.reduce((sum, item) => sum + item.value, 0);
@@ -725,7 +725,7 @@ function WorkflowOptimizationCard({
     return (
       <Card className="w-full">
         <CardHeader>
-          <CardTitle>Workflow Optimization</CardTitle>
+          <CardTitle>Primitive Optimization</CardTitle>
           <CardAction>{dragHandle}</CardAction>
         </CardHeader>
         <CardContent>
@@ -740,7 +740,7 @@ function WorkflowOptimizationCard({
   return (
     <Card className="w-full">
       <CardHeader>
-        <CardTitle>Workflow Optimization</CardTitle>
+        <CardTitle>Primitive Optimization</CardTitle>
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
@@ -748,7 +748,7 @@ function WorkflowOptimizationCard({
           <OptimizationProgressBar
             data={progressData}
             total={total}
-            config={WORKFLOW_OPTIMIZATION_CHART_CONFIG}
+            config={PRIMITIVE_OPTIMIZATION_CHART_CONFIG}
           />
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <div className="flex items-center gap-1.5">

@@ -43,7 +43,7 @@ export const CONTEXT_COMPOSITION_CHART_CONFIG = {
   },
 };
 
-export const WORKFLOW_OPTIMIZATION_CHART_CONFIG = {
+export const PRIMITIVE_OPTIMIZATION_CHART_CONFIG = {
   queued: {
     label: "Queued",
     color: "var(--chart-1)",
@@ -175,15 +175,15 @@ export type ContextCompositionCardData = {
   prefixLegend: ContextCompositionPrefixBar[];
 };
 
-export type WorkflowOptimizationChartDatum = {
+export type PrimitiveOptimizationChartDatum = {
   key: string;
   label: string;
   value: number;
-  colorKey: keyof typeof WORKFLOW_OPTIMIZATION_CHART_CONFIG;
+  colorKey: keyof typeof PRIMITIVE_OPTIMIZATION_CHART_CONFIG;
   detail: string;
 };
 
-export type WorkflowOptimizationDonutDatum = WorkflowOptimizationChartDatum & {
+export type PrimitiveOptimizationDonutDatum = PrimitiveOptimizationChartDatum & {
   chartValue: number;
 };
 
@@ -362,42 +362,42 @@ export function contextCompositionCardData(
   };
 }
 
-export function workflowOptimizationProgressData(
+export function primitiveOptimizationProgressData(
   snapshot: DashboardSnapshot | null,
-): WorkflowOptimizationChartDatum[] {
-  const workflow = snapshot?.workflow_optimization;
+): PrimitiveOptimizationChartDatum[] {
+  const primitive = snapshot?.primitive_optimization;
   const patchCandidates = Math.max(
     0,
-    workflow?.total_workflow_patch_candidates ?? 0,
+    primitive?.total_primitive_patch_candidates ?? 0,
   );
   const mergeCandidates = Math.max(
     0,
-    workflow?.total_workflow_merge_candidates ?? 0,
+    primitive?.total_primitive_merge_candidates ?? 0,
   );
-  const patchApplied = Math.max(0, workflow?.total_workflow_patch_applied ?? 0);
-  const mergeApplied = Math.max(0, workflow?.total_workflow_merge_applied ?? 0);
+  const patchApplied = Math.max(0, primitive?.total_primitive_patch_applied ?? 0);
+  const mergeApplied = Math.max(0, primitive?.total_primitive_merge_applied ?? 0);
 
   return [
     {
       key: "queued",
       label: "Queued",
-      value: Math.max(0, workflow?.workflow_evidence_records ?? 0),
+      value: Math.max(0, primitive?.primitive_evidence_records ?? 0),
       colorKey: "queued",
-      detail: "Workflow evidence waiting for sleep-time review",
+      detail: "Primitive evidence waiting for sleep-time review",
     },
     {
       key: "evidence",
       label: "Evidence",
-      value: Math.max(0, workflow?.total_workflow_evidence_run_records ?? 0),
+      value: Math.max(0, primitive?.total_primitive_evidence_run_records ?? 0),
       colorKey: "evidence",
-      detail: "Workflow run records consumed by optimization",
+      detail: "Primitive run records consumed by optimization",
     },
     {
       key: "reflections",
       label: "Reflect",
-      value: Math.max(0, workflow?.total_workflow_reflections ?? 0),
+      value: Math.max(0, primitive?.total_primitive_reflections ?? 0),
       colorKey: "reflections",
-      detail: "Generated workflow reflections",
+      detail: "Generated primitive reflections",
     },
     {
       key: "candidates",
@@ -411,9 +411,9 @@ export function workflowOptimizationProgressData(
     {
       key: "evaluations",
       label: "Evaluate",
-      value: Math.max(0, workflow?.total_workflow_candidate_evaluations ?? 0),
+      value: Math.max(0, primitive?.total_primitive_candidate_evaluations ?? 0),
       colorKey: "evaluations",
-      detail: "Workflow patch/merge candidate evaluations",
+      detail: "Primitive patch/merge candidate evaluations",
     },
     {
       key: "applied",
@@ -427,9 +427,9 @@ export function workflowOptimizationProgressData(
   ];
 }
 
-export function workflowOptimizationDonutData(
-  progressData: WorkflowOptimizationChartDatum[],
-): WorkflowOptimizationDonutDatum[] {
+export function primitiveOptimizationDonutData(
+  progressData: PrimitiveOptimizationChartDatum[],
+): PrimitiveOptimizationDonutDatum[] {
   const activeData = progressData
     .filter((item) => item.value > 0)
     .map((item) => ({
@@ -448,7 +448,7 @@ export function workflowOptimizationDonutData(
       value: 0,
       chartValue: 1,
       colorKey: "empty",
-      detail: "No workflow optimization activity yet",
+      detail: "No primitive optimization activity yet",
     },
   ];
 }

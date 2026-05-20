@@ -48,25 +48,25 @@ export type DashboardTokenUsageSnapshot = {
   judge_model?: string | null;
 };
 
-export type DashboardWorkflowOptimizationSnapshot = {
+export type DashboardPrimitiveOptimizationSnapshot = {
   running: boolean;
   current_trigger: string | null;
   last_result: string | null;
   last_completed_at_ms: number | null;
-  workflow_evidence_records: number;
-  total_workflow_evidence_run_records: number;
-  total_workflow_reflections: number;
-  total_workflow_patch_candidates: number;
-  total_workflow_merge_candidates: number;
-  total_workflow_candidate_evaluations: number;
-  total_workflow_frontier_entries: number;
-  latest_workflow_frontier_root_entries: number;
-  latest_workflow_frontier_branched_entries: number;
-  latest_workflow_frontier_max_generation: number;
-  total_workflow_patch_applied: number;
-  total_workflow_merge_applied: number;
-  total_workflow_update_rollbacks: number;
-  total_workflow_optimization_rounds: number;
+  primitive_evidence_records: number;
+  total_primitive_evidence_run_records: number;
+  total_primitive_reflections: number;
+  total_primitive_patch_candidates: number;
+  total_primitive_merge_candidates: number;
+  total_primitive_candidate_evaluations: number;
+  total_primitive_frontier_entries: number;
+  latest_primitive_frontier_root_entries: number;
+  latest_primitive_frontier_branched_entries: number;
+  latest_primitive_frontier_max_generation: number;
+  total_primitive_patch_applied: number;
+  total_primitive_merge_applied: number;
+  total_primitive_update_rollbacks: number;
+  total_primitive_optimization_rounds: number;
 };
 
 export type DashboardRuntimeOptimizationSnapshot = {
@@ -132,7 +132,7 @@ export type WebActivityKind =
   | "tool"
   | "app"
   | "plan"
-  | "workflow"
+  | "primitive"
   | "memory"
   | "patch"
   | "error"
@@ -324,7 +324,7 @@ export type ActivityCellPlan = {
   }>;
 };
 
-export type ActivityCellWorkflow = {
+export type ActivityCellPrimitive = {
   workflow_id: string;
 };
 
@@ -337,8 +337,8 @@ export type ActivityCellVariant =
   | { GenericApp: ActivityCellCommon }
   | { ToolResult: ActivityCellCommon }
   | { PlanResult: ActivityCellPlan }
-  | { CreateWorkflowResult: ActivityCellWorkflow }
-  | { ActivateWorkflowResult: ActivityCellWorkflow }
+  | { CreatePrimitiveSpecResult: ActivityCellPrimitive }
+  | { ActivatePrimitiveResult: ActivityCellPrimitive }
   | { ExecResult: ActivityCellExecResult }
   | { LiveExec: ActivityCellLiveExec }
   | { Patch: ActivityCellPatch }
@@ -416,7 +416,7 @@ export type DashboardSnapshot = {
   runtime_activity?: DashboardRuntimeActivity;
   current_plan_step: DashboardPlanStep | null;
   token_usage?: DashboardTokenUsageSnapshot;
-  workflow_optimization?: DashboardWorkflowOptimizationSnapshot;
+  primitive_optimization?: DashboardPrimitiveOptimizationSnapshot;
   runtime_optimization?: DashboardRuntimeOptimizationSnapshot;
   context_composition?: DashboardContextCompositionSnapshot | null;
   footer_context: string;
