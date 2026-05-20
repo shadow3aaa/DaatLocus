@@ -325,7 +325,7 @@ export type ActivityCellPlan = {
 };
 
 export type ActivityCellPrimitive = {
-  workflow_id: string;
+  primitive_id: string;
 };
 
 export type ActivityCellVariant =

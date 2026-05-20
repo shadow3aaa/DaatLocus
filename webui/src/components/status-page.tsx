@@ -2912,7 +2912,7 @@ function agentChatActivityCellRenderForBubble(
       kind: "primitive",
       marker: "⌘",
       title: "Created Primitive Spec:",
-      primitiveId: stringValue(createPrimitive.workflow_id, "unknown"),
+      primitiveId: stringValue(createPrimitive.primitive_id, "unknown"),
     };
   }
 
@@ -2925,7 +2925,7 @@ function agentChatActivityCellRenderForBubble(
       kind: "primitive",
       marker: "⌘",
       title: "Activated Primitive:",
-      primitiveId: stringValue(activatePrimitive.workflow_id, "unknown"),
+      primitiveId: stringValue(activatePrimitive.primitive_id, "unknown"),
     };
   }
 
