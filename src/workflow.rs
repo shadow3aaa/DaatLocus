@@ -1346,7 +1346,7 @@ mod tests {
         let mut store = PrimitiveStore::open_scoped(primary).await;
         store
             .create_workflow(NewPrimitiveSpec {
-                id: "inspect-local-project".to_string(),
+                id: "alpha-project-scan".to_string(),
                 when_to_use: vec!["inspect project".to_string()],
                 preconditions: vec![],
                 primitive_steps: vec!["inspect files".to_string()],
@@ -1357,7 +1357,7 @@ mod tests {
             .expect("create inspect primitive");
         store
             .create_workflow(NewPrimitiveSpec {
-                id: "run-required-checks".to_string(),
+                id: "beta-required-checks".to_string(),
                 when_to_use: vec!["run checks".to_string()],
                 preconditions: vec![],
                 primitive_steps: vec!["run tests".to_string()],
@@ -1368,16 +1368,16 @@ mod tests {
             .expect("create checks primitive");
 
         let composition = store
-            .compose_primitives("inspect-local-project-run-required-checks")
+            .compose_primitives("alpha-project-scan-beta-required-checks")
             .expect("compose primitives");
 
         assert_eq!(
             composition.composition_id,
-            "inspect-local-project-run-required-checks"
+            "alpha-project-scan-beta-required-checks"
         );
         assert_eq!(
             composition.primitive_ids,
-            vec!["inspect-local-project", "run-required-checks"]
+            vec!["alpha-project-scan", "beta-required-checks"]
         );
     }
 
