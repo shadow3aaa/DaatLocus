@@ -36,8 +36,19 @@ pub struct TerminalExecArgs {
 pub struct TerminalWriteStdinArgs {
     pub session_id: String,
     pub text: String,
+    /// Defaults to `any_output`. Use `timeout` for a pure wait that suppresses intermediate progress updates.
+    pub wait_mode: Option<TerminalWaitMode>,
     pub yield_time_ms: Option<u64>,
     pub max_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalWaitMode {
+    /// Return after new output arrives, the process exits, or the yield window expires.
+    AnyOutput,
+    /// Wait until the yield window expires or the process exits; do not stream intermediate output updates.
+    Timeout,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

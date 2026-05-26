@@ -19,7 +19,7 @@ use crate::{
         App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
         AppToolScope, AppToolSpec, AppUsage,
     },
-    core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWriteStdinArgs},
+    core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWaitMode, TerminalWriteStdinArgs},
     dashboard::{DashboardActivityEvent, apply_activity_event},
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     sandbox::RuntimeSandboxPolicy,
@@ -40,6 +40,7 @@ const TERMINAL_HOW_TO_USE_LINES: &[&str] = &[
     "Use only the currently exposed Terminal tool names for terminal operations; app scope mangling exposes them as `terminal__terminal_exec / terminal__terminal_write_stdin / terminal__terminal_terminate`.",
     "`terminal_exec` creates a new session when `session_id` is omitted and reuses an existing session only when `session_id` is explicitly provided.",
     "If a command is still running, continue with `terminal_write_stdin` and explicitly provide the target `session_id`. Send empty text when you only want to wait for more output.",
+    "For `terminal_write_stdin`, omit `wait_mode` or use `any_output` to return after the next output update; use `timeout` to wait the full yield window or process exit without streaming intermediate progress updates.",
     "Never use interactive full-screen terminal programs such as vim, vi, nano, less, or top. Use non-interactive commands such as `cat`, `grep`, `head`, `tail`, or `python -c` to inspect files; prefer `apply_patch` for edits instead of shell string assembly.",
     "Never proactively start commands that require human accounts, passwords, browser authorization, device-code authorization, or interactive login wizards, such as `gh auth login`, `docker login`, or `npm login`. Prefer public webpages, HTTP APIs, `git clone`, `curl`, or unauthenticated lookup paths.",
     "If the terminal is already stuck in an authentication or login prompt you should not enter, do not continue answering wizard questions; interrupt it and switch to a non-interactive approach.",
@@ -51,6 +52,7 @@ const TERMINAL_HOW_TO_USE_LINES: &[&str] = &[
     "Use only the currently exposed Terminal tool names for terminal operations; app scope mangling exposes them as `terminal__terminal_exec / terminal__terminal_write_stdin / terminal__terminal_terminate`.",
     "`terminal_exec` creates a new session when `session_id` is omitted and reuses an existing session only when `session_id` is explicitly provided.",
     "If a command is still running, continue with `terminal_write_stdin` and explicitly provide the target `session_id`. Send empty text when you only want to wait for more output.",
+    "For `terminal_write_stdin`, omit `wait_mode` or use `any_output` to return after the next output update; use `timeout` to wait the full yield window or process exit without streaming intermediate progress updates.",
     "Never use interactive full-screen terminal programs such as vim, vi, nano, less, or top. Use non-interactive commands such as `cat`, `grep`, `head`, `tail`, or `python -c` to inspect files; prefer `apply_patch` for edits instead of shell string assembly.",
     "Never proactively start commands that require human accounts, passwords, browser authorization, device-code authorization, or interactive login wizards, such as `gh auth login`, `docker login`, or `npm login`. Prefer public webpages, HTTP APIs, `git clone`, `curl`, or unauthenticated lookup paths.",
     "If the terminal is already stuck in an authentication or login prompt you should not enter, do not continue answering wizard questions; interrupt it and switch to a non-interactive approach.",
@@ -111,8 +113,10 @@ pub struct TerminalSessionState {
 impl TerminalApp {
     const DEFAULT_EXEC_YIELD_TIME_MS: u64 = 10_000;
     const DEFAULT_WRITE_STDIN_YIELD_TIME_MS: u64 = 250;
+    const DEFAULT_WAIT_YIELD_TIME_MS: u64 = 30_000;
     const MIN_EMPTY_POLL_YIELD_TIME_MS: u64 = 5_000;
     const MAX_WRITE_STDIN_YIELD_TIME_MS: u64 = 30_000;
+    const MAX_WAIT_YIELD_TIME_MS: u64 = 120_000;
     const MAX_EXITED_SESSION_TOMBSTONES: usize = 4;
 
     pub fn new() -> Self {
@@ -280,6 +284,7 @@ impl TerminalApp {
         &mut self,
         session_id: &str,
         text: String,
+        wait_mode: TerminalWaitMode,
         yield_time_ms: Option<u64>,
         max_chars: Option<usize>,
         mut on_progress: F,
@@ -305,20 +310,26 @@ impl TerminalApp {
             .map_err(|err| miette!("failed to write stdin to terminal process: {err}"))?;
         session.last_activity = Instant::now();
         session.state.has_unread_output = true;
-        let requested_yield_ms = yield_time_ms.unwrap_or(Self::DEFAULT_WRITE_STDIN_YIELD_TIME_MS);
-        let effective_yield_ms = if text.is_empty() {
-            requested_yield_ms.clamp(
+        let requested_yield_ms = yield_time_ms.unwrap_or(match wait_mode {
+            TerminalWaitMode::AnyOutput => Self::DEFAULT_WRITE_STDIN_YIELD_TIME_MS,
+            TerminalWaitMode::Timeout => Self::DEFAULT_WAIT_YIELD_TIME_MS,
+        });
+        let effective_yield_ms = match wait_mode {
+            TerminalWaitMode::AnyOutput if text.is_empty() => requested_yield_ms.clamp(
                 Self::MIN_EMPTY_POLL_YIELD_TIME_MS,
                 Self::MAX_WRITE_STDIN_YIELD_TIME_MS,
-            )
-        } else {
-            requested_yield_ms.min(Self::MAX_WRITE_STDIN_YIELD_TIME_MS)
+            ),
+            TerminalWaitMode::AnyOutput => {
+                requested_yield_ms.min(Self::MAX_WRITE_STDIN_YIELD_TIME_MS)
+            }
+            TerminalWaitMode::Timeout => requested_yield_ms.min(Self::MAX_WAIT_YIELD_TIME_MS),
         };
         let timeout = Duration::from_millis(effective_yield_ms);
         let started_at = Instant::now();
         loop {
             tokio::time::sleep(Duration::from_millis(50)).await;
             refresh_terminal_session(session);
+            let previous_progress_offset = progress_offset;
             let chunk = session
                 .process
                 .as_ref()
@@ -326,11 +337,18 @@ impl TerminalApp {
                 .unwrap_or_else(|| empty_terminal_output_chunk(progress_offset, &session.state));
             progress_offset = chunk.next_offset;
             apply_terminal_output_stats(&mut session.state, chunk.stats);
-            let delta = format_terminal_output_chunk(&chunk, max_chars);
-            if !delta.is_empty() {
-                on_progress(&session.state, &delta);
+            let has_output_update =
+                chunk.missed_bytes > 0 || chunk.next_offset > previous_progress_offset;
+            if wait_mode == TerminalWaitMode::AnyOutput {
+                let delta = format_terminal_output_chunk(&chunk, max_chars);
+                if !delta.is_empty() {
+                    on_progress(&session.state, &delta);
+                }
             }
-            if session.state.status != "running" || started_at.elapsed() >= timeout {
+            if session.state.status != "running"
+                || started_at.elapsed() >= timeout
+                || (wait_mode == TerminalWaitMode::AnyOutput && has_output_update)
+            {
                 break;
             }
         }
@@ -453,6 +471,13 @@ fn display_session_label(session_id: &str) -> String {
 
 fn terminal_progress_mode(text: &str) -> &'static str {
     if text.is_empty() { "poll" } else { "continue" }
+}
+
+fn terminal_wait_mode_label(wait_mode: TerminalWaitMode) -> &'static str {
+    match wait_mode {
+        TerminalWaitMode::AnyOutput => "any_output",
+        TerminalWaitMode::Timeout => "timeout",
+    }
 }
 
 fn terminal_session_meta(session: &TerminalSessionState) -> String {
@@ -601,9 +626,7 @@ fn compact_terminal_model_content(
     lines.extend(extra_lines.iter().cloned());
     if !output.trim().is_empty() {
         lines.push("output=".to_string());
-        lines.push(crate::context_budget::truncate_text_to_token_budget(
-            output, max_tokens,
-        ));
+        lines.push(truncate_terminal_output_for_model(output, max_tokens));
     }
     crate::context_budget::truncate_text_to_token_budget(&lines.join("\n"), max_tokens)
 }
@@ -685,7 +708,7 @@ impl App for TerminalApp {
             },
             AppToolSpec {
                 name: "terminal_write_stdin".to_string(),
-                description: "Continue a running terminal session. Send text to write stdin; send empty text to only wait for the next output chunk.".to_string(),
+                description: "Continue a running terminal session. Send text to write stdin; send empty text to wait. By default `wait_mode=any_output` returns after new output, exit, or timeout; use `wait_mode=timeout` to wait for the full yield window or process exit without streaming intermediate progress.".to_string(),
                 scope: AppToolScope::Terminal,
                 input_schema: serde_json::to_value(schema_for!(TerminalWriteStdinArgs)).unwrap(),
             },
@@ -717,12 +740,14 @@ impl App for TerminalApp {
             }
             "terminal_write_stdin" => {
                 let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
+                let wait_mode = args.wait_mode.unwrap_or(TerminalWaitMode::AnyOutput);
                 Ok(EpisodeActionRecord {
                     kind: "terminal_write_stdin".to_string(),
                     summary: format!(
-                        "session={} mode={} yield_time_ms={}",
+                        "session={} mode={} wait_mode={} yield_time_ms={}",
                         args.session_id,
                         terminal_progress_mode(&args.text),
+                        terminal_wait_mode_label(wait_mode),
                         args.yield_time_ms
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "default".to_string())
@@ -759,6 +784,7 @@ impl App for TerminalApp {
             }
             "terminal_write_stdin" => {
                 let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
+                let wait_mode = args.wait_mode.unwrap_or(TerminalWaitMode::AnyOutput);
                 Ok(ToolCallUiEvent::terminal(
                     if args.text.is_empty() {
                         TerminalUiAction::Poll
@@ -767,7 +793,8 @@ impl App for TerminalApp {
                     },
                     summarize_terminal_inline_text(&args.session_id),
                     vec![format!(
-                        "yield_time_ms={}",
+                        "wait_mode={} yield_time_ms={}",
+                        terminal_wait_mode_label(wait_mode),
                         args.yield_time_ms
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "default".to_string())
@@ -916,6 +943,7 @@ impl App for TerminalApp {
             }
             "terminal_write_stdin" => {
                 let args: TerminalWriteStdinArgs = parse_terminal_tool_args(call)?;
+                let wait_mode = args.wait_mode.unwrap_or(TerminalWaitMode::AnyOutput);
                 let session = self.session_state(&args.session_id)?;
                 if let Some(cwd) = session.cwd.as_deref() {
                     let resolved_cwd = resolve_terminal_path(context, cwd, None);
@@ -937,6 +965,7 @@ impl App for TerminalApp {
                     .write_stdin_with_progress(
                         &args.session_id,
                         args.text.clone(),
+                        wait_mode,
                         args.yield_time_ms,
                         args.max_chars,
                         move |session, delta| {
@@ -956,6 +985,7 @@ impl App for TerminalApp {
                     )
                     .await?;
                 let mode = terminal_progress_mode(&args.text);
+                let wait_mode_label = terminal_wait_mode_label(wait_mode);
                 let running = result.session.status == "running";
                 let command_label = summarize_terminal_inline_text(
                     result
@@ -992,6 +1022,7 @@ impl App for TerminalApp {
                 };
                 let mut extra_lines = vec![
                     format!("mode={mode}"),
+                    format!("wait_mode={wait_mode_label}"),
                     format!("running={running}"),
                     format!(
                         "yield_time_ms={}",
@@ -1025,6 +1056,7 @@ impl App for TerminalApp {
                         "output_buffer_capacity": result.output_buffer_capacity,
                         "running": running,
                         "mode": mode,
+                        "wait_mode": wait_mode_label,
                         "yield_time_ms": args.yield_time_ms,
                         "max_chars": args.max_chars,
                     }),
@@ -1190,14 +1222,40 @@ fn summarize_terminal_preview(screen: &str) -> String {
 }
 
 fn truncate_terminal_output(content: String, max_chars: Option<usize>) -> String {
+    truncate_terminal_output_tail(content, max_chars, "terminal output shortened by max_chars")
+}
+
+fn truncate_terminal_output_for_model(content: &str, max_tokens: usize) -> String {
+    let output_token_budget = max_tokens.saturating_sub(128).max(1);
+    let max_chars = output_token_budget
+        .saturating_mul(crate::context_budget::APPROX_BYTES_PER_TOKEN)
+        .max(1);
+    truncate_terminal_output_tail(
+        content.to_string(),
+        Some(max_chars),
+        "terminal output shortened for model context",
+    )
+}
+
+fn truncate_terminal_output_tail(
+    content: String,
+    max_chars: Option<usize>,
+    reason: &str,
+) -> String {
     if let Some(limit) = max_chars
         && content.chars().count() > limit
     {
         let chars = content.chars().collect::<Vec<_>>();
+        let omitted = chars.len().saturating_sub(limit);
         let tail = chars[chars.len().saturating_sub(limit)..]
             .iter()
             .collect::<String>();
-        return format!("...{tail}");
+        let notice = format!("[{reason}: {omitted} char(s) omitted; showing tail]");
+        return if tail.is_empty() {
+            notice
+        } else {
+            format!("{notice}\n{tail}")
+        };
     }
     content
 }
@@ -1205,7 +1263,10 @@ fn truncate_terminal_output(content: String, max_chars: Option<usize>) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{env, time::Duration};
+    use std::{
+        env,
+        time::{Duration, Instant},
+    };
 
     use crate::sandbox::{
         FileSystemSandboxPolicy, RuntimeSandboxPolicy, StrongFilesystemSandboxMode,
@@ -1275,6 +1336,22 @@ mod tests {
             format!("[Console]::Out.Write(('x' * {byte_count}))")
         } else {
             format!("printf '%{byte_count}s' '' | tr ' ' x")
+        }
+    }
+
+    fn delayed_output_command(text: &str) -> String {
+        if cfg!(windows) {
+            format!("Start-Sleep -Milliseconds 100; Write-Output '{text}'")
+        } else {
+            format!("sleep 0.1; printf '%s\\n' '{text}'")
+        }
+    }
+
+    fn delayed_output_then_sleep_command(text: &str) -> String {
+        if cfg!(windows) {
+            format!("Start-Sleep -Milliseconds 100; Write-Output '{text}'; Start-Sleep -Seconds 2")
+        } else {
+            format!("sleep 0.1; printf '%s\\n' '{text}'; sleep 2")
         }
     }
 
@@ -1568,6 +1645,7 @@ mod tests {
                 .write_stdin_with_progress(
                     &started.session.session_id,
                     input,
+                    TerminalWaitMode::AnyOutput,
                     Some(1000),
                     None,
                     |_session, _delta| {},
@@ -1580,6 +1658,123 @@ mod tests {
                 "unexpected polled status: {}",
                 polled.session.status
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn any_output_wait_mode_returns_after_output_update() {
+        let mut app = TerminalApp::new();
+        let sandbox_policy = test_sandbox_policy();
+
+        let started = app
+            .exec_command_with_progress(
+                TerminalExecCommandRequest {
+                    command: if cfg!(windows) {
+                        "powershell.exe".to_string()
+                    } else {
+                        "bash".to_string()
+                    },
+                    session_id: None,
+                    workdir: None,
+                    sandbox_policy: &sandbox_policy,
+                    yield_time_ms: Some(50),
+                    max_chars: None,
+                },
+                |_session, _delta| {},
+            )
+            .await
+            .expect("exec should succeed");
+
+        if started.session.status == "running" {
+            let input = format!("{}\n", delayed_output_then_sleep_command("any-output-mode"));
+            let started_at = Instant::now();
+            let result = app
+                .write_stdin_with_progress(
+                    &started.session.session_id,
+                    input,
+                    TerminalWaitMode::AnyOutput,
+                    Some(5_000),
+                    None,
+                    |_session, _delta| {},
+                )
+                .await
+                .expect("any_output wait should succeed");
+
+            assert!(
+                result.output.contains("any-output-mode"),
+                "expected output update before timeout: {:?}",
+                result.output
+            );
+            assert!(
+                result.session.status == "running",
+                "process should still be running after first output update: {}",
+                result.session.status
+            );
+            assert!(
+                started_at.elapsed() < Duration::from_secs(2),
+                "any_output mode should return before the full command exits"
+            );
+            app.terminate_session(&result.session.session_id)
+                .await
+                .expect("terminate should succeed");
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_wait_mode_suppresses_progress_until_timeout() {
+        let mut app = TerminalApp::new();
+        let sandbox_policy = test_sandbox_policy();
+
+        let started = app
+            .exec_command_with_progress(
+                TerminalExecCommandRequest {
+                    command: if cfg!(windows) {
+                        "powershell.exe".to_string()
+                    } else {
+                        "bash".to_string()
+                    },
+                    session_id: None,
+                    workdir: None,
+                    sandbox_policy: &sandbox_policy,
+                    yield_time_ms: Some(50),
+                    max_chars: None,
+                },
+                |_session, _delta| {},
+            )
+            .await
+            .expect("exec should succeed");
+
+        if started.session.status == "running" {
+            let input = format!("{}\n", delayed_output_command("timeout-mode"));
+            let started_at = Instant::now();
+            let mut progress_calls = 0usize;
+            let waited = app
+                .write_stdin_with_progress(
+                    &started.session.session_id,
+                    input,
+                    TerminalWaitMode::Timeout,
+                    Some(400),
+                    None,
+                    |_session, _delta| {
+                        progress_calls += 1;
+                    },
+                )
+                .await
+                .expect("timeout wait should succeed");
+
+            assert_eq!(progress_calls, 0, "timeout wait must not stream progress");
+            assert!(
+                started_at.elapsed() >= Duration::from_millis(350),
+                "timeout wait should wait for the requested yield window"
+            );
+            assert!(
+                waited.output.contains("timeout-mode"),
+                "final output should still include data produced while waiting: {:?}",
+                waited.output
+            );
+            app.terminate_session(&waited.session.session_id)
+                .await
+                .expect("terminate should succeed");
         }
     }
 }

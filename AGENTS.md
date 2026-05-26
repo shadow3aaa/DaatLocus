@@ -16,7 +16,7 @@ The goal is not to write abstract slogans. The goal is to give future changes to
 
 - Telegram is not an `App`; it is a transport and event source.
 - Normal event completion must not be plain text only. It must explicitly call `finish_and_send`.
-- Browser and Terminal are `App`s because they represent interactive surfaces that require focus and continued operation.
+- Browser, Terminal, and Coding are built-in `App`s because they represent interactive surfaces that require focus and continued operation.
 - `App` and `Event` are parallel concepts. Do not collapse one into the other.
 - Let the model make semantic judgments. Do not make the model perform mechanical enumeration, lookup, deduplication, or freshness checks that code can already perform.
 
@@ -58,10 +58,11 @@ Therefore, when adding an agent-facing interface, first decide which layer it be
 
 An `App` is an interactive surface that only makes sense to operate after it has been focused.
 
-The current implementation has only two built-in apps:
+The current implementation has these built-in apps:
 
 - `Browser`
 - `Terminal`
+- `Coding`
 
 Something should be modeled as an `App` only if it satisfies all of these conditions:
 
@@ -326,7 +327,7 @@ Operational constraints:
 - If a page change invalidates refs, reread the page instead of blindly retrying old refs.
 - Search result pages are usually leads for locating sources, not final facts.
 
-### Coding (Planned)
+### Coding
 
 `Coding` is the interface for semantic code operations powered by scope-engine.
 
@@ -347,7 +348,7 @@ Coding app must render its key state into `AppStateRender` so that:
 Operational constraints:
 
 - Coding tools (`read_code`, `edit_code`, `search_code`, `find_references`) must go through the Coding app, requiring `focus_app("coding")` first.
-- `apply_patch` remains a Terminal app tool for raw file edits; Coding app handles semantic (selector-based) operations.
+- `apply_patch` is a raw patch runtime tool, not a semantic code editing primitive. When Coding is focused, use Coding tools for SCOPE-owned source files; raw patches are reserved for non-source files or cases outside SCOPE responsibility.
 - Coding app `render_state()` must include: project_root, open_languages, lsp_status, propagation_pending_count, and up to N recent propagation events.
 - LSP process lifecycle (start, crash recovery, shutdown) belongs to Coding app internals, not to tool return values.
 
@@ -358,7 +359,7 @@ An app may declare that it *contains* other apps, making their tools available w
 When `Coding` is focused, the tool scope includes:
 
 - Coding's own tools: `read_code`, `edit_code`, `search_code`, `find_references`
-- Terminal's tools: `terminal_exec`, `terminal_write_stdin`, `terminal_terminate`, `apply_patch`
+- Terminal's delegated tools: `terminal_exec`, `terminal_write_stdin`, `terminal_terminate`
 - Browser's tools: **not** available unless the model explicitly focuses Browser
 
 Implementation: each `App` can optionally expose `fn composed_apps() -> Vec<AppId>`. The runtime tool-scope check traverses this list so that focused-app restriction plus composition gives the correct tool availability.
@@ -369,7 +370,7 @@ Rationale:
 - Forcing `focus_app("terminal")` back-and-forth would be an unnecessary interruption.
 - Composition preserves the attention model: `focus_app("coding")` means "I am in coding mode," and all tools needed for that mode are available.
 
-### SCOPE Capability Gap and Propagation Bridge
+### SCOPE Capability Gap and Raw Patch Boundary
 
 SCOPE (scope-engine) provides semantic code operations, but its modification capability is **not complete**:
 
@@ -381,20 +382,15 @@ SCOPE (scope-engine) provides semantic code operations, but its modification cap
 | Edit code | ⚠️ `edit_code` (SCOPE Diff) | Selector-based Add/Delete/Update; no semantic refactoring |
 | Rename | ❌ | Not implemented |
 | Extract/inline | ❌ | Not implemented |
-| File-level structure | ❌ | Cannot add imports, move files |
-| New files | ⚠️ | `edit_code` can create files but no template support |
+| File-level structure | ⚠️ | Can edit explicit ranges, but no semantic import management or move-file refactoring |
+| New files | ⚠️ | Use raw file tools or explicit supported creation paths; SCOPE has no template support |
 | Config files | ❌ | SCOPE does not understand .toml/.yaml/.json config |
 
-**Propagation bridge for `apply_patch`:**
+**Raw patch boundary for `apply_patch`:**
 
-When Coding is focused and `apply_patch` is used on a source-code file (by extension: `.rs`, `.py`, `.go`, `.ts`, `.js`, `.java`, `.c`, `.cpp`, `.rb`, `.php`):
+When Coding is focused and `apply_patch` targets a source-code file that SCOPE owns (for example `.rs`, `.py`, `.go`, `.ts`, `.js`, `.java`, `.c`, `.cpp`, `.rb`, `.php`), Coding rejects the call and requires `edit_code`/SCOPE Diff instead.
 
-1. The patch executes normally as a raw file edit.
-2. **Then** Coding app automatically runs tree-sitter symbol analysis on the modified file to find affected symbols.
-3. The propagation results are appended to the tool result in the same format as `edit_code` returns.
-4. For non-source-code files (`.toml`, `.yaml`, `.md`, `.json`, `.sh`, etc.), `apply_patch` works normally with no propagation analysis.
-
-This ensures that even when the model bypasses semantic editing, propagation tracking does not go silent.
+For non-source-code files (`.toml`, `.yaml`, `.md`, `.json`, `.sh`, etc.) or unsupported cases outside SCOPE responsibility, raw patching is allowed. Propagation review is then limited to what Coding can observe through its own semantic operations and explicit review events; do not assume raw patches silently receive the same propagation analysis as `edit_code`.
 
 ## Third-Party App Package
 
