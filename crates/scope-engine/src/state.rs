@@ -68,6 +68,10 @@ impl PropagationState {
             }
         }
     }
+
+    pub fn next_reviews(&mut self, limit: usize) -> Vec<ReviewEvent> {
+        (0..limit).filter_map(|_| self.next_review()).collect()
+    }
 }
 
 #[cfg(test)]
@@ -167,6 +171,33 @@ mod tests {
     fn next_review_returns_none_when_empty() {
         let mut state = PropagationState::new();
         assert!(state.next_review().is_none());
+    }
+
+    #[test]
+    fn next_reviews_respects_limit_and_reports_remaining() {
+        let mut state = PropagationState::new();
+        state.accumulate(vec![
+            lsp_result("src/a.rs::fn foo", "first"),
+            lsp_result("src/b.rs::fn bar", "second"),
+            lsp_result("src/c.rs::fn baz", "third"),
+        ]);
+
+        let events = state.next_reviews(2);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(state.pending_count(), 1);
+        match &events[0] {
+            ReviewEvent::KnownReferences {
+                modified_symbol, ..
+            } => assert_eq!(modified_symbol, "src/c.rs::fn baz"),
+            _ => panic!("Expected KnownReferences variant"),
+        }
+        match &events[1] {
+            ReviewEvent::KnownReferences {
+                modified_symbol, ..
+            } => assert_eq!(modified_symbol, "src/b.rs::fn bar"),
+            _ => panic!("Expected KnownReferences variant"),
+        }
     }
 
     #[test]

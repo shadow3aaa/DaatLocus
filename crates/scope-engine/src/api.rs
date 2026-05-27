@@ -252,7 +252,24 @@ pub struct PropagationResult {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NextReviewResponse {
+    /// Backward-compatible single-event field. Contains the first returned
+    /// event, or `None` when no review was pending.
     pub review: Option<ReviewEvent>,
+    /// Batch of acknowledged review events. Callers that only understand the
+    /// older single-event contract can keep reading `review`.
+    pub reviews: Vec<ReviewEvent>,
+    /// Number of review events returned in this response.
+    pub returned: usize,
+    /// Number of review events still pending after this acknowledgement.
+    pub remaining: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NextReviewRequest {
+    /// Maximum number of review events to acknowledge and return.
+    /// Omitted means one event to preserve existing `next_review` behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 /// A reference found by LSP or other precise analysis.

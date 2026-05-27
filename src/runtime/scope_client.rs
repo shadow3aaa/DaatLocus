@@ -219,14 +219,34 @@ impl ScopeClient {
         state.pending_count()
     }
 
-    /// Get the next accumulated propagation review event, if any.
+    /// Acknowledge and return accumulated propagation review events.
     #[allow(dead_code)]
-    pub fn ack_next_event(&self) -> Option<api::ReviewEvent> {
+    pub fn ack_next_events(&self, limit: Option<usize>) -> api::NextReviewResponse {
+        const DEFAULT_LIMIT: usize = 1;
+        const MAX_LIMIT: usize = 100;
+
+        let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
         let mut state = self
             .propagation_state
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        state.next_review()
+        let reviews = state.next_reviews(limit);
+        let review = reviews.first().cloned();
+        let returned = reviews.len();
+        let remaining = state.pending_count();
+
+        api::NextReviewResponse {
+            review,
+            reviews,
+            returned,
+            remaining,
+        }
+    }
+
+    /// Get the next accumulated propagation review event, if any.
+    #[allow(dead_code)]
+    pub fn ack_next_event(&self) -> Option<api::ReviewEvent> {
+        self.ack_next_events(None).review
     }
 
     fn dispatch(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
@@ -350,5 +370,31 @@ mod tests {
                 .next_review_event(vec![open_result("src/main.rs::fn main")])
                 .is_some()
         );
+    }
+
+    #[test]
+    fn ack_next_events_returns_batch_and_remaining_count() {
+        let client = ScopeClient::new();
+        client
+            .propagation_state
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .accumulate(vec![
+                open_result("src/a.rs::fn first"),
+                open_result("src/b.rs::fn second"),
+                open_result("src/c.rs::fn third"),
+            ]);
+
+        let response = client.ack_next_events(Some(2));
+
+        assert_eq!(response.returned, 2);
+        assert_eq!(response.reviews.len(), 2);
+        assert_eq!(response.remaining, 1);
+        match response.review.unwrap() {
+            api::ReviewEvent::InvestigateImpact {
+                modified_symbol, ..
+            } => assert_eq!(modified_symbol, "src/c.rs::fn third"),
+            _ => panic!("expected InvestigateImpact review"),
+        }
     }
 }

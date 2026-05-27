@@ -19,6 +19,8 @@ use std::sync::Mutex;
 
 const DEFAULT_SEARCH_LIMIT: usize = 100;
 const MAX_SEARCH_LIMIT: usize = 1000;
+const DEFAULT_REVIEW_LIMIT: usize = 1;
+const MAX_REVIEW_LIMIT: usize = 100;
 const DEFAULT_FILE_SEARCH_LIMIT: usize = 100;
 
 pub fn dispatch(
@@ -210,14 +212,41 @@ pub fn dispatch(
             handle_edit_code(req, &params, project_root, propagation_state, lsp_analyzer)
         }
         "ack_next_event" => {
+            let params: NextReviewRequest = if req.params.is_null() {
+                NextReviewRequest { limit: None }
+            } else {
+                match serde_json::from_value(req.params.clone()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::err(
+                            req.id.clone(),
+                            -32602,
+                            format!("Invalid params: {e}"),
+                        );
+                    }
+                }
+            };
+            let limit = params
+                .limit
+                .unwrap_or(DEFAULT_REVIEW_LIMIT)
+                .clamp(1, MAX_REVIEW_LIMIT);
             let mut state = match propagation_state.lock() {
                 Ok(s) => s,
                 Err(_) => return JsonRpcResponse::err(req.id.clone(), -32603, "lock poisoned"),
             };
-            let review = state.next_review();
+            let reviews = state.next_reviews(limit);
+            let review = reviews.first().cloned();
+            let returned = reviews.len();
+            let remaining = state.pending_count();
             JsonRpcResponse::ok(
                 req.id.clone(),
-                serde_json::to_value(NextReviewResponse { review }).unwrap(),
+                serde_json::to_value(NextReviewResponse {
+                    review,
+                    reviews,
+                    returned,
+                    remaining,
+                })
+                .unwrap(),
             )
         }
         "get_config_hints" => handle_get_config_hints(req),
@@ -1402,6 +1431,60 @@ mod tests {
                 .unwrap()
                 .contains("fn second #L5-L7")
         );
+    }
+
+    #[test]
+    fn ack_next_event_can_return_a_limited_batch() {
+        let propagation_state = Mutex::new(PropagationState::new());
+        let lsp_analyzer = Mutex::new(None);
+        propagation_state.lock().unwrap().accumulate(vec![
+            PropagationResult {
+                selector: "src/a.rs::fn foo".to_string(),
+                reason: "first".to_string(),
+                source: PropagationSource::Lsp,
+                lsp_references: Some(vec![]),
+                diff_summary: None,
+                file_snippet: None,
+                project_files: None,
+            },
+            PropagationResult {
+                selector: "src/b.rs::fn bar".to_string(),
+                reason: "second".to_string(),
+                source: PropagationSource::Lsp,
+                lsp_references: Some(vec![]),
+                diff_summary: None,
+                file_snippet: None,
+                project_files: None,
+            },
+            PropagationResult {
+                selector: "src/c.rs::fn baz".to_string(),
+                reason: "third".to_string(),
+                source: PropagationSource::Lsp,
+                lsp_references: Some(vec![]),
+                diff_summary: None,
+                file_snippet: None,
+                project_files: None,
+            },
+        ]);
+        let req = JsonRpcRequest {
+            _jsonrpc: "2.0".to_string(),
+            id: serde_json::json!(1),
+            method: "ack_next_event".to_string(),
+            params: serde_json::json!({ "limit": 2 }),
+        };
+
+        let response = dispatch(&req, None, &propagation_state, &lsp_analyzer);
+
+        assert!(
+            response.error.is_none(),
+            "unexpected error: {:?}",
+            response.error
+        );
+        let result = response.result.unwrap();
+        assert_eq!(result["returned"], 2);
+        assert_eq!(result["remaining"], 1);
+        assert_eq!(result["reviews"].as_array().unwrap().len(), 2);
+        assert_eq!(result["review"]["modified_symbol"], "src/c.rs::fn baz");
     }
 
     #[test]

@@ -38,7 +38,7 @@ First, if the project you need to edit is not open yet, use the currently expose
 
 When editing source code, always prefer the currently exposed Coding app tools, such as `coding__edit_code`, `coding__read_code`, `coding__grep`, and `coding__glob`, instead of substituting terminal commands. Important: except for configuration, generated assets, or other non-source areas outside SCOPE engine responsibility, or cases where these tools genuinely cannot complete the task, do not use other tools or shell commands to edit source code. When Coding is focused, `apply_patch` is rejected for source files that SCOPE says it is responsible for; use `coding__edit_code`/SCOPE Diff for those files when that mangled name is exposed.
 
-After each edit, the tool automatically evaluates the impact of your changes and accumulates pending review events. You can also see the current number of pending review events in Coding app state. You do not need to handle them immediately. However, after you finish a series of edits (usually when a plan step is complete, or when you judge that too many review events have accumulated), call the currently exposed Coding review tool, such as `coding__next_review`, to acknowledge and claim review events, then follow their instructions to inspect the impact of your changes. This must always be done before reporting back to the user.
+After each edit, the tool automatically evaluates the impact of your changes and accumulates pending review events. You can also see the current number of pending review events in Coding app state. You do not need to handle them immediately. However, after you finish a series of edits (usually when a plan step is complete, or when you judge that too many review events have accumulated), call the currently exposed Coding review tool, such as `coding__next_review`, to acknowledge and claim review events; pass `limit` when many reviews are pending so several impact targets can be claimed in one response. Then follow their instructions to inspect the impact of your changes. This must always be done before reporting back to the user.
 
 SCOPE engine configuration hints are returned by `coding__open_project` when that mangled name is exposed and retained in Coding app state, including available tree-sitter languages plus visible per-language `lsp_setup_hint` lines for LSP language/server setup guidance.
 
@@ -78,7 +78,12 @@ pub struct CodingEditCodeArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct CodingNextReviewArgs {}
+pub struct CodingNextReviewArgs {
+    /// Maximum number of review events to acknowledge and return.
+    /// Omitted means one event to preserve existing behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
 
 #[derive(Debug, Clone)]
 struct ProjectInstructionDocument {
@@ -712,7 +717,7 @@ impl App for CodingApp {
             },
             AppToolSpec {
                 name: "next_review".to_string(),
-                description: "Acknowledge and return the next accumulated scope-engine propagation review event, if any.".to_string(),
+                description: "Acknowledge and return accumulated scope-engine propagation review events, optionally batched with limit.".to_string(),
                 scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingNextReviewArgs)).unwrap(),
             },
@@ -745,7 +750,13 @@ impl App for CodingApp {
                 let args: CodingEditCodeArgs = parse_coding_tool_args(call)?;
                 format!("scope_diff_chars={}", args.diff.len())
             }
-            "next_review" => "next propagation review".to_string(),
+            "next_review" => {
+                let args: CodingNextReviewArgs = parse_coding_tool_args(call)?;
+                match args.limit {
+                    Some(limit) => format!("propagation review batch limit={limit}"),
+                    None => "next propagation review".to_string(),
+                }
+            }
             _ => return Err(miette!("unknown coding tool `{}`", call.name)),
         };
         Ok(EpisodeActionRecord {
@@ -935,37 +946,30 @@ impl App for CodingApp {
             }
             "next_review" => {
                 self.require_project()?;
-                let _args: CodingNextReviewArgs = parse_coding_tool_args(call)?;
-                let review = self.scope.ack_next_event();
-                self.last_action = Some("acknowledged next review".to_string());
-                let review_present = review.is_some();
-                let review_title = match review.as_ref() {
-                    Some(scope_engine::api::ReviewEvent::KnownReferences {
-                        modified_symbol,
-                        ..
-                    })
-                    | Some(scope_engine::api::ReviewEvent::InvestigateImpact {
-                        modified_symbol,
-                        ..
-                    }) => format!(
-                        "Reviewing impact of {}",
-                        coding_target_summary(modified_symbol)
-                    ),
-                    None => "No review pending".to_string(),
-                };
-                let review_summary = if review_present {
-                    "change impact target acquired"
+                let args: CodingNextReviewArgs = parse_coding_tool_args(call)?;
+                let response = self.scope.ack_next_events(args.limit);
+                self.last_action = Some(if response.returned == 1 {
+                    "acknowledged next review".to_string()
                 } else {
-                    "no pending propagation review"
-                };
+                    format!("acknowledged {} reviews", response.returned)
+                });
+                let review_present = response.returned > 0;
+                let review_title = coding_review_title(&response);
+                let review_summary = coding_review_summary(&response);
+                let model_content = coding_review_model_content(&response).map(|content| {
+                    truncate_text_to_token_budget(&content, context.tool_output_max_tokens)
+                });
                 Ok(AppToolExecutionResult {
                     summary: if review_present {
-                        "acknowledged coding impact review target".to_string()
+                        format!(
+                            "acknowledged {} coding impact review target(s); remaining={}",
+                            response.returned, response.remaining
+                        )
                     } else {
                         "no coding review event pending".to_string()
                     },
-                    payload: json!({ "review": review }),
-                    model_content: None,
+                    payload: serde_json::to_value(&response).unwrap(),
+                    model_content,
                     ui_event: ToolUiEvent::coding_review(
                         review_title,
                         review_summary,
@@ -1037,6 +1041,112 @@ fn coding_count_label(count: usize, singular: &str, plural: &str) -> String {
 
 fn coding_target_summary(selector: &str) -> String {
     summarize_coding_inline_text(selector)
+}
+
+fn coding_review_title(response: &scope_engine::api::NextReviewResponse) -> String {
+    match response.returned {
+        0 => "No review pending".to_string(),
+        1 => match response.review.as_ref() {
+            Some(review) => format!(
+                "Reviewing impact of {}",
+                coding_target_summary(review_modified_symbol(review))
+            ),
+            None => "Reviewing impact target".to_string(),
+        },
+        returned => format!("Reviewing {returned} impact targets"),
+    }
+}
+
+fn coding_review_summary(response: &scope_engine::api::NextReviewResponse) -> String {
+    if response.returned == 0 {
+        return "no pending propagation review".to_string();
+    }
+
+    format!(
+        "{} acquired; {} remaining",
+        coding_count_label(response.returned, "impact target", "impact targets"),
+        response.remaining
+    )
+}
+
+fn coding_review_model_content(response: &scope_engine::api::NextReviewResponse) -> Option<String> {
+    if response.returned == 0 {
+        return None;
+    }
+
+    let mut lines = vec![
+        format!("returned={}", response.returned),
+        format!("remaining={}", response.remaining),
+    ];
+    for (index, review) in response.reviews.iter().enumerate() {
+        lines.push(format!(
+            "{}. {}",
+            index + 1,
+            review_instruction_summary(review)
+        ));
+    }
+
+    Some(lines.join("\n"))
+}
+
+fn review_modified_symbol(review: &scope_engine::api::ReviewEvent) -> &str {
+    match review {
+        scope_engine::api::ReviewEvent::KnownReferences {
+            modified_symbol, ..
+        }
+        | scope_engine::api::ReviewEvent::InvestigateImpact {
+            modified_symbol, ..
+        } => modified_symbol,
+    }
+}
+
+fn summarize_review_references(references: &[scope_engine::api::Reference]) -> String {
+    if references.is_empty() {
+        return "none".to_string();
+    }
+
+    let mut parts = references
+        .iter()
+        .take(3)
+        .map(|reference| {
+            summarize_coding_inline_text(&format!("{}:L{}", reference.selector, reference.line))
+        })
+        .collect::<Vec<_>>();
+    if references.len() > 3 {
+        parts.push(format!("+{} more", references.len() - 3));
+    }
+    parts.join(", ")
+}
+
+fn review_instruction_summary(review: &scope_engine::api::ReviewEvent) -> String {
+    match review {
+        scope_engine::api::ReviewEvent::KnownReferences {
+            modified_symbol,
+            change_summary,
+            references,
+            file_snippet,
+        } => format!(
+            "known references: target={} refs={} change={} snippet={}",
+            summarize_coding_inline_text(modified_symbol),
+            summarize_review_references(references),
+            summarize_coding_inline_text(change_summary),
+            summarize_coding_inline_text(file_snippet)
+        ),
+        scope_engine::api::ReviewEvent::InvestigateImpact {
+            modified_symbol,
+            change_summary,
+            diff_summary,
+            file_snippet,
+            project_files,
+        } => format!(
+            "investigate impact: target={} project_files={} change={} diff={} snippet={}",
+            summarize_coding_inline_text(modified_symbol),
+            project_files.len(),
+            summarize_coding_inline_text(change_summary),
+            summarize_coding_inline_text(diff_summary),
+            summarize_coding_inline_text(file_snippet)
+        ),
+    }
 }
 
 fn build_coding_edit_impact_lines(results: &[scope_engine::api::PropagationResult]) -> Vec<String> {
