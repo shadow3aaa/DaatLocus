@@ -1713,6 +1713,7 @@ async fn prompt_provider(
             ProviderConfig::OpenaiCompatible {
                 base_url: normalize_provider_base_url(&base_url),
                 api_key,
+                api_style: None,
             }
         }
         ProviderKind::Ollama => {
@@ -1956,7 +1957,9 @@ async fn fetch_model_ids(provider_name: &str, provider: &ProviderConfig) -> Vec<
                 .unwrap_or(codex_oauth_default_base_url());
             fetch_codex_oauth_models(provider_name, auth_file.as_deref(), base).await
         }
-        ProviderConfig::OpenaiCompatible { base_url, api_key } => {
+        ProviderConfig::OpenaiCompatible {
+            base_url, api_key, ..
+        } => {
             let api_key = resolve_env_reference(api_key);
             fetch_openai_models(base_url, &api_key).await
         }
@@ -2669,7 +2672,9 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
                     ],
                 )
             }
-            ProviderConfig::OpenaiCompatible { base_url, api_key } => {
+            ProviderConfig::OpenaiCompatible {
+                base_url, api_key, ..
+            } => {
                 let masked = mask_secret(api_key);
                 (
                     "openai-compatible",
@@ -3342,6 +3347,7 @@ mod tests {
             ProviderConfig::OpenaiCompatible {
                 base_url: "https://example.test/v1".to_string(),
                 api_key: "sk-secret-token".to_string(),
+                api_style: None,
             },
         );
         config.models.insert(

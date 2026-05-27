@@ -43,6 +43,8 @@ pub(crate) use codex_oauth::{
 mod ollama;
 pub use ollama::OllamaClient;
 
+pub(crate) mod responses_compat;
+
 mod io;
 use io::*;
 mod payload;
@@ -672,6 +674,19 @@ impl OpenAIClient {
                 continue;
             }
 
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && request_has_reasoning_content
+                && adapter_state.reasoning_content_mode == ReasoningContentMode::Enabled
+            {
+                adapter_state.reasoning_content_mode = ReasoningContentMode::Disabled;
+                self.update_adapter_state(adapter_state);
+                warn!(
+                    "llm provider returned HTTP 400 with no recognized error pattern; retrying agent turn without reasoning_content as fallback\n{}",
+                    request_context.join("\n")
+                );
+                continue;
+            }
+
             return Err(miette!(
                 "llm api returned HTTP {}: {}",
                 status,
@@ -1159,13 +1174,25 @@ pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn Llm + Send
                 model_config,
             )))
         }
-        ProviderConfig::OpenaiCompatible { base_url, api_key } => {
+        ProviderConfig::OpenaiCompatible {
+            base_url,
+            api_key,
+            api_style,
+        } => {
             let api_key = resolve_env_reference(api_key);
-            Ok(Box::new(OpenAIClient::from_parts(
-                &api_key,
-                base_url,
-                model_config,
-            )))
+            if api_style.as_deref() == Some("responses") {
+                Ok(Box::new(responses_compat::ResponsesCompatibleClient::new(
+                    &api_key,
+                    base_url,
+                    model_config,
+                )))
+            } else {
+                Ok(Box::new(OpenAIClient::from_parts(
+                    &api_key,
+                    base_url,
+                    model_config,
+                )))
+            }
         }
         ProviderConfig::GithubCopilot { github_token } => {
             let resolved = resolve_env_reference(github_token);

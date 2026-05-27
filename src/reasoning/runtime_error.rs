@@ -28,6 +28,7 @@ pub enum RuntimeErrorKind {
     ContextOverflowAfterRecovery,
     ClaimedInputLeftUnresolved,
     TransportCompletionViolation,
+    ModelRequestRepeatedFailure,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

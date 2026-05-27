@@ -64,6 +64,8 @@ pub enum ProviderConfig {
     OpenaiCompatible {
         base_url: String,
         api_key: String,
+        #[serde(default)]
+        api_style: Option<String>,
     },
     Ollama {
         #[serde(default)]
@@ -580,6 +582,7 @@ mod tests {
             ProviderConfig::OpenaiCompatible {
                 base_url: "https://example.com/v1".to_string(),
                 api_key: "env:COMPATIBLE_TOKEN".to_string(),
+                api_style: None,
             },
         );
         config.providers.insert(

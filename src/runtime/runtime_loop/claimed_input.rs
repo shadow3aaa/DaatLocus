@@ -250,6 +250,113 @@ pub(super) fn runtime_overflow_failure_note(attempts: usize, error_text: &str) -
     format!("runtime context overflow persisted after {attempts} attempts: {error_text}")
 }
 
+pub(super) fn handle_model_request_failure(
+    context: &mut Context,
+    fingerprint: Option<&str>,
+    event_ids: &[String],
+    app_notices: &[AppNoticeKey],
+    error_text: &str,
+) -> bool {
+    let Some(fingerprint) = fingerprint else {
+        if !event_ids.is_empty() {
+            requeue_claimed_runtime_events(context, event_ids);
+        }
+        return false;
+    };
+
+    let attempts = context.record_model_request_failure(fingerprint);
+    if attempts < super::RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD {
+        tracing::warn!(
+            model_request_failure_attempt = attempts,
+            model_request_fuse_threshold = super::RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD,
+            claimed_events = event_ids.join(","),
+            claimed_app_notices = app_notices
+                .iter()
+                .map(|notice| notice.app.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            "model request failure persisted; requeueing claimed inputs"
+        );
+        if !event_ids.is_empty() {
+            requeue_claimed_runtime_events(context, event_ids);
+        }
+        for notice in app_notices {
+            let work = PendingWork::AppNotice {
+                app: notice.app.clone(),
+                reason: notice.reason.clone(),
+            };
+            if let Ok(true) = context.pending_work.release_claimed(work) {
+                let requeue_work = PendingWork::AppNotice {
+                    app: notice.app.clone(),
+                    reason: notice.reason.clone(),
+                };
+                if let Err(err) = context.pending_work.requeue_front(requeue_work) {
+                    let app = &notice.app;
+                    tracing::error!(
+                        "failed to requeue claimed app notice driver for {app} after model request failure: {err:?}"
+                    );
+                }
+            }
+        }
+        return false;
+    }
+
+    let failure_note = format!("model request failed after {attempts} attempts: {error_text}");
+    for event_id in event_ids {
+        if let Err(err) =
+            context
+                .events
+                .set_status(event_id, EventStatus::Failed, Some(failure_note.clone()))
+        {
+            tracing::error!(
+                "failed to mark event {event_id} as failed after model request fuse: {err:?}"
+            );
+        }
+        if let Ok(parsed_event_id) = uuid::Uuid::parse_str(event_id)
+            && let Err(err) = context.pending_work.consume(PendingWork::Event {
+                event_id: parsed_event_id,
+            })
+        {
+            tracing::error!(
+                "failed to consume event driver {event_id} after model request fuse: {err:?}"
+            );
+        }
+    }
+
+    for notice in app_notices {
+        context.suppress_app_notice(
+            &notice.app,
+            notice.reason.clone(),
+            super::APP_NOTICE_OVERFLOW_SUPPRESSION,
+        );
+        context.clear_active_app_notice(&notice.app);
+        if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
+            app: notice.app.clone(),
+            reason: String::new(),
+        }) {
+            let app = &notice.app;
+            tracing::error!(
+                "failed to consume app notice driver for {app} after model request fuse: {err:?}"
+            );
+        }
+    }
+
+    context.clear_model_request_failure(fingerprint);
+    tracing::error!(
+        model_request_failure_attempts = attempts,
+        model_request_fuse_threshold = super::RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD,
+        suppression_secs = super::APP_NOTICE_OVERFLOW_SUPPRESSION.as_secs(),
+        claimed_events = event_ids.join(","),
+        claimed_app_notices = app_notices
+            .iter()
+            .map(|notice| notice.app.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        "model request failure fuse tripped; claimed inputs were terminated instead of requeued"
+    );
+    true
+}
+
 pub(super) fn finalize_claimed_runtime_events(
     context: &Context,
     event_ids: &[String],

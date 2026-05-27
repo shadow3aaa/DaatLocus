@@ -93,6 +93,7 @@ use workspace_apps::{drain_workspace_app_invalidations, sync_workspace_apps_from
 
 const RUNTIME_EVENT_CLAIM_BATCH_SIZE: usize = 1;
 const RUNTIME_OVERFLOW_FUSE_THRESHOLD: usize = 3;
+const RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD: usize = 3;
 const APP_NOTICE_UNRESOLVED_SUPPRESSION_THRESHOLD: usize = 3;
 const APP_NOTICE_OVERFLOW_SUPPRESSION: Duration = Duration::from_secs(300);
 const RUNTIME_HISTORY_MIN_MESSAGES: usize = 0;

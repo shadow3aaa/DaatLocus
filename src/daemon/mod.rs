@@ -1238,7 +1238,9 @@ fn settings_provider_summary(name: &str, provider: &ProviderConfig) -> SettingsP
             },
             auth_file: auth_file.clone(),
         },
-        ProviderConfig::OpenaiCompatible { base_url, api_key } => SettingsProviderSummary {
+        ProviderConfig::OpenaiCompatible {
+            base_url, api_key, ..
+        } => SettingsProviderSummary {
             name: name.to_string(),
             provider_type: "openai-compatible",
             base_url: Some(base_url.clone()),

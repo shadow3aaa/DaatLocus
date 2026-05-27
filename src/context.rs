@@ -85,6 +85,7 @@ pub struct Context {
     pub runtime_turn_epoch: u64,
     pub active_app_notices: HashMap<AppNoticeKey, ActiveAppNotice>,
     pub runtime_overflow_failures: Arc<Mutex<HashMap<String, usize>>>,
+    pub runtime_model_request_failures: Arc<Mutex<HashMap<String, usize>>>,
     pub suppressed_app_notices: Arc<Mutex<HashMap<AppNoticeKey, SuppressedAppNotice>>>,
     pub live_progress_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<LiveProgressEvent>>>>,
     pub telegram_live_drafts: TelegramLiveDraftRegistry,
@@ -286,6 +287,17 @@ impl Context {
 
     pub fn clear_runtime_overflow_failure(&self, key: &str) {
         self.runtime_overflow_failures.lock().remove(key);
+    }
+
+    pub fn record_model_request_failure(&self, key: &str) -> usize {
+        let mut failures = self.runtime_model_request_failures.lock();
+        let entry = failures.entry(key.to_string()).or_insert(0);
+        *entry += 1;
+        *entry
+    }
+
+    pub fn clear_model_request_failure(&self, key: &str) {
+        self.runtime_model_request_failures.lock().remove(key);
     }
 
     pub fn suppress_app_notice(&self, app: &AppId, reason: impl Into<String>, duration: Duration) {

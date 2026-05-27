@@ -949,6 +949,9 @@ mod tests {
                 runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new(
                     HashMap::new(),
                 )),
+                runtime_model_request_failures: std::sync::Arc::new(parking_lot::Mutex::new(
+                    HashMap::new(),
+                )),
                 suppressed_app_notices: std::sync::Arc::new(
                     parking_lot::Mutex::new(HashMap::new()),
                 ),

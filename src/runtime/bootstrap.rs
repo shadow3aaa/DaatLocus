@@ -173,6 +173,9 @@ pub(crate) async fn build_eval_context_with_compiled(
         runtime_turn_epoch: 0,
         active_app_notices: std::collections::HashMap::new(),
         runtime_overflow_failures: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        runtime_model_request_failures: std::sync::Arc::new(
+            parking_lot::Mutex::new(HashMap::new()),
+        ),
         suppressed_app_notices: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
         live_progress_tx: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         telegram_live_drafts: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),

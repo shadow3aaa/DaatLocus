@@ -47,6 +47,7 @@ async fn abort_runtime_turn_before_model(
     }
     if let Some(fingerprint) = claimed_input_fingerprint {
         context.clear_runtime_overflow_failure(fingerprint);
+        context.clear_model_request_failure(fingerprint);
     }
     let output = AgentLoopStepOutput {
         observation: observation.clone(),
@@ -548,8 +549,41 @@ pub(crate) async fn execute_agent_loop_step(
                     )
                     .await;
                 }
-                if !is_overflow && !overflow_fuse_tripped && !claimed_event_ids.is_empty() {
-                    requeue_claimed_runtime_events(context, &claimed_event_ids);
+                if !is_overflow && !overflow_fuse_tripped {
+                    let model_request_fuse_tripped = handle_model_request_failure(
+                        context,
+                        claimed_input_fingerprint.as_deref(),
+                        &claimed_event_ids,
+                        &claimed_app_notice_entries,
+                        &err.to_string(),
+                    );
+                    if model_request_fuse_tripped {
+                        record_runtime_error_case(
+                            context,
+                            RuntimeErrorRecordInput {
+                                turn_id: &runtime_turn_id,
+                                claimed_inputs: &claimed_inputs,
+                                claimed_event_ids: &claimed_event_ids,
+                                claimed_app_notices: &claimed_app_notice_entries,
+                                tools: &tools,
+                                context_text: &runtime_context_text,
+                                error_kind: RuntimeErrorKind::ModelRequestRepeatedFailure,
+                                severity: 3,
+                                detected_by: "runtime_model_request",
+                                expected_behavior: "Model request should succeed or recover with adaptive retry. Repeated non-overflow failures should trip a fuse and terminate the claimed inputs instead of requeueing indefinitely.",
+                                actual_behavior: &format!("Model request failed repeatedly: {}", err),
+                                evidence: &err.to_string(),
+                                recoverability: "terminated_by_model_request_fuse",
+                                retry_count: 0,
+                                terminal_status: Some("fuse_tripped"),
+                                assistant_text: None,
+                                tool_calls: &[],
+                                tool_results: &tool_results,
+                                actions: &actions,
+                            },
+                        )
+                        .await;
+                    }
                 }
                 let observation = format!("agent turn failed: {err}");
                 let terminal_action = EpisodeActionRecord {
@@ -946,6 +980,7 @@ pub(crate) async fn execute_agent_loop_step(
     }
     if let Some(fingerprint) = claimed_input_fingerprint.as_deref() {
         context.clear_runtime_overflow_failure(fingerprint);
+        context.clear_model_request_failure(fingerprint);
     }
     let claimed_events_finished =
         claimed_event_ids.is_empty() || claimed_events_are_terminal(context, &claimed_event_ids);
@@ -1158,6 +1193,9 @@ fn runtime_error_contract_refs(kind: RuntimeErrorKind) -> Vec<String> {
         RuntimeErrorKind::RepeatedIdenticalToolError => vec!["tool retry contract".to_string()],
         RuntimeErrorKind::ContextOverflowAfterRecovery => {
             vec!["context overflow recovery".to_string()]
+        }
+        RuntimeErrorKind::ModelRequestRepeatedFailure => {
+            vec!["model request fuse".to_string()]
         }
     }
 }
