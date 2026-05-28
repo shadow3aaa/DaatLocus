@@ -1,6 +1,9 @@
 use super::model_driver::run_agent_turn_with_retry;
 use super::*;
 use crate::reasoning::prompt_parts::compact_horizontal_whitespace;
+use tracing::warn;
+
+const EMPTY_REASONING_MAX_LOOPS: usize = 2;
 
 fn enter_runtime_phase(
     context: &mut Context,
@@ -451,6 +454,7 @@ pub(crate) async fn execute_agent_loop_step(
     let mut tool_results = Vec::new();
     let mut actions = Vec::new();
     let mut budget_recoveries = 0usize;
+    let mut consecutive_empty_reasoning_loops = 0usize;
 
     let output = 'agent_loop: loop {
         let tools = build_runtime_tool_specs(context);
@@ -898,6 +902,29 @@ pub(crate) async fn execute_agent_loop_step(
         }
 
         let content = response_assistant_content.unwrap_or_default();
+        let is_empty_reasoning = content.trim().is_empty()
+            && response
+                .last_reasoning_content
+                .as_deref()
+                .is_some_and(|rc| !rc.trim().is_empty());
+        if is_empty_reasoning {
+            consecutive_empty_reasoning_loops += 1;
+            if consecutive_empty_reasoning_loops >= EMPTY_REASONING_MAX_LOOPS {
+                warn!(
+                    "agent loop returned empty content with reasoning for {count} consecutive iterations; \
+                     breaking the loop",
+                    count = consecutive_empty_reasoning_loops
+                );
+                break 'agent_loop AgentLoopStepOutput {
+                    observation: String::new(),
+                    description: "The model produced reasoning but no text output for multiple consecutive iterations.".to_string(),
+                    current_doing: "idle".to_string(),
+                    actions: actions.clone(),
+                };
+            }
+            continue 'agent_loop;
+        }
+        consecutive_empty_reasoning_loops = 0;
         if let RuntimeFollowUpDecision::Continue { reason } = runtime_turn_follow_up_decision(
             context,
             response.raw_stream_follow_up,
@@ -929,13 +956,6 @@ pub(crate) async fn execute_agent_loop_step(
                     },
                 )
                 .await;
-            }
-            if content.trim().is_empty()
-                && let Some(reasoning) = response.last_reasoning_content.as_deref()
-                && !reasoning.trim().is_empty()
-            {
-                runtime_step
-                    .push_agent_message(AgentMessage::assistant(format!("[thinking] {reasoning}")));
             }
             runtime_step.push_agent_message(AgentMessage::system(reason.message().to_string()));
             continue 'agent_loop;
