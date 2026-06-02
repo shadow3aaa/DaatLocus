@@ -54,7 +54,7 @@ const SUMMARY_TYPE_INTERVAL_MS = 28;
 const AGENT_CHAT_HISTORY_PAGE_LIMIT = 80;
 const AGENT_CHAT_PREVIEW_MAX_VISIBLE_BUBBLES = 24;
 const AGENT_CHAT_MESSAGE_LINE_LIMIT = 5;
-const AGENT_CHAT_FOCUSED_MESSAGE_LINE_LIMIT = 12;
+const AGENT_CHAT_ACTIVITY_BLOCK_LINE_LIMIT = 12;
 const AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT = Number.MAX_SAFE_INTEGER;
 const AGENT_CHAT_PLAN_STEP_LIMIT = 8;
 const AGENT_CHAT_TERMINAL_OUTPUT_HEAD_LINES = 4;
@@ -250,6 +250,8 @@ type AgentChatBubble = {
   kind: string;
   status: string;
   title: string;
+  createdAt: number;
+  updatedAt: number;
   blocks: WebActivityBlock[];
   planSteps: AgentChatPlanStep[];
   live?: boolean;
@@ -354,6 +356,18 @@ type AgentChatActivityCellViewProps = {
   bubbleId: string;
   render: AgentChatActivityCellRender;
 };
+
+type AgentChatDisplayItem =
+  | {
+      kind: "bubble";
+      id: string;
+      bubble: AgentChatBubble;
+    }
+  | {
+      kind: "foldedActivityGroup";
+      id: string;
+      bubbles: AgentChatBubble[];
+    };
 
 function AgentChatComposer({
   agentName,
@@ -873,9 +887,12 @@ function AgentChatBubbles({
     () => mergeAgentChatBubbles(historyBubbles, snapshotBubbles),
     [historyBubbles, snapshotBubbles],
   );
-  const visibleBubbles = isFocused
-    ? bubbles
-    : bubbles.slice(-AGENT_CHAT_PREVIEW_MAX_VISIBLE_BUBBLES);
+  const displayItems = useMemo(() => {
+    const items = foldCompletedAgentChatActivity(bubbles);
+    return isFocused
+      ? items
+      : items.slice(-AGENT_CHAT_PREVIEW_MAX_VISIBLE_BUBBLES);
+  }, [bubbles, isFocused]);
 
   function scrollToChatBottom(behavior: ScrollBehavior = "auto") {
     const panel = panelRef.current;
@@ -1108,7 +1125,7 @@ function AgentChatBubbles({
         )}
       >
         <div className="relative z-10 flex min-h-full w-full flex-col justify-end">
-          {visibleBubbles.length > 0 ? (
+          {displayItems.length > 0 ? (
             <div
               className={cn(
                 "w-full space-y-3 px-6 py-1.5",
@@ -1139,13 +1156,22 @@ function AgentChatBubbles({
                   ) : null}
                 </div>
               ) : null}
-              {visibleBubbles.map((bubble) => (
-                <AgentChatBubbleItem
-                  key={bubble.id}
-                  bubble={bubble}
-                  isFocused={isFocused}
-                />
-              ))}
+              {displayItems.map((item) =>
+                item.kind === "bubble" ? (
+                  <AgentChatBubbleItem
+                    key={item.id}
+                    bubble={item.bubble}
+                    isFocused={isFocused}
+                  />
+                ) : (
+                  <AgentChatFoldedActivityGroup
+                    key={item.id}
+                    id={item.id}
+                    bubbles={item.bubbles}
+                    isFocused={isFocused}
+                  />
+                ),
+              )}
             </div>
           ) : (
             <p className="mx-auto max-w-[min(32rem,calc(100vw-3rem))] px-4 py-3 text-center text-xs text-muted-foreground/70">
@@ -1180,6 +1206,61 @@ function AgentChatBubbles({
         <ArrowDownIcon className="size-4" aria-hidden="true" />
       </Button>
     </>
+  );
+}
+
+function AgentChatFoldedActivityGroup({
+  id,
+  bubbles,
+  isFocused,
+}: {
+  id: string;
+  bubbles: AgentChatBubble[];
+  isFocused: boolean;
+}) {
+  const { open, toggle } = useCollapsibleState(false);
+  const activityCount = bubbles.length;
+  const workedDurationLabel = formatAgentChatWorkedDuration(bubbles);
+
+  if (activityCount === 0) {
+    return null;
+  }
+
+  return (
+    <article
+      className={cn(
+        "w-full py-1 text-sm leading-6 text-muted-foreground",
+        !isFocused && "select-none",
+      )}
+    >
+      <div className="rounded-2xl border border-border/45 bg-background/50 p-4 shadow-sm backdrop-blur-xl">
+        <div className="flex min-w-0 items-center justify-between gap-4">
+          <p className="min-w-0 truncate font-semibold text-foreground/90">
+            Worked For {workedDurationLabel}
+          </p>
+          {isFocused ? (
+            <CollapsibleTrigger
+              open={open}
+              onToggle={toggle}
+              className="ml-3 w-auto shrink-0 text-xs"
+            >
+              {open ? "Hide" : "Show"}
+            </CollapsibleTrigger>
+          ) : null}
+        </div>
+        {isFocused && open ? (
+          <div className="mt-4 border-l border-border/60 pl-3">
+            {bubbles.map((bubble) => (
+              <AgentChatBubbleItem
+                key={`${id}-${bubble.id}`}
+                bubble={bubble}
+                isFocused={isFocused}
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </article>
   );
 }
 
@@ -2023,11 +2104,11 @@ function AgentChatBlock({
   const record = asRecord(block);
   const type = typeof record?.type === "string" ? record.type : "unknown";
   const lineLimit =
-    messageMode && isFocused
-      ? AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT
-      : isFocused
-        ? AGENT_CHAT_FOCUSED_MESSAGE_LINE_LIMIT
-        : AGENT_CHAT_MESSAGE_LINE_LIMIT;
+    messageMode
+      ? isFocused
+        ? AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT
+        : AGENT_CHAT_MESSAGE_LINE_LIMIT
+      : AGENT_CHAT_ACTIVITY_BLOCK_LINE_LIMIT;
 
   if (!record) {
     return null;
@@ -2638,6 +2719,129 @@ function mergeAgentChatBubbles(
   return Array.from(merged.values());
 }
 
+function foldCompletedAgentChatActivity(
+  bubbles: AgentChatBubble[],
+): AgentChatDisplayItem[] {
+  const items: AgentChatDisplayItem[] = [];
+  let activeInput: AgentChatBubble | null = null;
+  let pendingActivity: AgentChatBubble[] = [];
+
+  function pushBubble(bubble: AgentChatBubble) {
+    items.push({ kind: "bubble", id: bubble.id, bubble });
+  }
+
+  function flushPendingActivity() {
+    for (const bubble of pendingActivity) {
+      pushBubble(bubble);
+    }
+    pendingActivity = [];
+  }
+
+  function pushFoldedActivity(outputBubble: AgentChatBubble) {
+    if (pendingActivity.length === 0) {
+      return;
+    }
+
+    const first = pendingActivity[0];
+    const last = pendingActivity[pendingActivity.length - 1];
+    items.push({
+      kind: "foldedActivityGroup",
+      id: `folded-${activeInput?.id ?? "input"}-${outputBubble.id}-${first.id}-${last.id}`,
+      bubbles: pendingActivity,
+    });
+    pendingActivity = [];
+  }
+
+  for (const bubble of bubbles) {
+    if (agentChatBubbleIsUserInputBoundary(bubble)) {
+      flushPendingActivity();
+      pushBubble(bubble);
+      activeInput = bubble;
+      continue;
+    }
+
+    if (activeInput && agentChatBubbleIsOutputBoundary(bubble)) {
+      pushFoldedActivity(bubble);
+      pushBubble(bubble);
+      activeInput = null;
+      continue;
+    }
+
+    if (activeInput && agentChatBubbleCanFoldWithCompletedWork(bubble)) {
+      pendingActivity.push(bubble);
+      continue;
+    }
+
+    flushPendingActivity();
+    pushBubble(bubble);
+  }
+
+  flushPendingActivity();
+  return items;
+}
+
+function agentChatBubbleIsUserInputBoundary(bubble: AgentChatBubble) {
+  return (
+    agentChatBubbleIsConversationMessage(bubble) &&
+    (bubble.role === "user" || bubble.role === "telegram")
+  );
+}
+
+function agentChatBubbleIsOutputBoundary(bubble: AgentChatBubble) {
+  return agentChatBubbleHasActivityCellVariant(bubble, "Reply");
+}
+
+function agentChatBubbleCanFoldWithCompletedWork(bubble: AgentChatBubble) {
+  return !bubble.live && bubble.status !== "running";
+}
+
+function agentChatBubbleHasActivityCellVariant(
+  bubble: AgentChatBubble,
+  variant: string,
+) {
+  return Boolean(agentChatActivityCellPayload(bubble.cell, variant));
+}
+
+function formatAgentChatWorkedDuration(bubbles: AgentChatBubble[]) {
+  const startTimes = bubbles
+    .map((bubble) => bubble.createdAt)
+    .filter((value) => value > 0);
+  const endTimes = bubbles
+    .map((bubble) => bubble.updatedAt)
+    .filter((value) => value > 0);
+
+  if (startTimes.length === 0 || endTimes.length === 0) {
+    return "0s";
+  }
+
+  return formatAgentChatDuration(
+    Math.max(0, Math.max(...endTimes) - Math.min(...startTimes)),
+  );
+}
+
+function formatAgentChatDuration(durationMs: number) {
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (totalMinutes < 60) {
+    return seconds > 0 ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`;
+  }
+
+  const totalHours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (totalHours < 24) {
+    return minutes > 0 ? `${totalHours}h ${minutes}m` : `${totalHours}h`;
+  }
+
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+}
+
 function agentChatBubbleFromWebActivityItem(
   item: WebActivityItem | unknown,
   fallbackId: string,
@@ -2663,6 +2867,8 @@ function agentChatBubbleFromWebActivityItem(
     kind,
     status,
     title,
+    createdAt: numberValue(record.created_at, 0),
+    updatedAt: numberValue(record.updated_at, 0),
     blocks: webActivityBlocksValue(record.blocks),
     planSteps: agentChatPlanStepsFromMetadata(record.metadata),
     live,
