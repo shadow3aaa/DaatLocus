@@ -81,12 +81,7 @@ pub(crate) async fn daat_locus_loop(
         } else {
             clear_runtime_status(Some(tx));
         }
-        sync_dashboard_state(
-            context,
-            tx,
-            sleep_status,
-            Some(cycle_started_at.elapsed().as_millis()),
-        );
+        sync_dashboard_state(context, tx, sleep_status, None);
         tokio::time::sleep(Duration::from_secs(2)).await;
         return;
     }

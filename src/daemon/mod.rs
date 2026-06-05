@@ -1378,6 +1378,18 @@ fn is_valid_env_reference_name(name: &str) -> bool {
     }
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
+#[derive(serde::Serialize)]
+#[serde(tag = "type")]
+enum DashboardWsMessage {
+    #[serde(rename = "snapshot")]
+    Snapshot {
+        data: Box<crate::dashboard::DashboardState>,
+    },
+    #[serde(rename = "delta")]
+    Delta {
+        data: serde_json::Map<String, serde_json::Value>,
+    },
+}
 
 fn strong_filesystem_mode_label(value: StrongFilesystemSandboxMode) -> &'static str {
     match value {
@@ -1393,50 +1405,71 @@ async fn dashboard_ws(mut socket: WebSocket, state: ServerState) {
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut rx = state.dashboard_rx.clone();
     let shutdown_notify = state.shutdown_notify.clone();
+    use crate::dashboard::DashboardState;
+
     let initial_snapshot = rx.borrow_and_update().clone();
-    if send_dashboard_ws_snapshot(&mut socket, &initial_snapshot)
-        .await
-        .is_ok()
-    {
-        loop {
-            tokio::select! {
-                result = rx.changed() => {
-                    match result {
-                        Ok(()) => {
-                            let snapshot = rx.borrow().clone();
-                            if send_dashboard_ws_snapshot(&mut socket, &snapshot)
-                                .await
-                                .is_err()
-                            {
-                                break;
+    match serde_json::to_string(&DashboardWsMessage::Snapshot {
+        data: Box::new(initial_snapshot),
+    }) {
+        Ok(json) => {
+            if socket.send(Message::Text(json.into())).await.is_err() {
+                state
+                    .connected_clients
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
+        Err(err) => {
+            tracing::error!("encode dashboard ws snapshot failed: {err}");
+            state
+                .connected_clients
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+    }
+    let mut last_state: Option<DashboardState> = None;
+    loop {
+        tokio::select! {
+            result = rx.changed() => {
+                match result {
+                    Ok(()) => {
+                        let snapshot = rx.borrow().clone();
+                        let msg = if let Some(ref prev) = last_state {
+                            match prev.diff_json(&snapshot) {
+                                Some(delta) if !delta.is_empty() => {
+                                    DashboardWsMessage::Delta { data: delta }
+                                }
+                                _ => {
+                                    DashboardWsMessage::Snapshot { data: Box::new(snapshot.clone()) }
+                                }
+                            }
+                        } else {
+                            DashboardWsMessage::Snapshot { data: Box::new(snapshot.clone()) }
+                        };
+                        match serde_json::to_string(&msg) {
+                            Ok(json) => {
+                                if socket.send(Message::Text(json.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                tracing::error!("encode dashboard ws message failed: {err}");
+                                continue;
                             }
                         }
-                        Err(_) => break,
+                        last_state = Some(snapshot);
                     }
+                    Err(_) => break,
                 }
-                _ = shutdown_notify.notified() => {
-                    break;
-                }
+            }
+            _ = shutdown_notify.notified() => {
+                break;
             }
         }
     }
     state
         .connected_clients
         .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-}
-
-async fn send_dashboard_ws_snapshot(
-    socket: &mut WebSocket,
-    snapshot: &DashboardState,
-) -> std::result::Result<(), ()> {
-    let payload = serde_json::to_string(snapshot).map_err(|err| {
-        tracing::error!("encode dashboard ws snapshot failed: {err}");
-    })?;
-
-    socket
-        .send(Message::Text(payload.into()))
-        .await
-        .map_err(|_| ())
 }
 
 #[derive(Clone)]

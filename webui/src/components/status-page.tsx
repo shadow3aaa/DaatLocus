@@ -9,6 +9,7 @@ import {
   type ClipboardEvent,
   type DragEvent,
   type FormEvent,
+  type ReactNode,
   type RefObject,
   type UIEvent,
 } from "react";
@@ -75,6 +76,9 @@ const AGENT_CHAT_COMPOSER_DEFAULT_HEIGHT_PX = 60;
 const AGENT_CHAT_COMPOSER_BOTTOM_GAP_PX = 16;
 const AGENT_CHAT_PREVIEW_NOTICE_VISIBLE_MS = 3000;
 const AGENT_CHAT_PREVIEW_NOTICE_FADE_MS = 300;
+const AGENT_STATUS_CONTEXT_RING_RADIUS = 8;
+const AGENT_STATUS_CONTEXT_RING_CIRCUMFERENCE =
+  2 * Math.PI * AGENT_STATUS_CONTEXT_RING_RADIUS;
 export function AgentPage() {
   const { isLoading, loadError, snapshot } = useDashboardSnapshot();
   const chatPanelRef = useRef<HTMLDivElement>(null);
@@ -220,6 +224,7 @@ export function AgentPage() {
             </span>
           ) : null}
         </p>
+        {!isChatFocused ? <AgentStatusChips snapshot={snapshot} /> : null}
         <span aria-live="polite" className="sr-only">
           {agentStatus.label}
         </span>
@@ -235,6 +240,231 @@ export function AgentPage() {
       />
     </section>
   );
+}
+
+type AgentStatusChipMetrics = {
+  model: string;
+  contextRatio: number | null;
+  contextText: string;
+  inputTokens: string;
+  outputTokens: string;
+  taskTokens: string;
+};
+
+function AgentStatusChips({ snapshot }: { snapshot: DashboardSnapshot | null }) {
+  const metrics = useMemo(() => agentStatusChipMetrics(snapshot), [snapshot]);
+
+  return (
+    <div
+      aria-label="Agent status"
+      className="relative z-20 flex max-w-[min(40rem,calc(100vw-3rem))] flex-wrap items-center justify-center gap-2 text-xs text-muted-foreground transition-opacity duration-300"
+    >
+      <AgentStatusChip
+        ariaLabel={`Model ${metrics.model}`}
+        value={metrics.model}
+        valueClassName="max-w-[13rem]"
+      />
+      <AgentStatusChip
+        ariaLabel={`Context ${metrics.contextText}`}
+        value={
+          <>
+            <AgentStatusContextRing ratio={metrics.contextRatio} />
+            <span className="font-mono tabular-nums">{metrics.contextText}</span>
+          </>
+        }
+        valueClassName="flex items-center gap-1.5"
+      />
+      <AgentStatusChip
+        ariaLabel={`Current task tokens ${metrics.inputTokens} uncached input, ${metrics.outputTokens} output`}
+        value={metrics.taskTokens}
+      />
+    </div>
+  );
+}
+
+function AgentStatusChip({
+  ariaLabel,
+  value,
+  valueClassName,
+}: {
+  ariaLabel: string;
+  value: ReactNode;
+  valueClassName?: string;
+}) {
+  return (
+    <span
+      aria-label={ariaLabel}
+      className="inline-flex h-8 min-w-0 items-center justify-center rounded-full border border-border/60 bg-background/70 px-3 text-xs shadow-sm shadow-background/30 backdrop-blur-md"
+    >
+      <span
+        className={cn(
+          "min-w-0 truncate font-mono font-medium tabular-nums text-foreground/90",
+          valueClassName,
+        )}
+      >
+        {value}
+      </span>
+    </span>
+  );
+}
+
+function AgentStatusContextRing({ ratio }: { ratio: number | null }) {
+  const progress = ratio ?? 0;
+  const dashOffset =
+    AGENT_STATUS_CONTEXT_RING_CIRCUMFERENCE * (1 - progress);
+
+  return (
+    <svg
+      aria-hidden="true"
+      className="size-5 shrink-0 -rotate-90"
+      viewBox="0 0 20 20"
+    >
+      <circle
+        className="stroke-muted-foreground/20"
+        cx="10"
+        cy="10"
+        r={AGENT_STATUS_CONTEXT_RING_RADIUS}
+        fill="none"
+        strokeWidth="2.5"
+      />
+      <circle
+        className={cn(
+          "stroke-foreground transition-[stroke-dashoffset] duration-300",
+          ratio === null && "stroke-muted-foreground/40",
+        )}
+        cx="10"
+        cy="10"
+        r={AGENT_STATUS_CONTEXT_RING_RADIUS}
+        fill="none"
+        strokeLinecap="round"
+        strokeWidth="2.5"
+        strokeDasharray={AGENT_STATUS_CONTEXT_RING_CIRCUMFERENCE}
+        strokeDashoffset={dashOffset}
+      />
+    </svg>
+  );
+}
+
+function agentStatusChipMetrics(
+  snapshot: DashboardSnapshot | null,
+): AgentStatusChipMetrics {
+  const mainUsage = snapshot?.token_usage?.main;
+  const composition = snapshot?.context_composition ?? null;
+  const lastInputTokens = finiteNonNegativeNumber(
+    mainUsage?.last_token_usage.input_tokens,
+  );
+  const lastCachedInputTokens = finiteNonNegativeNumber(
+    mainUsage?.last_token_usage.cached_input_tokens,
+  );
+  const lastUncachedInputTokens =
+    lastInputTokens !== null
+      ? Math.max(0, lastInputTokens - (lastCachedInputTokens ?? 0))
+      : null;
+  const estimatedInputTokens = firstFiniteNonNegativeNumber(
+    snapshot?.footer_estimated_input_tokens,
+    composition?.total_estimated_tokens,
+  );
+  const inputTokens = lastUncachedInputTokens ?? estimatedInputTokens;
+  const outputTokens = finiteNonNegativeNumber(
+    mainUsage?.last_token_usage.output_tokens,
+  );
+  const contextTokens = firstFiniteNonNegativeNumber(
+    composition?.total_estimated_tokens,
+    snapshot?.footer_estimated_input_tokens,
+    lastInputTokens,
+  );
+  const contextWindowTokens = finitePositiveNumber(
+    mainUsage?.model_context_window,
+  );
+  const contextRatio =
+    contextTokens !== null && contextWindowTokens !== null
+      ? Math.min(contextTokens / contextWindowTokens, 1)
+      : null;
+
+  return {
+    model:
+      firstNonEmptyString(composition?.model, snapshot?.token_usage?.main_model) ??
+      "unknown",
+    contextRatio,
+    contextText: agentStatusContextText(contextTokens, contextWindowTokens),
+    inputTokens: formatAgentStatusTokenCount(inputTokens),
+    outputTokens: formatAgentStatusTokenCount(outputTokens),
+    taskTokens: agentStatusTaskTokenText(inputTokens, outputTokens),
+  };
+}
+
+function agentStatusContextText(
+  contextTokens: number | null,
+  contextWindowTokens: number | null,
+) {
+  const used = formatAgentStatusTokenCount(contextTokens);
+  const window = formatAgentStatusTokenCount(contextWindowTokens);
+
+  return `${used} / ${window}`;
+}
+
+function formatAgentStatusTokenCount(value: number | null) {
+  if (value === null) {
+    return "—";
+  }
+
+  const normalized = Math.max(0, value);
+  const unit = normalized >= 999_500 ? "M" : "k";
+  const divisor = unit === "M" ? 1_000_000 : 1_000;
+
+  return `${formatAgentStatusTokenUnit(normalized / divisor)}${unit}`;
+}
+
+function agentStatusTaskTokenText(
+  inputTokens: number | null,
+  outputTokens: number | null,
+) {
+  return `${formatAgentStatusTokenCount(inputTokens)}↑${formatAgentStatusTokenCount(
+    outputTokens,
+  )}↓`;
+}
+
+function formatAgentStatusTokenUnit(value: number) {
+  const maximumFractionDigits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+
+  return new Intl.NumberFormat("en", {
+    maximumFractionDigits,
+  }).format(value);
+}
+
+function firstNonEmptyString(...values: Array<string | null | undefined>) {
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed) {
+      return trimmed;
+    }
+  }
+
+  return null;
+}
+
+function firstFiniteNonNegativeNumber(
+  ...values: Array<number | null | undefined>
+) {
+  for (const value of values) {
+    const normalized = finiteNonNegativeNumber(value);
+    if (normalized !== null) {
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
+function finiteNonNegativeNumber(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, value)
+    : null;
+}
+
+function finitePositiveNumber(value: number | null | undefined) {
+  const normalized = finiteNonNegativeNumber(value);
+  return normalized !== null && normalized > 0 ? normalized : null;
 }
 
 type AgentChatBubbleRole =
@@ -2772,7 +3002,10 @@ function foldCompletedAgentChatActivity(
       continue;
     }
 
-    flushPendingActivity();
+    if (activeInput) {
+      flushPendingActivity();
+      activeInput = null;
+    }
     pushBubble(bubble);
   }
 
@@ -2788,11 +3021,14 @@ function agentChatBubbleIsUserInputBoundary(bubble: AgentChatBubble) {
 }
 
 function agentChatBubbleIsOutputBoundary(bubble: AgentChatBubble) {
-  return agentChatBubbleHasActivityCellVariant(bubble, "Reply");
+  return (
+    bubble.status === "completed" &&
+    agentChatBubbleHasActivityCellVariant(bubble, "Reply")
+  );
 }
 
 function agentChatBubbleCanFoldWithCompletedWork(bubble: AgentChatBubble) {
-  return !bubble.live && bubble.status !== "running";
+  return !bubble.live && bubble.status === "completed";
 }
 
 function agentChatBubbleHasActivityCellVariant(

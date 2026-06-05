@@ -250,6 +250,31 @@ pub struct DashboardState {
     pub footer_estimated_input_tokens: Option<usize>,
 }
 
+impl DashboardState {
+    /// Returns a partial JSON object containing only the fields that differ from `prev`.
+    /// When more than half of the total fields changed, returns `None` to signal that
+    /// a full snapshot is cheaper.
+    pub fn diff_json(&self, prev: &Self) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let prev_value = serde_json::to_value(prev).ok()?;
+        let next_value = serde_json::to_value(self).ok()?;
+        let prev_obj = prev_value.as_object()?;
+        let next_obj = next_value.as_object()?;
+        let total_fields = next_obj.len();
+        let mut changed = serde_json::Map::new();
+        for (key, next_val) in next_obj {
+            if prev_obj.get(key) == Some(next_val) {
+                continue;
+            }
+            changed.insert(key.clone(), next_val.clone());
+        }
+        if changed.len() > total_fields / 2 {
+            None
+        } else {
+            Some(changed)
+        }
+    }
+}
+
 fn default_agent_name() -> String {
     dashboard_agent_name()
 }
@@ -1708,11 +1733,16 @@ pub async fn run_tui_dashboard(
         let term_size = terminal.size().ok();
         let term_width = term_size.map(|size| size.width).unwrap_or(80);
         let term_height = term_size.map(|size| size.height).unwrap_or(24);
-        let input_lines = command_input_display_height(
-            wrapped_input_height(command_input.as_str(), term_width),
-            term_height,
-            popup_rows,
+        let input_wrap_width = term_width.max(1) as usize;
+        let input_height = wrapped_input_height(command_input.as_str(), term_width).max(
+            cursor_display_row(
+                command_input.as_str(),
+                command_input.cursor_pos,
+                input_wrap_width,
+            )
+            .saturating_add(1),
         );
+        let input_lines = command_input_display_height(input_height, term_height, popup_rows);
 
         // Decrement load cooldown each tick
         load_cooldown = load_cooldown.saturating_sub(1);
@@ -2276,6 +2306,11 @@ struct CommandBarRenderState<'a> {
 fn should_insert_newline_on_enter(modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::ALT)
 }
+
+const COMMAND_INPUT_PROMPT: &str = "› ";
+const COMMAND_INPUT_CONTINUATION_PREFIX: &str = "  ";
+const COMMAND_INPUT_PREFIX_WIDTH: usize = 2;
+
 fn command_input_display_height(input_height: u16, terminal_height: u16, popup_rows: u16) -> u16 {
     let reserved_rows = 2u16.saturating_add(popup_rows);
     let max_rows = terminal_height
@@ -2286,21 +2321,15 @@ fn command_input_display_height(input_height: u16, terminal_height: u16, popup_r
 }
 
 fn wrapped_input_height(text: &str, term_width: u16) -> u16 {
-    let available = term_width.saturating_sub(2).max(1) as usize;
+    let wrap_width = term_width.max(1) as usize;
     if text.is_empty() {
         return 1;
     }
-    let mut total: u16 = 0;
-    for line in text.split('\n') {
-        if line.is_empty() {
-            total += 1;
-            continue;
-        }
-        let display_width: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
-        let lines = display_width.div_ceil(available).max(1);
-        total += lines as u16;
-    }
-    total.max(1)
+
+    text.split('\n')
+        .map(|line| wrapped_prefixed_input_line_height(line, wrap_width))
+        .sum::<u16>()
+        .max(1)
 }
 
 /// Threshold above which pasted text gets a placeholder block instead of being inserted inline.
@@ -2351,59 +2380,100 @@ fn expand_paste_placeholders(text: &str, pending: &[(String, String)]) -> String
     result
 }
 
-/// Compute (x, y) display position for a byte cursor position within the input text.
-/// Accounts for multi-line input and terminal wrapping at `available_width`.
-/// `prompt_width` is the display width of the leading prompt (e.g. "› " = 2).
-fn cursor_display_row(text: &str, byte_pos: usize, available_width: usize) -> u16 {
-    let byte_pos = byte_pos.min(text.len());
+fn command_input_char_width(c: char) -> usize {
+    if c.is_ascii() { 1 } else { 2 }
+}
+
+fn clamp_to_char_boundary(text: &str, byte_pos: usize) -> usize {
+    let mut byte_pos = byte_pos.min(text.len());
+    while byte_pos > 0 && !text.is_char_boundary(byte_pos) {
+        byte_pos -= 1;
+    }
+    byte_pos
+}
+
+fn normalize_wrapped_cursor(row: &mut u16, col: &mut usize, wrap_width: usize) {
+    if *col >= wrap_width {
+        *row = row.saturating_add((*col / wrap_width) as u16);
+        *col %= wrap_width;
+    }
+}
+
+fn advance_wrapped_cursor(row: &mut u16, col: &mut usize, ch_width: usize, wrap_width: usize) {
+    if ch_width == 0 {
+        return;
+    }
+    if *col > 0 && *col + ch_width > wrap_width {
+        *row = row.saturating_add(1);
+        *col = 0;
+    }
+    *col += ch_width;
+    normalize_wrapped_cursor(row, col, wrap_width);
+}
+
+fn wrapped_prefixed_input_line_height(line: &str, wrap_width: usize) -> u16 {
+    if line.is_empty() {
+        return 1;
+    }
+
+    let (row, col) = cursor_display_position_for_prefix(
+        line,
+        line.len(),
+        wrap_width,
+        COMMAND_INPUT_PREFIX_WIDTH,
+    );
+    if col == 0 {
+        row.max(1)
+    } else {
+        row.saturating_add(1)
+    }
+}
+
+fn cursor_display_position_for_prefix(
+    text: &str,
+    byte_pos: usize,
+    wrap_width: usize,
+    prefix_width: usize,
+) -> (u16, u16) {
+    let wrap_width = wrap_width.max(1);
+    let byte_pos = clamp_to_char_boundary(text, byte_pos);
     let before = &text[..byte_pos];
-    let mut total_rows: u16 = 0;
-    let mut lines = before.split('\n').peekable();
-    while let Some(line) = lines.next() {
-        let dw: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
-        if lines.peek().is_some() {
-            if dw == 0 {
-                total_rows += 1;
-            } else {
-                total_rows += dw.div_ceil(available_width) as u16;
-            }
+    let mut row: u16 = 0;
+    let mut col: usize = prefix_width;
+    normalize_wrapped_cursor(&mut row, &mut col, wrap_width);
+
+    for ch in before.chars() {
+        if ch == '\n' {
+            row = row.saturating_add(1);
+            col = prefix_width;
+            normalize_wrapped_cursor(&mut row, &mut col, wrap_width);
         } else {
-            total_rows += (dw / available_width) as u16;
+            advance_wrapped_cursor(&mut row, &mut col, command_input_char_width(ch), wrap_width);
         }
     }
-    total_rows
+
+    (row, col as u16)
+}
+
+/// Compute the display row for a byte cursor position within the input text.
+/// The wrap width is the full rendered paragraph width; the prompt prefix only
+/// consumes cells on the first visual row of each explicit input line.
+fn cursor_display_row(text: &str, byte_pos: usize, wrap_width: usize) -> u16 {
+    cursor_display_position_for_prefix(text, byte_pos, wrap_width, COMMAND_INPUT_PREFIX_WIDTH).0
 }
 
 fn cursor_display_xy(
     text: &str,
     byte_pos: usize,
-    available_width: usize,
+    wrap_width: usize,
     prompt_width: u16,
     area: Rect,
     scroll: u16,
 ) -> (u16, u16) {
-    let byte_pos = byte_pos.min(text.len());
-    let before = &text[..byte_pos];
-    let mut total_rows: u16 = 0;
-    let mut col: u16 = 0;
-    let mut lines = before.split('\n').peekable();
-    while let Some(line) = lines.next() {
-        let dw: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
-        if lines.peek().is_some() {
-            // completed logical line
-            if dw == 0 {
-                total_rows += 1;
-            } else {
-                total_rows += dw.div_ceil(available_width) as u16;
-            }
-        } else {
-            // current (last) line
-            total_rows += (dw / available_width) as u16;
-            col = (dw % available_width) as u16;
-        }
-    }
-    let x = area.x + prompt_width + col;
-    let y = area.y + total_rows.saturating_sub(scroll);
+    let (row, col) =
+        cursor_display_position_for_prefix(text, byte_pos, wrap_width, prompt_width as usize);
+    let x = area.x + col;
+    let y = area.y + row.saturating_sub(scroll);
     (x, y)
 }
 
@@ -2448,13 +2518,17 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
         _ => Line::from(""),
     };
     f.render_widget(Paragraph::new(status_line), rows[0]);
-    let available_width = area.width.saturating_sub(2).max(1) as usize;
+    let wrap_width = rows[1].width.max(1) as usize;
     // Build input text with prompt prefix, render as wrapping Paragraph
     let display_text = if input.is_empty() {
         "› type a message, or /command".to_string()
     } else {
-        let mut s = String::with_capacity(input.len() + 2 + input.matches('\n').count() * 2);
-        s.push_str("› ");
+        let mut s = String::with_capacity(
+            input.len()
+                + COMMAND_INPUT_PROMPT.len()
+                + input.matches('\n').count() * COMMAND_INPUT_CONTINUATION_PREFIX.len(),
+        );
+        s.push_str(COMMAND_INPUT_PROMPT);
         push_command_input_display_text(&mut s, input);
         if let Some(completion) = completion
             && completion != input
@@ -2468,7 +2542,7 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
     } else {
         Style::default().fg(Color::White)
     };
-    let cursor_total_row = cursor_display_row(input, cursor_pos, available_width);
+    let cursor_total_row = cursor_display_row(input, cursor_pos, wrap_width);
     let input_scroll = cursor_total_row.saturating_sub(rows[1].height.saturating_sub(1));
     let input_para = Paragraph::new(display_text)
         .style(input_style)
@@ -2480,8 +2554,8 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
     let (cursor_x, cursor_y) = cursor_display_xy(
         input,
         cursor_pos,
-        available_width,
-        2, // prompt "› " width
+        wrap_width,
+        COMMAND_INPUT_PREFIX_WIDTH as u16,
         rows[1],
         input_scroll,
     );
@@ -2522,7 +2596,7 @@ fn push_command_input_display_text(output: &mut String, input: &str) {
     for (line_index, line) in input.split('\n').enumerate() {
         if line_index > 0 {
             output.push('\n');
-            output.push_str("  ");
+            output.push_str(COMMAND_INPUT_CONTINUATION_PREFIX);
         }
         output.push_str(line);
     }
@@ -2803,6 +2877,13 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_input_height_uses_full_width_after_prompt_wrap() {
+        assert_eq!(wrapped_input_height(&"a".repeat(78), 80), 1);
+        assert_eq!(wrapped_input_height(&"a".repeat(79), 80), 2);
+        assert_eq!(wrapped_input_height(&"a".repeat(158), 80), 2);
+    }
+
+    #[test]
     fn command_input_display_height_expands_past_ten_lines() {
         assert_eq!(command_input_display_height(18, 40, 0), 18);
     }
@@ -2811,8 +2892,24 @@ mod tests {
     fn cursor_display_xy_moves_after_trailing_newline() {
         let area = Rect::new(0, 0, 80, 10);
         assert_eq!(
-            cursor_display_xy("hello\n", "hello\n".len(), 78, 2, area, 0),
+            cursor_display_xy("hello\n", "hello\n".len(), 80, 2, area, 0),
             (2, 1)
+        );
+    }
+
+    #[test]
+    fn cursor_display_xy_starts_auto_wrap_continuations_at_column_zero() {
+        let area = Rect::new(0, 0, 80, 10);
+        let boundary = "a".repeat(78);
+        assert_eq!(
+            cursor_display_xy(&boundary, boundary.len(), 80, 2, area, 0),
+            (0, 1)
+        );
+
+        let wrapped = "a".repeat(79);
+        assert_eq!(
+            cursor_display_xy(&wrapped, wrapped.len(), 80, 2, area, 0),
+            (1, 1)
         );
     }
 
