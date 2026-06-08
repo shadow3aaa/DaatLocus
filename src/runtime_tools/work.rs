@@ -52,7 +52,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<FocusAppArgs>(
             "focus_app",
             "Bring the specified app to the foreground.",
-            None,
             summarize_focus_app_tool,
             render_focus_app_call_ui,
             execute_focus_app_tool,
@@ -60,7 +59,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<PutAwayAppArgs>(
             "put_away_app",
             "Put the current foreground app back into the background.",
-            None,
             summarize_put_away_app_tool,
             render_put_away_app_call_ui,
             execute_put_away_app_tool,
@@ -68,7 +66,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<EventResolveArgs>(
             "finish_and_send",
             "Explicitly finish an event and send the final reply when a user reply is needed. `resolved` and `failed` both require `reply_message`; `dismissed` silently ends without sending a message.",
-            None,
             summarize_event_resolve_tool,
             render_event_resolve_call_ui,
             execute_event_resolve_tool,
@@ -76,7 +73,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<NoticeResolvedArgs>(
             "notice_resolved",
             "Explicitly resolve an app notice claimed by the current turn. This completes the notice without sending an external reply.",
-            None,
             summarize_notice_resolved_tool,
             render_notice_resolved_call_ui,
             execute_notice_resolved_tool,
@@ -84,7 +80,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<UpdatePlanArgs>(
             "update_plan",
             "Submit the complete step-by-step plan for the current task.",
-            None,
             summarize_update_plan_tool,
             render_update_plan_call_ui,
             execute_update_plan_tool,
@@ -92,7 +87,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<CreatePrimitiveSpecArgs>(
             "create_primitive_spec",
             "Create an initial reusable SOP primitive draft when no reusable primitive fits.",
-            None,
             summarize_create_primitive_spec_tool,
             render_create_primitive_spec_call_ui,
             execute_create_primitive_spec_tool,
@@ -100,7 +94,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<ActivateComposedPrimitiveArgs>(
             "activate_composed_primitive",
             "Bind one existing SOP primitive or a temporary composition of existing primitives to the current task.",
-            None,
             summarize_activate_primitive_tool,
             render_activate_primitive_call_ui,
             execute_activate_primitive_tool,
@@ -108,7 +101,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<ReadPrimitiveSpecArgs>(
             "read_primitive_spec",
             "Read the complete SOP primitive spec for a primitive id, including origin and backing file path when it is a workspace primitive.",
-            None,
             summarize_read_workflow_tool,
             render_read_workflow_call_ui,
             execute_read_workflow_tool,
@@ -116,7 +108,6 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
         Box::new(StaticRuntimeTool::new::<UpdatePrimitiveSpecArgs>(
             "update_primitive_spec",
             "Replace a workspace SOP primitive spec with a complete cleaned version. Use this for user-requested primitive maintenance; builtin primitives are read-only.",
-            None,
             summarize_update_workflow_tool,
             render_update_workflow_call_ui,
             execute_update_workflow_tool,

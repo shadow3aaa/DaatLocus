@@ -6,7 +6,7 @@ use schemars::schema_for;
 use serde_json::{Value, json};
 
 use crate::{
-    app::{AppId, AppToolExecutionContext, AppToolScope},
+    app::{AppId, AppToolExecutionContext},
     context::Context,
     context_budget::truncate_text_to_token_budget_with_notice,
     live_progress::TelegramLiveStatus,
@@ -187,7 +187,6 @@ struct StaticRuntimeTool {
     name: &'static str,
     description: &'static str,
     input_spec: AgentToolInputSpec,
-    scope: Option<AppToolScope>,
     availability: Option<ToolAvailability>,
     summarize: ToolSummarizer,
     call_ui: ToolCallUiBuilder,
@@ -198,7 +197,6 @@ impl StaticRuntimeTool {
     fn new<T: schemars::JsonSchema>(
         name: &'static str,
         description: &'static str,
-        scope: Option<AppToolScope>,
         summarize: ToolSummarizer,
         call_ui: ToolCallUiBuilder,
         execute: ToolExecutor,
@@ -209,7 +207,6 @@ impl StaticRuntimeTool {
             input_spec: AgentToolInputSpec::JsonSchema {
                 schema: normalize_tool_input_schema(serde_json::to_value(schema_for!(T)).unwrap()),
             },
-            scope,
             availability: None,
             summarize,
             call_ui,
@@ -233,15 +230,9 @@ impl RuntimeTool for StaticRuntimeTool {
     }
 
     fn is_available(&self, context: &Context) -> bool {
-        let scope_available = match self.scope {
-            None => true,
-            Some(scope) => context.apps.focused_tool_scopes().contains(&scope),
-        };
-        scope_available
-            && self
-                .availability
-                .map(|availability| availability(context))
-                .unwrap_or(true)
+        self.availability
+            .map(|availability| availability(context))
+            .unwrap_or(true)
     }
 
     fn summarize_action(&self, call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
@@ -318,11 +309,8 @@ LF: /\n/"#
         }
     }
 
-    fn is_available(&self, context: &Context) -> bool {
-        context
-            .apps
-            .focused_tool_scopes()
-            .contains(&AppToolScope::Terminal)
+    fn is_available(&self, _context: &Context) -> bool {
+        true
     }
 
     fn summarize_action(&self, call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
@@ -344,7 +332,6 @@ LF: /\n/"#
 
 struct AppRuntimeTool {
     owner_app_id: AppId,
-    scope: AppToolScope,
     exposed_name: String,
     app_tool_name: String,
     description: String,
@@ -369,8 +356,8 @@ impl RuntimeTool for AppRuntimeTool {
         self.input_spec.clone()
     }
 
-    fn is_available(&self, context: &Context) -> bool {
-        context.apps.tool_scope_is_focused(self.scope)
+    fn is_available(&self, _context: &Context) -> bool {
+        true
     }
 
     fn summarize_action(&self, _call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
@@ -428,40 +415,51 @@ fn build_app_runtime_tools(
 ) -> Vec<Box<dyn RuntimeTool>> {
     let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
     let mut seen_names = reserved_names.clone();
-    for scoped_tool in context.apps.all_tool_specs() {
-        let owner_app_id = scoped_tool.owner_app_id;
-        let tool = scoped_tool.tool;
-        if !is_valid_dynamic_tool_name(&tool.name) {
-            tracing::warn!(
-                "skipping app tool `{}` from app `{}` because its name must match [A-Za-z0-9_-]+",
-                tool.name,
-                owner_app_id
-            );
+
+    let focused = context.apps.focused();
+    let Some(focused) = focused.as_ref() else {
+        return tools;
+    };
+
+    let mut allowed_apps: HashSet<AppId> = HashSet::new();
+    allowed_apps.insert(focused.clone());
+    for surface in context.apps.focused_composed_surfaces() {
+        allowed_apps.insert(surface.app_id);
+    }
+
+    for (owner_app_id, app_tools) in context.apps.all_tool_specs() {
+        if !allowed_apps.contains(&owner_app_id) {
             continue;
         }
-        if !context.apps.tool_scope_is_focused(tool.scope) {
-            continue;
+        for tool in &app_tools {
+            if !is_valid_dynamic_tool_name(&tool.name) {
+                tracing::warn!(
+                    "skipping app tool `{}` from app `{}` because its name must match [A-Za-z0-9_-]+",
+                    tool.name,
+                    owner_app_id
+                );
+                continue;
+            }
+            let exposed_name = owner_app_id.mangle_tool_name(&tool.name);
+            if !seen_names.insert(exposed_name.clone()) {
+                tracing::warn!(
+                    "skipping app tool `{}` from app `{}` because exposed name `{}` conflicts with another runtime tool",
+                    tool.name,
+                    owner_app_id,
+                    exposed_name
+                );
+                continue;
+            }
+            tools.push(Box::new(AppRuntimeTool {
+                owner_app_id: owner_app_id.clone(),
+                exposed_name,
+                app_tool_name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_spec: AgentToolInputSpec::JsonSchema {
+                    schema: normalize_tool_input_schema(tool.input_schema.clone()),
+                },
+            }));
         }
-        let exposed_name = owner_app_id.mangle_tool_name(&tool.name);
-        if !seen_names.insert(exposed_name.clone()) {
-            tracing::warn!(
-                "skipping app tool `{}` from app `{}` because exposed name `{}` conflicts with another runtime tool",
-                tool.name,
-                owner_app_id,
-                exposed_name
-            );
-            continue;
-        }
-        tools.push(Box::new(AppRuntimeTool {
-            owner_app_id,
-            scope: tool.scope,
-            exposed_name,
-            app_tool_name: tool.name,
-            description: tool.description,
-            input_spec: AgentToolInputSpec::JsonSchema {
-                schema: normalize_tool_input_schema(tool.input_schema),
-            },
-        }));
     }
     tools
 }
@@ -1247,10 +1245,6 @@ mod tests {
         assert!(rendered.contains("<terminal>"), "{rendered}");
         assert!(rendered.contains("role: delegated_tools"), "{rendered}");
         assert!(
-            rendered.contains("exposed_scopes: [terminal]"),
-            "{rendered}"
-        );
-        assert!(
             rendered.contains(
                 "exposed_tools: [terminal__terminal_exec, terminal__terminal_write_stdin, terminal__terminal_terminate]"
             ),
@@ -1259,11 +1253,6 @@ mod tests {
         assert!(rendered.contains("kind=terminal"), "{rendered}");
         assert!(
             rendered.contains("segmented-terminal-context"),
-            "{rendered}"
-        );
-        assert!(
-            rendered
-                .contains("terminal__terminal_exec / terminal__terminal_write_stdin / terminal__terminal_terminate"),
             "{rendered}"
         );
     }

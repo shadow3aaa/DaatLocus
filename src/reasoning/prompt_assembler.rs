@@ -4,10 +4,10 @@ use super::{
     prompt_doc::{PromptBlock, PromptDocument, PromptNode, PromptUnitDoc},
     prompt_parts::{
         AfterClaimContextInput, AfterClaimContextPart, AfterClaimInputPart,
-        AfterClaimWorkflowPrimitiveRoutingPart, AppsSystemPart, CompiledAdditionsSystemPart,
-        EventSystemPart, PersonaSystemPart, PlanSystemPart, PreTurnAppSurfacePart,
-        PreTurnContextPart, PreTurnPlanPart, PreTurnSensoryPart, PreTurnWorkflowStatePart,
-        SystemPromptPart, WorkflowSystemPart, WorkspaceSystemPart,
+        AfterClaimWorkflowPrimitiveRoutingPart, AppDocsSystemPart, AppsSystemPart,
+        CompiledAdditionsSystemPart, EventSystemPart, PersonaSystemPart, PlanSystemPart,
+        PreTurnAppSurfacePart, PreTurnContextPart, PreTurnPlanPart, PreTurnSensoryPart,
+        PreTurnWorkflowStatePart, SystemPromptPart, WorkflowSystemPart, WorkspaceSystemPart,
     },
     prompts::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
@@ -41,6 +41,7 @@ impl SystemPromptAssembler {
             Box::new(WorkspaceSystemPart),
             Box::new(PlanSystemPart),
             Box::new(WorkflowSystemPart),
+            Box::new(AppDocsSystemPart),
             Box::new(PersonaSystemPart),
             Box::new(CompiledAdditionsSystemPart),
         ])

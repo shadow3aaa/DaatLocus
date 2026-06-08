@@ -42,7 +42,7 @@ pub const PLAN_UNIT_HOW: &str = "Use `update_plan` to maintain the plan. Each ca
 
 pub const WORKFLOW_UNIT_WHAT: &str = "A primitive is the runtime binding and evolution layer for an evolvable SOP primitive library. Each persisted primitive spec describes one reusable primitive procedure with applicability metadata, preconditions, reusable steps, done criteria, and stable recovery paths.";
 
-pub const WORKFLOW_UNIT_WHEN: &str = "When `<primitive>` shows `bound_primitive_id=<none>`, inspect `<primitive_routing>` in `<afterclaim_context>` as a reusable SOP primitive routing catalog. `primitive_ids` is the full loaded primitive vocabulary for composition awareness; primitive ids are legal only when they are primitive filenames made from lowercase `a-z` and `-`. `relevant_primitives` expands only the top task-relevant primitives with capability, input, output, and when metadata. To bind one primitive, call `activate_composed_primitive` with that primitive id. To bind a temporary graph of multiple existing primitives, call `activate_composed_primitive` with the ordered primitive ids joined by `-`; the runtime first exact-matches an existing primitive id, otherwise segments the joined value into existing primitive filenames. If none fits, continue with a normal plan instead of creating a composite workflow merely to proceed. Call `create_primitive_spec` only when the task truly requires authoring a new stable primitive. If the user asks to modify the primitive/spec for a past, existing, or previously discussed task class, treat it as SOP primitive maintenance even when the wording is an ordinary instruction and still says workflow. If a primitive or composition is already bound, do not call `activate_composed_primitive` again just to reaffirm it; continue executing under the current binding.";
+pub const WORKFLOW_UNIT_WHEN: &str = "When `<primitive>` shows `bound_primitive_id=<none>`, inspect `<primitive_routing>` in `<afterclaim_context>` as a reusable SOP primitive routing catalog. `primitive_ids` is the full loaded primitive vocabulary for composition awareness; primitive ids are legal only when they are primitive filenames made from lowercase `a-z` and `-`. `relevant_primitives` expands only the top task-relevant primitives with capability, input, output, and when metadata. To bind one primitive, call `activate_composed_primitive` with that primitive id before executing it. To bind a temporary graph of multiple existing primitives, call `activate_composed_primitive` with the ordered primitive ids joined by `-`; exact primitive filename matches win before composition segmentation. If none fits, continue with a normal plan; call `create_primitive_spec` only when the task truly needs a new stable primitive, not to persist a one-off composite task graph. If the user asks to modify the primitive/spec for a past, existing, or previously discussed task class, treat it as SOP primitive maintenance even when the wording is an ordinary instruction and still says workflow. If a primitive or composition is already bound, do not call `activate_composed_primitive` again just to reaffirm it; continue executing under the current binding.";
 
 pub const WORKFLOW_UNIT_HOW: &str = "A primitive binding is runtime state for the current task and does not rewrite the primitive spec. Persisted specs are primitives; task-time compositions are ephemeral runtime plans or graphs with artifact handoff and must not be written back as new primitive specs by default. A composition is legal only when the input to `activate_composed_primitive` is exactly existing primitive filenames joined by `-`; the activation result returns `bound_primitive_id` plus ordered `primitive_ids` and binds that temporary composition without persisting a new primitive. You do not need to manually log daytime workflow outcomes; the runtime writes `PrimitiveRunRecord` directly at work-completion boundaries for sleep-time patch or merge. When the user asks or contextually implies that an existing reusable process should change, bind the primitive-spec-editing meta primitive, then use `read_primitive_spec` and `update_primitive_spec`; do not execute or activate the primitive being edited as the current task primitive.";
 
@@ -69,27 +69,6 @@ pub fn build_workspace_unit_what(context: &Context) -> String {
         "Your absolute workspace path is `{}`.",
         context.execution_cwd.display()
     )
-}
-
-pub fn build_runtime_app_usages(context: &Context) -> Vec<(AppId, AppUsage)> {
-    let focused = context.apps.focused();
-    context
-        .apps
-        .state_renders()
-        .into_iter()
-        .filter(|(app_id, _state)| focused.as_ref() != Some(app_id))
-        .filter_map(|(app_id, _state)| context.apps.usage(&app_id).map(|usage| (app_id, usage)))
-        .collect()
-}
-
-pub fn build_runtime_focused_app_how_to_use_prompt(context: &Context) -> Option<String> {
-    let app_id = context.apps.focused()?;
-    build_runtime_app_how_to_use_prompt(context, &app_id)
-}
-
-pub fn build_runtime_app_how_to_use_prompt(context: &Context, app_id: &AppId) -> Option<String> {
-    let how_to_use = context.apps.how_to_use(app_id)?;
-    Some(build_app_how_to_use_prompt(app_id.clone(), &how_to_use))
 }
 
 pub fn build_runtime_background_hint_items(context: &Context) -> Vec<String> {

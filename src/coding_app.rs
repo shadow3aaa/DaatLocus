@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     app::{
         App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
-        AppToolScope, AppToolSpec, AppUsage,
+        AppToolSpec, AppUsage,
     },
     apply_patch::{PatchOp, parse_apply_patch},
     context_budget::truncate_text_to_token_budget,
@@ -43,7 +43,6 @@ After each edit, the tool automatically evaluates the impact of your changes and
 SCOPE engine configuration hints are returned by `coding__open_project` when that mangled name is exposed and retained in Coding app state, including available tree-sitter languages plus visible per-language `lsp_setup_hint` lines for LSP language/server setup guidance.
 
 Coding app keeps app-level usage rules here. Selector grammar, selector operation support, grep bridge expectations, and structured selector result fields are owned by SCOPE and appended below from SCOPE's compiled usage interface."#;
-const CODING_TOOL_SCOPES: &[AppToolScope] = &[AppToolScope::Coding, AppToolScope::Terminal];
 const MAX_RENDERED_LSP_SETUP_HINTS: usize = 5;
 const PROJECT_INSTRUCTION_FILENAMES: &[&str] =
     &["AGENTS.override.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"];
@@ -671,18 +670,19 @@ impl App for CodingApp {
     }
 
     fn how_to_use(&self) -> AppHowToUse {
-        let scope_usage = ScopeClient::usage();
+        static SCOPE_USAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let scope_usage_md = SCOPE_USAGE.get_or_init(|| ScopeClient::usage().usage_markdown);
         AppHowToUse {
             lines: Vec::new(),
             body_markdown: Some(format!(
                 "{}\n\n---\n\n{}",
-                CODING_HOW_TO_USE, scope_usage.usage_markdown
+                CODING_HOW_TO_USE, scope_usage_md
             )),
         }
     }
 
-    fn focused_tool_scopes(&self) -> &'static [AppToolScope] {
-        CODING_TOOL_SCOPES
+    fn composed_apps(&self) -> Vec<AppId> {
+        vec![AppId::terminal()]
     }
 
     fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
@@ -690,37 +690,31 @@ impl App for CodingApp {
             AppToolSpec {
                 name: "open_project".to_string(),
                 description: "Open a project for semantic code operations using scope-engine.".to_string(),
-                scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingOpenProjectArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "read_code".to_string(),
                 description: "Read selector-resolved code content and language metadata.".to_string(),
-                scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingReadCodeArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "grep".to_string(),
                 description: "Search file contents using a regex pattern.".to_string(),
-                scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingGrepArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "glob".to_string(),
                 description: "Find files by glob pattern.".to_string(),
-                scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingGlobArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "edit_code".to_string(),
                 description: "Apply structured edits via selector+guard+content and return propagation results.".to_string(),
-                scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingEditCodeArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "next_review".to_string(),
                 description: "Acknowledge and return accumulated scope-engine propagation review events, optionally batched with limit.".to_string(),
-                scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingNextReviewArgs)).unwrap(),
             },
         ])

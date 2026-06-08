@@ -17,7 +17,7 @@ use serde_json::json;
 use crate::{
     app::{
         App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
-        AppToolScope, AppToolSpec, AppUsage,
+        AppToolSpec, AppUsage,
     },
     core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWaitMode, TerminalWriteStdinArgs},
     dashboard::{DashboardActivityEvent, apply_activity_event},
@@ -694,28 +694,21 @@ impl App for TerminalApp {
         }
     }
 
-    fn focused_tool_scopes(&self) -> &'static [AppToolScope] {
-        &[AppToolScope::Terminal]
-    }
-
     fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
         Ok(vec![
             AppToolSpec {
                 name: "terminal_exec".to_string(),
                 description: "Start a terminal command and return output after the current output window ends. If `session_id` is provided, reuse that session; otherwise create a new session. If the command is still running, the result keeps the session so later calls can continue with terminal_write_stdin.".to_string(),
-                scope: AppToolScope::Terminal,
                 input_schema: serde_json::to_value(schema_for!(TerminalExecArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "terminal_write_stdin".to_string(),
                 description: "Continue a running terminal session. Send text to write stdin; send empty text to wait. By default `wait_mode=any_output` returns after new output, exit, or timeout; use `wait_mode=timeout` to wait for the full yield window or process exit without streaming intermediate progress.".to_string(),
-                scope: AppToolScope::Terminal,
                 input_schema: serde_json::to_value(schema_for!(TerminalWriteStdinArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "terminal_terminate".to_string(),
                 description: "Terminate the current foreground process in the specified terminal session and return the updated session state.".to_string(),
-                scope: AppToolScope::Terminal,
                 input_schema: serde_json::to_value(schema_for!(TerminalTerminateArgs)).unwrap(),
             },
         ])

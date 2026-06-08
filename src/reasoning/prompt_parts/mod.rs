@@ -11,8 +11,7 @@ use super::{
         APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
         PLAN_UNIT_HOW, PLAN_UNIT_WHAT, PLAN_UNIT_WHEN, WORKFLOW_UNIT_HOW, WORKFLOW_UNIT_WHAT,
         WORKFLOW_UNIT_WHEN, WORKSPACE_UNIT_HOW, WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY,
-        build_app_usage_prompt, build_runtime_app_how_to_use_prompt, build_runtime_app_usages,
-        build_runtime_background_hint_items, build_runtime_focused_app_how_to_use_prompt,
+        build_app_how_to_use_prompt, build_app_usage_prompt, build_runtime_background_hint_items,
         build_workspace_unit_what,
     },
     turn_compile::load_prompt_persona_spec_sync,
@@ -52,6 +51,7 @@ pub struct PlanSystemPart;
 pub struct WorkflowSystemPart;
 pub struct PersonaSystemPart;
 pub struct CompiledAdditionsSystemPart;
+pub struct AppDocsSystemPart;
 
 pub struct PreTurnSensoryPart;
 pub struct PreTurnPlanPart;
@@ -190,6 +190,47 @@ impl SystemPromptPart for CompiledAdditionsSystemPart {
             Vec::new(),
             Vec::new(),
             vec![PromptBlock::BulletList(additions)],
+        ))
+    }
+}
+
+impl SystemPromptPart for AppDocsSystemPart {
+    fn key(&self) -> &'static str {
+        "app_docs"
+    }
+
+    fn build(&self, ctx: &Context) -> Option<PromptUnitDoc> {
+        let mut blocks = Vec::new();
+        let state_renders = ctx.apps.state_renders();
+        for (app_id, _state) in &state_renders {
+            if let Some(usage) = ctx.apps.usage(app_id) {
+                blocks.push(PromptBlock::Paragraph(format!(
+                    "--- {app_id} (pre-focus: what & when) ---"
+                )));
+                blocks.push(PromptBlock::Paragraph(build_app_usage_prompt(
+                    app_id.clone(),
+                    &usage,
+                )));
+            }
+            if let Some(how_to_use) = ctx.apps.how_to_use(app_id) {
+                blocks.push(PromptBlock::Paragraph(format!(
+                    "--- {app_id} (post-focus: how to use) ---"
+                )));
+                blocks.push(PromptBlock::Paragraph(build_app_how_to_use_prompt(
+                    app_id.clone(),
+                    &how_to_use,
+                )));
+            }
+        }
+        if blocks.is_empty() {
+            return None;
+        }
+        Some(PromptUnitDoc::new(
+            self.key(),
+            blocks,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
         ))
     }
 }
@@ -335,28 +376,8 @@ impl PreTurnContextPart for PreTurnAppSurfacePart {
 
         let focused = state.focused_app_runtime_text();
         let composed_apps = ctx.apps.focused_composed_surfaces();
-        let composed_app_ids = composed_apps
-            .iter()
-            .map(|surface| surface.app_id.clone())
-            .collect::<Vec<_>>();
-        let mut other_app_children = Vec::new();
 
-        let app_usages = build_runtime_app_usages(ctx);
-        if !app_usages.is_empty() {
-            let app_groups = app_usages
-                .into_iter()
-                .filter(|(app_id, _usage)| !composed_app_ids.contains(app_id))
-                .map(|(app_id, usage)| {
-                    PromptNode::State(PromptStateDoc::new(
-                        app_id.to_string(),
-                        vec![PromptBlock::Paragraph(build_app_usage_prompt(
-                            app_id, &usage,
-                        ))],
-                    ))
-                })
-                .collect::<Vec<_>>();
-            other_app_children.extend(app_groups);
-        }
+        let mut other_app_children = Vec::new();
 
         let background_hints = build_runtime_background_hint_items(ctx);
         if !background_hints.is_empty() {
@@ -389,15 +410,6 @@ impl PreTurnContextPart for PreTurnAppSurfacePart {
             focused_app_children.push(PromptNode::State(PromptStateDoc::new("state", blocks)));
         }
 
-        if let Some(how_to_use) = build_runtime_focused_app_how_to_use_prompt(ctx)
-            && !how_to_use.trim().is_empty()
-        {
-            focused_app_children.push(PromptNode::State(PromptStateDoc::new(
-                "how_to_use",
-                vec![PromptBlock::Paragraph(how_to_use)],
-            )));
-        }
-
         let composed_app_children = composed_apps
             .iter()
             .filter_map(|surface| build_composed_app_surface_node(ctx, state, surface))
@@ -428,7 +440,7 @@ impl PreTurnContextPart for PreTurnAppSurfacePart {
 }
 
 fn build_composed_app_surface_node(
-    ctx: &Context,
+    _ctx: &Context,
     state: &PreTurnState,
     surface: &AppComposedSurface,
 ) -> Option<PromptNode> {
@@ -437,10 +449,6 @@ fn build_composed_app_surface_node(
         "composition",
         vec![PromptBlock::KeyValueList(vec![
             ("role".to_string(), surface.role.clone()),
-            (
-                "exposed_scopes".to_string(),
-                render_bracketed_values(surface.exposed_scopes.iter().map(ToString::to_string)),
-            ),
             (
                 "exposed_tools".to_string(),
                 render_bracketed_values(surface.exposed_tools.iter().cloned()),
@@ -457,15 +465,6 @@ fn build_composed_app_surface_node(
             blocks.push(PromptBlock::BulletList(entry.lines));
         }
         children.push(PromptNode::State(PromptStateDoc::new("state", blocks)));
-    }
-
-    if let Some(how_to_use) = build_runtime_app_how_to_use_prompt(ctx, &surface.app_id)
-        && !how_to_use.trim().is_empty()
-    {
-        children.push(PromptNode::State(PromptStateDoc::new(
-            "how_to_use",
-            vec![PromptBlock::Paragraph(how_to_use)],
-        )));
     }
 
     (!children.is_empty())
@@ -529,10 +528,7 @@ impl AfterClaimContextPart for AfterClaimWorkflowPrimitiveRoutingPart {
     fn build(&self, ctx: &Context, input: &AfterClaimContextInput) -> Option<PromptNode> {
         let mut blocks = Vec::new();
         if ctx.bound_primitive_id.is_none() {
-            blocks.push(PromptBlock::Paragraph(
-                "Primitive routing catalog exposes the full reusable SOP primitive ID vocabulary plus expanded details for only the most relevant primitives. Primitive ids are filenames restricted to lowercase `a-z` and `-`. If one primitive fits the claimed work, call `activate_composed_primitive` with that primitive id before executing it. If multiple existing primitives should form a temporary graph, call `activate_composed_primitive` with the ordered existing primitive ids joined by `-`; exact primitive filename matches win before composition segmentation. If no primitive fits, continue with a normal plan; call `create_primitive_spec` only when the task truly needs a new stable primitive, not to persist a one-off composite task graph."
-                    .to_string(),
-            ));
+            // Routing contract already in system prompt WORKFLOW_UNIT_WHEN.
         } else if let Some(workflow_id) = ctx.bound_primitive_id.as_deref() {
             blocks.push(PromptBlock::KeyValueList(vec![(
                 "current_bound_primitive_id".to_string(),
@@ -643,16 +639,6 @@ fn render_workflow_primitive_ids(ids: &[crate::workflow::PrimitiveId]) -> String
 
 fn render_afterclaim_events(events: &[EventView]) -> String {
     let mut lines = Vec::new();
-    if events
-        .iter()
-        .any(|event| matches!(event.status, crate::events::EventStatus::Claimed))
-    {
-        lines.push(
-            "Delivery reminder: assistant text is not automatically sent to the user; use `finish_and_send` with `reply_message` for final delivery."
-                .to_string(),
-        );
-        lines.push(String::new());
-    }
     for (index, event) in events.iter().enumerate() {
         if index > 0 {
             lines.push(String::new());
