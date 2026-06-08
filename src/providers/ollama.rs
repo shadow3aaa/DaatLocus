@@ -20,7 +20,7 @@ use crate::{
     },
     core::{Llm, TokenUsage, TokenUsageInfo},
     dsml_repair,
-    model_catalog::{catalog_model_capacity, model_name_suggests_vision},
+    model_catalog::catalog_model_capacity,
     providers::io::{
         default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
         looks_like_vision_unsupported_error, non_empty_string, parse_retry_after_seconds,
@@ -160,9 +160,7 @@ impl OllamaClient {
             Some(false) => OllamaVisionMode::Disabled,
             _ => {
                 let catalog = catalog_model_capacity(&model_config.model_id);
-                let supports = catalog
-                    .map(|c| c.supports_vision)
-                    .unwrap_or_else(|| model_name_suggests_vision(&model_config.model_id));
+                let supports = catalog.map(|c| c.supports_vision).unwrap_or(false);
                 if supports {
                     OllamaVisionMode::Enabled
                 } else {

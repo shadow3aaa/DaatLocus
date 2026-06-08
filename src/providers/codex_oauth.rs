@@ -144,12 +144,12 @@ impl CodexResponsesClient {
         let max_completion_tokens = model_config.max_completion_tokens();
         let client_version = codex_oauth_client_version();
         let supports_vision_initial = {
-            use crate::model_catalog::{catalog_model_capacity, model_name_suggests_vision};
+            use crate::model_catalog::catalog_model_capacity;
             match model_config.supports_vision {
                 Some(v) => v,
                 None => catalog_model_capacity(&model_config.model_id)
                     .map(|c| c.supports_vision)
-                    .unwrap_or_else(|| model_name_suggests_vision(&model_config.model_id)),
+                    .unwrap_or(false),
             }
         };
         Self {

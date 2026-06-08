@@ -192,14 +192,14 @@ impl OpenAIClient {
                 model_config.rpm(),
             ),
             adapter_state: Mutex::new({
-                use crate::model_catalog::{catalog_model_capacity, model_name_suggests_vision};
+                use crate::model_catalog::catalog_model_capacity;
                 let vision_mode = match model_config.supports_vision {
                     Some(true) => VisionMode::Enabled,
                     Some(false) => VisionMode::Disabled,
                     None => {
                         let supports = catalog_model_capacity(&model_config.model_id)
                             .map(|c| c.supports_vision)
-                            .unwrap_or_else(|| model_name_suggests_vision(&model_config.model_id));
+                            .unwrap_or(false);
                         if supports {
                             VisionMode::Enabled
                         } else {

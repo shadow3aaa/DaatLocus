@@ -14,7 +14,7 @@ use crate::context_budget::{
     estimate_prompt_request,
 };
 use crate::core::{Llm, TokenUsage, TokenUsageInfo};
-use crate::model_catalog::{catalog_model_capacity, model_name_suggests_vision};
+use crate::model_catalog::catalog_model_capacity;
 use crate::reasoning::runtime::{
     AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec, AgentToolSpec,
     AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage, PromptRequest,
@@ -67,7 +67,7 @@ impl ResponsesCompatibleClient {
             Some(v) => v,
             None => catalog_model_capacity(&model_config.model_id)
                 .map(|c| c.supports_vision)
-                .unwrap_or_else(|| model_name_suggests_vision(&model_config.model_id)),
+                .unwrap_or(false),
         };
         Self {
             client,

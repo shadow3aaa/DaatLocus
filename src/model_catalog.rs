@@ -3,7 +3,7 @@
 //! Three-layer fallback:
 //! 1. Local cache at `~/.daat-locus/cache/models-dev-api.json`
 //! 2. Built-in copy compiled into the binary
-//! 3. Conservative defaults (32_768 context, 4_000 output)
+//! 3. Conservative defaults
 //!
 //! The cache is refreshed from `https://models.dev/api.json` on daemon
 //! startup and during the config wizard.
@@ -23,13 +23,15 @@ pub struct ModelCapacity {
     pub context_window_tokens: usize,
     pub max_completion_tokens: usize,
     pub supports_vision: bool,
+    pub supports_tool_call: bool,
 }
 
 pub fn conservative_model_capacity() -> ModelCapacity {
     ModelCapacity {
         context_window_tokens: CONSERVATIVE_CONTEXT_WINDOW_TOKENS,
         max_completion_tokens: CONSERVATIVE_MAX_COMPLETION_TOKENS,
-        supports_vision: true,
+        supports_vision: false,
+        supports_tool_call: true,
     }
 }
 
@@ -73,6 +75,16 @@ pub async fn refresh_models_dev_cache() -> Result<(), String> {
     Ok(())
 }
 
+fn input_modalities_suggest_vision(modalities: &serde_json::Value) -> bool {
+    let Some(inputs) = modalities["input"].as_array() else {
+        return false;
+    };
+    inputs.iter().any(|v| {
+        let s = v.as_str().unwrap_or_default();
+        matches!(s, "image" | "video" | "pdf" | "audio")
+    })
+}
+
 /// Search all provider sections for a matching model ID.
 fn lookup_model_in_json(root: &serde_json::Value, normalized: &str) -> Option<ModelCapacity> {
     for section in root.as_object()?.values() {
@@ -81,10 +93,12 @@ fn lookup_model_in_json(root: &serde_json::Value, normalized: &str) -> Option<Mo
             let limit = &model["limit"];
             let context = limit["context"].as_u64().map(|v| v as usize)?;
             let output = limit["output"].as_u64().map(|v| v as usize)?;
+            let modalities = &model["modalities"];
             return Some(ModelCapacity {
                 context_window_tokens: context,
                 max_completion_tokens: output,
-                supports_vision: model["supports_vision"].as_bool().unwrap_or(true),
+                supports_vision: input_modalities_suggest_vision(modalities),
+                supports_tool_call: model["tool_call"].as_bool().unwrap_or(false),
             });
         }
     }
@@ -103,39 +117,4 @@ pub fn fetch_models_dev_capacity(model_id: &str) -> Option<ModelCapacity> {
     let root: serde_json::Value = serde_json::from_str(&text).ok()?;
     let normalized = model_id.trim().to_ascii_lowercase();
     lookup_model_in_json(&root, &normalized)
-}
-
-pub fn model_name_suggests_vision(model_id: &str) -> bool {
-    let lower = model_id.trim().to_ascii_lowercase();
-    if lower.contains("vision")
-        || lower.contains("multimodal")
-        || lower.contains("-vl")
-        || lower.contains("vl-")
-        || lower.contains("llava")
-        || lower.contains("pixtral")
-    {
-        return true;
-    }
-    if lower.starts_with("gpt-4o")
-        || lower.contains("/gpt-4o")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
-    {
-        return true;
-    }
-    if lower.contains("claude-3")
-        || lower.contains("claude-sonnet-4")
-        || lower.contains("claude-opus-4")
-        || lower.contains("claude-haiku-4")
-    {
-        return true;
-    }
-    if lower.contains("gemini") {
-        return true;
-    }
-    if lower.contains("gpt-4-turbo") {
-        return true;
-    }
-    false
 }

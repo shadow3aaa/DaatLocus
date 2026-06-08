@@ -1834,6 +1834,9 @@ fn resolve_model_capacity(
                 .map(|c| c.supports_vision)
                 .unwrap_or(fallback.supports_vision)
         }),
+        supports_tool_call: catalog
+            .map(|c| c.supports_tool_call)
+            .unwrap_or(fallback.supports_tool_call),
     }
 }
 
@@ -2361,6 +2364,12 @@ async fn prompt_model(
     let context_window = ui.usize("Context window tokens", capacity.context_window_tokens)?;
 
     let max_completion = ui.usize("Max completion tokens", capacity.max_completion_tokens)?;
+
+    if !capacity.supports_tool_call {
+        return Err(miette!(
+            "model {model_id} does not support tool/function calling; Daat Locus requires tool_call support for agent operation. Choose a model with tool_call: true in the models.dev catalog."
+        ));
+    }
 
     Ok((
         name,
@@ -3196,6 +3205,7 @@ mod tests {
                 context_window_tokens: 12_345,
                 max_completion_tokens: 678,
                 supports_vision: true,
+                supports_tool_call: true,
             }
         );
     }
@@ -3210,6 +3220,7 @@ mod tests {
                 context_window_tokens: 12_345,
                 max_completion_tokens: 32_768,
                 supports_vision: true,
+                supports_tool_call: true,
             }
         );
     }
