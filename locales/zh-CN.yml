@@ -67,6 +67,8 @@ config:
   manual_model: "手动输入..."
   select_model: "选择模型"
   model_name: "Model 名称（config.toml 中的 key）"
+  reasoning_config: "推理强度"
+  reasoning_skip: "跳过（使用模型默认值）"
   bind_provider: "绑定 Provider"
   add_provider: "添加模型提供商"
   add_model: "添加模型"

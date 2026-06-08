@@ -67,6 +67,8 @@ config:
   manual_model: "Manual input..."
   select_model: "Select model"
   model_name: "Model name (key in config.toml)"
+  reasoning_config: "Reasoning effort"
+  reasoning_skip: "skip (use model default)"
   bind_provider: "Bind Provider"
   add_provider: "Add Provider"
   add_model: "Add Model"

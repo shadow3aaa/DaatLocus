@@ -2402,12 +2402,12 @@ fn prompt_reasoning_config(
         return Ok(None);
     }
 
-    let skip_label = format!("skip ({} reasoning configured if needed)", model_id);
+    let skip_label = crate::tr!(ui.locale(), "config.reasoning_skip");
     let mut labels: Vec<String> = options
         .iter()
         .flat_map(|opt| match opt {
             crate::model_catalog::ReasoningOption::Toggle => {
-                vec!["enabled".to_string()]
+                vec!["high (recommended)".to_string()]
             }
             crate::model_catalog::ReasoningOption::Effort { values } => values.clone(),
             crate::model_catalog::ReasoningOption::BudgetTokens { .. } => {
