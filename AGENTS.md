@@ -379,7 +379,7 @@ SCOPE (scope-engine) provides semantic code operations, but its modification cap
 | Symbol location | ✅ tree-sitter `find_containing_symbol` | — |
 | Read code | ✅ `read_code` (selector-based) | — |
 | Search code | ✅ `search_code` (ripgrep + symbol) | — |
-| Edit code | ⚠️ `edit_code` (SCOPE Diff) | Selector-based Add/Delete/Update; no semantic refactoring |
+| Edit code | ⚠️ `edit_code` (hash-anchored) | Line-hash anchored Replace/Append/Prepend; no semantic refactoring |
 | Rename | ❌ | Not implemented |
 | Extract/inline | ❌ | Not implemented |
 | File-level structure | ⚠️ | Can edit explicit ranges, but no semantic import management or move-file refactoring |
@@ -388,7 +388,7 @@ SCOPE (scope-engine) provides semantic code operations, but its modification cap
 
 **Raw patch boundary for `apply_patch`:**
 
-When Coding is focused and `apply_patch` targets a source-code file that SCOPE owns (for example `.rs`, `.py`, `.go`, `.ts`, `.js`, `.java`, `.c`, `.cpp`, `.rb`, `.php`), Coding rejects the call and requires `edit_code`/SCOPE Diff instead.
+When Coding is focused and `apply_patch` targets a source-code file that SCOPE owns (for example `.rs`, `.py`, `.go`, `.ts`, `.js`, `.java`, `.c`, `.cpp`, `.rb`, `.php`), Coding rejects the call and requires `edit_code` instead.
 
 For non-source-code files (`.toml`, `.yaml`, `.md`, `.json`, `.sh`, etc.) or unsupported cases outside SCOPE responsibility, raw patching is allowed. Propagation review is then limited to what Coding can observe through its own semantic operations and explicit review events; do not assume raw patches silently receive the same propagation analysis as `edit_code`.
 

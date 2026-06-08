@@ -1,6 +1,6 @@
 # SCOPE Usage
 
-SCOPE is the semantic code positioning and propagation engine behind the Coding app. Its selector language is a SCOPE-owned positioning DSL: selectors answer “where is the target?” and “what range should this operation use?”. Selectors do not encode edit behavior, refactor intent, propagation policy, or other operation semantics.
+SCOPE is the semantic code positioning and propagation engine behind the Coding app. Its selector language is a SCOPE-owned positioning DSL: selectors answer "where is the target?" and "what range should this operation use?". Selectors do not encode edit behavior, refactor intent, propagation policy, or other operation semantics.
 
 ## Selector forms
 
@@ -14,156 +14,108 @@ SCOPE is the semantic code positioning and propagation engine behind the Coding 
 
 ## Operation support
 
-Read operations may accept broad selectors. `read_code` and future `read_selection`-style operations may support symbols, files, ranges, around contexts, matches, outlines, and enclosing symbols.
+Read operations may accept broad selectors. `read_code` may support symbols, files, ranges, around contexts, matches, outlines, and enclosing symbols.
 
-Edit operations use `edit_code` with a single `diff` argument containing a complete SCOPE Diff document. Do not pass separate selector or patch fields to `edit_code`.
+Edit operations use `edit_code` with a structured `edits` array. Each edit specifies the file path, operation kind, line-hash anchors from `read_code`, and optional content.
 
-Selector support for SCOPE Diff actions:
+## `edit_code` format
 
-- Symbol selector: allow semantic edits and normal propagation analysis.
-- File range selector: allow patch actions, then run affected-symbol analysis.
-- Match selector: edit only when the match is unique; if multiple matches exist, return candidates instead of guessing.
-- Enclosing selector: resolve to the enclosing symbol first, then use symbol edit semantics.
-- Outline selector: read-only; never edit an outline.
-
-## SCOPE Diff format for `edit_code`
-
-`edit_code` takes exactly one argument:
+`edit_code` takes a single `edits` argument containing an array of structured edit objects:
 
 ```json
-{ "diff": "*** Begin Patch\n*** Update: src/foo.rs::fn old()\n@@\n-old()\n+new()\n*** End Patch\n" }
+{
+  "edits": [
+    {
+      "path": "src/foo.rs",
+      "op": "replace",
+      "start": "11#VK",
+      "end": "33#MB",
+      "content": "pub fn new_func() {\n    println!(\"hi\");\n}\n"
+    },
+    {
+      "path": "src/foo.rs",
+      "op": "append",
+      "start": "33#MB",
+      "content": "\npub fn extra() {\n    // added\n}\n"
+    },
+    {
+      "path": "src/foo.rs",
+      "op": "prepend",
+      "start": "11#VK",
+      "content": "// header comment\n\n"
+    },
+    {
+      "path": "src/foo.rs",
+      "op": "replace",
+      "start": "11#VK",
+      "end": "33#MB",
+      "content": null
+    }
+  ]
+}
 ```
 
-The `diff` string is a selector-based patch wrapped in an explicit envelope:
+### Operations
 
-```text
-*** Begin Patch
-*** Add: <selector>
-+new content
+- **`replace`** — Replace the range from `start` to `end` (inclusive) with `content`. Requires both `start` and `end`. Set `content` to `null` to delete the range.
+- **`append`** — Insert `content` after the line identified by `start`. Only `start` is required; `end` is ignored.
+- **`prepend`** — Insert `content` before the line identified by `start`. Only `start` is required; `end` is ignored.
 
-*** Delete: <selector>
--old content guard
+### Line-hash anchors
 
-*** Update: <selector>
-@@
- context
--old content
-+new content
- context
-*** End Patch
+`start` and `end` use the format `line#hash` where:
+
+- `line` is a 1-based line number
+- `hash` is a 2-char hex prefix (first byte of SHA-256) of that line's content
+
+These anchors come directly from `read_code` output. The `read_code` response returns content with per-line hash prefixes:
+
+```json
+{
+  "path": "src/foo.rs",
+  "content": "11#VK|pub fn old_func() {\n22#XJ|    println!(\"hello\");\n33#MB|}\n"
+}
 ```
 
-Each action header is one of:
+The model copies `11#VK` and `33#MB` from the read response into the edit `start`/`end` fields. The system verifies that line hashes match before applying edits, providing freshness validation without requiring a separate guard field. If a hash does not match, the edit is rejected and the model should re-read the file.
 
-```text
-*** Add: <selector>
-*** Delete: <selector>
-*** Update: <selector>
-```
+### Content
 
-### Add
-
-`Add` inserts new text at the selector-designated insertion point.
-
-```text
-*** Begin Patch
-*** Add: src/user.rs#L1-L1
-+use crate::display::DisplayName;
-*** End Patch
-```
-
-Rules:
-
-- Body lines must start with `+`.
-- The payload is the body with the leading `+` prefixes removed.
-- The selector must resolve to exactly one insertion point or creation target.
-- `Add` must not overwrite existing text. Use `Update` for replacement.
-
-### Delete
-
-`Delete` removes the selector-designated range.
-
-```text
-*** Begin Patch
-*** Delete: src/user.rs::fn legacy_name()
--pub fn legacy_name(&self) -> &str {
--    &self.name
--}
-*** End Patch
-```
-
-Rules:
-
-- Body lines, when present, must start with `-`.
-- The old-side body is a guard and must match the selected range after removing leading `-` prefixes.
-- If the body is omitted, SCOPE deletes the full resolved selector range only for stable selectors such as unique symbols or exact line ranges.
-- If the selector is stale, ambiguous, or the guard does not match, the edit fails without modifying files.
-
-### Update
-
-`Update` applies one or more guarded hunks inside the selector-designated range.
-
-```text
-*** Begin Patch
-*** Update: src/user.rs::fn display_name()
-@@
- pub fn display_name(&self) -> &str {
--    &self.name
-+    &self.display_name
- }
-*** End Patch
-```
-
-Rules:
-
-- Hunks use selector-scoped unified-diff body lines:
-  - space-prefixed lines are context
-  - `-` lines are old text
-  - `+` lines are new text
-- A bare `@@` hunk header is allowed when the selector already narrows the target enough for unambiguous matching.
-- Numbered hunk headers are supported. Line numbers are relative to the resolved selector range.
-- Old-side text plus context must match exactly one location inside the resolved selector range.
-- `Update` can express replacement by deleting all old-side lines in the selected range and adding the new body.
+`content` accepts three forms:
+- A **string** with newline-delimited lines
+- An **array of strings** (one entry per line)
+- **`null`** — only valid with `replace`, meaning delete the range
 
 ### Execution behavior
 
-SCOPE applies a diff by parsing the envelope, resolving every selector against the current project state, validating guards and hunk contexts, applying edits transactionally per call, reparsing modified files, and returning propagation results. The preferred failure mode is all-or-nothing: stale selectors, ambiguous matches, invalid syntax, read-only selectors, or guard mismatches reject the edit before writes complete.
+SCOPE applies edits by parsing line-hash anchors, verifying every anchor against the current file state, applying edits transactionally per call, reparsing modified files, and returning propagation results. The preferred failure mode is all-or-nothing: hash mismatches, overlapping edits, or tree-sitter parse errors reject the edit before writes complete.
 
-Use SCOPE Diff when the target is code and selector semantics help keep the edit anchored to symbols, unique matches, enclosing symbols, or explicit ranges. Use raw `apply_patch` only for non-source files or cases outside SCOPE engine responsibility. SCOPE exposes `is_responsible_source` so callers can ask whether a path is source code owned by SCOPE before allowing raw file edits.
+Use `edit_code` when the target is source code and line-level anchoring with freshness validation helps keep edits safe. Use raw `apply_patch` only for non-source files or cases outside SCOPE engine responsibility. SCOPE exposes `is_responsible_source` so callers can ask whether a path is source code owned by SCOPE before allowing raw file edits.
 
 ## Grep bridge
 
-Text search should bridge into selectors. A grep/search match should include structured fields such as `file`, `line`, `match_id`, `selector`, `enclosing_selector`, and structured selector metadata so callers can move directly from search to reading or editing:
+Text search returns matches with file, line, text, and selector, enabling direct navigation from search to reading or editing:
 
 ```json
 {
   "file": "src/coding_app.rs",
   "line": 150,
-  "match_id": "src/coding_app.rs:150:1",
-  "enclosing_selector": "src/coding_app.rs::fn how_to_use #L140-L170"
+  "text": "fn how_to_use() {",
+  "selector": "src/coding_app.rs::fn how_to_use #L140-L170"
 }
 ```
 
-Useful follow-up selectors include:
+Use the returned selectors to call `read_code`, which produces line-hash anchors for subsequent `edit_code` calls.
 
-- `src/x.rs#around:L42±30`
-- `src/x.rs#enclosing:L42`
-- `src/x.rs#match:/needle/`
+## read_code
 
-## Structured selector data
-
-Human-writable selector strings are convenient, but tool results should also return structured selector data. Include line location information whenever possible to reduce ambiguity:
+`read_code` resolves a selector and returns the file path and annotated content:
 
 ```json
 {
-  "file": "src/coding_app.rs",
-  "range": { "start_line": 120, "end_line": 180 },
-  "kind": "enclosing_symbol",
-  "symbol_selector": "src/coding_app.rs::CodingApp::open_project",
-  "symbol_start_line": 120,
-  "symbol_end_line": 180,
-  "definition_line": 120
+  "path": "src/foo.rs",
+  "content": "11#VK|pub fn target() {\n22#XJ|    let x = 1;\n33#MB|}\n"
 }
 ```
 
-Prefer passing structured selector data between tools over reconstructing selector strings by hand.
+Each line is prefixed with `line#hash|`. The model uses these anchors directly in `edit_code` `start`/`end` fields.

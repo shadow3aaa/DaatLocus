@@ -36,7 +36,7 @@ const CODING_HOW_TO_USE: &str = r#"Coding app is used to modify projects; think 
 
 First, if the project you need to edit is not open yet, use the currently exposed Coding open-project tool; app scope mangling exposes it as `coding__open_project`.
 
-When editing source code, always prefer the currently exposed Coding app tools, such as `coding__edit_code`, `coding__read_code`, `coding__grep`, and `coding__glob`, instead of substituting terminal commands. Important: except for configuration, generated assets, or other non-source areas outside SCOPE engine responsibility, or cases where these tools genuinely cannot complete the task, do not use other tools or shell commands to edit source code. When Coding is focused, `apply_patch` is rejected for source files that SCOPE says it is responsible for; use `coding__edit_code`/SCOPE Diff for those files when that mangled name is exposed.
+When editing source code, always prefer the currently exposed Coding app tools, such as `coding__edit_code`, `coding__read_code`, `coding__grep`, and `coding__glob`, instead of substituting terminal commands. Important: except for configuration, generated assets, or other non-source areas outside SCOPE engine responsibility, or cases where these tools genuinely cannot complete the task, do not use other tools or shell commands to edit source code. When Coding is focused, `apply_patch` is rejected for source files that SCOPE says it is responsible for; use `coding__edit_code` for those files when that mangled name is exposed.
 
 After each edit, the tool automatically evaluates the impact of your changes and accumulates pending review events. You can also see the current number of pending review events in Coding app state. You do not need to handle them immediately. However, after you finish a series of edits (usually when a plan step is complete, or when you judge that too many review events have accumulated), call the currently exposed Coding review tool, such as `coding__next_review`, to acknowledge and claim review events; pass `limit` when many reviews are pending so several impact targets can be claimed in one response. Then follow their instructions to inspect the impact of your changes. This must always be done before reporting back to the user.
 
@@ -74,7 +74,7 @@ pub struct CodingGlobArgs {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct CodingEditCodeArgs {
-    pub diff: String,
+    pub edits: Vec<scope_engine::api::StructuredEdit>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -577,11 +577,13 @@ impl CodingApp {
         format!("coding-tools-{}", short_hash(&hash))
     }
 
-    fn coding_edit_stable_id(&self, diff: &str) -> String {
+    fn coding_edit_stable_id(&self, edits: &[scope_engine::api::StructuredEdit]) -> String {
         let project_root = self.project_root_display();
         let mut hasher = Sha256::new();
         hasher.update(project_root.as_bytes());
-        hasher.update(diff.as_bytes());
+        if let Ok(json) = serde_json::to_string(edits) {
+            hasher.update(json.as_bytes());
+        }
         let hash = format!("{:x}", hasher.finalize());
         format!("coding-edit-{}", short_hash(&hash))
     }
@@ -614,7 +616,7 @@ impl CodingApp {
             return Ok(());
         }
         Err(miette!(
-            "apply_patch is forbidden for SCOPE-owned source files while Coding is focused. Use edit_code/SCOPE Diff instead. Blocked file(s): {}",
+            "apply_patch is forbidden for SCOPE-owned source files while Coding is focused. Use edit_code instead. Blocked file(s): {}",
             blocked.join(", ")
         ))
     }
@@ -711,7 +713,7 @@ impl App for CodingApp {
             },
             AppToolSpec {
                 name: "edit_code".to_string(),
-                description: "Apply a complete SCOPE Diff patch document and return propagation results.".to_string(),
+                description: "Apply structured edits via selector+guard+content and return propagation results.".to_string(),
                 scope: AppToolScope::Coding,
                 input_schema: serde_json::to_value(schema_for!(CodingEditCodeArgs)).unwrap(),
             },
@@ -748,7 +750,7 @@ impl App for CodingApp {
             }
             "edit_code" => {
                 let args: CodingEditCodeArgs = parse_coding_tool_args(call)?;
-                format!("scope_diff_chars={}", args.diff.len())
+                format!("edits_count={}", args.edits.len())
             }
             "next_review" => {
                 let args: CodingNextReviewArgs = parse_coding_tool_args(call)?;
@@ -798,25 +800,20 @@ impl App for CodingApp {
                 let args: CodingReadCodeArgs = parse_coding_tool_args(call)?;
                 let result = self.scope.read_code(&args.selector)?;
                 self.last_action = Some(format!("read {}", args.selector));
-                let selector_info = serde_json::to_string_pretty(&result.selector_info)
-                    .unwrap_or_else(|_| "{}".to_string());
                 let model_content = format!(
-                    "selector={}\nselector_info={}\nlanguage={}\ncontent=\n{}",
-                    result.selector,
-                    selector_info,
-                    result.language,
+                    "path={}\ncontent=\n{}",
+                    result.path,
                     truncate_text_to_token_budget(&result.content, context.tool_output_max_tokens)
                 );
                 let mut output = AppToolExecutionResult {
-                    summary: format!("read code {}", result.selector),
+                    summary: format!("read code {}", args.selector),
                     payload: serde_json::to_value(&result).unwrap(),
                     model_content: Some(model_content),
                     ui_event: self.coding_tool_group_event(
                         "Read",
-                        coding_target_summary(&result.selector),
+                        coding_target_summary(&args.selector),
                         vec![format!(
-                            "{} · {}",
-                            result.language,
+                            "{} lines",
                             coding_count_label(result.content.lines().count(), "line", "lines")
                         )],
                     ),
@@ -842,11 +839,12 @@ impl App for CodingApp {
                 if let Some(include) = args.include.as_deref() {
                     detail_lines.push(format!("include {}", summarize_coding_inline_text(include)));
                 }
+                let model_content = format_grep_matches_for_model(&result.matches);
                 let mut output = AppToolExecutionResult {
                     summary: format!("found {} matches", result.matches.len()),
                     payload: serde_json::to_value(&result).unwrap(),
                     model_content: Some(truncate_text_to_token_budget(
-                        &result.output,
+                        &model_content,
                         context.tool_output_max_tokens,
                     )),
                     ui_event: self.coding_tool_group_event(
@@ -876,11 +874,12 @@ impl App for CodingApp {
                 if let Some(path) = args.path.as_deref() {
                     detail_lines.push(format!("under {}", summarize_coding_inline_text(path)));
                 }
+                let model_content = result.files.join("\n");
                 let mut output = AppToolExecutionResult {
                     summary: format!("found {} files", result.files.len()),
                     payload: serde_json::to_value(&result).unwrap(),
                     model_content: Some(truncate_text_to_token_budget(
-                        &result.output,
+                        &model_content,
                         context.tool_output_max_tokens,
                     )),
                     ui_event: self.coding_tool_group_event(
@@ -904,9 +903,9 @@ impl App for CodingApp {
             "edit_code" => {
                 self.require_project()?;
                 let args: CodingEditCodeArgs = parse_coding_tool_args(call)?;
-                let results = self.scope.edit_code(&args.diff)?;
-                self.last_action = Some("edited SCOPE Diff".to_string());
-                let diff_files = scope_diff_ui_files(&args.diff, &results);
+                let results = self.scope.edit_code(&args.edits)?;
+                self.last_action = Some("edited code".to_string());
+                let diff_files = structured_edit_ui_files(&args.edits, &results);
                 let added_lines = diff_files
                     .iter()
                     .map(|file| file.added_lines)
@@ -916,19 +915,16 @@ impl App for CodingApp {
                     .map(|file| file.removed_lines)
                     .sum::<usize>();
                 let impact_lines = build_coding_edit_impact_lines(&results);
-                let summary = format!(
-                    "edited code via SCOPE Diff; propagation_results={}",
-                    results.len()
-                );
+                let summary = format!("edited code; propagation_results={}", results.len());
                 let mut output = AppToolExecutionResult {
                     summary: summary.clone(),
                     payload: json!({ "propagation_results": results }),
                     model_content: None,
                     ui_event: ToolUiEvent::coding_edit(CodingEditUiData {
-                        stable_id: self.coding_edit_stable_id(&args.diff),
+                        stable_id: self.coding_edit_stable_id(&args.edits),
                         title: "Edited Code".to_string(),
-                        selector: "SCOPE Diff".to_string(),
-                        file: first_scope_diff_path(&args.diff).map(str::to_string),
+                        selector: "hash-anchored edit".to_string(),
+                        file: args.edits.first().map(|e| e.path.clone()),
                         added_lines,
                         removed_lines,
                         propagation_count: results.len(),
@@ -939,7 +935,10 @@ impl App for CodingApp {
                 };
                 self.append_scoped_instructions_to_result(
                     &mut output,
-                    first_scope_diff_path(&args.diff).unwrap_or_default(),
+                    args.edits
+                        .first()
+                        .map(|e| e.path.as_str())
+                        .unwrap_or_default(),
                     context,
                 )?;
                 Ok(output)
@@ -1171,38 +1170,73 @@ fn build_coding_edit_impact_lines(results: &[scope_engine::api::PropagationResul
         .collect()
 }
 
-fn first_scope_diff_path(diff: &str) -> Option<&str> {
-    diff.lines()
-        .find_map(scope_diff_action_selector)
-        .map(selector_path)
-        .filter(|path| !path.is_empty())
-}
-
-fn scope_diff_ui_files(
-    diff: &str,
+fn structured_edit_ui_files(
+    edits: &[scope_engine::api::StructuredEdit],
     results: &[scope_engine::api::PropagationResult],
 ) -> Vec<PatchFileUiData> {
     let mut files = Vec::new();
-    let mut current: Option<(PatchFileOperation, String, Vec<String>)> = None;
-
-    for line in diff.lines() {
-        if line.trim_end() == "*** End Patch" {
-            if let Some((operation, selector, body)) = current.take() {
-                files.push(scope_diff_ui_file(operation, &selector, &body));
+    for edit in edits {
+        let path = edit.path.clone();
+        let (added, removed) = match edit.op {
+            scope_engine::api::EditOp::Append | scope_engine::api::EditOp::Prepend => {
+                let line_count = edit
+                    .content
+                    .as_ref()
+                    .map(|c| match c {
+                        scope_engine::api::EditContent::Lines(lines) => lines.len(),
+                        scope_engine::api::EditContent::Text(text) => text.lines().count(),
+                    })
+                    .unwrap_or(0);
+                (line_count, 0)
             }
-            break;
-        }
-        if let Some((operation, selector)) = scope_diff_action_header(line) {
-            if let Some((prev_operation, prev_selector, body)) = current.take() {
-                files.push(scope_diff_ui_file(prev_operation, &prev_selector, &body));
+            scope_engine::api::EditOp::Replace => {
+                let line_count = edit
+                    .content
+                    .as_ref()
+                    .map(|c| match c {
+                        scope_engine::api::EditContent::Lines(lines) => lines.len(),
+                        scope_engine::api::EditContent::Text(text) => text.lines().count(),
+                    })
+                    .unwrap_or(0);
+                (line_count, 0)
             }
-            current = Some((operation, selector.to_string(), Vec::new()));
-        } else if let Some((_, _, body)) = current.as_mut() {
-            body.push(line.to_string());
-        }
+        };
+        let diff_lines: Vec<PatchDiffLineUiData> = edit
+            .content
+            .as_ref()
+            .map(|content| {
+                let lines: Vec<String> = match content {
+                    scope_engine::api::EditContent::Lines(lines) => lines.clone(),
+                    scope_engine::api::EditContent::Text(text) => {
+                        text.lines().map(str::to_string).collect()
+                    }
+                };
+                lines
+                    .iter()
+                    .map(|line| PatchDiffLineUiData {
+                        kind: PatchDiffLineKind::Context,
+                        old_lineno: None,
+                        new_lineno: None,
+                        text: line.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.push(PatchFileUiData {
+            path,
+            operation: match edit.op {
+                scope_engine::api::EditOp::Append | scope_engine::api::EditOp::Prepend => {
+                    PatchFileOperation::Add
+                }
+                scope_engine::api::EditOp::Replace => PatchFileOperation::Update,
+            },
+            added_lines: added,
+            removed_lines: removed,
+            diff_lines,
+        });
     }
-
     if files.is_empty() {
+        // Fallback to results-based UI
         files.extend(results.iter().map(|result| {
             PatchFileUiData {
                 path: selector_path(&result.selector).to_string(),
@@ -1225,75 +1259,50 @@ fn scope_diff_ui_files(
                                 new_lineno: None,
                                 text: line.to_string(),
                             })
-                            .collect::<Vec<_>>()
+                            .collect()
                     })
                     .unwrap_or_default(),
             }
         }));
     }
-
     files
-}
-
-fn scope_diff_ui_file(
-    operation: PatchFileOperation,
-    selector: &str,
-    body: &[String],
-) -> PatchFileUiData {
-    let mut added_lines = 0;
-    let mut removed_lines = 0;
-    let diff_lines = body
-        .iter()
-        .filter_map(|line| {
-            let (kind, text) = if let Some(text) = line.strip_prefix('+') {
-                added_lines += 1;
-                (PatchDiffLineKind::Add, text)
-            } else if let Some(text) = line.strip_prefix('-') {
-                removed_lines += 1;
-                (PatchDiffLineKind::Delete, text)
-            } else if let Some(text) = line.strip_prefix(' ') {
-                (PatchDiffLineKind::Context, text)
-            } else if line.starts_with("@@") {
-                (PatchDiffLineKind::Context, line.as_str())
-            } else {
-                return None;
-            };
-            Some(PatchDiffLineUiData {
-                kind,
-                old_lineno: None,
-                new_lineno: None,
-                text: text.to_string(),
-            })
-        })
-        .collect();
-
-    PatchFileUiData {
-        path: selector_path(selector).to_string(),
-        operation,
-        added_lines,
-        removed_lines,
-        diff_lines,
-    }
-}
-
-fn scope_diff_action_header(line: &str) -> Option<(PatchFileOperation, &str)> {
-    let (operation, selector) = if let Some(selector) = line.strip_prefix("*** Add: ") {
-        (PatchFileOperation::Add, selector)
-    } else if let Some(selector) = line.strip_prefix("*** Delete: ") {
-        (PatchFileOperation::Delete, selector)
-    } else {
-        let selector = line.strip_prefix("*** Update: ")?;
-        (PatchFileOperation::Update, selector)
-    };
-    Some((operation, selector.trim()))
-}
-
-fn scope_diff_action_selector(line: &str) -> Option<&str> {
-    scope_diff_action_header(line).map(|(_, selector)| selector)
 }
 
 fn count_change_lines(text: &str) -> usize {
     text.lines().filter(|line| !line.trim().is_empty()).count()
+}
+
+fn format_grep_matches_for_model(matches: &[scope_engine::api::SearchMatch]) -> String {
+    if matches.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec![format!("Found {} matches", matches.len()), String::new()];
+    let mut current_file: Option<&str> = None;
+    let mut current_selector: Option<Option<&str>> = None;
+
+    for item in matches {
+        if current_file != Some(item.file.as_str()) {
+            if current_file.is_some() {
+                lines.push(String::new());
+            }
+            lines.push(format!("{}:", item.file));
+            current_file = Some(item.file.as_str());
+            current_selector = None;
+        }
+
+        let selector = item.selector.as_deref();
+        if current_selector != Some(selector) {
+            match selector {
+                Some(sel) => lines.push(format!("  {sel}:")),
+                None => lines.push("  Unclassified matches:".to_string()),
+            }
+            current_selector = Some(selector);
+        }
+
+        lines.push(format!("    Line {}: {}", item.line, item.text));
+    }
+
+    lines.join("\n")
 }
 
 fn coding_pattern_result_summary(

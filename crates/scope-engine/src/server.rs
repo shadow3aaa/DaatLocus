@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -355,9 +356,7 @@ pub fn grep_code(
         params.include.as_deref(),
         DEFAULT_FILE_SEARCH_LIMIT,
     )?;
-    let output = format_grep_output(&matches);
-
-    Ok(GrepCodeResponse { matches, output })
+    Ok(GrepCodeResponse { matches })
 }
 
 pub fn glob_files(
@@ -379,13 +378,7 @@ pub fn glob_files(
     let truncated = files.len() > DEFAULT_FILE_SEARCH_LIMIT;
     files.truncate(DEFAULT_FILE_SEARCH_LIMIT);
     let files = files.into_iter().map(|(path, _)| path).collect::<Vec<_>>();
-    let output = format_glob_output(&files, truncated);
-
-    Ok(GlobFilesResponse {
-        files,
-        truncated,
-        output,
-    })
+    Ok(GlobFilesResponse { files, truncated })
 }
 
 fn handle_is_responsible_source(
@@ -487,17 +480,11 @@ fn search_project(
             let selector = symbol_match
                 .as_ref()
                 .map(|symbol| symbol.canonical_selector(path, project_root));
-            let selector_info = symbol_match.as_ref().map(|symbol| {
-                selector_info_for_symbol(path, project_root, symbol, "enclosing_symbol")
-            });
             matches.push(SearchMatch {
                 file: relative.clone(),
                 line,
-                match_id: format!("{relative}:{line}:{}", matches.len() + 1),
                 text: text.to_string(),
-                enclosing_selector: selector.clone(),
                 selector,
-                selector_info,
             });
             if matches.len() >= limit {
                 return Ok(matches);
@@ -660,17 +647,15 @@ fn normalize_relative_path(path: &str) -> String {
 }
 
 struct ResolvedReadSelection {
-    selector: String,
     start_line: usize,
     end_line: usize,
-    selector_info: SelectorInfo,
     content_override: Option<String>,
 }
 
 fn resolve_read_selection(
     analyzer: &TreeSitterAnalyzer,
     full_path: &Path,
-    project_root: &Path,
+    _project_root: &Path,
     file_content: &str,
     parsed: &selector::ParsedSelector,
 ) -> Result<ResolvedReadSelection, String> {
@@ -678,12 +663,9 @@ fn resolve_read_selection(
     match &parsed.target {
         SelectorTarget::Symbol(_) => {
             let symbol = analyzer.resolve_selector(full_path, parsed)?;
-            let selector = symbol.canonical_selector(full_path, project_root);
             Ok(ResolvedReadSelection {
-                selector: selector.clone(),
                 start_line: symbol.start_line,
                 end_line: symbol.end_line,
-                selector_info: selector_info_for_symbol(full_path, project_root, &symbol, "symbol"),
                 content_override: None,
             })
         }
@@ -693,22 +675,8 @@ fn resolve_read_selection(
         } => {
             let (start_line, end_line) = clamp_range(*start_line, *end_line, line_count)?;
             Ok(ResolvedReadSelection {
-                selector: format!(
-                    "{}#L{}-L{}",
-                    relative_file_path(project_root, full_path),
-                    start_line,
-                    end_line
-                ),
                 start_line,
                 end_line,
-                selector_info: selector_info_for_range(
-                    full_path,
-                    project_root,
-                    "line_range",
-                    start_line,
-                    end_line,
-                    None,
-                ),
                 content_override: None,
             })
         }
@@ -716,22 +684,8 @@ fn resolve_read_selection(
             let start_line = line.saturating_sub(*context).max(1);
             let end_line = (*line + *context).min(line_count);
             Ok(ResolvedReadSelection {
-                selector: format!(
-                    "{}#around:L{}±{}",
-                    relative_file_path(project_root, full_path),
-                    line,
-                    context
-                ),
                 start_line,
                 end_line,
-                selector_info: selector_info_for_range(
-                    full_path,
-                    project_root,
-                    "around_line",
-                    start_line,
-                    end_line,
-                    analyzer.find_containing_symbol_match(full_path, *line),
-                ),
                 content_override: None,
             })
         }
@@ -746,7 +700,7 @@ fn resolve_read_selection(
                 0 => Err(format!("match selector found no matches for /{pattern}/")),
                 1 => {
                     let line = hits.remove(0);
-                    let (start_line, end_line, kind) = if let Some(context) = around {
+                    let (start_line, end_line, _kind) = if let Some(context) = around {
                         (
                             line.saturating_sub(*context).max(1),
                             (line + *context).min(line_count),
@@ -756,30 +710,8 @@ fn resolve_read_selection(
                         (line, line, "match")
                     };
                     Ok(ResolvedReadSelection {
-                        selector: if let Some(context) = around {
-                            format!(
-                                "{}#match:/{}/#around:{}",
-                                relative_file_path(project_root, full_path),
-                                pattern,
-                                context
-                            )
-                        } else {
-                            format!(
-                                "{}#match:/{}/",
-                                relative_file_path(project_root, full_path),
-                                pattern
-                            )
-                        },
                         start_line,
                         end_line,
-                        selector_info: selector_info_for_range(
-                            full_path,
-                            project_root,
-                            kind,
-                            start_line,
-                            end_line,
-                            analyzer.find_containing_symbol_match(full_path, line),
-                        ),
                         content_override: None,
                     })
                 }
@@ -795,22 +727,8 @@ fn resolve_read_selection(
         SelectorTarget::BeforeLine { line } | SelectorTarget::AfterLine { line } => {
             let (start_line, end_line) = clamp_range(*line, *line, line_count)?;
             Ok(ResolvedReadSelection {
-                selector: format!(
-                    "{}#L{}-L{}",
-                    relative_file_path(project_root, full_path),
-                    start_line,
-                    end_line
-                ),
                 start_line,
                 end_line,
-                selector_info: selector_info_for_range(
-                    full_path,
-                    project_root,
-                    "insertion_line",
-                    start_line,
-                    end_line,
-                    analyzer.find_containing_symbol_match(full_path, *line),
-                ),
                 content_override: None,
             })
         }
@@ -824,17 +742,9 @@ fn resolve_read_selection(
                         line
                     )
                 })?;
-            let selector = symbol.canonical_selector(full_path, project_root);
             Ok(ResolvedReadSelection {
-                selector: selector.clone(),
                 start_line: symbol.start_line,
                 end_line: symbol.end_line,
-                selector_info: selector_info_for_symbol(
-                    full_path,
-                    project_root,
-                    &symbol,
-                    "enclosing_symbol",
-                ),
                 content_override: None,
             })
         }
@@ -852,18 +762,8 @@ fn resolve_read_selection(
                 .join("\n");
             let end_line = content.lines().count().max(1);
             Ok(ResolvedReadSelection {
-                selector: format!("{}#outline", relative_file_path(project_root, full_path)),
                 start_line: 1,
                 end_line,
-                selector_info: SelectorInfo {
-                    file: relative_file_path(project_root, full_path),
-                    kind: "outline".to_string(),
-                    range: None,
-                    symbol_selector: None,
-                    symbol_start_line: None,
-                    symbol_end_line: None,
-                    definition_line: None,
-                },
                 content_override: Some(if content.is_empty() {
                     String::new()
                 } else {
@@ -900,56 +800,6 @@ fn read_line_range(content: &str, start_line: usize, end_line: usize) -> String 
         snippet.push('\n');
     }
     snippet
-}
-
-fn selector_info_for_symbol(
-    full_path: &Path,
-    project_root: &Path,
-    symbol: &crate::treesitter::SymbolMatch,
-    kind: &str,
-) -> SelectorInfo {
-    let selector = symbol.canonical_selector(full_path, project_root);
-    SelectorInfo {
-        file: relative_file_path(project_root, full_path),
-        kind: kind.to_string(),
-        range: Some(LineRange {
-            start_line: symbol.start_line,
-            end_line: symbol.end_line,
-        }),
-        symbol_selector: Some(selector),
-        symbol_start_line: Some(symbol.start_line),
-        symbol_end_line: Some(symbol.end_line),
-        definition_line: Some(symbol.start_line),
-    }
-}
-
-fn selector_info_for_range(
-    full_path: &Path,
-    project_root: &Path,
-    kind: &str,
-    start_line: usize,
-    end_line: usize,
-    symbol: Option<crate::treesitter::SymbolMatch>,
-) -> SelectorInfo {
-    let mut info = SelectorInfo {
-        file: relative_file_path(project_root, full_path),
-        kind: kind.to_string(),
-        range: Some(LineRange {
-            start_line,
-            end_line,
-        }),
-        symbol_selector: None,
-        symbol_start_line: None,
-        symbol_end_line: None,
-        definition_line: None,
-    };
-    if let Some(symbol) = symbol {
-        info.symbol_selector = Some(symbol.canonical_selector(full_path, project_root));
-        info.symbol_start_line = Some(symbol.start_line);
-        info.symbol_end_line = Some(symbol.end_line);
-        info.definition_line = Some(symbol.start_line);
-    }
-    info
 }
 
 fn handle_read_code(
@@ -991,48 +841,53 @@ fn handle_read_code(
         }
     };
 
-    let language = guess_language(&full_path);
     let analyzer = TreeSitterAnalyzer::new();
     let resolved =
         match resolve_read_selection(&analyzer, &full_path, project_root, &file_content, &parsed) {
             Ok(resolved) => resolved,
             Err(e) => return JsonRpcResponse::err(req.id.clone(), -32002, e),
         };
-    let content = resolved
+    let raw_content = resolved
         .content_override
         .clone()
         .unwrap_or_else(|| read_line_range(&file_content, resolved.start_line, resolved.end_line));
 
+    let path = relative_file_path(project_root, &full_path);
+    let prefixed_content = prefix_lines_with_hash(&raw_content, resolved.start_line);
+
     JsonRpcResponse::ok(
         req.id.clone(),
         serde_json::to_value(ReadCodeResponse {
-            selector: resolved.selector,
-            content,
-            language: language.to_string(),
-            start_line: resolved.start_line,
-            end_line: resolved.end_line,
-            selector_info: resolved.selector_info,
+            path,
+            content: prefixed_content,
         })
         .unwrap(),
     )
 }
 
-fn guess_language(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("rs") => "rust",
-        Some("py") => "python",
-        Some("js") | Some("mjs") | Some("cjs") => "javascript",
-        Some("ts") | Some("mts") | Some("cts") => "typescript",
-        Some("go") => "go",
-        Some("java") => "java",
-        Some("c") | Some("h") => "c",
-        Some("cpp") | Some("cc") | Some("cxx") | Some("hpp") => "cpp",
-        Some("toml") => "toml",
-        Some("json") => "json",
-        Some("yaml") | Some("yml") => "yaml",
-        Some("md") => "markdown",
-        _ => "text",
-    }
+fn line_hash(line_content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(line_content.as_bytes());
+    let result = hasher.finalize();
+    format!("{:02x}", result[0])
+}
+
+fn prefix_lines_with_hash(content: &str, start_line: usize) -> String {
+    content
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let line_num = start_line + i;
+            let hash = line_hash(line);
+            format!("{line_num}#{hash}|{line}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if content.ends_with('\n') || content.is_empty() {
+            "\n"
+        } else {
+            ""
+        }
 }
 
 fn handle_edit_code(
@@ -1053,7 +908,7 @@ fn handle_edit_code(
         }
     };
 
-    match patch::edit_code_apply(&params.diff, project_root, lsp_analyzer) {
+    match patch::edit_code_apply(&params.edits, project_root, lsp_analyzer) {
         Ok(results) => {
             if !results.is_empty()
                 && let Ok(mut state) = propagation_state.lock()
@@ -1156,29 +1011,20 @@ mod tests {
             SearchMatch {
                 file: "src/coding_app.rs".to_string(),
                 line: 10,
-                match_id: "src/coding_app.rs:10:1".to_string(),
                 text: "fn build_usage() {".to_string(),
                 selector: Some("src/coding_app.rs::fn build_usage #L10-L20".to_string()),
-                enclosing_selector: Some("src/coding_app.rs::fn build_usage #L10-L20".to_string()),
-                selector_info: None,
             },
             SearchMatch {
                 file: "src/coding_app.rs".to_string(),
                 line: 12,
-                match_id: "src/coding_app.rs:12:2".to_string(),
                 text: "usage.push_str(\"grep\");".to_string(),
                 selector: Some("src/coding_app.rs::fn build_usage #L10-L20".to_string()),
-                enclosing_selector: Some("src/coding_app.rs::fn build_usage #L10-L20".to_string()),
-                selector_info: None,
             },
             SearchMatch {
                 file: "src/coding_app.rs".to_string(),
                 line: 3,
-                match_id: "src/coding_app.rs:3:3".to_string(),
                 text: "use std::path::PathBuf;".to_string(),
                 selector: None,
-                enclosing_selector: None,
-                selector_info: None,
             },
         ];
 
@@ -1235,7 +1081,7 @@ mod tests {
             .map(|item| item.file.as_str())
             .collect::<Vec<_>>();
         assert_eq!(files, vec!["src/lib.rs", "src/nested/mod.rs"]);
-        assert!(response.output.starts_with("Found 2 matches"));
+        assert_eq!(response.matches.len(), 2);
     }
 
     #[test]
@@ -1259,7 +1105,6 @@ mod tests {
 
         assert_eq!(response.files, vec!["src/new.rs", "src/old.rs"]);
         assert!(!response.truncated);
-        assert_eq!(response.output, "src/new.rs\nsrc/old.rs");
     }
 
     #[test]
@@ -1341,17 +1186,24 @@ mod tests {
         );
         let result = response.result.expect("read_code should return a result");
 
-        assert_eq!(
-            result["content"],
-            "pub fn second() {\n    println!(\"second\");\n}\n"
+        assert_eq!(result["path"], "lib.rs");
+        let content = result["content"].as_str().unwrap();
+        assert!(
+            content.contains("pub fn second()"),
+            "should contain fn second, got: {content}"
         );
-        assert_eq!(result["start_line"], 5);
-        assert_eq!(result["end_line"], 7);
-        assert_eq!(result["selector"], "lib.rs::fn second #L5-L7");
-        assert!(!result["content"].as_str().unwrap().contains("first"));
+        assert!(!content.contains("first"));
+        // Check line-hash format: line_number#hash|content
+        assert!(
+            content.lines().all(|line| {
+                let parts: Vec<&str> = line.splitn(2, '|').collect();
+                parts.len() == 2 && parts[0].contains('#')
+            }),
+            "each line should have line#hash| prefix, got: {content}"
+        );
     }
     #[test]
-    fn read_code_supports_line_range_enclosing_outline_and_structured_info() {
+    fn read_code_supports_line_range_enclosing_outline() {
         let dir = tempfile::tempdir().unwrap();
         let source = "pub fn first() {\n    println!(\"first\");\n}\n\npub fn second() {\n    println!(\"second\");\n}\n";
         std::fs::write(dir.path().join("lib.rs"), source).unwrap();
@@ -1376,11 +1228,15 @@ mod tests {
             response.error
         );
         let result = response.result.unwrap();
-        assert_eq!(result["selector_info"]["kind"], "line_range");
-        assert_eq!(result["selector_info"]["range"]["start_line"], 5);
-        assert_eq!(
-            result["content"],
-            "pub fn second() {\n    println!(\"second\");\n}\n"
+        assert_eq!(result["path"], "lib.rs");
+        let content = result["content"].as_str().unwrap();
+        assert!(
+            content.contains("pub fn second()"),
+            "should contain fn second, got: {content}"
+        );
+        assert!(
+            !content.contains("pub fn first()"),
+            "should not contain fn first"
         );
 
         let enclosing_req = JsonRpcRequest {
@@ -1401,9 +1257,12 @@ mod tests {
             response.error
         );
         let result = response.result.unwrap();
-        assert_eq!(result["selector_info"]["kind"], "enclosing_symbol");
-        assert_eq!(result["selector_info"]["symbol_start_line"], 5);
-        assert_eq!(result["selector_info"]["symbol_end_line"], 7);
+        assert_eq!(result["path"], "lib.rs");
+        let content = result["content"].as_str().unwrap();
+        assert!(
+            content.contains("pub fn second()"),
+            "enclosing should contain fn second, got: {content}"
+        );
 
         let outline_req = JsonRpcRequest {
             _jsonrpc: "2.0".to_string(),
@@ -1423,8 +1282,7 @@ mod tests {
             response.error
         );
         let result = response.result.unwrap();
-        assert_eq!(result["selector"], "lib.rs#outline");
-        assert_eq!(result["selector_info"]["kind"], "outline");
+        assert_eq!(result["path"], "lib.rs");
         assert!(
             result["content"]
                 .as_str()

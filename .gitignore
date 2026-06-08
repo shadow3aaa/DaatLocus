@@ -12,3 +12,5 @@
 /webui/.yarn/
 /webui/dist/
 /webui/node_modules/
+scope-engine.zip
+.DS_Store

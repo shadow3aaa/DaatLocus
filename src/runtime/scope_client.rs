@@ -179,14 +179,14 @@ impl ScopeClient {
         serde_json::from_value(result).map_err(|err| miette!("invalid glob_files response: {err}"))
     }
 
-    /// Apply a complete SCOPE Diff patch via scope-engine.
+    /// Apply structured edits via scope-engine.
     #[allow(dead_code)]
-    pub fn edit_code(&self, diff: &str) -> Result<Vec<api::PropagationResult>> {
+    pub fn edit_code(&self, edits: &[api::StructuredEdit]) -> Result<Vec<api::PropagationResult>> {
         let root = self
             .project_root
             .as_deref()
             .ok_or_else(|| miette!("no project opened"))?;
-        let results = patch::edit_code_apply(diff, root, &self.lsp_analyzer)
+        let results = patch::edit_code_apply(edits, root, &self.lsp_analyzer)
             .map_err(|err| miette!("{err}"))?;
         if !results.is_empty() {
             let mut state = self

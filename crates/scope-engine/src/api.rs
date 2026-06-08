@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 // ── JSON-RPC 2.0 types ──────────────────────────────────────
@@ -65,62 +66,18 @@ pub struct ReadCodeRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReadCodeResponse {
-    pub selector: String,
-    pub content: String,
-    pub language: String,
-    pub start_line: usize,
-    pub end_line: usize,
-    pub selector_info: SelectorInfo,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LineRange {
-    pub start_line: usize,
-    pub end_line: usize,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SelectorInfo {
     /// Relative file path from project root.
-    pub file: String,
-    /// Selector kind, such as `symbol`, `line_range`, `around_line`,
-    /// `match`, `match_around`, `enclosing_symbol`, or `outline`.
-    pub kind: String,
-    /// Resolved range when the selector maps to concrete file lines.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub range: Option<LineRange>,
-    /// Canonical symbol selector when the target is or is inside a symbol.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub symbol_selector: Option<String>,
-    /// Symbol start line, included whenever known to remove ambiguity.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub symbol_start_line: Option<usize>,
-    /// Symbol end line, included whenever known to remove ambiguity.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub symbol_end_line: Option<usize>,
-    /// Definition/name line for the symbol, when known.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub definition_line: Option<usize>,
+    pub path: String,
+    /// File content with per-line hash prefix: `line#hash|original_text\n`
+    pub content: String,
 }
 
-/// Each match from a search_code query.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SearchMatch {
-    /// Relative file path from project root.
     pub file: String,
-    /// 1-based line number.
     pub line: usize,
-    /// Stable match id within a grep/search response.
-    pub match_id: String,
-    /// The matching line text.
     pub text: String,
-    /// The selector of the containing symbol (e.g. "src/net.rs::fn connect()").
     pub selector: Option<String>,
-    /// Alias for `selector`, making grep-to-selector bridging explicit.
-    pub enclosing_selector: Option<String>,
-    /// Structured selector metadata for the match/enclosing symbol.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub selector_info: Option<SelectorInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -131,8 +88,6 @@ pub struct SearchCodeResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchCodeRequest {
     pub query: String,
-    /// Optional maximum number of matches to return.
-    /// If omitted, scope-engine applies a safe default limit.
     pub limit: Option<usize>,
 }
 
@@ -146,7 +101,6 @@ pub struct GrepCodeRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GrepCodeResponse {
     pub matches: Vec<SearchMatch>,
-    pub output: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -159,35 +113,69 @@ pub struct GlobFilesRequest {
 pub struct GlobFilesResponse {
     pub files: Vec<String>,
     pub truncated: bool,
-    pub output: String,
 }
 
-/// edit_code parameters: complete SCOPE Diff patch document.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EditCodeRequest {
-    /// Complete SCOPE Diff document wrapped in `*** Begin Patch` / `*** End Patch`.
-    pub diff: String,
+    pub edits: Vec<StructuredEdit>,
+}
+
+/// Operation kind for a single structured edit.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum EditOp {
+    Replace,
+    Append,
+    Prepend,
+}
+
+/// Content value: string, array of strings, or null.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum EditContent {
+    Lines(Vec<String>),
+    Text(String),
+}
+
+impl EditContent {
+    pub fn into_lines(self) -> Vec<String> {
+        match self {
+            EditContent::Lines(lines) => lines,
+            EditContent::Text(text) => text.lines().map(str::to_string).collect(),
+        }
+    }
+}
+
+/// One structured edit: op + path + line-hash anchors + optional content.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct StructuredEdit {
+    /// Relative file path from project root.
+    pub path: String,
+    pub op: EditOp,
+    /// `line#hash` anchor from read_code response.
+    pub start: String,
+    /// `line#hash` end anchor (required for replace, ignored otherwise).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    /// Replacement/insertion content as string, array, or null.
+    /// `null` with `replace` means delete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<EditContent>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IsResponsibleSourceRequest {
-    /// Project-relative or absolute file path to classify.
     pub path: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IsResponsibleSourceResponse {
-    /// True when SCOPE owns semantic source-code operations for this path.
     pub is_responsible: bool,
-    /// Normalized project-relative path when the input is inside the project root.
     pub path: String,
-    /// File extension used for the decision, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension: Option<String>,
-    /// SCOPE language adapter name that owns the path, when recognized.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    /// Human-readable reason for diagnostics and policy errors.
     pub reason: String,
 }
 
@@ -208,13 +196,10 @@ pub struct ScopeSelectorKindSchema {
 
 // ── Propagation types ────────────────────────────────────────
 
-/// Source of a propagation result.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PropagationSource {
-    /// Cross-file reference found by LSP.
     Lsp,
-    /// No LSP available; agent should investigate on its own.
     OpenEnded,
 }
 
@@ -223,99 +208,56 @@ pub struct PropagationResponse {
     pub propagation_results: Vec<PropagationResult>,
 }
 
-/// Result of propagation analysis for a modified symbol.
-///
-/// When LSP is available, `lsp_references` contains precise cross-file
-/// references. When LSP is unavailable, `diff_summary`, `file_snippet`,
-/// and `project_files` carry context for the agent to investigate.
 #[derive(Debug, Clone, Serialize)]
 pub struct PropagationResult {
     pub selector: String,
     pub reason: String,
     pub source: PropagationSource,
-    /// LSP references: (selector, line, context) tuples.
-    /// Only set when source == Lsp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsp_references: Option<Vec<(String, usize, String)>>,
-    /// Diff summary of the change.
-    /// Only set when source == OpenEnded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff_summary: Option<String>,
-    /// Code snippet around the modification site.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_snippet: Option<String>,
-    /// Project file list for agent investigation.
-    /// Only set when source == OpenEnded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NextReviewResponse {
-    /// Backward-compatible single-event field. Contains the first returned
-    /// event, or `None` when no review was pending.
     pub review: Option<ReviewEvent>,
-    /// Batch of acknowledged review events. Callers that only understand the
-    /// older single-event contract can keep reading `review`.
     pub reviews: Vec<ReviewEvent>,
-    /// Number of review events returned in this response.
     pub returned: usize,
-    /// Number of review events still pending after this acknowledgement.
     pub remaining: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NextReviewRequest {
-    /// Maximum number of review events to acknowledge and return.
-    /// Omitted means one event to preserve existing `next_review` behavior.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
 }
 
-/// A reference found by LSP or other precise analysis.
 #[derive(Debug, Clone, Serialize)]
 pub struct Reference {
-    /// Selector of the referencing symbol (e.g. "src/routes.rs::fn login").
     pub selector: String,
-    /// 1-based line number of the reference.
     pub line: usize,
-    /// Code context around the reference.
     pub context: String,
 }
 
-/// A review event produced by SCOPE propagation.
-///
-/// Two variants based on what the agent should do:
-/// - `KnownReferences`: LSP (or other precise tool) found exact cross-file
-///   references. Agent should verify each reference is compatible.
-/// - `InvestigateImpact`: No precise reference data available. Agent should
-///   use search_code and other tools to find and assess impact.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewEvent {
-    /// References are known precisely. Agent should verify compatibility.
     KnownReferences {
-        /// The symbol that was modified.
         modified_symbol: String,
-        /// Summary of what changed.
         change_summary: String,
-        /// Precise reference locations found by LSP.
         references: Vec<Reference>,
-        /// Code snippet around the modification site.
         file_snippet: String,
     },
-    /// References are unknown. Agent should investigate impact on its own.
     InvestigateImpact {
-        /// The symbol that was modified.
         modified_symbol: String,
-        /// Summary of what changed.
         change_summary: String,
-        /// The diff hunks describing the change.
         diff_summary: String,
-        /// Code snippet around the modification site.
         file_snippet: String,
-        /// Project file list to help agent locate potential impact.
         project_files: Vec<String>,
     },
 }
