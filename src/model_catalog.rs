@@ -94,6 +94,7 @@ pub enum ReasoningOption {
 }
 
 /// Search all provider sections for reasoning options for a matching model ID.
+/// Falls back to a basic toggle when `reasoning: true` but no explicit options.
 pub fn catalog_model_reasoning_options(model_id: &str) -> Vec<ReasoningOption> {
     let root = load_catalog_json();
     let normalized = model_id.trim().to_ascii_lowercase();
@@ -101,7 +102,15 @@ pub fn catalog_model_reasoning_options(model_id: &str) -> Vec<ReasoningOption> {
         if let Some(models) = section["models"].as_object()
             && let Some(model) = models.get(&normalized)
         {
-            return parse_reasoning_options(&model["reasoning_options"]);
+            let options = parse_reasoning_options(&model["reasoning_options"]);
+            if !options.is_empty() {
+                return options;
+            }
+            // Fallback: model declares reasoning support but lacks explicit options
+            if model["reasoning"].as_bool() == Some(true) {
+                return vec![ReasoningOption::Toggle];
+            }
+            return Vec::new();
         }
     }
     Vec::new()
