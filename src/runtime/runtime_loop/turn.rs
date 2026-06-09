@@ -1656,4 +1656,40 @@ mod tests {
         assert_eq!(apps.focused(), Some(AppId::coding()));
         assert!(coding_project_root_is_open(&apps, project.path()));
     }
+
+    #[tokio::test]
+    async fn coding_project_prepare_keeps_root_instructions_visible_without_duplication() {
+        let project = tempfile::tempdir().expect("project dir");
+        std::fs::write(
+            project.path().join("AGENTS.md"),
+            "Root instruction marker\n",
+        )
+        .expect("write agents");
+        let mut apps =
+            crate::app::AppManager::new(None, vec![Box::new(crate::coding_app::CodingApp::new())])
+                .await
+                .expect("app manager");
+        let app_context = AppToolExecutionContext {
+            execution_cwd: project.path().to_path_buf(),
+            sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),
+            dashboard_tx: None,
+            tool_output_max_tokens: 4096,
+            turn_epoch: 0,
+        };
+
+        prepare_coding_project_app(&mut apps, project.path(), &app_context)
+            .await
+            .expect("prepare coding app");
+        prepare_coding_project_app(&mut apps, project.path(), &app_context)
+            .await
+            .expect("prepare coding app again");
+
+        let state = apps
+            .state_render_for(&AppId::coding())
+            .expect("coding state");
+        let rendered_state = state.lines.join("\n");
+        assert!(rendered_state.contains("<root_project_instructions>"));
+        assert!(rendered_state.contains("AGENTS.md"));
+        assert_eq!(rendered_state.matches("Root instruction marker").count(), 1);
+    }
 }
