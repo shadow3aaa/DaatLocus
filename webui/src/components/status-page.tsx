@@ -16,9 +16,12 @@ import {
 import { AgentStatusAnimation } from "@/components/agent-status-animation";
 import {
   ArrowDownIcon,
+  AlertTriangleIcon,
   CheckIcon,
   ClipboardIcon,
+  CommandIcon,
   ImagePlusIcon,
+  InfoIcon,
   Loader2Icon,
   SendHorizontalIcon,
   XIcon,
@@ -37,6 +40,7 @@ import {
   runDashboardCommand,
   type DashboardActivityHistoryPage,
   type DashboardCommandAttachment,
+  type DashboardPendingAccessRequest,
   type DashboardSnapshot,
   type ActivityCellVariant,
   type WebActivityBlock,
@@ -227,6 +231,7 @@ export function AgentPage({ sessionId }: { sessionId: string }) {
       </div>
       <AgentChatComposer
         sessionId={sessionId}
+        snapshot={snapshot}
         agentName={snapshot?.agent_name}
         supportsVision={supportsVision}
         isFocused={isChatFocused}
@@ -285,6 +290,144 @@ type AgentChatPendingImageAttachment = {
   file: File;
   previewUrl?: string;
 };
+
+type WebSlashCommandLevel = "info" | "warning" | "error";
+
+type WebSlashCommandSuggestion = {
+  display: string;
+  completion: string;
+  description: string;
+};
+
+type WebSlashCommandFeedback = {
+  title: string;
+  message: string;
+  detail?: string;
+  level: WebSlashCommandLevel;
+  blocksSubmit?: boolean;
+};
+
+type WebSlashCommandResult = {
+  command: string;
+  title: string;
+  output: string;
+  message: string;
+  detail?: string;
+  level: WebSlashCommandLevel;
+  presentation: "panel" | "compact";
+};
+
+type WebSlashTelegramPicker = {
+  action: "approve" | "reject";
+  requests: DashboardPendingAccessRequest[];
+};
+
+type WebSlashCommandDefinition = {
+  name: string;
+  usage: string;
+  description: string;
+  aliases?: string[];
+  argumentKind?: "app";
+  subcommands?: WebSlashSubcommandDefinition[];
+};
+
+type WebSlashSubcommandDefinition = {
+  name: string;
+  usage: string;
+  description: string;
+  aliases?: string[];
+  argumentKind?: "telegram-request";
+};
+
+const WEB_SLASH_COMMANDS: WebSlashCommandDefinition[] = [
+  {
+    name: "status",
+    usage: "status",
+    description: "show overall status",
+  },
+  {
+    name: "clear",
+    usage: "clear",
+    description: "clear runtime conversation, plan, events, and activity",
+  },
+  {
+    name: "debug",
+    usage: "debug",
+    description: "debug outputs and internal runtime views",
+    subcommands: [
+      {
+        name: "persona",
+        usage: "persona",
+        description: "show current prompt persona config",
+      },
+      {
+        name: "system-prompt",
+        usage: "system-prompt",
+        description: "show current runtime system prompt",
+        aliases: ["system_prompt"],
+      },
+      {
+        name: "context",
+        usage: "context",
+        description: "show latest pre-turn runtime context",
+        aliases: ["preturn-context", "preturn_context"],
+      },
+    ],
+  },
+  {
+    name: "app-status",
+    usage: "app-status <app>",
+    description: "show current structured app state and llm-facing note",
+    aliases: ["app_status"],
+    argumentKind: "app",
+  },
+  {
+    name: "restart",
+    usage: "restart",
+    description: "restart the daemon",
+  },
+  {
+    name: "sleep",
+    usage: "sleep",
+    description: "sleep controls and status",
+    subcommands: [
+      {
+        name: "status",
+        usage: "status",
+        description: "show sleep status",
+      },
+      {
+        name: "run",
+        usage: "run",
+        description: "start a background sleep run",
+      },
+    ],
+  },
+  {
+    name: "telegram",
+    usage: "telegram",
+    description: "telegram status and access controls",
+    subcommands: [
+      {
+        name: "status",
+        usage: "status",
+        description: "show telegram details",
+      },
+      {
+        name: "approve",
+        usage: "approve [chat_id]",
+        description: "approve a telegram access request",
+        argumentKind: "telegram-request",
+      },
+      {
+        name: "reject",
+        usage: "reject [chat_id]",
+        description: "reject a telegram access request",
+        argumentKind: "telegram-request",
+      },
+    ],
+  },
+];
 
 type AgentChatActivityCellRender =
   | {
@@ -373,6 +516,7 @@ type AgentChatDisplayItem =
 
 function AgentChatComposer({
   sessionId,
+  snapshot,
   agentName,
   supportsVision = true,
   isFocused,
@@ -382,6 +526,7 @@ function AgentChatComposer({
   onSendResult,
 }: {
   sessionId: string;
+  snapshot: DashboardSnapshot | null;
   agentName?: string;
   supportsVision?: boolean;
   isFocused: boolean;
@@ -403,6 +548,36 @@ function AgentChatComposer({
   const [isSending, setIsSending] = useState(false);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [slashCommandSelection, setSlashCommandSelection] = useState(0);
+  const [slashCommandResult, setSlashCommandResult] =
+    useState<WebSlashCommandResult | null>(null);
+
+  const slashCommandSuggestions = useMemo(
+    () => webSlashCommandSuggestions(message, snapshot),
+    [message, snapshot],
+  );
+  const slashCommandFeedback = useMemo(
+    () => webSlashCommandFeedback(message, snapshot, imageAttachments.length),
+    [imageAttachments.length, message, snapshot],
+  );
+  const slashTelegramPicker = useMemo(
+    () => webSlashTelegramPicker(message, snapshot),
+    [message, snapshot],
+  );
+  const selectedSlashSuggestion =
+    slashCommandSuggestions[
+      Math.min(slashCommandSelection, slashCommandSuggestions.length - 1)
+    ];
+  const slashCommandBlocksSubmit =
+    Boolean(slashCommandFeedback?.blocksSubmit) ||
+    (isWebSlashCommandInput(message) &&
+      !parseWebSlashCommand(message)?.trimmed);
+
+  useEffect(() => {
+    setSlashCommandSelection((current) =>
+      Math.min(current, Math.max(0, slashCommandSuggestions.length - 1)),
+    );
+  }, [slashCommandSuggestions.length]);
 
   useEffect(() => {
     imageAttachmentsRef.current = imageAttachments;
@@ -548,11 +723,19 @@ function AgentChatComposer({
     );
   }
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const trimmed = message.trim();
-
-    if ((!trimmed && imageAttachments.length === 0) || isSending) {
+  async function submitComposerInput(rawInput: string) {
+    const trimmed = rawInput.trim();
+    const isSlashCommand = isWebSlashCommandInput(trimmed);
+    const slashBodyMissing =
+      isSlashCommand && !parseWebSlashCommand(trimmed)?.trimmed;
+    if (
+      (!trimmed && imageAttachments.length === 0) ||
+      isSending ||
+      slashBodyMissing ||
+      (isSlashCommand &&
+        webSlashCommandFeedback(trimmed, snapshot, imageAttachments.length)
+          ?.blocksSubmit)
+    ) {
       return;
     }
 
@@ -560,12 +743,13 @@ function AgentChatComposer({
     setSendError(null);
 
     try {
-      const attachments = await commandAttachmentsFromPendingImages();
+      const attachments = isSlashCommand
+        ? []
+        : await commandAttachmentsFromPendingImages();
       const output = await runDashboardCommand(trimmed, {
         attachments,
         sessionId,
       });
-      const sendResultText = agentChatSendResultText(output);
       setMessage("");
       setImageAttachments((current) => {
         for (const attachment of current) {
@@ -573,8 +757,15 @@ function AgentChatComposer({
         }
         return [];
       });
-      if (sendResultText) {
-        onSendResult(sendResultText);
+
+      if (isSlashCommand) {
+        setSlashCommandSelection(0);
+        setSlashCommandResult(webSlashCommandResultForResponse(trimmed, output));
+      } else {
+        const sendResultText = agentChatSendResultText(output);
+        if (sendResultText) {
+          onSendResult(sendResultText);
+        }
       }
       onFocusChange(true);
       window.requestAnimationFrame(() => {
@@ -587,6 +778,21 @@ function AgentChatComposer({
     } finally {
       setIsSending(false);
     }
+  }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await submitComposerInput(message);
+  }
+
+  function applySlashSuggestion(suggestion: WebSlashCommandSuggestion) {
+    setMessage(suggestion.completion);
+    setSendError(null);
+    setSlashCommandSelection(0);
+    window.requestAnimationFrame(() => {
+      updateMessageTextareaHeight();
+      textareaRef.current?.focus();
+    });
   }
 
   function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
@@ -655,6 +861,25 @@ function AgentChatComposer({
           : "border-border/70 hover:border-primary/30",
       )}
     >
+      <WebSlashCommandPanel
+        feedback={slashCommandFeedback}
+        suggestions={slashCommandSuggestions}
+        selectedSuggestionIndex={slashCommandSelection}
+        result={slashCommandResult}
+        telegramPicker={slashTelegramPicker}
+        isSending={isSending}
+        onCloseResult={() => setSlashCommandResult(null)}
+        onSelectSuggestion={applySlashSuggestion}
+        onHoverSuggestion={setSlashCommandSelection}
+        onRunTelegramRequest={(request) => {
+          if (!slashTelegramPicker) {
+            return;
+          }
+          void submitComposerInput(
+            `/telegram ${slashTelegramPicker.action} ${request.chat_id}`,
+          );
+        }}
+      />
       {supportsVision ? (
         <input
           ref={fileInputRef}
@@ -719,16 +944,55 @@ function AgentChatComposer({
           onChange={(event) => {
             setMessage(event.target.value);
             setSendError(null);
+            setSlashCommandSelection(0);
+            setSlashCommandResult((current) =>
+              current?.presentation === "compact" ? null : current,
+            );
             updateMessageTextareaHeight();
           }}
           onPaste={handlePaste}
           onKeyDown={(event) => {
+            if (
+              isWebSlashCommandInput(message) &&
+              slashCommandSuggestions.length > 0
+            ) {
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                setSlashCommandSelection((current) =>
+                  (current + 1) % slashCommandSuggestions.length,
+                );
+                return;
+              }
+              if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setSlashCommandSelection(
+                  (current) =>
+                    (current - 1 + slashCommandSuggestions.length) %
+                    slashCommandSuggestions.length,
+                );
+                return;
+              }
+              if (event.key === "Tab") {
+                event.preventDefault();
+                applySlashSuggestion(
+                  selectedSlashSuggestion ?? slashCommandSuggestions[0],
+                );
+                return;
+              }
+            }
             if (
               event.key === "Enter" &&
               !event.shiftKey &&
               !event.nativeEvent.isComposing
             ) {
               event.preventDefault();
+              if (
+                selectedSlashSuggestion &&
+                selectedSlashSuggestion.completion !== message.trim()
+              ) {
+                applySlashSuggestion(selectedSlashSuggestion);
+                return;
+              }
               event.currentTarget.form?.requestSubmit();
             }
           }}
@@ -756,6 +1020,7 @@ function AgentChatComposer({
           disabled={
             !supportsVision ||
             isSending ||
+            isWebSlashCommandInput(message) ||
             imageAttachments.length >= AGENT_CHAT_MAX_IMAGE_ATTACHMENTS
           }
         >
@@ -765,7 +1030,9 @@ function AgentChatComposer({
           type="submit"
           size="icon-lg"
           disabled={
-            (!message.trim() && imageAttachments.length === 0) || isSending
+            (!message.trim() && imageAttachments.length === 0) ||
+            isSending ||
+            slashCommandBlocksSubmit
           }
           aria-label="Send message"
           className="rounded-full"
@@ -783,6 +1050,197 @@ function AgentChatComposer({
         </p>
       ) : null}
     </form>
+  );
+}
+
+function WebSlashCommandPanel({
+  feedback,
+  suggestions,
+  selectedSuggestionIndex,
+  result,
+  telegramPicker,
+  isSending,
+  onCloseResult,
+  onSelectSuggestion,
+  onHoverSuggestion,
+  onRunTelegramRequest,
+}: {
+  feedback: WebSlashCommandFeedback | null;
+  suggestions: WebSlashCommandSuggestion[];
+  selectedSuggestionIndex: number;
+  result: WebSlashCommandResult | null;
+  telegramPicker: WebSlashTelegramPicker | null;
+  isSending: boolean;
+  onCloseResult: () => void;
+  onSelectSuggestion: (suggestion: WebSlashCommandSuggestion) => void;
+  onHoverSuggestion: (index: number) => void;
+  onRunTelegramRequest: (request: DashboardPendingAccessRequest) => void;
+}) {
+  const hasContent =
+    Boolean(result) ||
+    Boolean(feedback) ||
+    suggestions.length > 0 ||
+    Boolean(telegramPicker && telegramPicker.requests.length > 0);
+
+  if (!hasContent) {
+    return null;
+  }
+
+  return (
+    <div className="mb-2 space-y-2 border-b border-border/70 px-2 pb-2">
+      {result ? (
+        <section
+          aria-label={`${result.title} result`}
+          className="space-y-2 text-sm"
+        >
+          <div className="flex min-w-0 items-center gap-2">
+            <WebSlashCommandLevelIcon level={result.level} />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-foreground">
+                {result.title}
+              </p>
+              <p className="truncate text-xs text-muted-foreground">
+                {result.command}
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label="Close command result"
+              onClick={onCloseResult}
+              className="size-7 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+            >
+              <XIcon className="size-3.5" />
+            </Button>
+          </div>
+          {result.presentation === "panel" ? (
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/45 p-3 font-mono text-xs leading-5 text-foreground/90">
+              {result.output.trim() || result.message}
+            </pre>
+          ) : (
+            <p className="break-words text-sm leading-5 text-muted-foreground">
+              {result.message}
+              {result.detail ? (
+                <span className="ml-1 text-muted-foreground/70">
+                  {result.detail}
+                </span>
+              ) : null}
+            </p>
+          )}
+        </section>
+      ) : null}
+
+      {feedback ? <WebSlashCommandFeedbackView feedback={feedback} /> : null}
+
+      {telegramPicker && telegramPicker.requests.length > 0 ? (
+        <section aria-label="Telegram access requests" className="space-y-1">
+          {telegramPicker.requests.slice(0, 5).map((request) => (
+            <button
+              key={`${telegramPicker.action}-${request.chat_id}`}
+              type="button"
+              disabled={isSending}
+              onClick={() => onRunTelegramRequest(request)}
+              className="flex w-full min-w-0 items-center gap-3 rounded-md px-2 py-1.5 text-left text-sm transition hover:bg-muted/70 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <span className="shrink-0 font-mono text-xs text-muted-foreground">
+                {request.chat_id}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-foreground">
+                  {request.title || request.sender}
+                </span>
+                <span className="block truncate text-xs text-muted-foreground">
+                  {request.sender} · {request.last_message_preview}
+                </span>
+              </span>
+              <span className="shrink-0 text-xs font-medium text-primary">
+                {telegramPicker.action}
+              </span>
+            </button>
+          ))}
+        </section>
+      ) : null}
+
+      {suggestions.length > 0 ? (
+        <section aria-label="Command suggestions" className="space-y-1">
+          {suggestions.slice(0, 6).map((suggestion, index) => {
+            const selected = index === selectedSuggestionIndex;
+            return (
+              <button
+                key={`${suggestion.completion}-${index}`}
+                type="button"
+                onMouseEnter={() => onHoverSuggestion(index)}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  onSelectSuggestion(suggestion);
+                }}
+                className={cn(
+                  "flex w-full min-w-0 items-baseline gap-3 rounded-md px-2 py-1.5 text-left text-sm transition",
+                  selected
+                    ? "bg-muted text-foreground"
+                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                )}
+              >
+                <span className="shrink-0 font-mono text-xs">
+                  {suggestion.display}
+                </span>
+                <span className="min-w-0 truncate text-xs text-muted-foreground/75">
+                  {suggestion.description}
+                </span>
+              </button>
+            );
+          })}
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function WebSlashCommandFeedbackView({
+  feedback,
+}: {
+  feedback: WebSlashCommandFeedback;
+}) {
+  return (
+    <div className="flex min-w-0 items-start gap-2 text-sm">
+      <WebSlashCommandLevelIcon level={feedback.level} />
+      <div className="min-w-0 flex-1">
+        <p className="break-words text-sm font-medium leading-5 text-foreground">
+          {feedback.message}
+        </p>
+        {feedback.detail ? (
+          <p className="break-words text-xs leading-5 text-muted-foreground">
+            {feedback.detail}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function WebSlashCommandLevelIcon({ level }: { level: WebSlashCommandLevel }) {
+  if (level === "error") {
+    return (
+      <AlertTriangleIcon
+        className="mt-0.5 size-4 shrink-0 text-destructive"
+        aria-hidden="true"
+      />
+    );
+  }
+  if (level === "warning") {
+    return (
+      <InfoIcon
+        className="mt-0.5 size-4 shrink-0 text-amber-500"
+        aria-hidden="true"
+      />
+    );
+  }
+  return (
+    <CommandIcon
+      className="mt-0.5 size-4 shrink-0 text-primary"
+      aria-hidden="true"
+    />
   );
 }
 
@@ -827,6 +1285,547 @@ function revokeImagePreviewUrl(attachment: AgentChatPendingImageAttachment) {
   } catch {
     // Some mobile WebViews throw while revoking blob URLs during teardown.
   }
+}
+
+function isWebSlashCommandInput(input: string) {
+  return input.trimStart().startsWith("/");
+}
+
+function webSlashCommandBody(input: string) {
+  const trimmedStart = input.trimStart();
+  if (!trimmedStart.startsWith("/")) {
+    return null;
+  }
+  return trimmedStart.slice(1);
+}
+
+function parseWebSlashCommand(input: string) {
+  const body = webSlashCommandBody(input);
+  if (body === null) {
+    return null;
+  }
+  const trimmed = body.trim();
+  return {
+    body,
+    trimmed,
+    trailingSpace: body.endsWith(" "),
+    parts: trimmed ? trimmed.split(/\s+/) : [],
+  };
+}
+
+function webSlashCommandSuggestions(
+  input: string,
+  snapshot: DashboardSnapshot | null,
+): WebSlashCommandSuggestion[] {
+  const parsed = parseWebSlashCommand(input);
+  if (!parsed) {
+    return [];
+  }
+  if (!parsed.trimmed) {
+    return WEB_SLASH_COMMANDS.map(webSlashRootSuggestion);
+  }
+
+  const [verb] = parsed.parts;
+  const command = webSlashFindCommand(verb);
+  if (!command) {
+    return WEB_SLASH_COMMANDS.filter((candidate) =>
+      candidate.name.startsWith(verb),
+    ).map(webSlashRootSuggestion);
+  }
+
+  if (command.subcommands) {
+    return webSlashSubcommandSuggestions(command, parsed, snapshot);
+  }
+
+  if (command.argumentKind === "app") {
+    return webSlashAppSuggestions(command, parsed, snapshot);
+  }
+
+  return [];
+}
+
+function webSlashSubcommandSuggestions(
+  command: WebSlashCommandDefinition,
+  parsed: NonNullable<ReturnType<typeof parseWebSlashCommand>>,
+  snapshot: DashboardSnapshot | null,
+) {
+  const subcommands = command.subcommands ?? [];
+  if (parsed.parts.length === 1) {
+    return subcommands.map((subcommand) =>
+      webSlashSubcommandSuggestion(command, subcommand),
+    );
+  }
+
+  const subcommandName = parsed.parts[1] ?? "";
+  const subcommand = webSlashFindSubcommand(command, subcommandName);
+  const inSubcommandWord =
+    (parsed.trailingSpace && parsed.parts.length === 1) ||
+    (!parsed.trailingSpace && parsed.parts.length === 2);
+
+  if (inSubcommandWord) {
+    if (subcommand && !parsed.trailingSpace) {
+      return [];
+    }
+    return subcommands
+      .filter((candidate) => webSlashSubcommandStartsWith(candidate, subcommandName))
+      .map((candidate) => webSlashSubcommandSuggestion(command, candidate));
+  }
+
+  if (subcommand?.argumentKind === "telegram-request") {
+    const prefix = parsed.parts[2] ?? "";
+    return webSlashTelegramRequestSuggestions(
+      subcommand,
+      prefix,
+      snapshot?.pending_access_requests ?? [],
+    );
+  }
+
+  return [];
+}
+
+function webSlashAppSuggestions(
+  command: WebSlashCommandDefinition,
+  parsed: NonNullable<ReturnType<typeof parseWebSlashCommand>>,
+  snapshot: DashboardSnapshot | null,
+) {
+  const apps = webSlashAppNames(snapshot);
+  const prefix = parsed.parts[1] ?? "";
+  if (parsed.parts.length > 2) {
+    return [];
+  }
+  if (parsed.parts.length === 2 && apps.includes(prefix) && !parsed.trailingSpace) {
+    return [];
+  }
+  return apps
+    .filter((candidate) => candidate.startsWith(prefix))
+    .map((candidate) => ({
+      display: candidate,
+      completion: `/${command.name} ${candidate}`,
+      description: command.description,
+    }));
+}
+
+function webSlashTelegramRequestSuggestions(
+  subcommand: WebSlashSubcommandDefinition,
+  prefix: string,
+  requests: DashboardPendingAccessRequest[],
+) {
+  return requests
+    .filter((request) => request.chat_id.toString().startsWith(prefix))
+    .map((request) => ({
+      display: `${request.chat_id} (${request.sender})`,
+      completion: `/telegram ${subcommand.name} ${request.chat_id}`,
+      description: request.title || request.last_message_preview,
+    }));
+}
+
+function webSlashCommandFeedback(
+  input: string,
+  snapshot: DashboardSnapshot | null,
+  attachmentCount: number,
+): WebSlashCommandFeedback | null {
+  const parsed = parseWebSlashCommand(input);
+  if (!parsed || !parsed.trimmed) {
+    return null;
+  }
+  if (attachmentCount > 0) {
+    return {
+      title: "COMMAND",
+      message: "Commands cannot include image attachments.",
+      detail: "Remove the image or send it as a normal agent message.",
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+
+  const [verb] = parsed.parts;
+  const command = webSlashFindCommand(verb);
+  if (!command) {
+    if (webSlashCommandSuggestions(input, snapshot).length > 0) {
+      return null;
+    }
+    return {
+      title: "UNKNOWN COMMAND",
+      message: `No dashboard command named '${verb}'.`,
+      detail: "Type / to browse available commands.",
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+
+  if (command.subcommands) {
+    const feedback = webSlashSubcommandFeedback(command, parsed, snapshot);
+    if (feedback) {
+      return feedback;
+    }
+  }
+
+  const extraArgumentFeedback = webSlashExtraArgumentFeedback(parsed.parts);
+  if (extraArgumentFeedback) {
+    return extraArgumentFeedback;
+  }
+
+  if (command.argumentKind === "app") {
+    return webSlashAppFeedback(command, parsed, snapshot);
+  }
+
+  return null;
+}
+
+function webSlashSubcommandFeedback(
+  command: WebSlashCommandDefinition,
+  parsed: NonNullable<ReturnType<typeof parseWebSlashCommand>>,
+  snapshot: DashboardSnapshot | null,
+): WebSlashCommandFeedback | null {
+  if (parsed.parts.length === 1) {
+    return {
+      title: command.name.toUpperCase(),
+      message: `Choose a subcommand for /${command.name}.`,
+      detail: webSlashSubcommandChoiceText(command),
+      level: "warning",
+      blocksSubmit: true,
+    };
+  }
+
+  const subcommandName = parsed.parts[1];
+  const subcommand = webSlashFindSubcommand(command, subcommandName);
+  if (!subcommand) {
+    const possible = (command.subcommands ?? []).some((candidate) =>
+      webSlashSubcommandStartsWith(candidate, subcommandName),
+    );
+    if (possible) {
+      return null;
+    }
+    return {
+      title: command.name.toUpperCase(),
+      message: `Unknown ${command.name} subcommand '${subcommandName}'.`,
+      detail: webSlashSubcommandChoiceText(command),
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+
+  if (
+    command.name === "telegram" &&
+    subcommand.argumentKind === "telegram-request" &&
+    parsed.parts.length === 2
+  ) {
+    const requests = snapshot?.pending_access_requests ?? [];
+    if (requests.length === 0) {
+      return {
+        title: "TELEGRAM",
+        message: `No pending Telegram requests to ${subcommand.name}.`,
+        detail: "Use /telegram status to inspect Telegram state.",
+        level: "info",
+        blocksSubmit: true,
+      };
+    }
+    return {
+      title: "TELEGRAM",
+      message: `Choose a request to ${subcommand.name}.`,
+      detail: requests
+        .slice(0, 4)
+        .map((request) => `${request.chat_id} ${request.sender}`)
+        .join(" · "),
+      level: "info",
+      blocksSubmit: true,
+    };
+  }
+
+  if (
+    command.name === "telegram" &&
+    subcommand.argumentKind === "telegram-request" &&
+    parsed.parts.length === 3 &&
+    !/^-?\d+$/.test(parsed.parts[2]) &&
+    webSlashTelegramRequestSuggestions(
+      subcommand,
+      parsed.parts[2],
+      snapshot?.pending_access_requests ?? [],
+    ).length === 0
+  ) {
+    return {
+      title: "TELEGRAM",
+      message: `Invalid chat_id '${parsed.parts[2]}'.`,
+      detail: `Use /telegram ${subcommand.name} [chat_id].`,
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+
+  return null;
+}
+
+function webSlashAppFeedback(
+  command: WebSlashCommandDefinition,
+  parsed: NonNullable<ReturnType<typeof parseWebSlashCommand>>,
+  snapshot: DashboardSnapshot | null,
+): WebSlashCommandFeedback | null {
+  const apps = webSlashAppNames(snapshot);
+  if (parsed.parts.length === 1) {
+    return {
+      title: "APP STATUS",
+      message: "Choose an app for /app-status.",
+      detail:
+        apps.length > 0
+          ? `available: ${apps.join(", ")}`
+          : "No app state is currently available.",
+      level: "warning",
+      blocksSubmit: true,
+    };
+  }
+  const target = parsed.parts[1];
+  if (
+    parsed.parts.length === 2 &&
+    !apps.includes(target) &&
+    !apps.some((candidate) => candidate.startsWith(target)) &&
+    webSlashAppSuggestions(command, parsed, snapshot).length === 0
+  ) {
+    return {
+      title: "APP STATUS",
+      message: `Unknown app '${target}'.`,
+      detail:
+        apps.length > 0
+          ? `available: ${apps.join(", ")}`
+          : "No app state is currently available.",
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+  return null;
+}
+
+function webSlashExtraArgumentFeedback(
+  parts: string[],
+): WebSlashCommandFeedback | null {
+  const [verb] = parts;
+  const rootNoArg = ["status", "clear", "restart"];
+  if (rootNoArg.includes(verb) && parts.length > 1) {
+    return {
+      title: verb.toUpperCase(),
+      message: `/${verb} does not take extra arguments.`,
+      detail: `usage: /${verb}`,
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+
+  if (parts[0] === "debug" && parts.length > 2) {
+    return {
+      title: "DEBUG",
+      message: `/debug ${parts[1]} does not take extra arguments.`,
+      detail: `usage: /debug ${parts[1]}`,
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+  if (parts[0] === "sleep" && parts.length > 2) {
+    return {
+      title: "SLEEP",
+      message: `/sleep ${parts[1]} does not take extra arguments.`,
+      detail: `usage: /sleep ${parts[1]}`,
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+  if (parts[0] === "telegram" && parts[1] === "status" && parts.length > 2) {
+    return {
+      title: "TELEGRAM",
+      message: "/telegram status does not take extra arguments.",
+      detail: "usage: /telegram status",
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+  if (
+    parts[0] === "telegram" &&
+    (parts[1] === "approve" || parts[1] === "reject") &&
+    parts.length > 3
+  ) {
+    return {
+      title: "TELEGRAM",
+      message: `/telegram ${parts[1]} accepts at most one chat_id.`,
+      detail: `usage: /telegram ${parts[1]} [chat_id]`,
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+  if (webSlashFindCommand(parts[0])?.argumentKind === "app" && parts.length > 2) {
+    return {
+      title: "APP STATUS",
+      message: "/app-status accepts exactly one app name.",
+      detail: "usage: /app-status <app>",
+      level: "error",
+      blocksSubmit: true,
+    };
+  }
+
+  return null;
+}
+
+function webSlashTelegramPicker(
+  input: string,
+  snapshot: DashboardSnapshot | null,
+): WebSlashTelegramPicker | null {
+  const parsed = parseWebSlashCommand(input);
+  if (!parsed || parsed.parts.length !== 2 || parsed.parts[0] !== "telegram") {
+    return null;
+  }
+  const action = parsed.parts[1];
+  if (action !== "approve" && action !== "reject") {
+    return null;
+  }
+  const requests = snapshot?.pending_access_requests ?? [];
+  return requests.length > 0 ? { action, requests } : null;
+}
+
+function webSlashCommandResultForResponse(
+  input: string,
+  output: string,
+): WebSlashCommandResult | null {
+  const level = webSlashCommandLevelForResponse(output);
+  if (webSlashIsClearCommand(input) && level !== "error") {
+    return null;
+  }
+  const message = webSlashCompactMessage(output);
+  if (!message && !output.trim()) {
+    return null;
+  }
+  const presentation =
+    webSlashCommandUsesPanel(input) && level !== "error" ? "panel" : "compact";
+  return {
+    command: input.trim(),
+    title: webSlashCommandTitle(input),
+    output,
+    message,
+    detail: webSlashCommandDetail(output),
+    level,
+    presentation,
+  };
+}
+
+function webSlashCommandUsesPanel(input: string) {
+  const parsed = parseWebSlashCommand(input);
+  if (!parsed) {
+    return false;
+  }
+  const parts = parsed.parts;
+  if (parts[0] === "status") {
+    return true;
+  }
+  if (parts[0] === "debug" && parts.length >= 2) {
+    return true;
+  }
+  if (parts[0] === "sleep" && parts[1] === "status") {
+    return true;
+  }
+  if (parts[0] === "telegram" && parts[1] === "status") {
+    return true;
+  }
+  return Boolean(webSlashFindCommand(parts[0])?.argumentKind === "app" && parts[1]);
+}
+
+function webSlashIsClearCommand(input: string) {
+  const parsed = parseWebSlashCommand(input);
+  return parsed?.parts[0] === "clear";
+}
+
+function webSlashCommandTitle(input: string) {
+  return (
+    parseWebSlashCommand(input)?.parts.join(" ").toUpperCase() || "COMMAND"
+  );
+}
+
+function webSlashCommandLevelForResponse(output: string): WebSlashCommandLevel {
+  const lower = output.toLowerCase();
+  return lower.includes("failed") ||
+    lower.includes("unknown") ||
+    lower.includes("invalid") ||
+    lower.includes("unavailable") ||
+    lower.includes("required") ||
+    lower.includes("cannot") ||
+    lower.includes("error")
+    ? "error"
+    : "info";
+}
+
+function webSlashCompactMessage(output: string) {
+  const first = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  return truncateText(first ?? "Done", 180);
+}
+
+function webSlashCommandDetail(output: string) {
+  const lines = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.length > 1 ? truncateText(lines.slice(1).join("  "), 220) : undefined;
+}
+
+function webSlashFindCommand(verb: string) {
+  return WEB_SLASH_COMMANDS.find(
+    (command) => command.name === verb || command.aliases?.includes(verb),
+  );
+}
+
+function webSlashFindSubcommand(
+  command: WebSlashCommandDefinition,
+  name: string,
+) {
+  return command.subcommands?.find(
+    (subcommand) =>
+      subcommand.name === name || subcommand.aliases?.includes(name),
+  );
+}
+
+function webSlashSubcommandStartsWith(
+  subcommand: WebSlashSubcommandDefinition,
+  prefix: string,
+) {
+  return (
+    subcommand.name.startsWith(prefix) ||
+    Boolean(subcommand.aliases?.some((alias) => alias.startsWith(prefix)))
+  );
+}
+
+function webSlashRootSuggestion(
+  command: WebSlashCommandDefinition,
+): WebSlashCommandSuggestion {
+  return {
+    display: command.usage,
+    completion: `/${command.name}`,
+    description: command.description,
+  };
+}
+
+function webSlashSubcommandSuggestion(
+  command: WebSlashCommandDefinition,
+  subcommand: WebSlashSubcommandDefinition,
+): WebSlashCommandSuggestion {
+  return {
+    display: subcommand.usage,
+    completion: `/${command.name} ${subcommand.name}`,
+    description: subcommand.description,
+  };
+}
+
+function webSlashSubcommandChoiceText(command: WebSlashCommandDefinition) {
+  return `available: ${(command.subcommands ?? [])
+    .map((subcommand) => subcommand.usage)
+    .join(" | ")}`;
+}
+
+function webSlashAppNames(snapshot: DashboardSnapshot | null) {
+  return (snapshot?.app_status_outputs ?? [])
+    .map(([name]) => name)
+    .filter(Boolean)
+    .sort();
+}
+
+function truncateText(text: string, maxLength: number) {
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
 function readFileAsDataUrl(file: File) {
@@ -3639,7 +4638,7 @@ function safeJsonPreview(value: unknown) {
 }
 
 function agentChatSendResultText(output: string) {
-  return /^queued terminal message as event\b/.test(output)
+  return /^queued (terminal|session) message as event\b/.test(output)
     ? "Sent to agent"
     : output;
 }
