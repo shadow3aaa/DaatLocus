@@ -116,6 +116,30 @@ General sessions are shown in `daat-locus run`. Project-scoped sessions are
 shown in `daat-locus code <project-dir>` only when the canonical project
 directory matches. A single project directory may have multiple sessions.
 
+### Session Titles
+
+`session_id` is an operation handle, not the normal user-facing label.
+Non-command clients should display a session title and avoid falling back to
+raw session ids.
+
+Title generation belongs to the Session process because only the Session owns
+its event store, memory, and runtime context. Before a generated title exists,
+the Session should publish a placeholder title derived from the first external
+user/event sentence.
+
+Generated titles should use the configured efficient model. Do not use the main
+runtime model or judge model for routine title refreshes. Regenerate only when
+session activity changed, and no more frequently than every five minutes. If
+there is no new activity since the last generated title, do not regenerate.
+
+The Manager may cache the latest title in `SessionRegistry` from session
+status/dashboard snapshots. It must not inspect per-session memory or event
+files to compute titles.
+
+Command surfaces may expose `session_id` or a unique id prefix when the user
+needs an explicit operation handle, such as attach, switch, delete, or
+debugging.
+
 ### Code Mode
 
 `daat-locus code <project-dir>` is a project-scoped session selector, not a
@@ -226,7 +250,7 @@ only routes input and proxies output.
 3. Manager spawns a Session child process with `--session-id`, `--ipc-name`,
    `--ipc-token`, and optional workspace/scope arguments.
 4. Session binds its local socket and initializes its runtime.
-5. Manager polls `Status` over IPC until the Session is ready or failed.
+5. Manager polls `StatusSummary` over IPC until the Session is ready or failed.
 6. Manager routes all client work to the target Session over IPC.
 7. On delete, Manager sends `Shutdown`, waits for process exit, removes registry
    metadata, and deletes session state only when explicitly requested by the

@@ -137,6 +137,7 @@ pub(crate) async fn run_session_serve(
         .unwrap_or(&config.main_model)
         .to_string();
     let judge_client = build_llm(&judge_model_key, &config)?;
+    let efficient_client = build_llm(&config.efficient_model, &config)?;
     let execution_cwd = if let Some(project_dir) = args.project_dir {
         if !project_dir.is_dir() {
             return Err(miette!(
@@ -170,6 +171,7 @@ pub(crate) async fn run_session_serve(
     let mut context = Context {
         llm: client,
         judge_llm: judge_client,
+        efficient_llm: efficient_client,
         config,
         memory,
         plan,
@@ -208,6 +210,7 @@ pub(crate) async fn run_session_serve(
         afterclaim_context_fingerprint: None,
         idle_since: None,
         last_idle_sleep_at: None,
+        session_title: crate::runtime::session_title::SessionTitleState::default(),
         token_estimate_baseline: load_token_estimate_baseline().await,
     };
 
@@ -220,6 +223,7 @@ pub(crate) async fn run_session_serve(
     tx.send_modify(|state| {
         *state = DashboardState {
             agent_name: dashboard_agent_name(),
+            session_title: context.session_title.snapshot(),
             focused_app: context.apps.focused(),
             status_output: render_status_command_output_for_dashboard(&context, &app_renders),
             sleep_status_output: render_sleep_status_output_for_dashboard(&context, &sleep_status),
@@ -253,6 +257,7 @@ pub(crate) async fn run_session_serve(
         };
         sync_web_activity_state(state);
     });
+    crate::runtime::session_title::sync_session_title_placeholder(&mut context, &tx);
 
     let workspace_app_watcher = match start_workspace_app_watcher(
         workspace_apps_dir(&context.execution_cwd),
@@ -415,6 +420,7 @@ async fn handle_ipc_connection(
                 SessionIpcResponse::StatusSummary {
                     summary: Box::new(crate::daemon::session_ipc::SessionStatusSummary {
                         runtime_status: runtime_status_from_state(&state),
+                        session_title: snapshot.session_title.clone(),
                         dashboard:
                             crate::daemon::session_ipc::SessionStatusDashboard::from_dashboard_state(
                                 &snapshot,

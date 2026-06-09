@@ -29,6 +29,12 @@ export type SessionInfo = {
   last_seen_at_ms: number | null;
 };
 
+export type DashboardSessionTitle = {
+  title: string;
+  generated: boolean;
+  updated_at_ms: number;
+};
+
 export type DashboardPlanStep = {
   status: "pending" | "in_progress" | "completed";
   step: string;
@@ -59,6 +65,7 @@ export type DashboardTokenUsageSnapshot = {
   main_model?: string | null;
   judge: TokenUsageInfo | null;
   judge_model?: string | null;
+  efficient_model?: string | null;
 };
 
 export type DashboardPrimitiveOptimizationSnapshot = {
@@ -406,6 +413,7 @@ export type DashboardActivityHistoryPage = {
 
 export type DashboardSnapshot = {
   agent_name: string;
+  session_title?: DashboardSessionTitle | null;
   focused_app: string | null;
   status_output: string;
   sleep_status_output: string;
@@ -445,6 +453,7 @@ export type SessionRuntimeStatus = {
 
 export type SessionStatusDashboard = {
   agent_name: string;
+  session_title?: DashboardSessionTitle | null;
   focused_app: string | null;
   last_cycle_elapsed_ms: number | null;
   runtime_status: string | null;

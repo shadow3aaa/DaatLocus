@@ -47,7 +47,7 @@ use crate::{
     daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync},
     dashboard::{
         DashboardActivityHistoryPage, DashboardCommandRunner, DashboardControlCommand,
-        DashboardHistoryLoader, DashboardIncomingAttachment, DashboardState,
+        DashboardHistoryLoader, DashboardIncomingAttachment, DashboardSessionTitle, DashboardState,
         execute_control_command,
     },
     model_catalog::catalog_model_capacity,
@@ -986,6 +986,12 @@ async fn status_session_summary(
                 {
                     Ok(session_ipc::SessionIpcResponse::StatusSummary { summary }) => {
                         let summary = *summary;
+                        let session_title = summary
+                            .session_title
+                            .clone()
+                            .or_else(|| summary.dashboard.session_title.clone());
+                        apply_session_title_update(&sessions, &mut info, session_title.as_ref())
+                            .await;
                         runtime_status = Some(summary.runtime_status.into());
                         dashboard = Some(summary.dashboard);
                     }
@@ -1028,6 +1034,42 @@ async fn status_session_summary(
     }
 }
 
+async fn apply_session_title_update(
+    sessions: &session::SessionRegistry,
+    info: &mut session::SessionInfo,
+    title: Option<&DashboardSessionTitle>,
+) {
+    let Some(title) = title
+        .map(|title| title.title.trim())
+        .filter(|title| !title.is_empty())
+    else {
+        return;
+    };
+    if info.title.as_deref().map(str::trim) == Some(title) {
+        return;
+    }
+    match sessions
+        .set_title(&info.session_id, title.to_string())
+        .await
+    {
+        Ok(true) => {
+            info.title = Some(title.to_string());
+        }
+        Ok(false) => {
+            tracing::warn!(
+                "session title update ignored for unknown session {}",
+                info.session_id
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                "failed to persist title for session {}: {err:?}",
+                info.session_id
+            );
+        }
+    }
+}
+
 async fn snapshot_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1042,8 +1084,11 @@ async fn snapshot_handler(
                 .request(session_ipc::SessionIpcRequest::DashboardSnapshot)
                 .await
             {
-                Ok(session_ipc::SessionIpcResponse::DashboardSnapshot { state }) => {
-                    Json(*state).into_response()
+                Ok(session_ipc::SessionIpcResponse::DashboardSnapshot { state: snapshot }) => {
+                    let snapshot = *snapshot;
+                    sync_session_title_from_dashboard_state(&state.sessions, session_id, &snapshot)
+                        .await;
+                    Json(snapshot).into_response()
                 }
                 Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => {
                     (StatusCode::BAD_GATEWAY, message).into_response()
@@ -1155,8 +1200,12 @@ async fn stream_handler(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if let Some(session_id) = query.session_id.as_deref() {
-        return match session_client_for_request(&state, session_id).await {
-            Ok(client) => ws.on_upgrade(move |socket| session_dashboard_ws(socket, client)),
+        let sessions = state.sessions.clone();
+        let session_id = session_id.to_string();
+        return match session_client_for_request(&state, &session_id).await {
+            Ok(client) => ws.on_upgrade(move |socket| {
+                session_dashboard_ws(socket, client, sessions, session_id)
+            }),
             Err(err) => (StatusCode::NOT_FOUND, format!("{err:?}")).into_response(),
         };
     }
@@ -1620,25 +1669,41 @@ async fn spawn_session_process(
 
     let client = session_ipc::SessionIpcClient::new(session_id.clone(), ipc_name, ipc_token)
         .with_timeout(Duration::from_secs(2));
-    if let Err(err) = wait_for_session_ready(&client).await {
-        let _ = sessions.mark_dead(&session_id).await;
-        return Err(err);
-    }
+    let startup_title = match wait_for_session_ready(&client).await {
+        Ok(title) => title,
+        Err(err) => {
+            let _ = sessions.mark_dead(&session_id).await;
+            return Err(err);
+        }
+    };
     sessions.mark_ready(&session_id).await?;
+    if let Some(startup_title) = startup_title
+        && let Some(mut info) = sessions.get(&session_id)
+    {
+        apply_session_title_update(&sessions, &mut info, Some(&startup_title)).await;
+    }
     Ok(pid)
 }
 
-async fn wait_for_session_ready(client: &session_ipc::SessionIpcClient) -> Result<()> {
+async fn wait_for_session_ready(
+    client: &session_ipc::SessionIpcClient,
+) -> Result<Option<DashboardSessionTitle>> {
     const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(30);
     let deadline = Instant::now() + SESSION_READY_TIMEOUT;
     while Instant::now() < deadline {
-        match client.request(session_ipc::SessionIpcRequest::Status).await {
-            Ok(session_ipc::SessionIpcResponse::Status { runtime_status })
-                if runtime_status.ready =>
+        match client
+            .request(session_ipc::SessionIpcRequest::StatusSummary)
+            .await
+        {
+            Ok(session_ipc::SessionIpcResponse::StatusSummary { summary })
+                if summary.runtime_status.ready =>
             {
-                return Ok(());
+                return Ok(summary
+                    .session_title
+                    .clone()
+                    .or_else(|| summary.dashboard.session_title.clone()));
             }
-            Ok(session_ipc::SessionIpcResponse::Status { .. }) => {}
+            Ok(session_ipc::SessionIpcResponse::StatusSummary { .. }) => {}
             Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => {
                 tracing::warn!("session status returned error during startup: {message}");
             }
@@ -1914,7 +1979,12 @@ fn strong_filesystem_mode_label(value: StrongFilesystemSandboxMode) -> &'static 
     }
 }
 
-async fn session_dashboard_ws(mut socket: WebSocket, client: session_ipc::SessionIpcClient) {
+async fn session_dashboard_ws(
+    mut socket: WebSocket,
+    client: session_ipc::SessionIpcClient,
+    sessions: session::SessionRegistry,
+    session_id: String,
+) {
     let mut stream = match client.subscribe_dashboard().await {
         Ok(stream) => stream,
         Err(err) => {
@@ -1934,6 +2004,8 @@ async fn session_dashboard_ws(mut socket: WebSocket, client: session_ipc::Sessio
     loop {
         match session_ipc::read_stream_event(&mut stream).await {
             Ok(session_ipc::SessionIpcStreamEvent::DashboardSnapshot { state }) => {
+                sync_session_title_from_dashboard_state(&sessions, &session_id, state.as_ref())
+                    .await;
                 if send_dashboard_ws_snapshot(&mut socket, state.as_ref())
                     .await
                     .is_err()
@@ -1949,6 +2021,24 @@ async fn session_dashboard_ws(mut socket: WebSocket, client: session_ipc::Sessio
             Err(_) => break,
         }
     }
+}
+
+async fn sync_session_title_from_dashboard_state(
+    sessions: &session::SessionRegistry,
+    session_id: &str,
+    snapshot: &DashboardState,
+) {
+    if snapshot.session_title.is_none() {
+        return;
+    }
+    let Ok(session_id) = session::SessionId::from_string(session_id.to_string()) else {
+        tracing::warn!("dashboard snapshot carried invalid session id `{session_id}`");
+        return;
+    };
+    let Some(mut info) = sessions.get(&session_id) else {
+        return;
+    };
+    apply_session_title_update(sessions, &mut info, snapshot.session_title.as_ref()).await;
 }
 
 async fn send_dashboard_ws_snapshot(

@@ -168,11 +168,14 @@ pub(crate) async fn build_eval_context_with_compiled(
         .to_string();
     let judge_client = build_llm(&judge_model_key, &config)
         .unwrap_or_else(|err| panic!("failed to construct judge LLM client: {err:?}"));
+    let efficient_client = build_llm(&config.efficient_model, &config)
+        .unwrap_or_else(|err| panic!("failed to construct efficient LLM client: {err:?}"));
     let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();
 
     Context {
         llm: client,
         judge_llm: judge_client,
+        efficient_llm: efficient_client,
         config,
         memory,
         plan,
@@ -213,6 +216,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         afterclaim_context_fingerprint: None,
         idle_since: None,
         last_idle_sleep_at: None,
+        session_title: crate::runtime::session_title::SessionTitleState::default(),
         token_estimate_baseline: load_token_estimate_baseline().await,
     }
 }

@@ -32,6 +32,7 @@ pub fn sync_dashboard_state(
     tx.send_modify(|state| {
         let app_renders = context.apps.state_renders();
         state.agent_name = dashboard_agent_name();
+        state.session_title = context.session_title.snapshot();
         state.focused_app = context.apps.focused();
         state.status_output = render_status_command_output_for_dashboard(context, &app_renders);
         state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);

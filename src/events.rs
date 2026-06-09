@@ -304,15 +304,23 @@ impl EventStore {
             .events
             .get(&event_id)
             .ok_or_else(|| miette!("unknown event: {event_id}"))?;
-        Ok(EventView {
-            event_id,
-            source: event.source,
-            status: event.status,
-            reply_message: event.reply_message.clone(),
-            arrived_at_ms: event.arrived_at_ms,
-            payload: event.payload.clone(),
-            last_error: event.last_error.clone(),
-        })
+        Ok(event_view(event_id, event))
+    }
+
+    pub fn views(&self) -> Vec<EventView> {
+        let inner = self.inner.lock();
+        inner
+            .state
+            .order
+            .iter()
+            .filter_map(|event_id| {
+                inner
+                    .state
+                    .events
+                    .get(event_id)
+                    .map(|event| event_view(*event_id, event))
+            })
+            .collect()
     }
 
     pub fn prepare_telegram_delivery(&self, event_id: &str) -> Result<()> {
@@ -426,6 +434,18 @@ impl EventStore {
         event.last_updated_at_ms = Utc::now().timestamp_millis();
         persist_locked(&inner)?;
         Ok(result)
+    }
+}
+
+fn event_view(event_id: Uuid, event: &Event) -> EventView {
+    EventView {
+        event_id,
+        source: event.source,
+        status: event.status,
+        reply_message: event.reply_message.clone(),
+        arrived_at_ms: event.arrived_at_ms,
+        payload: event.payload.clone(),
+        last_error: event.last_error.clone(),
     }
 }
 

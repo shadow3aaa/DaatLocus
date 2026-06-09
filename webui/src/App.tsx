@@ -95,7 +95,7 @@ export default function App() {
     setIsCreatingSession(true);
     setSessionError(null);
     try {
-      const session = await createSession({ title: "WebUI Session" });
+      const session = await createSession();
       setSessions((current) => [...current, session]);
       setSelectedSessionId(session.session_id);
     } catch (error) {
@@ -259,7 +259,7 @@ function NoSessionPage({
 }
 
 function sessionLabel(session: SessionInfo) {
-  const title = session.title?.trim() || session.session_id.slice(0, 8);
+  const title = session.title?.trim() || "Untitled session";
   const scope =
     session.scope.kind === "project"
       ? session.scope.project_dir.split("/").filter(Boolean).pop()

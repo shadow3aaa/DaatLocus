@@ -55,6 +55,13 @@ pub struct DashboardPlanStep {
     pub step: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DashboardSessionTitle {
+    pub title: String,
+    pub generated: bool,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardTokenUsageSnapshot {
     pub main: Option<TokenUsageInfo>,
@@ -207,6 +214,8 @@ impl Default for DashboardRuntimeActivity {
 pub struct DashboardState {
     #[serde(default = "default_agent_name")]
     pub agent_name: String,
+    #[serde(default)]
+    pub session_title: Option<DashboardSessionTitle>,
     pub focused_app: Option<AppId>,
     pub status_output: String,
     pub sleep_status_output: String,

@@ -440,7 +440,7 @@ function SessionStatusLine({ entry }: { entry: StatusSessionSummary }) {
     <div className="flex min-w-0 items-center gap-3 rounded-lg border bg-muted/20 px-3 py-2">
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium">
-          {sessionDisplayName(entry.session)}
+          {sessionDisplayName(entry.session, entry.dashboard)}
         </div>
         <div className="truncate text-xs text-muted-foreground">{detail}</div>
       </div>
@@ -688,7 +688,7 @@ function SessionContextComposition({
     <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="truncate text-sm font-medium">
-          {sessionDisplayName(entry.session)}
+          {sessionDisplayName(entry.session, entry.dashboard)}
         </div>
         <div className="shrink-0 font-mono text-xs text-muted-foreground">
           {composition.model ?? "unknown"}
@@ -855,7 +855,7 @@ function PrimitiveOptimizationCard({
           {visibleRows.map((row) => (
             <OptimizationSessionRow
               key={row.entry.session.session_id}
-              label={sessionDisplayName(row.entry.session)}
+              label={sessionDisplayName(row.entry.session, row.entry.dashboard)}
               data={row.progressData}
               total={row.total}
               config={PRIMITIVE_OPTIMIZATION_CHART_CONFIG}
@@ -912,7 +912,7 @@ function RuntimeOptimizationCard({
           {visibleRows.map((row) => (
             <OptimizationSessionRow
               key={row.entry.session.session_id}
-              label={sessionDisplayName(row.entry.session)}
+              label={sessionDisplayName(row.entry.session, row.entry.dashboard)}
               data={row.progressData}
               total={row.total}
               config={RUNTIME_OPTIMIZATION_CHART_CONFIG}
@@ -969,7 +969,7 @@ function tokenUsageSources(
 ): DailyTokenUsageSource[] {
   return sessionDashboardEntries(summary).flatMap((entry) => {
     const tokenUsage = entry.dashboard.token_usage;
-    const sessionLabel = sessionDisplayName(entry.session);
+    const sessionLabel = sessionDisplayName(entry.session, entry.dashboard);
     return [
       {
         label: `${sessionLabel} / ${tokenUsageModelLabel("main", tokenUsage.main_model)}`,
@@ -987,8 +987,15 @@ function tokenUsageModelLabel(role: string, model: string | null | undefined) {
   return model?.trim() || role;
 }
 
-function sessionDisplayName(session: SessionInfo) {
-  return session.title?.trim() || session.session_id.slice(0, 8);
+function sessionDisplayName(
+  session: SessionInfo,
+  dashboard?: SessionStatusDashboard | null,
+) {
+  return (
+    session.title?.trim() ||
+    dashboard?.session_title?.title.trim() ||
+    "Untitled session"
+  );
 }
 
 function sessionScopeLabel(session: SessionInfo) {

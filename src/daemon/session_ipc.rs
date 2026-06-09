@@ -16,8 +16,8 @@ use crate::{
     dashboard::{
         DashboardActivityHistoryPage, DashboardContextCompositionSnapshot, DashboardPlanStep,
         DashboardPrimitiveOptimizationSnapshot, DashboardRuntimeActivity,
-        DashboardRuntimeOptimizationSnapshot, DashboardRuntimeStatusLevel, DashboardState,
-        DashboardTokenUsageSnapshot,
+        DashboardRuntimeOptimizationSnapshot, DashboardRuntimeStatusLevel, DashboardSessionTitle,
+        DashboardState, DashboardTokenUsageSnapshot,
     },
     events::{EventStatus, TelegramIncomingEvent},
     telegram_transport::state::PendingOutboundMessage,
@@ -176,12 +176,16 @@ pub struct SessionRuntimeStatus {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SessionStatusSummary {
     pub runtime_status: SessionRuntimeStatus,
+    #[serde(default)]
+    pub session_title: Option<DashboardSessionTitle>,
     pub dashboard: SessionStatusDashboard,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SessionStatusDashboard {
     pub agent_name: String,
+    #[serde(default)]
+    pub session_title: Option<DashboardSessionTitle>,
     pub focused_app: Option<String>,
     pub last_cycle_elapsed_ms: Option<u64>,
     pub runtime_status: Option<String>,
@@ -198,6 +202,7 @@ impl SessionStatusDashboard {
     pub fn from_dashboard_state(state: &DashboardState) -> Self {
         Self {
             agent_name: state.agent_name.clone(),
+            session_title: state.session_title.clone(),
             focused_app: state.focused_app.as_ref().map(ToString::to_string),
             last_cycle_elapsed_ms: state.last_cycle_elapsed_ms,
             runtime_status: state.runtime_status.clone(),

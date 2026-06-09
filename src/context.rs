@@ -56,6 +56,7 @@ impl RuntimeTurnPhase {
 pub struct Context {
     pub llm: Box<dyn Llm + Send + Sync>,
     pub judge_llm: Box<dyn Llm + Send + Sync>,
+    pub efficient_llm: Box<dyn Llm + Send + Sync>,
     pub config: Config,
     pub memory: Memory,
     pub plan: Plan,
@@ -94,6 +95,7 @@ pub struct Context {
     pub afterclaim_context_fingerprint: Option<String>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
+    pub session_title: crate::runtime::session_title::SessionTitleState,
     pub token_estimate_baseline: TokenEstimateBaseline,
 }
 

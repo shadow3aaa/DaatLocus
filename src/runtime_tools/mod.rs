@@ -916,6 +916,7 @@ mod tests {
             let context = Context {
                 llm: Box::new(UnusedLlm),
                 judge_llm: Box::new(UnusedLlm),
+                efficient_llm: Box::new(UnusedLlm),
                 config,
                 memory: Memory::new().await,
                 plan: Plan::new().await,
@@ -960,6 +961,7 @@ mod tests {
                 afterclaim_context_fingerprint: None,
                 idle_since: None,
                 last_idle_sleep_at: None,
+                session_title: crate::runtime::session_title::SessionTitleState::default(),
                 token_estimate_baseline: TokenEstimateBaseline::default(),
             };
             Self {

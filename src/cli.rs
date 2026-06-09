@@ -489,7 +489,7 @@ async fn run_session_selector(client: DaemonClient, project_dir: Option<PathBuf>
                                 .title
                                 .as_deref()
                                 .filter(|title| !title.trim().is_empty())
-                                .unwrap_or_else(|| s.session_id.as_str());
+                                .unwrap_or("Untitled session");
                             match &s.scope {
                                 crate::daemon::session::SessionScope::General => name.to_string(),
                                 crate::daemon::session::SessionScope::Project { project_dir } => {
@@ -564,7 +564,7 @@ async fn run_session_selector(client: DaemonClient, project_dir: Option<PathBuf>
                         print!(
                             "Title [{}]: ",
                             if current_title.is_empty() {
-                                session_id.as_str()
+                                "untitled"
                             } else {
                                 current_title.as_str()
                             }
