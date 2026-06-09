@@ -61,6 +61,9 @@ pub enum SessionIpcRequest {
         attachments: Vec<InputAttachment>,
         wait_for_reply: bool,
     },
+    DashboardCommand {
+        command: String,
+    },
     EnqueueTelegramEvent {
         event: TelegramIncomingEvent,
     },
@@ -144,6 +147,9 @@ pub enum SessionIpcResponse {
         event_id: String,
         reply_message: Option<String>,
         terminal_status: Option<String>,
+    },
+    DashboardCommandResult {
+        output: String,
     },
     DashboardSnapshot {
         state: Box<DashboardState>,

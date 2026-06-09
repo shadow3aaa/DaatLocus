@@ -79,6 +79,18 @@ pub(crate) async fn handle_dashboard_control_command(
                 live_drafts.clear();
                 count
             };
+            let cleared_dashboard_history = match context.dashboard_history.as_ref() {
+                Some(history) => match history.clear_all() {
+                    Ok(count) => count,
+                    Err(err) => {
+                        tracing::error!(
+                            "failed to clear dashboard activity history during /clear: {err:?}"
+                        );
+                        0
+                    }
+                },
+                None => 0,
+            };
             if let Some(session) = context.active_primitive_run.as_mut() {
                 session.final_summary = "abandoned by dashboard /clear".to_string();
             }
@@ -100,11 +112,19 @@ pub(crate) async fn handle_dashboard_control_command(
             {
                 tracing::error!("failed to persist cleared plan: {err}");
             }
+            tx.send_modify(|state| {
+                state.activity_history = DashboardActivityHistoryWindow::default();
+                state.activity_cells.clear();
+                state.live_activity_cells.clear();
+                state.web_activity_items.clear();
+                state.live_web_activity_items.clear();
+                crate::dashboard::sync_web_activity_state(state);
+            });
             set_runtime_status(
                 Some(tx),
                 RuntimeStatusLevel::Info,
                 format!(
-                    "runtime conversation, current plan, and events cleared (events={cleared_events}, event_work={cleared_event_work}, telegram_outbox={cleared_outbound}, live_drafts={cleared_live_drafts})"
+                    "runtime conversation, current plan, events, and dashboard activity cleared (events={cleared_events}, event_work={cleared_event_work}, telegram_outbox={cleared_outbound}, live_drafts={cleared_live_drafts}, activity_items={cleared_dashboard_history})"
                 ),
             );
             sync_dashboard_state(context, tx, sleep_status, None);

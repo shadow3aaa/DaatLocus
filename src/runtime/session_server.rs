@@ -26,7 +26,8 @@ use crate::{
     dashboard::{
         DashboardActivityHistoryStore, DashboardControlCommand, DashboardRuntimeActivity,
         DashboardRuntimeActivityStatus, DashboardRuntimeStatusLevel, DashboardState, ReducedMotion,
-        activity_cells_from_history_items, dashboard_agent_name, sync_web_activity_state,
+        activity_cells_from_history_items, dashboard_agent_name, execute_control_command,
+        sync_web_activity_state,
     },
     events::{
         EventStore, TelegramIncomingEvent, TerminalIncomingAttachment,
@@ -93,7 +94,7 @@ pub(crate) async fn run_session_serve(
         activity_history: initial_activity_history,
         ..DashboardState::default()
     });
-    let (_dashboard_control_tx, mut dashboard_control_rx) =
+    let (dashboard_control_tx, mut dashboard_control_rx) =
         mpsc::unbounded_channel::<DashboardControlCommand>();
     let (sleep_result_tx, mut sleep_result_rx) = mpsc::unbounded_channel::<SleepTaskResult>();
     let (workspace_app_invalidation_tx, mut workspace_app_invalidation_rx) =
@@ -115,6 +116,8 @@ pub(crate) async fn run_session_serve(
         events: events.clone(),
         pending_work: pending_work.clone(),
         telegram: telegram_handle.clone(),
+        telegram_acl: telegram_acl.clone(),
+        dashboard_control_tx: dashboard_control_tx.clone(),
         daemon_control_tx: daemon_control_tx.clone(),
     }));
 
@@ -364,6 +367,8 @@ struct SessionIpcServerState {
     events: EventStore,
     pending_work: PendingWorkQueue,
     telegram: TelegramTransportStateHandle,
+    telegram_acl: TelegramAclHandle,
+    dashboard_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
 }
 
@@ -445,6 +450,19 @@ async fn handle_ipc_connection(
                 request_id,
             )
             .await
+        }
+        SessionIpcRequest::DashboardCommand { command } => {
+            let snapshot = state.dashboard_rx.borrow().clone();
+            let output = execute_control_command(
+                command.trim(),
+                &state.telegram_acl,
+                &snapshot,
+                &state.dashboard_control_tx,
+            );
+            IpcResponseEnvelope::ok(
+                request_id,
+                SessionIpcResponse::DashboardCommandResult { output },
+            )
         }
         SessionIpcRequest::EnqueueTelegramEvent { event } => {
             enqueue_telegram_event(&state.events, &state.pending_work, event, request_id).await

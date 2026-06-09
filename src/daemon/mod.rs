@@ -1250,6 +1250,30 @@ async fn command_handler(
                     .into_response();
             }
         };
+        let trimmed = request.command.trim();
+        if let Some(command) = trimmed.strip_prefix('/') {
+            if !attachments.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(CommandResponse {
+                        output: "dashboard commands cannot include attachments".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+            let response = client
+                .request(session_ipc::SessionIpcRequest::DashboardCommand {
+                    command: command.trim().to_string(),
+                })
+                .await;
+            let output = match response {
+                Ok(session_ipc::SessionIpcResponse::DashboardCommandResult { output }) => output,
+                Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => message,
+                Ok(_) => "unexpected session IPC dashboard command response".to_string(),
+                Err(err) => format!("session dashboard command failed: {err:?}"),
+            };
+            return Json(CommandResponse { output }).into_response();
+        }
         let response = client
             .request(session_ipc::SessionIpcRequest::SubmitUserInput {
                 origin: session_ipc::UserInputOrigin::WebUi,

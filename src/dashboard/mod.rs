@@ -386,6 +386,21 @@ struct CommandOverlay {
     scroll: u16,
 }
 
+#[derive(Clone)]
+struct CommandFeedback {
+    title: String,
+    message: String,
+    detail: Option<String>,
+    level: CommandFeedbackLevel,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommandFeedbackLevel {
+    Info,
+    Warning,
+    Error,
+}
+
 struct TelegramAccessPicker {
     action: TelegramAccessAction,
     requests: Vec<PendingAccessRequest>,
@@ -550,7 +565,7 @@ static TELEGRAM_STATUS_SUBCOMMAND: TelegramStatusSubcommand = TelegramStatusSubc
 static TELEGRAM_APPROVE_SUBCOMMAND: TelegramApproveSubcommand = TelegramApproveSubcommand;
 static TELEGRAM_REJECT_SUBCOMMAND: TelegramRejectSubcommand = TelegramRejectSubcommand;
 static SLEEP_SUBCOMMANDS: [&dyn DashboardSubcommand; 2] =
-    [&SLEEP_RUN_SUBCOMMAND, &SLEEP_STATUS_SUBCOMMAND];
+    [&SLEEP_STATUS_SUBCOMMAND, &SLEEP_RUN_SUBCOMMAND];
 static TELEGRAM_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
     &TELEGRAM_STATUS_SUBCOMMAND,
     &TELEGRAM_APPROVE_SUBCOMMAND,
@@ -816,7 +831,7 @@ impl DashboardCommand for AppStatusCommand {
             .filter(|candidate| candidate.starts_with(&prefix))
             .map(|candidate| CommandSuggestion {
                 display: candidate.to_string(),
-                completion: format!("{} {}", self.primary_verb(), candidate),
+                completion: format!("/{} {}", self.primary_verb(), candidate),
                 description: self.description().to_string(),
             })
             .collect()
@@ -1033,7 +1048,7 @@ impl DashboardCommand for TelegramCommand {
             .filter(|r| r.chat_id.to_string().starts_with(prefix))
             .map(|r| CommandSuggestion {
                 display: format!("{} ({})", r.chat_id, r.sender),
-                completion: format!("telegram {} {}", subcommand, r.chat_id),
+                completion: format!("/telegram {} {}", subcommand, r.chat_id),
                 description: format!("{} — {}", r.title, r.sender),
             })
             .collect()
@@ -1276,6 +1291,7 @@ pub async fn run_tui_dashboard(
     let mut command_popup_selection: usize = 0;
     let mut command_popup_scroll: usize = 0;
     let mut command_overlay: Option<CommandOverlay> = None;
+    let mut command_feedback: Option<CommandFeedback> = None;
     let mut telegram_access_picker: Option<TelegramAccessPicker> = None;
     // Scroll and lazy-load state
     let mut scroll_offset: u16 = 0;
@@ -1293,6 +1309,7 @@ pub async fn run_tui_dashboard(
     > = None;
     let mut cached_activity_lines = CachedActivityLines::new();
     let mut expanded_thinking: HashSet<usize> = HashSet::new();
+    let mut visible_activity_cleared = false;
 
     // Async event loop: TuiEvent from crossterm stream, watch channel, frame requester.
     let mut needs_render = true;
@@ -1397,11 +1414,19 @@ pub async fn run_tui_dashboard(
                             telegram_access_picker = None;
                             let state = rx.borrow().clone();
                             let response = command_runner.run_command(&command, &state).await;
-                            command_overlay = Some(CommandOverlay {
-                                title: command.to_uppercase(),
-                                text: response,
-                                scroll: 0,
-                            });
+                            match command_presentation_for_response(&command, response) {
+                                Some(CommandPresentation::Overlay(overlay)) => {
+                                    command_overlay = Some(overlay);
+                                    command_feedback = None;
+                                }
+                                Some(CommandPresentation::Feedback(feedback)) => {
+                                    command_overlay = None;
+                                    command_feedback = Some(feedback);
+                                }
+                                None => {
+                                    command_overlay = None;
+                                }
+                            }
                         }
                         continue;
                     }
@@ -1511,6 +1536,7 @@ pub async fn run_tui_dashboard(
                     match key.code {
                         KeyCode::Char(c) => {
                             command_input.insert_char(c);
+                            command_feedback = None;
                             command_popup_selection = 0;
                             command_popup_scroll = 0;
                         }
@@ -1527,12 +1553,14 @@ pub async fn run_tui_dashboard(
                                 &command_context,
                             ) {
                                 command_input.set_text(completion);
+                                command_feedback = None;
                                 command_popup_selection = 0;
                                 command_popup_scroll = 0;
                             }
                         }
                         KeyCode::Backspace => {
                             command_input.delete_before_cursor();
+                            command_feedback = None;
                             command_popup_selection = 0;
                             command_popup_scroll = 0;
                         }
@@ -1575,6 +1603,7 @@ pub async fn run_tui_dashboard(
                         }
                         KeyCode::Esc => {
                             command_input.clear();
+                            command_feedback = None;
                             command_popup_selection = 0;
                             command_popup_scroll = 0;
                         }
@@ -1606,6 +1635,7 @@ pub async fn run_tui_dashboard(
                             ) && completion != command_input.as_str()
                             {
                                 command_input.set_text(completion);
+                                command_feedback = None;
                                 command_popup_selection = 0;
                                 command_popup_scroll = 0;
                                 continue;
@@ -1620,19 +1650,50 @@ pub async fn run_tui_dashboard(
                                 {
                                     telegram_access_picker = Some(picker);
                                     command_input.clear();
+                                    command_feedback = None;
+                                    command_popup_selection = 0;
+                                    command_popup_scroll = 0;
+                                    continue;
+                                }
+                                if let Some(feedback) =
+                                    command_blocks_submission(&input, &command_context)
+                                {
+                                    command_overlay = None;
+                                    command_feedback = Some(feedback);
                                     command_popup_selection = 0;
                                     command_popup_scroll = 0;
                                     continue;
                                 }
                                 let response = command_runner.run_command(&input, &state).await;
-                                if is_dashboard_command_input(&input) {
-                                    command_overlay = Some(CommandOverlay {
-                                        title: input.to_uppercase(),
-                                        text: response,
-                                        scroll: 0,
-                                    });
-                                } else {
-                                    command_overlay = None;
+                                let clear_visible_after_response =
+                                    is_clear_command_input(&input)
+                                        && command_feedback_level_for_response(&response)
+                                            != CommandFeedbackLevel::Error;
+                                match command_presentation_for_response(&input, response) {
+                                    Some(CommandPresentation::Overlay(overlay)) => {
+                                        command_overlay = Some(overlay);
+                                        command_feedback = None;
+                                    }
+                                    Some(CommandPresentation::Feedback(feedback)) => {
+                                        command_overlay = None;
+                                        command_feedback = Some(feedback);
+                                    }
+                                    None => {
+                                        command_overlay = None;
+                                        command_feedback = None;
+                                    }
+                                }
+                                if clear_visible_after_response {
+                                    extra_history_cells.clear();
+                                    oldest_cursor = None;
+                                    has_more_before = false;
+                                    loading_history = false;
+                                    history_load_rx = None;
+                                    cached_activity_lines = CachedActivityLines::new();
+                                    expanded_thinking.clear();
+                                    auto_scroll = true;
+                                    scroll_offset = 0;
+                                    visible_activity_cleared = true;
                                 }
                             }
                             command_input.clear();
@@ -1672,6 +1733,7 @@ pub async fn run_tui_dashboard(
                             &mut pending_pastes,
                         );
                         command_input.move_end();
+                        command_feedback = None;
                         needs_render = true;
                     }
                     tui_event::TuiEvent::Draw => {
@@ -1702,6 +1764,31 @@ pub async fn run_tui_dashboard(
 
         let state = rx.borrow_and_update();
         let pending_requests = state.pending_access_requests.clone();
+        if visible_activity_cleared
+            && state.activity_history.items.is_empty()
+            && state.activity_cells.is_empty()
+            && state.live_activity_cells.is_empty()
+        {
+            visible_activity_cleared = false;
+        }
+        let live_command_feedback = if command_overlay.is_none() && telegram_access_picker.is_none()
+        {
+            let command_context = DashboardCommandContext {
+                requests: &pending_requests,
+                state: &state,
+                executor: None,
+            };
+            command_live_feedback(command_input.as_str(), &command_context)
+        } else {
+            None
+        };
+        let active_command_feedback =
+            if command_overlay.is_none() && telegram_access_picker.is_none() {
+                live_command_feedback.as_ref().or(command_feedback.as_ref())
+            } else {
+                None
+            };
+        let feedback_rows = command_feedback_row_count(active_command_feedback);
         let popup_rows = if command_overlay.is_none() && telegram_access_picker.is_none() {
             let command_context = DashboardCommandContext {
                 requests: &pending_requests,
@@ -1718,7 +1805,7 @@ pub async fn run_tui_dashboard(
         let input_lines = command_input_display_height(
             wrapped_input_height(command_input.as_str(), term_width),
             term_height,
-            popup_rows,
+            popup_rows.saturating_add(feedback_rows),
         );
 
         // Decrement load cooldown each tick
@@ -1786,8 +1873,19 @@ pub async fn run_tui_dashboard(
         }
 
         // Build combined cells: extra history + current state
-        let mut combined_cells: Vec<ActivityCell> = extra_history_cells.clone();
-        combined_cells.extend(state.activity_cells.clone());
+        let mut combined_cells: Vec<ActivityCell> = if visible_activity_cleared {
+            Vec::new()
+        } else {
+            let mut cells = extra_history_cells.clone();
+            cells.extend(state.activity_cells.clone());
+            cells
+        };
+        let empty_live_activity_cells: Vec<LiveActivityCell> = Vec::new();
+        let live_activity_cells = if visible_activity_cleared {
+            empty_live_activity_cells.as_slice()
+        } else {
+            state.live_activity_cells.as_slice()
+        };
 
         // Sync expanded state onto thinking cells
         for (i, cell) in combined_cells.iter_mut().enumerate() {
@@ -1804,7 +1902,7 @@ pub async fn run_tui_dashboard(
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Min(18),
-                    Constraint::Length(2 + input_lines + popup_rows),
+                    Constraint::Length(2 + input_lines + popup_rows + feedback_rows),
                 ])
                 .split(f.area());
             // max_scroll now returned directly from render (no double traversal)
@@ -1812,7 +1910,7 @@ pub async fn run_tui_dashboard(
                 f.buffer_mut(),
                 root[0],
                 &combined_cells,
-                &state.live_activity_cells,
+                live_activity_cells,
                 display_scroll,
                 &mut cached_activity_lines,
                 expanded_thinking.len(),
@@ -1844,6 +1942,7 @@ pub async fn run_tui_dashboard(
                     popup_scroll: command_popup_scroll,
                     last_cursor_pos: &mut last_cursor_pos,
                     input_lines,
+                    feedback: active_command_feedback,
                 },
             );
         })?;
@@ -2155,7 +2254,7 @@ fn render_command_popup(
             let style = if selected {
                 Style::default().fg(Color::Cyan)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(Color::Gray)
             };
             let desc_style = if selected {
                 Style::default().fg(Color::Gray)
@@ -2177,10 +2276,56 @@ fn render_command_popup(
     );
 }
 
+fn render_command_feedback(f: &mut Frame, area: Rect, feedback: &CommandFeedback) {
+    let (marker, marker_style, text_style) = match feedback.level {
+        CommandFeedbackLevel::Info => (
+            "ok",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Gray),
+        ),
+        CommandFeedbackLevel::Warning => (
+            "!",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Gray),
+        ),
+        CommandFeedbackLevel::Error => (
+            "x",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Gray),
+        ),
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled(marker, marker_style),
+        Span::raw("  "),
+        Span::styled(feedback.title.clone(), Style::default().fg(Color::White)),
+        Span::raw("  "),
+        Span::styled(feedback.message.clone(), text_style),
+    ])];
+    if let Some(detail) = feedback
+        .detail
+        .as_ref()
+        .filter(|detail| !detail.trim().is_empty())
+    {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(detail.clone(), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 struct CommandBarRenderState<'a> {
     input: &'a str,
     cursor_pos: usize,
     context: &'a DashboardCommandContext<'a>,
+    feedback: Option<&'a CommandFeedback>,
     runtime_status: Option<&'a str>,
     footer_context: &'a str,
     overlay_open: bool,
@@ -2330,6 +2475,7 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
         cursor_pos,
         input_lines,
         context,
+        feedback,
         runtime_status,
         footer_context,
         overlay_open,
@@ -2345,10 +2491,18 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
     } else {
         command_popup_row_count(input, context)
     };
+    let feedback_rows = if overlay_open {
+        0
+    } else {
+        command_feedback_row_count(feedback)
+    };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints({
             let mut c = vec![Constraint::Length(1), Constraint::Length(input_lines)];
+            if feedback_rows > 0 {
+                c.insert(1, Constraint::Length(feedback_rows));
+            }
             if popup_rows > 0 {
                 c.push(Constraint::Length(popup_rows));
             }
@@ -2365,6 +2519,12 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
         _ => Line::from(""),
     };
     f.render_widget(Paragraph::new(status_line), rows[0]);
+    let input_row_index = if feedback_rows > 0 { 2 } else { 1 };
+    if let Some(feedback) = feedback
+        && feedback_rows > 0
+    {
+        render_command_feedback(f, rows[1], feedback);
+    }
     let available_width = area.width.saturating_sub(2).max(1) as usize;
     // Build input text with prompt prefix, render as wrapping Paragraph
     let display_text = if input.is_empty() {
@@ -2386,12 +2546,13 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
         Style::default().fg(Color::White)
     };
     let cursor_total_row = cursor_display_row(input, cursor_pos, available_width);
-    let input_scroll = cursor_total_row.saturating_sub(rows[1].height.saturating_sub(1));
+    let input_scroll =
+        cursor_total_row.saturating_sub(rows[input_row_index].height.saturating_sub(1));
     let input_para = Paragraph::new(display_text)
         .style(input_style)
         .wrap(ratatui::widgets::Wrap { trim: false })
         .scroll((input_scroll, 0));
-    f.render_widget(input_para, rows[1]);
+    f.render_widget(input_para, rows[input_row_index]);
 
     // Compute cursor position from tracked cursor_pos, accounting for wrapping
     let (cursor_x, cursor_y) = cursor_display_xy(
@@ -2399,7 +2560,7 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
         cursor_pos,
         available_width,
         2, // prompt "› " width
-        rows[1],
+        rows[input_row_index],
         input_scroll,
     );
     f.set_cursor_position(Position {
@@ -2407,11 +2568,19 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
         y: cursor_y,
     });
     *last_cursor_pos = Some((cursor_x, cursor_y));
+    let popup_row_index = input_row_index + 1;
     let footer_row = if popup_rows > 0 {
-        render_command_popup(f, rows[2], input, context, popup_selection, popup_scroll);
-        rows[3]
+        render_command_popup(
+            f,
+            rows[popup_row_index],
+            input,
+            context,
+            popup_selection,
+            popup_scroll,
+        );
+        rows[popup_row_index + 1]
     } else {
-        rows[2]
+        rows[popup_row_index]
     };
     let footer = Paragraph::new(match runtime_status {
         _ if overlay_open => Line::from(vec![
@@ -2498,6 +2667,358 @@ fn fallback_output(output: &str) -> String {
     }
 }
 
+enum CommandPresentation {
+    Overlay(CommandOverlay),
+    Feedback(CommandFeedback),
+}
+
+fn command_presentation_for_response(input: &str, response: String) -> Option<CommandPresentation> {
+    if !is_dashboard_command_input(input) {
+        return None;
+    }
+    let level = command_feedback_level_for_response(&response);
+    if is_clear_command_input(input) && level != CommandFeedbackLevel::Error {
+        return None;
+    }
+    if command_should_show_overlay(input) && level != CommandFeedbackLevel::Error {
+        return Some(CommandPresentation::Overlay(CommandOverlay {
+            title: command_title_from_input(input),
+            text: response,
+            scroll: 0,
+        }));
+    }
+    Some(CommandPresentation::Feedback(CommandFeedback {
+        title: command_title_from_input(input),
+        message: compact_command_feedback_message(&response),
+        detail: command_feedback_detail(&response),
+        level,
+    }))
+}
+
+fn command_should_show_overlay(input: &str) -> bool {
+    let Some(parts) = dashboard_command_parts(input) else {
+        return false;
+    };
+    match parts.as_slice() {
+        ["status"] => true,
+        ["debug", subcommand, ..] => debug_subcommand_is_read_only(subcommand),
+        ["sleep", "status", ..] => true,
+        ["telegram", "status", ..] => true,
+        [verb, _target, ..] if APP_STATUS_COMMAND.accepts(verb) => true,
+        _ => false,
+    }
+}
+
+fn is_clear_command_input(input: &str) -> bool {
+    matches!(
+        dashboard_command_parts(input).as_deref(),
+        Some(["clear", ..])
+    )
+}
+
+fn debug_subcommand_is_read_only(subcommand: &str) -> bool {
+    DEBUG_SUBCOMMANDS
+        .iter()
+        .copied()
+        .any(|candidate| candidate.accepts(subcommand))
+}
+
+fn command_feedback_level_for_response(response: &str) -> CommandFeedbackLevel {
+    let lower = response.to_ascii_lowercase();
+    if lower.contains("failed")
+        || lower.contains("unknown")
+        || lower.contains("invalid")
+        || lower.contains("unavailable")
+        || lower.contains("required")
+        || lower.contains("cannot")
+        || lower.contains("error")
+    {
+        CommandFeedbackLevel::Error
+    } else {
+        CommandFeedbackLevel::Info
+    }
+}
+
+fn compact_command_feedback_message(response: &str) -> String {
+    let message = response
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("done");
+    truncate_chars(message, 160)
+}
+
+fn command_feedback_detail(response: &str) -> Option<String> {
+    let non_empty = response
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if non_empty.len() <= 1 {
+        None
+    } else {
+        Some(truncate_chars(&non_empty[1..].join("  "), 180))
+    }
+}
+
+fn command_title_from_input(input: &str) -> String {
+    dashboard_command_body(input)
+        .map(|body| body.to_uppercase())
+        .unwrap_or_else(|| "COMMAND".to_string())
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut output = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        output.push_str("...");
+    }
+    output
+}
+
+fn dashboard_command_parts(input: &str) -> Option<Vec<&str>> {
+    let body = dashboard_command_body(input)?;
+    let parts = body.split_whitespace().collect::<Vec<_>>();
+    (!parts.is_empty()).then_some(parts)
+}
+
+fn command_live_feedback(
+    input: &str,
+    context: &DashboardCommandContext<'_>,
+) -> Option<CommandFeedback> {
+    let command_input = command_completion_body(input)?;
+    let trimmed = command_input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+    let verb = parts.first().copied().unwrap_or_default();
+    let command = dashboard_commands()
+        .iter()
+        .copied()
+        .find(|command| command.accepts(verb));
+    let Some(command) = command else {
+        if matching_commands(input, context).is_empty() {
+            return Some(CommandFeedback {
+                title: "UNKNOWN COMMAND".to_string(),
+                message: format!("No dashboard command named '{verb}'."),
+                detail: Some("Type / to browse available commands.".to_string()),
+                level: CommandFeedbackLevel::Error,
+            });
+        }
+        return None;
+    };
+
+    if !command.subcommands().is_empty() {
+        if parts.len() == 1 {
+            return Some(CommandFeedback {
+                title: command.primary_verb().to_uppercase(),
+                message: format!("{} needs a subcommand.", command.primary_verb()),
+                detail: Some(format_subcommand_choices(command)),
+                level: CommandFeedbackLevel::Warning,
+            });
+        }
+        let subcommand = parts[1];
+        let known = command
+            .subcommands()
+            .iter()
+            .copied()
+            .any(|candidate| candidate.accepts(subcommand));
+        if !known {
+            let possible = command.subcommands().iter().copied().any(|candidate| {
+                candidate.name().starts_with(subcommand)
+                    || candidate
+                        .aliases()
+                        .iter()
+                        .any(|alias| alias.starts_with(subcommand))
+            });
+            if !possible {
+                return Some(CommandFeedback {
+                    title: command.primary_verb().to_uppercase(),
+                    message: format!(
+                        "Unknown {} subcommand '{subcommand}'.",
+                        command.primary_verb()
+                    ),
+                    detail: Some(format_subcommand_choices(command)),
+                    level: CommandFeedbackLevel::Error,
+                });
+            }
+        }
+        if command.primary_verb() == "telegram"
+            && matches!(subcommand, "approve" | "reject")
+            && parts.len() == 2
+        {
+            if context.requests.is_empty() {
+                return Some(CommandFeedback {
+                    title: "TELEGRAM".to_string(),
+                    message: format!("No pending Telegram requests to {subcommand}."),
+                    detail: Some("Use /telegram status to inspect Telegram state.".to_string()),
+                    level: CommandFeedbackLevel::Info,
+                });
+            }
+            return Some(CommandFeedback {
+                title: "TELEGRAM".to_string(),
+                message: format!("Press Enter to choose a request to {subcommand}."),
+                detail: Some(format_pending_request_choices(context.requests)),
+                level: CommandFeedbackLevel::Info,
+            });
+        }
+    }
+
+    if let Some(feedback) = command_extra_argument_feedback(&parts) {
+        return Some(feedback);
+    }
+
+    if APP_STATUS_COMMAND.accepts(verb) {
+        let apps = context
+            .state
+            .app_status_outputs
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        if parts.len() == 1 {
+            return Some(CommandFeedback {
+                title: "APP STATUS".to_string(),
+                message: "app-status needs an app name.".to_string(),
+                detail: Some(if apps.is_empty() {
+                    "No app state is currently available.".to_string()
+                } else {
+                    format!("available: {}", apps.join(", "))
+                }),
+                level: CommandFeedbackLevel::Warning,
+            });
+        }
+        let target = parts[1].to_ascii_lowercase();
+        let known = apps.iter().any(|name| *name == target);
+        let possible = apps.iter().any(|name| name.starts_with(&target));
+        if !known && !possible {
+            return Some(CommandFeedback {
+                title: "APP STATUS".to_string(),
+                message: format!("Unknown app '{target}'."),
+                detail: Some(if apps.is_empty() {
+                    "No app state is currently available.".to_string()
+                } else {
+                    format!("available: {}", apps.join(", "))
+                }),
+                level: CommandFeedbackLevel::Error,
+            });
+        }
+    }
+
+    if let Some(feedback) = command_extra_argument_feedback(&parts) {
+        return Some(feedback);
+    }
+
+    None
+}
+
+fn command_extra_argument_feedback(parts: &[&str]) -> Option<CommandFeedback> {
+    let verb = parts.first().copied().unwrap_or_default();
+    let extra_for_root = |usage: &str| CommandFeedback {
+        title: verb.to_uppercase(),
+        message: format!("{verb} does not take extra arguments."),
+        detail: Some(format!("usage: /{usage}")),
+        level: CommandFeedbackLevel::Error,
+    };
+    if (QUIT_COMMAND.accepts(verb)
+        || CLEAR_COMMAND.accepts(verb)
+        || STATUS_COMMAND.accepts(verb)
+        || RESTART_COMMAND.accepts(verb))
+        && parts.len() > 1
+    {
+        let usage = if QUIT_COMMAND.accepts(verb) {
+            QUIT_COMMAND.usage()
+        } else if CLEAR_COMMAND.accepts(verb) {
+            CLEAR_COMMAND.usage()
+        } else if STATUS_COMMAND.accepts(verb) {
+            STATUS_COMMAND.usage()
+        } else {
+            RESTART_COMMAND.usage()
+        };
+        return Some(extra_for_root(usage));
+    }
+
+    match parts {
+        ["debug", subcommand, ..]
+            if parts.len() > 2 && debug_subcommand_is_read_only(subcommand) =>
+        {
+            Some(CommandFeedback {
+                title: "DEBUG".to_string(),
+                message: format!("debug {subcommand} does not take extra arguments."),
+                detail: Some(format!("usage: /debug {subcommand}")),
+                level: CommandFeedbackLevel::Error,
+            })
+        }
+        ["sleep", "run" | "status", ..] if parts.len() > 2 => Some(CommandFeedback {
+            title: "SLEEP".to_string(),
+            message: format!("sleep {} does not take extra arguments.", parts[1]),
+            detail: Some(format!("usage: /sleep {}", parts[1])),
+            level: CommandFeedbackLevel::Error,
+        }),
+        ["telegram", "status", ..] if parts.len() > 2 => Some(CommandFeedback {
+            title: "TELEGRAM".to_string(),
+            message: "telegram status does not take extra arguments.".to_string(),
+            detail: Some("usage: /telegram status".to_string()),
+            level: CommandFeedbackLevel::Error,
+        }),
+        ["telegram", "approve" | "reject", ..] if parts.len() > 3 => Some(CommandFeedback {
+            title: "TELEGRAM".to_string(),
+            message: format!("telegram {} accepts at most one chat_id.", parts[1]),
+            detail: Some(format!("usage: /telegram {} [chat_id]", parts[1])),
+            level: CommandFeedbackLevel::Error,
+        }),
+        [verb, ..] if APP_STATUS_COMMAND.accepts(verb) && parts.len() > 2 => {
+            Some(CommandFeedback {
+                title: "APP STATUS".to_string(),
+                message: "app-status accepts exactly one app name.".to_string(),
+                detail: Some("usage: /app-status <app>".to_string()),
+                level: CommandFeedbackLevel::Error,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn command_blocks_submission(
+    input: &str,
+    context: &DashboardCommandContext<'_>,
+) -> Option<CommandFeedback> {
+    let feedback = command_live_feedback(input, context)?;
+    match feedback.level {
+        CommandFeedbackLevel::Warning | CommandFeedbackLevel::Error => Some(feedback),
+        CommandFeedbackLevel::Info => {
+            let parts = dashboard_command_parts(input)?;
+            if matches!(
+                parts.as_slice(),
+                ["telegram", "approve"] | ["telegram", "reject"]
+            ) {
+                Some(feedback)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn format_subcommand_choices(command: &dyn DashboardCommand) -> String {
+    let choices = command
+        .subcommands()
+        .iter()
+        .map(|subcommand| subcommand.usage())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!("available: {choices}")
+}
+
+fn format_pending_request_choices(requests: &[PendingAccessRequest]) -> String {
+    requests
+        .iter()
+        .take(4)
+        .map(|request| format!("{} {}", request.chat_id, request.sender))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 fn selected_command_completion(
     input: &str,
     selected_index: usize,
@@ -2546,6 +3067,18 @@ fn matching_commands(input: &str, context: &DashboardCommandContext<'_>) -> Vec<
         .copied()
         .find(|command| command.accepts(parts[0]))
     {
+        if !command.subcommands().is_empty() && parts.len() == 1 {
+            return command
+                .subcommands()
+                .iter()
+                .copied()
+                .map(|subcommand| CommandSuggestion {
+                    display: subcommand.usage().to_string(),
+                    completion: format!("/{} {}", command.primary_verb(), subcommand.name()),
+                    description: subcommand.description().to_string(),
+                })
+                .collect::<Vec<_>>();
+        }
         if !command.subcommands().is_empty() && (parts.len() > 1 || trailing_space) {
             // Complete subcommands only while the cursor is still within the subcommand word:
             //   "telegram "      → trailing_space=true,  parts.len()==1  ✓
@@ -2583,12 +3116,14 @@ fn matching_commands(input: &str, context: &DashboardCommandContext<'_>) -> Vec<
                 }
             }
             return Vec::new();
-        } else if parts.len() > 1 || trailing_space {
+        } else {
             let args = command.complete_arguments(&parts, context);
             if !args.is_empty() {
                 return args;
             }
-            return Vec::new();
+            if parts.len() > 1 || trailing_space {
+                return Vec::new();
+            }
         }
     }
     dashboard_commands()
@@ -2609,6 +3144,21 @@ fn command_popup_row_count(input: &str, context: &DashboardCommandContext<'_>) -
         0
     } else {
         matches.len().min(6) as u16
+    }
+}
+
+fn command_feedback_row_count(feedback: Option<&CommandFeedback>) -> u16 {
+    match feedback {
+        Some(feedback)
+            if feedback
+                .detail
+                .as_ref()
+                .is_some_and(|detail| !detail.trim().is_empty()) =>
+        {
+            2
+        }
+        Some(_) => 1,
+        None => 0,
     }
 }
 
@@ -2699,6 +3249,101 @@ mod tests {
                 .iter()
                 .all(|suggestion| suggestion.completion.starts_with('/'))
         );
+    }
+
+    #[test]
+    fn exact_subcommand_command_completes_to_subcommands() {
+        let context = test_command_context();
+        let matches = matching_commands("/sleep", &context);
+
+        assert_eq!(
+            matches
+                .iter()
+                .map(|suggestion| suggestion.completion.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/sleep status", "/sleep run"]
+        );
+        let feedback = command_live_feedback("/sleep", &context).expect("sleep needs feedback");
+        assert!(matches!(feedback.level, CommandFeedbackLevel::Warning));
+        assert!(feedback.message.contains("needs a subcommand"));
+    }
+
+    #[test]
+    fn argument_completions_keep_slash_prefix() {
+        let requests = vec![pending_request(42)];
+        let state = DashboardState {
+            app_status_outputs: vec![("browser".to_string(), "state".to_string())],
+            ..DashboardState::default()
+        };
+        let context = DashboardCommandContext {
+            requests: &requests,
+            state: &state,
+            executor: None,
+        };
+
+        let app_match = matching_commands("/app-status", &context)
+            .into_iter()
+            .next()
+            .expect("app completion");
+        assert_eq!(app_match.completion, "/app-status browser");
+
+        let telegram_match = matching_commands("/telegram approve ", &context)
+            .into_iter()
+            .next()
+            .expect("telegram request completion");
+        assert_eq!(telegram_match.completion, "/telegram approve 42");
+    }
+
+    #[test]
+    fn illegal_extra_arguments_block_submission() {
+        let context = test_command_context();
+        let feedback =
+            command_blocks_submission("/sleep run now", &context).expect("extra arg feedback");
+
+        assert!(matches!(feedback.level, CommandFeedbackLevel::Error));
+        assert!(feedback.message.contains("does not take extra arguments"));
+    }
+
+    #[test]
+    fn clear_success_presents_no_tui_feedback() {
+        assert!(is_clear_command_input("/clear"));
+        assert!(
+            command_presentation_for_response(
+                "/clear",
+                "queued runtime conversation + plan + event clear".to_string(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn action_commands_present_as_feedback_not_overlay() {
+        let presentation =
+            command_presentation_for_response("/sleep run", "queued sleep run".to_string())
+                .expect("presentation");
+
+        match presentation {
+            CommandPresentation::Feedback(feedback) => {
+                assert!(matches!(feedback.level, CommandFeedbackLevel::Info));
+            }
+            CommandPresentation::Overlay(_) => panic!("sleep run should not open an overlay"),
+        }
+    }
+
+    #[test]
+    fn clear_errors_still_present_as_feedback() {
+        let presentation = command_presentation_for_response(
+            "/clear",
+            "failed to queue clear command: channel closed".to_string(),
+        )
+        .expect("presentation");
+
+        match presentation {
+            CommandPresentation::Feedback(feedback) => {
+                assert!(matches!(feedback.level, CommandFeedbackLevel::Error));
+            }
+            CommandPresentation::Overlay(_) => panic!("clear error should not open an overlay"),
+        }
     }
 
     #[test]

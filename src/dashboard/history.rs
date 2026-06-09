@@ -109,6 +109,17 @@ impl DashboardActivityHistoryStore {
         self.try_append_items(items)
     }
 
+    pub fn clear_all(&self) -> Result<usize> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| miette::miette!("dashboard activity history lock poisoned"))?;
+        let conn = self.open_connection()?;
+        conn.execute("DELETE FROM dashboard_activity", [])
+            .into_diagnostic()
+            .wrap_err("clear dashboard activity history failed")
+    }
+
     pub fn query_before(
         &self,
         before: Option<i64>,
