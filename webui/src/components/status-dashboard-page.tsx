@@ -234,7 +234,7 @@ export function StatusPage() {
     <section
       id="status"
       aria-label="Status"
-      className="min-h-screen w-full px-6 pb-10 pt-20 md:pb-12 md:pt-24"
+      className="min-h-screen w-full px-6 pb-10 pt-20 md:pb-12 md:pt-8"
     >
       {loadError ? (
         <div

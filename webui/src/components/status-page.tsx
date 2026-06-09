@@ -648,7 +648,7 @@ function AgentChatComposer({
       }}
       onDrop={handleDrop}
       className={cn(
-        "fixed bottom-5 left-1/2 z-30 w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 rounded-[16px] border bg-background/85 p-2 shadow-2xl shadow-background/40 backdrop-blur-xl transition-all duration-300",
+        "fixed bottom-5 left-1/2 z-30 w-[min(42rem,calc(100vw-2rem))] -translate-x-1/2 rounded-[16px] border bg-background/85 p-2 shadow-2xl shadow-background/40 backdrop-blur-xl transition-all duration-300 md:left-[calc(18rem+(100vw-18rem)/2)] md:w-[min(42rem,calc(100vw-18rem-2rem))]",
         isDraggingImage && "border-primary/70 ring-4 ring-primary/15",
         isFocused
           ? "border-primary/45 ring-4 ring-primary/10"
@@ -1214,7 +1214,7 @@ function AgentChatBubbles({
           }px)`,
         }}
         className={cn(
-          "fixed left-1/2 z-40 -translate-x-1/2 rounded-full border border-border/70 bg-background/90 shadow-lg shadow-background/30 backdrop-blur-xl transition-all duration-200",
+          "fixed left-1/2 z-40 -translate-x-1/2 rounded-full border border-border/70 bg-background/90 shadow-lg shadow-background/30 backdrop-blur-xl transition-all duration-200 md:left-[calc(18rem+(100vw-18rem)/2)]",
           showScrollToBottom
             ? "pointer-events-auto translate-y-0 opacity-100"
             : "pointer-events-none translate-y-2 opacity-0",

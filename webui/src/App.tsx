@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 
-import { AppNavigation } from "@/components/app-navigation";
+import { AppSidebar } from "@/components/app-sidebar";
 import { LoginPage } from "@/components/login-page";
 import { LogsPage } from "@/components/logs-page";
 import { SettingsPage } from "@/components/settings-page";
 import { AgentPage, StatusPage } from "@/components/status-page";
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { getStoredDaemonToken } from "@/lib/daemon-auth";
 import {
   createSession,
@@ -105,26 +106,35 @@ export default function App() {
     }
   }
 
+  function handleSelectSession(sessionId: string) {
+    setSelectedSessionId(sessionId);
+    if (activePage !== "agent") {
+      window.location.hash = "#agent";
+    }
+  }
+
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <AppNavigation isAuthenticated={isAuthenticated} />
       {isAuthenticated ? (
-        <>
-          <SessionSelector
+        <SidebarProvider>
+          <AppSidebar
+            activePage={activePage}
             sessions={sessions}
             selectedSessionId={selectedSessionId}
             sessionError={sessionError}
             isCreatingSession={isCreatingSession}
-            onSelectSession={setSelectedSessionId}
+            onSelectSession={handleSelectSession}
             onCreateSession={handleCreateSession}
           />
-          {renderAuthenticatedPage(activePage, selectedSessionId, {
-            hasLoadedSessions,
-            isCreatingSession,
-            sessionError,
-            onCreateSession: handleCreateSession,
-          })}
-        </>
+          <SidebarInset className="min-h-screen">
+            {renderAuthenticatedPage(activePage, selectedSessionId, {
+              hasLoadedSessions,
+              isCreatingSession,
+              sessionError,
+              onCreateSession: handleCreateSession,
+            })}
+          </SidebarInset>
+        </SidebarProvider>
       ) : (
         <LoginPage onAuthenticated={() => setIsAuthenticated(true)} />
       )}
@@ -157,64 +167,6 @@ function renderAuthenticatedPage(
         <NoSessionPage {...sessionState} />
       );
   }
-}
-
-function SessionSelector({
-  sessions,
-  selectedSessionId,
-  sessionError,
-  isCreatingSession,
-  onSelectSession,
-  onCreateSession,
-}: {
-  sessions: SessionInfo[];
-  selectedSessionId: string | null;
-  sessionError: string | null;
-  isCreatingSession: boolean;
-  onSelectSession: (sessionId: string) => void;
-  onCreateSession: () => void;
-}) {
-  const hasSessions = sessions.length > 0;
-  return (
-    <div className="fixed right-4 top-4 z-50 flex max-w-[calc(100vw-5rem)] items-center gap-2 md:right-6 md:top-6">
-      <select
-        aria-label="Session"
-        value={selectedSessionId ?? ""}
-        disabled={!hasSessions}
-        onChange={(event) => {
-          if (event.target.value) {
-            onSelectSession(event.target.value);
-          }
-        }}
-        className="h-10 max-w-[14rem] rounded-lg border border-border/70 bg-background/85 px-3 text-sm shadow-sm outline-none backdrop-blur supports-[backdrop-filter]:bg-background/70"
-      >
-        {hasSessions ? null : <option value="">No sessions</option>}
-        {hasSessions && !selectedSessionId ? (
-          <option value="" disabled>
-            Select session
-          </option>
-        ) : null}
-        {sessions.map((session) => (
-          <option key={session.session_id} value={session.session_id}>
-            {sessionLabel(session)}
-          </option>
-        ))}
-      </select>
-      <button
-        type="button"
-        onClick={onCreateSession}
-        disabled={isCreatingSession}
-        className="h-10 rounded-lg border border-border/70 bg-background/85 px-3 text-sm shadow-sm transition hover:border-primary/50 disabled:opacity-50"
-      >
-        {isCreatingSession ? "Creating" : "New"}
-      </button>
-      {sessionError ? (
-        <span role="alert" className="sr-only">
-          {sessionError}
-        </span>
-      ) : null}
-    </div>
-  );
 }
 
 function NoSessionPage({
@@ -256,15 +208,6 @@ function NoSessionPage({
       </div>
     </section>
   );
-}
-
-function sessionLabel(session: SessionInfo) {
-  const title = session.title?.trim() || "Untitled session";
-  const scope =
-    session.scope.kind === "project"
-      ? session.scope.project_dir.split("/").filter(Boolean).pop()
-      : null;
-  return scope ? `${title} · ${scope}` : title;
 }
 
 function preferredSession(sessions: SessionInfo[]) {

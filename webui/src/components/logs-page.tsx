@@ -303,7 +303,7 @@ export function LogsPage() {
     >
       <div
         ref={menuBarRef}
-        className="fixed top-4 left-16 z-50 flex items-start gap-2 md:top-6 md:left-20"
+        className="fixed top-4 left-16 z-50 flex items-start gap-2 md:top-6 md:left-[calc(18rem+1.5rem)]"
       >
         <div className="relative">
           <Button
