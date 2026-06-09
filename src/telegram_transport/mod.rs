@@ -26,6 +26,16 @@ pub trait TelegramInputRouter: Send + Sync {
     async fn route_telegram_event(&self, event: TelegramIncomingEvent) -> Result<()>;
 }
 
+#[async_trait]
+pub trait TelegramSessionCommandHandler: Send + Sync {
+    async fn handle_session_command(
+        &self,
+        chat_id: &str,
+        chat_title: &str,
+        command: &str,
+    ) -> Result<Option<String>>;
+}
+
 #[derive(Clone)]
 pub struct TelegramDeliveryClient {
     client: Client,
@@ -105,6 +115,7 @@ pub struct TelegramTransport {
     acl: TelegramAclHandle,
     handle: TelegramTransportStateHandle,
     input_router: Arc<dyn TelegramInputRouter>,
+    session_command_handler: Arc<dyn TelegramSessionCommandHandler>,
     command_state_rx: watch::Receiver<DashboardState>,
     command_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     offset: Option<i64>,
@@ -118,6 +129,7 @@ impl TelegramTransport {
         handle: TelegramTransportStateHandle,
         acl: TelegramAclHandle,
         input_router: Arc<dyn TelegramInputRouter>,
+        session_command_handler: Arc<dyn TelegramSessionCommandHandler>,
         command_state_rx: watch::Receiver<DashboardState>,
         command_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     ) -> Self {
@@ -128,6 +140,7 @@ impl TelegramTransport {
             acl,
             handle,
             input_router,
+            session_command_handler,
             command_state_rx,
             command_control_tx,
             offset,
@@ -240,7 +253,10 @@ impl TelegramTransport {
                 if let Some(command) =
                     extract_telegram_command(&message, self.bot_username.as_deref())
                 {
-                    if let Err(err) = self.handle_command_message(message.chat.id, &command).await {
+                    if let Err(err) = self
+                        .handle_command_message(message.chat.id, &chat_title, &command)
+                        .await
+                    {
                         tracing::error!("handle telegram command failed: {err:?}");
                     }
                     return;
@@ -296,13 +312,32 @@ impl TelegramTransport {
         }
     }
 
-    async fn handle_command_message(&self, chat_id: i64, command: &str) -> Result<()> {
+    async fn handle_command_message(
+        &self,
+        chat_id: i64,
+        chat_title: &str,
+        command: &str,
+    ) -> Result<()> {
+        let chat_id_string = chat_id.to_string();
+        self.handle
+            .register_known_chat(chat_id_string.clone(), chat_title.to_string());
+        match self
+            .session_command_handler
+            .handle_session_command(&chat_id_string, chat_title, command)
+            .await
+        {
+            Ok(Some(response)) => return self.send_text(chat_id, &response).await,
+            Ok(None) => {}
+            Err(err) => {
+                return self
+                    .send_text(chat_id, &format!("session command failed: {err:?}"))
+                    .await;
+            }
+        }
         let response = {
             let state = self.command_state_rx.borrow();
             execute_control_command(command, &self.acl, &state, &self.command_control_tx)
         };
-        self.handle
-            .register_known_chat(chat_id.to_string(), chat_id.to_string());
         self.send_text(chat_id, &response).await
     }
 
@@ -364,7 +399,7 @@ impl TelegramTransport {
     }
 
     async fn set_my_commands(&self) -> Result<()> {
-        let commands = remote_dashboard_commands();
+        let commands = telegram_bot_commands();
         let response = self
             .client
             .post(self.endpoint("setMyCommands"))
@@ -564,6 +599,39 @@ impl TelegramTransport {
             self.config.bot_token, method
         )
     }
+}
+
+const TELEGRAM_SESSION_COMMANDS: &[(&str, &str)] = &[
+    (
+        "session_list",
+        "list sessions and the current chat attachment",
+    ),
+    ("session_new", "create and attach a new session"),
+    ("session_attach", "attach this chat to an existing session"),
+    ("session_delete", "delete an existing session"),
+];
+
+fn telegram_bot_commands() -> Vec<serde_json::Value> {
+    let mut commands = remote_dashboard_commands()
+        .into_iter()
+        .map(|command| {
+            serde_json::json!({
+                "command": command.command,
+                "description": command.description,
+            })
+        })
+        .collect::<Vec<_>>();
+    commands.extend(
+        TELEGRAM_SESSION_COMMANDS
+            .iter()
+            .map(|(command, description)| {
+                serde_json::json!({
+                    "command": command,
+                    "description": description,
+                })
+            }),
+    );
+    commands
 }
 
 #[derive(Clone)]
@@ -1188,5 +1256,18 @@ mod tests {
             "image/png"
         );
         assert_eq!(extension_for_file("photos/demo", "image/png"), "png");
+    }
+
+    #[test]
+    fn bot_commands_include_telegram_session_controls() {
+        let commands = telegram_bot_commands()
+            .into_iter()
+            .filter_map(|command| command.get("command")?.as_str().map(ToString::to_string))
+            .collect::<Vec<_>>();
+
+        assert!(commands.contains(&"session_list".to_string()));
+        assert!(commands.contains(&"session_new".to_string()));
+        assert!(commands.contains(&"session_attach".to_string()));
+        assert!(commands.contains(&"session_delete".to_string()));
     }
 }

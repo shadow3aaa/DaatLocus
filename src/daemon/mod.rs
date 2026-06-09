@@ -1519,36 +1519,16 @@ async fn session_delete_handler(
                 .into_response();
         }
     };
-    let ipc_token = state.session_tokens.read().get(&session_id).cloned();
-    if let Some(info) = state.sessions.get(&session_id)
-        && info.status.is_process_backed()
-        && let Some(ipc_name) = info.ipc_name.clone()
-        && let Some(ipc_token) = ipc_token
+    match delete_session_by_id(
+        &state.sessions,
+        &state.session_tokens,
+        &session_id,
+        "session deleted",
+    )
+    .await
     {
-        let client = session_ipc::SessionIpcClient::new(session_id.clone(), ipc_name, ipc_token);
-        let _ = client
-            .request(session_ipc::SessionIpcRequest::Shutdown {
-                reason: "session deleted".to_string(),
-            })
-            .await;
-    }
-    state.session_tokens.write().remove(&session_id);
-    match state.sessions.remove(&session_id).await {
-        Ok(Some(_)) => {
-            let session_dir = session::session_state_paths(&session_id)
-                .root()
-                .to_path_buf();
-            if session_dir.exists()
-                && let Err(err) = std::fs::remove_dir_all(&session_dir)
-            {
-                tracing::warn!(
-                    "failed to remove session directory {}: {err}",
-                    session_dir.display()
-                );
-            }
-            Json(serde_json::json!({ "deleted": session_id.as_str() })).into_response()
-        }
-        Ok(None) => (
+        Ok(true) => Json(serde_json::json!({ "deleted": session_id.as_str() })).into_response(),
+        Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "session not found" })),
         )
@@ -1559,6 +1539,43 @@ async fn session_delete_handler(
         )
             .into_response(),
     }
+}
+
+pub(crate) async fn delete_session_by_id(
+    sessions: &session::SessionRegistry,
+    session_tokens: &SessionTokenStore,
+    session_id: &session::SessionId,
+    reason: &str,
+) -> Result<bool> {
+    let ipc_token = session_tokens.read().get(session_id).cloned();
+    if let Some(info) = sessions.get(session_id)
+        && info.status.is_process_backed()
+        && let Some(ipc_name) = info.ipc_name.clone()
+        && let Some(ipc_token) = ipc_token
+    {
+        let client = session_ipc::SessionIpcClient::new(session_id.clone(), ipc_name, ipc_token);
+        let _ = client
+            .request(session_ipc::SessionIpcRequest::Shutdown {
+                reason: reason.to_string(),
+            })
+            .await;
+    }
+    session_tokens.write().remove(session_id);
+    let removed = sessions.remove(session_id).await?.is_some();
+    if removed {
+        let session_dir = session::session_state_paths(session_id)
+            .root()
+            .to_path_buf();
+        if session_dir.exists()
+            && let Err(err) = std::fs::remove_dir_all(&session_dir)
+        {
+            tracing::warn!(
+                "failed to remove session directory {}: {err}",
+                session_dir.display()
+            );
+        }
+    }
+    Ok(removed)
 }
 
 async fn spawn_session_process(

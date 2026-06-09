@@ -356,6 +356,27 @@ impl TelegramSessionDefaults {
         self.persist().await
     }
 
+    pub async fn remove_by_session(&self, session_id: &SessionId) -> Result<Vec<String>> {
+        let removed = {
+            let mut inner = self.inner.write();
+            let chat_ids = inner
+                .chats
+                .iter()
+                .filter_map(|(chat_id, mapped_session_id)| {
+                    (mapped_session_id == session_id).then_some(chat_id.clone())
+                })
+                .collect::<Vec<_>>();
+            for chat_id in &chat_ids {
+                inner.chats.remove(chat_id);
+            }
+            chat_ids
+        };
+        if !removed.is_empty() {
+            self.persist().await?;
+        }
+        Ok(removed)
+    }
+
     async fn persist(&self) -> Result<()> {
         let bytes = {
             let inner = self.inner.read();
@@ -637,5 +658,46 @@ mod tests {
             .await
             .expect("reload overwritten defaults");
         assert_eq!(reloaded_again.get("12345"), Some(second));
+    }
+
+    #[tokio::test]
+    async fn telegram_session_defaults_remove_mappings_by_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("telegram-session-defaults.json");
+        let defaults = TelegramSessionDefaults::load_from_path(path.clone())
+            .await
+            .expect("load defaults");
+        let first = fixed_session_id("session-first");
+        let second = fixed_session_id("session-second");
+
+        defaults
+            .set("chat-a", first.clone())
+            .await
+            .expect("set first chat");
+        defaults
+            .set("chat-b", first.clone())
+            .await
+            .expect("set second chat");
+        defaults
+            .set("chat-c", second.clone())
+            .await
+            .expect("set third chat");
+
+        let mut removed = defaults
+            .remove_by_session(&first)
+            .await
+            .expect("remove by session");
+        removed.sort();
+        assert_eq!(removed, vec!["chat-a".to_string(), "chat-b".to_string()]);
+        assert_eq!(defaults.get("chat-a"), None);
+        assert_eq!(defaults.get("chat-b"), None);
+        assert_eq!(defaults.get("chat-c"), Some(second.clone()));
+
+        let reloaded = TelegramSessionDefaults::load_from_path(path)
+            .await
+            .expect("reload defaults");
+        assert_eq!(reloaded.get("chat-a"), None);
+        assert_eq!(reloaded.get("chat-b"), None);
+        assert_eq!(reloaded.get("chat-c"), Some(second));
     }
 }

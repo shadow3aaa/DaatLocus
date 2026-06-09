@@ -6,8 +6,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::{
     daemon::{
         DAEMON_HOST_DISPLAY, DaemonControlCommand, DaemonLifecycleHandle, DaemonLifecycleState,
-        DaemonLock, DaemonServerStartParams, SessionTokenStore, session, session_client_for_id,
-        session_ipc, spawn_detached_daemon_process, start_server,
+        DaemonLock, DaemonServerStartParams, SessionTokenStore, delete_session_by_id, session,
+        session_client_for_id, session_ipc, spawn_detached_daemon_process, start_server,
     },
     dashboard::{
         DashboardControlCommand, DashboardRuntimeActivity, DashboardRuntimeActivityStatus,
@@ -17,7 +17,8 @@ use crate::{
     runtime::bootstrap::{bootstrap_telegram_transport_state_from_acl, emit_startup_progress},
     telegram_acl::TelegramAclHandle,
     telegram_transport::{
-        TelegramDeliveryClient, TelegramInputRouter, TelegramTransport,
+        TelegramDeliveryClient, TelegramInputRouter, TelegramSessionCommandHandler,
+        TelegramTransport,
         state::{PendingOutboundMessage, TelegramTransportState},
     },
 };
@@ -60,6 +61,200 @@ impl TelegramInputRouter for ManagerTelegramInputRouter {
                 Err(miette!("session rejected telegram event: {message}"))
             }
             _ => Err(miette!("unexpected session IPC telegram route response")),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
+    async fn handle_session_command(
+        &self,
+        chat_id: &str,
+        chat_title: &str,
+        command: &str,
+    ) -> Result<Option<String>> {
+        let command = command.trim();
+        let Some(verb) = command.split_whitespace().next() else {
+            return Ok(None);
+        };
+        match verb {
+            "session_list" => Ok(Some(self.telegram_session_list(chat_id))),
+            "session_new" => {
+                let title = command_remainder(command)
+                    .filter(|title| !title.trim().is_empty())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| default_telegram_session_title(chat_id, chat_title));
+                let info = self
+                    .sessions
+                    .create(session::SessionScope::General, Some(title))
+                    .await?;
+                self.telegram_defaults
+                    .set(chat_id.to_string(), info.session_id.clone())
+                    .await?;
+                Ok(Some(format!(
+                    "created and attached session `{}`",
+                    info.session_id.as_str()
+                )))
+            }
+            "session_attach" | "session_switch" => {
+                let Some(reference) = command.split_whitespace().nth(1) else {
+                    return Ok(Some(
+                        "usage: /session_attach <session_id_or_unique_prefix>".to_string(),
+                    ));
+                };
+                match resolve_session_reference(&self.sessions, reference) {
+                    Ok(info) => {
+                        self.telegram_defaults
+                            .set(chat_id.to_string(), info.session_id.clone())
+                            .await?;
+                        Ok(Some(format!(
+                            "attached this chat to session `{}` ({})",
+                            info.session_id.as_str(),
+                            session_display_title(&info)
+                        )))
+                    }
+                    Err(message) => Ok(Some(message)),
+                }
+            }
+            "session_delete" => {
+                let Some(reference) = command.split_whitespace().nth(1) else {
+                    return Ok(Some(
+                        "usage: /session_delete <session_id_or_unique_prefix>".to_string(),
+                    ));
+                };
+                let info = match resolve_session_reference(&self.sessions, reference) {
+                    Ok(info) => info,
+                    Err(message) => return Ok(Some(message)),
+                };
+                let deleted = delete_session_by_id(
+                    &self.sessions,
+                    &self.session_tokens,
+                    &info.session_id,
+                    "telegram session_delete command",
+                )
+                .await?;
+                if !deleted {
+                    return Ok(Some(format!("session `{}` was not found", reference)));
+                }
+                let removed_defaults = self
+                    .telegram_defaults
+                    .remove_by_session(&info.session_id)
+                    .await?;
+                let current_chat_note = if removed_defaults.iter().any(|removed| removed == chat_id)
+                {
+                    " This chat now has no attached session; the next normal message will create one."
+                } else {
+                    ""
+                };
+                Ok(Some(format!(
+                    "deleted session `{}` and removed {} Telegram default mapping(s).{}",
+                    info.session_id.as_str(),
+                    removed_defaults.len(),
+                    current_chat_note
+                )))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+impl ManagerTelegramInputRouter {
+    fn telegram_session_list(&self, chat_id: &str) -> String {
+        let current = self
+            .telegram_defaults
+            .get(chat_id)
+            .filter(|session_id| self.sessions.get(session_id).is_some());
+        let mut sessions = self.sessions.list();
+        sessions.sort_by_key(|info| info.started_at_ms);
+        if sessions.is_empty() {
+            return "no sessions\n/session_new [title] creates and attaches one".to_string();
+        }
+
+        let mut lines = Vec::with_capacity(sessions.len() + 2);
+        match current.as_ref() {
+            Some(session_id) => lines.push(format!("attached: `{}`", session_id.as_str())),
+            None => lines
+                .push("attached: none. The next normal message will create a session.".to_string()),
+        }
+        lines.push("sessions:".to_string());
+        lines.extend(sessions.into_iter().map(|info| {
+            let marker = if current.as_ref() == Some(&info.session_id) {
+                "current"
+            } else {
+                "      "
+            };
+            format!(
+                "{} `{}` | {} | {}",
+                marker,
+                info.session_id.as_str(),
+                session_display_title(&info),
+                session_scope_label(&info.scope)
+            )
+        }));
+        lines.join("\n")
+    }
+}
+
+fn command_remainder(command: &str) -> Option<&str> {
+    let command = command.trim();
+    let verb = command.split_whitespace().next()?;
+    command
+        .get(verb.len()..)
+        .map(str::trim)
+        .filter(|remainder| !remainder.is_empty())
+}
+
+fn default_telegram_session_title(chat_id: &str, chat_title: &str) -> String {
+    let title = chat_title.trim();
+    if title.is_empty() {
+        format!("Telegram {chat_id}")
+    } else {
+        format!("Telegram {title}")
+    }
+}
+
+fn resolve_session_reference(
+    sessions: &session::SessionRegistry,
+    reference: &str,
+) -> std::result::Result<session::SessionInfo, String> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err("session id cannot be empty".to_string());
+    }
+    let sessions = sessions.list();
+    if let Some(info) = sessions
+        .iter()
+        .find(|info| info.session_id.as_str() == reference)
+    {
+        return Ok(info.clone());
+    }
+    let matches = sessions
+        .into_iter()
+        .filter(|info| info.session_id.as_str().starts_with(reference))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [info] => Ok(info.clone()),
+        [] => Err(format!("session `{reference}` was not found")),
+        _ => Err(format!(
+            "session prefix `{reference}` is ambiguous; use more characters"
+        )),
+    }
+}
+
+fn session_display_title(info: &session::SessionInfo) -> String {
+    info.title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| info.session_id.as_str())
+        .to_string()
+}
+
+fn session_scope_label(scope: &session::SessionScope) -> String {
+    match scope {
+        session::SessionScope::General => "general".to_string(),
+        session::SessionScope::Project { project_dir } => {
+            format!("project {}", project_dir.display())
         }
     }
 }
@@ -111,16 +306,18 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         let telegram = TelegramTransportState::new();
         let telegram_handle = telegram.handle();
         bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
+        let telegram_router = Arc::new(ManagerTelegramInputRouter {
+            sessions: telegram_sessions,
+            session_tokens: telegram_session_tokens,
+            telegram_defaults,
+        });
         Some(tokio::spawn(
             TelegramTransport::new(
                 config.telegram.clone(),
                 telegram_handle,
                 telegram_acl.clone(),
-                Arc::new(ManagerTelegramInputRouter {
-                    sessions: telegram_sessions,
-                    session_tokens: telegram_session_tokens,
-                    telegram_defaults,
-                }),
+                telegram_router.clone(),
+                telegram_router,
                 dashboard_tx.subscribe(),
                 dashboard_control_tx.clone(),
             )
