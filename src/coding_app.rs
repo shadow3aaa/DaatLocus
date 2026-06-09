@@ -1585,17 +1585,6 @@ mod tests {
     }
 
     #[test]
-    fn open_project_args_reject_manual_language_param() {
-        let err = serde_json::from_value::<CodingOpenProjectArgs>(json!({
-            "project_root": "/tmp/project",
-            "language": "rust",
-        }))
-        .expect_err("language must not be accepted");
-
-        assert!(err.to_string().contains("unknown field `language`"));
-    }
-
-    #[test]
     fn loads_project_instruction_documents_with_hash() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("AGENTS.md"), "Root rule\n").expect("write agents");

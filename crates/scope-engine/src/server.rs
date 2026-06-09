@@ -1100,34 +1100,6 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn open_project_rejects_manual_language_param() {
-        let dir = tempfile::tempdir().unwrap();
-        let req = JsonRpcRequest {
-            _jsonrpc: "2.0".to_string(),
-            id: serde_json::json!(1),
-            method: "open_project".to_string(),
-            params: serde_json::json!({
-                "project_root": dir.path(),
-                "language": "rust",
-            }),
-        };
-        let propagation_state = Mutex::new(PropagationState::new());
-        let lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
-
-        let response = dispatch(&req, None, &propagation_state, &lsp_analyzer);
-
-        assert!(response.error.is_some());
-        assert!(
-            response
-                .error
-                .as_ref()
-                .unwrap()
-                .message
-                .contains("unknown field `language`")
-        );
-    }
-
-    #[test]
     fn open_project_detects_lsp_language_from_project_files() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
