@@ -935,6 +935,7 @@ mod tests {
                 telegram_acl: TelegramAclHandle::load().await,
                 compiled_prompts: CompiledPromptStore::from_entries(Vec::new()),
                 execution_cwd: execution.path().to_path_buf(),
+                coding_project_dir: None,
                 sandbox_policy: RuntimeSandboxPolicy::disabled(),
                 dashboard_tx: None,
                 dashboard_history: None,

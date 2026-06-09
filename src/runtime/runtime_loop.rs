@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::{
-    app::AppId,
+    app::{AppId, AppToolExecutionContext},
     apply_patch::summarize_apply_patch_error,
     context::{
         ActivePrimitiveRunSession, AppNoticeKey, Context, PendingPrimitiveRunFlush,
@@ -33,8 +33,8 @@ use crate::{
         episode::EpisodeActionRecord,
         prompt_parts::AfterClaimContextInput,
         runtime::{
-            AgentContent, AgentContentPart, AgentMessage, AgentTurnItem, AgentTurnRequest,
-            AgentTurnStreamResult, HistoryMessage,
+            AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentTurnItem,
+            AgentTurnRequest, AgentTurnStreamResult, HistoryMessage,
         },
         runtime_error::{
             RuntimeErrorActionContext, RuntimeErrorCase, RuntimeErrorCaseParts, RuntimeErrorKind,

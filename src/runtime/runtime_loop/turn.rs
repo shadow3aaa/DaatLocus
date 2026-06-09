@@ -1,6 +1,7 @@
 use super::model_driver::run_agent_turn_with_retry;
 use super::*;
 use crate::reasoning::prompt_parts::compact_horizontal_whitespace;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 const EMPTY_REASONING_MAX_LOOPS: usize = 2;
@@ -184,6 +185,68 @@ fn output_is_runtime_context_compaction_boundary(output: &AgentLoopStepOutput) -
         .any(|action| action.kind == "runtime_context_compacted")
 }
 
+fn should_prepare_coding_project_for_claimed_input(
+    previous_fingerprint: Option<&str>,
+    claimed_fingerprint: Option<&str>,
+) -> bool {
+    claimed_fingerprint.is_some_and(|fingerprint| previous_fingerprint != Some(fingerprint))
+}
+
+async fn prepare_coding_project_session(context: &mut Context) -> Result<()> {
+    let Some(project_dir) = context.coding_project_dir.clone() else {
+        return Ok(());
+    };
+    let app_context = AppToolExecutionContext {
+        execution_cwd: context.execution_cwd.clone(),
+        sandbox_policy: context.sandbox_policy.clone(),
+        dashboard_tx: context.dashboard_tx.clone(),
+        tool_output_max_tokens: context
+            .config
+            .main_model_config()
+            .tool_output_max_tokens
+            .max(1),
+        turn_epoch: context.runtime_turn_epoch,
+    };
+    prepare_coding_project_app(&mut context.apps, &project_dir, &app_context).await
+}
+
+async fn prepare_coding_project_app(
+    apps: &mut crate::app::AppManager,
+    project_dir: &Path,
+    app_context: &AppToolExecutionContext,
+) -> Result<()> {
+    let coding_id = AppId::coding();
+
+    apps.focus(coding_id.clone()).await?;
+    if coding_project_root_is_open(apps, project_dir) {
+        return Ok(());
+    }
+
+    let call = AgentToolCall {
+        id: format!("auto-open-coding-project-{}", uuid::Uuid::new_v4()),
+        name: "open_project".to_string(),
+        arguments: json!({
+            "project_root": project_dir.display().to_string(),
+        }),
+    };
+    apps.execute_tool_for_app(&coding_id, &call, app_context)
+        .await?;
+    Ok(())
+}
+
+fn coding_project_root_is_open(apps: &crate::app::AppManager, project_dir: &Path) -> bool {
+    apps.state_render_for(&AppId::coding())
+        .and_then(|render| coding_project_root_from_lines(&render.lines))
+        .is_some_and(|current| current == project_dir)
+}
+
+fn coding_project_root_from_lines(lines: &[String]) -> Option<PathBuf> {
+    lines.iter().find_map(|line| {
+        let value = line.strip_prefix("project_root=")?.trim();
+        (!value.is_empty() && value != "none").then(|| PathBuf::from(value))
+    })
+}
+
 pub(crate) async fn execute_agent_loop_step(
     context: &mut Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
@@ -224,6 +287,31 @@ pub(crate) async fn execute_agent_loop_step(
         .collect::<Vec<_>>();
     let live_draft_session = maybe_start_telegram_live_draft_session(context, &claimed_event_views);
     enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightPreTurnContext);
+    let should_prepare_coding_project = should_prepare_coding_project_for_claimed_input(
+        context.afterclaim_context_fingerprint.as_deref(),
+        claimed_input_fingerprint.as_deref(),
+    );
+    if should_prepare_coding_project && let Err(err) = prepare_coding_project_session(context).await
+    {
+        set_runtime_status(
+            tx,
+            RuntimeStatusLevel::Error,
+            "runtime turn preflight failed: coding project setup".to_string(),
+        );
+        return abort_runtime_turn_before_model(
+            context,
+            RuntimeTurnAbort {
+                live_draft_session,
+                claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
+                claimed_event_ids: &claimed_event_ids,
+                claimed_app_notices: &claimed_app_notice_entries,
+                observation: format!("runtime preflight failed: auto coding project setup: {err}"),
+                description: "Failed to prepare the Coding app for the project session."
+                    .to_string(),
+            },
+        )
+        .await;
+    }
     let preturn_started_at = std::time::Instant::now();
     tracing::debug!(
         "runtime preflight stage started: {}",
@@ -1499,5 +1587,73 @@ mod tests {
     fn runtime_compaction_boundary_output_is_detected() {
         let output = runtime_context_compacted_output("compacted");
         assert!(output_is_runtime_context_compaction_boundary(&output));
+    }
+
+    #[test]
+    fn coding_project_prepare_runs_only_for_new_claimed_input() {
+        assert!(!should_prepare_coding_project_for_claimed_input(None, None));
+        assert!(should_prepare_coding_project_for_claimed_input(
+            None,
+            Some("event-a")
+        ));
+        assert!(should_prepare_coding_project_for_claimed_input(
+            Some("event-a"),
+            Some("event-b")
+        ));
+        assert!(!should_prepare_coding_project_for_claimed_input(
+            Some("event-a"),
+            Some("event-a")
+        ));
+    }
+
+    #[test]
+    fn coding_project_root_parser_ignores_none_and_reads_path() {
+        assert_eq!(
+            coding_project_root_from_lines(&[
+                "kind=coding".to_string(),
+                "project_root=none".to_string()
+            ]),
+            None
+        );
+
+        let root = PathBuf::from("/tmp/project with spaces");
+        assert_eq!(
+            coding_project_root_from_lines(&[
+                "kind=coding".to_string(),
+                format!("project_root={}", root.display()),
+                "pending_review_events=0".to_string()
+            ]),
+            Some(root)
+        );
+    }
+
+    #[tokio::test]
+    async fn coding_project_prepare_focuses_and_opens_project() {
+        let project = tempfile::tempdir().expect("project dir");
+        let mut apps =
+            crate::app::AppManager::new(None, vec![Box::new(crate::coding_app::CodingApp::new())])
+                .await
+                .expect("app manager");
+        let app_context = AppToolExecutionContext {
+            execution_cwd: project.path().to_path_buf(),
+            sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),
+            dashboard_tx: None,
+            tool_output_max_tokens: 4096,
+            turn_epoch: 0,
+        };
+
+        prepare_coding_project_app(&mut apps, project.path(), &app_context)
+            .await
+            .expect("prepare coding app");
+
+        assert_eq!(apps.focused(), Some(AppId::coding()));
+        assert!(coding_project_root_is_open(&apps, project.path()));
+
+        prepare_coding_project_app(&mut apps, project.path(), &app_context)
+            .await
+            .expect("prepare coding app again");
+
+        assert_eq!(apps.focused(), Some(AppId::coding()));
+        assert!(coding_project_root_is_open(&apps, project.path()));
     }
 }

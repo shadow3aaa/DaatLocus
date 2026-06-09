@@ -141,14 +141,15 @@ pub(crate) async fn run_session_serve(
         .to_string();
     let judge_client = build_llm(&judge_model_key, &config)?;
     let efficient_client = build_llm(&config.efficient_model, &config)?;
-    let execution_cwd = if let Some(project_dir) = args.project_dir {
+    let coding_project_dir = args.project_dir;
+    let execution_cwd = if let Some(project_dir) = coding_project_dir.as_ref() {
         if !project_dir.is_dir() {
             return Err(miette!(
                 "session project directory does not exist: {}",
                 project_dir.display()
             ));
         }
-        project_dir
+        project_dir.clone()
     } else {
         resolve_runtime_workspace_dir()?
     };
@@ -193,6 +194,7 @@ pub(crate) async fn run_session_serve(
         telegram_acl: telegram_acl.clone(),
         compiled_prompts,
         execution_cwd,
+        coding_project_dir,
         sandbox_policy,
         dashboard_tx: Some(tx.clone()),
         dashboard_history: Some(dashboard_history.clone()),

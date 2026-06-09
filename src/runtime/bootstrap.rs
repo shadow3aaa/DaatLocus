@@ -194,6 +194,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         telegram_acl,
         compiled_prompts,
         execution_cwd,
+        coding_project_dir: None,
         sandbox_policy,
         dashboard_tx: None,
         dashboard_history: None,

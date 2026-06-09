@@ -372,6 +372,10 @@ impl AppManager {
             .collect()
     }
 
+    pub fn state_render_for(&self, id: &AppId) -> Option<AppStateRender> {
+        self.apps.get(id).map(|app| app.render_state())
+    }
+
     pub fn usage(&self, id: &AppId) -> Option<AppUsage> {
         self.apps.get(id).map(|app| app.usage())
     }

@@ -75,6 +75,7 @@ pub struct Context {
     pub telegram_acl: TelegramAclHandle,
     pub compiled_prompts: CompiledPromptStore,
     pub execution_cwd: PathBuf,
+    pub coding_project_dir: Option<PathBuf>,
     pub sandbox_policy: RuntimeSandboxPolicy,
     pub dashboard_tx: Option<tokio::sync::watch::Sender<DashboardState>>,
     pub dashboard_history: Option<DashboardActivityHistoryStore>,
