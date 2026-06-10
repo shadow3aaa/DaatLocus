@@ -278,14 +278,14 @@ where
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| miette!("Codex OAuth HTTP client failed: {e}"))?;
+        .map_err(|e| miette!("OpenAI Codex HTTP client failed: {e}"))?;
 
     let pkce = generate_codex_pkce();
     let state = generate_codex_oauth_state();
     let listener = bind_codex_oauth_callback_listener().await?;
     let actual_port = listener
         .local_addr()
-        .map_err(|e| miette!("Codex OAuth callback listener address failed: {e}"))?
+        .map_err(|e| miette!("OpenAI Codex callback listener address failed: {e}"))?
         .port();
     let redirect_uri = format!("http://localhost:{actual_port}/auth/callback");
     let auth_url = build_codex_authorize_url(&redirect_uri, &pkce, &state);
@@ -328,14 +328,14 @@ where
 
     let callback = tokio::time::timeout(Duration::from_secs(15 * 60), callback_rx)
         .await
-        .map_err(|_| miette!("Codex OAuth browser authorization timed out"))?
-        .map_err(|_| miette!("Codex OAuth callback server stopped before authorization"))?;
+        .map_err(|_| miette!("OpenAI Codex browser authorization timed out"))?
+        .map_err(|_| miette!("OpenAI Codex callback server stopped before authorization"))?;
     let _ = shutdown_tx.send(());
     match tokio::time::timeout(Duration::from_secs(2), server_handle).await {
         Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(err))) => tracing::debug!("Codex OAuth callback server stopped: {err}"),
-        Ok(Err(err)) => tracing::debug!("Codex OAuth callback server task failed: {err}"),
-        Err(_) => tracing::debug!("Codex OAuth callback server did not stop within timeout"),
+        Ok(Ok(Err(err))) => tracing::debug!("OpenAI Codex callback server stopped: {err}"),
+        Ok(Err(err)) => tracing::debug!("OpenAI Codex callback server task failed: {err}"),
+        Err(_) => tracing::debug!("OpenAI Codex callback server did not stop within timeout"),
     }
 
     let authorization_code = match callback {
@@ -372,7 +372,7 @@ async fn bind_codex_oauth_callback_listener() -> Result<TcpListener> {
             let fallback_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
             TcpListener::bind(fallback_addr).await.map_err(|fallback_err| {
                 miette!(
-                    "Codex OAuth callback listener failed on {default_addr} ({default_err}) and on an ephemeral port ({fallback_err})"
+                    "OpenAI Codex callback listener failed on {default_addr} ({default_err}) and on an ephemeral port ({fallback_err})"
                 )
             })
         }
@@ -414,9 +414,9 @@ async fn handle_codex_oauth_callback(
         axum::http::StatusCode::BAD_REQUEST
     };
     let title = if is_success {
-        "OpenAI Codex OAuth complete"
+        "OpenAI Codex authorization complete"
     } else {
-        "OpenAI Codex OAuth failed"
+        "OpenAI Codex authorization failed"
     };
     let body = if is_success {
         "Authorization is complete. You can close this tab and return to Daat Locus."
@@ -505,7 +505,7 @@ where
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| miette!("Codex OAuth HTTP client failed: {e}"))?;
+        .map_err(|e| miette!("OpenAI Codex HTTP client failed: {e}"))?;
 
     let auth_title = crate::tr!(locale, "codex_oauth.authorization");
     status(
@@ -519,20 +519,20 @@ where
         .json(&serde_json::json!({ "client_id": CODEX_OAUTH_CLIENT_ID }))
         .send()
         .await
-        .map_err(|e| miette!("Codex OAuth device code request failed: {e}"))?;
+        .map_err(|e| miette!("OpenAI Codex device code request failed: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(miette!(
-            "Codex OAuth device code request returned HTTP {status}: {body}"
+            "OpenAI Codex device code request returned HTTP {status}: {body}"
         ));
     }
 
     let device: CodexDeviceUserCodeResponse = resp
         .json()
         .await
-        .map_err(|e| miette!("Codex OAuth device code response parse failed: {e}"))?;
+        .map_err(|e| miette!("OpenAI Codex device code response parse failed: {e}"))?;
     let interval_secs = parse_codex_device_interval(&device.interval).max(5);
     let verification_url = format!("{CODEX_OAUTH_ISSUER}/codex/device");
 
@@ -599,7 +599,7 @@ where
 
     loop {
         if std::time::Instant::now() >= expires_at {
-            return Err(miette!("Codex OAuth device authorization expired"));
+            return Err(miette!("OpenAI Codex device authorization expired"));
         }
 
         tokio::time::sleep(context.interval).await;
@@ -621,7 +621,7 @@ where
             }))
             .send()
             .await
-            .map_err(|e| miette!("Codex OAuth device polling failed: {e}"))?;
+            .map_err(|e| miette!("OpenAI Codex device polling failed: {e}"))?;
 
         let status = resp.status();
         if status.is_success() {
@@ -632,7 +632,7 @@ where
             return resp
                 .json()
                 .await
-                .map_err(|e| miette!("Codex OAuth device token response parse failed: {e}"));
+                .map_err(|e| miette!("OpenAI Codex device token response parse failed: {e}"));
         }
 
         if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND {
@@ -641,7 +641,7 @@ where
 
         let body = resp.text().await.unwrap_or_default();
         return Err(miette!(
-            "Codex OAuth device polling returned HTTP {status}: {body}"
+            "OpenAI Codex device polling returned HTTP {status}: {body}"
         ));
     }
 }
@@ -665,21 +665,21 @@ async fn exchange_codex_authorization_code_with_pkce(
         ))
         .send()
         .await
-        .map_err(|e| miette!("Codex OAuth token exchange failed: {e}"))?;
+        .map_err(|e| miette!("OpenAI Codex token exchange failed: {e}"))?;
 
     let status = resp.status();
     let body = resp
         .text()
         .await
-        .map_err(|e| miette!("Codex OAuth token exchange body read failed: {e}"))?;
+        .map_err(|e| miette!("OpenAI Codex token exchange body read failed: {e}"))?;
     if !status.is_success() {
         return Err(miette!(
-            "Codex OAuth token exchange returned HTTP {status}: {body}"
+            "OpenAI Codex token exchange returned HTTP {status}: {body}"
         ));
     }
 
     let tokens: CodexOAuthTokenResponse = serde_json::from_str(&body)
-        .map_err(|e| miette!("Codex OAuth token exchange response parse failed: {e}"))?;
+        .map_err(|e| miette!("OpenAI Codex token exchange response parse failed: {e}"))?;
     Ok(CodexOAuthTokens {
         id_token: tokens.id_token,
         access_token: tokens.access_token,
@@ -1639,7 +1639,7 @@ impl ProviderKind {
     fn labels(locale: Locale) -> Vec<String> {
         vec![
             "OpenAI".to_string(),
-            "OpenAI Codex OAuth".to_string(),
+            "OpenAI Codex".to_string(),
             "GitHub Copilot".to_string(),
             crate::tr!(locale, "config.provider_openai_compatible"),
             crate::tr!(locale, "config.provider_ollama_local"),
@@ -1882,7 +1882,7 @@ const COPILOT_DEFAULT_MODELS: &[&str] = &[
     "o1-mini",
 ];
 
-/// Static fallback for Codex OAuth. The ChatGPT Codex backend may return an
+/// Static fallback for OpenAI Codex. The ChatGPT Codex backend may return an
 /// empty `/models` list while still accepting current Codex model slugs.
 const CODEX_OAUTH_DEFAULT_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini"];
 
@@ -2274,7 +2274,7 @@ async fn fetch_codex_oauth_models(
         Err(err) => {
             tracing::warn!(
                 auth_file = %auth_file.display(),
-                "Codex OAuth model discovery: auth unavailable: {err}"
+                "OpenAI Codex model discovery: auth unavailable: {err}"
             );
             return vec![];
         }
@@ -2290,7 +2290,7 @@ async fn fetch_codex_oauth_models(
     {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("Codex OAuth model discovery: failed to build http client: {e}");
+            tracing::warn!("OpenAI Codex model discovery: failed to build http client: {e}");
             return vec![];
         }
     };
@@ -2308,7 +2308,7 @@ async fn fetch_codex_oauth_models(
     let resp = match request.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(url = %url, "Codex OAuth model discovery request failed: {e}");
+            tracing::warn!(url = %url, "OpenAI Codex model discovery request failed: {e}");
             return vec![];
         }
     };
@@ -2316,7 +2316,7 @@ async fn fetch_codex_oauth_models(
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         let body = redact_secret_text(&body, &access.access_token);
-        tracing::warn!(url = %url, http_status = %status, body = %body, "Codex OAuth model discovery non-2xx");
+        tracing::warn!(url = %url, http_status = %status, body = %body, "OpenAI Codex model discovery non-2xx");
         return vec![];
     }
     let models = parse_models_response(resp.json().await.ok());
@@ -3484,6 +3484,14 @@ mod tests {
             crate::tr!(Locale::ZhCn, "config.codex_oauth_import_codex_auth_file"),
             "从指定 Codex auth.json 路径导入"
         );
+    }
+
+    #[test]
+    fn codex_provider_kind_label_is_product_name() {
+        let labels = ProviderKind::labels(Locale::EnUs);
+
+        assert!(labels.iter().any(|label| label == "OpenAI Codex"));
+        assert!(!labels.iter().any(|label| label == "OpenAI Codex OAuth"));
     }
 
     #[test]

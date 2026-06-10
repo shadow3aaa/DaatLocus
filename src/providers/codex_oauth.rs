@@ -706,7 +706,7 @@ impl CodexOAuthClient {
         let auth_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .expect("failed to build Codex OAuth auth http client");
+            .expect("failed to build OpenAI Codex auth http client");
         let base_url = base_url.unwrap_or(CODEX_RESPONSES_BASE_URL);
         let inner = CodexResponsesClient::new(base_url, model_config);
         Self {
@@ -722,7 +722,7 @@ impl CodexOAuthClient {
             .await
             .map_err(|err| {
                 miette!(
-                    "Codex OAuth auth at {} is unavailable: {err}",
+                    "OpenAI Codex auth at {} is unavailable: {err}",
                     self.auth_file.display()
                 )
             })?;
@@ -1244,12 +1244,12 @@ pub(crate) async fn write_codex_oauth_tokens(
     tokens: &CodexOAuthTokens,
 ) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(tokens)
-        .map_err(|err| miette!("serialize Codex OAuth tokens failed: {err}"))?;
+        .map_err(|err| miette!("serialize OpenAI Codex tokens failed: {err}"))?;
     write_bytes_atomic(auth_file.to_path_buf(), bytes, PersistenceFileMode::Private)
         .await
         .map_err(|err| {
             miette!(
-                "write Codex OAuth tokens {} failed: {err}",
+                "write OpenAI Codex tokens {} failed: {err}",
                 auth_file.display()
             )
         })
@@ -1259,7 +1259,7 @@ pub(crate) async fn codex_oauth_access_from_file(auth_file: &Path) -> Result<Cod
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|err| miette!("failed to build Codex OAuth auth http client: {err}"))?;
+        .map_err(|err| miette!("failed to build OpenAI Codex auth http client: {err}"))?;
     codex_oauth_access_from_file_with_client(auth_file, &client).await
 }
 
@@ -1347,22 +1347,22 @@ async fn refresh_codex_oauth_tokens(
         })
         .send()
         .await
-        .map_err(|err| miette!("Codex OAuth token refresh request failed: {err}"))?;
+        .map_err(|err| miette!("OpenAI Codex token refresh request failed: {err}"))?;
 
     let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|err| miette!("Codex OAuth token refresh body read failed: {err}"))?;
+        .map_err(|err| miette!("OpenAI Codex token refresh body read failed: {err}"))?;
     if !status.is_success() {
         let body = redact_secret_text(&body, &tokens.refresh_token);
         return Err(miette!(
-            "Codex OAuth token refresh returned HTTP {status}: {body}"
+            "OpenAI Codex token refresh returned HTTP {status}: {body}"
         ));
     }
 
     let refreshed: RefreshResponse = serde_json::from_str(&body)
-        .map_err(|err| miette!("Codex OAuth token refresh JSON parse failed: {err}"))?;
+        .map_err(|err| miette!("OpenAI Codex token refresh JSON parse failed: {err}"))?;
     let mut next = tokens.clone();
     if let Some(id_token) = refreshed.id_token {
         next.id_token = id_token;

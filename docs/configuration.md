@@ -96,16 +96,16 @@ Supported provider types are configured through `config add-provider`:
 - `openai`: OpenAI API key provider.
 - `openai-compatible`: OpenAI-compatible HTTP API provider.
 - `github-copilot`: GitHub Copilot provider.
-- `openai-codex-oauth`: ChatGPT Codex OAuth provider.
+- `openai-codex-oauth`: OpenAI Codex provider.
 
-OpenAI Codex OAuth uses the ChatGPT Codex Responses backend rather than a
+OpenAI Codex uses the ChatGPT Codex Responses backend rather than a
 public OpenAI API key. Browser callback login is the default flow; device-code
 login remains available as a fallback. Rotating OAuth credentials are stored in
 a private auth JSON file, while `config.toml` keeps only the auth-file path.
 
 Model `thinking_budget` is a provider-agnostic optional enum: `none`,
 `minimal`, `low`, `medium`, `high`, or `max`. Daat Locus lowers it to each
-provider's supported request shape. For OpenAI Codex OAuth, `max` is sent as
+provider's supported request shape. For OpenAI Codex, `max` is sent as
 Codex's `xhigh` reasoning effort. Providers that reject thinking controls are
 retried without them.
 
