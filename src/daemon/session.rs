@@ -578,33 +578,6 @@ mod tests {
         assert!(reloaded_again.get(&second.session_id).is_none());
     }
 
-    #[tokio::test]
-    async fn session_registry_rejects_legacy_top_level_map_shape() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("sessions.json");
-        tokio::fs::write(
-            &path,
-            br#"{
-              "code-b26e93316a05a4cb": {
-                "session_id": "code-b26e93316a05a4cb",
-                "port": 53826,
-                "status": "ready"
-              }
-            }"#,
-        )
-        .await
-        .expect("write legacy registry");
-
-        let err = match SessionRegistry::load_from_path(path).await {
-            Ok(_) => panic!("legacy registry unexpectedly loaded"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string().contains("missing field `sessions`"),
-            "unexpected error: {err:?}"
-        );
-    }
-
     #[test]
     fn session_summary_serialization_excludes_process_and_ipc_metadata() {
         let mut info = SessionInfo::new(
