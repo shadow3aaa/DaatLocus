@@ -85,6 +85,15 @@ fn input_modalities_suggest_vision(modalities: &serde_json::Value) -> bool {
     })
 }
 
+fn normalize_catalog_key(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn normalize_catalog_api_url(value: &str) -> Option<String> {
+    let normalized = value.trim().trim_end_matches('/');
+    (!normalized.is_empty()).then(|| normalized.to_string())
+}
+
 /// Reasoning configuration option discovered from models.dev.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReasoningOption {
@@ -97,26 +106,40 @@ pub enum ReasoningOption {
 /// Falls back to a basic toggle when `reasoning: true` but no explicit options.
 pub fn catalog_model_reasoning_options(model_id: &str) -> Vec<ReasoningOption> {
     let root = load_catalog_json();
-    let normalized = model_id.trim().to_ascii_lowercase();
+    let normalized = normalize_catalog_key(model_id);
     for section in root.as_object().into_iter().flat_map(|o| o.values()) {
-        if let Some(models) = section["models"].as_object()
-            && let Some(model) = models.get(&normalized)
-        {
-            let options = parse_reasoning_options(&model["reasoning_options"]);
-            if !options.is_empty() {
-                return options;
-            }
-            // Fallback: model declares reasoning support but lacks explicit options
-            if model["reasoning"].as_bool() == Some(true) {
-                return vec![ReasoningOption::Toggle];
-            }
-            return Vec::new();
+        if let Some(model) = lookup_model_value_in_section(section, &normalized) {
+            return reasoning_options_for_model(model);
         }
     }
     Vec::new()
 }
 
-fn parse_reasoning_options(raw: &serde_json::Value) -> Vec<ReasoningOption> {
+pub fn catalog_model_reasoning_options_for_provider(
+    provider_id: &str,
+    model_id: &str,
+) -> Option<Vec<ReasoningOption>> {
+    let root = load_catalog_json();
+    lookup_provider_section(&root, provider_id)
+        .and_then(|section| {
+            lookup_model_value_in_section(section, &normalize_catalog_key(model_id))
+        })
+        .map(reasoning_options_for_model)
+}
+
+fn reasoning_options_for_model(model: &serde_json::Value) -> Vec<ReasoningOption> {
+    let options = parse_reasoning_options(&model["reasoning_options"]);
+    if !options.is_empty() {
+        return options;
+    }
+    // Fallback: model declares reasoning support but lacks explicit options.
+    if model["reasoning"].as_bool() == Some(true) {
+        return vec![ReasoningOption::Toggle];
+    }
+    Vec::new()
+}
+
+pub(crate) fn parse_reasoning_options(raw: &serde_json::Value) -> Vec<ReasoningOption> {
     let Some(arr) = raw.as_array() else {
         return Vec::new();
     };
@@ -143,33 +166,134 @@ fn parse_reasoning_options(raw: &serde_json::Value) -> Vec<ReasoningOption> {
 /// Search all provider sections for a matching model ID.
 fn lookup_model_in_json(root: &serde_json::Value, normalized: &str) -> Option<ModelCapacity> {
     for section in root.as_object()?.values() {
-        let models = section["models"].as_object()?;
-        if let Some(model) = models.get(normalized) {
-            let limit = &model["limit"];
-            let context = limit["context"].as_u64().map(|v| v as usize)?;
-            let output = limit["output"].as_u64().map(|v| v as usize)?;
-            let modalities = &model["modalities"];
-            return Some(ModelCapacity {
-                context_window_tokens: context,
-                max_completion_tokens: output,
-                supports_vision: input_modalities_suggest_vision(modalities),
-                supports_tool_call: model["tool_call"].as_bool().unwrap_or(false),
-            });
+        if let Some(model) = lookup_model_value_in_section(section, normalized) {
+            return capacity_for_model(model);
         }
     }
     None
 }
 
+fn lookup_provider_section<'a>(
+    root: &'a serde_json::Value,
+    provider_id: &str,
+) -> Option<&'a serde_json::Value> {
+    let normalized = normalize_catalog_key(provider_id);
+    root.as_object()?.get(&normalized)
+}
+
+fn lookup_model_value_in_section<'a>(
+    section: &'a serde_json::Value,
+    normalized_model_id: &str,
+) -> Option<&'a serde_json::Value> {
+    section["models"].as_object()?.get(normalized_model_id)
+}
+
+fn capacity_for_model(model: &serde_json::Value) -> Option<ModelCapacity> {
+    let limit = &model["limit"];
+    let context = limit["context"].as_u64().map(|v| v as usize)?;
+    let output = limit["output"].as_u64().map(|v| v as usize)?;
+    let modalities = &model["modalities"];
+    Some(ModelCapacity {
+        context_window_tokens: context,
+        max_completion_tokens: output,
+        supports_vision: input_modalities_suggest_vision(modalities),
+        supports_tool_call: model["tool_call"].as_bool().unwrap_or(false),
+    })
+}
+
 pub fn catalog_model_capacity(model_id: &str) -> Option<ModelCapacity> {
     let root = load_catalog_json();
-    let normalized = model_id.trim().to_ascii_lowercase();
+    let normalized = normalize_catalog_key(model_id);
     lookup_model_in_json(&root, &normalized)
 }
 
-pub fn fetch_models_dev_capacity(model_id: &str) -> Option<ModelCapacity> {
-    let response = reqwest::blocking::get("https://models.dev/api.json").ok()?;
-    let text = response.text().ok()?;
-    let root: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let normalized = model_id.trim().to_ascii_lowercase();
-    lookup_model_in_json(&root, &normalized)
+pub fn catalog_model_capacity_for_provider(
+    provider_id: &str,
+    model_id: &str,
+) -> Option<ModelCapacity> {
+    let root = load_catalog_json();
+    lookup_provider_section(&root, provider_id)
+        .and_then(|section| {
+            lookup_model_value_in_section(section, &normalize_catalog_key(model_id))
+        })
+        .and_then(capacity_for_model)
+}
+
+pub fn catalog_provider_ids_for_api_url(base_url: &str) -> Vec<String> {
+    let root = load_catalog_json();
+    provider_ids_for_api_url_in_json(&root, base_url)
+}
+
+fn provider_ids_for_api_url_in_json(root: &serde_json::Value, base_url: &str) -> Vec<String> {
+    let Some(normalized_base_url) = normalize_catalog_api_url(base_url) else {
+        return Vec::new();
+    };
+    let Some(providers) = root.as_object() else {
+        return Vec::new();
+    };
+    let mut matches: Vec<String> = providers
+        .iter()
+        .filter_map(|(provider_id, section)| {
+            let api_url = normalize_catalog_api_url(section["api"].as_str()?)?;
+            (api_url == normalized_base_url).then(|| provider_id.clone())
+        })
+        .collect();
+    matches.sort();
+    matches
+}
+
+pub fn catalog_provider_has_model(provider_id: &str, model_id: &str) -> bool {
+    let root = load_catalog_json();
+    lookup_provider_section(&root, provider_id)
+        .and_then(|section| {
+            lookup_model_value_in_section(section, &normalize_catalog_key(model_id))
+        })
+        .is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_api_url_matching_is_exact_after_trailing_slash_trim() {
+        let root = serde_json::json!({
+            "alpha": {
+                "api": "https://example.com/v1",
+                "models": {}
+            },
+            "beta": {
+                "api": "https://example.com/v1/chat",
+                "models": {}
+            },
+            "gamma": {
+                "api": null,
+                "models": {}
+            }
+        });
+
+        assert_eq!(
+            provider_ids_for_api_url_in_json(&root, "https://example.com/v1/"),
+            vec!["alpha".to_string()]
+        );
+    }
+
+    #[test]
+    fn provider_api_url_matching_returns_duplicate_providers_sorted() {
+        let root = serde_json::json!({
+            "beta": {
+                "api": "https://example.com/v1",
+                "models": {}
+            },
+            "alpha": {
+                "api": "https://example.com/v1/",
+                "models": {}
+            }
+        });
+
+        assert_eq!(
+            provider_ids_for_api_url_in_json(&root, "https://example.com/v1"),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+    }
 }

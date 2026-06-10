@@ -28,8 +28,10 @@ use crate::{
     },
     i18n::Locale,
     model_catalog::{
-        ModelCapacity, catalog_model_capacity, conservative_model_capacity,
-        fetch_models_dev_capacity,
+        ModelCapacity, ReasoningOption, catalog_model_capacity,
+        catalog_model_capacity_for_provider, catalog_model_reasoning_options_for_provider,
+        catalog_provider_has_model, catalog_provider_ids_for_api_url, conservative_model_capacity,
+        parse_reasoning_options,
     },
     providers::{
         CodexOAuthTokens, codex_cli_auth_file, codex_oauth_access_from_file, codex_oauth_auth_file,
@@ -1885,43 +1887,45 @@ const COPILOT_DEFAULT_MODELS: &[&str] = &[
 /// Static fallback for OpenAI Codex. The ChatGPT Codex backend may return an
 /// empty `/models` list while still accepting current Codex model slugs.
 const CODEX_OAUTH_DEFAULT_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini"];
+const OPENAI_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 fn codex_oauth_fallback_models() -> Vec<DiscoveredModel> {
     CODEX_OAUTH_DEFAULT_MODELS
         .iter()
         .map(|id| {
-            let capacity = catalog_model_capacity(id);
+            let capacity = catalog_model_capacity_for_provider("openai", id);
             DiscoveredModel {
                 id: (*id).to_string(),
                 context_window: capacity.map(|capacity| capacity.context_window_tokens),
                 max_output_tokens: capacity.map(|capacity| capacity.max_completion_tokens),
                 supports_vision: capacity.map(|c| c.supports_vision),
+                reasoning_options: Some(codex_oauth_reasoning_options()),
             }
         })
         .collect()
 }
 
 fn resolve_model_capacity(
+    provider: &ProviderConfig,
     model_id: &str,
     detected_context_window: Option<usize>,
     detected_max_output: Option<usize>,
     detected_supports_vision: Option<bool>,
 ) -> ModelCapacity {
-    let catalog = catalog_model_capacity(model_id);
+    let catalog_provider_id = catalog_provider_id_for_model(provider, model_id);
+    let catalog = if let Some(provider_id) = catalog_provider_id.as_deref() {
+        catalog_model_capacity_for_provider(provider_id, model_id)
+    } else {
+        catalog_model_capacity(model_id)
+    };
     let fallback = conservative_model_capacity();
-
-    let models_dev = || fetch_models_dev_capacity(model_id);
-    let ctx = || models_dev().map(|c| c.context_window_tokens);
-    let out = || models_dev().map(|c| c.max_completion_tokens);
 
     ModelCapacity {
         context_window_tokens: detected_context_window
             .or_else(|| catalog.map(|capacity| capacity.context_window_tokens))
-            .or_else(ctx)
             .unwrap_or(fallback.context_window_tokens),
         max_completion_tokens: detected_max_output
             .or_else(|| catalog.map(|capacity| capacity.max_completion_tokens))
-            .or_else(out)
             .unwrap_or(fallback.max_completion_tokens),
         supports_vision: detected_supports_vision.unwrap_or_else(|| {
             catalog
@@ -1931,6 +1935,46 @@ fn resolve_model_capacity(
         supports_tool_call: catalog
             .map(|c| c.supports_tool_call)
             .unwrap_or(fallback.supports_tool_call),
+    }
+}
+
+fn catalog_provider_id_for_model(provider: &ProviderConfig, model_id: &str) -> Option<String> {
+    match provider {
+        ProviderConfig::Openai { base_url, .. } => match base_url.as_deref() {
+            Some(base_url) => catalog_provider_id_for_base_url_and_model(base_url, model_id)
+                .or_else(|| Some("openai".to_string())),
+            None => Some("openai".to_string()),
+        },
+        ProviderConfig::GithubCopilot { .. } => Some("github-copilot".to_string()),
+        // models.dev has no separate ChatGPT Codex provider. The model slugs
+        // line up with OpenAI entries for capacity metadata; Codex-specific
+        // reasoning defaults are handled separately below.
+        ProviderConfig::OpenaiCodexOauth { .. } => Some("openai".to_string()),
+        ProviderConfig::OpenaiCompatible { base_url, .. } => {
+            catalog_provider_id_for_base_url_and_model(base_url, model_id)
+        }
+        ProviderConfig::Ollama { .. } => None,
+    }
+}
+
+fn catalog_provider_id_for_base_url_and_model(base_url: &str, model_id: &str) -> Option<String> {
+    if normalize_provider_base_url(base_url) == OPENAI_DEFAULT_BASE_URL {
+        return Some("openai".to_string());
+    }
+
+    let provider_ids = catalog_provider_ids_for_api_url(base_url);
+    if provider_ids.len() == 1 {
+        return provider_ids.into_iter().next();
+    }
+
+    let model_matches: Vec<String> = provider_ids
+        .into_iter()
+        .filter(|provider_id| catalog_provider_has_model(provider_id, model_id))
+        .collect();
+    if model_matches.len() == 1 {
+        model_matches.into_iter().next()
+    } else {
+        None
     }
 }
 
@@ -1944,6 +1988,7 @@ async fn fetch_copilot_models(github_token: &str) -> Vec<DiscoveredModel> {
                 context_window: None,
                 max_output_tokens: None,
                 supports_vision: None,
+                reasoning_options: None,
             })
             .collect::<Vec<_>>()
     };
@@ -2044,6 +2089,7 @@ struct DiscoveredModel {
     context_window: Option<usize>,
     max_output_tokens: Option<usize>,
     supports_vision: Option<bool>,
+    reasoning_options: Option<Vec<ReasoningOption>>,
 }
 
 /// Fetch provider model IDs. Failures return an empty list.
@@ -2177,6 +2223,7 @@ async fn fetch_ollama_models(host: &str) -> Vec<DiscoveredModel> {
                     context_window: None,
                     max_output_tokens: None,
                     supports_vision: None,
+                    reasoning_options: None,
                 })
                 .collect();
         }
@@ -2211,6 +2258,7 @@ async fn fetch_ollama_models(host: &str) -> Vec<DiscoveredModel> {
                 context_window: ctx,
                 max_output_tokens: None,
                 supports_vision: vision,
+                reasoning_options: None,
             });
         }
     }
@@ -2387,16 +2435,43 @@ fn parse_models_response(json: Option<serde_json::Value>) -> Vec<DiscoveredModel
                 .as_u64()
                 .or_else(|| m["max_output_tokens"].as_u64())
                 .map(|v| v as usize);
+            let reasoning_options = discovered_reasoning_options(m);
             Some(DiscoveredModel {
                 id,
                 context_window,
                 max_output_tokens,
                 supports_vision: None,
+                reasoning_options,
             })
         })
         .collect();
     models.sort_by(|a, b| a.id.cmp(&b.id));
     models
+}
+
+fn discovered_reasoning_options(model: &serde_json::Value) -> Option<Vec<ReasoningOption>> {
+    let options = parse_reasoning_options(&model["reasoning_options"]);
+    if !options.is_empty() {
+        return Some(options);
+    }
+
+    [
+        &model["supported_reasoning_efforts"],
+        &model["reasoning_efforts"],
+        &model["reasoning"]["efforts"],
+        &model["capabilities"]["reasoning_efforts"],
+        &model["capabilities"]["reasoning"]["efforts"],
+    ]
+    .into_iter()
+    .find_map(|raw| {
+        let values: Vec<String> = raw
+            .as_array()
+            .into_iter()
+            .flat_map(|items| items.iter().filter_map(|item| item.as_str()))
+            .map(str::to_string)
+            .collect();
+        (!values.is_empty()).then_some(vec![ReasoningOption::Effort { values }])
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2416,9 +2491,9 @@ async fn prompt_model(
     )?;
     let discovered = fetch_model_ids(provider_name, provider).await;
 
-    let (model_id, api_ctx, api_out, api_vision) = if discovered.is_empty() {
+    let (model_id, api_ctx, api_out, api_vision, api_reasoning_options) = if discovered.is_empty() {
         let id = ui.text("Model ID", None)?;
-        (id, None, None, None)
+        (id, None, None, None, None)
     } else {
         let manual = crate::tr!(locale, "config.manual_model");
         let labels: Vec<String> = discovered
@@ -2431,7 +2506,7 @@ async fn prompt_model(
 
         if labels[idx] == manual {
             let id = ui.text("Model ID", None)?;
-            (id, None, None, None)
+            (id, None, None, None, None)
         } else {
             let m = &discovered[idx];
             (
@@ -2439,11 +2514,12 @@ async fn prompt_model(
                 m.context_window,
                 m.max_output_tokens,
                 m.supports_vision,
+                m.reasoning_options.clone(),
             )
         }
     };
 
-    let capacity = resolve_model_capacity(&model_id, api_ctx, api_out, api_vision);
+    let capacity = resolve_model_capacity(provider, &model_id, api_ctx, api_out, api_vision);
 
     let default_name = model_id
         .split(['/', ':'])
@@ -2467,7 +2543,9 @@ async fn prompt_model(
 
     let thinking_budget = prompt_reasoning_config(
         ui,
+        provider,
         &model_id,
+        api_reasoning_options.as_deref(),
         &crate::tr!(locale, "config.reasoning_config"),
     )?;
 
@@ -2487,11 +2565,12 @@ async fn prompt_model(
 
 fn prompt_reasoning_config(
     ui: &mut PromptUi,
+    provider: &ProviderConfig,
     model_id: &str,
+    detected_options: Option<&[ReasoningOption]>,
     title: &str,
 ) -> Result<Option<ThinkingBudget>> {
-    use crate::model_catalog::catalog_model_reasoning_options;
-    let options = catalog_model_reasoning_options(model_id);
+    let options = reasoning_options_for_prompt(provider, model_id, detected_options);
     if options.is_empty() {
         return Ok(None);
     }
@@ -2500,13 +2579,9 @@ fn prompt_reasoning_config(
     let mut labels: Vec<String> = options
         .iter()
         .flat_map(|opt| match opt {
-            crate::model_catalog::ReasoningOption::Toggle => {
-                vec!["high (recommended)".to_string()]
-            }
-            crate::model_catalog::ReasoningOption::Effort { values } => values.clone(),
-            crate::model_catalog::ReasoningOption::BudgetTokens { .. } => {
-                vec!["custom (budget tokens)".to_string()]
-            }
+            ReasoningOption::Toggle => vec!["high (recommended)".to_string()],
+            ReasoningOption::Effort { values } => values.clone(),
+            ReasoningOption::BudgetTokens { .. } => vec!["custom (budget tokens)".to_string()],
         })
         .collect();
     let skip_idx = labels.len();
@@ -2520,19 +2595,19 @@ fn prompt_reasoning_config(
     let mut flat_idx = idx;
     for opt in &options {
         match opt {
-            crate::model_catalog::ReasoningOption::Toggle => {
+            ReasoningOption::Toggle => {
                 if flat_idx == 0 {
                     return Ok(Some(ThinkingBudget::new("high")));
                 }
                 flat_idx -= 1;
             }
-            crate::model_catalog::ReasoningOption::Effort { values } => {
+            ReasoningOption::Effort { values } => {
                 if flat_idx < values.len() {
                     return Ok(Some(ThinkingBudget::new(&values[flat_idx])));
                 }
                 flat_idx -= values.len();
             }
-            crate::model_catalog::ReasoningOption::BudgetTokens { min, max } => {
+            ReasoningOption::BudgetTokens { min, max } => {
                 if flat_idx == 0 {
                     let default = (*min).max(1024);
                     let val = ui.usize("Reasoning budget tokens", default)?;
@@ -2544,6 +2619,42 @@ fn prompt_reasoning_config(
         }
     }
     Ok(None)
+}
+
+fn reasoning_options_for_prompt(
+    provider: &ProviderConfig,
+    model_id: &str,
+    detected_options: Option<&[ReasoningOption]>,
+) -> Vec<ReasoningOption> {
+    if let Some(options) = detected_options
+        && !options.is_empty()
+    {
+        return options.to_vec();
+    }
+
+    let provider_defaults = match provider {
+        ProviderConfig::OpenaiCodexOauth { .. } => codex_oauth_reasoning_options(),
+        _ => Vec::new(),
+    };
+    if !provider_defaults.is_empty() {
+        return provider_defaults;
+    }
+
+    if let Some(provider_id) = catalog_provider_id_for_model(provider, model_id) {
+        return catalog_model_reasoning_options_for_provider(&provider_id, model_id)
+            .unwrap_or_default();
+    }
+
+    crate::model_catalog::catalog_model_reasoning_options(model_id)
+}
+
+fn codex_oauth_reasoning_options() -> Vec<ReasoningOption> {
+    vec![ReasoningOption::Effort {
+        values: ["none", "minimal", "low", "medium", "high", "xhigh"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    }]
 }
 
 // ---------------------------------------------------------------------------
@@ -3357,9 +3468,38 @@ fn mask_secret(s: &str) -> String {
 mod tests {
     use super::*;
 
+    fn openai_provider() -> ProviderConfig {
+        ProviderConfig::Openai {
+            api_key: "test".to_string(),
+            base_url: None,
+        }
+    }
+
+    fn openai_provider_with_base_url(base_url: &str) -> ProviderConfig {
+        ProviderConfig::Openai {
+            api_key: "test".to_string(),
+            base_url: Some(base_url.to_string()),
+        }
+    }
+
+    fn copilot_provider() -> ProviderConfig {
+        ProviderConfig::GithubCopilot {
+            github_token: "test".to_string(),
+        }
+    }
+
+    fn compatible_provider(base_url: &str) -> ProviderConfig {
+        ProviderConfig::OpenaiCompatible {
+            base_url: base_url.to_string(),
+            api_key: "test".to_string(),
+            api_style: None,
+        }
+    }
+
     #[test]
     fn model_capacity_prefers_detected_values() {
-        let capacity = resolve_model_capacity("gpt-4.1", Some(12_345), Some(678), None);
+        let capacity =
+            resolve_model_capacity(&openai_provider(), "gpt-4.1", Some(12_345), Some(678), None);
 
         assert_eq!(
             capacity,
@@ -3374,7 +3514,8 @@ mod tests {
 
     #[test]
     fn model_capacity_fills_missing_detected_fields_from_exact_catalog_match() {
-        let capacity = resolve_model_capacity("gpt-4.1", Some(12_345), None, None);
+        let capacity =
+            resolve_model_capacity(&openai_provider(), "gpt-4.1", Some(12_345), None, None);
 
         assert_eq!(
             capacity,
@@ -3389,30 +3530,70 @@ mod tests {
 
     #[test]
     fn model_capacity_uses_conservative_defaults_for_unknown_models() {
-        let capacity = resolve_model_capacity("unknown-local-model", None, None, None);
+        let capacity =
+            resolve_model_capacity(&openai_provider(), "unknown-local-model", None, None, None);
 
         assert_eq!(capacity, conservative_model_capacity());
     }
 
     #[test]
     fn model_catalog_does_not_substring_match_similar_model_names() {
-        let capacity = resolve_model_capacity("gpt-4.1-custom", None, None, None);
+        let capacity =
+            resolve_model_capacity(&openai_provider(), "gpt-4.1-custom", None, None, None);
 
         assert_eq!(capacity, conservative_model_capacity());
     }
 
     #[test]
     fn model_capacity_uses_detected_vision_over_catalog() {
-        let capacity = resolve_model_capacity("gpt-4.1", None, None, Some(false));
+        let capacity =
+            resolve_model_capacity(&openai_provider(), "gpt-4.1", None, None, Some(false));
 
         assert!(!capacity.supports_vision);
     }
 
     #[test]
     fn model_capacity_uses_detected_vision_true_for_unknown() {
-        let capacity = resolve_model_capacity("unknown-model", None, None, Some(true));
+        let capacity =
+            resolve_model_capacity(&openai_provider(), "unknown-model", None, None, Some(true));
 
         assert!(capacity.supports_vision);
+    }
+
+    #[test]
+    fn model_capacity_prefers_special_provider_catalog_match() {
+        let capacity = resolve_model_capacity(&copilot_provider(), "gpt-5.5", None, None, None);
+
+        assert_eq!(capacity.context_window_tokens, 400_000);
+        assert_eq!(capacity.max_completion_tokens, 128_000);
+        assert!(capacity.supports_vision);
+        assert!(capacity.supports_tool_call);
+    }
+
+    #[test]
+    fn model_capacity_prefers_url_matched_catalog_provider() {
+        let capacity = resolve_model_capacity(
+            &compatible_provider("https://api.githubcopilot.com/"),
+            "gpt-5.5",
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(capacity.context_window_tokens, 400_000);
+    }
+
+    #[test]
+    fn openai_provider_custom_base_url_can_match_catalog_provider() {
+        let capacity = resolve_model_capacity(
+            &openai_provider_with_base_url("https://api.githubcopilot.com/"),
+            "gpt-5.5",
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(capacity.context_window_tokens, 400_000);
     }
 
     #[test]
@@ -3495,6 +3676,25 @@ mod tests {
     }
 
     #[test]
+    fn codex_oauth_reasoning_options_use_responses_effort_scale() {
+        let provider = ProviderConfig::OpenaiCodexOauth {
+            auth_file: None,
+            base_url: None,
+        };
+        let options = reasoning_options_for_prompt(&provider, "gpt-5.5", None);
+
+        assert_eq!(
+            options,
+            vec![ReasoningOption::Effort {
+                values: ["none", "minimal", "low", "medium", "high", "xhigh"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            }]
+        );
+    }
+
+    #[test]
     fn parse_models_response_accepts_codex_models_shape() {
         let models = parse_models_response(Some(serde_json::json!({
             "models": [
@@ -3507,7 +3707,15 @@ mod tests {
                     "slug": "gpt-5.5",
                     "display_name": "GPT-5.5",
                     "max_context_window": 400000,
-                    "max_output_tokens": 128000
+                    "max_output_tokens": 128000,
+                    "supported_reasoning_efforts": [
+                        "none",
+                        "minimal",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ]
                 },
                 {
                     "slug": "gpt-5.3-codex-spark",
@@ -3529,6 +3737,15 @@ mod tests {
         assert_eq!(models[1].id, "gpt-5.5");
         assert_eq!(models[1].context_window, Some(400000));
         assert_eq!(models[1].max_output_tokens, Some(128000));
+        assert_eq!(
+            models[1].reasoning_options,
+            Some(vec![ReasoningOption::Effort {
+                values: ["none", "minimal", "low", "medium", "high", "xhigh"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            }])
+        );
     }
 
     #[test]
