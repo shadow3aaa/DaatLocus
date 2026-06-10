@@ -1,6 +1,11 @@
 //! Interactive configuration wizard for first-run setup and `config` subcommands.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use base64::Engine;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -27,8 +32,9 @@ use crate::{
         fetch_models_dev_capacity,
     },
     providers::{
-        CodexOAuthTokens, codex_oauth_access_from_file, codex_oauth_auth_file,
-        codex_oauth_client_version, codex_oauth_default_base_url, write_codex_oauth_tokens,
+        CodexOAuthTokens, codex_cli_auth_file, codex_oauth_access_from_file, codex_oauth_auth_file,
+        codex_oauth_client_version, codex_oauth_default_base_url, import_codex_cli_oauth_tokens,
+        write_codex_oauth_tokens,
     },
 };
 use sha2::Digest;
@@ -714,6 +720,65 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         .spawn()?
         .wait()?;
     Ok(())
+}
+
+fn expand_user_path(path: &str) -> PathBuf {
+    let trimmed = path.trim();
+    if trimmed == "~" {
+        return std::env::home_dir().unwrap_or_else(|| PathBuf::from(trimmed));
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        return std::env::home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(trimmed));
+    }
+    PathBuf::from(trimmed)
+}
+
+async fn import_codex_cli_auth_file_for_provider(
+    ui: &mut PromptUi,
+    source_auth_file: &Path,
+    destination_auth_file: &Path,
+) -> Result<String> {
+    let locale = ui.locale();
+    let source = source_auth_file.display().to_string();
+    let destination = destination_auth_file.display().to_string();
+    let tokens = import_codex_cli_oauth_tokens(source_auth_file)
+        .await
+        .map_err(|err| {
+            miette!(
+                "{}",
+                crate::tr!(
+                    locale,
+                    "codex_oauth.import_failed",
+                    path = source.clone(),
+                    error = err
+                )
+            )
+        })?;
+    write_codex_oauth_tokens(destination_auth_file, &tokens)
+        .await
+        .map_err(|err| {
+            miette!(
+                "{}",
+                crate::tr!(
+                    locale,
+                    "codex_oauth.import_write_failed",
+                    path = destination.clone(),
+                    error = err
+                )
+            )
+        })?;
+    ui.status(
+        &crate::tr!(locale, "codex_oauth.authorization"),
+        &[crate::tr!(
+            locale,
+            "codex_oauth.import_success",
+            source = source,
+            destination = destination.clone()
+        )],
+    )?;
+    Ok(destination)
 }
 
 fn prompt_cancelled(locale: Locale) -> miette::Report {
@@ -1643,6 +1708,8 @@ async fn prompt_provider(
                 &[
                     crate::tr!(locale, "config.codex_oauth_browser_login"),
                     crate::tr!(locale, "config.codex_oauth_device_login"),
+                    crate::tr!(locale, "config.codex_oauth_import_local_codex"),
+                    crate::tr!(locale, "config.codex_oauth_import_codex_auth_file"),
                     crate::tr!(locale, "config.codex_oauth_auth_file"),
                 ],
                 0,
@@ -1663,6 +1730,33 @@ async fn prompt_provider(
                 let tokens = result?;
                 write_codex_oauth_tokens(&default_auth_file, &tokens).await?;
                 Some(default_auth_file.to_string_lossy().to_string())
+            } else if auth_method == 2 {
+                let source_auth_file = codex_cli_auth_file();
+                Some(
+                    import_codex_cli_auth_file_for_provider(
+                        ui,
+                        &source_auth_file,
+                        &default_auth_file,
+                    )
+                    .await?,
+                )
+            } else if auth_method == 3 {
+                let default_codex_auth_file = codex_cli_auth_file();
+                let default_codex_auth_file_display =
+                    default_codex_auth_file.to_string_lossy().to_string();
+                let source = ui.text(
+                    &crate::tr!(locale, "config.codex_oauth_codex_auth_file_path"),
+                    Some(&default_codex_auth_file_display),
+                )?;
+                let source_auth_file = expand_user_path(&source);
+                Some(
+                    import_codex_cli_auth_file_for_provider(
+                        ui,
+                        &source_auth_file,
+                        &default_auth_file,
+                    )
+                    .await?,
+                )
             } else {
                 let default_auth_file_display = default_auth_file.to_string_lossy().to_string();
                 let path = ui.text(
@@ -3369,6 +3463,26 @@ mod tests {
             state
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
+    }
+
+    #[test]
+    fn codex_oauth_import_auth_method_labels_are_translated() {
+        assert_eq!(
+            crate::tr!(Locale::EnUs, "config.codex_oauth_import_local_codex"),
+            "Import from local Codex"
+        );
+        assert_eq!(
+            crate::tr!(Locale::EnUs, "config.codex_oauth_import_codex_auth_file"),
+            "Import from Codex auth.json path"
+        );
+        assert_eq!(
+            crate::tr!(Locale::ZhCn, "config.codex_oauth_import_local_codex"),
+            "从本地 Codex 导入"
+        );
+        assert_eq!(
+            crate::tr!(Locale::ZhCn, "config.codex_oauth_import_codex_auth_file"),
+            "从指定 Codex auth.json 路径导入"
         );
     }
 

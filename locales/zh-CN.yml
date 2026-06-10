@@ -61,8 +61,11 @@ config:
   codex_oauth_auth_method: "OpenAI Codex OAuth 认证方式"
   codex_oauth_browser_login: "浏览器登录（推荐，本地回调）"
   codex_oauth_device_login: "Device code 登录（备用/无头环境）"
-  codex_oauth_auth_file: "使用已有 Codex OAuth auth 文件"
-  codex_oauth_auth_file_path: "Codex OAuth auth 文件路径"
+  codex_oauth_import_local_codex: "从本地 Codex 导入"
+  codex_oauth_import_codex_auth_file: "从指定 Codex auth.json 路径导入"
+  codex_oauth_auth_file: "使用已有 Daat Locus Codex OAuth auth 文件"
+  codex_oauth_auth_file_path: "Daat Locus Codex OAuth auth 文件路径"
+  codex_oauth_codex_auth_file_path: "Codex auth.json 路径"
   discover_models: "获取模型列表"
   manual_model: "手动输入..."
   select_model: "选择模型"
@@ -141,6 +144,9 @@ codex_oauth:
   waiting: "等待 Codex OAuth 授权%{dots}   "
   success: "授权成功"
   browser_failed: "浏览器授权失败: %{error}"
+  import_success: "已从 %{source} 导入 Codex auth，并写入 %{destination}"
+  import_failed: "从 %{path} 导入 Codex auth 失败: %{error}"
+  import_write_failed: "写入导入后的 Codex auth 到 %{path} 失败: %{error}"
 
 daemon:
   stopped: "daemon 已停止"

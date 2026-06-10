@@ -37,8 +37,9 @@ mod copilot;
 pub use copilot::CopilotClient;
 mod codex_oauth;
 pub(crate) use codex_oauth::{
-    CodexOAuthClient, CodexOAuthTokens, codex_oauth_access_from_file, codex_oauth_auth_file,
-    codex_oauth_client_version, codex_oauth_default_base_url, write_codex_oauth_tokens,
+    CodexOAuthClient, CodexOAuthTokens, codex_cli_auth_file, codex_oauth_access_from_file,
+    codex_oauth_auth_file, codex_oauth_client_version, codex_oauth_default_base_url,
+    import_codex_cli_oauth_tokens, write_codex_oauth_tokens,
 };
 mod ollama;
 pub use ollama::OllamaClient;

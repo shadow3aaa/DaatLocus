@@ -61,8 +61,11 @@ config:
   codex_oauth_auth_method: "OpenAI Codex OAuth authentication method"
   codex_oauth_browser_login: "Browser login (recommended, local callback)"
   codex_oauth_device_login: "Device code login (fallback/headless)"
-  codex_oauth_auth_file: "Use existing Codex OAuth auth file"
-  codex_oauth_auth_file_path: "Codex OAuth auth file path"
+  codex_oauth_import_local_codex: "Import from local Codex"
+  codex_oauth_import_codex_auth_file: "Import from Codex auth.json path"
+  codex_oauth_auth_file: "Use existing Daat Locus Codex OAuth auth file"
+  codex_oauth_auth_file_path: "Daat Locus Codex OAuth auth file path"
+  codex_oauth_codex_auth_file_path: "Codex auth.json path"
   discover_models: "Fetching model list"
   manual_model: "Manual input..."
   select_model: "Select model"
@@ -141,6 +144,9 @@ codex_oauth:
   waiting: "Waiting for Codex OAuth authorization%{dots}   "
   success: "Authorization succeeded"
   browser_failed: "Browser authorization failed: %{error}"
+  import_success: "Imported Codex auth from %{source} into %{destination}"
+  import_failed: "Failed to import Codex auth from %{path}: %{error}"
+  import_write_failed: "Failed to write imported Codex auth to %{path}: %{error}"
 
 daemon:
   stopped: "daemon stopped"

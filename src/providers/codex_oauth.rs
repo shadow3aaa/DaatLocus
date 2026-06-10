@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    env,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -127,6 +128,20 @@ struct RefreshResponse {
     id_token: Option<String>,
     access_token: Option<String>,
     refresh_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CodexCliAuthFile {
+    tokens: CodexCliAuthTokens,
+}
+
+#[derive(Deserialize)]
+struct CodexCliAuthTokens {
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+    #[serde(default)]
+    account_id: Option<String>,
 }
 
 impl CodexResponsesClient {
@@ -1196,6 +1211,17 @@ pub(crate) fn default_codex_oauth_auth_file(provider_name: &str) -> PathBuf {
     PersistenceStore::runtime_sync().config_file(&file_name)
 }
 
+pub(crate) fn codex_cli_auth_file() -> PathBuf {
+    env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".codex")
+        })
+        .join("auth.json")
+}
+
 fn sanitize_auth_file_component(value: &str) -> String {
     let mut out = String::new();
     for ch in value.chars() {
@@ -1235,6 +1261,33 @@ pub(crate) async fn codex_oauth_access_from_file(auth_file: &Path) -> Result<Cod
         .build()
         .map_err(|err| miette!("failed to build Codex OAuth auth http client: {err}"))?;
     codex_oauth_access_from_file_with_client(auth_file, &client).await
+}
+
+pub(crate) async fn import_codex_cli_oauth_tokens(auth_file: &Path) -> Result<CodexOAuthTokens> {
+    let bytes = tokio::fs::read(auth_file)
+        .await
+        .map_err(|err| miette!("read Codex auth file {} failed: {err}", auth_file.display()))?;
+    parse_codex_cli_oauth_tokens(&bytes).map_err(|err| {
+        miette!(
+            "parse Codex auth file {} failed: {err}",
+            auth_file.display()
+        )
+    })
+}
+
+fn parse_codex_cli_oauth_tokens(bytes: &[u8]) -> Result<CodexOAuthTokens> {
+    let auth: CodexCliAuthFile = serde_json::from_slice(bytes).map_err(|err| {
+        miette!(
+            "expected Codex CLI auth.json with a tokens object containing id_token, access_token, and refresh_token: {err}"
+        )
+    })?;
+    Ok(CodexOAuthTokens {
+        id_token: auth.tokens.id_token,
+        access_token: auth.tokens.access_token,
+        refresh_token: auth.tokens.refresh_token,
+        account_id: auth.tokens.account_id,
+        last_refresh_at_ms: now_ms(),
+    })
 }
 
 async fn codex_oauth_access_from_file_with_client(
@@ -1394,6 +1447,30 @@ mod tests {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&payload).unwrap());
         format!("{header}.{payload}.sig")
+    }
+
+    #[test]
+    fn parse_codex_cli_auth_file_extracts_nested_tokens() {
+        let before = now_ms();
+        let tokens = parse_codex_cli_oauth_tokens(
+            br#"{
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "id_token": "id-token",
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "account_id": "account-123"
+                },
+                "last_refresh": "2026-06-10T00:00:00Z"
+            }"#,
+        )
+        .expect("parse Codex CLI auth");
+
+        assert_eq!(tokens.id_token, "id-token");
+        assert_eq!(tokens.access_token, "access-token");
+        assert_eq!(tokens.refresh_token, "refresh-token");
+        assert_eq!(tokens.account_id.as_deref(), Some("account-123"));
+        assert!(tokens.last_refresh_at_ms >= before);
     }
 
     #[test]
