@@ -348,7 +348,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|err| miette!("failed to install SIGTERM handler: {err}"))?;
     let mut ctrl_c_disabled = false;
-    let mut restart_requested = false;
+    let mut shutdown_action = ManagerShutdownAction::Stop;
     let mut shutdown_completion_tx = None;
 
     loop {
@@ -357,14 +357,14 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
                 apply_daemon_control_command(
                     command,
                     &mut shutdown_completion_tx,
-                    &mut restart_requested,
+                    &mut shutdown_action,
                 );
                 break;
             }
             Some(command) = dashboard_control_rx.recv() => {
                 match command {
                     DashboardControlCommand::RestartDaemon => {
-                        restart_requested = true;
+                        shutdown_action = ManagerShutdownAction::Restart;
                         break;
                     }
                     DashboardControlCommand::RunSleep => {
@@ -405,13 +405,13 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         handle.abort();
     }
     session_health_checks.abort();
-    let session_shutdown_error = if restart_requested {
-        terminate_process_backed_sessions(&sessions, &session_tokens, "daemon restart")
-            .await
-            .err()
-    } else {
-        None
-    };
+    let session_shutdown_error = terminate_process_backed_sessions(
+        &sessions,
+        &session_tokens,
+        shutdown_action.session_shutdown_reason(),
+    )
+    .await
+    .err();
     lock.release();
     if let Some(completion_tx) = shutdown_completion_tx.take() {
         let _ = completion_tx.send(());
@@ -422,7 +422,7 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     if let Some(err) = session_shutdown_error {
         return Err(err);
     }
-    if restart_requested {
+    if shutdown_action.should_restart() {
         spawn_detached_daemon_process().await?;
     }
     Ok(())
@@ -688,17 +688,81 @@ fn manager_telegram_status_output(telegram_acl: &TelegramAclHandle) -> String {
     lines.join("\n")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManagerShutdownAction {
+    Stop,
+    Restart,
+}
+
+impl ManagerShutdownAction {
+    fn session_shutdown_reason(self) -> &'static str {
+        match self {
+            Self::Stop => "daemon stop",
+            Self::Restart => "daemon restart",
+        }
+    }
+
+    fn should_restart(self) -> bool {
+        matches!(self, Self::Restart)
+    }
+}
+
 fn apply_daemon_control_command(
     command: DaemonControlCommand,
     shutdown_completion_tx: &mut Option<oneshot::Sender<()>>,
-    restart_requested: &mut bool,
+    shutdown_action: &mut ManagerShutdownAction,
 ) {
     match command {
         DaemonControlCommand::ShutdownRequested { completion_tx } => {
             *shutdown_completion_tx = Some(completion_tx);
         }
         DaemonControlCommand::RestartRequested => {
-            *restart_requested = true;
+            *shutdown_action = ManagerShutdownAction::Restart;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manager_shutdown_actions_share_session_shutdown_reason_path() {
+        assert_eq!(
+            ManagerShutdownAction::Stop.session_shutdown_reason(),
+            "daemon stop"
+        );
+        assert!(!ManagerShutdownAction::Stop.should_restart());
+
+        assert_eq!(
+            ManagerShutdownAction::Restart.session_shutdown_reason(),
+            "daemon restart"
+        );
+        assert!(ManagerShutdownAction::Restart.should_restart());
+    }
+
+    #[test]
+    fn daemon_control_commands_select_manager_shutdown_action() {
+        let mut shutdown_action = ManagerShutdownAction::Stop;
+        let mut completion = None;
+
+        let (completion_tx, _completion_rx) = oneshot::channel();
+        apply_daemon_control_command(
+            DaemonControlCommand::ShutdownRequested { completion_tx },
+            &mut completion,
+            &mut shutdown_action,
+        );
+        assert_eq!(shutdown_action, ManagerShutdownAction::Stop);
+        assert!(completion.is_some());
+
+        let mut shutdown_action = ManagerShutdownAction::Stop;
+        let mut completion = None;
+        apply_daemon_control_command(
+            DaemonControlCommand::RestartRequested,
+            &mut completion,
+            &mut shutdown_action,
+        );
+        assert_eq!(shutdown_action, ManagerShutdownAction::Restart);
+        assert!(completion.is_none());
     }
 }

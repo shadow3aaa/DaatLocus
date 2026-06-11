@@ -1682,7 +1682,7 @@ pub(crate) async fn terminate_process_backed_sessions(
         Ok(())
     } else {
         Err(miette!(
-            "failed to terminate session processes before daemon restart: {}",
+            "failed to terminate session processes for {reason}: {}",
             errors.join("; ")
         ))
     }
