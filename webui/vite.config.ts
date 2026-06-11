@@ -31,6 +31,10 @@ export default defineConfig({
         target: daemonTarget,
         changeOrigin: true,
       },
+      "/sessions": {
+        target: daemonTarget,
+        changeOrigin: true,
+      },
       "/logs": {
         target: daemonTarget,
         changeOrigin: true,

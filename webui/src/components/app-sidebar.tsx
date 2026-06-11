@@ -11,6 +11,9 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -103,7 +106,7 @@ export function AppSidebar(props: AppSidebarProps) {
     <>
       <SidebarTrigger
         aria-label="Open sidebar"
-        className="fixed top-4 left-4 z-50 rounded-full border-border/60 bg-background/80 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/60 md:hidden"
+        className="fixed top-4 left-4 rounded-full border-border/60 bg-background/80 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/60 md:hidden"
       />
       <Sidebar>
         <AppSidebarBody {...props} />
@@ -151,29 +154,56 @@ function AppSidebarBody({
 
   return (
     <>
-      <SidebarHeader className="h-14 flex-row items-center justify-between border-b border-sidebar-border px-3">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-semibold">Daat Locus</div>
-        </div>
+      <SidebarHeader className="border-b border-sidebar-border p-3">
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              type="button"
+              size="lg"
+              className="h-12 cursor-default gap-3 rounded-lg px-2"
+            >
+              <Avatar className="size-8 rounded-lg">
+                <AvatarFallback className="rounded-lg text-xs font-semibold">
+                  DL
+                </AvatarFallback>
+              </Avatar>
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate text-sm font-semibold">
+                  Daat Locus
+                </span>
+                <span className="truncate text-xs font-normal text-sidebar-foreground/55">
+                  Local agent runtime
+                </span>
+              </span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
       </SidebarHeader>
 
-      <SidebarContent>
+      <SidebarContent className="gap-0 px-2 py-3">
         {sessionError ? (
-          <div
-            role="alert"
-            className="mx-3 mt-3 rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs text-destructive"
-          >
-            {sessionError}
-          </div>
+          <Alert variant="destructive" className="mb-3">
+            <AlertDescription className="text-xs">
+              {sessionError}
+            </AlertDescription>
+          </Alert>
         ) : null}
 
-        <SidebarGroup className="min-h-0 flex-1">
-          <SidebarGroupLabel>Sessions</SidebarGroupLabel>
+        <SidebarGroup className="min-h-0 flex-1 p-0">
+          <SidebarGroupLabel className="h-7 justify-between px-1">
+            <span>Sessions</span>
+            <Badge variant="secondary">{sessions.length}</Badge>
+          </SidebarGroupLabel>
           <SidebarGroupContent className="min-h-0">
-            <div role="tree" aria-label="Sessions" className="space-y-2">
+            <div
+              role="tree"
+              aria-label="Sessions"
+              className="flex flex-col gap-2"
+            >
               <SessionTreeBranch
                 icon={MessageSquareIcon}
                 label="General"
+                count={sessionTree.general.length}
               >
                 <SessionLeafList
                   createLabel="New general session"
@@ -195,8 +225,12 @@ function AppSidebarBody({
                 <SessionTreeBranch
                   icon={Code2Icon}
                   label="Coding"
+                  count={sessionTree.projectGroups.reduce(
+                    (count, group) => count + group.sessions.length,
+                    0,
+                  )}
                 >
-                  <div className="space-y-2">
+                  <div className="flex flex-col gap-2">
                     {sessionTree.projectGroups.map((group) => (
                       <SessionProjectBranch key={group.projectDir} group={group}>
                         <SessionLeafList
@@ -225,21 +259,26 @@ function AppSidebarBody({
 
       <SidebarSeparator />
 
-      <SidebarFooter>
-        <SidebarMenu>
+      <SidebarFooter className="p-2">
+        <SidebarGroupLabel className="h-6 px-1">Navigation</SidebarGroupLabel>
+        <SidebarMenu className="grid grid-cols-2 gap-1">
           {navigationItems.map((item) => {
             const Icon = item.icon;
             const isActive = activePage === item.page;
 
             return (
               <SidebarMenuItem key={item.href}>
-                <SidebarMenuButton asChild isActive={isActive}>
+                <SidebarMenuButton
+                  asChild
+                  isActive={isActive}
+                  className="h-9 justify-center gap-1.5"
+                >
                   <a
                     href={item.href}
                     aria-current={isActive ? "page" : undefined}
                     onClick={closeMobile}
                   >
-                    <Icon className="size-4" />
+                    <Icon />
                     <span>{item.label}</span>
                   </a>
                 </SidebarMenuButton>
@@ -266,19 +305,22 @@ function AppSidebarBody({
 function SessionTreeBranch({
   icon: Icon,
   label,
+  count,
   children,
 }: {
   icon: typeof MessageSquareIcon;
   label: string;
+  count: number;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(true);
 
   return (
-    <div role="group" className="min-w-0">
-      <div className="flex h-7 items-center gap-2 rounded-md px-2 text-xs font-medium text-sidebar-foreground/70">
-        <Icon className="size-3.5 shrink-0" />
-        <span className="min-w-0 flex-1 truncate">{label}</span>
+    <div
+      role="group"
+      className="min-w-0 rounded-lg border border-sidebar-border bg-sidebar"
+    >
+      <div className="flex h-9 items-center gap-2 px-2">
         <Button
           type="button"
           variant="ghost"
@@ -286,17 +328,20 @@ function SessionTreeBranch({
           aria-label={`${open ? "Collapse" : "Expand"} ${label}`}
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
-          className="size-6 text-sidebar-foreground/55 hover:text-sidebar-foreground"
+          className="text-sidebar-foreground/55 hover:text-sidebar-foreground"
         >
           <ChevronRightIcon
-            className={cn("size-3.5 transition-transform", open && "rotate-90")}
+            className={cn("transition-transform", open && "rotate-90")}
           />
         </Button>
+        <Icon className="size-3.5 shrink-0 text-sidebar-foreground/60" />
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-sidebar-foreground/80">
+          {label}
+        </span>
+        <Badge variant="outline">{count}</Badge>
       </div>
       {open ? (
-        <div className="ml-3 border-l border-sidebar-border/70 pl-2">
-          {children}
-        </div>
+        <div className="flex flex-col gap-2 p-1 pt-0">{children}</div>
       ) : null}
     </div>
   );
@@ -312,9 +357,22 @@ function SessionProjectBranch({
   const [open, setOpen] = useState(true);
 
   return (
-    <div role="group" className="min-w-0">
-      <div className="flex min-h-7 items-center gap-2 rounded-md px-2 py-1 text-xs text-sidebar-foreground/65">
-        <FolderIcon className="size-3.5 shrink-0" />
+    <div role="group" className="min-w-0 rounded-md bg-sidebar-accent/35">
+      <div className="flex min-h-10 items-center gap-2 px-2 py-1.5">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label={`${open ? "Collapse" : "Expand"} ${group.label}`}
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+          className="text-sidebar-foreground/55 hover:text-sidebar-foreground"
+        >
+          <ChevronRightIcon
+            className={cn("transition-transform", open && "rotate-90")}
+          />
+        </Button>
+        <FolderIcon className="size-3.5 shrink-0 text-sidebar-foreground/60" />
         <div className="min-w-0 flex-1">
           <div className="truncate font-medium text-sidebar-foreground/80">
             {group.label}
@@ -323,24 +381,10 @@ function SessionProjectBranch({
             {group.projectDir}
           </div>
         </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          aria-label={`${open ? "Collapse" : "Expand"} ${group.label}`}
-          aria-expanded={open}
-          onClick={() => setOpen((value) => !value)}
-          className="size-6 text-sidebar-foreground/55 hover:text-sidebar-foreground"
-        >
-          <ChevronRightIcon
-            className={cn("size-3.5 transition-transform", open && "rotate-90")}
-          />
-        </Button>
+        <Badge variant="secondary">{group.sessions.length}</Badge>
       </div>
       {open ? (
-        <div className="ml-3 border-l border-sidebar-border/60 pl-2">
-          {children}
-        </div>
+        <div className="flex flex-col gap-1 p-1 pt-0">{children}</div>
       ) : null}
     </div>
   );
@@ -368,17 +412,16 @@ function SessionLeafList({
   onCloseMobile: () => void;
 }) {
   return (
-    <SidebarMenu className="gap-0.5 py-1">
+    <SidebarMenu className="gap-1">
       <SidebarMenuItem>
         <SidebarMenuButton
           type="button"
-          size="lg"
           role="treeitem"
           disabled={isCreatingSession}
           onClick={onCreateSession}
-          className="h-auto min-h-10 gap-2 py-2 text-sidebar-foreground/75"
+          className="h-8 justify-start text-sidebar-foreground/75"
         >
-          <PlusIcon className="size-4" />
+          <PlusIcon />
           <span className="block max-w-full truncate font-medium">
             {isCreatingSession ? "Creating session" : createLabel}
           </span>
@@ -386,7 +429,7 @@ function SessionLeafList({
       </SidebarMenuItem>
       {sessions.map((session) => (
         <SidebarMenuItem key={session.session_id}>
-          <div className="group/session-row flex min-w-0 items-stretch gap-1">
+          <div className="group/session-row flex min-w-0 items-stretch gap-1 rounded-md">
             <SidebarMenuButton
               type="button"
               size="lg"
@@ -397,7 +440,7 @@ function SessionLeafList({
                 onSelectSession(session.session_id);
                 onCloseMobile();
               }}
-              className="h-auto min-h-11 flex-1 flex-col items-start gap-0.5 py-2"
+              className="h-12 flex-1 flex-col items-start justify-center gap-0.5 px-2 py-1.5"
             >
               <span className="block max-w-full truncate font-medium">
                 {sessionTitle(session)}
@@ -414,9 +457,9 @@ function SessionLeafList({
               title="Delete session"
               disabled={deletingSessionId !== null}
               onClick={() => onRequestDeleteSession(session)}
-              className="mt-1 text-sidebar-foreground/45 hover:text-destructive focus-visible:text-destructive"
+              className="mt-1 opacity-100 transition-opacity md:opacity-0 md:group-hover/session-row:opacity-100 md:focus-visible:opacity-100"
             >
-              <Trash2Icon className="size-4" />
+              <Trash2Icon />
             </Button>
           </div>
         </SidebarMenuItem>
