@@ -626,9 +626,16 @@ impl CommandPanel {
         }
     }
 
-    fn set_feedback(&mut self, feedback: CommandFeedback) {
+    fn set_error_feedback(&mut self, feedback: CommandFeedback) {
         if let CommandPanel::SkillsToggle(panel) = self {
-            panel.feedback = Some(feedback);
+            panel.feedback =
+                matches!(feedback.level, CommandFeedbackLevel::Error).then_some(feedback);
+        }
+    }
+
+    fn clear_feedback(&mut self) {
+        if let CommandPanel::SkillsToggle(panel) = self {
+            panel.feedback = None;
         }
     }
 }
@@ -2139,7 +2146,11 @@ pub async fn run_tui_dashboard(
                                 let feedback = command_feedback_from_action_result(title, result);
                                 if keep_panel {
                                     if let Some(panel) = command_panel.as_mut() {
-                                        panel.set_feedback(feedback);
+                                        if matches!(feedback.level, CommandFeedbackLevel::Error) {
+                                            panel.set_error_feedback(feedback);
+                                        } else {
+                                            panel.clear_feedback();
+                                        }
                                     }
                                 } else {
                                     command_feedback = Some(feedback);
@@ -4362,6 +4373,47 @@ mod tests {
             invocation.action,
             DashboardAction::ApproveTelegramAccess { chat_id: 42 }
         );
+    }
+
+    #[test]
+    fn skills_toggle_panel_shows_only_error_feedback() {
+        let mut panel = CommandPanel::SkillsToggle(SkillsTogglePanel {
+            items: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            search: String::new(),
+            feedback: None,
+        });
+
+        panel.set_error_feedback(CommandFeedback {
+            title: "SKILLS".to_string(),
+            message: "queued skills auto-use enable".to_string(),
+            detail: None,
+            level: CommandFeedbackLevel::Info,
+        });
+        match &panel {
+            CommandPanel::SkillsToggle(panel) => assert!(panel.feedback.is_none()),
+            _ => panic!("expected skills toggle panel"),
+        }
+
+        panel.set_error_feedback(CommandFeedback {
+            title: "SKILLS".to_string(),
+            message: "failed to queue skills auto-use".to_string(),
+            detail: None,
+            level: CommandFeedbackLevel::Error,
+        });
+        match &panel {
+            CommandPanel::SkillsToggle(panel) => {
+                assert_eq!(
+                    panel
+                        .feedback
+                        .as_ref()
+                        .map(|feedback| feedback.message.as_str()),
+                    Some("failed to queue skills auto-use")
+                );
+            }
+            _ => panic!("expected skills toggle panel"),
+        }
     }
 
     #[test]
