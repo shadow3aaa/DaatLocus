@@ -25,15 +25,15 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc};
 use async_trait::async_trait;
 use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
-    KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use futures_util::StreamExt;
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
 };
 use std::time::Duration;
 
@@ -284,9 +284,34 @@ pub enum DashboardControlCommand {
     SetSkillAutoUse { path: PathBuf, enabled: bool },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DashboardAction {
+    RunSleep,
+    ClearConversation,
+    RestartDaemon,
+    ReloadSkills,
+    SetSkillAutoUse { path: PathBuf, enabled: bool },
+    ApproveTelegramAccess { chat_id: i64 },
+    RejectTelegramAccess { chat_id: i64 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardActionResult {
+    pub success: bool,
+    pub message: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 #[async_trait]
 pub trait DashboardCommandRunner: Send + Sync {
     async fn run_command(&self, command: &str, state: &DashboardState) -> String;
+    async fn run_action(
+        &self,
+        action: DashboardAction,
+        state: &DashboardState,
+    ) -> DashboardActionResult;
 }
 
 #[async_trait]
@@ -387,13 +412,87 @@ impl InputState {
     }
 }
 
-struct CommandOverlay {
+struct CommandDetailPanel {
     title: String,
     text: String,
     scroll: u16,
 }
 
+struct CommandSelectionPanel {
+    title: String,
+    subtitle: Option<String>,
+    items: Vec<CommandSelectionItem>,
+    selected: usize,
+    scroll: usize,
+}
+
+struct CommandSelectionItem {
+    name: String,
+    description: String,
+    action: CommandSelectionAction,
+    disabled: bool,
+}
+
+enum CommandSelectionAction {
+    ShowDetail {
+        title: String,
+        text: String,
+    },
+    OpenSkillsList,
+    OpenSkillsToggle,
+    OpenTelegramAccess(TelegramAccessAction),
+    RunAction {
+        title: String,
+        action: DashboardAction,
+        keep_panel: bool,
+    },
+}
+
+struct SkillsListPanel {
+    items: Vec<SkillsListPanelItem>,
+    errors: Vec<OpenSkillDashboardError>,
+    selected: usize,
+    scroll: usize,
+    search: String,
+}
+
 #[derive(Clone)]
+struct SkillsListPanelItem {
+    name: String,
+    description: String,
+    path: String,
+    scope: String,
+    status: String,
+}
+
+struct SkillsTogglePanel {
+    items: Vec<SkillsTogglePanelItem>,
+    selected: usize,
+    scroll: usize,
+    search: String,
+    feedback: Option<CommandFeedback>,
+}
+
+#[derive(Clone)]
+struct SkillsTogglePanelItem {
+    name: String,
+    description: String,
+    path: String,
+    scope: String,
+    allow_implicit_invocation: bool,
+    user_disabled: bool,
+    auto_use_enabled: bool,
+}
+
+enum CommandPanel {
+    Detail(CommandDetailPanel),
+    Selection(CommandSelectionPanel),
+    SkillsList(SkillsListPanel),
+    SkillsToggle(SkillsTogglePanel),
+    TelegramAccess(TelegramAccessPicker),
+}
+
+#[derive(Clone, Debug)]
 struct CommandFeedback {
     title: String,
     message: String,
@@ -401,7 +500,7 @@ struct CommandFeedback {
     level: CommandFeedbackLevel,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandFeedbackLevel {
     Info,
     Warning,
@@ -437,16 +536,308 @@ impl TelegramAccessAction {
     }
 }
 
+enum CommandPanelAction {
+    None,
+    Close,
+    Replace(CommandPanel),
+    OpenSkillsList,
+    OpenSkillsToggle,
+    OpenTelegramAccess(TelegramAccessAction),
+    RunAction {
+        title: String,
+        action: DashboardAction,
+        keep_panel: bool,
+    },
+}
+
+struct DashboardActionInvocation {
+    title: String,
+    action: DashboardAction,
+    quiet_success: bool,
+}
+
+impl CommandPanel {
+    fn sync_state(&mut self, state: &DashboardState) {
+        match self {
+            CommandPanel::SkillsList(panel) => panel.sync_state(state),
+            CommandPanel::SkillsToggle(panel) => panel.sync_state(state),
+            CommandPanel::Detail(_)
+            | CommandPanel::Selection(_)
+            | CommandPanel::TelegramAccess(_) => {}
+        }
+    }
+
+    fn desired_height(&self) -> u16 {
+        match self {
+            CommandPanel::Detail(panel) => {
+                let line_count = render_panel_text_lines(&panel.text).len() as u16;
+                line_count.saturating_add(3).clamp(5, 16)
+            }
+            CommandPanel::Selection(panel) => {
+                let header = 1 + u16::from(panel.subtitle.is_some());
+                header
+                    .saturating_add(panel.items.len().min(8) as u16)
+                    .saturating_add(2)
+                    .clamp(5, 14)
+            }
+            CommandPanel::SkillsList(panel) => {
+                let rows = panel.visible_indices().len().min(8) as u16;
+                let error_rows = panel.errors.len().min(2) as u16;
+                4u16.saturating_add(rows)
+                    .saturating_add(error_rows)
+                    .clamp(6, 16)
+            }
+            CommandPanel::SkillsToggle(panel) => {
+                let rows = panel.visible_indices().len().min(8) as u16;
+                let feedback_rows = command_feedback_row_count(panel.feedback.as_ref());
+                4u16.saturating_add(rows)
+                    .saturating_add(feedback_rows)
+                    .clamp(6, 16)
+            }
+            CommandPanel::TelegramAccess(picker) => 4u16
+                .saturating_add(
+                    picker
+                        .requests
+                        .len()
+                        .min(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS) as u16,
+                )
+                .clamp(6, 15),
+        }
+    }
+
+    fn footer_hint(&self) -> &'static str {
+        match self {
+            CommandPanel::Detail(_) => "Esc close   ↑/↓ scroll   PgUp/PgDn page",
+            CommandPanel::Selection(_) => "Enter select   ↑/↓ move   PgUp/PgDn page   Esc close",
+            CommandPanel::SkillsList(_) => {
+                "Enter details   type search   Backspace edit   ↑/↓ move   Esc close"
+            }
+            CommandPanel::SkillsToggle(_) => {
+                "Space/Enter toggle auto-use   type search   Backspace edit   Esc close"
+            }
+            CommandPanel::TelegramAccess(picker) => match picker.action {
+                TelegramAccessAction::Approve => {
+                    "Enter approve selected   ↑/↓ move   PgUp/PgDn page   Esc cancel"
+                }
+                TelegramAccessAction::Reject => {
+                    "Enter reject selected   ↑/↓ move   PgUp/PgDn page   Esc cancel"
+                }
+            },
+        }
+    }
+
+    fn set_feedback(&mut self, feedback: CommandFeedback) {
+        if let CommandPanel::SkillsToggle(panel) = self {
+            panel.feedback = Some(feedback);
+        }
+    }
+}
+
+impl SkillsListPanel {
+    fn from_state(state: &DashboardState) -> Self {
+        Self {
+            items: state
+                .skills
+                .iter()
+                .map(SkillsListPanelItem::from_summary)
+                .collect(),
+            errors: state.skill_errors.clone(),
+            selected: 0,
+            scroll: 0,
+            search: String::new(),
+        }
+    }
+
+    fn sync_state(&mut self, state: &DashboardState) {
+        let selected_path = self
+            .selected_actual_index()
+            .and_then(|idx| self.items.get(idx))
+            .map(|item| item.path.clone());
+        self.items = state
+            .skills
+            .iter()
+            .map(SkillsListPanelItem::from_summary)
+            .collect();
+        self.errors = state.skill_errors.clone();
+        if let Some(selected_path) = selected_path
+            && let Some(actual_idx) = self
+                .items
+                .iter()
+                .position(|item| item.path == selected_path)
+            && let Some(visible_idx) = self
+                .visible_indices()
+                .iter()
+                .position(|idx| *idx == actual_idx)
+        {
+            self.selected = visible_idx;
+        }
+        self.clamp_after_filter_change();
+    }
+
+    fn visible_indices(&self) -> Vec<usize> {
+        let query = self.search.trim().to_ascii_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                if query.is_empty()
+                    || item.name.to_ascii_lowercase().contains(&query)
+                    || item.description.to_ascii_lowercase().contains(&query)
+                    || item.path.to_ascii_lowercase().contains(&query)
+                    || item.scope.to_ascii_lowercase().contains(&query)
+                {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn selected_actual_index(&self) -> Option<usize> {
+        self.visible_indices().get(self.selected).copied()
+    }
+
+    fn selected_detail_panel(&self) -> Option<CommandPanel> {
+        let idx = self.selected_actual_index()?;
+        let item = self.items.get(idx)?;
+        Some(detail_panel(
+            format!("SKILL {}", item.name),
+            [
+                format!("Name: {}", item.name),
+                format!("Status: {}", item.status),
+                format!("Scope: {}", item.scope),
+                format!("Path: {}", item.path),
+                format!("Description: {}", item.description),
+            ]
+            .join("\n"),
+        ))
+    }
+
+    fn clamp_after_filter_change(&mut self) {
+        let visible_len = self.visible_indices().len();
+        self.selected = self.selected.min(visible_len.saturating_sub(1));
+        self.scroll = adjusted_list_scroll(self.scroll, self.selected, visible_len, 8);
+    }
+}
+
+impl SkillsListPanelItem {
+    fn from_summary(skill: &OpenSkillDashboardSummary) -> Self {
+        Self {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            path: skill.path.clone(),
+            scope: skill.scope.clone(),
+            status: skill_status_description(skill),
+        }
+    }
+}
+
+impl CommandSelectionPanel {
+    fn adjusted_scroll(&self) -> usize {
+        adjusted_list_scroll(self.scroll, self.selected, self.items.len(), 8)
+    }
+}
+
+impl SkillsTogglePanel {
+    fn from_state(state: &DashboardState) -> Self {
+        Self {
+            items: state
+                .skills
+                .iter()
+                .map(SkillsTogglePanelItem::from_summary)
+                .collect(),
+            selected: 0,
+            scroll: 0,
+            search: String::new(),
+            feedback: None,
+        }
+    }
+
+    fn sync_state(&mut self, state: &DashboardState) {
+        let selected_path = self
+            .selected_actual_index()
+            .and_then(|idx| self.items.get(idx))
+            .map(|item| item.path.clone());
+        self.items = state
+            .skills
+            .iter()
+            .map(SkillsTogglePanelItem::from_summary)
+            .collect();
+        if let Some(selected_path) = selected_path
+            && let Some(actual_idx) = self
+                .items
+                .iter()
+                .position(|item| item.path == selected_path)
+            && let Some(visible_idx) = self
+                .visible_indices()
+                .iter()
+                .position(|idx| *idx == actual_idx)
+        {
+            self.selected = visible_idx;
+        }
+        self.clamp_after_filter_change();
+    }
+
+    fn visible_indices(&self) -> Vec<usize> {
+        let query = self.search.trim().to_ascii_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                if query.is_empty()
+                    || item.name.to_ascii_lowercase().contains(&query)
+                    || item.description.to_ascii_lowercase().contains(&query)
+                    || item.path.to_ascii_lowercase().contains(&query)
+                {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn selected_actual_index(&self) -> Option<usize> {
+        self.visible_indices().get(self.selected).copied()
+    }
+
+    fn clamp_after_filter_change(&mut self) {
+        let visible_len = self.visible_indices().len();
+        self.selected = self.selected.min(visible_len.saturating_sub(1));
+        self.scroll = adjusted_list_scroll(self.scroll, self.selected, visible_len, 8);
+    }
+}
+
+impl SkillsTogglePanelItem {
+    fn from_summary(skill: &OpenSkillDashboardSummary) -> Self {
+        Self {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            path: skill.path.clone(),
+            scope: skill.scope.clone(),
+            allow_implicit_invocation: skill.allow_implicit_invocation,
+            user_disabled: skill.user_disabled,
+            auto_use_enabled: skill.auto_use_enabled,
+        }
+    }
+
+    fn status_description(&self) -> String {
+        if self.auto_use_enabled {
+            "auto-use enabled".to_string()
+        } else if self.user_disabled {
+            "manual-only: disabled by /skills".to_string()
+        } else if !self.allow_implicit_invocation {
+            "manual-only: policy disallows implicit invocation".to_string()
+        } else {
+            "manual-only".to_string()
+        }
+    }
+}
+
 struct DashboardCommandContext<'a> {
     requests: &'a [PendingAccessRequest],
     state: &'a DashboardState,
-    executor: Option<DashboardCommandExecutor<'a>>,
-}
-
-#[derive(Clone, Copy)]
-struct DashboardCommandExecutor<'a> {
-    telegram_acl: &'a TelegramAclHandle,
-    control_tx: &'a tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
 }
 
 #[derive(Clone)]
@@ -456,924 +847,144 @@ struct CommandSuggestion {
     description: String,
 }
 
-enum DashboardCommandResult {
-    ShowOverlay { title: String, text: String },
-    Quit,
+#[derive(Clone, Copy)]
+struct DashboardCommandSpec {
+    primary_verb: &'static str,
+    description: &'static str,
+    aliases: &'static [&'static str],
+    remote_command: Option<&'static str>,
+    remote_description: Option<&'static str>,
 }
 
-trait DashboardCommand: Sync {
-    fn usage(&self) -> &'static str;
-    fn description(&self) -> &'static str;
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &[]
+impl DashboardCommandSpec {
+    fn accepts(self, verb: &str) -> bool {
+        self.primary_verb == verb || self.aliases.contains(&verb)
     }
 
-    fn primary_verb(&self) -> &'static str {
-        self.usage().split_whitespace().next().unwrap_or_default()
-    }
-
-    fn accepts(&self, verb: &str) -> bool {
-        self.primary_verb() == verb || self.aliases().contains(&verb)
-    }
-
-    fn remote_command(&self) -> Option<&'static str> {
-        Some(self.primary_verb())
-    }
-
-    fn remote_description(&self) -> &'static str {
-        self.description()
-    }
-
-    fn overlay_title(&self, raw: &str) -> String {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            "RESULT".to_string()
-        } else {
-            trimmed.to_uppercase()
-        }
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult;
-
-    fn subcommands(&self) -> &'static [&'static dyn DashboardSubcommand] {
-        &[]
-    }
-
-    fn complete_arguments(
-        &self,
-        _parts: &[&str],
-        _context: &DashboardCommandContext<'_>,
-    ) -> Vec<CommandSuggestion> {
-        Vec::new()
+    fn remote_description(self) -> &'static str {
+        self.remote_description.unwrap_or(self.description)
     }
 }
 
-trait DashboardSubcommand: Sync {
-    fn usage(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+const NO_ALIASES: &[&str] = &[];
+const QUIT_ALIASES: &[&str] = &["q", "exit"];
+const APP_STATUS_ALIASES: &[&str] = &["app_status"];
 
-    fn name(&self) -> &'static str {
-        self.usage().split_whitespace().next().unwrap_or_default()
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &[]
-    }
-
-    fn accepts(&self, verb: &str) -> bool {
-        self.name() == verb || self.aliases().contains(&verb)
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult;
-}
-
-struct QuitCommand;
-struct ClearCommand;
-struct DebugCommand;
-struct DebugPersonaSubcommand;
-struct DebugSystemPromptSubcommand;
-struct DebugContextSubcommand;
-struct AppStatusCommand;
-struct StatusCommand;
-struct SleepCommand;
-struct RestartCommand;
-struct SleepRunSubcommand;
-struct SleepStatusSubcommand;
-struct SkillsCommand;
-struct SkillsListSubcommand;
-struct SkillsShowSubcommand;
-struct SkillsEnableSubcommand;
-struct SkillsDisableSubcommand;
-struct SkillsReloadSubcommand;
-struct TelegramCommand;
-struct TelegramStatusSubcommand;
-struct TelegramApproveSubcommand;
-struct TelegramRejectSubcommand;
-
-static QUIT_COMMAND: QuitCommand = QuitCommand;
-static CLEAR_COMMAND: ClearCommand = ClearCommand;
-static DEBUG_COMMAND: DebugCommand = DebugCommand;
-static DEBUG_PERSONA_SUBCOMMAND: DebugPersonaSubcommand = DebugPersonaSubcommand;
-static DEBUG_SYSTEM_PROMPT_SUBCOMMAND: DebugSystemPromptSubcommand = DebugSystemPromptSubcommand;
-static DEBUG_CONTEXT_SUBCOMMAND: DebugContextSubcommand = DebugContextSubcommand;
-static APP_STATUS_COMMAND: AppStatusCommand = AppStatusCommand;
-static STATUS_COMMAND: StatusCommand = StatusCommand;
-static SLEEP_COMMAND: SleepCommand = SleepCommand;
-static RESTART_COMMAND: RestartCommand = RestartCommand;
-static SLEEP_RUN_SUBCOMMAND: SleepRunSubcommand = SleepRunSubcommand;
-static SLEEP_STATUS_SUBCOMMAND: SleepStatusSubcommand = SleepStatusSubcommand;
-static SKILLS_COMMAND: SkillsCommand = SkillsCommand;
-static SKILLS_LIST_SUBCOMMAND: SkillsListSubcommand = SkillsListSubcommand;
-static SKILLS_SHOW_SUBCOMMAND: SkillsShowSubcommand = SkillsShowSubcommand;
-static SKILLS_ENABLE_SUBCOMMAND: SkillsEnableSubcommand = SkillsEnableSubcommand;
-static SKILLS_DISABLE_SUBCOMMAND: SkillsDisableSubcommand = SkillsDisableSubcommand;
-static SKILLS_RELOAD_SUBCOMMAND: SkillsReloadSubcommand = SkillsReloadSubcommand;
-static TELEGRAM_COMMAND: TelegramCommand = TelegramCommand;
-static TELEGRAM_STATUS_SUBCOMMAND: TelegramStatusSubcommand = TelegramStatusSubcommand;
-static TELEGRAM_APPROVE_SUBCOMMAND: TelegramApproveSubcommand = TelegramApproveSubcommand;
-static TELEGRAM_REJECT_SUBCOMMAND: TelegramRejectSubcommand = TelegramRejectSubcommand;
-static SLEEP_SUBCOMMANDS: [&dyn DashboardSubcommand; 2] =
-    [&SLEEP_STATUS_SUBCOMMAND, &SLEEP_RUN_SUBCOMMAND];
-static SKILLS_SUBCOMMANDS: [&dyn DashboardSubcommand; 5] = [
-    &SKILLS_LIST_SUBCOMMAND,
-    &SKILLS_SHOW_SUBCOMMAND,
-    &SKILLS_ENABLE_SUBCOMMAND,
-    &SKILLS_DISABLE_SUBCOMMAND,
-    &SKILLS_RELOAD_SUBCOMMAND,
-];
-static TELEGRAM_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
-    &TELEGRAM_STATUS_SUBCOMMAND,
-    &TELEGRAM_APPROVE_SUBCOMMAND,
-    &TELEGRAM_REJECT_SUBCOMMAND,
-];
-static DEBUG_SUBCOMMANDS: [&dyn DashboardSubcommand; 3] = [
-    &DEBUG_PERSONA_SUBCOMMAND,
-    &DEBUG_SYSTEM_PROMPT_SUBCOMMAND,
-    &DEBUG_CONTEXT_SUBCOMMAND,
+static DASHBOARD_COMMANDS: [DashboardCommandSpec; 9] = [
+    DashboardCommandSpec {
+        primary_verb: "quit",
+        description: "exit the dashboard",
+        aliases: QUIT_ALIASES,
+        remote_command: None,
+        remote_description: None,
+    },
+    DashboardCommandSpec {
+        primary_verb: "clear",
+        description: "clear runtime conversation history, current plan, and all events",
+        aliases: NO_ALIASES,
+        remote_command: Some("clear"),
+        remote_description: None,
+    },
+    DashboardCommandSpec {
+        primary_verb: "debug",
+        description: "debug outputs and internal runtime views",
+        aliases: NO_ALIASES,
+        remote_command: Some("debug"),
+        remote_description: None,
+    },
+    DashboardCommandSpec {
+        primary_verb: "app-status",
+        description: "show current structured app state and llm-facing note",
+        aliases: APP_STATUS_ALIASES,
+        remote_command: Some("app_status"),
+        remote_description: None,
+    },
+    DashboardCommandSpec {
+        primary_verb: "status",
+        description: "show overall status",
+        aliases: NO_ALIASES,
+        remote_command: Some("status"),
+        remote_description: None,
+    },
+    DashboardCommandSpec {
+        primary_verb: "restart",
+        description: "restart the daemon",
+        aliases: NO_ALIASES,
+        remote_command: Some("restart"),
+        remote_description: None,
+    },
+    DashboardCommandSpec {
+        primary_verb: "sleep",
+        description: "sleep controls and status",
+        aliases: NO_ALIASES,
+        remote_command: Some("sleep"),
+        remote_description: None,
+    },
+    DashboardCommandSpec {
+        primary_verb: "skills",
+        description: "list and manage OpenSkills automatic use",
+        aliases: NO_ALIASES,
+        remote_command: Some("skills"),
+        remote_description: None,
+    },
+    DashboardCommandSpec {
+        primary_verb: "telegram",
+        description: "telegram status and access controls",
+        aliases: NO_ALIASES,
+        remote_command: Some("telegram"),
+        remote_description: None,
+    },
 ];
 
-static DASHBOARD_COMMANDS: [&dyn DashboardCommand; 9] = [
-    &QUIT_COMMAND,
-    &CLEAR_COMMAND,
-    &DEBUG_COMMAND,
-    &APP_STATUS_COMMAND,
-    &STATUS_COMMAND,
-    &RESTART_COMMAND,
-    &SLEEP_COMMAND,
-    &SKILLS_COMMAND,
-    &TELEGRAM_COMMAND,
-];
-
-impl DashboardCommand for QuitCommand {
-    fn usage(&self) -> &'static str {
-        "quit"
-    }
-
-    fn description(&self) -> &'static str {
-        "exit the dashboard"
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["q", "exit"]
-    }
-
-    fn remote_command(&self) -> Option<&'static str> {
-        None
-    }
-
-    fn execute(
-        &self,
-        _: &[&str],
-        _: &str,
-        _: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::Quit
-    }
-}
-
-impl DashboardCommand for StatusCommand {
-    fn usage(&self) -> &'static str {
-        "status"
-    }
-
-    fn description(&self) -> &'static str {
-        "show overall status"
-    }
-
-    fn execute(
-        &self,
-        _: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::ShowOverlay {
-            title: self.overlay_title(raw),
-            text: fallback_output(&context.state.status_output),
-        }
-    }
-}
-
-impl DashboardCommand for ClearCommand {
-    fn usage(&self) -> &'static str {
-        "clear"
-    }
-
-    fn description(&self) -> &'static str {
-        "clear runtime conversation history, current plan, and all events"
-    }
-
-    fn execute(
-        &self,
-        _: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        let Some(executor) = context.executor else {
-            return DashboardCommandResult::ShowOverlay {
-                title: raw.trim().to_uppercase(),
-                text: "clear is unavailable in completion-only mode".to_string(),
-            };
-        };
-        match executor
-            .control_tx
-            .send(DashboardControlCommand::ClearConversation)
-        {
-            Ok(()) => DashboardCommandResult::ShowOverlay {
-                title: raw.trim().to_uppercase(),
-                text: "queued runtime conversation + plan + event clear".to_string(),
-            },
-            Err(err) => DashboardCommandResult::ShowOverlay {
-                title: raw.trim().to_uppercase(),
-                text: format!("failed to queue clear command: {err}"),
-            },
-        }
-    }
-}
-
-impl DashboardCommand for DebugCommand {
-    fn usage(&self) -> &'static str {
-        "debug"
-    }
-
-    fn description(&self) -> &'static str {
-        "debug outputs and internal runtime views"
-    }
-
-    fn subcommands(&self) -> &'static [&'static dyn DashboardSubcommand] {
-        &DEBUG_SUBCOMMANDS
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        let Some(subcommand_name) = parts.get(1).copied() else {
-            return DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: "available:\n  debug persona\n  debug system-prompt\n  debug context"
-                    .to_string(),
-            };
-        };
-        if let Some(subcommand) = self
-            .subcommands()
-            .iter()
-            .copied()
-            .find(|subcommand| subcommand.accepts(subcommand_name))
-        {
-            subcommand.execute(parts, raw, context)
-        } else {
-            DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: format!("unknown debug subcommand: {subcommand_name}"),
-            }
-        }
-    }
-}
-
-impl DashboardSubcommand for DebugPersonaSubcommand {
-    fn usage(&self) -> &'static str {
-        "persona"
-    }
-
-    fn description(&self) -> &'static str {
-        "show current prompt persona config"
-    }
-
-    fn execute(
-        &self,
-        _: &[&str],
-        raw: &str,
-        _: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        let path = prompt_persona_path_sync();
-        let text = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(_) => render_prompt_persona_markdown(&load_prompt_persona_spec_sync()),
-        };
-        DashboardCommandResult::ShowOverlay {
-            title: raw.trim().to_uppercase(),
-            text,
-        }
-    }
-}
-
-impl DashboardSubcommand for DebugSystemPromptSubcommand {
-    fn usage(&self) -> &'static str {
-        "system-prompt"
-    }
-
-    fn description(&self) -> &'static str {
-        "show current runtime system prompt"
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["system_prompt"]
-    }
-
-    fn execute(
-        &self,
-        _: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::ShowOverlay {
-            title: raw.trim().to_uppercase(),
-            text: fallback_output(&context.state.system_prompt_output),
-        }
-    }
-}
-
-impl DashboardSubcommand for DebugContextSubcommand {
-    fn usage(&self) -> &'static str {
-        "context"
-    }
-
-    fn description(&self) -> &'static str {
-        "show latest pre-turn runtime context"
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["preturn-context", "preturn_context"]
-    }
-
-    fn execute(
-        &self,
-        _: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::ShowOverlay {
-            title: raw.trim().to_uppercase(),
-            text: fallback_output(&context.state.preturn_context_output),
-        }
-    }
-}
-
-impl DashboardCommand for AppStatusCommand {
-    fn usage(&self) -> &'static str {
-        "app-status <app>"
-    }
-
-    fn description(&self) -> &'static str {
-        "show current structured app state and llm-facing note"
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &["app_status"]
-    }
-
-    fn remote_command(&self) -> Option<&'static str> {
-        Some("app_status")
-    }
-
-    fn complete_arguments(
-        &self,
-        parts: &[&str],
-        context: &DashboardCommandContext<'_>,
-    ) -> Vec<CommandSuggestion> {
-        let prefix = parts
-            .get(1)
-            .copied()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        context
-            .state
-            .app_status_outputs
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .filter(|candidate| candidate.starts_with(&prefix))
-            .map(|candidate| CommandSuggestion {
-                display: candidate.to_string(),
-                completion: format!("/{} {}", self.primary_verb(), candidate),
-                description: self.description().to_string(),
-            })
-            .collect()
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        let Some(target) = parts.get(1).copied() else {
-            let apps = context
-                .state
-                .app_status_outputs
-                .iter()
-                .map(|(name, _)| name.clone())
-                .collect::<Vec<_>>();
-            return DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: if apps.is_empty() {
-                    "available apps: none".to_string()
-                } else {
-                    format!("available apps: {}", apps.join(", "))
-                },
-            };
-        };
-        let target = target.trim().to_ascii_lowercase();
-        let output = context
-            .state
-            .app_status_outputs
-            .iter()
-            .find(|(name, _)| name == &target)
-            .map(|(_, output)| output.clone());
-        DashboardCommandResult::ShowOverlay {
-            title: self.overlay_title(raw),
-            text: output.unwrap_or_else(|| {
-                let apps = context
-                    .state
-                    .app_status_outputs
-                    .iter()
-                    .map(|(name, _)| name.clone())
-                    .collect::<Vec<_>>();
-                if apps.is_empty() {
-                    format!("unknown app: {target}")
-                } else {
-                    format!("unknown app: {target}\navailable apps: {}", apps.join(", "))
-                }
-            }),
-        }
-    }
-}
-
-impl DashboardCommand for RestartCommand {
-    fn usage(&self) -> &'static str {
-        "restart"
-    }
-
-    fn description(&self) -> &'static str {
-        "restart the daemon"
-    }
-
-    fn execute(
-        &self,
-        _: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        let Some(executor) = context.executor else {
-            return DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: "restart is unavailable in completion-only mode".to_string(),
-            };
-        };
-        match executor
-            .control_tx
-            .send(DashboardControlCommand::RestartDaemon)
-        {
-            Ok(()) => DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: "queued daemon restart".to_string(),
-            },
-            Err(err) => DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: format!("failed to queue daemon restart: {err}"),
-            },
-        }
-    }
-}
-
-impl DashboardCommand for SleepCommand {
-    fn usage(&self) -> &'static str {
-        "sleep"
-    }
-
-    fn description(&self) -> &'static str {
-        "sleep controls and status"
-    }
-
-    fn subcommands(&self) -> &'static [&'static dyn DashboardSubcommand] {
-        &SLEEP_SUBCOMMANDS
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        let Some(subcommand_name) = parts.get(1).copied() else {
-            return DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: "available:\n  sleep run\n  sleep status".to_string(),
-            };
-        };
-        if let Some(subcommand) = self
-            .subcommands()
-            .iter()
-            .copied()
-            .find(|subcommand| subcommand.accepts(subcommand_name))
-        {
-            subcommand.execute(parts, raw, context)
-        } else {
-            DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: format!("unknown sleep subcommand: {subcommand_name}"),
-            }
-        }
-    }
-}
-
-impl DashboardSubcommand for SleepRunSubcommand {
-    fn usage(&self) -> &'static str {
-        "run"
-    }
-
-    fn description(&self) -> &'static str {
-        "start a background sleep run"
-    }
-
-    fn execute(
-        &self,
-        _: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        let Some(executor) = context.executor else {
-            return DashboardCommandResult::ShowOverlay {
-                title: raw.trim().to_uppercase(),
-                text: "sleep run is unavailable in completion-only mode".to_string(),
-            };
-        };
-        match executor.control_tx.send(DashboardControlCommand::RunSleep) {
-            Ok(()) => DashboardCommandResult::ShowOverlay {
-                title: raw.trim().to_uppercase(),
-                text: "queued sleep run".to_string(),
-            },
-            Err(err) => DashboardCommandResult::ShowOverlay {
-                title: raw.trim().to_uppercase(),
-                text: format!("failed to queue sleep run: {err}"),
-            },
-        }
-    }
-}
-
-impl DashboardSubcommand for SleepStatusSubcommand {
-    fn usage(&self) -> &'static str {
-        "status"
-    }
-
-    fn description(&self) -> &'static str {
-        "show sleep status"
-    }
-
-    fn execute(
-        &self,
-        _parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::ShowOverlay {
-            title: raw.trim().to_uppercase(),
-            text: fallback_output(&context.state.sleep_status_output),
-        }
-    }
-}
-
-impl DashboardCommand for SkillsCommand {
-    fn usage(&self) -> &'static str {
-        "skills"
-    }
-
-    fn description(&self) -> &'static str {
-        "list and manage OpenSkills automatic use"
-    }
-
-    fn subcommands(&self) -> &'static [&'static dyn DashboardSubcommand] {
-        &SKILLS_SUBCOMMANDS
-    }
-
-    fn complete_arguments(
-        &self,
-        parts: &[&str],
-        context: &DashboardCommandContext<'_>,
-    ) -> Vec<CommandSuggestion> {
-        let Some(subcommand) = parts.get(1).copied() else {
-            return Vec::new();
-        };
-        if !matches!(subcommand, "show" | "enable" | "disable") {
-            return Vec::new();
-        }
-        let prefix = parts.get(2).copied().unwrap_or_default();
-        context
-            .state
-            .skills
-            .iter()
-            .filter(|skill| skill.name.starts_with(prefix))
-            .map(|skill| CommandSuggestion {
-                display: skill.name.clone(),
-                completion: format!("/skills {} {}", subcommand, skill.name),
-                description: skill_status_description(skill),
-            })
-            .collect()
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        let Some(subcommand_name) = parts.get(1).copied() else {
-            return DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: render_skills_list(context.state),
-            };
-        };
-        if let Some(subcommand) = self
-            .subcommands()
-            .iter()
-            .copied()
-            .find(|subcommand| subcommand.accepts(subcommand_name))
-        {
-            subcommand.execute(parts, raw, context)
-        } else {
-            DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: format!("unknown skills subcommand: {subcommand_name}"),
-            }
-        }
-    }
-}
-
-impl DashboardSubcommand for SkillsListSubcommand {
-    fn usage(&self) -> &'static str {
-        "list"
-    }
-
-    fn description(&self) -> &'static str {
-        "list loaded skills"
-    }
-
-    fn execute(
-        &self,
-        _: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::ShowOverlay {
-            title: raw.trim().to_uppercase(),
-            text: render_skills_list(context.state),
-        }
-    }
-}
-
-impl DashboardSubcommand for SkillsShowSubcommand {
-    fn usage(&self) -> &'static str {
-        "show <skill>"
-    }
-
-    fn description(&self) -> &'static str {
-        "show loaded skill details"
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::ShowOverlay {
-            title: raw.trim().to_uppercase(),
-            text: match parts.get(2).copied() {
-                Some(target) => render_skill_detail(context.state, target),
-                None => "usage: /skills show <skill>".to_string(),
-            },
-        }
-    }
-}
-
-impl DashboardSubcommand for SkillsEnableSubcommand {
-    fn usage(&self) -> &'static str {
-        "enable <skill>"
-    }
-
-    fn description(&self) -> &'static str {
-        "allow a skill to be used automatically"
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::ShowOverlay {
-            title: raw.trim().to_uppercase(),
-            text: execute_skill_auto_use_command(true, parts, context),
-        }
-    }
-}
-
-impl DashboardSubcommand for SkillsDisableSubcommand {
-    fn usage(&self) -> &'static str {
-        "disable <skill>"
-    }
-
-    fn description(&self) -> &'static str {
-        "keep a skill available only for explicit use"
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::ShowOverlay {
-            title: raw.trim().to_uppercase(),
-            text: execute_skill_auto_use_command(false, parts, context),
-        }
-    }
-}
-
-impl DashboardSubcommand for SkillsReloadSubcommand {
-    fn usage(&self) -> &'static str {
-        "reload"
-    }
-
-    fn description(&self) -> &'static str {
-        "reload skills from disk"
-    }
-
-    fn execute(
-        &self,
-        _: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        let Some(executor) = context.executor else {
-            return DashboardCommandResult::ShowOverlay {
-                title: raw.trim().to_uppercase(),
-                text: "skills reload is unavailable in completion-only mode".to_string(),
-            };
-        };
-        match executor
-            .control_tx
-            .send(DashboardControlCommand::ReloadSkills)
-        {
-            Ok(()) => DashboardCommandResult::ShowOverlay {
-                title: raw.trim().to_uppercase(),
-                text: "queued skills reload".to_string(),
-            },
-            Err(err) => DashboardCommandResult::ShowOverlay {
-                title: raw.trim().to_uppercase(),
-                text: format!("failed to queue skills reload: {err}"),
-            },
-        }
-    }
-}
-
-impl DashboardCommand for TelegramCommand {
-    fn usage(&self) -> &'static str {
-        "telegram"
-    }
-
-    fn description(&self) -> &'static str {
-        "telegram status and access controls"
-    }
-
-    fn subcommands(&self) -> &'static [&'static dyn DashboardSubcommand] {
-        &TELEGRAM_SUBCOMMANDS
-    }
-
-    fn complete_arguments(
-        &self,
-        parts: &[&str],
-        context: &DashboardCommandContext<'_>,
-    ) -> Vec<CommandSuggestion> {
-        let subcommand = parts.get(1).copied().unwrap_or_default();
-        if subcommand != "approve" && subcommand != "reject" {
-            return Vec::new();
-        }
-        let prefix = parts.get(2).copied().unwrap_or_default();
-        context
-            .requests
-            .iter()
-            .filter(|r| r.chat_id.to_string().starts_with(prefix))
-            .map(|r| CommandSuggestion {
-                display: format!("{} ({})", r.chat_id, r.sender),
-                completion: format!("/telegram {} {}", subcommand, r.chat_id),
-                description: format!("{} — {}", r.title, r.sender),
-            })
-            .collect()
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        let Some(subcommand_name) = parts.get(1).copied() else {
-            return DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: "available:\n  telegram status\n  telegram approve [chat_id]\n  telegram reject [chat_id]".to_string(),
-            };
-        };
-        if let Some(subcommand) = self
-            .subcommands()
-            .iter()
-            .copied()
-            .find(|subcommand| subcommand.accepts(subcommand_name))
-        {
-            subcommand.execute(parts, raw, context)
-        } else {
-            DashboardCommandResult::ShowOverlay {
-                title: self.overlay_title(raw),
-                text: format!("unknown telegram subcommand: {subcommand_name}"),
-            }
-        }
-    }
-}
-
-impl DashboardSubcommand for TelegramStatusSubcommand {
-    fn usage(&self) -> &'static str {
-        "status"
-    }
-
-    fn description(&self) -> &'static str {
-        "show telegram details"
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::ShowOverlay {
-            title: raw.trim().to_uppercase(),
-            text: match parts.get(1).copied() {
-                Some("status") => fallback_output(&context.state.inspect_telegram_output),
-                _ => "unknown telegram subcommand: status".to_string(),
-            },
-        }
-    }
-}
-
-impl DashboardSubcommand for TelegramApproveSubcommand {
-    fn usage(&self) -> &'static str {
-        "approve [chat_id]"
-    }
-
-    fn description(&self) -> &'static str {
-        "approve a telegram access request"
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::ShowOverlay {
-            title: raw.trim().to_uppercase(),
-            text: execute_access_request_command(true, parts, context),
-        }
-    }
-}
-
-impl DashboardSubcommand for TelegramRejectSubcommand {
-    fn usage(&self) -> &'static str {
-        "reject [chat_id]"
-    }
-
-    fn description(&self) -> &'static str {
-        "reject a telegram access request"
-    }
-
-    fn execute(
-        &self,
-        parts: &[&str],
-        raw: &str,
-        context: &DashboardCommandContext<'_>,
-    ) -> DashboardCommandResult {
-        DashboardCommandResult::ShowOverlay {
-            title: raw.trim().to_uppercase(),
-            text: execute_access_request_command(false, parts, context),
-        }
-    }
-}
-
-fn dashboard_commands() -> &'static [&'static dyn DashboardCommand] {
+fn dashboard_commands() -> &'static [DashboardCommandSpec] {
     &DASHBOARD_COMMANDS
+}
+
+fn dashboard_command_spec(primary_verb: &str) -> Option<DashboardCommandSpec> {
+    dashboard_commands()
+        .iter()
+        .copied()
+        .find(|command| command.primary_verb == primary_verb)
+}
+
+fn dashboard_command_accepts(primary_verb: &str, verb: &str) -> bool {
+    dashboard_command_spec(primary_verb).is_some_and(|command| command.accepts(verb))
+}
+
+fn quit_command_accepts(verb: &str) -> bool {
+    dashboard_command_accepts("quit", verb)
+}
+
+fn clear_command_accepts(verb: &str) -> bool {
+    dashboard_command_accepts("clear", verb)
+}
+
+fn status_command_accepts(verb: &str) -> bool {
+    dashboard_command_accepts("status", verb)
+}
+
+fn restart_command_accepts(verb: &str) -> bool {
+    dashboard_command_accepts("restart", verb)
+}
+
+fn debug_command_accepts(verb: &str) -> bool {
+    dashboard_command_accepts("debug", verb)
+}
+
+fn app_status_command_accepts(verb: &str) -> bool {
+    dashboard_command_accepts("app-status", verb)
+}
+
+fn sleep_command_accepts(verb: &str) -> bool {
+    dashboard_command_accepts("sleep", verb)
+}
+
+fn skills_command_accepts(verb: &str) -> bool {
+    dashboard_command_accepts("skills", verb)
+}
+
+fn telegram_command_accepts(verb: &str) -> bool {
+    dashboard_command_accepts("telegram", verb)
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -1387,7 +998,7 @@ pub(crate) fn remote_dashboard_commands() -> Vec<RemoteDashboardCommand> {
         .iter()
         .filter_map(|command| {
             command
-                .remote_command()
+                .remote_command
                 .map(|remote_command| RemoteDashboardCommand {
                     command: remote_command,
                     description: command.remote_description(),
@@ -1428,7 +1039,7 @@ fn render_skills_list(state: &DashboardState) -> String {
             "OpenSkills loaded: {} (auto: {auto_count}, manual-only: {manual_count})",
             state.skills.len()
         ),
-        "Commands: /skills show <skill> | /skills enable <skill> | /skills disable <skill> | /skills reload".to_string(),
+        "Use /skills in the dashboard to browse, inspect, or toggle skills.".to_string(),
         String::new(),
         "Skills:".to_string(),
     ];
@@ -1468,42 +1079,6 @@ fn render_skill_detail(state: &DashboardState, target: &str) -> String {
         format!("Description: {}", skill.description),
     ]
     .join("\n")
-}
-
-fn execute_skill_auto_use_command(
-    enabled: bool,
-    parts: &[&str],
-    context: &DashboardCommandContext<'_>,
-) -> String {
-    let action = if enabled { "enable" } else { "disable" };
-    let Some(target) = parts.get(2).copied() else {
-        return format!("usage: /skills {action} <skill>");
-    };
-    let skill = match resolve_skill_target(context.state, target) {
-        Ok(skill) => skill,
-        Err(message) => return message,
-    };
-    let Some(executor) = context.executor else {
-        return format!("skills {action} is unavailable in completion-only mode");
-    };
-    match executor
-        .control_tx
-        .send(DashboardControlCommand::SetSkillAutoUse {
-            path: PathBuf::from(&skill.path),
-            enabled,
-        }) {
-        Ok(()) => {
-            if enabled && !skill.allow_implicit_invocation {
-                format!(
-                    "queued skills auto-use enable for {}; policy.allow_implicit_invocation=false still keeps it manual-only",
-                    skill.name
-                )
-            } else {
-                format!("queued skills auto-use {action} for {}", skill.name)
-            }
-        }
-        Err(err) => format!("failed to queue skills {action}: {err}"),
-    }
 }
 
 fn resolve_skill_target<'a>(
@@ -1578,36 +1153,93 @@ fn truncate_command_text(text: &str, max_chars: usize) -> String {
     out
 }
 
-fn execute_access_request_command(
-    approve: bool,
-    parts: &[&str],
-    context: &DashboardCommandContext<'_>,
-) -> String {
-    let action = if approve { "approve" } else { "reject" };
-
-    let chat_id = if let Some(target) = parts.get(2).copied() {
-        match target.parse::<i64>() {
-            Ok(id) => id,
-            Err(_) => return format!("invalid chat_id: {target}"),
+pub(crate) fn execute_dashboard_action(
+    action: DashboardAction,
+    telegram_acl: &TelegramAclHandle,
+    control_tx: &tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
+) -> DashboardActionResult {
+    match action {
+        DashboardAction::RunSleep => match control_tx.send(DashboardControlCommand::RunSleep) {
+            Ok(()) => DashboardActionResult::ok("queued sleep run"),
+            Err(err) => DashboardActionResult::error(format!("failed to queue sleep run: {err}")),
+        },
+        DashboardAction::ClearConversation => {
+            match control_tx.send(DashboardControlCommand::ClearConversation) {
+                Ok(()) => DashboardActionResult::ok("queued runtime clear"),
+                Err(err) => DashboardActionResult::error(format!("failed to queue clear: {err}")),
+            }
         }
-    } else {
-        return render_pending_access_requests(action, context.requests);
-    };
+        DashboardAction::RestartDaemon => {
+            match control_tx.send(DashboardControlCommand::RestartDaemon) {
+                Ok(()) => DashboardActionResult::ok("queued daemon restart"),
+                Err(err) => {
+                    DashboardActionResult::error(format!("failed to queue daemon restart: {err}"))
+                }
+            }
+        }
+        DashboardAction::ReloadSkills => {
+            match control_tx.send(DashboardControlCommand::ReloadSkills) {
+                Ok(()) => DashboardActionResult::ok("queued skills reload"),
+                Err(err) => {
+                    DashboardActionResult::error(format!("failed to queue skills reload: {err}"))
+                }
+            }
+        }
+        DashboardAction::SetSkillAutoUse { path, enabled } => {
+            match control_tx.send(DashboardControlCommand::SetSkillAutoUse { path, enabled }) {
+                Ok(()) => {
+                    let action = if enabled { "enable" } else { "disable" };
+                    DashboardActionResult::ok(format!("queued skills auto-use {action}"))
+                }
+                Err(err) => {
+                    DashboardActionResult::error(format!("failed to queue skills auto-use: {err}"))
+                }
+            }
+        }
+        DashboardAction::ApproveTelegramAccess { chat_id } => match telegram_acl.approve(chat_id) {
+            Ok(()) => DashboardActionResult::ok(format!("approved {chat_id}")),
+            Err(err) => {
+                DashboardActionResult::error(format!("approve failed for {chat_id}: {err}"))
+            }
+        },
+        DashboardAction::RejectTelegramAccess { chat_id } => match telegram_acl.reject(chat_id) {
+            Ok(()) => DashboardActionResult::ok(format!("rejected {chat_id}")),
+            Err(err) => DashboardActionResult::error(format!("reject failed for {chat_id}: {err}")),
+        },
+    }
+}
 
-    let result = if approve {
-        let Some(executor) = context.executor else {
-            return format!("{action} is unavailable in completion-only mode");
-        };
-        executor.telegram_acl.approve(chat_id)
-    } else {
-        let Some(executor) = context.executor else {
-            return format!("{action} is unavailable in completion-only mode");
-        };
-        executor.telegram_acl.reject(chat_id)
-    };
-    match result {
-        Ok(()) => format!("{} {}", action, chat_id),
-        Err(err) => format!("{action} failed for {chat_id}: {err}"),
+impl DashboardActionResult {
+    fn ok(message: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            message: message.into(),
+            detail: None,
+        }
+    }
+
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            message: message.into(),
+            detail: None,
+        }
+    }
+}
+
+fn command_feedback_from_action_result(
+    title: String,
+    result: DashboardActionResult,
+) -> CommandFeedback {
+    CommandFeedback {
+        title,
+        message: result.message,
+        detail: result.detail,
+        level: if result.success {
+            CommandFeedbackLevel::Info
+        } else {
+            CommandFeedbackLevel::Error
+        },
     }
 }
 
@@ -1626,6 +1258,400 @@ fn render_pending_access_requests(action: &str, requests: &[PendingAccessRequest
         )
     }));
     lines.join("\n")
+}
+
+fn command_panel_for_input(
+    input: &str,
+    context: &DashboardCommandContext<'_>,
+) -> Option<CommandPanel> {
+    let parts = dashboard_command_parts(input)?;
+    match parts.as_slice() {
+        ["status"] => Some(detail_panel(
+            "STATUS",
+            fallback_output(&context.state.status_output),
+        )),
+        ["debug"] => Some(debug_command_panel(context.state)),
+        ["debug", "persona"] => Some(debug_persona_panel()),
+        ["debug", "system-prompt"] | ["debug", "system_prompt"] => {
+            Some(debug_system_prompt_panel(context.state))
+        }
+        ["debug", "context"] | ["debug", "preturn-context"] | ["debug", "preturn_context"] => {
+            Some(debug_context_panel(context.state))
+        }
+        ["sleep"] => Some(sleep_command_panel(context.state)),
+        ["sleep", "status"] => Some(sleep_status_panel(context.state)),
+        ["telegram"] => Some(telegram_command_panel(context.state, context.requests)),
+        ["telegram", "status"] => Some(telegram_status_panel(context.state)),
+        ["telegram", "approve"] => Some(
+            telegram_access_picker_for_input(input, context.requests)
+                .map(CommandPanel::TelegramAccess)
+                .unwrap_or_else(|| {
+                    telegram_access_command_panel(TelegramAccessAction::Approve, context.requests)
+                }),
+        ),
+        ["telegram", "reject"] => Some(
+            telegram_access_picker_for_input(input, context.requests)
+                .map(CommandPanel::TelegramAccess)
+                .unwrap_or_else(|| {
+                    telegram_access_command_panel(TelegramAccessAction::Reject, context.requests)
+                }),
+        ),
+        [verb] if app_status_command_accepts(verb) => {
+            Some(app_status_selection_panel(context.state))
+        }
+        [verb, target] if app_status_command_accepts(verb) => {
+            Some(app_status_detail_panel(context.state, target))
+        }
+        ["skills"] => Some(skills_command_panel(context.state)),
+        ["skills", "list"] | ["skills", "show"] => Some(CommandPanel::SkillsList(
+            SkillsListPanel::from_state(context.state),
+        )),
+        ["skills", "show", target] => skill_detail_panel(context.state, target),
+        _ => None,
+    }
+}
+
+fn dashboard_action_for_input(
+    input: &str,
+    context: &DashboardCommandContext<'_>,
+) -> Result<Option<DashboardActionInvocation>, CommandFeedback> {
+    let Some(parts) = dashboard_command_parts(input) else {
+        return Ok(None);
+    };
+    let invocation = match parts.as_slice() {
+        ["clear"] => DashboardActionInvocation {
+            title: "CLEAR".to_string(),
+            action: DashboardAction::ClearConversation,
+            quiet_success: true,
+        },
+        ["restart"] => DashboardActionInvocation {
+            title: "RESTART".to_string(),
+            action: DashboardAction::RestartDaemon,
+            quiet_success: false,
+        },
+        ["sleep", "run"] => DashboardActionInvocation {
+            title: "SLEEP".to_string(),
+            action: DashboardAction::RunSleep,
+            quiet_success: false,
+        },
+        ["skills", "reload"] => DashboardActionInvocation {
+            title: "SKILLS".to_string(),
+            action: DashboardAction::ReloadSkills,
+            quiet_success: false,
+        },
+        ["skills", "enable", target] | ["skills", "disable", target] => {
+            let enabled = parts[1] == "enable";
+            let skill =
+                resolve_skill_target(context.state, target).map_err(|message| CommandFeedback {
+                    title: "SKILLS".to_string(),
+                    message,
+                    detail: None,
+                    level: CommandFeedbackLevel::Error,
+                })?;
+            DashboardActionInvocation {
+                title: "SKILLS".to_string(),
+                action: DashboardAction::SetSkillAutoUse {
+                    path: PathBuf::from(&skill.path),
+                    enabled,
+                },
+                quiet_success: false,
+            }
+        }
+        ["telegram", "approve", chat_id] | ["telegram", "reject", chat_id] => {
+            let chat_id = chat_id.parse::<i64>().map_err(|_| CommandFeedback {
+                title: "TELEGRAM".to_string(),
+                message: format!("invalid chat_id: {chat_id}"),
+                detail: None,
+                level: CommandFeedbackLevel::Error,
+            })?;
+            let action = if parts[1] == "approve" {
+                DashboardAction::ApproveTelegramAccess { chat_id }
+            } else {
+                DashboardAction::RejectTelegramAccess { chat_id }
+            };
+            DashboardActionInvocation {
+                title: "TELEGRAM".to_string(),
+                action,
+                quiet_success: false,
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(invocation))
+}
+
+fn debug_command_panel(state: &DashboardState) -> CommandPanel {
+    CommandPanel::Selection(CommandSelectionPanel {
+        title: "Debug".to_string(),
+        subtitle: Some("Inspect internal runtime views.".to_string()),
+        items: vec![
+            CommandSelectionItem {
+                name: "Prompt persona".to_string(),
+                description: "show current prompt persona config".to_string(),
+                action: CommandSelectionAction::ShowDetail {
+                    title: "DEBUG PERSONA".to_string(),
+                    text: debug_persona_text(),
+                },
+                disabled: false,
+            },
+            CommandSelectionItem {
+                name: "System prompt".to_string(),
+                description: "show current runtime system prompt".to_string(),
+                action: CommandSelectionAction::ShowDetail {
+                    title: "DEBUG SYSTEM PROMPT".to_string(),
+                    text: fallback_output(&state.system_prompt_output),
+                },
+                disabled: false,
+            },
+            CommandSelectionItem {
+                name: "Runtime context".to_string(),
+                description: "show latest pre-turn runtime context".to_string(),
+                action: CommandSelectionAction::ShowDetail {
+                    title: "DEBUG CONTEXT".to_string(),
+                    text: fallback_output(&state.preturn_context_output),
+                },
+                disabled: false,
+            },
+        ],
+        selected: 0,
+        scroll: 0,
+    })
+}
+
+fn debug_persona_text() -> String {
+    let path = prompt_persona_path_sync();
+    match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => render_prompt_persona_markdown(&load_prompt_persona_spec_sync()),
+    }
+}
+
+fn debug_persona_panel() -> CommandPanel {
+    detail_panel("DEBUG PERSONA", debug_persona_text())
+}
+
+fn debug_system_prompt_panel(state: &DashboardState) -> CommandPanel {
+    detail_panel(
+        "DEBUG SYSTEM PROMPT",
+        fallback_output(&state.system_prompt_output),
+    )
+}
+
+fn debug_context_panel(state: &DashboardState) -> CommandPanel {
+    detail_panel(
+        "DEBUG CONTEXT",
+        fallback_output(&state.preturn_context_output),
+    )
+}
+
+fn sleep_command_panel(state: &DashboardState) -> CommandPanel {
+    CommandPanel::Selection(CommandSelectionPanel {
+        title: "Sleep".to_string(),
+        subtitle: Some("Inspect sleep state or start a background sleep run.".to_string()),
+        items: vec![
+            CommandSelectionItem {
+                name: "Status".to_string(),
+                description: "show sleep status".to_string(),
+                action: CommandSelectionAction::ShowDetail {
+                    title: "SLEEP STATUS".to_string(),
+                    text: fallback_output(&state.sleep_status_output),
+                },
+                disabled: false,
+            },
+            CommandSelectionItem {
+                name: "Start sleep run".to_string(),
+                description: "start a background sleep run".to_string(),
+                action: CommandSelectionAction::RunAction {
+                    title: "SLEEP".to_string(),
+                    action: DashboardAction::RunSleep,
+                    keep_panel: false,
+                },
+                disabled: false,
+            },
+        ],
+        selected: 0,
+        scroll: 0,
+    })
+}
+
+fn sleep_status_panel(state: &DashboardState) -> CommandPanel {
+    detail_panel("SLEEP STATUS", fallback_output(&state.sleep_status_output))
+}
+
+fn app_status_selection_panel(state: &DashboardState) -> CommandPanel {
+    let items = state
+        .app_status_outputs
+        .iter()
+        .map(|(name, output)| CommandSelectionItem {
+            name: name.clone(),
+            description: truncate_command_text(
+                output
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("app state"),
+                120,
+            ),
+            action: CommandSelectionAction::ShowDetail {
+                title: format!("APP STATUS {}", name.to_uppercase()),
+                text: output.clone(),
+            },
+            disabled: false,
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        return detail_panel("APP STATUS", "No app state is currently available.");
+    }
+    CommandPanel::Selection(CommandSelectionPanel {
+        title: "App Status".to_string(),
+        subtitle: Some("Choose an app to inspect.".to_string()),
+        items,
+        selected: 0,
+        scroll: 0,
+    })
+}
+
+fn app_status_detail_panel(state: &DashboardState, target: &str) -> CommandPanel {
+    let output = render_app_status_text(state, target);
+    let target = target.trim().to_ascii_lowercase();
+    detail_panel(format!("APP STATUS {}", target.to_uppercase()), output)
+}
+
+fn render_available_app_statuses(state: &DashboardState) -> String {
+    let apps = state
+        .app_status_outputs
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    if apps.is_empty() {
+        "available apps: none".to_string()
+    } else {
+        format!("available apps: {}", apps.join(", "))
+    }
+}
+
+fn render_app_status_text(state: &DashboardState, target: &str) -> String {
+    let target = target.trim().to_ascii_lowercase();
+    state
+        .app_status_outputs
+        .iter()
+        .find(|(name, _)| name == &target)
+        .map(|(_, output)| output.clone())
+        .unwrap_or_else(|| {
+            let apps = render_available_app_statuses(state);
+            format!("unknown app: {target}\n{apps}")
+        })
+}
+
+fn telegram_command_panel(
+    state: &DashboardState,
+    requests: &[PendingAccessRequest],
+) -> CommandPanel {
+    CommandPanel::Selection(CommandSelectionPanel {
+        title: "Telegram".to_string(),
+        subtitle: Some("Inspect transport state or handle access requests.".to_string()),
+        items: vec![
+            CommandSelectionItem {
+                name: "Status".to_string(),
+                description: "show Telegram transport details".to_string(),
+                action: CommandSelectionAction::ShowDetail {
+                    title: "TELEGRAM STATUS".to_string(),
+                    text: fallback_output(&state.inspect_telegram_output),
+                },
+                disabled: false,
+            },
+            CommandSelectionItem {
+                name: "Approve access request".to_string(),
+                description: format!("approve one of {} pending requests", requests.len()),
+                action: CommandSelectionAction::OpenTelegramAccess(TelegramAccessAction::Approve),
+                disabled: requests.is_empty(),
+            },
+            CommandSelectionItem {
+                name: "Reject access request".to_string(),
+                description: format!("reject one of {} pending requests", requests.len()),
+                action: CommandSelectionAction::OpenTelegramAccess(TelegramAccessAction::Reject),
+                disabled: requests.is_empty(),
+            },
+        ],
+        selected: 0,
+        scroll: 0,
+    })
+}
+
+fn telegram_status_panel(state: &DashboardState) -> CommandPanel {
+    detail_panel(
+        "TELEGRAM STATUS",
+        fallback_output(&state.inspect_telegram_output),
+    )
+}
+
+fn telegram_access_command_panel(
+    action: TelegramAccessAction,
+    requests: &[PendingAccessRequest],
+) -> CommandPanel {
+    if requests.is_empty() {
+        return detail_panel(action.title(), "No pending Telegram access requests.");
+    }
+    CommandPanel::TelegramAccess(TelegramAccessPicker {
+        action,
+        requests: requests.to_vec(),
+        selected: 0,
+        scroll: 0,
+    })
+}
+
+fn skills_command_panel(state: &DashboardState) -> CommandPanel {
+    let auto_count = state
+        .skills
+        .iter()
+        .filter(|skill| skill.auto_use_enabled)
+        .count();
+    let manual_count = state.skills.len().saturating_sub(auto_count);
+    CommandPanel::Selection(CommandSelectionPanel {
+        title: "Skills".to_string(),
+        subtitle: Some(format!(
+            "{} loaded, {auto_count} auto-use, {manual_count} manual-only",
+            state.skills.len()
+        )),
+        items: vec![
+            CommandSelectionItem {
+                name: "List skills".to_string(),
+                description: "show loaded skills and load errors".to_string(),
+                action: CommandSelectionAction::OpenSkillsList,
+                disabled: false,
+            },
+            CommandSelectionItem {
+                name: "Enable/Disable Skills".to_string(),
+                description: "toggle whether skills may be selected automatically".to_string(),
+                action: CommandSelectionAction::OpenSkillsToggle,
+                disabled: state.skills.is_empty(),
+            },
+        ],
+        selected: 0,
+        scroll: 0,
+    })
+}
+
+fn skill_detail_panel(state: &DashboardState, target: &str) -> Option<CommandPanel> {
+    let skill = resolve_skill_target(state, target).ok()?;
+    Some(detail_panel(
+        format!("SKILL {}", skill.name),
+        [
+            format!("Name: {}", skill.name),
+            format!("Status: {}", skill_status_description(skill)),
+            format!("Scope: {}", skill.scope),
+            format!("Path: {}", skill.path),
+            format!("Description: {}", skill.description),
+        ]
+        .join("\n"),
+    ))
+}
+
+fn detail_panel(title: impl Into<String>, text: impl Into<String>) -> CommandPanel {
+    CommandPanel::Detail(CommandDetailPanel {
+        title: title.into(),
+        text: text.into(),
+        scroll: 0,
+    })
 }
 
 fn telegram_access_picker_for_input(
@@ -1652,6 +1678,313 @@ fn telegram_access_picker_for_input(
     })
 }
 
+fn handle_command_panel_key(panel: &mut CommandPanel, key: KeyEvent) -> CommandPanelAction {
+    match panel {
+        CommandPanel::Detail(detail) => handle_detail_panel_key(detail, key),
+        CommandPanel::Selection(selection) => handle_selection_panel_key(selection, key),
+        CommandPanel::SkillsList(skills) => handle_skills_list_panel_key(skills, key),
+        CommandPanel::SkillsToggle(skills) => handle_skills_toggle_panel_key(skills, key),
+        CommandPanel::TelegramAccess(picker) => handle_telegram_access_panel_key(picker, key),
+    }
+}
+
+fn handle_detail_panel_key(panel: &mut CommandDetailPanel, key: KeyEvent) -> CommandPanelAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => CommandPanelAction::Close,
+        KeyCode::Up | KeyCode::Char('k') => {
+            panel.scroll = panel.scroll.saturating_sub(1);
+            CommandPanelAction::None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            panel.scroll = panel.scroll.saturating_add(1);
+            CommandPanelAction::None
+        }
+        KeyCode::PageUp => {
+            panel.scroll = panel.scroll.saturating_sub(10);
+            CommandPanelAction::None
+        }
+        KeyCode::PageDown => {
+            panel.scroll = panel.scroll.saturating_add(10);
+            CommandPanelAction::None
+        }
+        KeyCode::Home => {
+            panel.scroll = 0;
+            CommandPanelAction::None
+        }
+        KeyCode::End => {
+            panel.scroll = u16::MAX;
+            CommandPanelAction::None
+        }
+        _ => CommandPanelAction::None,
+    }
+}
+
+fn handle_selection_panel_key(
+    panel: &mut CommandSelectionPanel,
+    key: KeyEvent,
+) -> CommandPanelAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => CommandPanelAction::Close,
+        KeyCode::Up | KeyCode::Char('k') => {
+            panel.selected = panel
+                .selected
+                .saturating_sub(1)
+                .min(panel.items.len().saturating_sub(1));
+            panel.scroll = panel.adjusted_scroll();
+            CommandPanelAction::None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            panel.selected = (panel.selected + 1).min(panel.items.len().saturating_sub(1));
+            panel.scroll = panel.adjusted_scroll();
+            CommandPanelAction::None
+        }
+        KeyCode::PageUp => {
+            panel.selected = panel.selected.saturating_sub(8);
+            panel.scroll = panel.adjusted_scroll();
+            CommandPanelAction::None
+        }
+        KeyCode::PageDown => {
+            panel.selected = (panel.selected + 8).min(panel.items.len().saturating_sub(1));
+            panel.scroll = panel.adjusted_scroll();
+            CommandPanelAction::None
+        }
+        KeyCode::Home => {
+            panel.selected = 0;
+            panel.scroll = 0;
+            CommandPanelAction::None
+        }
+        KeyCode::End => {
+            panel.selected = panel.items.len().saturating_sub(1);
+            panel.scroll = panel.adjusted_scroll();
+            CommandPanelAction::None
+        }
+        KeyCode::Enter => {
+            let Some(item) = panel.items.get(panel.selected) else {
+                return CommandPanelAction::None;
+            };
+            if item.disabled {
+                return CommandPanelAction::None;
+            }
+            match &item.action {
+                CommandSelectionAction::ShowDetail { title, text } => {
+                    CommandPanelAction::Replace(detail_panel(title.clone(), text.clone()))
+                }
+                CommandSelectionAction::OpenSkillsList => CommandPanelAction::OpenSkillsList,
+                CommandSelectionAction::RunAction {
+                    title,
+                    action,
+                    keep_panel,
+                } => CommandPanelAction::RunAction {
+                    title: title.clone(),
+                    action: action.clone(),
+                    keep_panel: *keep_panel,
+                },
+                CommandSelectionAction::OpenSkillsToggle => CommandPanelAction::OpenSkillsToggle,
+                CommandSelectionAction::OpenTelegramAccess(action) => {
+                    CommandPanelAction::OpenTelegramAccess(*action)
+                }
+            }
+        }
+        _ => CommandPanelAction::None,
+    }
+}
+
+fn handle_skills_list_panel_key(panel: &mut SkillsListPanel, key: KeyEvent) -> CommandPanelAction {
+    match key.code {
+        KeyCode::Esc => CommandPanelAction::Close,
+        KeyCode::Up => {
+            panel.selected = panel.selected.saturating_sub(1);
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::Down => {
+            let len = panel.visible_indices().len();
+            panel.selected = (panel.selected + 1).min(len.saturating_sub(1));
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::PageUp => {
+            panel.selected = panel.selected.saturating_sub(8);
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::PageDown => {
+            let len = panel.visible_indices().len();
+            panel.selected = (panel.selected + 8).min(len.saturating_sub(1));
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::Home => {
+            panel.selected = 0;
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::End => {
+            panel.selected = panel.visible_indices().len().saturating_sub(1);
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::Backspace => {
+            panel.search.pop();
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::Enter => panel
+            .selected_detail_panel()
+            .map(CommandPanelAction::Replace)
+            .unwrap_or(CommandPanelAction::None),
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            panel.search.push(c);
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        _ => CommandPanelAction::None,
+    }
+}
+
+fn handle_skills_toggle_panel_key(
+    panel: &mut SkillsTogglePanel,
+    key: KeyEvent,
+) -> CommandPanelAction {
+    match key.code {
+        KeyCode::Esc => CommandPanelAction::Close,
+        KeyCode::Up => {
+            panel.selected = panel.selected.saturating_sub(1);
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::Down => {
+            let len = panel.visible_indices().len();
+            panel.selected = (panel.selected + 1).min(len.saturating_sub(1));
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::PageUp => {
+            panel.selected = panel.selected.saturating_sub(8);
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::PageDown => {
+            let len = panel.visible_indices().len();
+            panel.selected = (panel.selected + 8).min(len.saturating_sub(1));
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::Home => {
+            panel.selected = 0;
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::End => {
+            panel.selected = panel.visible_indices().len().saturating_sub(1);
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::Backspace => {
+            panel.search.pop();
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        KeyCode::Char(' ') | KeyCode::Enter => {
+            let Some(idx) = panel.selected_actual_index() else {
+                return CommandPanelAction::None;
+            };
+            let Some(item) = panel.items.get(idx) else {
+                return CommandPanelAction::None;
+            };
+            let next_enabled = !item.auto_use_enabled;
+            let item_path = PathBuf::from(&item.path);
+            panel.feedback = None;
+            CommandPanelAction::RunAction {
+                title: "SKILLS".to_string(),
+                action: DashboardAction::SetSkillAutoUse {
+                    path: item_path,
+                    enabled: next_enabled,
+                },
+                keep_panel: true,
+            }
+        }
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            panel.search.push(c);
+            panel.clamp_after_filter_change();
+            CommandPanelAction::None
+        }
+        _ => CommandPanelAction::None,
+    }
+}
+
+fn handle_telegram_access_panel_key(
+    picker: &mut TelegramAccessPicker,
+    key: KeyEvent,
+) -> CommandPanelAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => CommandPanelAction::Close,
+        KeyCode::Up | KeyCode::Char('k') => {
+            picker.selected = picker
+                .selected
+                .saturating_sub(1)
+                .min(picker.requests.len().saturating_sub(1));
+            picker.scroll =
+                adjusted_picker_scroll(picker.scroll, picker.selected, picker.requests.len());
+            CommandPanelAction::None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            picker.selected = (picker.selected + 1).min(picker.requests.len().saturating_sub(1));
+            picker.scroll =
+                adjusted_picker_scroll(picker.scroll, picker.selected, picker.requests.len());
+            CommandPanelAction::None
+        }
+        KeyCode::PageUp => {
+            picker.selected = picker.selected.saturating_sub(8);
+            picker.scroll =
+                adjusted_picker_scroll(picker.scroll, picker.selected, picker.requests.len());
+            CommandPanelAction::None
+        }
+        KeyCode::PageDown => {
+            picker.selected = (picker.selected + 8).min(picker.requests.len().saturating_sub(1));
+            picker.scroll =
+                adjusted_picker_scroll(picker.scroll, picker.selected, picker.requests.len());
+            CommandPanelAction::None
+        }
+        KeyCode::Home => {
+            picker.selected = 0;
+            picker.scroll = 0;
+            CommandPanelAction::None
+        }
+        KeyCode::End => {
+            picker.selected = picker.requests.len().saturating_sub(1);
+            picker.scroll =
+                adjusted_picker_scroll(picker.scroll, picker.selected, picker.requests.len());
+            CommandPanelAction::None
+        }
+        KeyCode::Enter => {
+            let Some(request) = picker.requests.get(picker.selected) else {
+                return CommandPanelAction::None;
+            };
+            let action = match picker.action {
+                TelegramAccessAction::Approve => DashboardAction::ApproveTelegramAccess {
+                    chat_id: request.chat_id,
+                },
+                TelegramAccessAction::Reject => DashboardAction::RejectTelegramAccess {
+                    chat_id: request.chat_id,
+                },
+            };
+            CommandPanelAction::RunAction {
+                title: picker.action.title().to_string(),
+                action,
+                keep_panel: false,
+            }
+        }
+        _ => CommandPanelAction::None,
+    }
+}
+
 fn adjusted_picker_scroll(current_scroll: usize, selected_index: usize, total: usize) -> usize {
     if total <= TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS {
         return 0;
@@ -1662,6 +1995,27 @@ fn adjusted_picker_scroll(current_scroll: usize, selected_index: usize, total: u
     } else if selected_index >= current_scroll + TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS {
         (selected_index + 1)
             .saturating_sub(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS)
+            .min(max_scroll)
+    } else {
+        current_scroll.min(max_scroll)
+    }
+}
+
+fn adjusted_list_scroll(
+    current_scroll: usize,
+    selected_index: usize,
+    total: usize,
+    visible_rows: usize,
+) -> usize {
+    if total <= visible_rows {
+        return 0;
+    }
+    let max_scroll = total.saturating_sub(visible_rows);
+    if selected_index < current_scroll {
+        selected_index
+    } else if selected_index >= current_scroll + visible_rows {
+        (selected_index + 1)
+            .saturating_sub(visible_rows)
             .min(max_scroll)
     } else {
         current_scroll.min(max_scroll)
@@ -1693,9 +2047,8 @@ pub async fn run_tui_dashboard(
     let mut pending_pastes: Vec<(String, String)> = Vec::new();
     let mut command_popup_selection: usize = 0;
     let mut command_popup_scroll: usize = 0;
-    let mut command_overlay: Option<CommandOverlay> = None;
+    let mut command_panel: Option<CommandPanel> = None;
     let mut command_feedback: Option<CommandFeedback> = None;
-    let mut telegram_access_picker: Option<TelegramAccessPicker> = None;
     // Scroll and lazy-load state
     let mut scroll_offset: u16 = 0;
     let mut auto_scroll: bool = true;
@@ -1741,122 +2094,57 @@ pub async fn run_tui_dashboard(
                                     continue;
                                 }
                                 let pending_requests = rx.borrow_and_update().pending_access_requests.clone();
-                    if telegram_access_picker.is_some() {
-                        let mut command_to_run: Option<String> = None;
-                        let mut close_picker = false;
-                        if let Some(picker) = telegram_access_picker.as_mut() {
-                            match key.code {
-                                KeyCode::Esc | KeyCode::Char('q') => {
-                                    close_picker = true;
-                                }
-                                KeyCode::Up => {
-                                    picker.selected = picker
-                                        .selected
-                                        .saturating_sub(1)
-                                        .min(picker.requests.len().saturating_sub(1));
-                                    picker.scroll = adjusted_picker_scroll(
-                                        picker.scroll,
-                                        picker.selected,
-                                        picker.requests.len(),
-                                    );
-                                }
-                                KeyCode::Down => {
-                                    picker.selected =
-                                        (picker.selected + 1).min(picker.requests.len().saturating_sub(1));
-                                    picker.scroll = adjusted_picker_scroll(
-                                        picker.scroll,
-                                        picker.selected,
-                                        picker.requests.len(),
-                                    );
-                                }
-                                KeyCode::PageUp => {
-                                    picker.selected = picker.selected.saturating_sub(8);
-                                    picker.scroll = adjusted_picker_scroll(
-                                        picker.scroll,
-                                        picker.selected,
-                                        picker.requests.len(),
-                                    );
-                                }
-                                KeyCode::PageDown => {
-                                    picker.selected =
-                                        (picker.selected + 8).min(picker.requests.len().saturating_sub(1));
-                                    picker.scroll = adjusted_picker_scroll(
-                                        picker.scroll,
-                                        picker.selected,
-                                        picker.requests.len(),
-                                    );
-                                }
-                                KeyCode::Home => {
-                                    picker.selected = 0;
-                                    picker.scroll = 0;
-                                }
-                                KeyCode::End => {
-                                    picker.selected = picker.requests.len().saturating_sub(1);
-                                    picker.scroll = adjusted_picker_scroll(
-                                        picker.scroll,
-                                        picker.selected,
-                                        picker.requests.len(),
-                                    );
-                                }
-                                KeyCode::Enter => {
-                                    if let Some(request) = picker.requests.get(picker.selected) {
-                                        command_to_run = Some(format!(
-                                            "/telegram {} {}",
-                                            picker.action.verb(),
-                                            request.chat_id
-                                        ));
-                                    }
-                                }
-                                _ => {}
+                    if command_panel.is_some() {
+                        let action = command_panel
+                            .as_mut()
+                            .map(|panel| handle_command_panel_key(panel, key))
+                            .unwrap_or(CommandPanelAction::None);
+                        match action {
+                            CommandPanelAction::None => {}
+                            CommandPanelAction::Close => {
+                                command_panel = None;
                             }
-                        }
-                        if close_picker {
-                            telegram_access_picker = None;
-                        }
-                        if let Some(command) = command_to_run {
-                            telegram_access_picker = None;
-                            let state = rx.borrow().clone();
-                            let response = command_runner.run_command(&command, &state).await;
-                            match command_presentation_for_response(&command, response) {
-                                Some(CommandPresentation::Overlay(overlay)) => {
-                                    command_overlay = Some(overlay);
-                                    command_feedback = None;
+                            CommandPanelAction::Replace(panel) => {
+                                command_panel = Some(panel);
+                                command_feedback = None;
+                            }
+                            CommandPanelAction::OpenSkillsList => {
+                                let state = rx.borrow();
+                                command_panel = Some(CommandPanel::SkillsList(
+                                    SkillsListPanel::from_state(&state),
+                                ));
+                            }
+                            CommandPanelAction::OpenSkillsToggle => {
+                                let state = rx.borrow();
+                                command_panel = Some(CommandPanel::SkillsToggle(
+                                    SkillsTogglePanel::from_state(&state),
+                                ));
+                            }
+                            CommandPanelAction::OpenTelegramAccess(action) => {
+                                command_panel = Some(telegram_access_command_panel(
+                                    action,
+                                    &pending_requests,
+                                ));
+                            }
+                            CommandPanelAction::RunAction {
+                                title,
+                                action,
+                                keep_panel,
+                            } => {
+                                if !keep_panel {
+                                    command_panel = None;
                                 }
-                                Some(CommandPresentation::Feedback(feedback)) => {
-                                    command_overlay = None;
+                                let state = rx.borrow().clone();
+                                let result = command_runner.run_action(action, &state).await;
+                                let feedback = command_feedback_from_action_result(title, result);
+                                if keep_panel {
+                                    if let Some(panel) = command_panel.as_mut() {
+                                        panel.set_feedback(feedback);
+                                    }
+                                } else {
                                     command_feedback = Some(feedback);
                                 }
-                                None => {
-                                    command_overlay = None;
-                                }
                             }
-                        }
-                        continue;
-                    }
-                    if let Some(overlay) = command_overlay.as_mut() {
-                        match key.code {
-                            KeyCode::Esc | KeyCode::Char('q') => {
-                                command_overlay = None;
-                            }
-                            KeyCode::Up => {
-                                overlay.scroll = overlay.scroll.saturating_sub(1);
-                            }
-                            KeyCode::Down => {
-                                overlay.scroll = overlay.scroll.saturating_add(1);
-                            }
-                            KeyCode::PageUp => {
-                                overlay.scroll = overlay.scroll.saturating_sub(10);
-                            }
-                            KeyCode::PageDown => {
-                                overlay.scroll = overlay.scroll.saturating_add(10);
-                            }
-                            KeyCode::Home => {
-                                overlay.scroll = 0;
-                            }
-                            KeyCode::End => {
-                                overlay.scroll = u16::MAX;
-                            }
-                            _ => {}
                         }
                         continue;
                     }
@@ -1948,7 +2236,6 @@ pub async fn run_tui_dashboard(
                             let command_context = DashboardCommandContext {
                                 requests: &pending_requests,
                                 state: &state,
-                                executor: None,
                             };
                             if let Some(completion) = selected_command_completion(
                                 command_input.as_str(),
@@ -1972,7 +2259,6 @@ pub async fn run_tui_dashboard(
                             let command_context = DashboardCommandContext {
                                 requests: &pending_requests,
                                 state: &state,
-                                executor: None,
                             };
                             let matches = matching_commands(command_input.as_str(), &command_context);
                             if !matches.is_empty() {
@@ -1991,7 +2277,6 @@ pub async fn run_tui_dashboard(
                             let command_context = DashboardCommandContext {
                                 requests: &pending_requests,
                                 state: &state,
-                                executor: None,
                             };
                             let matches = matching_commands(command_input.as_str(), &command_context);
                             if !matches.is_empty() {
@@ -2029,8 +2314,61 @@ pub async fn run_tui_dashboard(
                             let command_context = DashboardCommandContext {
                                 requests: &pending_requests,
                                 state: &state,
-                                executor: None,
                             };
+                            let input = command_input.as_str().trim().to_string();
+                            if !input.is_empty() {
+                                if matches!(dashboard_command_body(&input), Some("quit" | "q" | "exit")) {
+                                    break;
+                                }
+                                if let Some(panel) = command_panel_for_input(&input, &command_context) {
+                                    command_panel = Some(panel);
+                                    command_feedback = None;
+                                    command_input.clear();
+                                    command_popup_selection = 0;
+                                    command_popup_scroll = 0;
+                                    continue;
+                                }
+                                match dashboard_action_for_input(&input, &command_context) {
+                                    Ok(Some(invocation)) => {
+                                        let result = command_runner
+                                            .run_action(invocation.action, &state)
+                                            .await;
+                                        if is_clear_command_input(&input) && result.success {
+                                            extra_history_cells.clear();
+                                            oldest_cursor = None;
+                                            has_more_before = false;
+                                            loading_history = false;
+                                            history_load_rx = None;
+                                            cached_activity_lines = CachedActivityLines::new();
+                                            expanded_thinking.clear();
+                                            auto_scroll = true;
+                                            scroll_offset = 0;
+                                            visible_activity_cleared = true;
+                                        }
+                                        command_feedback =
+                                            if invocation.quiet_success && result.success {
+                                                None
+                                            } else {
+                                                Some(command_feedback_from_action_result(
+                                                    invocation.title,
+                                                    result,
+                                                ))
+                                            };
+                                        command_input.clear();
+                                        command_popup_selection = 0;
+                                        command_popup_scroll = 0;
+                                        continue;
+                                    }
+                                    Ok(None) => {}
+                                    Err(feedback) => {
+                                        command_panel = None;
+                                        command_feedback = Some(feedback);
+                                        command_popup_selection = 0;
+                                        command_popup_scroll = 0;
+                                        continue;
+                                    }
+                                }
+                            }
                             if let Some(completion) = selected_command_completion(
                                 command_input.as_str(),
                                 command_popup_selection,
@@ -2043,61 +2381,22 @@ pub async fn run_tui_dashboard(
                                 command_popup_scroll = 0;
                                 continue;
                             }
-                            let input = command_input.as_str().trim().to_string();
                             if !input.is_empty() {
-                                if matches!(dashboard_command_body(&input), Some("quit" | "q" | "exit")) {
-                                    break;
-                                }
-                                if let Some(picker) =
-                                    telegram_access_picker_for_input(&input, &pending_requests)
-                                {
-                                    telegram_access_picker = Some(picker);
-                                    command_input.clear();
-                                    command_feedback = None;
+                                if is_dashboard_command_input(&input) {
+                                    command_panel = None;
+                                    command_feedback = Some(
+                                        command_blocks_submission(&input, &command_context)
+                                            .unwrap_or_else(|| {
+                                                unsupported_dashboard_command_feedback(&input)
+                                            }),
+                                    );
                                     command_popup_selection = 0;
                                     command_popup_scroll = 0;
                                     continue;
                                 }
-                                if let Some(feedback) =
-                                    command_blocks_submission(&input, &command_context)
-                                {
-                                    command_overlay = None;
-                                    command_feedback = Some(feedback);
-                                    command_popup_selection = 0;
-                                    command_popup_scroll = 0;
-                                    continue;
-                                }
-                                let response = command_runner.run_command(&input, &state).await;
-                                let clear_visible_after_response =
-                                    is_clear_command_input(&input)
-                                        && command_feedback_level_for_response(&response)
-                                            != CommandFeedbackLevel::Error;
-                                match command_presentation_for_response(&input, response) {
-                                    Some(CommandPresentation::Overlay(overlay)) => {
-                                        command_overlay = Some(overlay);
-                                        command_feedback = None;
-                                    }
-                                    Some(CommandPresentation::Feedback(feedback)) => {
-                                        command_overlay = None;
-                                        command_feedback = Some(feedback);
-                                    }
-                                    None => {
-                                        command_overlay = None;
-                                        command_feedback = None;
-                                    }
-                                }
-                                if clear_visible_after_response {
-                                    extra_history_cells.clear();
-                                    oldest_cursor = None;
-                                    has_more_before = false;
-                                    loading_history = false;
-                                    history_load_rx = None;
-                                    cached_activity_lines = CachedActivityLines::new();
-                                    expanded_thinking.clear();
-                                    auto_scroll = true;
-                                    scroll_offset = 0;
-                                    visible_activity_cleared = true;
-                                }
+                                let _ = command_runner.run_command(&input, &state).await;
+                                command_panel = None;
+                                command_feedback = None;
                             }
                             command_input.clear();
                             command_popup_selection = 0;
@@ -2174,29 +2473,29 @@ pub async fn run_tui_dashboard(
         {
             visible_activity_cleared = false;
         }
-        let live_command_feedback = if command_overlay.is_none() && telegram_access_picker.is_none()
-        {
+        if let Some(panel) = command_panel.as_mut() {
+            panel.sync_state(&state);
+        }
+        let panel_open = command_panel.is_some();
+        let live_command_feedback = if !panel_open {
             let command_context = DashboardCommandContext {
                 requests: &pending_requests,
                 state: &state,
-                executor: None,
             };
             command_live_feedback(command_input.as_str(), &command_context)
         } else {
             None
         };
-        let active_command_feedback =
-            if command_overlay.is_none() && telegram_access_picker.is_none() {
-                live_command_feedback.as_ref().or(command_feedback.as_ref())
-            } else {
-                None
-            };
+        let active_command_feedback = if !panel_open {
+            live_command_feedback.as_ref().or(command_feedback.as_ref())
+        } else {
+            None
+        };
         let feedback_rows = command_feedback_row_count(active_command_feedback);
-        let popup_rows = if command_overlay.is_none() && telegram_access_picker.is_none() {
+        let popup_rows = if !panel_open {
             let command_context = DashboardCommandContext {
                 requests: &pending_requests,
                 state: &state,
-                executor: None,
             };
             command_popup_row_count(command_input.as_str(), &command_context)
         } else {
@@ -2209,6 +2508,13 @@ pub async fn run_tui_dashboard(
             wrapped_input_height(command_input.as_str(), term_width),
             term_height,
             popup_rows.saturating_add(feedback_rows),
+        );
+        let panel_rows = command_panel_row_count(
+            command_panel.as_ref(),
+            term_height,
+            input_lines,
+            popup_rows,
+            feedback_rows,
         );
 
         // Decrement load cooldown each tick
@@ -2304,8 +2610,8 @@ pub async fn run_tui_dashboard(
             let root = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(18),
-                    Constraint::Length(2 + input_lines + popup_rows + feedback_rows),
+                    Constraint::Min(6),
+                    Constraint::Length(2 + input_lines + panel_rows + popup_rows + feedback_rows),
                 ])
                 .split(f.area());
             // max_scroll now returned directly from render (no double traversal)
@@ -2321,12 +2627,6 @@ pub async fn run_tui_dashboard(
             // Update page height for PageUp/PageDown
             page_height = root[0].height.saturating_sub(1);
 
-            if let Some(overlay) = command_overlay.as_ref() {
-                render_command_overlay(f, root[0], overlay);
-            }
-            if let Some(picker) = telegram_access_picker.as_ref() {
-                render_telegram_access_picker(f, root[0], picker);
-            }
             render_command_bar(
                 f,
                 root[1],
@@ -2336,11 +2636,11 @@ pub async fn run_tui_dashboard(
                     context: &DashboardCommandContext {
                         requests: &pending_requests,
                         state: &state,
-                        executor: None,
                     },
                     runtime_status: state.runtime_status.as_deref(),
                     footer_context: &state.footer_context,
-                    overlay_open: command_overlay.is_some() || telegram_access_picker.is_some(),
+                    panel: command_panel.as_ref(),
+                    panel_rows,
                     popup_selection: command_popup_selection,
                     popup_scroll: command_popup_scroll,
                     last_cursor_pos: &mut last_cursor_pos,
@@ -2363,190 +2663,72 @@ pub async fn run_tui_dashboard(
     Ok(())
 }
 
-fn execute_dashboard_command(
-    command: &str,
-    requests: &[crate::telegram_acl::PendingAccessRequest],
-    telegram_acl: &TelegramAclHandle,
-    state: &DashboardState,
-    control_tx: &tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
-) -> DashboardCommandResult {
-    let parts = command.split_whitespace().collect::<Vec<_>>();
-    if parts.is_empty() {
-        return DashboardCommandResult::ShowOverlay {
-            title: "EMPTY".to_string(),
-            text: "empty command".to_string(),
-        };
-    }
-
-    let context = DashboardCommandContext {
-        requests,
-        state,
-        executor: Some(DashboardCommandExecutor {
-            telegram_acl,
-            control_tx,
-        }),
-    };
-
-    if let Some(command_impl) = dashboard_commands()
-        .iter()
-        .copied()
-        .find(|command_impl| command_impl.accepts(parts[0]))
-    {
-        command_impl.execute(&parts, command, &context)
-    } else {
-        DashboardCommandResult::ShowOverlay {
-            title: "UNKNOWN COMMAND".to_string(),
-            text: format!("unknown command: {}", parts[0]),
-        }
-    }
-}
-
 pub(crate) fn execute_control_command(
     command: &str,
     telegram_acl: &TelegramAclHandle,
     state: &DashboardState,
     control_tx: &tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
 ) -> String {
-    let result = execute_dashboard_command(
-        command,
-        &telegram_acl.pending_requests(),
-        telegram_acl,
+    let command = command.trim().trim_start_matches('/').trim();
+    if command.is_empty() {
+        return "empty command".to_string();
+    }
+    let input = format!("/{command}");
+    let requests = telegram_acl.pending_requests();
+    let context = DashboardCommandContext {
+        requests: &requests,
         state,
-        control_tx,
-    );
-    match result {
-        DashboardCommandResult::ShowOverlay { title, text } => {
-            if text.trim().is_empty() {
-                title
-            } else {
-                text
-            }
+    };
+    let Some(parts) = dashboard_command_parts(&input) else {
+        return "empty command".to_string();
+    };
+
+    if matches!(parts.as_slice(), ["quit"] | ["q"] | ["exit"]) {
+        return "quit command is only available in the local dashboard".to_string();
+    }
+
+    match dashboard_action_for_input(&input, &context) {
+        Ok(Some(invocation)) => {
+            let result = execute_dashboard_action(invocation.action, telegram_acl, control_tx);
+            return result.message;
         }
-        DashboardCommandResult::Quit => {
-            "quit command is only available in the local dashboard".to_string()
+        Ok(None) => {}
+        Err(feedback) => return feedback.message,
+    }
+
+    if let Some(feedback) = command_extra_argument_feedback(&parts) {
+        return feedback.message;
+    }
+
+    match parts.as_slice() {
+        ["status"] => fallback_output(&state.status_output),
+        ["debug"] => "available views: persona, system-prompt, context".to_string(),
+        ["debug", "persona"] => debug_persona_text(),
+        ["debug", "system-prompt"] | ["debug", "system_prompt"] => {
+            fallback_output(&state.system_prompt_output)
         }
+        ["debug", "context"] | ["debug", "preturn-context"] | ["debug", "preturn_context"] => {
+            fallback_output(&state.preturn_context_output)
+        }
+        [verb] if app_status_command_accepts(verb) => render_available_app_statuses(state),
+        [verb, target] if app_status_command_accepts(verb) => render_app_status_text(state, target),
+        ["sleep"] => "available actions: status, run".to_string(),
+        ["sleep", "status"] => fallback_output(&state.sleep_status_output),
+        ["skills"] | ["skills", "list"] | ["skills", "show"] => render_skills_list(state),
+        ["skills", "show", target] => render_skill_detail(state, target),
+        ["telegram"] => "available actions: status, approve, reject".to_string(),
+        ["telegram", "status"] => fallback_output(&state.inspect_telegram_output),
+        ["telegram", "approve"] => render_pending_access_requests("approve", &requests),
+        ["telegram", "reject"] => render_pending_access_requests("reject", &requests),
+        [verb, ..] if dashboard_command_is_known(verb) => {
+            format!("unsupported command shape: /{}", parts.join(" "))
+        }
+        [verb, ..] => format!("unknown command: {verb}"),
+        [] => "empty command".to_string(),
     }
 }
 
-fn panel(title: impl Into<Line<'static>>) -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(title.into())
-        .title_style(
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )
-        .padding(Padding::new(1, 1, 0, 0))
-}
-
-fn render_command_overlay(f: &mut Frame, area: Rect, overlay: &CommandOverlay) {
-    let outer = centered_rect(area, 92, 78);
-    let block = panel(format!("  {}  ", overlay.title));
-    let inner = block.inner(outer);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(1)])
-        .split(inner);
-
-    f.render_widget(Clear, outer);
-    f.render_widget(block, outer);
-    let lines = render_overlay_lines(&overlay.text);
-    let max_scroll = lines
-        .len()
-        .saturating_sub(rows[0].height.saturating_sub(1) as usize) as u16;
-    let scroll = overlay.scroll.min(max_scroll);
-    f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false }),
-        rows[0],
-    );
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "↑/↓ scroll   PgUp/PgDn page   Home/End jump   Esc close",
-            Style::default().fg(Color::DarkGray),
-        )])),
-        rows[1],
-    );
-}
-
-fn render_telegram_access_picker(f: &mut Frame, area: Rect, picker: &TelegramAccessPicker) {
-    let outer = centered_rect(area, 92, 70);
-    let block = panel(format!("  {}  ", picker.action.title()));
-    let inner = block.inner(outer);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS as u16),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    f.render_widget(Clear, outer);
-    f.render_widget(block, outer);
-    f.render_widget(
-        Paragraph::new(Text::from(vec![
-            Line::from(vec![Span::styled(
-                format!("Select a pending request to {}.", picker.action.verb()),
-                Style::default().fg(Color::Gray),
-            )]),
-            Line::from(vec![Span::styled(
-                "chat_id  title  sender  last message",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )]),
-        ])),
-        rows[0],
-    );
-
-    let lines = picker
-        .requests
-        .iter()
-        .skip(picker.scroll)
-        .take(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS)
-        .enumerate()
-        .map(|(visible_idx, request)| {
-            let idx = picker.scroll + visible_idx;
-            let selected = idx == picker.selected;
-            let marker = if selected { ">" } else { " " };
-            let style = if selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            Line::from(vec![Span::styled(
-                format!(
-                    "{marker} {}  {}  {}  {}",
-                    request.chat_id, request.title, request.sender, request.last_message_preview
-                ),
-                style,
-            )])
-        })
-        .collect::<Vec<_>>();
-    f.render_widget(
-        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
-        rows[1],
-    );
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            format!(
-                "Enter {} selected   Up/Down move   PgUp/PgDn page   Esc cancel",
-                picker.action.verb()
-            ),
-            Style::default().fg(Color::DarkGray),
-        )])),
-        rows[2],
-    );
-}
-
-fn render_overlay_lines(text: &str) -> Vec<Line<'static>> {
+fn render_panel_text_lines(text: &str) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut previous_blank = true;
 
@@ -2558,7 +2740,7 @@ fn render_overlay_lines(text: &str) -> Vec<Line<'static>> {
             continue;
         }
 
-        if is_overlay_section_header(line, previous_blank) {
+        if is_panel_section_header(line, previous_blank) {
             lines.push(Line::from(vec![Span::styled(
                 line.to_string(),
                 Style::default()
@@ -2570,7 +2752,7 @@ fn render_overlay_lines(text: &str) -> Vec<Line<'static>> {
         }
 
         if let Some(content) = line.strip_prefix("• ") {
-            lines.push(render_overlay_bullet_line(content));
+            lines.push(render_panel_bullet_line(content));
             previous_blank = false;
             continue;
         }
@@ -2607,7 +2789,7 @@ fn render_overlay_lines(text: &str) -> Vec<Line<'static>> {
     lines
 }
 
-fn is_overlay_section_header(line: &str, previous_blank: bool) -> bool {
+fn is_panel_section_header(line: &str, previous_blank: bool) -> bool {
     previous_blank
         && !line.contains(':')
         && !line.starts_with('[')
@@ -2615,7 +2797,7 @@ fn is_overlay_section_header(line: &str, previous_blank: bool) -> bool {
         && line.chars().count() <= 32
 }
 
-fn render_overlay_bullet_line(content: &str) -> Line<'static> {
+fn render_panel_bullet_line(content: &str) -> Line<'static> {
     if let Some((label, value)) = content.split_once(':') {
         Line::from(vec![
             Span::styled("•", Style::default().fg(Color::Cyan)),
@@ -2731,7 +2913,8 @@ struct CommandBarRenderState<'a> {
     feedback: Option<&'a CommandFeedback>,
     runtime_status: Option<&'a str>,
     footer_context: &'a str,
-    overlay_open: bool,
+    panel: Option<&'a CommandPanel>,
+    panel_rows: u16,
     popup_selection: usize,
     popup_scroll: usize,
     last_cursor_pos: &'a mut Option<(u16, u16)>,
@@ -2748,6 +2931,27 @@ fn command_input_display_height(input_height: u16, terminal_height: u16, popup_r
         .saturating_sub(reserved_rows)
         .max(1);
     input_height.max(1).min(max_rows)
+}
+
+fn command_panel_row_count(
+    panel: Option<&CommandPanel>,
+    terminal_height: u16,
+    input_lines: u16,
+    popup_rows: u16,
+    feedback_rows: u16,
+) -> u16 {
+    let Some(panel) = panel else {
+        return 0;
+    };
+    let base_rows = 2u16
+        .saturating_add(input_lines)
+        .saturating_add(popup_rows)
+        .saturating_add(feedback_rows);
+    let available = terminal_height.saturating_sub(base_rows).saturating_sub(6);
+    if available < 5 {
+        return 0;
+    }
+    panel.desired_height().min(available)
 }
 
 fn wrapped_input_height(text: &str, term_width: u16) -> u16 {
@@ -2872,6 +3076,379 @@ fn cursor_display_xy(
     (x, y)
 }
 
+fn render_command_panel(f: &mut Frame, area: Rect, panel: &CommandPanel) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let inner = inset_rect(area, 1, 2);
+    match panel {
+        CommandPanel::Detail(detail) => render_detail_panel(f, inner, detail),
+        CommandPanel::Selection(selection) => render_selection_panel(f, inner, selection),
+        CommandPanel::SkillsList(skills) => render_skills_list_panel(f, inner, skills),
+        CommandPanel::SkillsToggle(skills) => render_skills_toggle_panel(f, inner, skills),
+        CommandPanel::TelegramAccess(picker) => render_telegram_access_panel(f, inner, picker),
+    }
+}
+
+fn inset_rect(area: Rect, vertical: u16, horizontal: u16) -> Rect {
+    Rect {
+        x: area.x.saturating_add(horizontal),
+        y: area.y.saturating_add(vertical),
+        width: area.width.saturating_sub(horizontal.saturating_mul(2)),
+        height: area.height.saturating_sub(vertical.saturating_mul(2)),
+    }
+}
+
+fn render_panel_title(f: &mut Frame, area: Rect, title: &str, subtitle: Option<&str>) -> Rect {
+    if area.height == 0 {
+        return area;
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )])),
+        Rect { height: 1, ..area },
+    );
+    let mut rest = Rect {
+        y: area.y.saturating_add(1),
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    if let Some(subtitle) = subtitle
+        && rest.height > 0
+    {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                subtitle.to_string(),
+                Style::default().fg(Color::DarkGray),
+            )])),
+            Rect { height: 1, ..rest },
+        );
+        rest.y = rest.y.saturating_add(1);
+        rest.height = rest.height.saturating_sub(1);
+    }
+    rest
+}
+
+fn render_detail_panel(f: &mut Frame, area: Rect, panel: &CommandDetailPanel) {
+    let body = render_panel_title(f, area, &panel.title, None);
+    if body.height == 0 {
+        return;
+    }
+    let lines = render_panel_text_lines(&panel.text);
+    let max_scroll = lines.len().saturating_sub(body.height as usize) as u16;
+    let scroll = panel.scroll.min(max_scroll);
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .scroll((scroll, 0))
+            .wrap(Wrap { trim: false }),
+        body,
+    );
+}
+
+fn render_selection_panel(f: &mut Frame, area: Rect, panel: &CommandSelectionPanel) {
+    let list_area = render_panel_title(f, area, &panel.title, panel.subtitle.as_deref());
+    if list_area.height == 0 {
+        return;
+    }
+    let lines = panel
+        .items
+        .iter()
+        .skip(panel.scroll)
+        .take(list_area.height as usize)
+        .enumerate()
+        .map(|(visible_idx, item)| {
+            let idx = panel.scroll + visible_idx;
+            let selected = idx == panel.selected;
+            let marker = if selected { "›" } else { " " };
+            let name_style = if item.disabled {
+                Style::default().fg(Color::DarkGray)
+            } else if selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let description_style = if item.disabled {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+                Span::styled(item.name.clone(), name_style),
+                Span::raw("  "),
+                Span::styled(item.description.clone(), description_style),
+            ])
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        list_area,
+    );
+}
+
+fn render_skills_list_panel(f: &mut Frame, area: Rect, panel: &SkillsListPanel) {
+    let subtitle = if panel.items.is_empty() {
+        "No skills loaded.".to_string()
+    } else {
+        format!("{} loaded. Choose a skill to inspect.", panel.items.len())
+    };
+    let mut rest = render_panel_title(f, area, "Skills", Some(&subtitle));
+    if rest.height == 0 {
+        return;
+    }
+    let search_line = if panel.search.is_empty() {
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Type to search skills",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::DarkGray)),
+            Span::styled(panel.search.clone(), Style::default().fg(Color::White)),
+        ])
+    };
+    f.render_widget(Paragraph::new(search_line), Rect { height: 1, ..rest });
+    rest.y = rest.y.saturating_add(1);
+    rest.height = rest.height.saturating_sub(1);
+
+    if !panel.errors.is_empty() && rest.height > 0 {
+        let error_lines = panel
+            .errors
+            .iter()
+            .take(rest.height.min(2) as usize)
+            .map(|error| {
+                Line::from(vec![
+                    Span::styled("!", Style::default().fg(Color::Yellow)),
+                    Span::raw(" "),
+                    Span::styled(
+                        truncate_command_text(&error.path, 42),
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        truncate_command_text(&error.message, 120),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let rows = error_lines.len() as u16;
+        f.render_widget(
+            Paragraph::new(Text::from(error_lines)).wrap(Wrap { trim: false }),
+            Rect {
+                height: rows,
+                ..rest
+            },
+        );
+        rest.y = rest.y.saturating_add(rows);
+        rest.height = rest.height.saturating_sub(rows);
+    }
+
+    if rest.height == 0 {
+        return;
+    }
+    let visible_indices = panel.visible_indices();
+    let lines = visible_indices
+        .iter()
+        .skip(panel.scroll)
+        .take(rest.height as usize)
+        .enumerate()
+        .filter_map(|(visible_idx, actual_idx)| {
+            let item = panel.items.get(*actual_idx)?;
+            let idx = panel.scroll + visible_idx;
+            let selected = idx == panel.selected;
+            let marker = if selected { "›" } else { " " };
+            let name_style = if selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Some(Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+                Span::styled(item.name.clone(), name_style),
+                Span::raw("  "),
+                Span::styled(item.status.clone(), Style::default().fg(Color::Gray)),
+                Span::raw("  "),
+                Span::styled(
+                    truncate_command_text(&item.description, 100),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    let lines = if lines.is_empty() {
+        vec![Line::from(vec![Span::styled(
+            "no matches",
+            Style::default().fg(Color::DarkGray),
+        )])]
+    } else {
+        lines
+    };
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        rest,
+    );
+}
+
+fn render_skills_toggle_panel(f: &mut Frame, area: Rect, panel: &SkillsTogglePanel) {
+    let subtitle = if panel.items.is_empty() {
+        "No skills loaded.".to_string()
+    } else {
+        "Toggle automatic use for loaded skills.".to_string()
+    };
+    let mut rest = render_panel_title(f, area, "Skills", Some(&subtitle));
+    if rest.height == 0 {
+        return;
+    }
+    let search_line = if panel.search.is_empty() {
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Type to search skills",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::DarkGray)),
+            Span::styled(panel.search.clone(), Style::default().fg(Color::White)),
+        ])
+    };
+    f.render_widget(Paragraph::new(search_line), Rect { height: 1, ..rest });
+    rest.y = rest.y.saturating_add(1);
+    rest.height = rest.height.saturating_sub(1);
+
+    if let Some(feedback) = panel.feedback.as_ref() {
+        let rows = command_feedback_row_count(Some(feedback)).min(rest.height);
+        if rows > 0 {
+            render_command_feedback(
+                f,
+                Rect {
+                    height: rows,
+                    ..rest
+                },
+                feedback,
+            );
+            rest.y = rest.y.saturating_add(rows);
+            rest.height = rest.height.saturating_sub(rows);
+        }
+    }
+
+    if rest.height == 0 {
+        return;
+    }
+    let visible_indices = panel.visible_indices();
+    let lines = visible_indices
+        .iter()
+        .skip(panel.scroll)
+        .take(rest.height as usize)
+        .enumerate()
+        .filter_map(|(visible_idx, actual_idx)| {
+            let item = panel.items.get(*actual_idx)?;
+            let idx = panel.scroll + visible_idx;
+            let selected = idx == panel.selected;
+            let marker = if selected { "›" } else { " " };
+            let checkbox = if item.auto_use_enabled { "[x]" } else { "[ ]" };
+            let name_style = if selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Some(Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+                Span::styled(checkbox, Style::default().fg(Color::Gray)),
+                Span::raw(" "),
+                Span::styled(item.name.clone(), name_style),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{} - {}", item.scope, item.status_description()),
+                    Style::default().fg(Color::Gray),
+                ),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    let lines = if lines.is_empty() {
+        vec![Line::from(vec![Span::styled(
+            "no matches",
+            Style::default().fg(Color::DarkGray),
+        )])]
+    } else {
+        lines
+    };
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        rest,
+    );
+}
+
+fn render_telegram_access_panel(f: &mut Frame, area: Rect, picker: &TelegramAccessPicker) {
+    let rest = render_panel_title(
+        f,
+        area,
+        picker.action.title(),
+        Some(&format!(
+            "Select a pending request to {}.",
+            picker.action.verb()
+        )),
+    );
+    if rest.height == 0 {
+        return;
+    }
+    let lines = picker
+        .requests
+        .iter()
+        .skip(picker.scroll)
+        .take(rest.height as usize)
+        .enumerate()
+        .map(|(visible_idx, request)| {
+            let idx = picker.scroll + visible_idx;
+            let selected = idx == picker.selected;
+            let marker = if selected { "›" } else { " " };
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+                Span::styled(
+                    format!(
+                        "{}  {}  {}  {}",
+                        request.chat_id,
+                        request.title,
+                        request.sender,
+                        truncate_command_text(&request.last_message_preview, 100)
+                    ),
+                    style,
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        rest,
+    );
+}
+
 fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_>) {
     let CommandBarRenderState {
         input,
@@ -2881,20 +3458,25 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
         feedback,
         runtime_status,
         footer_context,
-        overlay_open,
+        panel,
+        panel_rows,
         popup_selection,
         popup_scroll,
         last_cursor_pos,
     } = state;
 
-    let completion = selected_command_completion(input, 0, context);
+    let completion = if panel.is_none() {
+        selected_command_completion(input, 0, context)
+    } else {
+        None
+    };
     let hint = command_hint(input, context);
-    let popup_rows = if overlay_open {
+    let popup_rows = if panel.is_some() {
         0
     } else {
         command_popup_row_count(input, context)
     };
-    let feedback_rows = if overlay_open {
+    let feedback_rows = if panel.is_some() {
         0
     } else {
         command_feedback_row_count(feedback)
@@ -2902,10 +3484,15 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints({
-            let mut c = vec![Constraint::Length(1), Constraint::Length(input_lines)];
-            if feedback_rows > 0 {
-                c.insert(1, Constraint::Length(feedback_rows));
+            let mut c = Vec::new();
+            if panel_rows > 0 {
+                c.push(Constraint::Length(panel_rows));
             }
+            c.push(Constraint::Length(1));
+            if feedback_rows > 0 {
+                c.push(Constraint::Length(feedback_rows));
+            }
+            c.push(Constraint::Length(input_lines));
             if popup_rows > 0 {
                 c.push(Constraint::Length(popup_rows));
             }
@@ -2913,6 +3500,13 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
             c
         })
         .split(area);
+    let mut row_index = 0usize;
+    if let Some(panel) = panel
+        && panel_rows > 0
+    {
+        render_command_panel(f, rows[row_index], panel);
+        row_index += 1;
+    }
     let status_line = match runtime_status {
         Some("Working") => render_working_status_line(),
         Some(status) if !status.trim().is_empty() => Line::from(vec![Span::styled(
@@ -2921,13 +3515,15 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
         )]),
         _ => Line::from(""),
     };
-    f.render_widget(Paragraph::new(status_line), rows[0]);
-    let input_row_index = if feedback_rows > 0 { 2 } else { 1 };
+    f.render_widget(Paragraph::new(status_line), rows[row_index]);
+    row_index += 1;
     if let Some(feedback) = feedback
         && feedback_rows > 0
     {
-        render_command_feedback(f, rows[1], feedback);
+        render_command_feedback(f, rows[row_index], feedback);
+        row_index += 1;
     }
+    let input_row_index = row_index;
     let available_width = area.width.saturating_sub(2).max(1) as usize;
     // Build input text with prompt prefix, render as wrapping Paragraph
     let display_text = if input.is_empty() {
@@ -2985,25 +3581,25 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
     } else {
         rows[popup_row_index]
     };
-    let footer = Paragraph::new(match runtime_status {
-        _ if overlay_open => Line::from(vec![
-            Span::styled("overlay", Style::default().fg(Color::DarkGray)),
+    let footer_line = if let Some(panel) = panel {
+        Line::from(vec![
+            Span::styled("panel", Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled(
-                "Esc/q close, Up/Down scroll, PgUp/PgDn page",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        _ if !footer_context.trim().is_empty() => Line::from(vec![Span::styled(
+            Span::styled(panel.footer_hint(), Style::default().fg(Color::DarkGray)),
+        ])
+    } else if !footer_context.trim().is_empty() {
+        Line::from(vec![Span::styled(
             footer_context.to_string(),
             Style::default().fg(Color::DarkGray),
-        )]),
-        _ => Line::from(vec![
+        )])
+    } else {
+        Line::from(vec![
             Span::styled("hint", Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(hint, Style::default().fg(Color::DarkGray)),
-        ]),
-    });
+        ])
+    };
+    let footer = Paragraph::new(footer_line);
     f.render_widget(footer, footer_row);
 }
 
@@ -3042,74 +3638,11 @@ fn render_working_status_line() -> Line<'static> {
     ])
 }
 
-fn centered_rect(area: Rect, width_percent: u16, height_percent: u16) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - height_percent) / 2),
-            Constraint::Percentage(height_percent),
-            Constraint::Percentage(100 - height_percent - (100 - height_percent) / 2),
-        ])
-        .split(area);
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - width_percent) / 2),
-            Constraint::Percentage(width_percent),
-            Constraint::Percentage(100 - width_percent - (100 - width_percent) / 2),
-        ])
-        .split(vertical[1]);
-    horizontal[1]
-}
-
 fn fallback_output(output: &str) -> String {
     if output.trim().is_empty() {
         "no data".to_string()
     } else {
         output.to_string()
-    }
-}
-
-enum CommandPresentation {
-    Overlay(CommandOverlay),
-    Feedback(CommandFeedback),
-}
-
-fn command_presentation_for_response(input: &str, response: String) -> Option<CommandPresentation> {
-    if !is_dashboard_command_input(input) {
-        return None;
-    }
-    let level = command_feedback_level_for_response(&response);
-    if is_clear_command_input(input) && level != CommandFeedbackLevel::Error {
-        return None;
-    }
-    if command_should_show_overlay(input) && level != CommandFeedbackLevel::Error {
-        return Some(CommandPresentation::Overlay(CommandOverlay {
-            title: command_title_from_input(input),
-            text: response,
-            scroll: 0,
-        }));
-    }
-    Some(CommandPresentation::Feedback(CommandFeedback {
-        title: command_title_from_input(input),
-        message: compact_command_feedback_message(&response),
-        detail: command_feedback_detail(&response),
-        level,
-    }))
-}
-
-fn command_should_show_overlay(input: &str) -> bool {
-    let Some(parts) = dashboard_command_parts(input) else {
-        return false;
-    };
-    match parts.as_slice() {
-        ["status"] => true,
-        ["debug", subcommand, ..] => debug_subcommand_is_read_only(subcommand),
-        ["sleep", "status", ..] => true,
-        ["skills"] | ["skills", "list", ..] | ["skills", "show", ..] => true,
-        ["telegram", "status", ..] => true,
-        [verb, _target, ..] if APP_STATUS_COMMAND.accepts(verb) => true,
-        _ => false,
     }
 }
 
@@ -3121,63 +3654,15 @@ fn is_clear_command_input(input: &str) -> bool {
 }
 
 fn debug_subcommand_is_read_only(subcommand: &str) -> bool {
-    DEBUG_SUBCOMMANDS
-        .iter()
-        .copied()
-        .any(|candidate| candidate.accepts(subcommand))
-}
-
-fn command_feedback_level_for_response(response: &str) -> CommandFeedbackLevel {
-    let lower = response.to_ascii_lowercase();
-    if lower.contains("failed")
-        || lower.contains("unknown")
-        || lower.contains("invalid")
-        || lower.contains("unavailable")
-        || lower.contains("required")
-        || lower.contains("cannot")
-        || lower.contains("error")
-    {
-        CommandFeedbackLevel::Error
-    } else {
-        CommandFeedbackLevel::Info
-    }
-}
-
-fn compact_command_feedback_message(response: &str) -> String {
-    let message = response
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("done");
-    truncate_chars(message, 160)
-}
-
-fn command_feedback_detail(response: &str) -> Option<String> {
-    let non_empty = response
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    if non_empty.len() <= 1 {
-        None
-    } else {
-        Some(truncate_chars(&non_empty[1..].join("  "), 180))
-    }
-}
-
-fn command_title_from_input(input: &str) -> String {
-    dashboard_command_body(input)
-        .map(|body| body.to_uppercase())
-        .unwrap_or_else(|| "COMMAND".to_string())
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars();
-    let mut output = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        output.push_str("...");
-    }
-    output
+    matches!(
+        subcommand,
+        "persona"
+            | "system-prompt"
+            | "system_prompt"
+            | "context"
+            | "preturn-context"
+            | "preturn_context"
+    )
 }
 
 fn dashboard_command_parts(input: &str) -> Option<Vec<&str>> {
@@ -3201,7 +3686,7 @@ fn command_live_feedback(
         .iter()
         .copied()
         .find(|command| command.accepts(verb));
-    let Some(command) = command else {
+    let Some(_command) = command else {
         if matching_commands(input, context).is_empty() {
             return Some(CommandFeedback {
                 title: "UNKNOWN COMMAND".to_string(),
@@ -3213,88 +3698,102 @@ fn command_live_feedback(
         return None;
     };
 
-    if !command.subcommands().is_empty() {
-        if command.primary_verb() == "skills" && parts.len() == 1 {
-            return None;
-        }
-        if parts.len() == 1 {
-            return Some(CommandFeedback {
-                title: command.primary_verb().to_uppercase(),
-                message: format!("{} needs a subcommand.", command.primary_verb()),
-                detail: Some(format_subcommand_choices(command)),
-                level: CommandFeedbackLevel::Warning,
-            });
-        }
-        let subcommand = parts[1];
-        let known = command
-            .subcommands()
-            .iter()
-            .copied()
-            .any(|candidate| candidate.accepts(subcommand));
-        if !known {
-            let possible = command.subcommands().iter().copied().any(|candidate| {
-                candidate.name().starts_with(subcommand)
-                    || candidate
-                        .aliases()
-                        .iter()
-                        .any(|alias| alias.starts_with(subcommand))
-            });
-            if !possible {
-                return Some(CommandFeedback {
-                    title: command.primary_verb().to_uppercase(),
-                    message: format!(
-                        "Unknown {} subcommand '{subcommand}'.",
-                        command.primary_verb()
-                    ),
-                    detail: Some(format_subcommand_choices(command)),
-                    level: CommandFeedbackLevel::Error,
-                });
-            }
-        }
-        if command.primary_verb() == "telegram"
-            && matches!(subcommand, "approve" | "reject")
-            && parts.len() == 2
-        {
-            if context.requests.is_empty() {
-                return Some(CommandFeedback {
-                    title: "TELEGRAM".to_string(),
-                    message: format!("No pending Telegram requests to {subcommand}."),
-                    detail: Some("Use /telegram status to inspect Telegram state.".to_string()),
-                    level: CommandFeedbackLevel::Info,
-                });
-            }
-            return Some(CommandFeedback {
-                title: "TELEGRAM".to_string(),
-                message: format!("Press Enter to choose a request to {subcommand}."),
-                detail: Some(format_pending_request_choices(context.requests)),
-                level: CommandFeedbackLevel::Info,
-            });
-        }
+    if parts.len() == 1 {
+        return None;
     }
 
     if let Some(feedback) = command_extra_argument_feedback(&parts) {
         return Some(feedback);
     }
 
-    if APP_STATUS_COMMAND.accepts(verb) {
+    if debug_command_accepts(verb) {
+        let subcommand = parts[1];
+        if !debug_subcommand_is_read_only(subcommand) {
+            return Some(unknown_command_part_feedback(
+                "DEBUG",
+                format!("Unknown debug view '{subcommand}'."),
+                "Use /debug to choose a view.",
+            ));
+        }
+    } else if sleep_command_accepts(verb) {
+        match parts.as_slice() {
+            ["sleep", "run"] | ["sleep", "status"] => {}
+            ["sleep", subcommand, ..] => {
+                return Some(unknown_command_part_feedback(
+                    "SLEEP",
+                    format!("Unknown sleep action '{subcommand}'."),
+                    "Use /sleep to choose an action.",
+                ));
+            }
+            _ => {}
+        }
+    } else if skills_command_accepts(verb) {
+        match parts.as_slice() {
+            ["skills", "list"] | ["skills", "reload"] => {}
+            ["skills", "show" | "enable" | "disable", target] => {
+                if let Err(message) = resolve_skill_target(context.state, target) {
+                    return Some(CommandFeedback {
+                        title: "SKILLS".to_string(),
+                        message,
+                        detail: Some("Use /skills to browse loaded skills.".to_string()),
+                        level: CommandFeedbackLevel::Error,
+                    });
+                }
+            }
+            ["skills", subcommand, ..] => {
+                return Some(unknown_command_part_feedback(
+                    "SKILLS",
+                    format!("Unknown skills action '{subcommand}'."),
+                    "Use /skills to choose an action.",
+                ));
+            }
+            _ => {}
+        }
+    } else if telegram_command_accepts(verb) {
+        match parts.as_slice() {
+            ["telegram", "status"] => {}
+            ["telegram", "approve" | "reject"] => {
+                let subcommand = parts[1];
+                if context.requests.is_empty() {
+                    return Some(CommandFeedback {
+                        title: "TELEGRAM".to_string(),
+                        message: format!("No pending Telegram requests to {subcommand}."),
+                        detail: Some("Use /telegram to inspect Telegram state.".to_string()),
+                        level: CommandFeedbackLevel::Info,
+                    });
+                }
+                return Some(CommandFeedback {
+                    title: "TELEGRAM".to_string(),
+                    message: format!("Press Enter to choose a request to {subcommand}."),
+                    detail: Some(format_pending_request_choices(context.requests)),
+                    level: CommandFeedbackLevel::Info,
+                });
+            }
+            ["telegram", "approve" | "reject", chat_id] if chat_id.parse::<i64>().is_err() => {
+                return Some(CommandFeedback {
+                    title: "TELEGRAM".to_string(),
+                    message: format!("Invalid chat_id '{chat_id}'."),
+                    detail: None,
+                    level: CommandFeedbackLevel::Error,
+                });
+            }
+            ["telegram", "approve" | "reject", _] => {}
+            ["telegram", subcommand, ..] => {
+                return Some(unknown_command_part_feedback(
+                    "TELEGRAM",
+                    format!("Unknown Telegram action '{subcommand}'."),
+                    "Use /telegram to choose an action.",
+                ));
+            }
+            _ => {}
+        }
+    } else if app_status_command_accepts(verb) {
         let apps = context
             .state
             .app_status_outputs
             .iter()
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>();
-        if parts.len() == 1 {
-            return Some(CommandFeedback {
-                title: "APP STATUS".to_string(),
-                message: "app-status needs an app name.".to_string(),
-                detail: Some(if apps.is_empty() {
-                    "No app state is currently available.".to_string()
-                } else {
-                    format!("available: {}", apps.join(", "))
-                }),
-                level: CommandFeedbackLevel::Warning,
-            });
-        }
         let target = parts[1].to_ascii_lowercase();
         let known = apps.iter().any(|name| *name == target);
         let possible = apps.iter().any(|name| name.starts_with(&target));
@@ -3312,11 +3811,20 @@ fn command_live_feedback(
         }
     }
 
-    if let Some(feedback) = command_extra_argument_feedback(&parts) {
-        return Some(feedback);
-    }
-
     None
+}
+
+fn unknown_command_part_feedback(
+    title: &str,
+    message: impl Into<String>,
+    detail: impl Into<String>,
+) -> CommandFeedback {
+    CommandFeedback {
+        title: title.to_string(),
+        message: message.into(),
+        detail: Some(detail.into()),
+        level: CommandFeedbackLevel::Error,
+    }
 }
 
 fn command_extra_argument_feedback(parts: &[&str]) -> Option<CommandFeedback> {
@@ -3327,20 +3835,20 @@ fn command_extra_argument_feedback(parts: &[&str]) -> Option<CommandFeedback> {
         detail: Some(format!("usage: /{usage}")),
         level: CommandFeedbackLevel::Error,
     };
-    if (QUIT_COMMAND.accepts(verb)
-        || CLEAR_COMMAND.accepts(verb)
-        || STATUS_COMMAND.accepts(verb)
-        || RESTART_COMMAND.accepts(verb))
+    if (quit_command_accepts(verb)
+        || clear_command_accepts(verb)
+        || status_command_accepts(verb)
+        || restart_command_accepts(verb))
         && parts.len() > 1
     {
-        let usage = if QUIT_COMMAND.accepts(verb) {
-            QUIT_COMMAND.usage()
-        } else if CLEAR_COMMAND.accepts(verb) {
-            CLEAR_COMMAND.usage()
-        } else if STATUS_COMMAND.accepts(verb) {
-            STATUS_COMMAND.usage()
+        let usage = if quit_command_accepts(verb) {
+            "quit"
+        } else if clear_command_accepts(verb) {
+            "clear"
+        } else if status_command_accepts(verb) {
+            "status"
         } else {
-            RESTART_COMMAND.usage()
+            "restart"
         };
         return Some(extra_for_root(usage));
     }
@@ -3392,7 +3900,7 @@ fn command_extra_argument_feedback(parts: &[&str]) -> Option<CommandFeedback> {
             detail: Some(format!("usage: /telegram {} [chat_id]", parts[1])),
             level: CommandFeedbackLevel::Error,
         }),
-        [verb, ..] if APP_STATUS_COMMAND.accepts(verb) && parts.len() > 2 => {
+        [verb, ..] if app_status_command_accepts(verb) && parts.len() > 2 => {
             Some(CommandFeedback {
                 title: "APP STATUS".to_string(),
                 message: "app-status accepts exactly one app name.".to_string(),
@@ -3425,14 +3933,20 @@ fn command_blocks_submission(
     }
 }
 
-fn format_subcommand_choices(command: &dyn DashboardCommand) -> String {
-    let choices = command
-        .subcommands()
-        .iter()
-        .map(|subcommand| subcommand.usage())
-        .collect::<Vec<_>>()
-        .join(" | ");
-    format!("available: {choices}")
+fn unsupported_dashboard_command_feedback(input: &str) -> CommandFeedback {
+    let command = dashboard_command_body(input)
+        .and_then(|body| body.split_whitespace().next())
+        .unwrap_or_default();
+    CommandFeedback {
+        title: "COMMAND".to_string(),
+        message: if command.is_empty() {
+            "Incomplete dashboard command.".to_string()
+        } else {
+            format!("Dashboard command '/{command}' is incomplete or unsupported here.")
+        },
+        detail: Some("Use / to choose a top-level command, then press Enter.".to_string()),
+        level: CommandFeedbackLevel::Error,
+    }
 }
 
 fn format_pending_request_choices(requests: &[PendingAccessRequest]) -> String {
@@ -3470,95 +3984,36 @@ fn is_dashboard_command_input(input: &str) -> bool {
     dashboard_command_body(input).is_some()
 }
 
-fn matching_commands(input: &str, context: &DashboardCommandContext<'_>) -> Vec<CommandSuggestion> {
+fn matching_commands(
+    input: &str,
+    _context: &DashboardCommandContext<'_>,
+) -> Vec<CommandSuggestion> {
     let Some(command_input) = command_completion_body(input) else {
         return Vec::new();
     };
     let trimmed = command_input.trim();
-    let trailing_space = command_input.ends_with(' ');
     if trimmed.is_empty() {
         return dashboard_commands()
             .iter()
             .map(|command| CommandSuggestion {
-                display: command.usage().to_string(),
-                completion: format!("/{}", command.primary_verb()),
-                description: command.description().to_string(),
+                display: command.primary_verb.to_string(),
+                completion: format!("/{}", command.primary_verb),
+                description: command.description.to_string(),
             })
             .collect::<Vec<_>>();
     }
     let parts = trimmed.split_whitespace().collect::<Vec<_>>();
-    if let Some(command) = dashboard_commands()
-        .iter()
-        .copied()
-        .find(|command| command.accepts(parts[0]))
-    {
-        if !command.subcommands().is_empty() && parts.len() == 1 {
-            return command
-                .subcommands()
-                .iter()
-                .copied()
-                .map(|subcommand| CommandSuggestion {
-                    display: subcommand.usage().to_string(),
-                    completion: format!("/{} {}", command.primary_verb(), subcommand.name()),
-                    description: subcommand.description().to_string(),
-                })
-                .collect::<Vec<_>>();
-        }
-        if !command.subcommands().is_empty() && (parts.len() > 1 || trailing_space) {
-            // Complete subcommands only while the cursor is still within the subcommand word:
-            //   "telegram "      → trailing_space=true,  parts.len()==1  ✓
-            //   "telegram app"   → trailing_space=false, parts.len()==2  ✓
-            // Once the user has typed a subcommand plus a space or argument, stop completing subcommands:
-            //   "telegram approve "   → trailing_space=true,  parts.len()==2  ✗
-            //   "telegram approve 1"  → trailing_space=false, parts.len()==3  ✗
-            let in_subcommand_word =
-                (trailing_space && parts.len() == 1) || (!trailing_space && parts.len() == 2);
-            if in_subcommand_word {
-                let prefix = if trailing_space {
-                    ""
-                } else {
-                    parts.get(1).copied().unwrap_or_default()
-                };
-                let direct = command
-                    .subcommands()
-                    .iter()
-                    .copied()
-                    .filter(|subcommand| subcommand.name().starts_with(prefix))
-                    .map(|subcommand| CommandSuggestion {
-                        display: subcommand.usage().to_string(),
-                        completion: format!("/{} {}", command.primary_verb(), subcommand.name()),
-                        description: subcommand.description().to_string(),
-                    })
-                    .collect::<Vec<_>>();
-                if !direct.is_empty() {
-                    return direct;
-                }
-            } else {
-                // Argument phase: let the command provide argument completions.
-                let args = command.complete_arguments(&parts, context);
-                if !args.is_empty() {
-                    return args;
-                }
-            }
-            return Vec::new();
-        } else {
-            let args = command.complete_arguments(&parts, context);
-            if !args.is_empty() {
-                return args;
-            }
-            if parts.len() > 1 || trailing_space {
-                return Vec::new();
-            }
-        }
+    if parts.len() > 1 || command_input.ends_with(' ') {
+        return Vec::new();
     }
     dashboard_commands()
         .iter()
         .copied()
-        .filter(|command| command.primary_verb().starts_with(parts[0]))
+        .filter(|command| command.primary_verb.starts_with(parts[0]))
         .map(|command| CommandSuggestion {
-            display: command.usage().to_string(),
-            completion: format!("/{}", command.primary_verb()),
-            description: command.description().to_string(),
+            display: command.primary_verb.to_string(),
+            completion: format!("/{}", command.primary_verb),
+            description: command.description.to_string(),
         })
         .collect::<Vec<_>>()
 }
@@ -3630,7 +4085,64 @@ fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
             .collect::<Vec<_>>()
             .join(" | ");
     }
+    if let Some(parts) = dashboard_command_parts(input) {
+        if dashboard_parts_open_panel(&parts) {
+            return "Enter open panel. Shift+Enter newline. Esc clear.".to_string();
+        }
+        if dashboard_parts_run_action(&parts) {
+            return "Enter run action. Shift+Enter newline. Esc clear.".to_string();
+        }
+        if dashboard_command_is_known(parts[0]) {
+            return "Enter run command. Shift+Enter newline. Esc clear.".to_string();
+        }
+    }
     "unknown command".to_string()
+}
+
+fn dashboard_parts_open_panel(parts: &[&str]) -> bool {
+    matches!(
+        parts,
+        ["status"]
+            | ["debug"]
+            | ["debug", "persona"]
+            | ["debug", "system-prompt"]
+            | ["debug", "system_prompt"]
+            | ["debug", "context"]
+            | ["debug", "preturn-context"]
+            | ["debug", "preturn_context"]
+            | ["sleep"]
+            | ["sleep", "status"]
+            | ["telegram"]
+            | ["telegram", "status"]
+            | ["telegram", "approve"]
+            | ["telegram", "reject"]
+            | ["skills"]
+            | ["skills", "list"]
+            | ["skills", "show"]
+            | ["skills", "show", _]
+    ) || matches!(parts, [verb] if app_status_command_accepts(verb))
+        || matches!(parts, [verb, _] if app_status_command_accepts(verb))
+}
+
+fn dashboard_parts_run_action(parts: &[&str]) -> bool {
+    matches!(
+        parts,
+        ["clear"]
+            | ["restart"]
+            | ["sleep", "run"]
+            | ["skills", "reload"]
+            | ["skills", "enable", _]
+            | ["skills", "disable", _]
+            | ["telegram", "approve", _]
+            | ["telegram", "reject", _]
+    )
+}
+
+fn dashboard_command_is_known(verb: &str) -> bool {
+    dashboard_commands()
+        .iter()
+        .copied()
+        .any(|command| command.accepts(verb))
 }
 
 #[cfg(test)]
@@ -3652,7 +4164,6 @@ mod tests {
         DashboardCommandContext {
             requests: &[],
             state: Box::leak(Box::new(DashboardState::default())),
-            executor: None,
         }
     }
 
@@ -3677,24 +4188,17 @@ mod tests {
     }
 
     #[test]
-    fn exact_subcommand_command_completes_to_subcommands() {
+    fn exact_entry_command_does_not_complete_to_subcommands() {
         let context = test_command_context();
         let matches = matching_commands("/sleep", &context);
 
-        assert_eq!(
-            matches
-                .iter()
-                .map(|suggestion| suggestion.completion.as_str())
-                .collect::<Vec<_>>(),
-            vec!["/sleep status", "/sleep run"]
-        );
-        let feedback = command_live_feedback("/sleep", &context).expect("sleep needs feedback");
-        assert!(matches!(feedback.level, CommandFeedbackLevel::Warning));
-        assert!(feedback.message.contains("needs a subcommand"));
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].completion, "/sleep");
+        assert!(command_live_feedback("/sleep", &context).is_none());
     }
 
     #[test]
-    fn argument_completions_keep_slash_prefix() {
+    fn completions_stay_at_top_level_entries() {
         let requests = vec![pending_request(42)];
         let state = DashboardState {
             app_status_outputs: vec![("browser".to_string(), "state".to_string())],
@@ -3712,26 +4216,17 @@ mod tests {
         let context = DashboardCommandContext {
             requests: &requests,
             state: &state,
-            executor: None,
         };
 
-        let app_match = matching_commands("/app-status", &context)
+        let app_match = matching_commands("/app", &context)
             .into_iter()
             .next()
             .expect("app completion");
-        assert_eq!(app_match.completion, "/app-status browser");
+        assert_eq!(app_match.completion, "/app-status");
 
-        let telegram_match = matching_commands("/telegram approve ", &context)
-            .into_iter()
-            .next()
-            .expect("telegram request completion");
-        assert_eq!(telegram_match.completion, "/telegram approve 42");
-
-        let skill_match = matching_commands("/skills disable ", &context)
-            .into_iter()
-            .next()
-            .expect("skill completion");
-        assert_eq!(skill_match.completion, "/skills disable writer");
+        assert!(matching_commands("/app-status ", &context).is_empty());
+        assert!(matching_commands("/telegram approve ", &context).is_empty());
+        assert!(matching_commands("/skills disable ", &context).is_empty());
     }
 
     #[test]
@@ -3751,18 +4246,71 @@ mod tests {
         let context = DashboardCommandContext {
             requests: &[],
             state: &state,
-            executor: None,
         };
 
         assert!(command_blocks_submission("/skills", &context).is_none());
-        let result = SKILLS_COMMAND.execute(&["skills"], "skills", &context);
+        let text = render_skills_list(&state);
+        assert!(text.contains("OpenSkills loaded: 1"));
+        assert!(text.contains("writer"));
+    }
 
-        match result {
-            DashboardCommandResult::ShowOverlay { text, .. } => {
-                assert!(text.contains("OpenSkills loaded: 1"));
-                assert!(text.contains("writer"));
+    #[test]
+    fn root_commands_open_interactive_bottom_panels() {
+        let requests = vec![pending_request(42)];
+        let state = DashboardState {
+            app_status_outputs: vec![("browser".to_string(), "ready".to_string())],
+            skills: vec![OpenSkillDashboardSummary {
+                name: "writer".to_string(),
+                description: "Write release notes".to_string(),
+                path: "/tmp/skills/writer/SKILL.md".to_string(),
+                scope: "user".to_string(),
+                allow_implicit_invocation: true,
+                user_disabled: false,
+                auto_use_enabled: true,
+            }],
+            ..DashboardState::default()
+        };
+        let context = DashboardCommandContext {
+            requests: &requests,
+            state: &state,
+        };
+
+        match command_panel_for_input("/debug", &context).expect("debug panel") {
+            CommandPanel::Selection(panel) => {
+                assert!(panel.items.iter().any(|item| item.name.contains("persona")));
             }
-            DashboardCommandResult::Quit => panic!("skills command should render an overlay"),
+            _ => panic!("debug should open a selection panel"),
+        }
+        match command_panel_for_input("/app-status", &context).expect("app panel") {
+            CommandPanel::Selection(panel) => {
+                assert_eq!(panel.items[0].name, "browser");
+            }
+            _ => panic!("app-status should open an app selection panel"),
+        }
+        match command_panel_for_input("/skills", &context).expect("skills panel") {
+            CommandPanel::Selection(panel) => {
+                assert_eq!(
+                    panel
+                        .items
+                        .iter()
+                        .map(|item| item.name.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["List skills", "Enable/Disable Skills"]
+                );
+            }
+            _ => panic!("skills should open a management panel"),
+        }
+        match command_panel_for_input("/skills list", &context).expect("skills list panel") {
+            CommandPanel::SkillsList(panel) => {
+                assert_eq!(panel.items[0].name, "writer");
+            }
+            _ => panic!("skills list should open a skill list panel"),
+        }
+        match command_panel_for_input("/telegram approve", &context).expect("telegram panel") {
+            CommandPanel::TelegramAccess(panel) => {
+                assert_eq!(panel.requests.len(), 1);
+            }
+            _ => panic!("telegram approve should open an access picker"),
         }
     }
 
@@ -3777,45 +4325,55 @@ mod tests {
     }
 
     #[test]
-    fn clear_success_presents_no_tui_feedback() {
-        assert!(is_clear_command_input("/clear"));
-        assert!(
-            command_presentation_for_response(
-                "/clear",
-                "queued runtime conversation + plan + event clear".to_string(),
-            )
-            .is_none()
+    fn hidden_action_commands_parse_to_dashboard_actions() {
+        let requests = vec![pending_request(42)];
+        let state = DashboardState {
+            skills: vec![OpenSkillDashboardSummary {
+                name: "writer".to_string(),
+                description: "Write release notes".to_string(),
+                path: "/tmp/skills/writer/SKILL.md".to_string(),
+                scope: "user".to_string(),
+                allow_implicit_invocation: true,
+                user_disabled: false,
+                auto_use_enabled: true,
+            }],
+            ..DashboardState::default()
+        };
+        let context = DashboardCommandContext {
+            requests: &requests,
+            state: &state,
+        };
+
+        let invocation = dashboard_action_for_input("/skills disable writer", &context)
+            .expect("valid action")
+            .expect("skills action");
+        assert_eq!(
+            invocation.action,
+            DashboardAction::SetSkillAutoUse {
+                path: PathBuf::from("/tmp/skills/writer/SKILL.md"),
+                enabled: false,
+            }
+        );
+
+        let invocation = dashboard_action_for_input("/telegram approve 42", &context)
+            .expect("valid action")
+            .expect("telegram action");
+        assert_eq!(
+            invocation.action,
+            DashboardAction::ApproveTelegramAccess { chat_id: 42 }
         );
     }
 
     #[test]
-    fn action_commands_present_as_feedback_not_overlay() {
-        let presentation =
-            command_presentation_for_response("/sleep run", "queued sleep run".to_string())
-                .expect("presentation");
+    fn clear_command_maps_to_quiet_dashboard_action() {
+        let context = test_command_context();
+        let invocation = dashboard_action_for_input("/clear", &context)
+            .expect("valid action")
+            .expect("clear action");
 
-        match presentation {
-            CommandPresentation::Feedback(feedback) => {
-                assert!(matches!(feedback.level, CommandFeedbackLevel::Info));
-            }
-            CommandPresentation::Overlay(_) => panic!("sleep run should not open an overlay"),
-        }
-    }
-
-    #[test]
-    fn clear_errors_still_present_as_feedback() {
-        let presentation = command_presentation_for_response(
-            "/clear",
-            "failed to queue clear command: channel closed".to_string(),
-        )
-        .expect("presentation");
-
-        match presentation {
-            CommandPresentation::Feedback(feedback) => {
-                assert!(matches!(feedback.level, CommandFeedbackLevel::Error));
-            }
-            CommandPresentation::Overlay(_) => panic!("clear error should not open an overlay"),
-        }
+        assert!(is_clear_command_input("/clear"));
+        assert!(invocation.quiet_success);
+        assert_eq!(invocation.action, DashboardAction::ClearConversation);
     }
 
     #[test]
@@ -3881,10 +4439,9 @@ mod tests {
         let context = DashboardCommandContext {
             requests: &requests,
             state: &state,
-            executor: None,
         };
 
-        let output = execute_access_request_command(true, &["telegram", "approve"], &context);
+        let output = render_pending_access_requests("approve", context.requests);
 
         assert!(output.contains("pending requests"));
         assert!(output.contains("/telegram approve <chat_id>"));

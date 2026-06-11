@@ -27,7 +27,7 @@ use crate::{
         DashboardActivityHistoryStore, DashboardControlCommand, DashboardRuntimeActivity,
         DashboardRuntimeActivityStatus, DashboardRuntimeStatusLevel, DashboardState, ReducedMotion,
         activity_cells_from_history_items, dashboard_agent_name, execute_control_command,
-        sync_web_activity_state,
+        execute_dashboard_action, sync_web_activity_state,
     },
     events::{
         EventStore, TelegramIncomingEvent, TerminalIncomingAttachment,
@@ -469,6 +469,14 @@ async fn handle_ipc_connection(
             IpcResponseEnvelope::ok(
                 request_id,
                 SessionIpcResponse::DashboardCommandResult { output },
+            )
+        }
+        SessionIpcRequest::DashboardAction { action } => {
+            let result =
+                execute_dashboard_action(action, &state.telegram_acl, &state.dashboard_control_tx);
+            IpcResponseEnvelope::ok(
+                request_id,
+                SessionIpcResponse::DashboardActionResult { result },
             )
         }
         SessionIpcRequest::EnqueueTelegramEvent { event } => {

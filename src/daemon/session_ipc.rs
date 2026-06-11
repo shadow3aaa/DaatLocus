@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use crate::{
     dashboard::{
-        DashboardActivityHistoryPage, DashboardContextCompositionSnapshot, DashboardPlanStep,
+        DashboardAction, DashboardActionResult, DashboardActivityHistoryPage,
+        DashboardContextCompositionSnapshot, DashboardPlanStep,
         DashboardPrimitiveOptimizationSnapshot, DashboardRuntimeActivity,
         DashboardRuntimeOptimizationSnapshot, DashboardRuntimeStatusLevel, DashboardSessionTitle,
         DashboardState, DashboardTokenUsageSnapshot,
@@ -63,6 +64,9 @@ pub enum SessionIpcRequest {
     },
     DashboardCommand {
         command: String,
+    },
+    DashboardAction {
+        action: DashboardAction,
     },
     EnqueueTelegramEvent {
         event: TelegramIncomingEvent,
@@ -150,6 +154,9 @@ pub enum SessionIpcResponse {
     },
     DashboardCommandResult {
         output: String,
+    },
+    DashboardActionResult {
+        result: DashboardActionResult,
     },
     DashboardSnapshot {
         state: Box<DashboardState>,

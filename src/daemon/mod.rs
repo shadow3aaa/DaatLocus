@@ -46,9 +46,10 @@ use crate::{
     config::{Config, ModelConfig, ProviderConfig, load_config},
     daat_locus_paths::{daat_locus_paths, daat_locus_paths_sync},
     dashboard::{
-        DashboardActivityHistoryPage, DashboardCommandRunner, DashboardControlCommand,
-        DashboardHistoryLoader, DashboardIncomingAttachment, DashboardSessionTitle, DashboardState,
-        execute_control_command,
+        DashboardAction, DashboardActionResult, DashboardActivityHistoryPage,
+        DashboardCommandRunner, DashboardControlCommand, DashboardHistoryLoader,
+        DashboardIncomingAttachment, DashboardSessionTitle, DashboardState,
+        execute_control_command, execute_dashboard_action,
     },
     model_catalog::catalog_model_capacity,
     sandbox::StrongFilesystemSandboxMode,
@@ -239,6 +240,18 @@ pub struct CommandRequest {
     pub attachments: Vec<CommandAttachmentRequest>,
     #[serde(default)]
     pub session_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DashboardActionRequest {
+    pub action: DashboardAction,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DashboardActionResponse {
+    pub result: DashboardActionResult,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -584,6 +597,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/dashboard/snapshot", get(snapshot_handler))
         .route("/dashboard/stream", get(stream_handler))
         .route("/dashboard/activity-history", get(activity_history_handler))
+        .route("/dashboard/action", post(dashboard_action_handler))
         .route(
             "/dashboard/attachments/{encoded_path}",
             get(dashboard_attachment_handler),
@@ -1329,6 +1343,68 @@ async fn command_handler(
         &state.dashboard_control_tx,
     );
     Json(CommandResponse { output }).into_response()
+}
+
+async fn dashboard_action_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Json(request): Json<DashboardActionRequest>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !state.lifecycle.get().allows_runtime_commands() {
+        return runtime_not_ready_response(state.lifecycle.get());
+    }
+    if let Some(session_id) = request.session_id.as_deref() {
+        let client = match session_client_for_request(&state, session_id).await {
+            Ok(client) => client,
+            Err(err) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(DashboardActionResponse {
+                        result: DashboardActionResult {
+                            success: false,
+                            message: format!("{err:?}"),
+                            detail: None,
+                        },
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let response = client
+            .request(session_ipc::SessionIpcRequest::DashboardAction {
+                action: request.action,
+            })
+            .await;
+        let result = match response {
+            Ok(session_ipc::SessionIpcResponse::DashboardActionResult { result }) => result,
+            Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => DashboardActionResult {
+                success: false,
+                message,
+                detail: None,
+            },
+            Ok(_) => DashboardActionResult {
+                success: false,
+                message: "unexpected session IPC dashboard action response".to_string(),
+                detail: None,
+            },
+            Err(err) => DashboardActionResult {
+                success: false,
+                message: format!("session dashboard action failed: {err:?}"),
+                detail: None,
+            },
+        };
+        return Json(DashboardActionResponse { result }).into_response();
+    }
+
+    let result = execute_dashboard_action(
+        request.action,
+        &state.telegram_acl,
+        &state.dashboard_control_tx,
+    );
+    Json(DashboardActionResponse { result }).into_response()
 }
 
 async fn send_handler(
@@ -2374,6 +2450,30 @@ impl DaemonClient {
         Ok(response.output)
     }
 
+    pub async fn send_dashboard_action(
+        &self,
+        action: DashboardAction,
+    ) -> Result<DashboardActionResult> {
+        let response = self
+            .with_auth(
+                self.http
+                    .post(format!("{}/dashboard/action", self.base_url()))
+                    .json(&DashboardActionRequest {
+                        action,
+                        session_id: self.session_id.clone(),
+                    }),
+            )?
+            .send()
+            .await
+            .map_err(|err| miette!("dashboard action request failed: {err}"))?
+            .error_for_status()
+            .map_err(|err| miette!("dashboard action returned error: {err}"))?
+            .json::<DashboardActionResponse>()
+            .await
+            .map_err(|err| miette!("decode dashboard action response failed: {err}"))?;
+        Ok(response.result)
+    }
+
     pub async fn send_message(&self, message: &str) -> Result<SendResponse> {
         let response =
             self.with_auth(self.http.post(format!("{}/send", self.base_url())).json(
@@ -2582,6 +2682,21 @@ impl DashboardCommandRunner for DaemonClient {
         match self.send_command(command).await {
             Ok(output) => output,
             Err(err) => format!("command failed: {err}"),
+        }
+    }
+
+    async fn run_action(
+        &self,
+        action: DashboardAction,
+        _state: &DashboardState,
+    ) -> DashboardActionResult {
+        match self.send_dashboard_action(action).await {
+            Ok(result) => result,
+            Err(err) => DashboardActionResult {
+                success: false,
+                message: format!("dashboard action failed: {err}"),
+                detail: None,
+            },
         }
     }
 }
