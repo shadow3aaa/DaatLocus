@@ -3808,7 +3808,10 @@ function agentChatBubbleIsOutputBoundary(bubble: AgentChatBubble) {
 }
 
 function agentChatBubbleCanFoldWithCompletedWork(bubble: AgentChatBubble) {
-  return !bubble.live && bubble.status !== "running";
+  // A terminal tool result can describe a still-running session after the
+  // tool call itself completed. Once it is committed history (not a live
+  // snapshot row), keep it eligible for the completed-work fold.
+  return !bubble.live;
 }
 
 function agentChatBubbleHasActivityCellVariant(
