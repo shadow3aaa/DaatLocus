@@ -3536,30 +3536,11 @@ fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_
     }
     let input_row_index = row_index;
     let available_width = area.width.saturating_sub(2).max(1) as usize;
-    // Build input text with prompt prefix, render as wrapping Paragraph
-    let display_text = if input.is_empty() {
-        "› type a message, or /command".to_string()
-    } else {
-        let mut s = String::with_capacity(input.len() + 2 + input.matches('\n').count() * 2);
-        s.push_str("› ");
-        push_command_input_display_text(&mut s, input);
-        if let Some(completion) = completion
-            && completion != input
-        {
-            s.push_str(completion.strip_prefix(input).unwrap_or_default());
-        }
-        s
-    };
-    let input_style = if input.is_empty() {
-        Style::default().fg(Color::DarkGray)
-    } else {
-        Style::default().fg(Color::White)
-    };
+    // Build input text with prompt prefix, render as wrapping Paragraph.
     let cursor_total_row = cursor_display_row(input, cursor_pos, available_width);
     let input_scroll =
         cursor_total_row.saturating_sub(rows[input_row_index].height.saturating_sub(1));
-    let input_para = Paragraph::new(display_text)
-        .style(input_style)
+    let input_para = Paragraph::new(command_input_display_text(input, completion.as_deref()))
         .wrap(ratatui::widgets::Wrap { trim: false })
         .scroll((input_scroll, 0));
     f.render_widget(input_para, rows[input_row_index]);
@@ -3622,6 +3603,43 @@ fn push_command_input_display_text(output: &mut String, input: &str) {
         }
         output.push_str(line);
     }
+}
+
+fn command_input_display_text(input: &str, completion: Option<&str>) -> Text<'static> {
+    if input.is_empty() {
+        return Text::from(Line::from(vec![Span::styled(
+            "› type a message, or /command",
+            Style::default().fg(Color::DarkGray),
+        )]));
+    }
+
+    let mut display = String::with_capacity(input.len() + 2 + input.matches('\n').count() * 2);
+    display.push_str("› ");
+    push_command_input_display_text(&mut display, input);
+    let completion_suffix = completion
+        .filter(|completion| *completion != input)
+        .and_then(|completion| completion.strip_prefix(input))
+        .unwrap_or_default();
+    let raw_lines = display.split('\n').collect::<Vec<_>>();
+    let last_index = raw_lines.len().saturating_sub(1);
+    let lines = raw_lines
+        .into_iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            let mut spans = vec![Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::White),
+            )];
+            if idx == last_index && !completion_suffix.is_empty() {
+                spans.push(Span::styled(
+                    completion_suffix.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    Text::from(lines)
 }
 
 fn render_working_status_line() -> Line<'static> {
@@ -4466,6 +4484,18 @@ mod tests {
         push_command_input_display_text(&mut display, "hello\nworld\n");
 
         assert_eq!(display, "› hello\n  world\n  ");
+    }
+
+    #[test]
+    fn command_input_display_text_renders_completion_suffix_dim() {
+        let text = command_input_display_text("/app", Some("/app-status"));
+
+        assert_eq!(text.lines.len(), 1);
+        assert_eq!(text.lines[0].spans.len(), 2);
+        assert_eq!(text.lines[0].spans[0].content.as_ref(), "› /app");
+        assert_eq!(text.lines[0].spans[0].style.fg, Some(Color::White));
+        assert_eq!(text.lines[0].spans[1].content.as_ref(), "-status");
+        assert_eq!(text.lines[0].spans[1].style.fg, Some(Color::DarkGray));
     }
 
     #[test]
