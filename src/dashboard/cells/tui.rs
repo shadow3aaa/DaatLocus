@@ -29,6 +29,8 @@ use crate::dashboard::renderable::{FlexRenderable, Renderable, ViewportCulledCol
 use crate::tool_ui::{PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, glyph};
 
 const ACTIVITY_TITLE_GAP: &str = " ";
+const ACTIVITY_BODY_INDENT: &str = "  ";
+const ACTIVITY_NESTED_BODY_INDENT: &str = "    ";
 
 // ---------------------------------------------------------------------------
 // Viewport-culled rendering
@@ -353,7 +355,7 @@ fn render_assistant_cell_lines(cell: &AssistantActivityCell) -> Vec<Line<'static
         ])];
         let md_lines = render_markdown(&body_text, Color::White);
         for md_line in md_lines {
-            let mut spans = vec![Span::raw("   ")];
+            let mut spans = vec![Span::raw(ACTIVITY_BODY_INDENT)];
             spans.extend(md_line.spans);
             let mut line = Line::from(spans);
             line.style = md_line.style;
@@ -496,7 +498,7 @@ fn render_user_cell_lines(cell: &UserActivityCell) -> Vec<Line<'static>> {
         ])];
         let md_lines = render_markdown(&body_text, Color::Gray);
         for md_line in md_lines {
-            let mut spans = vec![Span::raw("   ")];
+            let mut spans = vec![Span::raw(ACTIVITY_BODY_INDENT)];
             spans.extend(md_line.spans);
             let mut line = Line::from(spans);
             line.style = md_line.style;
@@ -679,7 +681,7 @@ fn render_coding_edit_cell_lines(cell: &CodingEditActivityCell) -> Vec<Line<'sta
     ])];
 
     lines.push(Line::from(vec![
-        Span::raw("   "),
+        Span::raw(ACTIVITY_BODY_INDENT),
         Span::styled(cell.selector.clone(), Style::default().fg(Color::Gray)),
     ]));
 
@@ -690,18 +692,18 @@ fn render_coding_edit_cell_lines(cell: &CodingEditActivityCell) -> Vec<Line<'sta
     stats.push(format!("+{} -{}", cell.added_lines, cell.removed_lines));
     stats.push(format!("{} propagation review(s)", cell.propagation_count));
     lines.push(Line::from(vec![
-        Span::raw("   "),
+        Span::raw(ACTIVITY_BODY_INDENT),
         Span::styled(stats.join(" · "), Style::default().fg(Color::DarkGray)),
     ]));
 
     if !cell.impact_lines.is_empty() {
         lines.push(Line::from(vec![
-            Span::raw("   "),
+            Span::raw(ACTIVITY_BODY_INDENT),
             Span::styled("Impact", Style::default().fg(Color::DarkGray)),
         ]));
         for impact in cell.impact_lines.iter().take(4) {
             lines.push(Line::from(vec![
-                Span::raw("     "),
+                Span::raw(ACTIVITY_NESTED_BODY_INDENT),
                 Span::styled(impact.clone(), Style::default().fg(Color::Gray)),
             ]));
         }
@@ -787,7 +789,7 @@ fn render_browser_cell_lines(cell: &BrowserActivityCell) -> Vec<Line<'static>> {
     }
     if !stats.is_empty() {
         lines.push(Line::from(vec![
-            Span::raw("   "),
+            Span::raw(ACTIVITY_BODY_INDENT),
             Span::styled(stats.join(" · "), Style::default().fg(Color::Gray)),
         ]));
     }
@@ -817,7 +819,7 @@ fn render_live_browser_cell_lines(cell: &LiveBrowserActivityCell) -> Vec<Line<'s
     ])];
     for line in cell.body_lines.iter().take(1) {
         lines.push(Line::from(vec![
-            Span::raw("   "),
+            Span::raw(ACTIVITY_BODY_INDENT),
             Span::styled(line.clone(), Style::default().fg(Color::Gray)),
         ]));
     }
@@ -1017,7 +1019,7 @@ fn render_reply_cell_lines(cell: &ReplyActivityCell) -> Vec<Line<'static>> {
         let joined = cell.message_lines.join("\n");
         let md_lines = render_markdown(&joined, Color::White);
         for md_line in md_lines {
-            let mut spans = vec![Span::raw("   ")];
+            let mut spans = vec![Span::raw(ACTIVITY_BODY_INDENT)];
             spans.extend(md_line.spans);
             let mut line = Line::from(spans);
             line.style = md_line.style;
@@ -1075,7 +1077,7 @@ fn render_plan_cell_lines(cell: &PlanActivityCell) -> Vec<Line<'static>> {
             ),
         };
         lines.push(Line::from(vec![
-            Span::raw("   "),
+            Span::raw(ACTIVITY_BODY_INDENT),
             Span::styled(marker, marker_style),
             Span::raw(" "),
             Span::styled(step.text.clone(), text_style),
@@ -1152,7 +1154,7 @@ fn render_text_activity_lines(
             .join("\n");
         let md_lines = render_markdown(&joined, Color::Gray);
         for md_line in md_lines {
-            let mut spans: Vec<Span<'static>> = vec![Span::raw("   ")];
+            let mut spans: Vec<Span<'static>> = vec![Span::raw(ACTIVITY_BODY_INDENT)];
             if !ep.is_empty() {
                 spans.push(Span::styled(
                     ep.to_string(),
@@ -1166,7 +1168,7 @@ fn render_text_activity_lines(
         }
     } else {
         for line in body_lines.iter().take(limit) {
-            let mut spans: Vec<Span<'static>> = vec![Span::raw("   ")];
+            let mut spans: Vec<Span<'static>> = vec![Span::raw(ACTIVITY_BODY_INDENT)];
             if !ep.is_empty() {
                 spans.push(Span::styled(
                     ep.to_string(),
@@ -1207,7 +1209,7 @@ fn render_message_activity_lines(
     ])];
     for line in detail_lines.iter().take(detail_limit) {
         lines.push(Line::from(vec![
-            Span::raw("   "),
+            Span::raw(ACTIVITY_BODY_INDENT),
             Span::styled(line.to_string(), Style::default().fg(Color::Gray)),
         ]));
     }
@@ -1289,7 +1291,7 @@ fn render_error_lines(title: &str, body_lines: &[String], limit: usize) -> Vec<L
     ])];
     for line in body_lines.iter().take(limit) {
         lines.push(Line::from(vec![
-            Span::raw("   "),
+            Span::raw(ACTIVITY_BODY_INDENT),
             Span::styled(line.to_string(), Style::default().fg(Color::LightRed)),
         ]));
     }
@@ -1883,6 +1885,22 @@ That's it.";
         .map(|line| line_text(&line))
         .collect::<Vec<_>>();
 
+        assert_eq!(
+            rendered.first().map(String::as_str),
+            Some("✣ Resolved Message")
+        );
+        let first_body_line = rendered
+            .iter()
+            .find(|line| line.contains("marker-001"))
+            .expect("reply body should render the first message line");
+        assert!(
+            first_body_line.starts_with(ACTIVITY_BODY_INDENT),
+            "reply body should align with activity title text: {rendered:?}"
+        );
+        assert!(
+            !first_body_line.starts_with("   "),
+            "reply body should not keep the old three-space indent: {rendered:?}"
+        );
         assert!(rendered.iter().any(|line| line.contains("marker-012")));
     }
 }
