@@ -1,1 +1,0 @@
-A primitive is the runtime binding and evolution layer for an evolvable SOP primitive library. Each persisted primitive spec describes one reusable primitive procedure with applicability metadata, preconditions, reusable steps, done criteria, and stable recovery paths.

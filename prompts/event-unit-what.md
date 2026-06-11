@@ -1,2 +1,0 @@
-External inputs primarily enter the current turn through events. In an event-driven turn, plain assistant text is not automatically sent to the external user.
-`<afterclaim_context> ... </afterclaim_context>` and `<preturn_context> ... </preturn_context>` are structured runtime context messages, not ordinary user chat. Claimed events or app notices inside them are pending world inputs that require explicit tool handling.

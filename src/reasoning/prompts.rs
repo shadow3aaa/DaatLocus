@@ -48,11 +48,23 @@ impl AppPrompt {
     }
 }
 
-pub fn build_workspace_unit_what(context: &Context) -> String {
-    format!(
+const WORKSPACE_PATH_PLACEHOLDER: &str = "{{workspace_path}}";
+
+pub fn build_workspace_unit_prompt(context: &Context) -> String {
+    workspace_unit_prompt_with_path_line(&format!(
         "Your absolute workspace path is `{}`.",
         context.execution_cwd.display()
+    ))
+}
+
+pub fn build_workspace_unit_placeholder_prompt() -> String {
+    workspace_unit_prompt_with_path_line(
+        "The absolute runtime workspace path is injected into the real system prompt.",
     )
+}
+
+fn workspace_unit_prompt_with_path_line(path_line: &str) -> String {
+    SYSTEM_WORKSPACE.replace(WORKSPACE_PATH_PLACEHOLDER, path_line)
 }
 
 pub fn build_runtime_background_hint_items(context: &Context) -> Vec<String> {
@@ -138,9 +150,12 @@ pub fn build_app_usage_prompt(_app_id: AppId, usage: &AppUsage) -> String {
         return body.trim().to_string();
     }
     let mut builder = PromptTextBuilder::new();
-    builder.push_labeled_section("what", usage.description.clone());
+    builder.push_labeled_section("description", usage.description.clone());
     if !usage.when_to_focus.is_empty() {
-        builder.push_labeled_section("when", render_bullet_list(usage.when_to_focus.clone()));
+        builder.push_labeled_section(
+            "focus_guidance",
+            render_bullet_list(usage.when_to_focus.clone()),
+        );
     }
     builder.build()
 }
@@ -166,7 +181,7 @@ mod tests {
         assert!(
             generated::PROMPT_SOURCES
                 .iter()
-                .any(|(id, source)| *id == "event-unit-what" && *source == EVENT_UNIT_WHAT)
+                .any(|(id, source)| *id == "system/event" && *source == SYSTEM_EVENT)
         );
     }
 

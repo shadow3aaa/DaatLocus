@@ -67,35 +67,11 @@ fn render_group(group: &PromptGroupDoc) -> String {
 }
 
 fn render_unit(unit: &PromptUnitDoc) -> String {
-    let mut parts = Vec::new();
-    if !unit.what.is_empty() {
-        let body = render_blocks(&unit.what);
-        if !body.trim().is_empty() {
-            parts.push(format!("<what>\n{body}\n</what>"));
-        }
-    }
-    if !unit.why.is_empty() {
-        let body = render_blocks(&unit.why);
-        if !body.trim().is_empty() {
-            parts.push(format!("<why>\n{body}\n</why>"));
-        }
-    }
-    if !unit.when.is_empty() {
-        let body = render_blocks(&unit.when);
-        if !body.trim().is_empty() {
-            parts.push(format!("<when>\n{body}\n</when>"));
-        }
-    }
-    if !unit.how.is_empty() {
-        let body = render_blocks(&unit.how);
-        if !body.trim().is_empty() {
-            parts.push(format!("<how>\n{body}\n</how>"));
-        }
-    }
-    if parts.is_empty() {
+    let body = render_blocks(&unit.blocks);
+    if body.trim().is_empty() {
         return String::new();
     }
-    format!("<{}>\n{}\n</{}>", unit.key, parts.join("\n\n"), unit.key)
+    format!("<{}>\n{}\n</{}>", unit.key, body, unit.key)
 }
 
 fn render_state(state: &PromptStateDoc) -> String {

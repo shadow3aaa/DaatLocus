@@ -8,11 +8,8 @@ use crate::{
 use super::{
     prompt_doc::{PromptBlock, PromptGroupDoc, PromptNode, PromptStateDoc, PromptUnitDoc},
     prompts::{
-        APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
-        PLAN_UNIT_HOW, PLAN_UNIT_WHAT, PLAN_UNIT_WHEN, WORKFLOW_UNIT_HOW, WORKFLOW_UNIT_WHAT,
-        WORKFLOW_UNIT_WHEN, WORKSPACE_UNIT_HOW, WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY,
-        build_app_how_to_use_prompt, build_app_usage_prompt, build_runtime_background_hint_items,
-        build_workspace_unit_what,
+        SYSTEM_APPS, SYSTEM_EVENT, SYSTEM_PLAN, SYSTEM_PRIMITIVE, build_app_how_to_use_prompt,
+        build_app_usage_prompt, build_runtime_background_hint_items, build_workspace_unit_prompt,
     },
     turn_compile::load_prompt_persona_spec_sync,
 };
@@ -68,10 +65,7 @@ impl SystemPromptPart for EventSystemPart {
     fn build(&self, _ctx: &Context) -> Option<PromptUnitDoc> {
         Some(PromptUnitDoc::new(
             self.key(),
-            vec![PromptBlock::Paragraph(EVENT_UNIT_WHAT.to_string())],
-            Vec::new(),
-            Vec::new(),
-            vec![PromptBlock::Paragraph(EVENT_UNIT_HOW.to_string())],
+            vec![PromptBlock::Paragraph(SYSTEM_EVENT.to_string())],
         ))
     }
 }
@@ -84,10 +78,7 @@ impl SystemPromptPart for AppsSystemPart {
     fn build(&self, _ctx: &Context) -> Option<PromptUnitDoc> {
         Some(PromptUnitDoc::new(
             self.key(),
-            vec![PromptBlock::Paragraph(APPS_UNIT_WHAT.to_string())],
-            Vec::new(),
-            vec![PromptBlock::Paragraph(APPS_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(APPS_UNIT_HOW.to_string())],
+            vec![PromptBlock::Paragraph(SYSTEM_APPS.to_string())],
         ))
     }
 }
@@ -100,10 +91,7 @@ impl SystemPromptPart for WorkspaceSystemPart {
     fn build(&self, ctx: &Context) -> Option<PromptUnitDoc> {
         Some(PromptUnitDoc::new(
             self.key(),
-            vec![PromptBlock::Paragraph(build_workspace_unit_what(ctx))],
-            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHY.to_string())],
-            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_HOW.to_string())],
+            vec![PromptBlock::Paragraph(build_workspace_unit_prompt(ctx))],
         ))
     }
 }
@@ -116,10 +104,7 @@ impl SystemPromptPart for PlanSystemPart {
     fn build(&self, _ctx: &Context) -> Option<PromptUnitDoc> {
         Some(PromptUnitDoc::new(
             self.key(),
-            vec![PromptBlock::Paragraph(PLAN_UNIT_WHAT.to_string())],
-            Vec::new(),
-            vec![PromptBlock::Paragraph(PLAN_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(PLAN_UNIT_HOW.to_string())],
+            vec![PromptBlock::Paragraph(SYSTEM_PLAN.to_string())],
         ))
     }
 }
@@ -132,10 +117,7 @@ impl SystemPromptPart for WorkflowSystemPart {
     fn build(&self, _ctx: &Context) -> Option<PromptUnitDoc> {
         Some(PromptUnitDoc::new(
             self.key(),
-            vec![PromptBlock::Paragraph(WORKFLOW_UNIT_WHAT.to_string())],
-            Vec::new(),
-            vec![PromptBlock::Paragraph(WORKFLOW_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(WORKFLOW_UNIT_HOW.to_string())],
+            vec![PromptBlock::Paragraph(SYSTEM_PRIMITIVE.to_string())],
         ))
     }
 }
@@ -161,9 +143,6 @@ impl SystemPromptPart for PersonaSystemPart {
                     persona.identity_summary.trim().to_string(),
                 ),
             ])],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
         ))
     }
 }
@@ -186,9 +165,6 @@ impl SystemPromptPart for CompiledAdditionsSystemPart {
         }
         Some(PromptUnitDoc::new(
             self.key(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
             vec![PromptBlock::BulletList(additions)],
         ))
     }
@@ -204,9 +180,7 @@ impl SystemPromptPart for AppDocsSystemPart {
         let state_renders = ctx.apps.state_renders();
         for (app_id, _state) in &state_renders {
             if let Some(usage) = ctx.apps.usage(app_id) {
-                blocks.push(PromptBlock::Paragraph(format!(
-                    "--- {app_id} (pre-focus: what & when) ---"
-                )));
+                blocks.push(PromptBlock::Paragraph(format!("--- {app_id} usage ---")));
                 blocks.push(PromptBlock::Paragraph(build_app_usage_prompt(
                     app_id.clone(),
                     &usage,
@@ -214,7 +188,7 @@ impl SystemPromptPart for AppDocsSystemPart {
             }
             if let Some(how_to_use) = ctx.apps.how_to_use(app_id) {
                 blocks.push(PromptBlock::Paragraph(format!(
-                    "--- {app_id} (post-focus: how to use) ---"
+                    "--- {app_id} operation ---"
                 )));
                 blocks.push(PromptBlock::Paragraph(build_app_how_to_use_prompt(
                     app_id.clone(),
@@ -225,13 +199,7 @@ impl SystemPromptPart for AppDocsSystemPart {
         if blocks.is_empty() {
             return None;
         }
-        Some(PromptUnitDoc::new(
-            self.key(),
-            blocks,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ))
+        Some(PromptUnitDoc::new(self.key(), blocks))
     }
 }
 
@@ -528,7 +496,7 @@ impl AfterClaimContextPart for AfterClaimWorkflowPrimitiveRoutingPart {
     fn build(&self, ctx: &Context, input: &AfterClaimContextInput) -> Option<PromptNode> {
         let mut blocks = Vec::new();
         if ctx.bound_primitive_id.is_none() {
-            // Routing contract already in system prompt WORKFLOW_UNIT_WHEN.
+            // Routing contract already lives in the primitive system prompt.
         } else if let Some(workflow_id) = ctx.bound_primitive_id.as_deref() {
             blocks.push(PromptBlock::KeyValueList(vec![(
                 "current_bound_primitive_id".to_string(),

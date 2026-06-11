@@ -10,10 +10,8 @@ use super::{
         PreTurnWorkflowStatePart, SystemPromptPart, WorkflowSystemPart, WorkspaceSystemPart,
     },
     prompts::{
-        APPS_UNIT_HOW, APPS_UNIT_WHAT, APPS_UNIT_WHEN, EVENT_UNIT_HOW, EVENT_UNIT_WHAT,
-        PLAN_UNIT_HOW, PLAN_UNIT_WHAT, PLAN_UNIT_WHEN, WORKFLOW_UNIT_HOW, WORKFLOW_UNIT_WHAT,
-        WORKFLOW_UNIT_WHEN, WORKSPACE_UNIT_HOW, WORKSPACE_UNIT_WHAT_PLACEHOLDER,
-        WORKSPACE_UNIT_WHEN, WORKSPACE_UNIT_WHY,
+        SYSTEM_APPS, SYSTEM_EVENT, SYSTEM_PLAN, SYSTEM_PRIMITIVE,
+        build_workspace_unit_placeholder_prompt,
     },
     turn_compile::load_prompt_persona_spec_sync,
 };
@@ -109,40 +107,25 @@ pub fn runtime_system_prompt_doc_from_additions(additions: &[String]) -> PromptD
     let mut nodes = vec![
         PromptNode::Unit(PromptUnitDoc::new(
             "event",
-            vec![PromptBlock::Paragraph(EVENT_UNIT_WHAT.to_string())],
-            Vec::new(),
-            Vec::new(),
-            vec![PromptBlock::Paragraph(EVENT_UNIT_HOW.to_string())],
+            vec![PromptBlock::Paragraph(SYSTEM_EVENT.to_string())],
         )),
         PromptNode::Unit(PromptUnitDoc::new(
             "apps",
-            vec![PromptBlock::Paragraph(APPS_UNIT_WHAT.to_string())],
-            Vec::new(),
-            vec![PromptBlock::Paragraph(APPS_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(APPS_UNIT_HOW.to_string())],
+            vec![PromptBlock::Paragraph(SYSTEM_APPS.to_string())],
         )),
         PromptNode::Unit(PromptUnitDoc::new(
             "workspace",
             vec![PromptBlock::Paragraph(
-                WORKSPACE_UNIT_WHAT_PLACEHOLDER.to_string(),
+                build_workspace_unit_placeholder_prompt(),
             )],
-            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHY.to_string())],
-            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(WORKSPACE_UNIT_HOW.to_string())],
         )),
         PromptNode::Unit(PromptUnitDoc::new(
             "plan",
-            vec![PromptBlock::Paragraph(PLAN_UNIT_WHAT.to_string())],
-            Vec::new(),
-            vec![PromptBlock::Paragraph(PLAN_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(PLAN_UNIT_HOW.to_string())],
+            vec![PromptBlock::Paragraph(SYSTEM_PLAN.to_string())],
         )),
         PromptNode::Unit(PromptUnitDoc::new(
             "primitive",
-            vec![PromptBlock::Paragraph(WORKFLOW_UNIT_WHAT.to_string())],
-            Vec::new(),
-            vec![PromptBlock::Paragraph(WORKFLOW_UNIT_WHEN.to_string())],
-            vec![PromptBlock::Paragraph(WORKFLOW_UNIT_HOW.to_string())],
+            vec![PromptBlock::Paragraph(SYSTEM_PRIMITIVE.to_string())],
         )),
         PromptNode::Unit(PromptUnitDoc::new(
             "persona",
@@ -158,9 +141,6 @@ pub fn runtime_system_prompt_doc_from_additions(additions: &[String]) -> PromptD
                     persona.identity_summary.trim().to_string(),
                 ),
             ])],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
         )),
     ];
     let additions = additions
@@ -171,9 +151,6 @@ pub fn runtime_system_prompt_doc_from_additions(additions: &[String]) -> PromptD
     if !additions.is_empty() {
         nodes.push(PromptNode::Unit(PromptUnitDoc::new(
             "compiled_additions",
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
             vec![PromptBlock::BulletList(additions)],
         )));
     }
