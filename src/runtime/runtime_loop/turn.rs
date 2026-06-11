@@ -736,17 +736,7 @@ pub(crate) async fn execute_agent_loop_step(
                 .iter()
                 .map(|call| {
                     render_tool_call_ui_event(context, call).unwrap_or_else(|_| {
-                        if call.name == "apply_patch" {
-                            ToolCallUiEvent::error(
-                                "apply_patch".to_string(),
-                                vec!["invalid patch syntax".to_string()],
-                            )
-                        } else {
-                            ToolCallUiEvent::error(
-                                call.name.clone(),
-                                vec![call.arguments.to_string()],
-                            )
-                        }
+                        ToolCallUiEvent::error(call.name.clone(), vec![call.arguments.to_string()])
                     })
                 })
                 .collect::<Vec<_>>();
@@ -868,11 +858,6 @@ pub(crate) async fn execute_agent_loop_step(
                             },
                         )
                         .await;
-                        let ui_error_text = if call.name == "apply_patch" {
-                            summarize_apply_patch_error(&error_text)
-                        } else {
-                            error_text.clone()
-                        };
                         let display_tool_name =
                             crate::app::AppId::render_exposed_tool_name(&call.name);
                         ToolExecutionResult::new(
@@ -882,7 +867,7 @@ pub(crate) async fn execute_agent_loop_step(
                             }),
                             ToolUiEvent::error(
                                 format!("{display_tool_name} failed"),
-                                compact_body_lines(&ui_error_text, 6),
+                                compact_body_lines(&error_text, 6),
                             ),
                         )
                     }

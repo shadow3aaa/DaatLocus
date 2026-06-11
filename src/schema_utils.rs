@@ -10,6 +10,48 @@ pub fn normalize_provider_function_schema(mut schema: Value) -> Value {
     schema
 }
 
+pub fn structured_edit_args_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "edits": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File path, relative to the active project/workspace unless absolute paths are allowed by the sandbox."
+                        },
+                        "op": {
+                            "type": "string",
+                            "enum": ["replace", "append", "prepend"],
+                            "description": "replace rewrites the inclusive start/end range; append inserts after start; prepend inserts before start."
+                        },
+                        "start": {
+                            "type": "string",
+                            "description": "line#hash anchor copied from read_file/read_code output, for example 12#ab."
+                        },
+                        "end": {
+                            "type": ["string", "null"],
+                            "description": "line#hash end anchor. Required for replace; use null for append/prepend."
+                        },
+                        "content": {
+                            "type": ["string", "null"],
+                            "description": "Replacement or insertion content as one string. Use an empty string to delete a replace range."
+                        }
+                    },
+                    "required": ["path", "op", "start", "end", "content"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["edits"],
+        "additionalProperties": false
+    })
+}
+
 pub fn normalize_openai_json_schema_in_place(schema: &mut Value) {
     match schema {
         Value::Object(object) => normalize_schema_object(object),
@@ -126,7 +168,10 @@ fn normalize_provider_schema_object(object: &mut Map<String, Value>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_openai_json_schema, normalize_provider_function_schema};
+    use super::{
+        normalize_openai_json_schema, normalize_provider_function_schema,
+        structured_edit_args_schema,
+    };
     use serde_json::json;
 
     fn sorted_required_list(value: &serde_json::Value) -> Vec<String> {
@@ -138,6 +183,19 @@ mod tests {
             .collect::<Vec<_>>();
         fields.sort();
         fields
+    }
+
+    fn contains_key(value: &serde_json::Value, needle: &str) -> bool {
+        match value {
+            serde_json::Value::Object(object) => {
+                object.contains_key(needle)
+                    || object.values().any(|value| contains_key(value, needle))
+            }
+            serde_json::Value::Array(values) => {
+                values.iter().any(|value| contains_key(value, needle))
+            }
+            _ => false,
+        }
     }
 
     #[test]
@@ -247,6 +305,23 @@ mod tests {
                     ["required"]
             ),
             vec!["must_use_tools".to_string(), "title".to_string()]
+        );
+    }
+
+    #[test]
+    fn structured_edit_schema_avoids_schema_composition() {
+        let schema = structured_edit_args_schema();
+
+        for key in ["oneOf", "anyOf", "allOf"] {
+            assert!(!contains_key(&schema, key), "{schema:#}");
+        }
+        assert_eq!(
+            schema["properties"]["edits"]["items"]["properties"]["content"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(
+            schema["properties"]["edits"]["items"]["properties"]["end"]["type"],
+            json!(["string", "null"])
         );
     }
 }

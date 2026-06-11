@@ -40,12 +40,9 @@ The normal read path uses a search handle:
 { "ref": "1268#k7Qp" }
 ```
 
-`read_code` also supports explicit path ranges for imports, top-level code,
-search misses, and user-specified locations:
-
-```json
-{ "path": "src/dashboard/mod.rs", "start_line": 1, "line_count": 24 }
-```
+Explicit path ranges for imports, top-level code, search misses, and
+user-specified locations belong to the runtime `read_file` tool, not to
+SCOPE `read_code`.
 
 Read output is source text with per-line edit anchors:
 

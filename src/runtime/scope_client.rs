@@ -108,7 +108,7 @@ impl ScopeClient {
             .find_containing_symbol(file_path, line_number, root)
     }
 
-    /// Read code using a stable search handle or an explicit path range.
+    /// Read code using a stable search handle.
     #[allow(dead_code)]
     pub fn read_code(&self, request: api::ReadCodeRequest) -> Result<api::ReadCodeResponse> {
         let root = self.require_project_root()?;

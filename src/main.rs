@@ -1,7 +1,6 @@
 rust_i18n::i18n!("locales", fallback = "en-US");
 
 mod app;
-mod apply_patch;
 mod browser_app;
 mod browser_install;
 mod cli;
@@ -44,7 +43,6 @@ mod workflow;
 mod workspace_app;
 
 pub(crate) use runtime::bootstrap::{DaatLocusHomeOverride, build_eval_context_with_compiled};
-pub(crate) use runtime::patch_tool::execute_apply_patch_tool;
 pub(crate) use runtime::runtime_loop::{AgentLoopStepOutput, execute_agent_loop_step};
 
 fn main() {

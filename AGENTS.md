@@ -662,6 +662,76 @@ Operational constraints:
 - Do not hand interactive login or authentication flows to the model.
 - Sessions are explicitly addressed; there is no hidden selected session.
 
+### Static Runtime File Tools
+
+Plain file reading and plain file editing are static runtime tools, not an
+`App` and not a `global::*` namespace. They do not represent an interactive
+surface that needs focus. They are exposed as ordinary runtime tools:
+
+```text
+read_file
+edit_file
+```
+
+`read_file` is the model-visible primitive for explicit file/range reads:
+
+```text
+read_file({
+  path: "src/dashboard/mod.rs",
+  start_line: 1268,
+  line_count: 53
+})
+-> 1268#7a|fn run_tui_dashboard(...) {
+   1269#c1|    ...
+```
+
+Rules:
+
+- `read_file` accepts a path plus optional `start_line` and `line_count`.
+- Paths may be workspace-relative or absolute paths allowed by the sandbox.
+- `read_file` output lines use the same `line#hash2|source line` format used by
+  Coding reads.
+- Line hashes are stale-edit guards. They are not long-term identities and
+  should stay short.
+- `read_file` is the fallback for imports, top-level code, search misses,
+  user-specified locations, and non-source/config/document files.
+- Do not put explicit path/range read compatibility into `read_code`; that
+  belongs here.
+
+`edit_file` is the model-visible primitive for plain file edits:
+
+```text
+edit_file({
+  edits: [{
+    path: "AGENTS.md",
+    op: "replace",
+    start: "708#4b",
+    end: "724#d1",
+    content: "..."
+  }]
+})
+```
+
+Rules:
+
+- `edit_file` uses the same structured edit schema and `line#hash2` anchors as
+  `edit_code`.
+- `edit_file` verifies line hashes before writing.
+- The model-visible edit schema should be flat and must not use JSON Schema
+  `oneOf`/`anyOf`. Expose edit `content` as a string field; implementation may
+  accept legacy array content, but the schema should not advertise it.
+- `edit_file` handles ordinary non-SCOPE files such as Markdown, TOML, YAML,
+  JSON, shell scripts, and unsupported file types.
+- `edit_file` does not run SCOPE propagation analysis and does not produce
+  propagation review events.
+- When Coding is focused and the target is a SCOPE-owned source file,
+  `edit_file` must be rejected with an instruction to use `edit_code`.
+
+`apply_patch` must not be a normal model-facing editing API. Patch-envelope or
+unified-diff parsing may remain as an internal implementation detail or
+migration aid, but the agent-facing path is `read_file` plus `edit_file`, or
+`search_code` plus `read_code` plus `edit_code` for SCOPE-owned source files.
+
 ### Browser
 
 `Browser` is the interface for viewing and interacting with web pages.
@@ -701,7 +771,10 @@ Coding app must render its key state into `AppStateRender` so that:
 Operational constraints:
 
 - Coding tools (`search_code`, `read_code`, `edit_code`, and review tools) must go through the Coding app, requiring `focus_app("coding")` first.
-- `apply_patch` is a raw patch runtime tool, not a semantic code editing primitive. When Coding is focused, use Coding tools for SCOPE-owned source files; raw patches are reserved for non-source files or cases outside SCOPE responsibility.
+- Use `read_file` for explicit path/range reads. Do not make `read_code`
+  support path/range compatibility.
+- Use `edit_file` for non-SCOPE files. When Coding is focused, `edit_file` must
+  reject SCOPE-owned source files and require `edit_code`.
 - Coding app `render_state()` must include: project_root, open_languages, lsp_status, propagation_pending_count, and up to N recent propagation events.
 - LSP process lifecycle (start, crash recovery, shutdown) belongs to Coding app internals, not to tool return values.
 
@@ -747,22 +820,12 @@ Rules:
 - The display label is for human/model reading and for copying the path into
   `edit_code`; it is not syntax the model is expected to author.
 
-`read_code` reads a handle or an explicit path range. Reading by handle is the
-normal path:
+`read_code` reads a search handle only:
 
 ```text
 code::read("1268#k7Qp")
 -> 1268#7a|fn run_tui_dashboard(...) {
    1269#c1|    ...
-```
-
-Path-range read remains as a fallback for imports, top-level code, search misses,
-and user-specified locations:
-
-```text
-code::read("src/dashboard/mod.rs", 1, 24)
--> 1#a8|use std::collections::HashMap;
-   2#3c|use std::time::Duration;
 ```
 
 Rules:
@@ -773,12 +836,14 @@ Rules:
 - Line hashes stay short. They are stale-edit guards, not identity handles.
 - Read-handle freshness and edit freshness are separate. Search handles locate
   targets; line hashes guard edits against stale source.
-- Avoid JSON Schema `oneOf`/`anyOf` for read input. If the tool accepts both
-  handle and path-range modes, expose one flat object schema and validate the
-  allowed field combinations in code.
+- `read_code` must not accept `path`, `start_line`, or `line_count`. Those
+  fields belong to `read_file`.
+- Avoid JSON Schema `oneOf`/`anyOf`. `read_code` should expose one clear handle
+  field such as `ref`/`handle`, not a flat schema that pretends to support
+  multiple modes.
 
-`edit_code` keeps its current API and semantics. It must not be changed to
-accept read handles:
+`edit_code` uses the same structured edit schema as `edit_file`, but with SCOPE
+propagation analysis and review:
 
 ```text
 code::edit({
@@ -795,10 +860,13 @@ code::edit({
 The model copies `path` from the search display label and copies `start`/`end`
 line anchors from `read_code`. Existing replace/append/prepend semantics, line
 hash verification, parse validation, and propagation analysis remain unchanged.
+`edit_code` must not accept read handles as edit targets.
+Like `edit_file`, `edit_code` must expose a flat structured-edit schema without
+JSON Schema `oneOf`/`anyOf`.
 
-The read-handle registry belongs to the Coding session state, not to global
+The read-handle registry belongs to the Coding session state, not shared/global
 state. It is cleared when the project changes and is not persisted as a
-long-term identity database.
+long-term identity database. `read_file` does not use this registry.
 
 ### App Composition
 
@@ -809,16 +877,20 @@ When `Coding` is focused, the tool scope includes:
 - Coding's own tools: `search_code`, `read_code`, `edit_code`, review tools
 - Terminal's delegated tools: `terminal_exec`, `terminal_write_stdin`, `terminal_terminate`
 - Browser's tools: **not** available unless the model explicitly focuses Browser
+- Static runtime file tools such as `read_file` and `edit_file` are not owned by
+  any app. Their availability is governed by runtime policy and the SCOPE
+  boundary, not by app composition.
 
 Implementation: each `App` can optionally expose `fn composed_apps() -> Vec<AppId>`. The runtime tool-scope check traverses this list so that focused-app restriction plus composition gives the correct tool availability.
 
 Rationale:
 
-- "I am coding" inherently includes "I need to run commands and edit raw files."
+- "I am coding" inherently includes "I need to run commands and edit non-SCOPE
+  files."
 - Forcing `focus_app("terminal")` back-and-forth would be an unnecessary interruption.
 - Composition preserves the attention model: `focus_app("coding")` means "I am in coding mode," and all tools needed for that mode are available.
 
-### SCOPE Current Boundary and Raw Patch Boundary
+### SCOPE Current Boundary and Static File Tool Boundary
 
 SCOPE (scope-engine) provides semantic code reading, searching, hash-anchored
 editing, and propagation review. Do not document unimplemented refactoring
@@ -827,17 +899,23 @@ features as expected model-facing capabilities.
 | Capability | SCOPE Status | Boundary |
 |---|---|---|
 | Target discovery | ✅ `search_code` | Content search returns stable read handles plus display labels; the model must not author target syntax. |
-| Read code | ✅ `read_code` | Reads a search handle or explicit path range and returns only hash-anchored source lines. |
-| Edit code | ✅ `edit_code` | Applies explicit Replace/Append/Prepend edits using `path` plus line-hash anchors. |
+| Read code | ✅ `read_code` | Reads a search handle only and returns hash-anchored source lines. Explicit path/range reads belong to `read_file`. |
+| Edit code | ✅ `edit_code` | Applies the same structured hash-anchored edits as `edit_file`, plus SCOPE parse validation and propagation review. |
 | Propagation review | ✅ review tools | Edit impact is surfaced through propagation results and review events. |
 | New source files | ⚠️ explicit supported creation paths | Use supported creation/edit paths; SCOPE has no template system. |
-| Non-source/config files | Outside SCOPE | Use raw file tools for `.toml`, `.yaml`, `.md`, `.json`, `.sh`, and other non-source files. |
+| Non-source/config files | Outside SCOPE | Use `read_file` and `edit_file` for `.toml`, `.yaml`, `.md`, `.json`, `.sh`, and other non-source files. |
 
-**Raw patch boundary for `apply_patch`:**
+**Static file edit boundary:**
 
-When Coding is focused and `apply_patch` targets a source-code file that SCOPE owns (for example `.rs`, `.py`, `.go`, `.ts`, `.js`, `.java`, `.c`, `.cpp`, `.rb`, `.php`), Coding rejects the call and requires `edit_code` instead.
+When Coding is focused and `edit_file` targets a source-code file that SCOPE
+owns (for example `.rs`, `.py`, `.go`, `.ts`, `.js`, `.java`, `.c`, `.cpp`,
+`.rb`, `.php`), Coding rejects the call and requires `edit_code` instead.
 
-For non-source-code files (`.toml`, `.yaml`, `.md`, `.json`, `.sh`, etc.) or unsupported cases outside SCOPE responsibility, raw patching is allowed. Propagation review is then limited to what Coding can observe through its own semantic operations and explicit review events; do not assume raw patches silently receive the same propagation analysis as `edit_code`.
+For non-source-code files (`.toml`, `.yaml`, `.md`, `.json`, `.sh`, etc.) or
+unsupported cases outside SCOPE responsibility, `edit_file` is allowed.
+Propagation review is then limited to what Coding can observe through its own
+semantic operations and explicit review events; do not assume plain file edits
+silently receive the same propagation analysis as `edit_code`.
 
 ## Third-Party App Package
 

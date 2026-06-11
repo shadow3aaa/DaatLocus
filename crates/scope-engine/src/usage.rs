@@ -24,12 +24,6 @@ pub fn protocol_schema() -> Vec<ScopeProtocolItemSchema> {
                 .to_string(),
         },
         ScopeProtocolItemSchema {
-            item: "read_code_range".to_string(),
-            syntax: r#"{"path":"src/foo.rs","start_line":1,"line_count":80}"#.to_string(),
-            notes: "Reads an explicit path range for imports, top-level code, search misses, or user-specified locations."
-                .to_string(),
-        },
-        ScopeProtocolItemSchema {
             item: "edit_code".to_string(),
             syntax: r#"{"edits":[{"path":"src/foo.rs","op":"replace","start":"10#7a","end":"20#d4","content":"..."}]}"#
                 .to_string(),

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::analyzer::Analyzer;
 use crate::api::{EditOp, PropagationResult, PropagationSource, StructuredEdit};
@@ -15,7 +15,41 @@ struct PlannedEdit {
     primary_symbol_name: Option<String>,
 }
 
-fn line_hash(line_content: &str) -> String {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppliedStructuredEditOperation {
+    Add,
+    Update,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedStructuredEditFile {
+    pub path: String,
+    pub operation: AppliedStructuredEditOperation,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+    pub original_content: String,
+    pub new_content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedStructuredEditSummary {
+    pub files: Vec<AppliedStructuredEditFile>,
+}
+
+struct PreparedFileEdits {
+    display_path: String,
+    full_path: PathBuf,
+    existed: bool,
+    original: String,
+    new_content: String,
+    planned: Vec<PlannedEdit>,
+}
+
+struct PreparedStructuredEdits {
+    files: Vec<PreparedFileEdits>,
+}
+
+pub fn line_hash(line_content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(line_content.as_bytes());
     let result = hasher.finalize();
@@ -224,34 +258,82 @@ pub fn edit_code_apply(
     project_root: &Path,
     lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
 ) -> Result<Vec<PropagationResult>, String> {
+    let analyzer = TreeSitterAnalyzer::new();
+    let prepared = prepare_structured_edits(edits, project_root, &analyzer, true)?;
+    write_prepared_structured_edits(&prepared, Some(lsp_analyzer))?;
+
+    let mut results = Vec::new();
+    for file in &prepared.files {
+        results.extend(collect_propagation_results(
+            PropagationCollectionContext {
+                full_path: &file.full_path,
+                original: &file.original,
+                new_content: &file.new_content,
+                project_root,
+                lsp_analyzer,
+                analyzer: &analyzer,
+            },
+            &file.planned,
+        ));
+    }
+
+    Ok(results)
+}
+
+pub fn edit_file_apply(
+    edits: &[StructuredEdit],
+    project_root: &Path,
+) -> Result<AppliedStructuredEditSummary, String> {
+    let analyzer = TreeSitterAnalyzer::new();
+    let prepared = prepare_structured_edits(edits, project_root, &analyzer, false)?;
+    write_prepared_structured_edits(&prepared, None)?;
+    Ok(applied_summary_from_prepared(&prepared))
+}
+
+fn prepare_structured_edits(
+    edits: &[StructuredEdit],
+    project_root: &Path,
+    analyzer: &TreeSitterAnalyzer,
+    validate_parse: bool,
+) -> Result<PreparedStructuredEdits, String> {
     if edits.is_empty() {
         return Err("edits array is empty".to_string());
     }
 
-    // Group edits by file path
-    let mut edits_by_file: HashMap<std::path::PathBuf, Vec<&StructuredEdit>> = HashMap::new();
+    struct EditGroup<'a> {
+        display_path: String,
+        edits: Vec<&'a StructuredEdit>,
+    }
+
+    let mut edits_by_file: HashMap<PathBuf, EditGroup<'_>> = HashMap::new();
     for edit in edits {
         let full_path = if std::path::Path::new(&edit.path).is_absolute() {
-            std::path::PathBuf::from(&edit.path)
+            PathBuf::from(&edit.path)
         } else {
             project_root.join(&edit.path)
         };
-        edits_by_file.entry(full_path).or_default().push(edit);
+        let display_path = display_path_for_edit(project_root, &full_path);
+        edits_by_file
+            .entry(full_path)
+            .and_modify(|group| group.edits.push(edit))
+            .or_insert_with(|| EditGroup {
+                display_path,
+                edits: vec![edit],
+            });
     }
 
-    let analyzer = TreeSitterAnalyzer::new();
-    let mut writes = Vec::new();
-    let mut all_planned: HashMap<std::path::PathBuf, Vec<PlannedEdit>> = HashMap::new();
+    let mut prepared_files = Vec::new();
 
-    for (full_path, file_edits) in &edits_by_file {
-        let original = if full_path.exists() {
-            std::fs::read_to_string(full_path)
+    for (full_path, group) in edits_by_file {
+        let existed = full_path.exists();
+        let original = if existed {
+            std::fs::read_to_string(&full_path)
                 .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?
         } else {
             // New file creation: only allow if all edits are Append to line 1
-            let can_create = file_edits.iter().all(|e| {
-                matches!(e.op, EditOp::Append | EditOp::Prepend) && e.start == "1#"
-                    || (e.start.starts_with("1#") && e.start.len() > 2)
+            let can_create = group.edits.iter().all(|e| {
+                matches!(e.op, EditOp::Append | EditOp::Prepend)
+                    && (e.start == "1#" || (e.start.starts_with("1#") && e.start.len() > 2))
             });
             if !can_create {
                 return Err(format!(
@@ -264,7 +346,7 @@ pub fn edit_code_apply(
 
         let mut planned: Vec<PlannedEdit> = Vec::new();
 
-        for edit in file_edits {
+        for edit in group.edits {
             let (start_line, start_hash) = parse_start_anchor(&edit.start)?;
 
             if !original.is_empty() {
@@ -272,9 +354,10 @@ pub fn edit_code_apply(
             }
 
             let mut primary_symbol_name = None;
-            if !original.is_empty()
+            if validate_parse
+                && !original.is_empty()
                 && let Some(sel) =
-                    analyzer.find_containing_symbol(full_path, start_line, project_root)
+                    analyzer.find_containing_symbol(&full_path, start_line, project_root)
                 && let Ok(parsed) = crate::selector::parse_selector(&sel)
             {
                 primary_symbol_name = parsed.name().map(str::to_string);
@@ -340,50 +423,91 @@ pub fn edit_code_apply(
             apply_planned_edits_to_content(&original, &planned, &full_path.to_string_lossy())?;
 
         let ext = full_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !ext.is_empty() && !new_content.is_empty() && !analyzer.can_parse(ext, &new_content) {
+        if validate_parse
+            && !ext.is_empty()
+            && !new_content.is_empty()
+            && !analyzer.can_parse(ext, &new_content)
+        {
             return Err(format!(
                 "edit rejected: tree-sitter cannot parse the result for {}",
                 full_path.display()
             ));
         }
 
-        all_planned.insert(full_path.clone(), planned);
-        writes.push((full_path.clone(), original, new_content));
+        prepared_files.push(PreparedFileEdits {
+            display_path: group.display_path,
+            full_path,
+            existed,
+            original,
+            new_content,
+            planned,
+        });
     }
 
-    for (full_path, _, new_content) in &writes {
-        if let Some(parent) = full_path.parent() {
+    Ok(PreparedStructuredEdits {
+        files: prepared_files,
+    })
+}
+
+fn write_prepared_structured_edits(
+    prepared: &PreparedStructuredEdits,
+    lsp_analyzer: Option<&Mutex<Option<Box<dyn Analyzer + Send>>>>,
+) -> Result<(), String> {
+    for file in &prepared.files {
+        if let Some(parent) = file.full_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                format!("cannot create parent dirs for {}: {e}", full_path.display())
+                format!(
+                    "cannot create parent dirs for {}: {e}",
+                    file.full_path.display()
+                )
             })?;
         }
-        std::fs::write(full_path, new_content)
-            .map_err(|e| format!("cannot write {}: {e}", full_path.display()))?;
-        if let Ok(lsp_guard) = lsp_analyzer.lock()
+        std::fs::write(&file.full_path, &file.new_content)
+            .map_err(|e| format!("cannot write {}: {e}", file.full_path.display()))?;
+        if let Some(lsp_analyzer) = lsp_analyzer
+            && let Ok(lsp_guard) = lsp_analyzer.lock()
             && let Some(ref lsp) = *lsp_guard
         {
-            lsp.notify_did_change(full_path, 1, new_content);
+            lsp.notify_did_change(&file.full_path, 1, &file.new_content);
         }
     }
+    Ok(())
+}
 
-    let mut results = Vec::new();
-    for (full_path, original, new_content) in &writes {
-        if let Some(planned) = all_planned.get(full_path) {
-            results.extend(collect_propagation_results(
-                PropagationCollectionContext {
-                    full_path,
-                    original,
-                    new_content,
-                    project_root,
-                    lsp_analyzer,
-                    analyzer: &analyzer,
+fn applied_summary_from_prepared(
+    prepared: &PreparedStructuredEdits,
+) -> AppliedStructuredEditSummary {
+    let files = prepared
+        .files
+        .iter()
+        .map(|file| {
+            let added_lines = file.planned.iter().map(|edit| edit.replacement.len()).sum();
+            let removed_lines = file.planned.iter().map(|edit| edit.old_count).sum();
+            AppliedStructuredEditFile {
+                path: file.display_path.clone(),
+                operation: if file.existed {
+                    AppliedStructuredEditOperation::Update
+                } else {
+                    AppliedStructuredEditOperation::Add
                 },
-                planned,
-            ));
+                added_lines,
+                removed_lines,
+                original_content: file.original.clone(),
+                new_content: file.new_content.clone(),
+            }
+        })
+        .collect();
+    AppliedStructuredEditSummary { files }
+}
+
+fn display_path_for_edit(project_root: &Path, full_path: &Path) -> String {
+    if let Ok(relative) = full_path.strip_prefix(project_root) {
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if !relative.is_empty() {
+            return relative;
         }
     }
-
-    Ok(results)
+    full_path.to_string_lossy().replace('\\', "/")
 }
 
 #[cfg(test)]

@@ -1,4 +1,3 @@
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,7 +22,6 @@ const DEFAULT_REVIEW_LIMIT: usize = 1;
 const MAX_REVIEW_LIMIT: usize = 100;
 const MAX_LSP_DID_OPEN_FILES: usize = 500;
 const SEARCH_FALLBACK_CONTEXT_LINES: usize = 12;
-const DEFAULT_READ_LINE_COUNT: usize = 80;
 
 fn lsp_config_for_language(lsp_lang: &str) -> Option<Box<dyn LspServerConfig>> {
     match lsp_lang {
@@ -466,47 +464,11 @@ fn resolve_read_target(
     params: &ReadCodeRequest,
     read_handles: &ReadHandleRegistry,
 ) -> Result<ReadHandleTarget, String> {
-    let has_handle = params.ref_handle.is_some();
-    let has_path_range = params.path.is_some() || params.start_line.is_some();
-    if has_handle && has_path_range {
-        return Err(
-            "read_code accepts either `ref` or `path` + `start_line`, not both".to_string(),
-        );
-    }
-
-    if let Some(handle) = params.ref_handle.as_deref() {
-        return read_handles
-            .resolve(handle)
-            .cloned()
-            .ok_or_else(|| format!("unknown read handle `{handle}`; search again"));
-    }
-
-    let path = params
-        .path
-        .as_deref()
-        .ok_or_else(|| "read_code requires `ref` or `path`".to_string())?;
-    let start_line = params
-        .start_line
-        .ok_or_else(|| "read_code path mode requires `start_line`".to_string())?;
-    if start_line == 0 {
-        return Err("read_code `start_line` must be >= 1".to_string());
-    }
-    let line_count = params.line_count.unwrap_or(DEFAULT_READ_LINE_COUNT).max(1);
-    let end_line = start_line + line_count - 1;
-    let path = normalize_relative_path(path);
-    Ok(ReadHandleTarget::new(
-        format!("{path}#L{start_line}-L{end_line}"),
-        path,
-        start_line,
-        end_line,
-    ))
-}
-
-fn line_hash(line_content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(line_content.as_bytes());
-    let result = hasher.finalize();
-    format!("{:02x}", result[0])
+    let handle = params.ref_handle.as_str();
+    read_handles
+        .resolve(handle)
+        .cloned()
+        .ok_or_else(|| format!("unknown read handle `{handle}`; search again"))
 }
 
 fn prefix_lines_with_hash(content: &str, start_line: usize) -> String {
@@ -515,7 +477,7 @@ fn prefix_lines_with_hash(content: &str, start_line: usize) -> String {
         .enumerate()
         .map(|(i, line)| {
             let line_num = start_line + i;
-            let hash = line_hash(line);
+            let hash = patch::line_hash(line);
             format!("{line_num}#{hash}|{line}")
         })
         .collect::<Vec<_>>()
@@ -819,12 +781,7 @@ mod tests {
         let handle = search.targets[0].handle.clone();
         let result = read_code(
             dir.path(),
-            &ReadCodeRequest {
-                ref_handle: Some(handle),
-                path: None,
-                start_line: None,
-                line_count: None,
-            },
+            &ReadCodeRequest { ref_handle: handle },
             &handles,
         )
         .unwrap();
@@ -845,32 +802,6 @@ mod tests {
             }),
             "each line should have line#hash| prefix, got: {content}"
         );
-    }
-
-    #[test]
-    fn read_code_supports_explicit_path_ranges() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = "pub fn first() {\n    println!(\"first\");\n}\n\npub fn second() {\n    println!(\"second\");\n}\n";
-        std::fs::write(dir.path().join("lib.rs"), source).unwrap();
-        let handles = ReadHandleRegistry::new();
-        let result = read_code(
-            dir.path(),
-            &ReadCodeRequest {
-                ref_handle: None,
-                path: Some("lib.rs".to_string()),
-                start_line: Some(5),
-                line_count: Some(3),
-            },
-            &handles,
-        )
-        .unwrap();
-        assert_eq!(result.path, "lib.rs");
-        let content = result.content.as_str();
-        assert!(
-            content.contains("pub fn second()"),
-            "path range should contain fn second, got: {content}"
-        );
-        assert!(!content.contains("pub fn first()"));
     }
 
     #[test]

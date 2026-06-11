@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use crate::{
     app::{AppId, AppToolExecutionContext},
-    apply_patch::summarize_apply_patch_error,
     context::{
         ActivePrimitiveRunSession, AppNoticeKey, Context, PendingPrimitiveRunFlush,
         RuntimeTurnPhase,

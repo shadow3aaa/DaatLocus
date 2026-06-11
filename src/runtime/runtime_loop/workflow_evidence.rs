@@ -39,7 +39,7 @@ fn detect_runtime_manual_fix(output: &AgentLoopStepOutput) -> bool {
     output.actions.iter().any(|action| {
         matches!(
             action.kind.as_str(),
-            "apply_patch" | "terminal_exec" | "terminal_write_stdin"
+            "edit_file" | "terminal_exec" | "terminal_write_stdin"
         )
     })
 }

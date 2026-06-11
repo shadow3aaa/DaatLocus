@@ -18,6 +18,7 @@ use crate::{
     tool_ui::{AppAttentionUiAction, ToolCallUiEvent, ToolUiEvent, glyph},
 };
 
+mod files;
 mod work;
 
 pub(super) type ToolFuture<'a> =
@@ -50,20 +51,6 @@ pub(super) fn summarize_inline_text(text: &str) -> String {
     } else {
         summary
     }
-}
-
-fn freeform_string_fallback_schema(description: &'static str) -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "input": {
-                "type": "string",
-                "description": description,
-            }
-        },
-        "required": ["input"],
-        "additionalProperties": false,
-    })
 }
 
 fn normalize_tool_input_schema(mut schema: serde_json::Value) -> serde_json::Value {
@@ -213,6 +200,27 @@ impl StaticRuntimeTool {
             execute,
         }
     }
+
+    fn new_with_schema(
+        name: &'static str,
+        description: &'static str,
+        schema: serde_json::Value,
+        summarize: ToolSummarizer,
+        call_ui: ToolCallUiBuilder,
+        execute: ToolExecutor,
+    ) -> Self {
+        Self {
+            name,
+            description,
+            input_spec: AgentToolInputSpec::JsonSchema {
+                schema: normalize_tool_input_schema(schema),
+            },
+            availability: None,
+            summarize,
+            call_ui,
+            execute,
+        }
+    }
 }
 
 #[async_trait]
@@ -249,84 +257,6 @@ impl RuntimeTool for StaticRuntimeTool {
         call: &AgentToolCall,
     ) -> miette::Result<ToolExecutionResult> {
         (self.execute)(context, call).await
-    }
-}
-
-struct ApplyPatchRuntimeTool;
-
-#[async_trait]
-impl RuntimeTool for ApplyPatchRuntimeTool {
-    fn name(&self) -> &str {
-        "apply_patch"
-    }
-
-    fn description(&self) -> &str {
-        r#"Use `apply_patch` to edit files with apply_patch envelope format.
-
-Patch requirements:
-- The patch must start with `*** Begin Patch` and end with `*** End Patch`
-- Each file operation starts with `*** Add File: <path>`, `*** Delete File: <path>`, or `*** Update File: <path>`
-- New file content lines must start with `+`
-- Update hunks must start with `@@`; hunk lines must start with a space, `+`, or `-`
-- Paths may be workspace-relative or absolute paths allowed by the sandbox
-- Rename patches are not currently supported; express them as delete plus add
-
-Example:
-*** Begin Patch
-*** Update File: src/app.py
-@@
--print("Hi")
-+print("Hello, world!")
-
-*** Add File: hello.txt
-+Hello world
-*** End Patch
-
-Notes:
-- Unified diff input is still accepted for compatibility, but apply_patch envelope format is preferred
-- Do not output explanation text; output only the complete patch"#
-    }
-
-    fn input_spec(&self) -> AgentToolInputSpec {
-        AgentToolInputSpec::FreeformGrammar {
-            syntax: "lark".to_string(),
-            definition: r#"start: begin_patch file_op+ end_patch
-begin_patch: "*** Begin Patch" LF
-end_patch: "*** End Patch" LF?
-file_op: add_file | delete_file | update_file
-add_file: "*** Add File: " filename LF add_line+
-delete_file: "*** Delete File: " filename LF
-update_file: "*** Update File: " filename LF change
-filename: /(.+)/
-add_line: "+" /(.*)/ LF
-change: (change_context | change_line)+ eof_line?
-change_context: ("@@" | "@@ " /(.*)/) LF
-change_line: ("+" | "-" | " ") /(.*)/ LF
-eof_line: "*** End of File" LF
-LF: /\n/"#
-                .to_string(),
-            fallback_schema: freeform_string_fallback_schema("The entire contents of the patch"),
-        }
-    }
-
-    fn is_available(&self, _context: &Context) -> bool {
-        true
-    }
-
-    fn summarize_action(&self, call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
-        work::summarize_apply_patch_tool(call)
-    }
-
-    fn call_ui_event(&self, call: &AgentToolCall) -> miette::Result<ToolCallUiEvent> {
-        work::render_apply_patch_call_ui(call)
-    }
-
-    async fn execute(
-        &self,
-        context: &mut Context,
-        call: &AgentToolCall,
-    ) -> miette::Result<ToolExecutionResult> {
-        work::execute_apply_patch_runtime_tool(context, call).await
     }
 }
 
@@ -404,7 +334,8 @@ impl RuntimeTool for AppRuntimeTool {
 }
 
 fn build_static_runtime_tools() -> Vec<Box<dyn RuntimeTool>> {
-    let mut tools: Vec<Box<dyn RuntimeTool>> = vec![Box::new(ApplyPatchRuntimeTool)];
+    let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
+    tools.extend(files::register_tools());
     tools.extend(work::register_tools());
     tools
 }
@@ -513,19 +444,12 @@ fn runtime_availability_denial(
         return None;
     }
 
-    match tool.name() {
-        "apply_patch" => Some((
-            "`apply_patch` is scoped to the terminal app, but terminal is not the focused app."
-                .to_string(),
-            "Call focus_app with app=\"terminal\" before editing files with apply_patch."
-                .to_string(),
-        )),
-        name => Some((
-            format!("`{name}` is disabled by the current runtime availability policy."),
-            "Use a currently allowed tool, or satisfy the tool's required runtime state before retrying."
-                .to_string(),
-        )),
-    }
+    let name = tool.name();
+    Some((
+        format!("`{name}` is disabled by the current runtime availability policy."),
+        "Use a currently allowed tool, or satisfy the tool's required runtime state before retrying."
+            .to_string(),
+    ))
 }
 
 fn unavailable_tool_result(
@@ -600,7 +524,7 @@ pub fn render_telegram_tool_result_status(
 
     match tool_name {
         "update_plan" => Some(telegram_status(glyph::PLAN, "Plan Updated")),
-        "apply_patch" => match &result.ui_event {
+        "edit_file" => match &result.ui_event {
             ToolUiEvent::Patch(event) => Some(telegram_status(
                 glyph::PATCH,
                 format!(
@@ -727,7 +651,7 @@ fn telegram_tool_failure_status(tool_name: &str) -> Option<TelegramLiveStatus> {
     match tool_name {
         "finish_and_send" | "notice_resolved" | "put_away_app" => None,
         "update_plan" => Some(telegram_status(glyph::ERROR, "Plan Update Failed")),
-        "apply_patch" => Some(telegram_status(glyph::ERROR, "File Edit Failed")),
+        "edit_file" => Some(telegram_status(glyph::ERROR, "File Edit Failed")),
         "terminal_exec" => Some(telegram_status(glyph::ERROR, "Command Failed")),
         "terminal_write_stdin" => Some(telegram_status(glyph::ERROR, "Terminal Write Failed")),
         "terminal_terminate" => Some(telegram_status(glyph::ERROR, "Terminal Stop Failed")),
@@ -990,23 +914,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn apply_patch_tool_uses_lark_envelope_grammar() {
-        let spec = ApplyPatchRuntimeTool.spec();
-
-        match spec.input_spec {
-            AgentToolInputSpec::FreeformGrammar {
-                syntax, definition, ..
-            } => {
-                assert_eq!(syntax, "lark");
-                assert!(definition.contains("start: begin_patch file_op+ end_patch"));
-                assert!(definition.contains("*** Begin Patch"));
-                assert!(definition.contains("*** Update File: "));
-            }
-            AgentToolInputSpec::JsonSchema { .. } => panic!("expected freeform grammar"),
-        }
-    }
-
     fn tool_result(tool_name: &str, payload: Value, ui_event: ToolUiEvent) -> ToolExecutionResult {
         ToolExecutionResult::new(format!("{tool_name} summary"), payload, ui_event)
     }
@@ -1140,6 +1047,33 @@ mod tests {
         for key in ["oneOf", "anyOf", "allOf"] {
             assert!(!json_contains_key(&schema, key), "{schema:#}");
         }
+        assert!(json_contains_key(&schema, "ref"), "{schema:#}");
+        assert!(!json_contains_key(&schema, "path"), "{schema:#}");
+        assert!(!json_contains_key(&schema, "start_line"), "{schema:#}");
+        assert!(!json_contains_key(&schema, "line_count"), "{schema:#}");
+    }
+
+    #[tokio::test]
+    async fn structured_edit_tool_schemas_do_not_use_schema_composition() {
+        let isolated = IsolatedTestContext::new(AppId::coding()).await;
+        let specs = build_runtime_tool_specs(&isolated.context);
+
+        for tool_name in ["edit_file", "coding__edit_code"] {
+            let spec = specs
+                .iter()
+                .find(|tool| tool.name == tool_name)
+                .unwrap_or_else(|| panic!("{tool_name} tool"));
+            let AgentToolInputSpec::JsonSchema { schema } = &spec.input_spec else {
+                panic!("{tool_name} should use json schema");
+            };
+
+            for key in ["oneOf", "anyOf", "allOf"] {
+                assert!(
+                    !json_contains_key(schema, key),
+                    "tool={tool_name} schema={schema:#}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1170,22 +1104,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_returns_line_hash_anchored_lines() {
+        let mut isolated = IsolatedTestContext::new(AppId::terminal()).await;
+        let root = isolated.context.execution_cwd.clone();
+        std::fs::write(root.join("notes.txt"), "alpha\nbeta\ngamma\n").expect("write fixture");
+
+        let call = AgentToolCall {
+            id: "call_read".to_string(),
+            name: "read_file".to_string(),
+            arguments: json!({
+                "path": "notes.txt",
+                "start_line": 2,
+                "line_count": 1,
+            }),
+        };
+
+        let result = execute_agent_tool_call(&mut isolated.context, &call)
+            .await
+            .expect("read file");
+
+        assert_eq!(
+            result.model_content(),
+            format!("2#{}|beta", scope_engine::patch::line_hash("beta"))
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_applies_structured_line_hash_edits() {
+        let mut isolated = IsolatedTestContext::new(AppId::terminal()).await;
+        let root = isolated.context.execution_cwd.clone();
+        std::fs::write(root.join("README.md"), "old\n").expect("write markdown fixture");
+
+        let hash = scope_engine::patch::line_hash("old");
+        let call = AgentToolCall {
+            id: "call_edit".to_string(),
+            name: "edit_file".to_string(),
+            arguments: json!({
+                "edits": [{
+                    "path": "README.md",
+                    "op": "replace",
+                    "start": format!("1#{hash}"),
+                    "end": format!("1#{hash}"),
+                    "content": "new"
+                }]
+            }),
+        };
+
+        execute_agent_tool_call(&mut isolated.context, &call)
+            .await
+            .expect("edit file");
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("README.md")).expect("read markdown fixture"),
+            "new\n"
+        );
+    }
+
+    #[tokio::test]
     async fn coding_focus_exposes_terminal_delegated_tools() {
         let isolated = IsolatedTestContext::new(AppId::coding()).await;
 
         let specs = build_runtime_tool_specs(&isolated.context);
-        assert_eq!(
-            specs
-                .iter()
-                .filter(|tool| tool.name == "apply_patch")
-                .count(),
-            1
-        );
         let names = specs
             .into_iter()
             .map(|tool| tool.name)
             .collect::<HashSet<_>>();
 
+        assert!(names.contains("read_file"));
+        assert!(names.contains("edit_file"));
         assert!(names.contains("coding__open_project"));
         assert!(names.contains("coding__search_code"));
         assert!(names.contains("coding__read_code"));
@@ -1194,7 +1180,7 @@ mod tests {
         assert!(names.contains("terminal__terminal_exec"));
         assert!(names.contains("terminal__terminal_write_stdin"));
         assert!(names.contains("terminal__terminal_terminate"));
-        assert!(names.contains("apply_patch"));
+        assert!(!names.contains("apply_patch"));
         assert!(!names.contains("coding__grep"));
         assert!(!names.contains("coding__glob"));
         assert!(!names.contains("open_project"));
@@ -1230,7 +1216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coding_focus_rejects_apply_patch_for_scope_owned_source() {
+    async fn coding_focus_rejects_edit_file_for_scope_owned_source() {
         let mut isolated = IsolatedTestContext::new(AppId::coding()).await;
         let root = isolated.context.execution_cwd.clone();
         std::fs::write(root.join("lib.rs"), "pub fn value() -> i32 {\n    1\n}\n")
@@ -1247,21 +1233,28 @@ mod tests {
             .await
             .expect("open project");
 
-        let patch_call = AgentToolCall {
-            id: "call_patch".to_string(),
-            name: "apply_patch".to_string(),
+        let hash = scope_engine::patch::line_hash("    1");
+        let edit_call = AgentToolCall {
+            id: "call_edit".to_string(),
+            name: "edit_file".to_string(),
             arguments: json!({
-                "input": "*** Begin Patch\n*** Update File: lib.rs\n@@\n-    1\n+    2\n*** End Patch\n",
+                "edits": [{
+                    "path": "lib.rs",
+                    "op": "replace",
+                    "start": format!("2#{hash}"),
+                    "end": format!("2#{hash}"),
+                    "content": "    2"
+                }]
             }),
         };
 
-        let err = execute_agent_tool_call(&mut isolated.context, &patch_call)
+        let err = execute_agent_tool_call(&mut isolated.context, &edit_call)
             .await
-            .expect_err("SCOPE-owned source patch should be rejected");
+            .expect_err("SCOPE-owned source edit should be rejected");
 
         assert!(
             err.to_string()
-                .contains("apply_patch is forbidden for SCOPE-owned source files"),
+                .contains("edit_file is forbidden for SCOPE-owned source files"),
             "unexpected error: {err}"
         );
         assert_eq!(
@@ -1271,7 +1264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coding_focus_allows_apply_patch_for_non_scope_file() {
+    async fn coding_focus_allows_edit_file_for_non_scope_file() {
         let mut isolated = IsolatedTestContext::new(AppId::coding()).await;
         let root = isolated.context.execution_cwd.clone();
         std::fs::write(root.join("README.md"), "old\n").expect("write markdown fixture");
@@ -1287,17 +1280,24 @@ mod tests {
             .await
             .expect("open project");
 
-        let patch_call = AgentToolCall {
-            id: "call_patch".to_string(),
-            name: "apply_patch".to_string(),
+        let hash = scope_engine::patch::line_hash("old");
+        let edit_call = AgentToolCall {
+            id: "call_edit".to_string(),
+            name: "edit_file".to_string(),
             arguments: json!({
-                "input": "*** Begin Patch\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch\n",
+                "edits": [{
+                    "path": "README.md",
+                    "op": "replace",
+                    "start": format!("1#{hash}"),
+                    "end": format!("1#{hash}"),
+                    "content": "new"
+                }]
             }),
         };
 
-        execute_agent_tool_call(&mut isolated.context, &patch_call)
+        execute_agent_tool_call(&mut isolated.context, &edit_call)
             .await
-            .expect("non-SCOPE patch should be allowed");
+            .expect("non-SCOPE edit should be allowed");
 
         assert_eq!(
             std::fs::read_to_string(root.join("README.md")).expect("read markdown fixture"),
@@ -1350,8 +1350,10 @@ mod tests {
             .map(|tool| tool.name)
             .collect::<HashSet<_>>();
 
+        assert!(names.contains("read_file"));
+        assert!(names.contains("edit_file"));
         assert!(names.contains("terminal__terminal_exec"));
-        assert!(names.contains("apply_patch"));
+        assert!(!names.contains("apply_patch"));
         assert!(!names.contains("terminal_exec"));
         assert!(!names.contains("coding__open_project"));
         assert!(!names.contains("open_project"));

@@ -2,7 +2,6 @@ use miette::Result;
 use serde_json::json;
 
 use crate::{
-    apply_patch::{PatchOperationKind, parse_apply_patch, summarize_patch_ops},
     context::Context,
     core::{
         ActivateComposedPrimitiveArgs, CreatePrimitiveSpecArgs, EventResolveArgs, FocusAppArgs,
@@ -21,31 +20,6 @@ use super::{
     RuntimeTool, StaticRuntimeTool, ToolExecutionResult, ToolFuture, parse_tool_args,
     summarize_inline_text,
 };
-
-fn extract_apply_patch_text(call: &AgentToolCall) -> Result<String> {
-    if let Some(input) = call
-        .arguments
-        .as_object()
-        .and_then(|value| value.get("input"))
-        && let Some(text) = input.as_str()
-    {
-        return Ok(text.to_string());
-    }
-    if let Some(patch) = call
-        .arguments
-        .as_object()
-        .and_then(|value| value.get("patch"))
-        && let Some(text) = patch.as_str()
-    {
-        return Ok(text.to_string());
-    }
-    if let Some(text) = call.arguments.as_str() {
-        return Ok(text.to_string());
-    }
-    Err(miette::miette!(
-        "invalid arguments for tool `apply_patch`: expected a patch string in `input`"
-    ))
-}
 
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![
@@ -757,49 +731,6 @@ fn execute_update_workflow_tool<'a>(
             ),
         )
         .with_turn_boundary("primitive spec updated; re-render world state in a new turn"))
-    })
-}
-
-pub(super) fn summarize_apply_patch_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    Ok(EpisodeActionRecord {
-        kind: "apply_patch".to_string(),
-        summary: summarize_inline_text(&extract_apply_patch_text(call)?),
-    })
-}
-
-pub(super) fn render_apply_patch_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let ops = parse_apply_patch(&extract_apply_patch_text(call)?)?;
-    let summary = summarize_patch_ops(&ops);
-    Ok(ToolCallUiEvent::patch(
-        format!(
-            "{} file(s) changed (+{} -{})",
-            summary.changed_files, summary.added_lines, summary.removed_lines
-        ),
-        summary
-            .files
-            .iter()
-            .cloned()
-            .map(|file| crate::tool_ui::PatchFileUiData {
-                path: file.path,
-                operation: match file.operation {
-                    PatchOperationKind::Add => crate::tool_ui::PatchFileOperation::Add,
-                    PatchOperationKind::Delete => crate::tool_ui::PatchFileOperation::Delete,
-                    PatchOperationKind::Update => crate::tool_ui::PatchFileOperation::Update,
-                },
-                added_lines: file.added_lines,
-                removed_lines: file.removed_lines,
-                diff_lines: Vec::new(),
-            })
-            .collect(),
-    ))
-}
-
-pub(super) fn execute_apply_patch_runtime_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        super::super::execute_apply_patch_tool(context, &extract_apply_patch_text(call)?).await
     })
 }
 

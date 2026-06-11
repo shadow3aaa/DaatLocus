@@ -20,12 +20,10 @@ pub struct OpenProjectResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReadCodeRequest {
-    #[serde(default, rename = "ref", alias = "handle")]
-    pub ref_handle: Option<String>,
-    pub path: Option<String>,
-    pub start_line: Option<usize>,
-    pub line_count: Option<usize>,
+    #[serde(rename = "ref", alias = "handle")]
+    pub ref_handle: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

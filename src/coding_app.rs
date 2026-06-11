@@ -17,10 +17,10 @@ use crate::{
         App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
         AppToolSpec, AppUsage,
     },
-    apply_patch::{PatchOp, parse_apply_patch},
     context_budget::truncate_text_to_token_budget,
     reasoning::{episode::EpisodeActionRecord, prompts::APP_CODING, runtime::AgentToolCall},
     runtime::scope_client::ScopeClient,
+    schema_utils::structured_edit_args_schema,
     tool_ui::{
         CodingEditUiData, CodingToolCallUiData, PatchDiffLineKind, PatchDiffLineUiData,
         PatchFileOperation, PatchFileUiData, ToolCallUiEvent, ToolUiEvent, compact_body_lines,
@@ -38,12 +38,10 @@ pub struct CodingOpenProjectArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CodingReadCodeArgs {
-    #[serde(default, rename = "ref", alias = "handle")]
-    pub ref_handle: Option<String>,
-    pub path: Option<String>,
-    pub start_line: Option<usize>,
-    pub line_count: Option<usize>,
+    #[serde(rename = "ref", alias = "handle")]
+    pub ref_handle: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -707,18 +705,29 @@ impl Default for CodingApp {
 }
 
 impl CodingApp {
-    fn reject_scope_owned_apply_patch(&self, call: &AgentToolCall) -> Result<()> {
+    fn reject_scope_owned_edit_file(&self, call: &AgentToolCall) -> Result<()> {
+        #[derive(Deserialize)]
+        struct EditFilePathArgs {
+            edits: Vec<EditFilePath>,
+        }
+
+        #[derive(Deserialize)]
+        struct EditFilePath {
+            path: String,
+        }
+
         self.require_project()?;
-        let patch_text = extract_coding_apply_patch_text(call)?;
-        let ops = parse_apply_patch(&patch_text)?;
+        let args: EditFilePathArgs =
+            serde_json::from_value(call.arguments.clone()).map_err(|err| {
+                miette!(
+                    "invalid arguments for tool `edit_file`: {}; arguments={}",
+                    err,
+                    call.arguments
+                )
+            })?;
         let mut blocked = Vec::new();
-        for op in ops {
-            let path = match op {
-                PatchOp::Add { path, .. }
-                | PatchOp::Delete { path }
-                | PatchOp::Update { path, .. } => path,
-            };
-            let response = self.scope.is_responsible_source(Path::new(&path))?;
+        for edit in args.edits {
+            let response = self.scope.is_responsible_source(Path::new(&edit.path))?;
             if response.is_responsible {
                 blocked.push(format!("{} ({})", response.path, response.reason));
             }
@@ -727,7 +736,7 @@ impl CodingApp {
             return Ok(());
         }
         Err(miette!(
-            "apply_patch is forbidden for SCOPE-owned source files while Coding is focused. Use edit_code instead. Blocked file(s): {}",
+            "edit_file is forbidden for SCOPE-owned source files while Coding is focused. Use edit_code instead. Blocked file(s): {}",
             blocked.join(", ")
         ))
     }
@@ -801,13 +810,13 @@ impl App for CodingApp {
             },
             AppToolSpec {
                 name: "read_code".to_string(),
-                description: "Read a stable search handle or explicit path range and return hash-anchored source lines.".to_string(),
+                description: "Read a stable search handle and return hash-anchored source lines.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(CodingReadCodeArgs)).unwrap(),
             },
             AppToolSpec {
                 name: "edit_code".to_string(),
                 description: "Apply structured path + line-hash anchored edits and return propagation results.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(CodingEditCodeArgs)).unwrap(),
+                input_schema: structured_edit_args_schema(),
             },
             AppToolSpec {
                 name: "next_review".to_string(),
@@ -868,8 +877,8 @@ impl App for CodingApp {
         call: &AgentToolCall,
         _context: &AppToolExecutionContext,
     ) -> Result<()> {
-        if call.name == "apply_patch" {
-            self.reject_scope_owned_apply_patch(call)?;
+        if call.name == "edit_file" {
+            self.reject_scope_owned_edit_file(call)?;
         }
         Ok(())
     }
@@ -930,9 +939,6 @@ impl App for CodingApp {
                 let summary_target = read_args_summary(&args);
                 let request = scope_engine::api::ReadCodeRequest {
                     ref_handle: args.ref_handle.clone(),
-                    path: args.path.clone(),
-                    start_line: args.start_line,
-                    line_count: args.line_count,
                 };
                 let result = self.scope.read_code(request)?;
                 self.last_action = Some(format!("read {summary_target}"));
@@ -1035,31 +1041,6 @@ impl App for CodingApp {
             _ => Err(miette!("unknown coding tool `{}`", call.name)),
         }
     }
-}
-
-fn extract_coding_apply_patch_text(call: &AgentToolCall) -> Result<String> {
-    if let Some(input) = call
-        .arguments
-        .as_object()
-        .and_then(|value| value.get("input"))
-        && let Some(text) = input.as_str()
-    {
-        return Ok(text.to_string());
-    }
-    if let Some(patch) = call
-        .arguments
-        .as_object()
-        .and_then(|value| value.get("patch"))
-        && let Some(text) = patch.as_str()
-    {
-        return Ok(text.to_string());
-    }
-    if let Some(text) = call.arguments.as_str() {
-        return Ok(text.to_string());
-    }
-    Err(miette!(
-        "invalid arguments for tool `apply_patch`: expected a patch string in `input`"
-    ))
 }
 
 fn parse_coding_tool_args<T: for<'de> Deserialize<'de>>(call: &AgentToolCall) -> Result<T> {
@@ -1336,20 +1317,7 @@ fn format_search_targets_for_model(targets: &[scope_engine::api::SearchTarget]) 
 }
 
 fn read_args_summary(args: &CodingReadCodeArgs) -> String {
-    if let Some(handle) = args.ref_handle.as_deref() {
-        return handle.to_string();
-    }
-    match (args.path.as_deref(), args.start_line) {
-        (Some(path), Some(start_line)) => {
-            let line_count = args
-                .line_count
-                .map(|line_count| line_count.to_string())
-                .unwrap_or_else(|| "default".to_string());
-            format!("{path}:L{start_line}+{line_count}")
-        }
-        (Some(path), None) => path.to_string(),
-        _ => "unresolved read target".to_string(),
-    }
+    args.ref_handle.clone()
 }
 
 fn coding_pattern_result_summary(

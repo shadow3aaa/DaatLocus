@@ -273,7 +273,7 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
         }
         ActivityCell::ExecResult(cell) => apply_exec_cell(&mut item, cell),
         ActivityCell::LiveExec(cell) => apply_live_exec_cell(&mut item, cell),
-        ActivityCell::Patch(cell) => apply_patch_cell(&mut item, cell),
+        ActivityCell::Patch(cell) => apply_file_edit_cell(&mut item, cell),
         ActivityCell::Telegram(cell) => apply_telegram_cell(&mut item, cell),
         ActivityCell::Reply(cell) => apply_reply_cell(&mut item, cell),
         ActivityCell::TerminalWait(cell) => apply_terminal_wait_cell(&mut item, cell),
@@ -305,7 +305,7 @@ fn activity_cell_variant_name(cell: &ActivityCell) -> &'static str {
         ActivityCell::ActivatePrimitiveResult(_) => "ActivatePrimitiveResult",
         ActivityCell::ExecResult(_) => "ExecResult",
         ActivityCell::LiveExec(_) => "LiveExec",
-        ActivityCell::Patch(_) => "Patch",
+        ActivityCell::Patch(_) => "FileEdit",
         ActivityCell::Telegram(_) => "Telegram",
         ActivityCell::Reply(_) => "Reply",
         ActivityCell::TerminalWait(_) => "TerminalWait",
@@ -785,11 +785,11 @@ fn apply_activate_primitive_cell(item: &mut WebActivityItem, cell: &ActivatePrim
     }]);
 }
 
-fn apply_patch_cell(item: &mut WebActivityItem, cell: &PatchActivityCell) {
+fn apply_file_edit_cell(item: &mut WebActivityItem, cell: &PatchActivityCell) {
     item.kind = WebActivityKind::Patch;
     item.actor = Some(WebActivityActor::Tool);
     item.title = if cell.summary_line.trim().is_empty() {
-        "Patch".to_string()
+        "File Edit".to_string()
     } else {
         cell.summary_line.clone()
     };
@@ -799,7 +799,7 @@ fn apply_patch_cell(item: &mut WebActivityItem, cell: &PatchActivityCell) {
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
     item.tool = Some(WebActivityTool {
-        name: "apply_patch".to_string(),
+        name: "edit_file".to_string(),
         app: Some("Workspace".to_string()),
         input_preview: Some(item.title.clone()),
         output_preview: Some(format_patch_summary(&cell.files)),

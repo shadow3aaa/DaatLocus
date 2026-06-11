@@ -1708,8 +1708,8 @@ mod tests {
                     },
                 },
                 crate::reasoning::runtime::AgentToolSpec {
-                    name: "apply_patch".to_string(),
-                    description: "Apply patch".to_string(),
+                    name: "custom_patch".to_string(),
+                    description: "Apply custom patch".to_string(),
                     input_spec: AgentToolInputSpec::FreeformGrammar {
                         syntax: "unified_diff".to_string(),
                         definition: "patch := text".to_string(),
@@ -1739,7 +1739,7 @@ mod tests {
         assert_eq!(payload["tools"][0]["type"], "function");
         assert_eq!(payload["tools"][0]["name"], "update_plan");
         assert_eq!(payload["tools"][1]["type"], "function");
-        assert_eq!(payload["tools"][1]["name"], "apply_patch");
+        assert_eq!(payload["tools"][1]["name"], "custom_patch");
         assert_eq!(payload["tools"][1]["strict"], false);
         assert_eq!(
             payload["tools"][1]["parameters"]["properties"]["input"]["type"],
@@ -1957,7 +1957,7 @@ mod tests {
         let custom = json!({
             "type": "custom_tool_call",
             "call_id": "call-3",
-            "name": "apply_patch",
+            "name": "custom_patch",
             "input": "--- a\n+++ b\n"
         });
         let parsed = response_item_tool_call(&custom).unwrap().unwrap();
