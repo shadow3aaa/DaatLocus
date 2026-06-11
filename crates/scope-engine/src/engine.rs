@@ -2,7 +2,6 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use crate::analyzer::Analyzer;
 use crate::api::*;
@@ -11,8 +10,7 @@ use crate::lsp::{
     GoplsConfig, JdtlsConfig, LspAnalyzer, LspServerConfig, PyrightConfig, RustAnalyzerConfig,
 };
 use crate::patch;
-use crate::selector::{self, SelectorTarget};
-use crate::state::PropagationState;
+use crate::state::{PropagationState, ReadHandleRegistry, ReadHandleTarget};
 use crate::treesitter::TreeSitterAnalyzer;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder};
@@ -23,8 +21,9 @@ const DEFAULT_SEARCH_LIMIT: usize = 100;
 const MAX_SEARCH_LIMIT: usize = 1000;
 const DEFAULT_REVIEW_LIMIT: usize = 1;
 const MAX_REVIEW_LIMIT: usize = 100;
-const DEFAULT_FILE_SEARCH_LIMIT: usize = 100;
 const MAX_LSP_DID_OPEN_FILES: usize = 500;
+const SEARCH_FALLBACK_CONTEXT_LINES: usize = 12;
+const DEFAULT_READ_LINE_COUNT: usize = 80;
 
 fn lsp_config_for_language(lsp_lang: &str) -> Option<Box<dyn LspServerConfig>> {
     match lsp_lang {
@@ -209,51 +208,23 @@ pub fn open_project(
 pub fn search_code(
     project_root: &Path,
     params: &SearchCodeRequest,
+    read_handles: &mut ReadHandleRegistry,
 ) -> Result<SearchCodeResponse, String> {
-    let limit = normalize_search_limit(params.limit);
-    let matches = search_project(project_root, &params.query, None, None, limit)?;
-    Ok(SearchCodeResponse { matches })
-}
-
-pub fn grep_code(
-    project_root: &Path,
-    params: &GrepCodeRequest,
-) -> Result<GrepCodeResponse, String> {
-    if params.pattern.is_empty() {
-        return Err("pattern is required".to_string());
+    if params.query.is_empty() {
+        return Err("query is required".to_string());
     }
 
+    let limit = normalize_search_limit(params.limit);
     let target = project_relative_arg(project_root, params.path.as_deref())?;
-    let matches = search_project(
+    let targets = search_project_targets(
         project_root,
-        &params.pattern,
+        &params.query,
         target.as_deref(),
         params.include.as_deref(),
-        DEFAULT_FILE_SEARCH_LIMIT,
+        limit,
+        read_handles,
     )?;
-    Ok(GrepCodeResponse { matches })
-}
-
-pub fn glob_files(
-    project_root: &Path,
-    params: &GlobFilesRequest,
-) -> Result<GlobFilesResponse, String> {
-    if params.pattern.is_empty() {
-        return Err("pattern is required".to_string());
-    }
-
-    let target = project_relative_arg(project_root, params.path.as_deref())?;
-    let mut files = find_glob_files(project_root, &params.pattern, target.as_deref())?;
-    files.sort_by(|(left_path, left_mtime), (right_path, right_mtime)| {
-        right_mtime
-            .cmp(left_mtime)
-            .then_with(|| left_path.cmp(right_path))
-    });
-
-    let truncated = files.len() > DEFAULT_FILE_SEARCH_LIMIT;
-    files.truncate(DEFAULT_FILE_SEARCH_LIMIT);
-    let files = files.into_iter().map(|(path, _)| path).collect::<Vec<_>>();
-    Ok(GlobFilesResponse { files, truncated })
+    Ok(SearchCodeResponse { targets })
 }
 
 pub fn is_responsible_source(
@@ -298,17 +269,19 @@ fn normalize_search_limit(limit: Option<usize>) -> usize {
         .clamp(1, MAX_SEARCH_LIMIT)
 }
 
-fn search_project(
+fn search_project_targets(
     project_root: &Path,
     pattern: &str,
     target: Option<&str>,
     include: Option<&str>,
     limit: usize,
-) -> Result<Vec<SearchMatch>, String> {
+    read_handles: &mut ReadHandleRegistry,
+) -> Result<Vec<SearchTarget>, String> {
     let regex = Regex::new(pattern).map_err(|e| format!("regex error: {e}"))?;
     let include = build_optional_glob_set(include)?;
     let analyzer = TreeSitterAnalyzer::new();
-    let mut matches = Vec::new();
+    let mut targets = Vec::new();
+    let mut seen_labels = std::collections::HashSet::new();
 
     for entry in project_files(project_root, target)? {
         let path = entry.path();
@@ -322,50 +295,47 @@ fn search_project(
         let Ok(content) = fs::read_to_string(path) else {
             continue;
         };
+        let line_count = content.lines().count().max(1);
         for (line_index, text) in content.lines().enumerate() {
             if !regex.is_match(text) {
                 continue;
             }
             let line = line_index + 1;
-            let symbol_match = analyzer.find_containing_symbol_match(path, line);
-            let selector = symbol_match
-                .as_ref()
-                .map(|symbol| symbol.canonical_selector(path, project_root));
-            matches.push(SearchMatch {
-                file: relative.clone(),
-                line,
-                text: text.to_string(),
-                selector,
-            });
-            if matches.len() >= limit {
-                return Ok(matches);
+            let target =
+                search_target_for_match(&analyzer, project_root, path, &relative, line, line_count);
+            if seen_labels.insert(target.label.clone()) {
+                targets.push(read_handles.intern(target)?);
+            }
+            if targets.len() >= limit {
+                return Ok(targets);
             }
         }
     }
 
-    Ok(matches)
+    Ok(targets)
 }
 
-fn find_glob_files(
+fn search_target_for_match(
+    analyzer: &TreeSitterAnalyzer,
     project_root: &Path,
-    pattern: &str,
-    target: Option<&str>,
-) -> Result<Vec<(String, SystemTime)>, String> {
-    let glob_set = build_glob_set(pattern)?;
-    let mut files = Vec::new();
-    for entry in project_files(project_root, target)? {
-        let path = entry.path();
-        let relative = relative_file_path(project_root, path);
-        if glob_set.is_match(&relative) {
-            let mtime = entry
-                .metadata()
-                .or_else(|_| fs::metadata(path))
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            files.push((relative, mtime));
-        }
+    path: &Path,
+    relative: &str,
+    line: usize,
+    line_count: usize,
+) -> ReadHandleTarget {
+    if let Some(symbol) = analyzer.find_containing_symbol_match(path, line) {
+        let label = symbol.canonical_selector(path, project_root);
+        return ReadHandleTarget::new(label, relative, symbol.start_line, symbol.end_line);
     }
-    Ok(files)
+
+    let start_line = line.saturating_sub(SEARCH_FALLBACK_CONTEXT_LINES).max(1);
+    let end_line = (line + SEARCH_FALLBACK_CONTEXT_LINES).min(line_count);
+    ReadHandleTarget::new(
+        format!("{relative}#L{start_line}-L{end_line}"),
+        relative,
+        start_line,
+        end_line,
+    )
 }
 
 fn project_files(project_root: &Path, target: Option<&str>) -> Result<Vec<DirEntry>, String> {
@@ -421,59 +391,6 @@ fn relative_file_path(project_root: &Path, path: &Path) -> String {
         .unwrap_or_else(|| normalize_relative_path(&path.to_string_lossy()))
 }
 
-pub fn format_grep_output(matches: &[SearchMatch]) -> String {
-    if matches.is_empty() {
-        return "No files found".to_string();
-    }
-
-    let mut lines = vec![format!("Found {} matches", matches.len()), String::new()];
-    let mut current_file: Option<&str> = None;
-    let mut current_selector: Option<Option<&str>> = None;
-
-    for item in matches {
-        if current_file != Some(item.file.as_str()) {
-            if current_file.is_some() {
-                lines.push(String::new());
-            }
-            lines.push(format!("{}:", item.file));
-            current_file = Some(item.file.as_str());
-            current_selector = None;
-        }
-
-        let selector = item.selector.as_deref();
-        if current_selector != Some(selector) {
-            match selector {
-                Some(selector) => lines.push(format!("  {selector}:")),
-                None => lines.push("  Unclassified matches:".to_string()),
-            }
-            current_selector = Some(selector);
-        }
-
-        lines.push(format!("    Line {}: {}", item.line, item.text));
-    }
-
-    lines.join("\n")
-}
-
-pub fn format_glob_output(files: &[String], truncated: bool) -> String {
-    let mut lines = Vec::new();
-    if files.is_empty() {
-        lines.push("No files found".to_string());
-    } else {
-        lines.extend(files.iter().cloned());
-    }
-
-    if truncated {
-        lines.push(String::new());
-        lines.push(
-            "(Results are truncated: showing first 100 results. Consider using a more specific path or pattern.)"
-                .to_string(),
-        );
-    }
-
-    lines.join("\n")
-}
-
 fn project_relative_arg(root: &Path, path: Option<&str>) -> Result<Option<String>, String> {
     let Some(path) = path.map(str::trim).filter(|path| !path.is_empty()) else {
         return Ok(None);
@@ -495,134 +412,6 @@ fn project_relative_arg(root: &Path, path: Option<&str>) -> Result<Option<String
 
 fn normalize_relative_path(path: &str) -> String {
     path.replace('\\', "/")
-}
-
-struct ResolvedReadSelection {
-    start_line: usize,
-    end_line: usize,
-    content_override: Option<String>,
-}
-
-fn resolve_read_selection(
-    analyzer: &TreeSitterAnalyzer,
-    full_path: &Path,
-    _project_root: &Path,
-    file_content: &str,
-    parsed: &selector::ParsedSelector,
-) -> Result<ResolvedReadSelection, String> {
-    let line_count = file_content.lines().count().max(1);
-    match &parsed.target {
-        SelectorTarget::Symbol(_) => {
-            let symbol = analyzer.resolve_selector(full_path, parsed)?;
-            Ok(ResolvedReadSelection {
-                start_line: symbol.start_line,
-                end_line: symbol.end_line,
-                content_override: None,
-            })
-        }
-        SelectorTarget::LineRange {
-            start_line,
-            end_line,
-        } => {
-            let (start_line, end_line) = clamp_range(*start_line, *end_line, line_count)?;
-            Ok(ResolvedReadSelection {
-                start_line,
-                end_line,
-                content_override: None,
-            })
-        }
-        SelectorTarget::AroundLine { line, context } => {
-            let start_line = line.saturating_sub(*context).max(1);
-            let end_line = (*line + *context).min(line_count);
-            Ok(ResolvedReadSelection {
-                start_line,
-                end_line,
-                content_override: None,
-            })
-        }
-        SelectorTarget::Match { pattern, around } => {
-            let regex = Regex::new(pattern).map_err(|e| format!("regex error: {e}"))?;
-            let mut hits = file_content
-                .lines()
-                .enumerate()
-                .filter_map(|(idx, line)| regex.is_match(line).then_some(idx + 1))
-                .collect::<Vec<_>>();
-            match hits.len() {
-                0 => Err(format!("match selector found no matches for /{pattern}/")),
-                1 => {
-                    let line = hits.remove(0);
-                    let (start_line, end_line, _kind) = if let Some(context) = around {
-                        (
-                            line.saturating_sub(*context).max(1),
-                            (line + *context).min(line_count),
-                            "match_around",
-                        )
-                    } else {
-                        (line, line, "match")
-                    };
-                    Ok(ResolvedReadSelection {
-                        start_line,
-                        end_line,
-                        content_override: None,
-                    })
-                }
-                _ => Err(format!(
-                    "match selector is ambiguous for /{pattern}/; candidate lines: {}",
-                    hits.iter()
-                        .map(|line| line.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
-            }
-        }
-        SelectorTarget::BeforeLine { line } | SelectorTarget::AfterLine { line } => {
-            let (start_line, end_line) = clamp_range(*line, *line, line_count)?;
-            Ok(ResolvedReadSelection {
-                start_line,
-                end_line,
-                content_override: None,
-            })
-        }
-        SelectorTarget::Enclosing { line } => {
-            let symbol = analyzer
-                .find_containing_symbol_match(full_path, *line)
-                .ok_or_else(|| {
-                    format!(
-                        "no enclosing symbol found at {} line {}",
-                        full_path.display(),
-                        line
-                    )
-                })?;
-            Ok(ResolvedReadSelection {
-                start_line: symbol.start_line,
-                end_line: symbol.end_line,
-                content_override: None,
-            })
-        }
-        SelectorTarget::Outline => {
-            let symbols = analyzer.symbols_in_file(full_path)?;
-            let content = symbols
-                .iter()
-                .map(|symbol| {
-                    format!(
-                        "{}{} #L{}-L{}",
-                        symbol.kind_prefix, symbol.name, symbol.start_line, symbol.end_line
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let end_line = content.lines().count().max(1);
-            Ok(ResolvedReadSelection {
-                start_line: 1,
-                end_line,
-                content_override: Some(if content.is_empty() {
-                    String::new()
-                } else {
-                    format!("{content}\n")
-                }),
-            })
-        }
-    }
 }
 
 fn clamp_range(
@@ -656,27 +445,61 @@ fn read_line_range(content: &str, start_line: usize, end_line: usize) -> String 
 pub fn read_code(
     project_root: &Path,
     params: &ReadCodeRequest,
+    read_handles: &ReadHandleRegistry,
 ) -> Result<ReadCodeResponse, String> {
-    let parsed =
-        selector::parse_selector(&params.selector).map_err(|e| format!("Bad selector: {e}"))?;
-    let (full_path, _ext) = selector::resolve_file(&parsed, project_root)?;
-    let file_content = std::fs::read_to_string(&full_path)
+    let target = resolve_read_target(params, read_handles)?;
+    let full_path = project_root.join(&target.path);
+    let file_content = fs::read_to_string(&full_path)
         .map_err(|e| format!("Failed to read {}: {e}", full_path.display()))?;
-    let analyzer = TreeSitterAnalyzer::new();
-    let resolved =
-        resolve_read_selection(&analyzer, &full_path, project_root, &file_content, &parsed)?;
-    let raw_content = resolved
-        .content_override
-        .clone()
-        .unwrap_or_else(|| read_line_range(&file_content, resolved.start_line, resolved.end_line));
-
-    let path = relative_file_path(project_root, &full_path);
-    let prefixed_content = prefix_lines_with_hash(&raw_content, resolved.start_line);
+    let line_count = file_content.lines().count().max(1);
+    let (start_line, end_line) = clamp_range(target.start_line, target.end_line, line_count)?;
+    let raw_content = read_line_range(&file_content, start_line, end_line);
+    let prefixed_content = prefix_lines_with_hash(&raw_content, start_line);
 
     Ok(ReadCodeResponse {
-        path,
+        path: target.path,
         content: prefixed_content,
     })
+}
+
+fn resolve_read_target(
+    params: &ReadCodeRequest,
+    read_handles: &ReadHandleRegistry,
+) -> Result<ReadHandleTarget, String> {
+    let has_handle = params.ref_handle.is_some();
+    let has_path_range = params.path.is_some() || params.start_line.is_some();
+    if has_handle && has_path_range {
+        return Err(
+            "read_code accepts either `ref` or `path` + `start_line`, not both".to_string(),
+        );
+    }
+
+    if let Some(handle) = params.ref_handle.as_deref() {
+        return read_handles
+            .resolve(handle)
+            .cloned()
+            .ok_or_else(|| format!("unknown read handle `{handle}`; search again"));
+    }
+
+    let path = params
+        .path
+        .as_deref()
+        .ok_or_else(|| "read_code requires `ref` or `path`".to_string())?;
+    let start_line = params
+        .start_line
+        .ok_or_else(|| "read_code path mode requires `start_line`".to_string())?;
+    if start_line == 0 {
+        return Err("read_code `start_line` must be >= 1".to_string());
+    }
+    let line_count = params.line_count.unwrap_or(DEFAULT_READ_LINE_COUNT).max(1);
+    let end_line = start_line + line_count - 1;
+    let path = normalize_relative_path(path);
+    Ok(ReadHandleTarget::new(
+        format!("{path}#L{start_line}-L{end_line}"),
+        path,
+        start_line,
+        end_line,
+    ))
 }
 
 fn line_hash(line_content: &str) -> String {
@@ -845,46 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn grep_output_groups_matches_by_file_and_selector() {
-        let matches = vec![
-            SearchMatch {
-                file: "src/coding_app.rs".to_string(),
-                line: 10,
-                text: "fn build_usage() {".to_string(),
-                selector: Some("src/coding_app.rs::fn build_usage #L10-L20".to_string()),
-            },
-            SearchMatch {
-                file: "src/coding_app.rs".to_string(),
-                line: 12,
-                text: "usage.push_str(\"grep\");".to_string(),
-                selector: Some("src/coding_app.rs::fn build_usage #L10-L20".to_string()),
-            },
-            SearchMatch {
-                file: "src/coding_app.rs".to_string(),
-                line: 3,
-                text: "use std::path::PathBuf;".to_string(),
-                selector: None,
-            },
-        ];
-
-        assert_eq!(
-            format_grep_output(&matches),
-            "Found 3 matches\n\nsrc/coding_app.rs:\n  src/coding_app.rs::fn build_usage #L10-L20:\n    Line 10: fn build_usage() {\n    Line 12: usage.push_str(\"grep\");\n  Unclassified matches:\n    Line 3: use std::path::PathBuf;"
-        );
-    }
-
-    #[test]
-    fn glob_output_matches_opencode_style() {
-        let files = vec!["src/coding_app.rs".to_string(), "src/app.rs".to_string()];
-
-        assert_eq!(
-            format_glob_output(&files, true),
-            "src/coding_app.rs\nsrc/app.rs\n\n(Results are truncated: showing first 100 results. Consider using a more specific path or pattern.)"
-        );
-    }
-
-    #[test]
-    fn grep_code_filters_by_path_and_include() {
+    fn search_code_returns_deduped_read_handles() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src/nested")).unwrap();
         std::fs::create_dir_all(dir.path().join("tests")).unwrap();
@@ -904,46 +688,39 @@ mod tests {
         )
         .unwrap();
 
-        let response = grep_code(
+        let mut handles = ReadHandleRegistry::new();
+        let response = search_code(
             dir.path(),
-            &GrepCodeRequest {
-                pattern: "needle".to_string(),
+            &SearchCodeRequest {
+                query: "needle".to_string(),
                 path: Some("src".to_string()),
                 include: Some("*.rs".to_string()),
+                limit: None,
             },
+            &mut handles,
         )
         .unwrap();
 
-        let files = response
-            .matches
+        let labels = response
+            .targets
             .iter()
-            .map(|item| item.file.as_str())
+            .map(|item| item.label.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(files, vec!["src/lib.rs", "src/nested/mod.rs"]);
-        assert_eq!(response.matches.len(), 2);
-    }
-
-    #[test]
-    fn glob_files_sorts_by_mtime_and_filters_path() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
-        std::fs::write(dir.path().join("src/old.rs"), "old").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        std::fs::write(dir.path().join("src/new.rs"), "new").unwrap();
-        std::fs::write(dir.path().join("tests/newer.rs"), "newer").unwrap();
-
-        let response = glob_files(
-            dir.path(),
-            &GlobFilesRequest {
-                pattern: "*.rs".to_string(),
-                path: Some("src".to_string()),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(response.files, vec!["src/new.rs", "src/old.rs"]);
-        assert!(!response.truncated);
+        assert_eq!(
+            labels,
+            vec![
+                "src/lib.rs::fn lib #L1-L1",
+                "src/nested/mod.rs::fn nested #L1-L1"
+            ]
+        );
+        for target in &response.targets {
+            assert!(
+                target.handle.starts_with("1#"),
+                "handle should include start line: {}",
+                target.handle
+            );
+            assert_eq!(target.handle.len(), "1#".len() + 4);
+        }
     }
 
     #[test]
@@ -955,15 +732,19 @@ mod tests {
         )
         .unwrap();
 
+        let mut handles = ReadHandleRegistry::new();
         let response = search_code(
             dir.path(),
             &SearchCodeRequest {
                 query: "needle".to_string(),
+                path: None,
+                include: None,
                 limit: Some(2),
             },
+            &mut handles,
         )
         .unwrap();
-        assert_eq!(response.matches.len(), 2);
+        assert_eq!(response.targets.len(), 2);
     }
 
     #[test]
@@ -975,58 +756,76 @@ mod tests {
         )
         .unwrap();
 
+        let mut handles = ReadHandleRegistry::new();
         let response = search_code(
             dir.path(),
             &SearchCodeRequest {
                 query: "needle".to_string(),
+                path: None,
+                include: None,
                 limit: Some(0),
             },
+            &mut handles,
         )
         .unwrap();
-        assert_eq!(response.matches.len(), 1);
+        assert_eq!(response.targets.len(), 1);
     }
 
     #[test]
-    fn read_code_returns_only_resolved_symbol_range() {
+    fn search_code_falls_back_to_line_range_for_top_level_matches() {
         let dir = tempfile::tempdir().unwrap();
-        let source = "pub fn first() {\n    println!(\"first\");\n}\n\npub fn second() {\n    println!(\"second\");\n}\n";
+        let source = "use std::fmt;\n\npub fn second() {\n    println!(\"second\");\n}\n";
         std::fs::write(dir.path().join("lib.rs"), source).unwrap();
 
-        let result = read_code(
+        let mut handles = ReadHandleRegistry::new();
+        let response = search_code(
             dir.path(),
-            &ReadCodeRequest {
-                selector: "lib.rs::fn second".to_string(),
+            &SearchCodeRequest {
+                query: "std::fmt".to_string(),
+                path: None,
+                include: None,
+                limit: None,
             },
+            &mut handles,
         )
-        .expect("read_code should return a result");
+        .unwrap();
 
-        assert_eq!(result.path, "lib.rs");
-        let content = result.content.as_str();
+        assert_eq!(response.targets.len(), 1);
+        assert_eq!(response.targets[0].label, "lib.rs#L1-L5");
         assert!(
-            content.contains("pub fn second()"),
-            "should contain fn second, got: {content}"
-        );
-        assert!(!content.contains("first"));
-        // Check line-hash format: line_number#hash|content
-        assert!(
-            content.lines().all(|line| {
-                let parts: Vec<&str> = line.splitn(2, '|').collect();
-                parts.len() == 2 && parts[0].contains('#')
-            }),
-            "each line should have line#hash| prefix, got: {content}"
+            response.targets[0].handle.starts_with("1#"),
+            "handle should include range start line"
         );
     }
+
     #[test]
-    fn read_code_supports_line_range_enclosing_outline() {
+    fn read_code_reads_search_handle_without_selector_input() {
         let dir = tempfile::tempdir().unwrap();
         let source = "pub fn first() {\n    println!(\"first\");\n}\n\npub fn second() {\n    println!(\"second\");\n}\n";
         std::fs::write(dir.path().join("lib.rs"), source).unwrap();
 
+        let mut handles = ReadHandleRegistry::new();
+        let search = search_code(
+            dir.path(),
+            &SearchCodeRequest {
+                query: "second".to_string(),
+                path: None,
+                include: None,
+                limit: None,
+            },
+            &mut handles,
+        )
+        .unwrap();
+        let handle = search.targets[0].handle.clone();
         let result = read_code(
             dir.path(),
             &ReadCodeRequest {
-                selector: "lib.rs#L5-L7".to_string(),
+                ref_handle: Some(handle),
+                path: None,
+                start_line: None,
+                line_count: None,
             },
+            &handles,
         )
         .unwrap();
         assert_eq!(result.path, "lib.rs");
@@ -1039,30 +838,39 @@ mod tests {
             !content.contains("pub fn first()"),
             "should not contain fn first"
         );
+        assert!(
+            content.lines().all(|line| {
+                let parts: Vec<&str> = line.splitn(2, '|').collect();
+                parts.len() == 2 && parts[0].contains('#')
+            }),
+            "each line should have line#hash| prefix, got: {content}"
+        );
+    }
 
+    #[test]
+    fn read_code_supports_explicit_path_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = "pub fn first() {\n    println!(\"first\");\n}\n\npub fn second() {\n    println!(\"second\");\n}\n";
+        std::fs::write(dir.path().join("lib.rs"), source).unwrap();
+        let handles = ReadHandleRegistry::new();
         let result = read_code(
             dir.path(),
             &ReadCodeRequest {
-                selector: "lib.rs#enclosing:L6".to_string(),
+                ref_handle: None,
+                path: Some("lib.rs".to_string()),
+                start_line: Some(5),
+                line_count: Some(3),
             },
+            &handles,
         )
         .unwrap();
         assert_eq!(result.path, "lib.rs");
         let content = result.content.as_str();
         assert!(
             content.contains("pub fn second()"),
-            "enclosing should contain fn second, got: {content}"
+            "path range should contain fn second, got: {content}"
         );
-
-        let result = read_code(
-            dir.path(),
-            &ReadCodeRequest {
-                selector: "lib.rs#outline".to_string(),
-            },
-        )
-        .unwrap();
-        assert_eq!(result.path, "lib.rs");
-        assert!(result.content.contains("fn second #L5-L7"));
+        assert!(!content.contains("pub fn first()"));
     }
 
     #[test]
@@ -1118,14 +926,14 @@ mod tests {
             result["usage_markdown"]
                 .as_str()
                 .unwrap()
-                .contains("positioning DSL")
+                .contains("stable read handles")
         );
         assert!(
-            result["selector_kinds"]
+            result["protocol_items"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|kind| kind["kind"] == "outline" && kind["edit"] == false)
+                .any(|item| item["item"] == "read_code_ref")
         );
     }
 

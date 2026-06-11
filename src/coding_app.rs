@@ -37,13 +37,13 @@ const CODING_HOW_TO_USE: &str = r#"Coding app is used to modify projects; think 
 
 First, if the project you need to edit is not open yet, use the currently exposed Coding open-project tool; app scope mangling exposes it as `coding__open_project`.
 
-When editing source code, always prefer the currently exposed Coding app tools, such as `coding__edit_code`, `coding__read_code`, `coding__grep`, and `coding__glob`, instead of substituting terminal commands. Important: except for configuration, generated assets, or other non-source areas outside SCOPE engine responsibility, or cases where these tools genuinely cannot complete the task, do not use other tools or shell commands to edit source code. When Coding is focused, `apply_patch` is rejected for source files that SCOPE says it is responsible for; use `coding__edit_code` for those files when that mangled name is exposed.
+When editing source code, always prefer the currently exposed Coding app tools, such as `coding__search_code`, `coding__read_code`, and `coding__edit_code`, instead of substituting terminal commands. Important: except for configuration, generated assets, or other non-source areas outside SCOPE engine responsibility, or cases where these tools genuinely cannot complete the task, do not use other tools or shell commands to edit source code. When Coding is focused, `apply_patch` is rejected for source files that SCOPE says it is responsible for; use `coding__edit_code` for those files when that mangled name is exposed.
 
 After each edit, the tool automatically evaluates the impact of your changes and accumulates pending review events. You can also see the current number of pending review events in Coding app state. You do not need to handle them immediately. However, after you finish a series of edits (usually when a plan step is complete, or when you judge that too many review events have accumulated), call the currently exposed Coding review tool, such as `coding__next_review`, to acknowledge and claim review events; pass `limit` when many reviews are pending so several impact targets can be claimed in one response. Then follow their instructions to inspect the impact of your changes. This must always be done before reporting back to the user.
 
 SCOPE engine configuration hints are returned by `coding__open_project` when that mangled name is exposed and retained in Coding app state, including available tree-sitter languages plus visible per-language `lsp_setup_hint` lines for LSP language/server setup guidance.
 
-Coding app keeps app-level usage rules here. Selector grammar, selector operation support, grep bridge expectations, and structured selector result fields are owned by SCOPE and appended below from SCOPE's compiled usage interface."#;
+Coding app keeps app-level usage rules here. Search handle, read, and edit protocol details are owned by SCOPE and appended below from SCOPE's compiled usage interface."#;
 const MAX_RENDERED_LSP_SETUP_HINTS: usize = 5;
 const PROJECT_INSTRUCTION_FILENAMES: &[&str] =
     &["AGENTS.override.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"];
@@ -56,20 +56,19 @@ pub struct CodingOpenProjectArgs {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct CodingReadCodeArgs {
-    pub selector: String,
+    #[serde(default, rename = "ref", alias = "handle")]
+    pub ref_handle: Option<String>,
+    pub path: Option<String>,
+    pub start_line: Option<usize>,
+    pub line_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct CodingGrepArgs {
-    pub pattern: String,
+pub struct CodingSearchCodeArgs {
+    pub query: String,
     pub path: Option<String>,
     pub include: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct CodingGlobArgs {
-    pub pattern: String,
-    pub path: Option<String>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -820,23 +819,18 @@ impl App for CodingApp {
                 input_schema: serde_json::to_value(schema_for!(CodingOpenProjectArgs)).unwrap(),
             },
             AppToolSpec {
+                name: "search_code".to_string(),
+                description: "Search source content and return stable read handles plus target labels.".to_string(),
+                input_schema: serde_json::to_value(schema_for!(CodingSearchCodeArgs)).unwrap(),
+            },
+            AppToolSpec {
                 name: "read_code".to_string(),
-                description: "Read selector-resolved code content and language metadata.".to_string(),
+                description: "Read a stable search handle or explicit path range and return hash-anchored source lines.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(CodingReadCodeArgs)).unwrap(),
             },
             AppToolSpec {
-                name: "grep".to_string(),
-                description: "Search file contents using a regex pattern.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(CodingGrepArgs)).unwrap(),
-            },
-            AppToolSpec {
-                name: "glob".to_string(),
-                description: "Find files by glob pattern.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(CodingGlobArgs)).unwrap(),
-            },
-            AppToolSpec {
                 name: "edit_code".to_string(),
-                description: "Apply structured edits via selector+guard+content and return propagation results.".to_string(),
+                description: "Apply structured path + line-hash anchored edits and return propagation results.".to_string(),
                 input_schema: serde_json::to_value(schema_for!(CodingEditCodeArgs)).unwrap(),
             },
             AppToolSpec {
@@ -856,17 +850,16 @@ impl App for CodingApp {
                     summarize_coding_inline_text(&args.project_root)
                 )
             }
+            "search_code" => {
+                let args: CodingSearchCodeArgs = parse_coding_tool_args(call)?;
+                format!("query={}", summarize_coding_inline_text(&args.query))
+            }
             "read_code" => {
                 let args: CodingReadCodeArgs = parse_coding_tool_args(call)?;
-                format!("selector={}", summarize_coding_inline_text(&args.selector))
-            }
-            "grep" => {
-                let args: CodingGrepArgs = parse_coding_tool_args(call)?;
-                format!("pattern={}", summarize_coding_inline_text(&args.pattern))
-            }
-            "glob" => {
-                let args: CodingGlobArgs = parse_coding_tool_args(call)?;
-                format!("pattern={}", summarize_coding_inline_text(&args.pattern))
+                format!(
+                    "target={}",
+                    summarize_coding_inline_text(&read_args_summary(&args))
+                )
             }
             "edit_code" => {
                 let args: CodingEditCodeArgs = parse_coding_tool_args(call)?;
@@ -915,53 +908,23 @@ impl App for CodingApp {
                 let args: CodingOpenProjectArgs = parse_coding_tool_args(call)?;
                 self.open_project(args, context)
             }
-            "read_code" => {
+            "search_code" => {
                 self.require_project()?;
-                let args: CodingReadCodeArgs = parse_coding_tool_args(call)?;
-                let result = self.scope.read_code(&args.selector)?;
-                self.last_action = Some(format!("read {}", args.selector));
-                let model_content = format!(
-                    "path={}\ncontent=\n{}",
-                    result.path,
-                    truncate_text_to_token_budget(&result.content, context.tool_output_max_tokens)
-                );
-                let mut output = AppToolExecutionResult {
-                    summary: format!("read code {}", args.selector),
-                    payload: serde_json::to_value(&result).unwrap(),
-                    model_content: Some(model_content),
-                    ui_event: self.coding_tool_group_event(
-                        "Read",
-                        coding_target_summary(&args.selector),
-                        vec![format!(
-                            "{} lines",
-                            coding_count_label(result.content.lines().count(), "line", "lines")
-                        )],
-                    ),
-                    turn_boundary_reason: None,
-                };
-                self.append_scoped_instructions_to_result(
-                    &mut output,
-                    selector_path(&args.selector),
-                    context,
-                )?;
-                Ok(output)
-            }
-            "grep" => {
-                self.require_project()?;
-                let args: CodingGrepArgs = parse_coding_tool_args(call)?;
-                let result = self.scope.grep_code(
-                    &args.pattern,
+                let args: CodingSearchCodeArgs = parse_coding_tool_args(call)?;
+                let result = self.scope.search_code(
+                    &args.query,
                     args.path.as_deref(),
                     args.include.as_deref(),
+                    args.limit,
                 )?;
-                self.last_action = Some(format!("searched {}", args.pattern));
+                self.last_action = Some(format!("searched {}", args.query));
                 let mut detail_lines = Vec::new();
                 if let Some(include) = args.include.as_deref() {
                     detail_lines.push(format!("include {}", summarize_coding_inline_text(include)));
                 }
-                let model_content = format_grep_matches_for_model(&result.matches);
+                let model_content = format_search_targets_for_model(&result.targets);
                 let mut output = AppToolExecutionResult {
-                    summary: format!("found {} matches", result.matches.len()),
+                    summary: format!("found {} targets", result.targets.len()),
                     payload: serde_json::to_value(&result).unwrap(),
                     model_content: Some(truncate_text_to_token_budget(
                         &model_content,
@@ -970,11 +933,11 @@ impl App for CodingApp {
                     ui_event: self.coding_tool_group_event(
                         "Search",
                         coding_pattern_result_summary(
-                            &args.pattern,
+                            &args.query,
                             args.path.as_deref(),
-                            result.matches.len(),
-                            "match",
-                            "matches",
+                            result.targets.len(),
+                            "target",
+                            "targets",
                         ),
                         detail_lines,
                     ),
@@ -985,39 +948,35 @@ impl App for CodingApp {
                 }
                 Ok(output)
             }
-            "glob" => {
+            "read_code" => {
                 self.require_project()?;
-                let args: CodingGlobArgs = parse_coding_tool_args(call)?;
-                let result = self.scope.glob_files(&args.pattern, args.path.as_deref())?;
-                self.last_action = Some(format!("globbed {}", args.pattern));
-                let mut detail_lines = Vec::new();
-                if let Some(path) = args.path.as_deref() {
-                    detail_lines.push(format!("under {}", summarize_coding_inline_text(path)));
-                }
-                let model_content = result.files.join("\n");
+                let args: CodingReadCodeArgs = parse_coding_tool_args(call)?;
+                let summary_target = read_args_summary(&args);
+                let request = scope_engine::api::ReadCodeRequest {
+                    ref_handle: args.ref_handle.clone(),
+                    path: args.path.clone(),
+                    start_line: args.start_line,
+                    line_count: args.line_count,
+                };
+                let result = self.scope.read_code(request)?;
+                self.last_action = Some(format!("read {summary_target}"));
+                let model_content =
+                    truncate_text_to_token_budget(&result.content, context.tool_output_max_tokens);
                 let mut output = AppToolExecutionResult {
-                    summary: format!("found {} files", result.files.len()),
+                    summary: format!("read code {summary_target}"),
                     payload: serde_json::to_value(&result).unwrap(),
-                    model_content: Some(truncate_text_to_token_budget(
-                        &model_content,
-                        context.tool_output_max_tokens,
-                    )),
+                    model_content: Some(model_content),
                     ui_event: self.coding_tool_group_event(
-                        "List",
-                        coding_pattern_result_summary(
-                            &args.pattern,
-                            args.path.as_deref(),
-                            result.files.len(),
-                            "file",
-                            "files",
-                        ),
-                        detail_lines,
+                        "Read",
+                        coding_target_summary(&summary_target),
+                        vec![format!(
+                            "{} lines",
+                            coding_count_label(result.content.lines().count(), "line", "lines")
+                        )],
                     ),
                     turn_boundary_reason: None,
                 };
-                if let Some(path) = args.path.as_deref() {
-                    self.append_scoped_instructions_to_result(&mut output, path, context)?;
-                }
+                self.append_scoped_instructions_to_result(&mut output, &result.path, context)?;
                 Ok(output)
             }
             "edit_code" => {
@@ -1392,37 +1351,29 @@ fn count_change_lines(text: &str) -> usize {
     text.lines().filter(|line| !line.trim().is_empty()).count()
 }
 
-fn format_grep_matches_for_model(matches: &[scope_engine::api::SearchMatch]) -> String {
-    if matches.is_empty() {
-        return String::new();
+fn format_search_targets_for_model(targets: &[scope_engine::api::SearchTarget]) -> String {
+    targets
+        .iter()
+        .map(|target| format!("{}|{}", target.handle, target.label))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn read_args_summary(args: &CodingReadCodeArgs) -> String {
+    if let Some(handle) = args.ref_handle.as_deref() {
+        return handle.to_string();
     }
-    let mut lines = vec![format!("Found {} matches", matches.len()), String::new()];
-    let mut current_file: Option<&str> = None;
-    let mut current_selector: Option<Option<&str>> = None;
-
-    for item in matches {
-        if current_file != Some(item.file.as_str()) {
-            if current_file.is_some() {
-                lines.push(String::new());
-            }
-            lines.push(format!("{}:", item.file));
-            current_file = Some(item.file.as_str());
-            current_selector = None;
+    match (args.path.as_deref(), args.start_line) {
+        (Some(path), Some(start_line)) => {
+            let line_count = args
+                .line_count
+                .map(|line_count| line_count.to_string())
+                .unwrap_or_else(|| "default".to_string());
+            format!("{path}:L{start_line}+{line_count}")
         }
-
-        let selector = item.selector.as_deref();
-        if current_selector != Some(selector) {
-            match selector {
-                Some(sel) => lines.push(format!("  {sel}:")),
-                None => lines.push("  Unclassified matches:".to_string()),
-            }
-            current_selector = Some(selector);
-        }
-
-        lines.push(format!("    Line {}: {}", item.line, item.text));
+        (Some(path), None) => path.to_string(),
+        _ => "unresolved read target".to_string(),
     }
-
-    lines.join("\n")
 }
 
 fn coding_pattern_result_summary(

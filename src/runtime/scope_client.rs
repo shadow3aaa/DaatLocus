@@ -13,22 +13,21 @@ use scope_engine::analyzer::Analyzer;
 use scope_engine::api;
 use scope_engine::engine;
 use scope_engine::language::LanguageRegistry;
-use scope_engine::selector;
-use scope_engine::state::PropagationState;
+use scope_engine::state::{PropagationState, ReadHandleRegistry};
 use scope_engine::treesitter::TreeSitterAnalyzer;
 
 /// In-process SCOPE engine client.
 ///
 /// Wraps the scope-engine library to provide:
-/// - Symbol-based code reading via selector
-/// - Text-based code search
-/// - Selector-based code editing and deletion
+/// - Stable-handle code search and reading
+/// - Hash-anchored code editing and deletion
 /// - Propagation review events
 /// - Tree-sitter symbol lookup
 /// - Config hints for language servers
 pub struct ScopeClient {
     project_root: Option<PathBuf>,
     propagation_state: Mutex<PropagationState>,
+    read_handles: Mutex<ReadHandleRegistry>,
     lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>>,
     tree_sitter: TreeSitterAnalyzer,
 }
@@ -40,6 +39,7 @@ impl ScopeClient {
         Self {
             project_root: None,
             propagation_state: Mutex::new(PropagationState::new()),
+            read_handles: Mutex::new(ReadHandleRegistry::new()),
             lsp_analyzer: Mutex::new(None),
             tree_sitter: TreeSitterAnalyzer::new(),
         }
@@ -65,6 +65,10 @@ impl ScopeClient {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *state = PropagationState::new();
+            self.read_handles
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
         }
         self.project_root = Some(project_root);
         Ok(response)
@@ -104,85 +108,43 @@ impl ScopeClient {
             .find_containing_symbol(file_path, line_number, root)
     }
 
-    /// Parse a selector string into a structured `ParsedSelector`.
+    /// Read code using a stable search handle or an explicit path range.
     #[allow(dead_code)]
-    pub fn parse_selector(selector_str: &str) -> Result<selector::ParsedSelector, String> {
-        selector::parse_selector(selector_str)
-    }
-
-    /// Resolve a selector's file path against the project root.
-    #[allow(dead_code)]
-    pub fn resolve_file(
-        &self,
-        parsed: &selector::ParsedSelector,
-    ) -> Result<(PathBuf, String), String> {
-        let root = self.project_root.as_deref().ok_or("no project opened")?;
-        selector::resolve_file(parsed, root)
-    }
-
-    /// Read a selector's file content using scope-engine selector resolution.
-    #[allow(dead_code)]
-    pub fn read_code(&self, selector_str: &str) -> Result<api::ReadCodeResponse> {
+    pub fn read_code(&self, request: api::ReadCodeRequest) -> Result<api::ReadCodeResponse> {
         let root = self.require_project_root()?;
-        engine::read_code(
-            root,
-            &api::ReadCodeRequest {
-                selector: selector_str.to_string(),
-            },
-        )
-        .map_err(|err| miette!("scope-engine read_code failed: {err}"))
+        let handles = self
+            .read_handles
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        engine::read_code(root, &request, &handles)
+            .map_err(|err| miette!("scope-engine read_code failed: {err}"))
     }
 
-    /// Search code using scope-engine's in-process library API.
+    /// Search code and return stable read handles.
     #[allow(dead_code)]
     pub fn search_code(
         &self,
         query: &str,
+        path: Option<&str>,
+        include: Option<&str>,
         limit: Option<usize>,
     ) -> Result<api::SearchCodeResponse> {
         let root = self.require_project_root()?;
+        let mut handles = self
+            .read_handles
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         engine::search_code(
             root,
             &api::SearchCodeRequest {
                 query: query.to_string(),
-                limit,
-            },
-        )
-        .map_err(|err| miette!("scope-engine search_code failed: {err}"))
-    }
-
-    /// Search code with opencode-style grep parameters.
-    #[allow(dead_code)]
-    pub fn grep_code(
-        &self,
-        pattern: &str,
-        path: Option<&str>,
-        include: Option<&str>,
-    ) -> Result<api::GrepCodeResponse> {
-        let root = self.require_project_root()?;
-        engine::grep_code(
-            root,
-            &api::GrepCodeRequest {
-                pattern: pattern.to_string(),
                 path: path.map(str::to_string),
                 include: include.map(str::to_string),
+                limit,
             },
+            &mut handles,
         )
-        .map_err(|err| miette!("scope-engine grep_code failed: {err}"))
-    }
-
-    /// Find files with opencode-style glob parameters.
-    #[allow(dead_code)]
-    pub fn glob_files(&self, pattern: &str, path: Option<&str>) -> Result<api::GlobFilesResponse> {
-        let root = self.require_project_root()?;
-        engine::glob_files(
-            root,
-            &api::GlobFilesRequest {
-                pattern: pattern.to_string(),
-                path: path.map(str::to_string),
-            },
-        )
-        .map_err(|err| miette!("scope-engine glob_files failed: {err}"))
+        .map_err(|err| miette!("scope-engine search_code failed: {err}"))
     }
 
     /// Apply structured edits via scope-engine.
@@ -243,7 +205,7 @@ impl ScopeClient {
         engine::config_hints()
     }
 
-    /// Return SCOPE-owned usage documentation and selector schema.
+    /// Return SCOPE-owned usage documentation and model-facing protocol schema.
     #[allow(dead_code)]
     pub fn usage() -> api::ScopeUsageResponse {
         scope_engine::usage::usage_response()

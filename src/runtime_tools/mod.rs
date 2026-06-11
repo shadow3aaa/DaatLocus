@@ -1123,6 +1123,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coding_read_code_tool_schema_does_not_use_schema_composition() {
+        let isolated = IsolatedTestContext::new(AppId::coding()).await;
+
+        let spec = build_runtime_tool_specs(&isolated.context)
+            .into_iter()
+            .find(|tool| tool.name == "coding__read_code")
+            .expect("coding read code tool");
+        let AgentToolInputSpec::JsonSchema { schema } = spec.input_spec else {
+            panic!("coding_read_code should use json schema");
+        };
+
+        for key in ["oneOf", "anyOf", "allOf"] {
+            assert!(!json_contains_key(&schema, key), "{schema:#}");
+        }
+    }
+
+    #[tokio::test]
     async fn exposed_runtime_tool_schemas_do_not_use_one_of() {
         for focused in [AppId::terminal(), AppId::coding()] {
             let isolated = IsolatedTestContext::new(focused).await;
@@ -1167,10 +1184,16 @@ mod tests {
             .collect::<HashSet<_>>();
 
         assert!(names.contains("coding__open_project"));
+        assert!(names.contains("coding__search_code"));
+        assert!(names.contains("coding__read_code"));
+        assert!(names.contains("coding__edit_code"));
+        assert!(names.contains("coding__next_review"));
         assert!(names.contains("terminal__terminal_exec"));
         assert!(names.contains("terminal__terminal_write_stdin"));
         assert!(names.contains("terminal__terminal_terminate"));
         assert!(names.contains("apply_patch"));
+        assert!(!names.contains("coding__grep"));
+        assert!(!names.contains("coding__glob"));
         assert!(!names.contains("open_project"));
         assert!(!names.contains("coding__coding_open_project"));
         assert!(!names.contains("coding_open_project"));

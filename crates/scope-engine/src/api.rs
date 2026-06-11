@@ -21,7 +21,11 @@ pub struct OpenProjectResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReadCodeRequest {
-    pub selector: String,
+    #[serde(default, rename = "ref", alias = "handle")]
+    pub ref_handle: Option<String>,
+    pub path: Option<String>,
+    pub start_line: Option<usize>,
+    pub line_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -33,46 +37,22 @@ pub struct ReadCodeResponse {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SearchMatch {
-    pub file: String,
-    pub line: usize,
-    pub text: String,
-    pub selector: Option<String>,
+pub struct SearchCodeResponse {
+    pub targets: Vec<SearchTarget>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SearchCodeResponse {
-    pub matches: Vec<SearchMatch>,
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SearchTarget {
+    pub handle: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchCodeRequest {
     pub query: String,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct GrepCodeRequest {
-    pub pattern: String,
     pub path: Option<String>,
     pub include: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct GrepCodeResponse {
-    pub matches: Vec<SearchMatch>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct GlobFilesRequest {
-    pub pattern: String,
-    pub path: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct GlobFilesResponse {
-    pub files: Vec<String>,
-    pub truncated: bool,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,15 +122,13 @@ pub struct IsResponsibleSourceResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScopeUsageResponse {
     pub usage_markdown: String,
-    pub selector_kinds: Vec<ScopeSelectorKindSchema>,
+    pub protocol_items: Vec<ScopeProtocolItemSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ScopeSelectorKindSchema {
-    pub kind: String,
+pub struct ScopeProtocolItemSchema {
+    pub item: String,
     pub syntax: String,
-    pub read: bool,
-    pub edit: bool,
     pub notes: String,
 }
 

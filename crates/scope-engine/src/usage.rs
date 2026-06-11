@@ -1,4 +1,4 @@
-use crate::api::{ScopeSelectorKindSchema, ScopeUsageResponse};
+use crate::api::{ScopeProtocolItemSchema, ScopeUsageResponse};
 
 const SCOPE_USAGE_MD: &str = include_str!("../USAGE.md");
 
@@ -7,57 +7,34 @@ pub fn usage_markdown() -> &'static str {
     SCOPE_USAGE_MD
 }
 
-/// Return SCOPE selector kinds and operation support as machine-readable data.
-pub fn selector_schema() -> Vec<ScopeSelectorKindSchema> {
+/// Return SCOPE's model-facing protocol surface as machine-readable data.
+pub fn protocol_schema() -> Vec<ScopeProtocolItemSchema> {
     vec![
-        ScopeSelectorKindSchema {
-            kind: "symbol".to_string(),
-            syntax: "src/foo.rs::Bar::new".to_string(),
-            read: true,
-            edit: true,
-            notes: "Symbol selectors resolve one AST definition and support semantic edits with normal propagation analysis.".to_string(),
+        ScopeProtocolItemSchema {
+            item: "search_code".to_string(),
+            syntax: r#"{"query":"content","path":"src","include":"*.rs","limit":20}"#
+                .to_string(),
+            notes: "Searches source content and returns stable read handles plus canonical target labels."
+                .to_string(),
         },
-        ScopeSelectorKindSchema {
-            kind: "line_range".to_string(),
-            syntax: "src/foo.rs#L120-L180".to_string(),
-            read: true,
-            edit: true,
-            notes: "File ranges locate explicit line spans. Edits are patch-only and must be followed by affected-symbol analysis.".to_string(),
+        ScopeProtocolItemSchema {
+            item: "read_code_ref".to_string(),
+            syntax: r##"{"ref":"1268#k7Qp"}"##.to_string(),
+            notes: "Reads a target located by a stable search handle and returns only hash-anchored source lines."
+                .to_string(),
         },
-        ScopeSelectorKindSchema {
-            kind: "around_line".to_string(),
-            syntax: "src/foo.rs#around:L150±40".to_string(),
-            read: true,
-            edit: false,
-            notes: "Around selectors are context windows for reading; resolve to a bounded file range.".to_string(),
+        ScopeProtocolItemSchema {
+            item: "read_code_range".to_string(),
+            syntax: r#"{"path":"src/foo.rs","start_line":1,"line_count":80}"#.to_string(),
+            notes: "Reads an explicit path range for imports, top-level code, search misses, or user-specified locations."
+                .to_string(),
         },
-        ScopeSelectorKindSchema {
-            kind: "match".to_string(),
-            syntax: "src/foo.rs#match:/ProjectInstructions/".to_string(),
-            read: true,
-            edit: true,
-            notes: "Match selectors locate regex hits. Edits require exactly one match; multiple matches must return candidates.".to_string(),
-        },
-        ScopeSelectorKindSchema {
-            kind: "match_around".to_string(),
-            syntax: "src/foo.rs#match:/ProjectInstructions/#around:40".to_string(),
-            read: true,
-            edit: false,
-            notes: "Match-around selectors read context around a unique regex match.".to_string(),
-        },
-        ScopeSelectorKindSchema {
-            kind: "enclosing".to_string(),
-            syntax: "src/foo.rs#enclosing:L150".to_string(),
-            read: true,
-            edit: true,
-            notes: "Enclosing selectors resolve the innermost symbol containing a line, then use symbol semantics.".to_string(),
-        },
-        ScopeSelectorKindSchema {
-            kind: "outline".to_string(),
-            syntax: "src/foo.rs#outline".to_string(),
-            read: true,
-            edit: false,
-            notes: "Outline selectors return file structure only and are read-only.".to_string(),
+        ScopeProtocolItemSchema {
+            item: "edit_code".to_string(),
+            syntax: r#"{"edits":[{"path":"src/foo.rs","op":"replace","start":"10#7a","end":"20#d4","content":"..."}]}"#
+                .to_string(),
+            notes: "Applies path plus line-hash anchored Replace/Append/Prepend edits and returns propagation results."
+                .to_string(),
         },
     ]
 }
@@ -66,6 +43,6 @@ pub fn selector_schema() -> Vec<ScopeSelectorKindSchema> {
 pub fn usage_response() -> ScopeUsageResponse {
     ScopeUsageResponse {
         usage_markdown: usage_markdown().to_string(),
-        selector_kinds: selector_schema(),
+        protocol_items: protocol_schema(),
     }
 }

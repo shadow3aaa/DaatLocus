@@ -1,121 +1,93 @@
 # SCOPE Usage
 
-SCOPE is the semantic code positioning and propagation engine behind the Coding app. Its selector language is a SCOPE-owned positioning DSL: selectors answer "where is the target?" and "what range should this operation use?". Selectors do not encode edit behavior, refactor intent, propagation policy, or other operation semantics.
+SCOPE is the semantic code search, read, edit, and propagation engine behind the
+Coding app. The model should not write SCOPE positioning syntax. SCOPE produces
+stable read handles from search results; the model copies those handles into
+`read_code` and copies read line anchors into `edit_code`.
 
-## Selector forms
+## `search_code`
 
-- `src/foo.rs::Bar::new` — existing symbol-level selector.
-- `src/foo.rs#L120-L180` — explicit file line range.
-- `src/foo.rs#around:L150±40` — context around a line.
-- `src/foo.rs#match:/ProjectInstructions/` — regex match point.
-- `src/foo.rs#match:/ProjectInstructions/#around:40` — context around a unique regex match.
-- `src/foo.rs#enclosing:L150` — innermost symbol containing a line.
-- `src/foo.rs#outline` — file structure / symbol outline.
+`search_code` is the normal entry point for locating code. It accepts a content
+query plus optional narrowing fields such as `path`, `include`, and `limit`.
 
-## Operation support
+Search returns compact read targets:
 
-Read operations may accept broad selectors. `read_code` may support symbols, files, ranges, around contexts, matches, outlines, and enclosing symbols.
+```text
+1268#k7Qp|src/dashboard/mod.rs::fn run_tui_dashboard #L1268-L1320
+286#b91Z|src/dashboard/mod.rs::trait DashboardHistoryLoader #L286-L302
+1#a0F2|src/dashboard/mod.rs#L1-L24
+```
 
-Edit operations use `edit_code` with a structured `edits` array. Each edit specifies the file path, operation kind, line-hash anchors from `read_code`, and optional content.
+The left side is a stable read handle. Its format is `start_line#hash4`.
 
-## `edit_code` format
+Rules:
 
-`edit_code` takes a single `edits` argument containing an array of structured edit objects:
+- The handle is a read capability for the canonical target label, not a content
+  fingerprint.
+- The four-character hash is derived only from the canonical target label.
+- The handle must not include target body text, search query, session salt, file
+  mtime, read timestamp, line hashes, or freshness data.
+- Search results inside an AST symbol point at that symbol's canonical target
+  label.
+- Search results outside an AST symbol point at a small canonical line range.
+- Multiple matches inside the same target are deduplicated.
+
+## `read_code`
+
+The normal read path uses a search handle:
+
+```json
+{ "ref": "1268#k7Qp" }
+```
+
+`read_code` also supports explicit path ranges for imports, top-level code,
+search misses, and user-specified locations:
+
+```json
+{ "path": "src/dashboard/mod.rs", "start_line": 1, "line_count": 24 }
+```
+
+Read output is source text with per-line edit anchors:
+
+```text
+1268#7a|fn run_tui_dashboard(...) {
+1269#c1|    ...
+```
+
+Do not repeat the search handle, canonical target label, or path in model-facing
+read output when the model already obtained them from search. The structured
+response may still carry the path for UI and scoped-instruction plumbing.
+
+## `edit_code`
+
+`edit_code` keeps the explicit path plus line-anchor API:
 
 ```json
 {
   "edits": [
     {
-      "path": "src/foo.rs",
+      "path": "src/dashboard/mod.rs",
       "op": "replace",
-      "start": "11#VK",
-      "end": "33#MB",
-      "content": "pub fn new_func() {\n    println!(\"hi\");\n}\n"
-    },
-    {
-      "path": "src/foo.rs",
-      "op": "append",
-      "start": "33#MB",
-      "content": "\npub fn extra() {\n    // added\n}\n"
-    },
-    {
-      "path": "src/foo.rs",
-      "op": "prepend",
-      "start": "11#VK",
-      "content": "// header comment\n\n"
-    },
-    {
-      "path": "src/foo.rs",
-      "op": "replace",
-      "start": "11#VK",
-      "end": "33#MB",
-      "content": null
+      "start": "1268#7a",
+      "end": "1320#d4",
+      "content": "fn run_tui_dashboard(...) {\n    ...\n}"
     }
   ]
 }
 ```
 
-### Operations
+Operations:
 
-- **`replace`** — Replace the range from `start` to `end` (inclusive) with `content`. Requires both `start` and `end`. Set `content` to `null` to delete the range.
-- **`append`** — Insert `content` after the line identified by `start`. Only `start` is required; `end` is ignored.
-- **`prepend`** — Insert `content` before the line identified by `start`. Only `start` is required; `end` is ignored.
+- `replace` replaces the inclusive range from `start` to `end`; `content: null`
+  deletes the range.
+- `append` inserts `content` after `start`.
+- `prepend` inserts `content` before `start`.
 
-### Line-hash anchors
+Line anchors use `line#hash2`, where `hash2` is a two-character hex prefix of
+the current line content. Line hashes are stale-edit guards, not target
+identity. SCOPE verifies anchors against the current file before writing,
+rejects mismatches, applies edits transactionally per call, reparses modified
+source, and returns propagation results.
 
-`start` and `end` use the format `line#hash` where:
-
-- `line` is a 1-based line number
-- `hash` is a 2-char hex prefix (first byte of SHA-256) of that line's content
-
-These anchors come directly from `read_code` output. The `read_code` response returns content with per-line hash prefixes:
-
-```json
-{
-  "path": "src/foo.rs",
-  "content": "11#VK|pub fn old_func() {\n22#XJ|    println!(\"hello\");\n33#MB|}\n"
-}
-```
-
-The model copies `11#VK` and `33#MB` from the read response into the edit `start`/`end` fields. The system verifies that line hashes match before applying edits, providing freshness validation without requiring a separate guard field. If a hash does not match, the edit is rejected and the model should re-read the file.
-
-### Content
-
-`content` accepts three forms:
-- A **string** with newline-delimited lines
-- An **array of strings** (one entry per line)
-- **`null`** — only valid with `replace`, meaning delete the range
-
-### Execution behavior
-
-SCOPE applies edits by parsing line-hash anchors, verifying every anchor against the current file state, applying edits transactionally per call, reparsing modified files, and returning propagation results. The preferred failure mode is all-or-nothing: hash mismatches, overlapping edits, or tree-sitter parse errors reject the edit before writes complete.
-
-Use `edit_code` when the target is source code and line-level anchoring with freshness validation helps keep edits safe. Use raw `apply_patch` only for non-source files or cases outside SCOPE engine responsibility. SCOPE exposes `is_responsible_source` so callers can ask whether a path is source code owned by SCOPE before allowing raw file edits.
-
-## Grep bridge
-
-Text search returns matches with file, line, text, and selector, enabling direct navigation from search to reading or editing:
-
-```json
-{
-  "file": "src/coding_app.rs",
-  "line": 150,
-  "text": "fn how_to_use() {",
-  "selector": "src/coding_app.rs::fn how_to_use #L140-L170"
-}
-```
-
-Use the returned selectors to call `read_code`, which produces line-hash anchors for subsequent `edit_code` calls.
-
-## read_code
-
-`read_code` resolves a selector and returns the file path and annotated content:
-
-```json
-{
-  "path": "src/foo.rs",
-  "content": "11#VK|pub fn target() {\n22#XJ|    let x = 1;\n33#MB|}\n"
-}
-```
-
-Each line is prefixed with `line#hash|`. The model uses these anchors directly in `edit_code` `start`/`end` fields.
+Use raw file tools only for non-source files or cases outside SCOPE engine
+responsibility.
