@@ -1,7 +1,6 @@
 //!
 //! Based on the codex renderable.rs pattern but adapted for DaatLocus:
 //! - Renderable: minimal trait (render + desired_height), no cursor support for now.
-//! - ColumnRenderable: stacks children vertically.
 //! - FlexRenderable: column with flex factors, allocates remaining space proportionally.
 //! - ViewportCulledColumn: wraps a column, renders only children overlapping the viewport.
 
@@ -12,7 +11,6 @@ use ratatui::layout::Rect;
 // Renderable trait
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 /// A renderable item that can produce its own desired height and render into a buffer.
 pub trait Renderable {
     /// Render self into `buf` within `area`.  The caller guarantees that `area` fits in `buf`.
@@ -32,61 +30,6 @@ pub trait Renderable {
         self.render(area, buf);
     }
 }
-
-// ---------------------------------------------------------------------------
-// ColumnRenderable
-// ---------------------------------------------------------------------------
-
-#[allow(dead_code)]
-/// Stacks children vertically, one after the other.
-pub struct ColumnRenderable {
-    children: Vec<Box<dyn Renderable>>,
-}
-
-#[allow(dead_code)]
-impl ColumnRenderable {
-    pub fn new() -> Self {
-        Self { children: vec![] }
-    }
-
-    pub fn push(&mut self, child: impl Renderable + 'static) {
-        self.children.push(Box::new(child));
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.children.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.children.len()
-    }
-}
-
-impl Renderable for ColumnRenderable {
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        let mut y = area.y;
-        for child in &self.children {
-            let child_h = child.desired_height(area.width);
-            let child_area = Rect::new(area.x, y, area.width, child_h);
-            let clipped = child_area.intersection(area);
-            if !clipped.is_empty() {
-                child.render(clipped, buf);
-            }
-            y = y.saturating_add(child_h);
-            if y >= area.bottom() {
-                break;
-            }
-        }
-    }
-
-    fn desired_height(&self, width: u16) -> u16 {
-        self.children.iter().map(|c| c.desired_height(width)).sum()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FlexRenderable
-// ---------------------------------------------------------------------------
 
 /// Lays out children in a column, allocating remaining height to flex children
 /// proportionally to their flex factor.  Loosely inspired by Flutter's Flex widget.

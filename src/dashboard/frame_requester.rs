@@ -8,10 +8,6 @@ use super::frame_rate_limiter::FrameRateLimiter;
 /// to request future redraws of the TUI.
 #[derive(Clone, Debug)]
 pub struct FrameRequester {
-    /// The TX half of the frame-scheduling channel. The RX half is owned by
-    /// `FrameScheduler`. This field is never read directly but must be kept
-    /// alive so the channel stays open while `FrameRequester` exists.
-    #[allow(dead_code)]
     frame_schedule_tx: mpsc::UnboundedSender<Instant>,
 }
 
@@ -27,13 +23,11 @@ impl FrameRequester {
     }
 
     /// Schedule a frame draw as soon as possible.
-    #[allow(dead_code)]
     pub fn schedule_frame(&self) {
         let _ = self.frame_schedule_tx.send(Instant::now());
     }
 
     /// Schedule a frame draw to occur after the specified duration.
-    #[allow(dead_code)]
     pub fn schedule_frame_in(&self, dur: Duration) {
         let _ = self.frame_schedule_tx.send(Instant::now() + dur);
     }
@@ -56,37 +50,95 @@ impl FrameScheduler {
     }
 
     async fn run(mut self) {
-        // Drain any immediate requests on startup so the first frame renders.
-        let now = Instant::now();
-        let _ = self.draw_tx.send(());
-        self.limiter.mark_emitted(now);
+        const FAR_FUTURE: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+        let mut next_deadline: Option<Instant> = None;
 
-        while let Some(deadline) = self.rx.recv().await {
-            let clamped = self.limiter.clamp_deadline(deadline);
-            let now = Instant::now();
-            if clamped > now {
-                let delay = clamped - now;
-                // Wait for either the delay or a new request that may supersede.
-                tokio::select! {
-                    _ = tokio::time::sleep(delay) => {
-                        let _ = self.draw_tx.send(());
-                        self.limiter.mark_emitted(Instant::now());
-                    }
-                    next = self.rx.recv() => {
-                        let Some(new_deadline) = next else { break };
+        loop {
+            let target = next_deadline.unwrap_or_else(|| Instant::now() + FAR_FUTURE);
+            let sleep = tokio::time::sleep_until(target.into());
+            tokio::pin!(sleep);
 
-                        // Re-evaluate with the new deadline
-                        let _new_clamped = self.limiter.clamp_deadline(new_deadline);
-                        self.limiter.mark_emitted(Instant::now());
+            tokio::select! {
+                deadline = self.rx.recv() => {
+                    let Some(deadline) = deadline else {
+                        break;
+                    };
+                    let deadline = self.limiter.clamp_deadline(deadline);
+                    next_deadline = Some(next_deadline.map_or(deadline, |current| current.min(deadline)));
+                }
+                _ = &mut sleep => {
+                    if next_deadline.is_some() {
+                        next_deadline = None;
+                        self.limiter.mark_emitted(target);
                         let _ = self.draw_tx.send(());
-                        // Continue the outer loop with the new deadline
-                        // For simplicity, just fire and continue
                     }
                 }
-            } else {
-                let _ = self.draw_tx.send(());
-                self.limiter.mark_emitted(now);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::timeout;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn immediate_frame_request_emits_one_draw() {
+        let (draw_tx, mut draw_rx) = broadcast::channel(16);
+        let requester = FrameRequester::new(draw_tx);
+
+        requester.schedule_frame();
+
+        timeout(Duration::from_millis(200), draw_rx.recv())
+            .await
+            .expect("timed out waiting for draw")
+            .expect("draw channel closed");
+        assert!(
+            timeout(Duration::from_millis(20), draw_rx.recv())
+                .await
+                .is_err(),
+            "unexpected extra draw"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delayed_frame_request_waits_before_emitting() {
+        let (draw_tx, mut draw_rx) = broadcast::channel(16);
+        let requester = FrameRequester::new(draw_tx);
+
+        requester.schedule_frame_in(Duration::from_millis(40));
+
+        assert!(
+            timeout(Duration::from_millis(10), draw_rx.recv())
+                .await
+                .is_err(),
+            "draw fired too early"
+        );
+        timeout(Duration::from_millis(200), draw_rx.recv())
+            .await
+            .expect("timed out waiting for delayed draw")
+            .expect("draw channel closed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn multiple_pending_requests_coalesce_to_one_draw() {
+        let (draw_tx, mut draw_rx) = broadcast::channel(16);
+        let requester = FrameRequester::new(draw_tx);
+
+        requester.schedule_frame();
+        requester.schedule_frame();
+        requester.schedule_frame_in(Duration::from_millis(40));
+
+        timeout(Duration::from_millis(200), draw_rx.recv())
+            .await
+            .expect("timed out waiting for coalesced draw")
+            .expect("draw channel closed");
+        assert!(
+            timeout(Duration::from_millis(80), draw_rx.recv())
+                .await
+                .is_err(),
+            "unexpected extra draw"
+        );
     }
 }

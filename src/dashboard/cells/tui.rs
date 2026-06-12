@@ -40,106 +40,163 @@ const ACTIVITY_NESTED_BODY_INDENT: &str = "    ";
 /// Avoids re-running expensive markdown rendering every frame.
 pub struct CachedActivityLines {
     entries: Vec<Option<CacheEntry>>,
+    #[cfg(feature = "tui-perf-cmd")]
+    hits: u64,
+    #[cfg(feature = "tui-perf-cmd")]
+    misses: u64,
 }
 
 struct CacheEntry {
     width: u16,
     cell: ActivityCell,
     lines: Vec<Line<'static>>,
+    height: u16,
+}
+
+#[cfg(feature = "tui-perf-cmd")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CachedActivityLinesStats {
+    pub entries: usize,
+    pub occupied_entries: usize,
+    pub hits: u64,
+    pub misses: u64,
 }
 
 impl CachedActivityLines {
     pub fn new() -> Self {
-        Self { entries: vec![] }
+        Self {
+            entries: vec![],
+            #[cfg(feature = "tui-perf-cmd")]
+            hits: 0,
+            #[cfg(feature = "tui-perf-cmd")]
+            misses: 0,
+        }
     }
 
-    #[allow(dead_code)]
-    /// Drop all cached entries (e.g. after expand/collapse toggle).
-    pub fn invalidate(&mut self) {
-        self.entries.clear();
+    #[cfg(feature = "tui-perf-cmd")]
+    pub fn stats(&self) -> CachedActivityLinesStats {
+        CachedActivityLinesStats {
+            entries: self.entries.len(),
+            occupied_entries: self.entries.iter().filter(|entry| entry.is_some()).count(),
+            hits: self.hits,
+            misses: self.misses,
+        }
+    }
+
+    #[cfg(feature = "tui-perf-cmd")]
+    pub fn reset_stats(&mut self) {
+        self.hits = 0;
+        self.misses = 0;
     }
 
     /// Make room for at least `count` cells.
     fn ensure_capacity(&mut self, count: usize) {
-        if self.entries.len() != count {
-            self.entries.clear();
+        if self.entries.len() < count {
             self.entries.resize_with(count, || None);
+        } else if self.entries.len() > count {
+            self.entries.truncate(count);
         }
     }
 
     /// Return cached lines for cell `index` at `width`, if the
     /// cached cell matches the current one.
-    fn get(&self, index: usize, width: u16, cell: &ActivityCell) -> Option<&Vec<Line<'static>>> {
-        self.entries.get(index).and_then(|e| {
+    fn get(&mut self, index: usize, width: u16, cell: &ActivityCell) -> Option<CachedCellLines> {
+        let cached = self.entries.get(index).and_then(|e| {
             e.as_ref().and_then(|entry| {
                 if entry.width == width && entry.cell == *cell {
-                    Some(&entry.lines)
+                    Some(CachedCellLines {
+                        lines: entry.lines.clone(),
+                        height: entry.height,
+                    })
                 } else {
                     None
                 }
             })
-        })
+        });
+        #[cfg(feature = "tui-perf-cmd")]
+        {
+            if cached.is_some() {
+                self.hits = self.hits.saturating_add(1);
+            } else {
+                self.misses = self.misses.saturating_add(1);
+            }
+        }
+        cached
     }
 
     /// Store rendered lines for cell `index`.
-    fn set(&mut self, index: usize, width: u16, cell: ActivityCell, lines: Vec<Line<'static>>) {
+    fn set(
+        &mut self,
+        index: usize,
+        width: u16,
+        cell: ActivityCell,
+        lines: Vec<Line<'static>>,
+    ) -> CachedCellLines {
         if index >= self.entries.len() {
             self.entries.resize_with(index + 1, || None);
         }
-        self.entries[index] = Some(CacheEntry { width, cell, lines });
+        let height = cached_lines_height(&lines, width);
+        self.entries[index] = Some(CacheEntry {
+            width,
+            cell,
+            lines: lines.clone(),
+            height,
+        });
+        CachedCellLines { lines, height }
     }
 }
 
 /// Thin Renderable wrapper around pre-computed lines.
 #[derive(Clone)]
-struct CachedCellLines(Vec<Line<'static>>);
+struct CachedCellLines {
+    lines: Vec<Line<'static>>,
+    height: u16,
+}
 
 impl Renderable for CachedCellLines {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        if self.0.is_empty() {
+        if self.lines.is_empty() {
             return;
         }
-        Paragraph::new(Text::from(self.0.clone()))
+        Paragraph::new(Text::from(self.lines.clone()))
             .wrap(Wrap { trim: false })
             .render(area, buf);
     }
 
     fn desired_height(&self, _width: u16) -> u16 {
-        if self.0.is_empty() {
-            return 0;
-        }
-        let width = _width as usize;
-        if width == 0 {
-            return 0;
-        }
-        let plain: String = self
-            .0
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let wrapped = textwrap::wrap(&plain, width);
-        wrapped.len() as u16
+        self.height
     }
 
     fn render_skip(&self, area: Rect, skip: u16, buf: &mut Buffer) {
-        if self.0.is_empty() {
+        if self.lines.is_empty() {
             return;
         }
         if skip == 0 {
             self.render(area, buf);
             return;
         }
-        Paragraph::new(Text::from(self.0.clone()))
+        Paragraph::new(Text::from(self.lines.clone()))
             .wrap(Wrap { trim: false })
             .scroll((skip, 0))
             .render(area, buf);
     }
+}
+
+fn cached_lines_height(lines: &[Line<'static>], width: u16) -> u16 {
+    if lines.is_empty() || width == 0 {
+        return 0;
+    }
+    let plain = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    textwrap::wrap(&plain, width as usize).len() as u16
 }
 
 /// Viewport-culled activity feed renderer with per-cell cache.
@@ -179,18 +236,20 @@ pub fn render_activity_feed_cached(
 
     let mut column = ViewportCulledColumn::new();
 
-    let spacer_line = CachedCellLines(vec![Line::from("")]);
+    let spacer_line = CachedCellLines {
+        lines: vec![Line::from("")],
+        height: 1,
+    };
 
     // Committed cells: use cache to skip markdown re-render.
     for (i, cell) in cells.iter().enumerate() {
-        let lines = if let Some(cached) = cache.get(i, inner.width, cell) {
-            cached.clone()
+        let cached = if let Some(cached) = cache.get(i, inner.width, cell) {
+            cached
         } else {
             let lines = render_activity_cell_lines(cell, inner.width);
-            cache.set(i, inner.width, cell.clone(), lines.clone());
-            lines
+            cache.set(i, inner.width, cell.clone(), lines)
         };
-        column.push(CachedCellLines(lines));
+        column.push(cached);
         // Blank line spacing between adjacent cells (matches old Vec<Line> behavior).
         if !live_cells.is_empty() || i + 1 < cells.len() {
             column.push(spacer_line.clone());
@@ -201,14 +260,8 @@ pub fn render_activity_feed_cached(
     for (i, lc) in live_cells.iter().enumerate() {
         let idx = cells.len() + i;
         let lines = render_activity_cell_lines(&lc.cell, inner.width);
-        // Still cache for consistency (the next frame may hit cache if cell stabilizes).
-        if let Some(cached) = cache.get(idx, inner.width, &lc.cell)
-            && cached.len() == lines.len()
-        {
-            // Reuse cached if same structure; live cells rarely change shape.
-        }
-        cache.set(idx, inner.width, lc.cell.clone(), lines.clone());
-        column.push(CachedCellLines(lines));
+        let cached = cache.set(idx, inner.width, lc.cell.clone(), lines);
+        column.push(cached);
         // Blank line spacing between adjacent cells.
         if i + 1 < live_cells.len() {
             column.push(spacer_line.clone());

@@ -4,13 +4,9 @@ pub enum TuiEvent {
     /// A terminal key event.
     Key(crossterm::event::KeyEvent),
     /// A bracketed paste payload.
-    #[allow(dead_code)]
     Paste(String),
     /// Terminal resized.
     Resize,
-    /// A scheduled repaint (not necessarily from terminal input).
-    #[allow(dead_code)]
-    Draw,
 }
 
 impl TuiEvent {
