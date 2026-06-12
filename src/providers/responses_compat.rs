@@ -40,6 +40,7 @@ pub(crate) struct ResponsesCompatibleClient {
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
+    reserved_output_tokens: usize,
     max_completion_tokens: usize,
     request_rate_limiter: Option<Arc<Mutex<VecDeque<Instant>>>>,
     token_usage: std::sync::Mutex<TokenUsageInfo>,
@@ -62,6 +63,7 @@ impl ResponsesCompatibleClient {
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
+        let reserved_output_tokens = model_config.reserved_output_tokens();
         let max_completion_tokens = model_config.max_completion_tokens();
         let supports_vision = match model_config.supports_vision {
             Some(v) => v,
@@ -82,6 +84,7 @@ impl ResponsesCompatibleClient {
             context_window_tokens,
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
+            reserved_output_tokens,
             max_completion_tokens,
             request_rate_limiter: shared_request_rate_limiter(
                 &base_url,
@@ -106,7 +109,7 @@ impl ResponsesCompatibleClient {
         RequestBudgetLimits {
             context_window_tokens: self.effective_context_window_tokens,
             auto_compact_threshold_tokens: self.auto_compact_threshold_tokens,
-            reserved_output_tokens: self.max_completion_tokens,
+            reserved_output_tokens: self.reserved_output_tokens,
         }
     }
 
@@ -580,6 +583,7 @@ fn base_payload(
         "parallel_tool_calls": true,
         "store": false,
         "stream": true,
+        "max_output_tokens": client.max_completion_tokens,
     });
     if let Some(budget) = client.thinking_budget.as_deref()
         && !budget.eq_ignore_ascii_case("none")

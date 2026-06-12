@@ -109,7 +109,7 @@ pub fn runtime_request_budget_limits(context: &Context) -> RequestBudgetLimits {
             .config
             .main_model_config()
             .auto_compact_token_limit(),
-        reserved_output_tokens: context.config.main_model_config().max_completion_tokens(),
+        reserved_output_tokens: context.config.main_model_config().reserved_output_tokens(),
     }
 }
 
@@ -175,7 +175,7 @@ fn judge_request_budget_limits(context: &Context) -> RequestBudgetLimits {
     RequestBudgetLimits {
         context_window_tokens: model.effective_context_window_tokens(),
         auto_compact_threshold_tokens: model.auto_compact_token_limit(),
-        reserved_output_tokens: model.max_completion_tokens(),
+        reserved_output_tokens: model.reserved_output_tokens(),
     }
 }
 

@@ -68,6 +68,7 @@ pub struct OpenAIClient {
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
+    reserved_output_tokens: usize,
     max_completion_tokens: usize,
     request_rate_limiter: Option<Arc<tokio::sync::Mutex<VecDeque<Instant>>>>,
     adapter_state: Mutex<ChatCompletionsAdapterState>,
@@ -169,6 +170,7 @@ impl OpenAIClient {
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
+        let reserved_output_tokens = model_config.reserved_output_tokens();
         let max_completion_tokens = model_config.max_completion_tokens();
         Self {
             client,
@@ -186,6 +188,7 @@ impl OpenAIClient {
             context_window_tokens,
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
+            reserved_output_tokens,
             max_completion_tokens,
             request_rate_limiter: shared_request_rate_limiter(
                 &base_url,
@@ -257,7 +260,7 @@ impl OpenAIClient {
         RequestBudgetLimits {
             context_window_tokens: self.effective_context_window_tokens,
             auto_compact_threshold_tokens: self.auto_compact_threshold_tokens,
-            reserved_output_tokens: self.max_completion_tokens,
+            reserved_output_tokens: self.reserved_output_tokens,
         }
     }
 

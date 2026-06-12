@@ -190,6 +190,11 @@ impl ModelConfig {
         self.max_completion_tokens
             .clamp(1, self.context_window_tokens())
     }
+
+    pub fn reserved_output_tokens(&self) -> usize {
+        self.effective_context_window_tokens()
+            .saturating_sub(self.auto_compact_token_limit())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -523,7 +528,8 @@ pub async fn load_config() -> Result<Config, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, ProviderConfig, ThinkingBudget, normalize_provider_base_url, resolve_env_reference,
+        Config, ModelConfig, ProviderConfig, ThinkingBudget, normalize_provider_base_url,
+        resolve_env_reference,
     };
     use crate::sandbox::StrongFilesystemSandboxMode;
 
@@ -767,6 +773,34 @@ thinking_budget = "xhigh"
                 .map(ThinkingBudget::as_str),
             Some("xhigh")
         );
+    }
+
+    #[test]
+    fn reserved_output_tokens_tracks_effective_window_headroom() {
+        let model = ModelConfig {
+            context_window_tokens: 272_000,
+            effective_context_window_percent: 95,
+            max_completion_tokens: 128_000,
+            ..Default::default()
+        };
+
+        assert_eq!(model.effective_context_window_tokens(), 258_400);
+        assert_eq!(model.auto_compact_token_limit(), 244_800);
+        assert_eq!(model.reserved_output_tokens(), 13_600);
+        assert_eq!(model.max_completion_tokens(), 128_000);
+    }
+
+    #[test]
+    fn reserved_output_tokens_can_be_zero_when_auto_limit_matches_effective_window() {
+        let model = ModelConfig {
+            context_window_tokens: 200_000,
+            effective_context_window_percent: 50,
+            ..Default::default()
+        };
+
+        assert_eq!(model.effective_context_window_tokens(), 100_000);
+        assert_eq!(model.auto_compact_token_limit(), 100_000);
+        assert_eq!(model.reserved_output_tokens(), 0);
     }
 
     #[cfg(unix)]

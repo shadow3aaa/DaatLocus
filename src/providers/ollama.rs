@@ -134,6 +134,7 @@ pub struct OllamaClient {
     stream_idle_timeout: Duration,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
+    reserved_output_tokens: usize,
     max_completion_tokens: usize,
     token_usage: Mutex<TokenUsageInfo>,
 }
@@ -155,6 +156,7 @@ impl OllamaClient {
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
+        let reserved_output_tokens = model_config.reserved_output_tokens();
         let max_completion_tokens = model_config.max_completion_tokens();
         let vision_mode_initial = match model_config.supports_vision {
             Some(false) => OllamaVisionMode::Disabled,
@@ -194,6 +196,7 @@ impl OllamaClient {
             stream_idle_timeout,
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
+            reserved_output_tokens,
             max_completion_tokens,
             token_usage: Mutex::new(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
@@ -212,7 +215,7 @@ impl OllamaClient {
         RequestBudgetLimits {
             context_window_tokens: self.effective_context_window_tokens,
             auto_compact_threshold_tokens: self.auto_compact_threshold_tokens,
-            reserved_output_tokens: self.max_completion_tokens,
+            reserved_output_tokens: self.reserved_output_tokens,
         }
     }
 
@@ -854,8 +857,11 @@ impl Llm for OllamaClient {
         if let Some(keep_alive) = &self.keep_alive {
             payload["keep_alive"] = json!(keep_alive);
         }
-        payload["options"] =
-            build_ollama_options(self.temperature, self.effective_context_window_tokens);
+        payload["options"] = build_ollama_options(
+            self.temperature,
+            self.effective_context_window_tokens,
+            self.max_completion_tokens,
+        );
 
         let (response, usage) = self
             .post_ollama_chat_with_adaptive_retry(
@@ -946,8 +952,11 @@ impl Llm for OllamaClient {
         if let Some(keep_alive) = &self.keep_alive {
             payload["keep_alive"] = json!(keep_alive);
         }
-        payload["options"] =
-            build_ollama_options(self.temperature, self.effective_context_window_tokens);
+        payload["options"] = build_ollama_options(
+            self.temperature,
+            self.effective_context_window_tokens,
+            self.max_completion_tokens,
+        );
 
         self.call_ollama_stream(context, &payload, &budget, &request)
             .await
@@ -962,10 +971,11 @@ impl Llm for OllamaClient {
     }
 }
 
-fn build_ollama_options(temperature: f64, num_ctx: usize) -> Value {
+fn build_ollama_options(temperature: f64, num_ctx: usize, num_predict: usize) -> Value {
     json!({
         "temperature": temperature,
         "num_ctx": num_ctx,
+        "num_predict": num_predict,
     })
 }
 

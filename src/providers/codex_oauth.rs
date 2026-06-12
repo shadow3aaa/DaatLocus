@@ -77,6 +77,7 @@ struct CodexResponsesClient {
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
+    reserved_output_tokens: usize,
     max_completion_tokens: usize,
     request_rate_limiter: Option<Arc<tokio::sync::Mutex<VecDeque<Instant>>>>,
     token_usage: std::sync::Mutex<TokenUsageInfo>,
@@ -168,6 +169,7 @@ impl CodexResponsesClient {
         let context_window_tokens = model_config.context_window_tokens();
         let effective_context_window_tokens = model_config.effective_context_window_tokens();
         let auto_compact_threshold_tokens = model_config.auto_compact_token_limit();
+        let reserved_output_tokens = model_config.reserved_output_tokens();
         let max_completion_tokens = model_config.max_completion_tokens();
         let client_version = codex_oauth_client_version();
         let supports_vision_initial = {
@@ -193,6 +195,7 @@ impl CodexResponsesClient {
             context_window_tokens,
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
+            reserved_output_tokens,
             max_completion_tokens,
             request_rate_limiter: shared_request_rate_limiter(
                 &base_url,
@@ -224,7 +227,7 @@ impl CodexResponsesClient {
         RequestBudgetLimits {
             context_window_tokens: self.effective_context_window_tokens,
             auto_compact_threshold_tokens: self.auto_compact_threshold_tokens,
-            reserved_output_tokens: self.max_completion_tokens,
+            reserved_output_tokens: self.reserved_output_tokens,
         }
     }
 
@@ -898,6 +901,7 @@ fn base_responses_payload(
         "parallel_tool_calls": true,
         "store": false,
         "stream": true,
+        "max_output_tokens": client.max_completion_tokens,
         "include": [],
         "client_metadata": {
             "x-codex-installation-id": client.installation_id,
@@ -1629,6 +1633,26 @@ mod tests {
             thread_id: "session-test".to_string(),
             window_id: "session-test:0".to_string(),
         }
+    }
+
+    #[test]
+    fn codex_request_budget_reserves_effective_window_headroom() {
+        let client = CodexResponsesClient::new(
+            CODEX_RESPONSES_BASE_URL,
+            &ModelConfig {
+                model_id: "gpt-5.5".to_string(),
+                provider: "codex-oauth".to_string(),
+                context_window_tokens: 272_000,
+                effective_context_window_percent: 95,
+                max_completion_tokens: 128_000,
+                ..ModelConfig::default()
+            },
+        );
+        let limits = client.request_budget_limits();
+
+        assert_eq!(limits.context_window_tokens, 258_400);
+        assert_eq!(limits.auto_compact_threshold_tokens, 244_800);
+        assert_eq!(limits.reserved_output_tokens, 13_600);
     }
 
     #[test]

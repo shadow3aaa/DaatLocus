@@ -52,7 +52,7 @@ pub struct ContextBudgetExceededError {
 impl RequestBudgetLimits {
     pub fn normalized(self) -> Self {
         let context_window_tokens = self.context_window_tokens.max(1);
-        let reserved_output_tokens = self.reserved_output_tokens.clamp(1, context_window_tokens);
+        let reserved_output_tokens = self.reserved_output_tokens.min(context_window_tokens);
         let auto_compact_threshold_tokens = self
             .auto_compact_threshold_tokens
             .clamp(1, context_window_tokens);
@@ -479,6 +479,22 @@ mod tests {
 
         assert!(!breakdown_for(99_999, limits).above_auto_compact_threshold());
         assert!(breakdown_for(100_000, limits).above_auto_compact_threshold());
+    }
+
+    #[test]
+    fn zero_reserved_output_is_valid() {
+        let limits = RequestBudgetLimits {
+            context_window_tokens: 128_000,
+            auto_compact_threshold_tokens: 115_200,
+            reserved_output_tokens: 0,
+        };
+        let breakdown = breakdown_for(115_199, limits);
+
+        assert_eq!(breakdown.reserved_output_tokens, 0);
+        assert_eq!(breakdown.input_budget_tokens(), 128_000);
+        assert_eq!(breakdown.auto_compact_input_threshold_tokens(), 115_200);
+        assert!(breakdown.within_context_window());
+        assert!(!breakdown.above_auto_compact_threshold());
     }
 
     #[test]
