@@ -405,10 +405,11 @@ function modelRolesFromFlags(model: SettingsModelSummary) {
 
 function modelFootprint(model: SettingsModelSummary) {
   const context = `${formatNumber(model.context_window_tokens)} ctx`;
+  const reserve = `${formatNumber(model.reserved_output_tokens)} reserve`;
   const output = `${formatNumber(model.max_completion_tokens)} out`;
   const timeout = `${model.request_timeout_secs}s`;
 
-  return `${context} · ${output} · ${timeout}`;
+  return `${context} · ${reserve} · ${output} · ${timeout}`;
 }
 
 function credentialTone(status: SettingsCredentialStatus): Tone {

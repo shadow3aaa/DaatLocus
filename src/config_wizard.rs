@@ -3070,6 +3070,11 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
         );
         push_config_subfield(
             &mut lines,
+            "reserved_output",
+            model.reserved_output_tokens().to_string(),
+        );
+        push_config_subfield(
+            &mut lines,
             "max_completion",
             model.max_completion_tokens.to_string(),
         );
@@ -3807,6 +3812,7 @@ mod tests {
         assert!(summary.contains("• coder (main)"));
         assert!(summary.contains("temperature          0.2"));
         assert!(summary.contains("effective_window     100000 tokens (50%)"));
+        assert!(summary.contains("reserved_output      0"));
         assert!(summary.contains("supports_vision      false"));
     }
 

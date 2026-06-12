@@ -579,6 +579,7 @@ export type SettingsModelSummary = {
   effective_context_window_percent: number;
   effective_context_window_tokens: number;
   auto_compact_token_limit: number;
+  reserved_output_tokens: number;
   max_completion_tokens: number;
   tool_output_max_tokens: number;
   /** Whether the model accepts image/vision input in messages (resolved). */

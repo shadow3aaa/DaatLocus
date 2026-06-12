@@ -340,6 +340,7 @@ pub struct SettingsModelSummary {
     pub effective_context_window_percent: i64,
     pub effective_context_window_tokens: usize,
     pub auto_compact_token_limit: usize,
+    pub reserved_output_tokens: usize,
     pub max_completion_tokens: usize,
     pub tool_output_max_tokens: usize,
     /// Whether the model accepts image/vision input in messages (resolved).
@@ -2093,6 +2094,7 @@ fn settings_model_summary(
         effective_context_window_percent: model.effective_context_window_percent(),
         effective_context_window_tokens: model.effective_context_window_tokens(),
         auto_compact_token_limit: model.auto_compact_token_limit(),
+        reserved_output_tokens: model.reserved_output_tokens(),
         max_completion_tokens: model.max_completion_tokens(),
         tool_output_max_tokens: model.tool_output_max_tokens,
         supports_vision: resolve_supports_vision(model),
