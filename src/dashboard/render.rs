@@ -675,27 +675,6 @@ fn render_status_usage_lines(context: &Context) -> Vec<String> {
         r
     }
 
-    fn context_bar(used: i64, window: i64) -> String {
-        const W: usize = 20;
-        if window <= 0 {
-            return String::new();
-        }
-        let used = used.max(0) as f64;
-        let window = window as f64;
-        let pct = used / window;
-        let pct_clamped = pct.clamp(0.0, 1.0);
-        let filled = (pct_clamped * W as f64).round() as usize;
-        let bar: String = (0..filled)
-            .map(|_| '\u{2588}')
-            .chain((0..W.saturating_sub(filled)).map(|_| '\u{2591}'))
-            .collect();
-        if pct > 1.0 {
-            format!("{bar}> {:.1}%", pct * 100.0)
-        } else {
-            format!("{bar} {:.1}%", pct * 100.0)
-        }
-    }
-
     let mut lines = Vec::new();
     for (label, llm) in [("main", &context.llm), ("judge", &context.judge_llm)] {
         let Some(info) = llm.token_usage_info() else {
@@ -711,18 +690,7 @@ fn render_status_usage_lines(context: &Context) -> Vec<String> {
         // Context pressure line — per-turn input vs window
         if let Some(window) = info.model_context_window {
             let used = info.last_token_usage.input_tokens.max(0);
-            lines.push(format!(
-                "    Context:  {} {} of {}",
-                context_bar(used, window),
-                if window > 0 && used > 0 {
-                    format!("{:.1}%", used as f64 / window as f64 * 100.0)
-                } else if window > 0 {
-                    "0.0%".to_string()
-                } else {
-                    String::new()
-                },
-                format_compact_tokens(window.max(0) as usize),
-            ));
+            lines.push(render_status_context_usage_line(used, window));
         }
 
         // Last-turn detail line
@@ -774,6 +742,35 @@ fn render_status_usage_lines(context: &Context) -> Vec<String> {
         lines.pop();
     }
     lines
+}
+
+fn render_status_context_usage_line(used: i64, window: i64) -> String {
+    format!(
+        "    Context:  {} of {}",
+        context_bar(used, window),
+        format_compact_tokens(window.max(0) as usize),
+    )
+}
+
+fn context_bar(used: i64, window: i64) -> String {
+    const W: usize = 20;
+    if window <= 0 {
+        return String::new();
+    }
+    let used = used.max(0) as f64;
+    let window = window as f64;
+    let pct = used / window;
+    let pct_clamped = pct.clamp(0.0, 1.0);
+    let filled = (pct_clamped * W as f64).round() as usize;
+    let bar: String = (0..filled)
+        .map(|_| '\u{2588}')
+        .chain((0..W.saturating_sub(filled)).map(|_| '\u{2591}'))
+        .collect();
+    if pct > 1.0 {
+        format!("{bar}> {:.1}%", pct * 100.0)
+    } else {
+        format!("{bar} {:.1}%", pct * 100.0)
+    }
 }
 
 fn render_status_plan_lines(context: &Context) -> Vec<String> {
@@ -890,6 +887,17 @@ mod tests {
                 EventStatus::Dismissed,
             ]),
             "0"
+        );
+    }
+
+    #[test]
+    fn status_context_usage_line_shows_one_percentage() {
+        let line = render_status_context_usage_line(6_206, 272_000);
+
+        assert_eq!(line.matches("2.3%").count(), 1);
+        assert_eq!(
+            line,
+            "    Context:  \u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591} 2.3% of 272k"
         );
     }
 }
