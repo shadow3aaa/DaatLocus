@@ -1,25 +1,24 @@
 use crate::{context::Context, preturn_state::PreTurnState};
 
 use super::{
-    prompt_doc::{PromptBlock, PromptDocument, PromptNode, PromptUnitDoc},
+    prompt_doc::PromptDocument,
     prompt_parts::{
         AfterClaimContextInput, AfterClaimContextPart, AfterClaimInputPart,
-        AfterClaimWorkflowPrimitiveRoutingPart, AppDocsSystemPart, AppsSystemPart,
-        CompiledAdditionsSystemPart, EventSystemPart, OpenSkillsSystemPart, PersonaSystemPart,
-        PlanSystemPart, PreTurnAppSurfacePart, PreTurnContextPart, PreTurnPlanPart,
-        PreTurnSensoryPart, PreTurnWorkflowStatePart, SystemPromptPart, WorkflowSystemPart,
-        WorkspaceSystemPart,
+        AfterClaimWorkflowPrimitiveRoutingPart, PreTurnAppSurfacePart, PreTurnContextPart,
+        PreTurnPlanPart, PreTurnSensoryPart, PreTurnWorkflowStatePart,
     },
-    prompts::{
-        SYSTEM_APPS, SYSTEM_EVENT, SYSTEM_PLAN, SYSTEM_PRIMITIVE,
-        build_workspace_unit_placeholder_prompt,
+    prompts::{SYSTEM_CORE, build_app_how_to_use_prompt, build_app_usage_prompt},
+    turn_compile::{
+        PromptPersonaSpec, load_or_create_prompt_persona_spec_sync, load_prompt_persona_spec_sync,
+        resolve_prompt_persona_language,
     },
-    turn_compile::load_prompt_persona_spec_sync,
 };
 
-pub struct SystemPromptAssembler {
-    parts: Vec<Box<dyn SystemPromptPart>>,
-}
+const WORKSPACE_PATH_PLACEHOLDER: &str = "{{workspace_path}}";
+const PERSONA_SECTION_PLACEHOLDER: &str = "{{persona_section}}";
+const SKILLS_SECTION_PLACEHOLDER: &str = "{{skills_section}}";
+const APP_DOCS_SECTION_PLACEHOLDER: &str = "{{app_docs_section}}";
+const COMPILED_ADDITIONS_SECTION_PLACEHOLDER: &str = "{{compiled_additions_section}}";
 
 pub struct PreTurnContextAssembler {
     parts: Vec<Box<dyn PreTurnContextPart>>,
@@ -29,33 +28,135 @@ pub struct AfterClaimContextAssembler {
     parts: Vec<Box<dyn AfterClaimContextPart>>,
 }
 
-impl SystemPromptAssembler {
-    pub fn new(parts: Vec<Box<dyn SystemPromptPart>>) -> Self {
-        Self { parts }
-    }
+struct RuntimeSystemPromptSections {
+    workspace_path: String,
+    persona_section: String,
+    skills_section: String,
+    app_docs_section: String,
+    compiled_additions_section: String,
+}
 
-    pub fn default_runtime() -> Self {
-        Self::new(vec![
-            Box::new(EventSystemPart),
-            Box::new(AppsSystemPart),
-            Box::new(WorkspaceSystemPart),
-            Box::new(PlanSystemPart),
-            Box::new(WorkflowSystemPart),
-            Box::new(OpenSkillsSystemPart),
-            Box::new(AppDocsSystemPart),
-            Box::new(PersonaSystemPart),
-            Box::new(CompiledAdditionsSystemPart),
-        ])
-    }
+pub fn runtime_system_prompt_text(ctx: &Context) -> String {
+    let configured_locale = ctx.config.locale.as_str();
+    let persona = load_or_create_prompt_persona_spec_sync(configured_locale);
+    render_runtime_system_prompt(RuntimeSystemPromptSections {
+        workspace_path: format!(
+            "Your absolute workspace path is `{}`.",
+            ctx.execution_cwd.display()
+        ),
+        persona_section: render_persona_section(
+            &persona,
+            &resolve_prompt_persona_language(&persona, configured_locale),
+            configured_locale,
+        ),
+        skills_section: ctx.openskills.render_prompt_block().unwrap_or_default(),
+        app_docs_section: render_app_docs_section(ctx),
+        compiled_additions_section: render_compiled_additions_section(
+            ctx.compiled_prompts.runtime_system_additions(),
+        ),
+    })
+}
 
-    pub fn assemble(&self, ctx: &Context) -> PromptDocument {
-        PromptDocument::new(
-            self.parts
-                .iter()
-                .filter_map(|part| part.build(ctx).map(PromptNode::Unit))
-                .collect(),
+pub fn runtime_system_prompt_text_from_additions(additions: &[String]) -> String {
+    let persona = load_prompt_persona_spec_sync();
+    render_runtime_system_prompt(RuntimeSystemPromptSections {
+        workspace_path:
+            "The absolute runtime workspace path is injected into the real system prompt."
+                .to_string(),
+        persona_section: render_persona_section(
+            &persona,
+            persona.language.trim(),
+            "injected in live runtime prompt",
+        ),
+        skills_section: String::new(),
+        app_docs_section: String::new(),
+        compiled_additions_section: render_compiled_additions_section(additions),
+    })
+}
+
+fn render_runtime_system_prompt(sections: RuntimeSystemPromptSections) -> String {
+    let rendered = SYSTEM_CORE
+        .replace(WORKSPACE_PATH_PLACEHOLDER, sections.workspace_path.trim())
+        .replace(PERSONA_SECTION_PLACEHOLDER, sections.persona_section.trim())
+        .replace(SKILLS_SECTION_PLACEHOLDER, sections.skills_section.trim())
+        .replace(
+            APP_DOCS_SECTION_PLACEHOLDER,
+            sections.app_docs_section.trim(),
         )
+        .replace(
+            COMPILED_ADDITIONS_SECTION_PLACEHOLDER,
+            sections.compiled_additions_section.trim(),
+        );
+    compact_blank_lines(&rendered)
+}
+
+fn render_persona_section(
+    persona: &PromptPersonaSpec,
+    language: &str,
+    configured_locale: &str,
+) -> String {
+    format!(
+        "# Persona\n\nname: {}\nlanguage: {}\nconfigured_locale: {}\n\n{}",
+        persona.name.trim(),
+        language.trim(),
+        configured_locale.trim(),
+        persona.identity_summary.trim()
+    )
+}
+
+fn render_app_docs_section(ctx: &Context) -> String {
+    let mut sections = Vec::new();
+    let state_renders = ctx.apps.state_renders();
+    for (app_id, _state) in &state_renders {
+        if let Some(usage) = ctx.apps.usage(app_id) {
+            sections.push(format!(
+                "## {app_id} Usage\n\n{}",
+                build_app_usage_prompt(app_id.clone(), &usage)
+            ));
+        }
+        if let Some(how_to_use) = ctx.apps.how_to_use(app_id) {
+            sections.push(format!(
+                "## {app_id} Operation\n\n{}",
+                build_app_how_to_use_prompt(app_id.clone(), &how_to_use)
+            ));
+        }
     }
+    if sections.is_empty() {
+        String::new()
+    } else {
+        format!("# App Documentation\n\n{}", sections.join("\n\n"))
+    }
+}
+
+fn render_compiled_additions_section(additions: &[String]) -> String {
+    let items = additions
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        String::new()
+    } else {
+        format!("# Runtime Prompt Additions\n\n{}", items.join("\n"))
+    }
+}
+
+fn compact_blank_lines(input: &str) -> String {
+    let mut lines = Vec::new();
+    let mut blank_count = 0usize;
+    for line in input.lines() {
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 2 {
+                lines.push(String::new());
+            }
+        } else {
+            blank_count = 0;
+            lines.push(line.trim_end().to_string());
+        }
+    }
+    lines.join("\n").trim().to_string()
 }
 
 impl PreTurnContextAssembler {
@@ -104,57 +205,21 @@ impl AfterClaimContextAssembler {
     }
 }
 
-pub fn runtime_system_prompt_doc_from_additions(additions: &[String]) -> PromptDocument {
-    let persona = load_prompt_persona_spec_sync();
-    let mut nodes = vec![
-        PromptNode::Unit(PromptUnitDoc::new(
-            "event",
-            vec![PromptBlock::Paragraph(SYSTEM_EVENT.to_string())],
-        )),
-        PromptNode::Unit(PromptUnitDoc::new(
-            "apps",
-            vec![PromptBlock::Paragraph(SYSTEM_APPS.to_string())],
-        )),
-        PromptNode::Unit(PromptUnitDoc::new(
-            "workspace",
-            vec![PromptBlock::Paragraph(
-                build_workspace_unit_placeholder_prompt(),
-            )],
-        )),
-        PromptNode::Unit(PromptUnitDoc::new(
-            "plan",
-            vec![PromptBlock::Paragraph(SYSTEM_PLAN.to_string())],
-        )),
-        PromptNode::Unit(PromptUnitDoc::new(
-            "primitive",
-            vec![PromptBlock::Paragraph(SYSTEM_PRIMITIVE.to_string())],
-        )),
-        PromptNode::Unit(PromptUnitDoc::new(
-            "persona",
-            vec![PromptBlock::KeyValueList(vec![
-                ("name".to_string(), persona.name.trim().to_string()),
-                ("language".to_string(), persona.language.trim().to_string()),
-                (
-                    "configured_locale".to_string(),
-                    "injected in live runtime prompt".to_string(),
-                ),
-                (
-                    "identity_summary".to_string(),
-                    persona.identity_summary.trim().to_string(),
-                ),
-            ])],
-        )),
-    ];
-    let additions = additions
-        .iter()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    if !additions.is_empty() {
-        nodes.push(PromptNode::Unit(PromptUnitDoc::new(
-            "compiled_additions",
-            vec![PromptBlock::BulletList(additions)],
-        )));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_system_prompt_from_additions_is_single_markdown_document() {
+        let text = runtime_system_prompt_text_from_additions(&["extra rule".to_string()]);
+
+        assert!(text.starts_with("# Runtime Identity"));
+        assert!(text.contains("# Event Handling"));
+        assert!(text.contains("# Planning"));
+        assert!(text.contains("# Primitive Workflows"));
+        assert!(text.contains("# Runtime Prompt Additions\n\n- extra rule"));
+        assert!(!text.contains("<core>"));
+        assert!(!text.contains("<event>"));
+        assert!(!text.contains("{{"));
     }
-    PromptDocument::new(nodes)
 }

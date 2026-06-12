@@ -229,10 +229,7 @@ pub fn render_dashboard_footer_context(
 }
 
 pub fn render_system_prompt_output_for_dashboard(context: &Context) -> String {
-    crate::reasoning::prompt_renderer::DashboardPromptRenderer::render_document(
-        &context.runtime_system_prompt_doc(),
-        "Runtime System Prompt",
-    )
+    crate::reasoning::prompt_assembler::runtime_system_prompt_text(context)
 }
 
 pub fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String, String)> {

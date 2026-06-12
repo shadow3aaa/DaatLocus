@@ -1,15 +1,8 @@
-use super::prompt_doc::{
-    PromptBlock, PromptDocument, PromptGroupDoc, PromptNode, PromptStateDoc, PromptUnitDoc,
-};
+use super::prompt_doc::{PromptBlock, PromptDocument, PromptGroupDoc, PromptNode, PromptStateDoc};
 
 pub struct LlmPromptRenderer;
-pub struct DashboardPromptRenderer;
 
 impl LlmPromptRenderer {
-    pub fn render_document(doc: &PromptDocument) -> String {
-        Self::render_document_with_root(doc, None)
-    }
-
     pub fn render_document_with_root(doc: &PromptDocument, root_tag: Option<&str>) -> String {
         let body = doc
             .nodes
@@ -24,30 +17,10 @@ impl LlmPromptRenderer {
         }
     }
 
-    pub fn render_system_messages(doc: &PromptDocument) -> Vec<String> {
-        doc.nodes
-            .iter()
-            .map(Self::render_node)
-            .filter(|node| !node.trim().is_empty())
-            .collect()
-    }
-
     pub fn render_node(node: &PromptNode) -> String {
         match node {
-            PromptNode::Unit(unit) => render_unit(unit),
             PromptNode::State(state) => render_state(state),
             PromptNode::Group(group) => render_group(group),
-        }
-    }
-}
-
-impl DashboardPromptRenderer {
-    pub fn render_document(doc: &PromptDocument, heading: &str) -> String {
-        let body = LlmPromptRenderer::render_document_with_root(doc, Some("system_prompt"));
-        if body.trim().is_empty() {
-            heading.to_string()
-        } else {
-            format!("{heading}\n\n{body}")
         }
     }
 }
@@ -64,14 +37,6 @@ fn render_group(group: &PromptGroupDoc) -> String {
         return String::new();
     }
     format!("<{}>\n{}\n</{}>", group.key, body, group.key)
-}
-
-fn render_unit(unit: &PromptUnitDoc) -> String {
-    let body = render_blocks(&unit.blocks);
-    if body.trim().is_empty() {
-        return String::new();
-    }
-    format!("<{}>\n{}\n</{}>", unit.key, body, unit.key)
 }
 
 fn render_state(state: &PromptStateDoc) -> String {

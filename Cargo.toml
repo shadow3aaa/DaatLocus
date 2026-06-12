@@ -19,6 +19,7 @@ include = [
     "/build.rs",
     "/docs/**",
     "/locales/**",
+    "/prompts/**",
     "/src/**",
     "/webui/.yarnrc.yml",
     "/webui/components.json",

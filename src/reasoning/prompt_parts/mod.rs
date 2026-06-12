@@ -6,18 +6,9 @@ use crate::{
 };
 
 use super::{
-    prompt_doc::{PromptBlock, PromptGroupDoc, PromptNode, PromptStateDoc, PromptUnitDoc},
-    prompts::{
-        SYSTEM_APPS, SYSTEM_EVENT, SYSTEM_PLAN, SYSTEM_PRIMITIVE, build_app_how_to_use_prompt,
-        build_app_usage_prompt, build_runtime_background_hint_items, build_workspace_unit_prompt,
-    },
-    turn_compile::load_prompt_persona_spec_sync,
+    prompt_doc::{PromptBlock, PromptGroupDoc, PromptNode, PromptStateDoc},
+    prompts::build_runtime_background_hint_items,
 };
-
-pub trait SystemPromptPart: Send + Sync {
-    fn key(&self) -> &'static str;
-    fn build(&self, ctx: &Context) -> Option<PromptUnitDoc>;
-}
 
 pub trait PreTurnContextPart: Send + Sync {
     fn key(&self) -> &'static str;
@@ -41,180 +32,12 @@ impl AfterClaimContextInput {
     }
 }
 
-pub struct EventSystemPart;
-pub struct AppsSystemPart;
-pub struct WorkspaceSystemPart;
-pub struct PlanSystemPart;
-pub struct WorkflowSystemPart;
-pub struct OpenSkillsSystemPart;
-pub struct PersonaSystemPart;
-pub struct CompiledAdditionsSystemPart;
-pub struct AppDocsSystemPart;
-
 pub struct PreTurnSensoryPart;
 pub struct PreTurnPlanPart;
 pub struct PreTurnWorkflowStatePart;
 pub struct PreTurnAppSurfacePart;
 pub struct AfterClaimInputPart;
 pub struct AfterClaimWorkflowPrimitiveRoutingPart;
-
-impl SystemPromptPart for EventSystemPart {
-    fn key(&self) -> &'static str {
-        "event"
-    }
-
-    fn build(&self, _ctx: &Context) -> Option<PromptUnitDoc> {
-        Some(PromptUnitDoc::new(
-            self.key(),
-            vec![PromptBlock::Paragraph(SYSTEM_EVENT.to_string())],
-        ))
-    }
-}
-
-impl SystemPromptPart for AppsSystemPart {
-    fn key(&self) -> &'static str {
-        "apps"
-    }
-
-    fn build(&self, _ctx: &Context) -> Option<PromptUnitDoc> {
-        Some(PromptUnitDoc::new(
-            self.key(),
-            vec![PromptBlock::Paragraph(SYSTEM_APPS.to_string())],
-        ))
-    }
-}
-
-impl SystemPromptPart for WorkspaceSystemPart {
-    fn key(&self) -> &'static str {
-        "workspace"
-    }
-
-    fn build(&self, ctx: &Context) -> Option<PromptUnitDoc> {
-        Some(PromptUnitDoc::new(
-            self.key(),
-            vec![PromptBlock::Paragraph(build_workspace_unit_prompt(ctx))],
-        ))
-    }
-}
-
-impl SystemPromptPart for PlanSystemPart {
-    fn key(&self) -> &'static str {
-        "plan"
-    }
-
-    fn build(&self, _ctx: &Context) -> Option<PromptUnitDoc> {
-        Some(PromptUnitDoc::new(
-            self.key(),
-            vec![PromptBlock::Paragraph(SYSTEM_PLAN.to_string())],
-        ))
-    }
-}
-
-impl SystemPromptPart for WorkflowSystemPart {
-    fn key(&self) -> &'static str {
-        "primitive"
-    }
-
-    fn build(&self, _ctx: &Context) -> Option<PromptUnitDoc> {
-        Some(PromptUnitDoc::new(
-            self.key(),
-            vec![PromptBlock::Paragraph(SYSTEM_PRIMITIVE.to_string())],
-        ))
-    }
-}
-
-impl SystemPromptPart for OpenSkillsSystemPart {
-    fn key(&self) -> &'static str {
-        "skills"
-    }
-
-    fn build(&self, ctx: &Context) -> Option<PromptUnitDoc> {
-        ctx.openskills
-            .render_prompt_block()
-            .map(|body| PromptUnitDoc::new(self.key(), vec![PromptBlock::Paragraph(body)]))
-    }
-}
-
-impl SystemPromptPart for PersonaSystemPart {
-    fn key(&self) -> &'static str {
-        "persona"
-    }
-
-    fn build(&self, _ctx: &Context) -> Option<PromptUnitDoc> {
-        let persona = load_prompt_persona_spec_sync();
-        Some(PromptUnitDoc::new(
-            self.key(),
-            vec![PromptBlock::KeyValueList(vec![
-                ("name".to_string(), persona.name.trim().to_string()),
-                ("language".to_string(), persona.language.trim().to_string()),
-                (
-                    "configured_locale".to_string(),
-                    _ctx.config.locale.as_str().to_string(),
-                ),
-                (
-                    "identity_summary".to_string(),
-                    persona.identity_summary.trim().to_string(),
-                ),
-            ])],
-        ))
-    }
-}
-
-impl SystemPromptPart for CompiledAdditionsSystemPart {
-    fn key(&self) -> &'static str {
-        "compiled_additions"
-    }
-
-    fn build(&self, ctx: &Context) -> Option<PromptUnitDoc> {
-        let additions = ctx
-            .compiled_prompts
-            .runtime_system_additions()
-            .iter()
-            .map(|line| line.trim().to_string())
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>();
-        if additions.is_empty() {
-            return None;
-        }
-        Some(PromptUnitDoc::new(
-            self.key(),
-            vec![PromptBlock::BulletList(additions)],
-        ))
-    }
-}
-
-impl SystemPromptPart for AppDocsSystemPart {
-    fn key(&self) -> &'static str {
-        "app_docs"
-    }
-
-    fn build(&self, ctx: &Context) -> Option<PromptUnitDoc> {
-        let mut blocks = Vec::new();
-        let state_renders = ctx.apps.state_renders();
-        for (app_id, _state) in &state_renders {
-            if let Some(usage) = ctx.apps.usage(app_id) {
-                blocks.push(PromptBlock::Paragraph(format!("--- {app_id} usage ---")));
-                blocks.push(PromptBlock::Paragraph(build_app_usage_prompt(
-                    app_id.clone(),
-                    &usage,
-                )));
-            }
-            if let Some(how_to_use) = ctx.apps.how_to_use(app_id) {
-                blocks.push(PromptBlock::Paragraph(format!(
-                    "--- {app_id} operation ---"
-                )));
-                blocks.push(PromptBlock::Paragraph(build_app_how_to_use_prompt(
-                    app_id.clone(),
-                    &how_to_use,
-                )));
-            }
-        }
-        if blocks.is_empty() {
-            return None;
-        }
-        Some(PromptUnitDoc::new(self.key(), blocks))
-    }
-}
 
 impl PreTurnContextPart for PreTurnSensoryPart {
     fn key(&self) -> &'static str {
@@ -520,7 +343,7 @@ impl AfterClaimContextPart for AfterClaimWorkflowPrimitiveRoutingPart {
     fn build(&self, ctx: &Context, input: &AfterClaimContextInput) -> Option<PromptNode> {
         let mut blocks = Vec::new();
         if ctx.bound_primitive_id.is_none() {
-            // Routing contract already lives in the primitive system prompt.
+            // Routing contract already lives in the core system prompt.
         } else if let Some(workflow_id) = ctx.bound_primitive_id.as_deref() {
             blocks.push(PromptBlock::KeyValueList(vec![(
                 "current_bound_primitive_id".to_string(),

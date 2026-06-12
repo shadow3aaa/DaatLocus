@@ -80,9 +80,7 @@ struct RuntimeCompactionTelemetryEvent {
 }
 
 pub fn build_runtime_request_envelope(context: &Context) -> RuntimeRequestEnvelope {
-    let system_messages =
-        LlmPromptRenderer::render_system_messages(&context.runtime_system_prompt_doc());
-    RuntimeRequestEnvelope::from_system_messages(system_messages)
+    RuntimeRequestEnvelope::from_system_messages(vec![context.runtime_system_prompt_text()])
 }
 
 pub fn build_preturn_context_text(context: &Context, state: &PreTurnState) -> String {

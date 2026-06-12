@@ -27,6 +27,13 @@ pub(crate) struct AppPrompt {
     pub how_to_use: &'static str,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct PromptPersona {
+    pub name: &'static str,
+    pub language: &'static str,
+    pub identity_summary: &'static str,
+}
+
 impl AppPrompt {
     pub(crate) fn usage(self) -> AppUsage {
         AppUsage {
@@ -46,25 +53,6 @@ impl AppPrompt {
             body_markdown: Some(self.how_to_use.to_string()),
         }
     }
-}
-
-const WORKSPACE_PATH_PLACEHOLDER: &str = "{{workspace_path}}";
-
-pub fn build_workspace_unit_prompt(context: &Context) -> String {
-    workspace_unit_prompt_with_path_line(&format!(
-        "Your absolute workspace path is `{}`.",
-        context.execution_cwd.display()
-    ))
-}
-
-pub fn build_workspace_unit_placeholder_prompt() -> String {
-    workspace_unit_prompt_with_path_line(
-        "The absolute runtime workspace path is injected into the real system prompt.",
-    )
-}
-
-fn workspace_unit_prompt_with_path_line(path_line: &str) -> String {
-    SYSTEM_WORKSPACE.replace(WORKSPACE_PATH_PLACEHOLDER, path_line)
 }
 
 pub fn build_runtime_background_hint_items(context: &Context) -> Vec<String> {
@@ -181,7 +169,12 @@ mod tests {
         assert!(
             generated::PROMPT_SOURCES
                 .iter()
-                .any(|(id, source)| *id == "system/event" && *source == SYSTEM_EVENT)
+                .any(|(id, source)| *id == "system/core" && *source == SYSTEM_CORE)
+        );
+        assert!(
+            generated::PROMPT_SOURCES
+                .iter()
+                .any(|(id, source)| *id == "persona/default" && *source == PERSONA_DEFAULT_SOURCE)
         );
     }
 
@@ -204,5 +197,12 @@ mod tests {
             assert!(!prompt.when_to_focus.is_empty());
             assert!(!prompt.how_to_use.is_empty());
         }
+    }
+
+    #[test]
+    fn generated_persona_prompt_struct_is_nonempty() {
+        assert!(!PERSONA_DEFAULT.name.is_empty());
+        assert!(!PERSONA_DEFAULT.language.is_empty());
+        assert!(!PERSONA_DEFAULT.identity_summary.is_empty());
     }
 }

@@ -5,15 +5,8 @@ pub struct PromptDocument {
 
 #[derive(Clone, Debug)]
 pub enum PromptNode {
-    Unit(PromptUnitDoc),
     State(PromptStateDoc),
     Group(PromptGroupDoc),
-}
-
-#[derive(Clone, Debug)]
-pub struct PromptUnitDoc {
-    pub key: String,
-    pub blocks: Vec<PromptBlock>,
 }
 
 #[derive(Clone, Debug)]
@@ -38,15 +31,6 @@ pub enum PromptBlock {
 impl PromptDocument {
     pub fn new(nodes: Vec<PromptNode>) -> Self {
         Self { nodes }
-    }
-}
-
-impl PromptUnitDoc {
-    pub fn new(key: impl Into<String>, blocks: Vec<PromptBlock>) -> Self {
-        Self {
-            key: key.into(),
-            blocks,
-        }
     }
 }
 

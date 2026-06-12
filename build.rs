@@ -276,12 +276,19 @@ struct PromptBinding {
 enum PromptBindingKind {
     Raw,
     App(AppPromptBinding),
+    Persona(PersonaPromptBinding),
 }
 
 struct AppPromptBinding {
     description: String,
     when_to_focus: Vec<String>,
     how_to_use: String,
+}
+
+struct PersonaPromptBinding {
+    name: String,
+    language: String,
+    identity_summary: String,
 }
 
 fn write_prompt_bindings(manifest_dir: &Path) {
@@ -318,10 +325,15 @@ fn write_prompt_bindings(manifest_dir: &Path) {
         let content = trim_trailing_line_endings(&content).to_string();
         let kind = if is_app_prompt_file(relative) {
             PromptBindingKind::App(parse_app_prompt_binding(&path, &content))
+        } else if is_persona_prompt_file(relative) {
+            PromptBindingKind::Persona(parse_persona_prompt_binding(&path, &content))
         } else {
             PromptBindingKind::Raw
         };
-        let source_const_name = if matches!(&kind, PromptBindingKind::App(_)) {
+        let source_const_name = if matches!(
+            &kind,
+            PromptBindingKind::App(_) | PromptBindingKind::Persona(_)
+        ) {
             let source_const_name = format!("{const_name}_SOURCE");
             if !const_names.insert(source_const_name.clone()) {
                 panic!("duplicate generated prompt constant name {source_const_name}");
@@ -367,6 +379,23 @@ fn write_prompt_bindings(manifest_dir: &Path) {
                 code.push_str(&format!("    how_to_use: {:?},\n", app.how_to_use));
                 code.push_str("};\n\n");
             }
+            PromptBindingKind::Persona(persona) => {
+                code.push_str(&format!(
+                    "pub(crate) const {}: &str = {:?};\n\n",
+                    prompt.source_const_name, prompt.content
+                ));
+                code.push_str(&format!(
+                    "pub(crate) const {}: super::PromptPersona = super::PromptPersona {{\n",
+                    prompt.const_name
+                ));
+                code.push_str(&format!("    name: {:?},\n", persona.name));
+                code.push_str(&format!("    language: {:?},\n", persona.language));
+                code.push_str(&format!(
+                    "    identity_summary: {:?},\n",
+                    persona.identity_summary
+                ));
+                code.push_str("};\n\n");
+            }
         }
     }
     code.push_str("#[allow(dead_code)]\npub(crate) const PROMPT_SOURCES: &[(&str, &str)] = &[\n");
@@ -387,6 +416,16 @@ fn is_app_prompt_file(relative: &Path) -> bool {
         .collect::<Vec<_>>();
     components.len() == 2
         && components[0] == "apps"
+        && relative.extension().and_then(|value| value.to_str()) == Some("md")
+}
+
+fn is_persona_prompt_file(relative: &Path) -> bool {
+    let components = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    components.len() == 2
+        && components[0] == "persona"
         && relative.extension().and_then(|value| value.to_str()) == Some("md")
 }
 
@@ -419,6 +458,9 @@ fn prompt_const_name_from_relative_path(relative: &Path) -> String {
     if let Some(app_stem) = app_prompt_stem(relative) {
         return format!("APP_{}", sanitize_const_name(&app_stem));
     }
+    if let Some(persona_stem) = persona_prompt_stem(relative) {
+        return format!("PERSONA_{}", sanitize_const_name(&persona_stem));
+    }
     let raw = relative
         .with_extension("")
         .components()
@@ -430,6 +472,16 @@ fn prompt_const_name_from_relative_path(relative: &Path) -> String {
 
 fn app_prompt_stem(relative: &Path) -> Option<String> {
     if !is_app_prompt_file(relative) {
+        return None;
+    }
+    relative
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(ToOwned::to_owned)
+}
+
+fn persona_prompt_stem(relative: &Path) -> Option<String> {
+    if !is_persona_prompt_file(relative) {
         return None;
     }
     relative
@@ -514,6 +566,58 @@ fn parse_app_prompt_binding_inner(content: &str) -> Result<AppPromptBinding, Str
         when_to_focus,
         how_to_use,
     })
+}
+
+fn parse_persona_prompt_binding(path: &Path, content: &str) -> PersonaPromptBinding {
+    parse_persona_prompt_binding_inner(content)
+        .unwrap_or_else(|err| panic!("invalid persona prompt doc {}: {err}", path.display()))
+}
+
+fn parse_persona_prompt_binding_inner(content: &str) -> Result<PersonaPromptBinding, String> {
+    let (frontmatter, body) = split_prompt_frontmatter(content)
+        .ok_or_else(|| "expected leading frontmatter delimited by ---".to_string())?;
+    let mut name = None::<String>;
+    let mut language = default_prompt_persona_language().to_string();
+
+    for line in frontmatter.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("name:") {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("name cannot be empty".to_string());
+            }
+            name = Some(value.to_string());
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("language:") {
+            let value = value.trim();
+            language = if value.is_empty() {
+                default_prompt_persona_language().to_string()
+            } else {
+                value.to_string()
+            };
+            continue;
+        }
+        return Err(format!("unsupported frontmatter line: {line}"));
+    }
+
+    let name = name.ok_or_else(|| "missing name".to_string())?;
+    let identity_summary = body.trim().to_string();
+    if identity_summary.is_empty() {
+        return Err("missing persona body".to_string());
+    }
+    Ok(PersonaPromptBinding {
+        name,
+        language,
+        identity_summary,
+    })
+}
+
+fn default_prompt_persona_language() -> &'static str {
+    "configured-locale"
 }
 
 fn split_prompt_frontmatter(content: &str) -> Option<(&str, &str)> {

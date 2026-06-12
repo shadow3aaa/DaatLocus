@@ -3,7 +3,10 @@
 //! that are not linked into the main binary path.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
@@ -32,8 +35,8 @@ use crate::{
         programs::runtime_turn_trace_judge::{
             RuntimeTurnTraceJudgeOutput, RuntimeTurnTraceJudgeProgram,
         },
-        prompt_assembler::runtime_system_prompt_doc_from_additions,
-        prompt_renderer::LlmPromptRenderer,
+        prompt_assembler::runtime_system_prompt_text_from_additions,
+        prompts::PERSONA_DEFAULT,
         render::openai_tools::OpenAIToolRenderer,
         runtime::HistoryMessage,
         runtime::{execute_program_with_ir_report, resolve_program_tuning},
@@ -42,6 +45,7 @@ use crate::{
 };
 
 pub const PROMPT_PERSONA_FILE_NAME: &str = "persona.md";
+const PROMPT_PERSONA_CONFIGURED_LOCALE_LANGUAGE: &str = "configured-locale";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -61,7 +65,7 @@ struct PromptPersonaFrontmatter {
 }
 
 fn default_prompt_persona_language() -> String {
-    "configured-locale".to_string()
+    PROMPT_PERSONA_CONFIGURED_LOCALE_LANGUAGE.to_string()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -276,18 +280,35 @@ pub fn prompt_persona_path_sync() -> PathBuf {
 
 pub fn load_prompt_persona_spec_sync() -> PromptPersonaSpec {
     let path = prompt_persona_path_sync();
+    load_prompt_persona_spec_from_path_sync(&path, None, false)
+}
+
+pub fn load_or_create_prompt_persona_spec_sync(locale: &str) -> PromptPersonaSpec {
+    let path = prompt_persona_path_sync();
+    load_prompt_persona_spec_from_path_sync(&path, Some(locale), true)
+}
+
+fn load_prompt_persona_spec_from_path_sync(
+    path: &Path,
+    locale_hint: Option<&str>,
+    create_if_missing: bool,
+) -> PromptPersonaSpec {
     if !path.exists() {
-        return PromptPersonaSpec::default();
+        let default = prompt_persona_spec_from_default_prompt(locale_hint);
+        if create_if_missing {
+            write_default_prompt_persona_file_sync(path, &default);
+        }
+        return default;
     }
 
-    let content = match std::fs::read_to_string(&path) {
+    let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) => {
             warn!(
                 "failed to read prompt persona spec '{}': {error}",
                 path.display()
             );
-            return PromptPersonaSpec::default();
+            return prompt_persona_spec_from_default_prompt(locale_hint);
         }
     };
 
@@ -298,8 +319,56 @@ pub fn load_prompt_persona_spec_sync() -> PromptPersonaSpec {
                 "failed to parse prompt persona spec '{}': {error}",
                 path.display()
             );
-            PromptPersonaSpec::default()
+            prompt_persona_spec_from_default_prompt(locale_hint)
         }
+    }
+}
+
+pub fn resolve_prompt_persona_language(
+    persona: &PromptPersonaSpec,
+    configured_locale: &str,
+) -> String {
+    let language = persona.language.trim();
+    if language.is_empty() || language == PROMPT_PERSONA_CONFIGURED_LOCALE_LANGUAGE {
+        configured_locale.trim().to_string()
+    } else {
+        language.to_string()
+    }
+}
+
+fn write_default_prompt_persona_file_sync(path: &Path, spec: &PromptPersonaSpec) {
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        warn!(
+            "failed to create prompt persona config dir '{}': {error}",
+            parent.display()
+        );
+        return;
+    }
+
+    let content = render_prompt_persona_markdown(spec);
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return,
+        Err(error) => {
+            warn!(
+                "failed to create default prompt persona spec '{}': {error}",
+                path.display()
+            );
+            return;
+        }
+    };
+
+    if let Err(error) = file.write_all(content.as_bytes()) {
+        warn!(
+            "failed to write default prompt persona spec '{}': {error}",
+            path.display()
+        );
     }
 }
 
@@ -334,12 +403,21 @@ fn normalized_persona_language(language: &str) -> String {
 
 fn split_prompt_persona_frontmatter(content: &str) -> Result<(&str, &str)> {
     let rest = content
-        .strip_prefix("---\n")
+        .strip_prefix("---\r\n")
+        .or_else(|| {
+            content
+                .strip_prefix("---\n")
+                .or_else(|| content.strip_prefix("---"))
+        })
         .ok_or_else(|| miette!("persona file missing frontmatter start"))?;
-    let end = rest
+    let delimiter = rest
         .find("\n---\n")
+        .map(|index| (index, 5))
+        .or_else(|| rest.find("\r\n---\r\n").map(|index| (index, 7)))
+        .or_else(|| rest.find("\n---\r\n").map(|index| (index, 6)))
+        .or_else(|| rest.find("\r\n---\n").map(|index| (index, 6)))
         .ok_or_else(|| miette!("persona file missing frontmatter end"))?;
-    Ok((&rest[..end], &rest[end + 5..]))
+    Ok((&rest[..delimiter.0], &rest[delimiter.0 + delimiter.1..]))
 }
 
 pub fn render_prompt_persona_markdown(spec: &PromptPersonaSpec) -> String {
@@ -613,18 +691,29 @@ pub fn current_runtime_system_prompt_artifact_from_store(
 }
 
 pub fn runtime_system_prompt_text(compiled_prompts: &CompiledPromptStore) -> String {
-    LlmPromptRenderer::render_document(&runtime_system_prompt_doc_from_additions(
-        compiled_prompts.runtime_system_additions(),
-    ))
+    runtime_system_prompt_text_from_additions(compiled_prompts.runtime_system_additions())
 }
 
 impl Default for PromptPersonaSpec {
     fn default() -> Self {
-        Self {
-            name: "Daat Locus".to_string(),
-            language: default_prompt_persona_language(),
-            identity_summary: "Daat Locus is a neutral, concise, results-oriented agent persona. It follows the configured locale for user-facing replies, communicates clearly, and prioritizes accurate, actionable responses.".to_string(),
-        }
+        prompt_persona_spec_from_default_prompt(None)
+    }
+}
+
+fn prompt_persona_spec_from_default_prompt(locale_hint: Option<&str>) -> PromptPersonaSpec {
+    let language = match PERSONA_DEFAULT.language.trim() {
+        "" => default_prompt_persona_language(),
+        PROMPT_PERSONA_CONFIGURED_LOCALE_LANGUAGE => locale_hint
+            .map(str::trim)
+            .filter(|locale| !locale.is_empty())
+            .unwrap_or(PROMPT_PERSONA_CONFIGURED_LOCALE_LANGUAGE)
+            .to_string(),
+        language => language.to_string(),
+    };
+    PromptPersonaSpec {
+        name: PERSONA_DEFAULT.name.trim().to_string(),
+        language: normalized_persona_language(&language),
+        identity_summary: PERSONA_DEFAULT.identity_summary.trim().to_string(),
     }
 }
 
@@ -711,6 +800,90 @@ Use the configured locale by default.
             parsed.identity_summary,
             "Use the configured locale by default."
         );
+    }
+
+    #[test]
+    fn parse_prompt_persona_markdown_accepts_crlf_frontmatter() {
+        let parsed = parse_prompt_persona_markdown(
+            "---\r\nname: Test Persona\r\nlanguage: zh-CN\r\n---\r\n\r\nUse Chinese.\r\n",
+        )
+        .expect("persona markdown should parse");
+
+        assert_eq!(parsed.name, "Test Persona");
+        assert_eq!(parsed.language, "zh-CN");
+        assert_eq!(parsed.identity_summary, "Use Chinese.");
+    }
+
+    #[test]
+    fn default_prompt_persona_spec_uses_generated_default() {
+        let parsed =
+            parse_prompt_persona_markdown(crate::reasoning::prompts::PERSONA_DEFAULT_SOURCE)
+                .expect("generated persona default should parse");
+        assert_eq!(PromptPersonaSpec::default(), parsed);
+    }
+
+    #[test]
+    fn default_prompt_persona_file_is_created_without_overwriting_existing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config").join(PROMPT_PERSONA_FILE_NAME);
+        let initial = PromptPersonaSpec {
+            name: "Initial Persona".to_string(),
+            language: "en-US".to_string(),
+            identity_summary: "Initial body.".to_string(),
+        };
+        write_default_prompt_persona_file_sync(&path, &initial);
+        let initial_content = std::fs::read_to_string(&path).expect("initial persona file");
+        let parsed_initial = parse_prompt_persona_markdown(&initial_content)
+            .expect("written initial persona should parse");
+        assert_eq!(parsed_initial, initial);
+
+        let replacement = PromptPersonaSpec {
+            name: "Replacement Persona".to_string(),
+            language: "zh-CN".to_string(),
+            identity_summary: "Replacement body.".to_string(),
+        };
+        write_default_prompt_persona_file_sync(&path, &replacement);
+        let final_content = std::fs::read_to_string(&path).expect("final persona file");
+        assert_eq!(final_content, initial_content);
+    }
+
+    #[test]
+    fn missing_prompt_persona_file_is_created_with_configured_locale_hint() {
+        for locale in ["zh-CN", "en-US"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let path = temp.path().join("config").join(PROMPT_PERSONA_FILE_NAME);
+
+            let loaded = load_prompt_persona_spec_from_path_sync(&path, Some(locale), true);
+            assert_eq!(loaded.language, locale);
+
+            let content = std::fs::read_to_string(&path).expect("written persona file");
+            let written =
+                parse_prompt_persona_markdown(&content).expect("written persona should parse");
+            assert_eq!(written.language, locale);
+        }
+    }
+
+    #[test]
+    fn readonly_prompt_persona_load_does_not_create_missing_file() {
+        for locale in ["zh-CN", "en-US"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let path = temp.path().join("config").join(PROMPT_PERSONA_FILE_NAME);
+
+            let loaded = load_prompt_persona_spec_from_path_sync(&path, Some(locale), false);
+            assert_eq!(loaded.language, locale);
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn prompt_persona_language_placeholder_resolves_to_configured_locale() {
+        let persona = PromptPersonaSpec {
+            name: "Test Persona".to_string(),
+            language: "configured-locale".to_string(),
+            identity_summary: "Body.".to_string(),
+        };
+
+        assert_eq!(resolve_prompt_persona_language(&persona, "zh-CN"), "zh-CN");
     }
 
     #[test]

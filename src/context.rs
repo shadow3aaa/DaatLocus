@@ -25,7 +25,7 @@ use crate::{
     preturn_state::PreTurnState,
     reasoning::{
         compiled::CompiledPromptStore,
-        prompt_assembler::{PreTurnContextAssembler, SystemPromptAssembler},
+        prompt_assembler::{PreTurnContextAssembler, runtime_system_prompt_text},
         prompt_doc::PromptDocument,
     },
     sandbox::RuntimeSandboxPolicy,
@@ -167,8 +167,8 @@ fn normalize_app_notice_reason_lossy(reason: impl AsRef<str>) -> String {
 }
 
 impl Context {
-    pub fn runtime_system_prompt_doc(&self) -> PromptDocument {
-        SystemPromptAssembler::default_runtime().assemble(self)
+    pub fn runtime_system_prompt_text(&self) -> String {
+        runtime_system_prompt_text(self)
     }
 
     pub fn preturn_context_doc(&self, state: &PreTurnState) -> PromptDocument {
