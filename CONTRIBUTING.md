@@ -36,6 +36,43 @@ cargo deny --locked check bans sources licenses
 Run the relevant subset locally before submitting changes. For high-risk
 runtime changes, add focused tests or include a clear manual verification note.
 
+## TUI Performance Command
+
+`tui-perf-cmd` enables a hidden developer command for deterministic dashboard
+render checks. It is a non-default feature and is not part of the normal CLI
+surface.
+
+Run the default mixed scenario:
+
+```bash
+cargo run --features tui-perf-cmd -- dev tui-perf \
+  --scenario mixed --frames 120 --warmup 10 --width 120 --height 40
+```
+
+Emit JSON for scripts:
+
+```bash
+cargo run --features tui-perf-cmd -- dev tui-perf \
+  --scenario long-history --frames 240 --warmup 20 --width 140 --height 48 --json
+```
+
+Available scenarios:
+
+- `mixed`: committed activity, live cells, skills toggle panel, markdown, diffs,
+  browser, terminal, and reply cells.
+- `long-history`: many committed activity cells with an explicit scroll offset.
+- `live-activity`: active runtime status and live activity cells.
+- `command-panels`: skills list panel and command-bar rendering.
+
+The command renders through the same dashboard frame function used by the real
+TUI, but it uses `ratatui::backend::TestBackend` instead of entering the
+terminal alternate screen. Reported metrics include frame, prep, draw, activity,
+and command timing, plus activity render-cache hit/miss counts.
+
+Use this command when a TUI change might affect render cost or frame scheduling.
+Treat absolute milliseconds as local-machine data; compare scenarios across
+nearby revisions instead of relying on tight cross-machine thresholds.
+
 ## Commit Messages
 
 Commit messages must be in English. Use a title that names the real behavior or

@@ -14,6 +14,8 @@ use crate::{
     logging::init_logging,
 };
 use crate::{config, config_wizard};
+#[cfg(feature = "tui-perf-cmd")]
+use clap::Args;
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result, miette};
 use ratatui::{
@@ -80,6 +82,13 @@ enum DaatLocusCommand {
         #[command(subcommand)]
         target: Option<ConfigTarget>,
     },
+    /// Developer-only commands.
+    #[cfg(feature = "tui-perf-cmd")]
+    #[command(name = "dev", hide = true)]
+    Dev {
+        #[command(subcommand)]
+        target: DevTarget,
+    },
     /// Print the JSON Schema for config.toml.
     #[command(name = "config-schema")]
     ConfigSchema,
@@ -99,6 +108,37 @@ enum DaatLocusCommand {
         #[arg(long)]
         token: String,
     },
+}
+
+#[cfg(feature = "tui-perf-cmd")]
+#[derive(Debug, Subcommand)]
+enum DevTarget {
+    /// Run deterministic TUI render performance scenarios.
+    #[command(name = "tui-perf", hide = true)]
+    TuiPerf(TuiPerfCliArgs),
+}
+
+#[cfg(feature = "tui-perf-cmd")]
+#[derive(Debug, Args)]
+struct TuiPerfCliArgs {
+    /// Scenario to render: mixed, long-history, live-activity, command-panels.
+    #[arg(long, default_value = "mixed")]
+    scenario: String,
+    /// Measured frame count after warmup.
+    #[arg(long, default_value_t = 120)]
+    frames: usize,
+    /// Warmup frames excluded from timing aggregates.
+    #[arg(long, default_value_t = 10)]
+    warmup: usize,
+    /// Mock terminal width.
+    #[arg(long, default_value_t = 120)]
+    width: u16,
+    /// Mock terminal height.
+    #[arg(long, default_value_t = 40)]
+    height: u16,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -218,6 +258,22 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
         }
         Some(DaatLocusCommand::ConfigSchema) => {
             print_config_schema()?;
+            return Ok(());
+        }
+        #[cfg(feature = "tui-perf-cmd")]
+        Some(DaatLocusCommand::Dev {
+            target: DevTarget::TuiPerf(args),
+        }) => {
+            crate::dashboard::tui_perf::run_tui_perf_command(
+                crate::dashboard::tui_perf::TuiPerfCommand {
+                    scenario: args.scenario.clone(),
+                    frames: args.frames,
+                    warmup: args.warmup,
+                    width: args.width,
+                    height: args.height,
+                    json: args.json,
+                },
+            )?;
             return Ok(());
         }
         Some(DaatLocusCommand::Daemon {

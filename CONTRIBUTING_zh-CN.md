@@ -27,6 +27,40 @@ cargo deny --locked check bans sources licenses
 
 提交修改前，请在本地运行相关检查。对于高风险 runtime 变更，应增加聚焦测试，或写清楚人工验证结果。
 
+## TUI 性能命令
+
+`tui-perf-cmd` 会启用一个隐藏的开发者命令，用于确定性地检查 dashboard
+渲染性能。它是非默认 feature，不属于普通 CLI 功能面。
+
+运行默认 mixed 场景：
+
+```bash
+cargo run --features tui-perf-cmd -- dev tui-perf \
+  --scenario mixed --frames 120 --warmup 10 --width 120 --height 40
+```
+
+为脚本输出 JSON：
+
+```bash
+cargo run --features tui-perf-cmd -- dev tui-perf \
+  --scenario long-history --frames 240 --warmup 20 --width 140 --height 48 --json
+```
+
+可用场景：
+
+- `mixed`：committed activity、live cells、skills toggle panel、markdown、diff、
+  browser、terminal 和 reply cells。
+- `long-history`：大量 committed activity cells，并设置显式滚动位置。
+- `live-activity`：活跃 runtime status 和 live activity cells。
+- `command-panels`：skills list panel 和 command bar 渲染。
+
+该命令使用真实 TUI 的 dashboard frame 渲染函数，但通过
+`ratatui::backend::TestBackend` 运行，不进入真实 terminal alternate screen。
+报告包含 frame、prep、draw、activity、command timing，以及 activity render
+cache 的 hit/miss 计数。
+
+当 TUI 改动可能影响渲染成本或 frame scheduling 时使用这个命令。绝对毫秒数只适合作为本机数据；更可靠的方式是在相邻 revision 之间比较同一场景的指标，而不是设置很紧的跨机器阈值。
+
 ## Commit Message
 
 Commit message 必须使用英文。标题应当说明真实改变的行为或边界，例如：

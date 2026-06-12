@@ -43,6 +43,10 @@ members = [".", "xtask", "crates/scope-engine"]
 default-members = ["."]
 resolver = "3"
 
+[features]
+default = []
+tui-perf-cmd = []
+
 [dependencies]
 async-trait = "0.1.89"
 axum = { version = "0.8.4", features = ["ws"] }
