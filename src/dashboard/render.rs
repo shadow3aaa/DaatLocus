@@ -663,6 +663,39 @@ fn render_status_event_summary_from_statuses(
 }
 
 fn render_status_usage_lines(context: &Context) -> Vec<String> {
+    fn fmt_num(n: i64) -> String {
+        let s = n.to_string();
+        let mut r = String::with_capacity(s.len() + s.len() / 3);
+        for (i, c) in s.chars().enumerate() {
+            if i > 0 && (s.len() - i).is_multiple_of(3) {
+                r.push(',');
+            }
+            r.push(c);
+        }
+        r
+    }
+
+    fn context_bar(used: i64, window: i64) -> String {
+        const W: usize = 20;
+        if window <= 0 {
+            return String::new();
+        }
+        let used = used.max(0) as f64;
+        let window = window as f64;
+        let pct = used / window;
+        let pct_clamped = pct.clamp(0.0, 1.0);
+        let filled = (pct_clamped * W as f64).round() as usize;
+        let bar: String = (0..filled)
+            .map(|_| '\u{2588}')
+            .chain((0..W.saturating_sub(filled)).map(|_| '\u{2591}'))
+            .collect();
+        if pct > 1.0 {
+            format!("{bar}> {:.1}%", pct * 100.0)
+        } else {
+            format!("{bar} {:.1}%", pct * 100.0)
+        }
+    }
+
     let mut lines = Vec::new();
     for (label, llm) in [("main", &context.llm), ("judge", &context.judge_llm)] {
         let Some(info) = llm.token_usage_info() else {
@@ -671,31 +704,76 @@ fn render_status_usage_lines(context: &Context) -> Vec<String> {
         if info.total_token_usage.is_zero() {
             continue;
         }
+
         let model = llm.model_name().unwrap_or_else(|| "<unknown>".to_string());
-        let context_window = info
-            .model_context_window
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "?".to_string());
-        lines.push(format!(
-            "• {label}  model={model} total={} input={} output={} cached={} reasoning={} window={context_window}",
-            info.total_token_usage.total_tokens,
-            info.total_token_usage.input_tokens,
-            info.total_token_usage.output_tokens,
-            info.total_token_usage.cached_input_tokens,
-            info.total_token_usage.reasoning_output_tokens,
-        ));
-        lines.push(format!(
-            "  last={} input={} output={}",
-            info.last_token_usage.total_tokens,
-            info.last_token_usage.input_tokens,
-            info.last_token_usage.output_tokens,
-        ));
+        lines.push(format!("  {label} · {model}"));
+
+        // Context pressure line — per-turn input vs window
+        if let Some(window) = info.model_context_window {
+            let used = info.last_token_usage.input_tokens.max(0);
+            lines.push(format!(
+                "    Context:  {} {} of {}",
+                context_bar(used, window),
+                if window > 0 && used > 0 {
+                    format!("{:.1}%", used as f64 / window as f64 * 100.0)
+                } else if window > 0 {
+                    "0.0%".to_string()
+                } else {
+                    String::new()
+                },
+                format_compact_tokens(window.max(0) as usize),
+            ));
+        }
+
+        // Last-turn detail line
+        let last = &info.last_token_usage;
+        if !last.is_zero() {
+            let mut last_parts = vec![format!("{} in", fmt_num(last.input_tokens))];
+            last_parts.push(format!("{} out", fmt_num(last.output_tokens)));
+            if last.reasoning_output_tokens > 0 {
+                last_parts.push(format!(
+                    "{} reasoning",
+                    fmt_num(last.reasoning_output_tokens)
+                ));
+            }
+            lines.push(format!("    Last turn: {}", last_parts.join(" · ")));
+        }
+
+        // Cumulative total line
+        let total = &info.total_token_usage;
+        let cached_pct = if total.input_tokens > 0 {
+            format!(
+                "{:.0}% cached",
+                total.cached_input_tokens as f64 / total.input_tokens as f64 * 100.0
+            )
+        } else {
+            String::new()
+        };
+        if cached_pct.is_empty() {
+            lines.push(format!(
+                "    Total:  {} Used",
+                format_compact_tokens(total.total_tokens.max(0) as usize),
+            ));
+        } else {
+            lines.push(format!(
+                "    Total:  {} Used · {}",
+                format_compact_tokens(total.total_tokens.max(0) as usize),
+                cached_pct,
+            ));
+        }
+
+        lines.push(String::new()); // blank separator between models
     }
+
     if lines.is_empty() {
-        vec!["No token usage recorded yet.".to_string()]
-    } else {
-        lines
+        return vec!["No token usage recorded yet.".to_string()];
     }
+
+    // Remove trailing blank separator
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines
 }
 
 fn render_status_plan_lines(context: &Context) -> Vec<String> {
