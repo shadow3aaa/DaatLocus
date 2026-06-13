@@ -11,8 +11,9 @@ use super::{
     apps::{BrowserActivityCell, LiveBrowserActivityCell, WebSearchActivityCell},
     common::{
         AssistantActivityCell, CodingEditActivityCell, CodingOpenProjectActivityCell,
-        CodingReviewActivityCell, ErrorActivityCell, ExploredActivityCell, GenericAppActivityCell,
-        TerminalWaitActivityCell, ThinkingActivityCell, UserActivityCell,
+        CodingReviewActivityCell, ErrorActivityCell, ExploredActivityCell,
+        FinalMessageSeparatorActivityCell, GenericAppActivityCell, TerminalWaitActivityCell,
+        ThinkingActivityCell, UserActivityCell,
     },
     exec::{ExecResultActivityCell, LiveExecActivityCell},
     messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell},
@@ -252,6 +253,9 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
 
     match cell {
         ActivityCell::Assistant(cell) => apply_assistant_cell(&mut item, cell),
+        ActivityCell::FinalMessageSeparator(cell) => {
+            apply_final_message_separator_cell(&mut item, cell)
+        }
         ActivityCell::User(cell) => apply_user_cell(&mut item, cell),
         ActivityCell::AppAttention(cell) => apply_simple_tool_item(
             &mut item,
@@ -296,6 +300,7 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
 fn activity_cell_variant_name(cell: &ActivityCell) -> &'static str {
     match cell {
         ActivityCell::Assistant(_) => "Assistant",
+        ActivityCell::FinalMessageSeparator(_) => "FinalMessageSeparator",
         ActivityCell::User(_) => "User",
         ActivityCell::AppAttention(_) => "AppAttention",
         ActivityCell::Browser(_) => "Browser",
@@ -326,6 +331,36 @@ fn apply_assistant_cell(item: &mut WebActivityItem, cell: &AssistantActivityCell
     item.actor = Some(WebActivityActor::Assistant);
     item.title = crate::dashboard::dashboard_agent_name();
     item.blocks = text_blocks(cell.body_lines.clone());
+}
+
+fn apply_final_message_separator_cell(
+    item: &mut WebActivityItem,
+    cell: &FinalMessageSeparatorActivityCell,
+) {
+    item.kind = WebActivityKind::Message;
+    item.actor = Some(WebActivityActor::System);
+    item.ui_hint = Some("final-message-separator".to_string());
+    item.title = "Worked".to_string();
+    item.blocks = text_blocks(vec![
+        cell.elapsed_seconds
+            .map(|seconds| format!("Worked for {}", format_elapsed_seconds_compact(seconds)))
+            .unwrap_or_else(|| "Worked".to_string()),
+    ]);
+}
+
+fn format_elapsed_seconds_compact(elapsed_seconds: u64) -> String {
+    if elapsed_seconds < 60 {
+        return format!("{elapsed_seconds}s");
+    }
+    if elapsed_seconds < 3600 {
+        let minutes = elapsed_seconds / 60;
+        let seconds = elapsed_seconds % 60;
+        return format!("{minutes}m {seconds:02}s");
+    }
+    let hours = elapsed_seconds / 3600;
+    let minutes = (elapsed_seconds % 3600) / 60;
+    let seconds = elapsed_seconds % 60;
+    format!("{hours}h {minutes:02}m {seconds:02}s")
 }
 
 fn apply_thinking_cell(item: &mut WebActivityItem, cell: &ThinkingActivityCell) {

@@ -18,6 +18,12 @@ pub struct AssistantActivityCell {
     pub rich_mode: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FinalMessageSeparatorActivityCell {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_seconds: Option<u64>,
+}
+
 fn default_rich_mode() -> bool {
     true
 }
@@ -142,6 +148,12 @@ pub fn assistant_cell_with_body(
         full_body,
         rich_mode: true,
     }
+}
+
+pub fn final_message_separator_cell(
+    elapsed_seconds: Option<u64>,
+) -> FinalMessageSeparatorActivityCell {
+    FinalMessageSeparatorActivityCell { elapsed_seconds }
 }
 
 pub fn user_cell(title: impl Into<String>, body_lines: Vec<String>) -> UserActivityCell {

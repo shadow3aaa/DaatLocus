@@ -17,8 +17,8 @@ use super::{
     common::{
         AssistantActivityCell, CodingEditActivityCell, CodingOpenProjectActivityCell,
         CodingReviewActivityCell, ErrorActivityCell, ExploredActivityCell,
-        ExploredCallActivityCell, GenericAppActivityCell, MessageImageAttachment,
-        TerminalWaitActivityCell, ThinkingActivityCell, UserActivityCell,
+        ExploredCallActivityCell, FinalMessageSeparatorActivityCell, GenericAppActivityCell,
+        MessageImageAttachment, TerminalWaitActivityCell, ThinkingActivityCell, UserActivityCell,
     },
     exec::{ExecResultActivityCell, LiveExecActivityCell, TerminalExecutionMeta},
     highlight::{
@@ -325,6 +325,9 @@ impl Renderable for ActivityCell {
 fn render_activity_cell_lines(cell: &ActivityCell, max_width: u16) -> Vec<Line<'static>> {
     match cell {
         ActivityCell::Assistant(cell) => render_assistant_cell_lines(cell, max_width),
+        ActivityCell::FinalMessageSeparator(cell) => {
+            render_final_message_separator_cell_lines(cell, max_width)
+        }
         ActivityCell::User(cell) => render_user_cell_lines(cell, max_width),
         ActivityCell::AppAttention(cell) => render_app_attention_cell_lines(cell, max_width),
         ActivityCell::Browser(cell) => render_browser_cell_lines(cell, max_width),
@@ -406,6 +409,9 @@ fn activity_cell_transcript_lines(cell: &ActivityCell, width: u16) -> Vec<Line<'
                 .clone()
                 .unwrap_or_else(|| cell.body_lines.join("\n"));
             transcript_markdown_section("ASSISTANT", &body, Color::White, width)
+        }
+        ActivityCell::FinalMessageSeparator(cell) => {
+            render_final_message_separator_cell_lines(cell, width)
         }
         ActivityCell::User(cell) => transcript_user_lines(cell, width),
         ActivityCell::Thinking(cell) => {
@@ -695,6 +701,10 @@ fn activity_cell_transcript_block(cell: &ActivityCell) -> String {
                 .clone()
                 .unwrap_or_else(|| primary_transcript_text(&cell.title, &cell.body_lines)),
         ),
+        ActivityCell::FinalMessageSeparator(cell) => cell
+            .elapsed_seconds
+            .map(|seconds| format!("Worked for {}", format_elapsed_seconds_compact(seconds)))
+            .unwrap_or_else(|| "Worked".to_string()),
         ActivityCell::User(cell) => transcript_section("USER", user_transcript_text(cell)),
         ActivityCell::Thinking(cell) => transcript_section(
             "THINKING",
@@ -1219,6 +1229,63 @@ fn spans_display_width(spans: &[Span<'static>]) -> usize {
         .flat_map(|span| span.content.chars())
         .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
         .sum()
+}
+
+fn render_final_message_separator_cell_lines(
+    cell: &FinalMessageSeparatorActivityCell,
+    max_width: u16,
+) -> Vec<Line<'static>> {
+    let width = usize::from(max_width);
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let label = cell
+        .elapsed_seconds
+        .map(|seconds| format!("─ Worked for {} ─", format_elapsed_seconds_compact(seconds)))
+        .unwrap_or_else(|| "─".to_string());
+    let label_width = display_width(&label);
+    let text = if label_width >= width {
+        truncate_display_width(&label, width)
+    } else {
+        format!("{label}{}", "─".repeat(width.saturating_sub(label_width)))
+    };
+    vec![Line::from(Span::styled(text, dim_style()))]
+}
+
+fn format_elapsed_seconds_compact(elapsed_seconds: u64) -> String {
+    if elapsed_seconds < 60 {
+        return format!("{elapsed_seconds}s");
+    }
+    if elapsed_seconds < 3600 {
+        let minutes = elapsed_seconds / 60;
+        let seconds = elapsed_seconds % 60;
+        return format!("{minutes}m {seconds:02}s");
+    }
+    let hours = elapsed_seconds / 3600;
+    let minutes = (elapsed_seconds % 3600) / 60;
+    let seconds = elapsed_seconds % 60;
+    format!("{hours}h {minutes:02}m {seconds:02}s")
+}
+
+fn display_width(text: &str) -> usize {
+    text.chars()
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+        .sum()
+}
+
+fn truncate_display_width(text: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
 }
 
 fn render_assistant_cell_lines(cell: &AssistantActivityCell, max_width: u16) -> Vec<Line<'static>> {
@@ -2983,6 +3050,23 @@ That's it.";
                 .any(|line| line.contains("https://docs.rs/ratatui")),
             "searched web cell should include the result url: {searched:?}"
         );
+    }
+
+    #[test]
+    fn final_message_separator_renders_worked_duration() {
+        let rendered = render_activity_cell_lines(
+            &ActivityCell::FinalMessageSeparator(FinalMessageSeparatorActivityCell {
+                elapsed_seconds: Some(17 * 60 + 44),
+            }),
+            80,
+        )
+        .into_iter()
+        .map(|line| line_text(&line))
+        .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].starts_with("─ Worked for 17m 44s ─"));
+        assert_eq!(display_width(&rendered[0]), 80);
     }
 
     #[test]

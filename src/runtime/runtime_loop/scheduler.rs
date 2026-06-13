@@ -101,9 +101,17 @@ pub(crate) async fn daat_locus_loop(
         .apps
         .wait_until_settled(Duration::from_secs(1), Duration::from_secs(3))
         .await;
+    let (activity_len_before_turn, last_activity_cell_before_turn) = {
+        let state = tx.borrow();
+        (
+            state.activity_cells.len(),
+            state.activity_cells.last().cloned(),
+        )
+    };
+    let runtime_turn_started_at = std::time::Instant::now();
     context.active_runtime_turn = true;
     context.runtime_turn_epoch = context.runtime_turn_epoch.wrapping_add(1);
-    context.runtime_turn_started_at = Some(std::time::Instant::now());
+    context.runtime_turn_started_at = Some(runtime_turn_started_at);
     context.runtime_turn_started_at_ms = Some(chrono::Utc::now().timestamp_millis());
     context.set_runtime_phase(Some(RuntimeTurnPhase::PreflightPreTurnContext));
     sync_dashboard_state(
@@ -118,6 +126,13 @@ pub(crate) async fn daat_locus_loop(
     {
         tracing::warn!("session title refresh failed: {err:?}");
     }
+    super::turn::append_final_message_separator_activity_cell(
+        context,
+        tx,
+        activity_len_before_turn,
+        last_activity_cell_before_turn,
+        Some(runtime_turn_started_at.elapsed().as_secs()),
+    );
     context.active_runtime_turn = false;
     context.runtime_turn_started_at = None;
     context.runtime_turn_started_at_ms = None;

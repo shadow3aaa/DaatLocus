@@ -16,8 +16,9 @@ use crate::{
     dashboard::{
         DashboardActivityEvent, DashboardActivityHistoryStore, DashboardActivityHistoryWindow,
         DashboardControlCommand, DashboardState, activity_cell_from_tool_ui_event,
-        apply_activity_event, assistant_activity_cell, render_activity_from_messages,
-        thinking_activity_cell, user_activity_cell_from_event, web_activity_item_from_cell,
+        apply_activity_event, assistant_activity_cell, final_message_separator_activity_cell,
+        render_activity_from_messages, thinking_activity_cell, user_activity_cell_from_event,
+        web_activity_item_from_cell,
     },
     events::{EventPayload, EventStatus, EventView},
     logging::{

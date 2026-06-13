@@ -26,9 +26,9 @@ pub use cells::{
     ActivityCell, CachedActivityLines, DashboardActivityEvent, LiveActivityCell,
     LiveWebActivityItem, ReducedMotion, WebActivityItem, activity_cell_from_tool_ui_event,
     activity_cells_from_history_items, apply_activity_event, assistant_activity_cell,
-    default_web_activity_version, render_activity_feed_cached, render_activity_from_messages,
-    sync_web_activity_state, thinking_activity_cell, user_activity_cell_from_event,
-    web_activity_item_from_cell,
+    default_web_activity_version, final_message_separator_activity_cell,
+    render_activity_feed_cached, render_activity_from_messages, sync_web_activity_state,
+    thinking_activity_cell, user_activity_cell_from_event, web_activity_item_from_cell,
 };
 pub(crate) use command_flow::execute_control_command;
 pub use commands::{

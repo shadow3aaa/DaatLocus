@@ -26,7 +26,7 @@ pub(crate) use common::ExploredCallActivityCell;
 use common::{
     AssistantActivityCell, ErrorActivityCell, GenericAppActivityCell, MessageImageAttachment,
     TerminalWaitActivityCell, UserActivityCell, assistant_cell_with_body, error_cell,
-    terminal_wait_cell, user_cell,
+    final_message_separator_cell, terminal_wait_cell, user_cell,
 };
 use common::{
     CodingEditActivityCell, CodingOpenProjectActivityCell, CodingReviewActivityCell,
@@ -59,6 +59,7 @@ const MAX_EXPLORED_CALLS: usize = 24;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ActivityCell {
     Assistant(AssistantActivityCell),
+    FinalMessageSeparator(common::FinalMessageSeparatorActivityCell),
     User(UserActivityCell),
     AppAttention(AppAttentionActivityCell),
     Browser(BrowserActivityCell),
@@ -211,6 +212,10 @@ pub fn assistant_activity_cell(content: &str) -> Option<ActivityCell> {
         remaining_lines_with_limit(trimmed, 8),
         Some(trimmed.to_string()),
     )))
+}
+
+pub fn final_message_separator_activity_cell(elapsed_seconds: Option<u64>) -> ActivityCell {
+    ActivityCell::FinalMessageSeparator(final_message_separator_cell(elapsed_seconds))
 }
 
 pub fn thinking_activity_cell(reasoning_content: &str) -> Option<ActivityCell> {
