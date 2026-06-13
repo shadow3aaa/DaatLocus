@@ -828,7 +828,7 @@ mod tests {
         async fn new(focused: AppId) -> Self {
             let home = tempfile::tempdir().expect("test home");
             let execution = tempfile::tempdir().expect("test execution cwd");
-            let home_override = DaatLocusHomeOverride::set(home.path().to_path_buf());
+            let home_override = DaatLocusHomeOverride::set(home.path().to_path_buf()).await;
             let config = Config::default();
             let telegram = TelegramTransportState::new();
             let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();

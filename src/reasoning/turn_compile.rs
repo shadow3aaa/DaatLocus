@@ -131,7 +131,7 @@ impl IsolatedEvalContext {
                 home_path.display()
             )
         })?;
-        let home_override = DaatLocusHomeOverride::set(home_path.clone());
+        let home_override = DaatLocusHomeOverride::set(home_path.clone()).await;
         let context = build_eval_context_with_compiled(config, compiled_prompts).await;
         Ok(Self {
             context,

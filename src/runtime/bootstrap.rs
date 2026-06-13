@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     env,
     path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
 };
+
+use tokio::sync::OwnedMutexGuard;
 
 use crate::{
     app::AppManager,
@@ -274,15 +277,20 @@ pub(crate) fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSu
 
 pub(crate) struct DaatLocusHomeOverride {
     previous: Option<String>,
+    _guard: OwnedMutexGuard<()>,
 }
 
 impl DaatLocusHomeOverride {
-    pub(crate) fn set(path: PathBuf) -> Self {
+    pub(crate) async fn set(path: PathBuf) -> Self {
+        let guard = daat_locus_home_override_lock().lock_owned().await;
         let previous = env::var("DAAT_LOCUS_HOME").ok();
         unsafe {
             env::set_var("DAAT_LOCUS_HOME", path);
         }
-        Self { previous }
+        Self {
+            previous,
+            _guard: guard,
+        }
     }
 }
 
@@ -299,6 +307,11 @@ impl Drop for DaatLocusHomeOverride {
     }
 }
 
+fn daat_locus_home_override_lock() -> Arc<tokio::sync::Mutex<()>> {
+    static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
+    Arc::clone(LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(()))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn eval_context_starts_without_focused_app() {
         let home = tempfile::tempdir().expect("test home");
-        let _home_override = DaatLocusHomeOverride::set(home.path().to_path_buf());
+        let _home_override = DaatLocusHomeOverride::set(home.path().to_path_buf()).await;
 
         let context = build_eval_context_with_compiled(
             crate::config::Config::default(),

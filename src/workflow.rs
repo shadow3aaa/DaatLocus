@@ -1262,7 +1262,6 @@ fn workflow_run_records_io_lock() -> &'static tokio::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -1621,10 +1620,7 @@ mod tests {
     #[tokio::test]
     async fn workflow_run_records_are_appended_and_deduped() {
         let temp_dir = TempDir::new().expect("workflow run record temp dir");
-        let previous_home = env::var("DAAT_LOCUS_HOME").ok();
-        unsafe {
-            env::set_var("DAAT_LOCUS_HOME", temp_dir.path());
-        }
+        let _home_override = crate::DaatLocusHomeOverride::set(temp_dir.path().to_path_buf()).await;
 
         let record = PrimitiveRunRecord {
             run_id: "workflow-run:run-1".to_string(),
@@ -1665,15 +1661,6 @@ mod tests {
         let remaining_count = primitive_run_record_count()
             .await
             .expect("count remaining workflow run records");
-
-        match previous_home {
-            Some(previous_home) => unsafe {
-                env::set_var("DAAT_LOCUS_HOME", previous_home);
-            },
-            None => unsafe {
-                env::remove_var("DAAT_LOCUS_HOME");
-            },
-        }
 
         assert_eq!(batch.records.len(), 1);
         assert_eq!(batch.unread_record_count, 1);

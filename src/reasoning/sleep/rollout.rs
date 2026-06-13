@@ -558,7 +558,7 @@ pub(super) async fn execute_workflow_candidate_rollout(
     tokio::fs::create_dir_all(&rollout_home)
         .await
         .into_diagnostic()?;
-    let home_override = DaatLocusHomeOverride::set(rollout_home.clone());
+    let home_override = DaatLocusHomeOverride::set(rollout_home.clone()).await;
     let mut isolated =
         build_eval_context_with_compiled(context.config.clone(), context.compiled_prompts.clone())
             .await;
