@@ -1,251 +1,459 @@
-//! Markdown rendering for the TUI dashboard.
+//! Markdown rendering for dashboard activity cells.
 //!
-//! Thin wrapper around [`tui-markdown`], converting markdown text into styled
-//! ratatui [`Line`]s with a configurable base colour. Delegates all parsing
-//! and layout to the upstream crate so that tables, task-lists, and other
-//! Markdown extensions are handled correctly without hand-rolled code.
+//! This renderer is intentionally small and deterministic. It keeps markdown
+//! source as the input of record, parses with `pulldown-cmark`, and can wrap
+//! block text at a caller-provided width so resize behavior is controlled by
+//! Daat rather than by a second render pass.
 
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use tui_markdown::{self, Options, StyleSheet, from_str_with_options};
+use unicode_width::UnicodeWidthStr;
 
-// ── Custom StyleSheet ─────────────────────────────────────────────────────
+use super::highlight::highlight_block;
 
-/// A [`StyleSheet`] that applies a configurable base colour to headings /
-/// plain text while keeping standard styling for code, links, blockquotes,
-/// and metadata.
-#[derive(Clone, Debug)]
-struct DashboardStyleSheet {
-    base_color: Color,
+#[derive(Clone, Copy)]
+struct MarkdownStyles {
+    base: Style,
+    emphasis: Style,
+    strong: Style,
+    strikethrough: Style,
+    code: Style,
+    link: Style,
+    blockquote: Style,
 }
 
-impl StyleSheet for DashboardStyleSheet {
-    fn heading(&self, level: u8) -> Style {
-        match level {
-            1 => Style::default()
-                .fg(self.base_color)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            2 => Style::default()
-                .fg(self.base_color)
-                .add_modifier(Modifier::BOLD),
-            3 => Style::default()
-                .fg(self.base_color)
-                .add_modifier(Modifier::BOLD),
-            4 => Style::default()
-                .fg(self.base_color)
+impl MarkdownStyles {
+    fn new(base_color: Color) -> Self {
+        Self {
+            base: Style::default().fg(base_color),
+            emphasis: Style::default()
+                .fg(base_color)
                 .add_modifier(Modifier::ITALIC),
-            5 => Style::default()
-                .fg(self.base_color)
-                .add_modifier(Modifier::ITALIC),
-            _ => Style::default()
-                .fg(self.base_color)
-                .add_modifier(Modifier::ITALIC),
+            strong: Style::default().fg(base_color).add_modifier(Modifier::BOLD),
+            strikethrough: Style::default()
+                .fg(base_color)
+                .add_modifier(Modifier::CROSSED_OUT),
+            code: Style::default().fg(Color::Yellow),
+            link: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::UNDERLINED),
+            blockquote: Style::default().fg(Color::Green),
+        }
+    }
+}
+
+struct RenderedMarkdownLine {
+    line: Line<'static>,
+    code_block: bool,
+    initial_indent: String,
+    subsequent_indent: String,
+}
+
+struct ListState {
+    next: Option<u64>,
+}
+
+struct MarkdownWriter {
+    lines: Vec<RenderedMarkdownLine>,
+    styles: MarkdownStyles,
+    style_stack: Vec<Style>,
+    current: Vec<Span<'static>>,
+    current_style: Style,
+    current_code_block: bool,
+    current_initial_indent: String,
+    current_subsequent_indent: String,
+    list_stack: Vec<ListState>,
+    blockquote_depth: usize,
+    in_code_block: bool,
+    code_block_language: Option<String>,
+    code_block_indent: String,
+    link: Option<String>,
+    wrap_width: Option<usize>,
+}
+
+impl MarkdownWriter {
+    fn new(base_color: Color, wrap_width: Option<u16>) -> Self {
+        let styles = MarkdownStyles::new(base_color);
+        Self {
+            lines: Vec::new(),
+            styles,
+            style_stack: vec![styles.base],
+            current: Vec::new(),
+            current_style: styles.base,
+            current_code_block: false,
+            current_initial_indent: String::new(),
+            current_subsequent_indent: String::new(),
+            list_stack: Vec::new(),
+            blockquote_depth: 0,
+            in_code_block: false,
+            code_block_language: None,
+            code_block_indent: String::new(),
+            link: None,
+            wrap_width: wrap_width.map(usize::from).filter(|width| *width > 0),
         }
     }
 
-    fn code(&self) -> Style {
-        Style::default().fg(Color::Yellow)
+    fn run(mut self, input: &str) -> Vec<Line<'static>> {
+        let mut options = Options::empty();
+        options.insert(Options::ENABLE_STRIKETHROUGH);
+        options.insert(Options::ENABLE_TABLES);
+        options.insert(Options::ENABLE_TASKLISTS);
+
+        for event in Parser::new_ext(input, options) {
+            self.handle_event(event);
+        }
+        self.flush_current();
+        self.lines
+            .into_iter()
+            .flat_map(|line| wrap_rendered_line(line, self.wrap_width))
+            .collect()
     }
 
-    fn link(&self) -> Style {
-        Style::default()
-            .fg(Color::Blue)
-            .add_modifier(Modifier::UNDERLINED)
+    fn handle_event(&mut self, event: Event<'_>) {
+        match event {
+            Event::Start(tag) => self.start_tag(tag),
+            Event::End(tag) => self.end_tag(tag),
+            Event::Text(text) => self.push_text(text.as_ref()),
+            Event::Code(code) => self.push_span(Span::styled(code.to_string(), self.styles.code)),
+            Event::SoftBreak => self.push_text(" "),
+            Event::HardBreak => self.flush_current(),
+            Event::Rule => {
+                self.flush_current();
+                self.push_line(Line::from(Span::styled("———", self.styles.base)), false);
+            }
+            Event::Html(html) | Event::InlineHtml(html) => self.push_text(html.as_ref()),
+            Event::FootnoteReference(_) => {}
+            Event::TaskListMarker(checked) => {
+                self.push_text(if checked { "[x] " } else { "[ ] " });
+            }
+            Event::InlineMath(math) | Event::DisplayMath(math) => self.push_text(math.as_ref()),
+        }
     }
 
-    fn blockquote(&self) -> Style {
-        Style::default().fg(Color::Green)
+    fn start_tag(&mut self, tag: Tag<'_>) {
+        match tag {
+            Tag::Paragraph => self.start_block_line(),
+            Tag::Heading { level, .. } => self.start_heading(level),
+            Tag::BlockQuote(_) => {
+                self.flush_current();
+                self.blockquote_depth = self.blockquote_depth.saturating_add(1);
+            }
+            Tag::CodeBlock(kind) => self.start_code_block(kind),
+            Tag::List(start) => self.list_stack.push(ListState { next: start }),
+            Tag::Item => self.start_list_item(),
+            Tag::Emphasis => self.push_style(self.styles.emphasis),
+            Tag::Strong => self.push_style(self.styles.strong),
+            Tag::Strikethrough => self.push_style(self.styles.strikethrough),
+            Tag::Link { dest_url, .. } => {
+                self.link = Some(dest_url.to_string());
+                self.push_style(self.styles.link);
+            }
+            Tag::Image {
+                dest_url, title, ..
+            } => {
+                self.push_text("[image");
+                if !title.is_empty() {
+                    self.push_text(": ");
+                    self.push_text(title.as_ref());
+                }
+                if !dest_url.is_empty() {
+                    self.push_text(" ");
+                    self.push_text(dest_url.as_ref());
+                }
+                self.push_text("]");
+            }
+            Tag::Table(_)
+            | Tag::TableHead
+            | Tag::TableRow
+            | Tag::TableCell
+            | Tag::FootnoteDefinition(_)
+            | Tag::MetadataBlock(_)
+            | Tag::HtmlBlock
+            | Tag::DefinitionList
+            | Tag::DefinitionListTitle
+            | Tag::DefinitionListDefinition
+            | Tag::Subscript
+            | Tag::Superscript => {}
+        }
     }
 
-    fn heading_meta(&self) -> Style {
-        Style::default().add_modifier(Modifier::DIM)
+    fn end_tag(&mut self, tag: TagEnd) {
+        match tag {
+            TagEnd::Paragraph | TagEnd::Heading(_) => self.flush_current(),
+            TagEnd::BlockQuote(_) => {
+                self.flush_current();
+                self.blockquote_depth = self.blockquote_depth.saturating_sub(1);
+            }
+            TagEnd::CodeBlock => {
+                self.flush_current();
+                self.in_code_block = false;
+                self.current_code_block = false;
+                self.code_block_language = None;
+                self.code_block_indent.clear();
+                self.current_style = self.styles.base;
+            }
+            TagEnd::List(_) => {
+                self.flush_current();
+                self.list_stack.pop();
+            }
+            TagEnd::Item => self.flush_current(),
+            TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => self.pop_style(),
+            TagEnd::Link => {
+                self.pop_style();
+                if let Some(link) = self.link.take() {
+                    self.push_text(" (");
+                    self.push_span(Span::styled(link, self.styles.link));
+                    self.push_text(")");
+                }
+            }
+            TagEnd::Table
+            | TagEnd::TableHead
+            | TagEnd::TableRow
+            | TagEnd::TableCell
+            | TagEnd::FootnoteDefinition
+            | TagEnd::MetadataBlock(_)
+            | TagEnd::HtmlBlock
+            | TagEnd::DefinitionList
+            | TagEnd::DefinitionListTitle
+            | TagEnd::DefinitionListDefinition
+            | TagEnd::Subscript
+            | TagEnd::Superscript
+            | TagEnd::Image => {}
+        }
     }
 
-    fn metadata_block(&self) -> Style {
-        Style::default().fg(Color::Yellow)
+    fn start_block_line(&mut self) {
+        self.flush_current();
+        self.current_initial_indent = blockquote_prefix(self.blockquote_depth);
+        self.current_subsequent_indent = self.current_initial_indent.clone();
+        if self.blockquote_depth > 0 {
+            self.current_style = self.styles.blockquote;
+        }
+    }
+
+    fn start_heading(&mut self, level: HeadingLevel) {
+        self.flush_current();
+        let modifier = match level {
+            HeadingLevel::H1 => Modifier::BOLD | Modifier::UNDERLINED,
+            HeadingLevel::H2 | HeadingLevel::H3 => Modifier::BOLD,
+            _ => Modifier::ITALIC,
+        };
+        self.current_style = self.styles.base.add_modifier(modifier);
+        self.push_style(self.current_style);
+    }
+
+    fn start_code_block(&mut self, kind: CodeBlockKind<'_>) {
+        self.flush_current();
+        self.in_code_block = true;
+        self.current_code_block = true;
+        self.current_style = self.styles.code;
+        self.code_block_language = match kind {
+            CodeBlockKind::Fenced(info) => {
+                let language = info.split_whitespace().next().unwrap_or_default().trim();
+                (!language.is_empty()).then(|| language.to_string())
+            }
+            CodeBlockKind::Indented => {
+                self.code_block_indent = "    ".to_string();
+                None
+            }
+        };
+        if self.code_block_indent.is_empty() {
+            self.current_initial_indent.clear();
+            self.current_subsequent_indent.clear();
+        } else {
+            self.current_initial_indent = self.code_block_indent.clone();
+            self.current_subsequent_indent = self.code_block_indent.clone();
+        }
+    }
+
+    fn start_list_item(&mut self) {
+        self.flush_current();
+        let depth = self.list_stack.len().saturating_sub(1);
+        let outer_indent = "  ".repeat(depth);
+        let marker = self
+            .list_stack
+            .last_mut()
+            .and_then(|state| {
+                state.next.map(|value| {
+                    state.next = Some(value.saturating_add(1));
+                    format!("{value}. ")
+                })
+            })
+            .unwrap_or_else(|| "- ".to_string());
+        let prefix = format!(
+            "{}{}{}",
+            blockquote_prefix(self.blockquote_depth),
+            outer_indent,
+            marker
+        );
+        let subsequent = " ".repeat(prefix.width());
+        self.current_initial_indent = prefix;
+        self.current_subsequent_indent = subsequent;
+    }
+
+    fn push_text(&mut self, text: &str) {
+        if self.in_code_block {
+            let mut parts = text.split('\n').peekable();
+            while let Some(part) = parts.next() {
+                if !part.is_empty() {
+                    self.push_code_line(part);
+                }
+                if parts.peek().is_some() {
+                    if part.is_empty() {
+                        self.push_code_line("");
+                    }
+                }
+            }
+            return;
+        }
+        self.push_span(Span::styled(text.to_string(), self.current_inline_style()));
+    }
+
+    fn push_code_line(&mut self, text: &str) {
+        let mut spans = Vec::new();
+        if !self.code_block_indent.is_empty() {
+            spans.push(Span::styled(
+                self.code_block_indent.clone(),
+                self.styles.code,
+            ));
+        }
+        let highlighted = self
+            .code_block_language
+            .as_deref()
+            .and_then(|language| highlight_block(text, language))
+            .and_then(|mut lines| lines.pop());
+        match highlighted {
+            Some(line_spans) => spans.extend(line_spans),
+            None if text.is_empty() => spans.push(Span::raw(String::new())),
+            None => spans.push(Span::styled(text.to_string(), self.styles.code)),
+        }
+        let mut line = Line::from(spans);
+        line.style = self.styles.code;
+        self.push_line(line, true);
+    }
+
+    fn push_span(&mut self, span: Span<'static>) {
+        self.current.push(span);
+    }
+
+    fn push_style(&mut self, style: Style) {
+        self.style_stack.push(style);
+    }
+
+    fn pop_style(&mut self) {
+        if self.style_stack.len() > 1 {
+            self.style_stack.pop();
+        }
+    }
+
+    fn current_inline_style(&self) -> Style {
+        *self.style_stack.last().unwrap_or(&self.styles.base)
+    }
+
+    fn flush_current(&mut self) {
+        if self.current.is_empty() {
+            self.current_initial_indent.clear();
+            self.current_subsequent_indent.clear();
+            self.current_style = self.styles.base;
+            return;
+        }
+        let mut spans = Vec::new();
+        if !self.current_initial_indent.is_empty() {
+            spans.push(Span::styled(
+                std::mem::take(&mut self.current_initial_indent),
+                self.current_style,
+            ));
+        }
+        spans.append(&mut self.current);
+        let mut line = Line::from(spans);
+        line.style = self.current_style;
+        self.lines.push(RenderedMarkdownLine {
+            line,
+            code_block: self.current_code_block,
+            initial_indent: String::new(),
+            subsequent_indent: std::mem::take(&mut self.current_subsequent_indent),
+        });
+        self.current_code_block = self.in_code_block;
+        self.current_style = if self.blockquote_depth > 0 {
+            self.styles.blockquote
+        } else {
+            self.styles.base
+        };
+    }
+
+    fn push_line(&mut self, line: Line<'static>, code_block: bool) {
+        self.lines.push(RenderedMarkdownLine {
+            line,
+            code_block,
+            initial_indent: String::new(),
+            subsequent_indent: String::new(),
+        });
     }
 }
 
-// ── Syntax-marker normalisation ─────────────────────────────────────────
+fn blockquote_prefix(depth: usize) -> String {
+    "> ".repeat(depth)
+}
 
-fn line_text(line: &Line<'_>) -> String {
+fn wrap_rendered_line(line: RenderedMarkdownLine, wrap_width: Option<usize>) -> Vec<Line<'static>> {
+    let Some(width) = wrap_width else {
+        return vec![line.line];
+    };
+    if line.code_block || line.line.width() <= width {
+        return vec![line.line];
+    }
+    let text = rendered_line_text(&line.line);
+    let initial_indent = line.initial_indent;
+    let subsequent_indent = line.subsequent_indent;
+    let options = textwrap::Options::new(width)
+        .initial_indent(&initial_indent)
+        .subsequent_indent(&subsequent_indent)
+        .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit);
+    textwrap::wrap(&text, options)
+        .into_iter()
+        .map(|wrapped| {
+            let mut rendered = Line::from(Span::styled(wrapped.into_owned(), line.line.style));
+            rendered.style = line.line.style;
+            rendered
+        })
+        .collect()
+}
+
+fn rendered_line_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
         .map(|span| span.content.as_ref())
         .collect()
 }
 
-fn is_code_fence_line(line: &Line<'_>) -> bool {
-    line_text(line).trim_start().starts_with("```")
-}
-
-fn heading_marker_prefix_len(text: &str) -> Option<usize> {
-    let mut hash_count = 0usize;
-    let mut after_hashes = 0usize;
-
-    for (index, ch) in text.char_indices() {
-        if ch != '#' || hash_count >= 6 {
-            break;
-        }
-        hash_count += 1;
-        after_hashes = index + ch.len_utf8();
-    }
-
-    if hash_count == 0 {
-        return None;
-    }
-
-    let rest = &text[after_hashes..];
-    if rest.is_empty() {
-        return Some(after_hashes);
-    }
-
-    let mut whitespace_len = 0usize;
-    for (index, ch) in rest.char_indices() {
-        if !ch.is_whitespace() {
-            break;
-        }
-        whitespace_len = index + ch.len_utf8();
-    }
-
-    if whitespace_len == 0 {
-        None
-    } else {
-        Some(after_hashes + whitespace_len)
-    }
-}
-
-fn strip_prefix_from_spans(spans: Vec<Span<'static>>, mut prefix_len: usize) -> Vec<Span<'static>> {
-    spans
-        .into_iter()
-        .filter_map(|span| {
-            let content = span.content.into_owned();
-            if prefix_len == 0 {
-                return Some(Span::styled(content, span.style));
-            }
-
-            if prefix_len >= content.len() {
-                prefix_len -= content.len();
-                return None;
-            }
-
-            let split_at = if content.is_char_boundary(prefix_len) {
-                prefix_len
-            } else {
-                content
-                    .char_indices()
-                    .map(|(index, _)| index)
-                    .find(|index| *index > prefix_len)
-                    .unwrap_or(content.len())
-            };
-            prefix_len = 0;
-            let stripped = content[split_at..].to_string();
-            if stripped.is_empty() {
-                None
-            } else {
-                Some(Span::styled(stripped, span.style))
-            }
-        })
-        .collect()
-}
-
-fn strip_heading_marker(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
-    let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
-    let Some(prefix_len) = heading_marker_prefix_len(&text) else {
-        return spans;
-    };
-    strip_prefix_from_spans(spans, prefix_len)
-}
-
-fn is_heading_line_style(style: Style) -> bool {
-    let modifiers = style.add_modifier;
-    modifiers.contains(Modifier::BOLD)
-        || modifiers.contains(Modifier::UNDERLINED)
-        || modifiers.contains(Modifier::ITALIC)
-}
-
-// ── Public API ────────────────────────────────────────────────────────────
-
-/// Render a full markdown text into styled ratatui [`Line`]s.
-///
-/// Supports:
-/// - Paragraphs, headings, blockquotes, lists, code blocks
-/// - Horizontal rules (`---`, `***`)
-/// - Inline: **bold**, *italic*, `code`, ~~strikethrough~~, links
-/// - Tables, task-lists, and other extensions (via tui-markdown)
 pub fn render_markdown(input: &str, base_color: Color) -> Vec<Line<'static>> {
+    render_markdown_with_width(input, base_color, None)
+}
+
+pub fn render_markdown_with_width(
+    input: &str,
+    base_color: Color,
+    width: Option<u16>,
+) -> Vec<Line<'static>> {
     if input.is_empty() {
         return Vec::new();
     }
-
-    let stylesheet = DashboardStyleSheet { base_color };
-    let options = Options::new(stylesheet);
-    let text = from_str_with_options(input, &options);
-
-    // Convert to 'static lines. For spans that have no explicit fg/bg (e.g.
-    // plain paragraph text, emphasis, strong, strikethrough), apply the base
-    // colour. tui-markdown keeps some block-level syntax markers as visible
-    // spans; hide those here so the dashboard reads like a Markdown preview.
-    text.lines
-        .into_iter()
-        .filter_map(|line| {
-            if is_code_fence_line(&line) {
-                return None;
-            }
-
-            let line_style = line.style;
-            let spans: Vec<Span<'static>> = line
-                .spans
-                .into_iter()
-                .map(|s| {
-                    // A span is "uncoloured" only when neither the span
-                    // nor the line style provides a colour attribute.
-                    let has_span_color = s.style.fg.is_some()
-                        || s.style.bg.is_some()
-                        || s.style.underline_color.is_some();
-                    let has_line_color = line_style.fg.is_some()
-                        || line_style.bg.is_some()
-                        || line_style.underline_color.is_some();
-                    let style = if !has_span_color && !has_line_color {
-                        s.style.fg(base_color)
-                    } else {
-                        s.style
-                    };
-                    Span::styled(s.content.into_owned(), style)
-                })
-                .collect();
-            let spans = if is_heading_line_style(line_style) {
-                strip_heading_marker(spans)
-            } else {
-                spans
-            };
-            let mut new_line = Line::from(spans);
-            // Preserve line-level style so that constructs whose
-            // colour lives on the line (e.g. fenced code blocks via
-            // tui-markdown's line_styles stack) are not lost.
-            new_line.style = line_style;
-            Some(new_line)
-        })
-        .collect()
+    MarkdownWriter::new(base_color, width).run(input)
 }
 
 #[cfg(test)]
 mod tests {
     use ratatui::style::{Color, Modifier};
 
-    use super::{line_text, render_markdown};
+    use super::{render_markdown, render_markdown_with_width, rendered_line_text};
 
     fn rendered_text(input: &str) -> Vec<String> {
         render_markdown(input, Color::White)
             .into_iter()
-            .map(|line| {
-                line.spans
-                    .into_iter()
-                    .map(|span| span.content.into_owned())
-                    .collect::<String>()
-            })
+            .map(|line| rendered_line_text(&line))
             .collect()
     }
 
@@ -265,7 +473,7 @@ mod tests {
             .next()
             .expect("expected heading line");
 
-        assert_eq!(line_text(&line), "Markdown 渲染测试");
+        assert_eq!(rendered_line_text(&line), "Markdown 渲染测试");
         assert!(line.style.add_modifier.contains(Modifier::BOLD));
         assert!(line.style.add_modifier.contains(Modifier::UNDERLINED));
     }
@@ -277,5 +485,50 @@ mod tests {
 
         assert!(joined.contains("fn main() {}"));
         assert!(!joined.contains("```"));
+    }
+
+    #[test]
+    fn wraps_list_items_preserving_indent() {
+        let lines =
+            render_markdown_with_width("- first second third fourth", Color::White, Some(14))
+                .into_iter()
+                .map(|line| rendered_line_text(&line))
+                .collect::<Vec<_>>();
+
+        assert_eq!(lines, vec!["- first second", "  third fourth"]);
+    }
+
+    #[test]
+    fn wraps_nested_lists_and_blockquotes() {
+        let markdown = "- outer item with several words to wrap\n  - inner item that also needs wrapping\n> quoted text that should wrap";
+        let lines = render_markdown_with_width(markdown, Color::White, Some(22))
+            .into_iter()
+            .map(|line| rendered_line_text(&line))
+            .collect::<Vec<_>>();
+
+        assert!(lines.contains(&"- outer item with".to_string()));
+        assert!(lines.contains(&"  several words to".to_string()));
+        assert!(lines.iter().any(|line| line.starts_with("  - inner")));
+        assert!(lines.iter().any(|line| line.starts_with("> quoted text")));
+    }
+
+    #[test]
+    fn appends_link_destination() {
+        let lines = rendered_text("[Daat](https://example.com)");
+        assert_eq!(lines, vec!["Daat (https://example.com)"]);
+    }
+
+    #[test]
+    fn does_not_wrap_code_blocks() {
+        let markdown = "````\nfn main() { println!(\"hi from a long line\"); }\n````";
+        let lines = render_markdown_with_width(markdown, Color::White, Some(10))
+            .into_iter()
+            .map(|line| rendered_line_text(&line))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            vec!["fn main() { println!(\"hi from a long line\"); }"]
+        );
     }
 }

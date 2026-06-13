@@ -158,7 +158,7 @@ fn convert_style(style: syntect::highlighting::Style) -> Style {
     converted
 }
 
-fn highlight_block(code: &str, path: &str) -> Option<Vec<Vec<Span<'static>>>> {
+pub(super) fn highlight_block(code: &str, path: &str) -> Option<Vec<Vec<Span<'static>>>> {
     if code.is_empty() || code.len() > 512 * 1024 || code.lines().count() > 10_000 {
         return None;
     }
@@ -181,6 +181,14 @@ fn highlight_block(code: &str, path: &str) -> Option<Vec<Vec<Span<'static>>>> {
         lines.push(spans);
     }
     Some(lines)
+}
+
+pub(super) fn highlight_shell_command(command: &str) -> Option<Vec<Span<'static>>> {
+    highlight_block(command, "shell").and_then(
+        |mut lines| {
+            if lines.len() == 1 { lines.pop() } else { None }
+        },
+    )
 }
 
 pub(super) fn highlight_patch_lines(
