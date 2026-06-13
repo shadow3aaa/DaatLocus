@@ -2,10 +2,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{
-    ActivityCell, DashboardAction, DashboardState, LiveActivityCell,
-    cells::activity_transcript_lines, command_text::skill_status_description,
-};
+use super::{DashboardAction, DashboardState, command_text::skill_status_description};
 use crate::{
     openskills::{OpenSkillDashboardError, OpenSkillDashboardSummary},
     telegram_acl::PendingAccessRequest,
@@ -17,15 +14,6 @@ pub(super) struct CommandDetailPanel {
     pub(super) title: String,
     pub(super) text: String,
     pub(super) scroll: u16,
-}
-
-pub(super) struct CommandTranscriptPanel {
-    pub(super) title: String,
-    pub(super) cells: Vec<ActivityCell>,
-    pub(super) live_cells: Vec<LiveActivityCell>,
-    pub(super) history_prefix_len: usize,
-    pub(super) scroll: u16,
-    pub(super) follow_bottom: bool,
 }
 
 pub(super) struct CommandSelectionPanel {
@@ -96,7 +84,6 @@ pub(super) struct SkillsTogglePanelItem {
 
 pub(super) enum CommandPanel {
     Detail(CommandDetailPanel),
-    Transcript(CommandTranscriptPanel),
     Selection(CommandSelectionPanel),
     SkillsList(SkillsListPanel),
     SkillsToggle(SkillsTogglePanel),
@@ -184,7 +171,6 @@ impl CommandPanel {
         match self {
             CommandPanel::SkillsList(panel) => panel.sync_state(state),
             CommandPanel::SkillsToggle(panel) => panel.sync_state(state),
-            CommandPanel::Transcript(panel) => panel.sync_state(state),
             CommandPanel::Detail(_)
             | CommandPanel::Selection(_)
             | CommandPanel::TelegramAccess(_) => {}
@@ -194,9 +180,6 @@ impl CommandPanel {
     pub(super) fn footer_hint(&self) -> &'static str {
         match self {
             CommandPanel::Detail(_) => "Esc close   ↑/↓ scroll   PgUp/PgDn page",
-            CommandPanel::Transcript(_) => {
-                "Esc close   ↑/↓ scroll   PgUp/PgDn page   Home/End jump"
-            }
             CommandPanel::Selection(_) => "Enter select   ↑/↓ move   PgUp/PgDn page   Esc close",
             CommandPanel::SkillsList(_) => {
                 "Enter details   type search   Backspace edit   ↑/↓ move   Esc close"
@@ -439,57 +422,12 @@ pub(super) fn detail_panel(title: impl Into<String>, text: impl Into<String>) ->
     })
 }
 
-pub(super) fn transcript_panel(
-    cells: Vec<ActivityCell>,
-    live_cells: Vec<LiveActivityCell>,
-    state_activity_len: usize,
-) -> CommandPanel {
-    let history_prefix_len = cells.len().saturating_sub(state_activity_len);
-    CommandPanel::Transcript(CommandTranscriptPanel {
-        title: "TRANSCRIPT".to_string(),
-        cells,
-        live_cells,
-        history_prefix_len,
-        scroll: 0,
-        follow_bottom: true,
-    })
-}
-
-impl CommandTranscriptPanel {
-    fn sync_state(&mut self, state: &DashboardState) {
-        let mut next_cells = self
-            .cells
-            .iter()
-            .take(self.history_prefix_len)
-            .cloned()
-            .collect::<Vec<_>>();
-        next_cells.extend(state.activity_cells.clone());
-        self.cells = next_cells;
-        self.live_cells = state.live_activity_cells.clone();
-    }
-
-    fn estimated_max_scroll(&self) -> u16 {
-        activity_transcript_lines(&self.cells, &self.live_cells, 80)
-            .len()
-            .saturating_sub(17)
-            .min(u16::MAX as usize) as u16
-    }
-
-    fn leave_bottom_follow(&mut self, rows_from_bottom: u16) {
-        if self.follow_bottom {
-            self.follow_bottom = false;
-            self.scroll = self.estimated_max_scroll().saturating_sub(rows_from_bottom);
-        }
-    }
-}
-
 pub(super) fn handle_command_panel_key(
     panel: &mut CommandPanel,
     key: KeyEvent,
 ) -> CommandPanelAction {
     match panel {
         CommandPanel::Detail(detail) => handle_detail_panel_key(detail, key),
-        CommandPanel::Transcript(transcript) => handle_transcript_panel_key(transcript, key),
         CommandPanel::Selection(selection) => handle_selection_panel_key(selection, key),
         CommandPanel::SkillsList(skills) => handle_skills_list_panel_key(skills, key),
         CommandPanel::SkillsToggle(skills) => handle_skills_toggle_panel_key(skills, key),
@@ -522,58 +460,6 @@ fn handle_detail_panel_key(panel: &mut CommandDetailPanel, key: KeyEvent) -> Com
         }
         KeyCode::End => {
             panel.scroll = u16::MAX;
-            CommandPanelAction::None
-        }
-        _ => CommandPanelAction::None,
-    }
-}
-
-fn handle_transcript_panel_key(
-    panel: &mut CommandTranscriptPanel,
-    key: KeyEvent,
-) -> CommandPanelAction {
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => CommandPanelAction::Close,
-        KeyCode::Up | KeyCode::Char('k') => {
-            panel.leave_bottom_follow(1);
-            panel.scroll = panel.scroll.saturating_sub(1);
-            CommandPanelAction::None
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if panel.follow_bottom {
-                return CommandPanelAction::None;
-            }
-            panel.scroll = panel.scroll.saturating_add(1);
-            if panel.scroll >= panel.estimated_max_scroll() {
-                panel.follow_bottom = true;
-                panel.scroll = 0;
-            }
-            CommandPanelAction::None
-        }
-        KeyCode::PageUp => {
-            panel.leave_bottom_follow(10);
-            panel.scroll = panel.scroll.saturating_sub(10);
-            CommandPanelAction::None
-        }
-        KeyCode::PageDown => {
-            if panel.follow_bottom {
-                return CommandPanelAction::None;
-            }
-            panel.scroll = panel.scroll.saturating_add(10);
-            if panel.scroll >= panel.estimated_max_scroll() {
-                panel.follow_bottom = true;
-                panel.scroll = 0;
-            }
-            CommandPanelAction::None
-        }
-        KeyCode::Home => {
-            panel.follow_bottom = false;
-            panel.scroll = 0;
-            CommandPanelAction::None
-        }
-        KeyCode::End => {
-            panel.follow_bottom = true;
-            panel.scroll = 0;
             CommandPanelAction::None
         }
         _ => CommandPanelAction::None,
@@ -880,65 +766,5 @@ fn adjusted_list_scroll(
             .min(max_scroll)
     } else {
         current_scroll.min(max_scroll)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::dashboard::assistant_activity_cell;
-
-    fn assistant_cell(text: &str) -> ActivityCell {
-        assistant_activity_cell(text).expect("assistant cell")
-    }
-
-    #[test]
-    fn transcript_panel_syncs_state_after_history_prefix() {
-        let history = assistant_cell("older history");
-        let first = assistant_cell("first state cell");
-        let second = assistant_cell("second state cell");
-        let mut panel = match transcript_panel(vec![history.clone(), first.clone()], Vec::new(), 1)
-        {
-            CommandPanel::Transcript(panel) => panel,
-            _ => panic!("expected transcript panel"),
-        };
-        let state = DashboardState {
-            activity_cells: vec![first, second.clone()],
-            ..DashboardState::default()
-        };
-
-        panel.sync_state(&state);
-
-        assert!(panel.follow_bottom);
-        assert_eq!(
-            panel.cells,
-            vec![history, state.activity_cells[0].clone(), second]
-        );
-    }
-
-    #[test]
-    fn transcript_panel_manual_scroll_leaves_bottom_follow() {
-        let cells = (0..30)
-            .map(|index| assistant_cell(&format!("cell {index}")))
-            .collect::<Vec<_>>();
-        let mut panel = match transcript_panel(cells, Vec::new(), 30) {
-            CommandPanel::Transcript(panel) => panel,
-            _ => panic!("expected transcript panel"),
-        };
-
-        assert!(panel.follow_bottom);
-        let action =
-            handle_transcript_panel_key(&mut panel, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-
-        assert!(matches!(action, CommandPanelAction::None));
-        assert!(!panel.follow_bottom);
-
-        let action = handle_transcript_panel_key(
-            &mut panel,
-            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
-        );
-
-        assert!(matches!(action, CommandPanelAction::None));
-        assert!(panel.follow_bottom);
     }
 }

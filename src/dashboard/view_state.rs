@@ -95,6 +95,125 @@ impl InputState {
     }
 }
 
+pub(super) struct TranscriptOverlayState {
+    pub(super) cells: Vec<ActivityCell>,
+    pub(super) live_cells: Vec<LiveActivityCell>,
+    pub(super) history_prefix_len: usize,
+    pub(super) scroll: u16,
+    pub(super) follow_bottom: bool,
+    pub(super) max_scroll: u16,
+    pub(super) page_height: u16,
+}
+
+impl TranscriptOverlayState {
+    pub(super) fn new(
+        cells: Vec<ActivityCell>,
+        live_cells: Vec<LiveActivityCell>,
+        state_activity_len: usize,
+    ) -> Self {
+        Self {
+            history_prefix_len: cells.len().saturating_sub(state_activity_len),
+            cells,
+            live_cells,
+            scroll: 0,
+            follow_bottom: true,
+            max_scroll: 0,
+            page_height: 20,
+        }
+    }
+
+    pub(super) fn sync_state(&mut self, state: &DashboardState) {
+        let mut next_cells = self
+            .cells
+            .iter()
+            .take(self.history_prefix_len)
+            .cloned()
+            .collect::<Vec<_>>();
+        next_cells.extend(state.activity_cells.clone());
+        self.cells = next_cells;
+        self.live_cells = state.live_activity_cells.clone();
+        self.clamp_scroll();
+    }
+
+    pub(super) fn set_render_metrics(&mut self, max_scroll: u16, page_height: u16) {
+        self.max_scroll = max_scroll;
+        self.page_height = page_height.max(1);
+        self.clamp_scroll();
+    }
+
+    pub(super) fn effective_scroll(&self) -> u16 {
+        if self.follow_bottom {
+            self.max_scroll
+        } else {
+            self.scroll.min(self.max_scroll)
+        }
+    }
+
+    pub(super) fn handle_scroll_rows(&mut self, rows: i16) -> bool {
+        match rows.cmp(&0) {
+            std::cmp::Ordering::Less => {
+                let rows = rows.unsigned_abs();
+                self.leave_bottom_follow(rows);
+                self.scroll = self.scroll.saturating_sub(rows);
+                true
+            }
+            std::cmp::Ordering::Greater => {
+                if self.follow_bottom {
+                    return true;
+                }
+                self.scroll = self.scroll.saturating_add(rows as u16);
+                if self.scroll >= self.max_scroll {
+                    self.follow_bottom = true;
+                    self.scroll = 0;
+                }
+                true
+            }
+            std::cmp::Ordering::Equal => false,
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.handle_scroll_rows(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.handle_scroll_rows(1),
+            KeyCode::PageUp => {
+                let page_height = self.page_height.min(i16::MAX as u16) as i16;
+                self.handle_scroll_rows(-page_height)
+            }
+            KeyCode::PageDown => {
+                let page_height = self.page_height.min(i16::MAX as u16) as i16;
+                self.handle_scroll_rows(page_height)
+            }
+            KeyCode::Home => {
+                self.follow_bottom = false;
+                self.scroll = 0;
+                true
+            }
+            KeyCode::End => {
+                self.follow_bottom = true;
+                self.scroll = 0;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn leave_bottom_follow(&mut self, rows_from_bottom: u16) {
+        if self.follow_bottom {
+            self.follow_bottom = false;
+            self.scroll = self.max_scroll.saturating_sub(rows_from_bottom);
+        }
+    }
+
+    fn clamp_scroll(&mut self) {
+        if self.follow_bottom {
+            self.scroll = 0;
+        } else {
+            self.scroll = self.scroll.min(self.max_scroll);
+        }
+    }
+}
+
 pub(super) struct TuiViewState {
     pub(super) command_input: InputState,
     pub(super) pending_pastes: Vec<(String, String)>,
@@ -102,6 +221,7 @@ pub(super) struct TuiViewState {
     pub(super) command_popup_selection: usize,
     pub(super) command_popup_scroll: usize,
     pub(super) command_panel: Option<CommandPanel>,
+    pub(super) transcript_overlay: Option<TranscriptOverlayState>,
     pub(super) command_feedback: Option<CommandFeedback>,
     pub(super) ctrl_c_reminder: Option<CtrlCReminder>,
     command_history: Vec<String>,
@@ -133,6 +253,7 @@ impl TuiViewState {
             command_popup_selection: 0,
             command_popup_scroll: 0,
             command_panel: None,
+            transcript_overlay: None,
             command_feedback: None,
             ctrl_c_reminder: None,
             command_history: Vec::new(),
@@ -158,6 +279,43 @@ impl TuiViewState {
     pub(super) fn reset_command_popup(&mut self) {
         self.command_popup_selection = 0;
         self.command_popup_scroll = 0;
+    }
+
+    pub(super) fn open_transcript_overlay(&mut self, state: &DashboardState) {
+        let (cells, live_cells) = self.visible_activity_cells(state);
+        self.transcript_overlay = Some(TranscriptOverlayState::new(
+            cells,
+            live_cells,
+            state.activity_cells.len(),
+        ));
+        self.command_panel = None;
+        self.command_feedback = None;
+        self.reset_command_popup();
+    }
+
+    pub(super) fn sync_transcript_overlay(&mut self, state: &DashboardState) {
+        if let Some(overlay) = self.transcript_overlay.as_mut() {
+            overlay.sync_state(state);
+        }
+    }
+
+    pub(super) fn handle_transcript_overlay_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.transcript_overlay = None;
+                true
+            }
+            _ => self
+                .transcript_overlay
+                .as_mut()
+                .is_some_and(|overlay| overlay.handle_key(key)),
+        }
+    }
+
+    pub(super) fn handle_transcript_overlay_scroll_rows(&mut self, rows: i16) -> bool {
+        self.transcript_overlay
+            .as_mut()
+            .is_some_and(|overlay| overlay.handle_scroll_rows(rows))
     }
 
     pub(super) fn clear_ctrl_c_reminder(&mut self) {
@@ -375,6 +533,7 @@ impl TuiViewState {
         self.auto_scroll = true;
         self.scroll_offset = 0;
         self.visible_activity_cleared = true;
+        self.transcript_overlay = None;
     }
 
     pub(super) fn toggle_thinking_expansion(&mut self, activity_cells: &[ActivityCell]) -> bool {
@@ -451,6 +610,7 @@ impl TuiViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::assistant_activity_cell;
 
     #[test]
     fn scroll_rows_moves_up_from_auto_scroll_without_key_event() {
@@ -518,5 +678,54 @@ mod tests {
 
         assert!(!view.auto_scroll);
         assert_eq!(view.scroll_offset, 80);
+    }
+
+    fn assistant_cell(text: &str) -> ActivityCell {
+        assistant_activity_cell(text).expect("assistant cell")
+    }
+
+    #[test]
+    fn transcript_overlay_syncs_state_after_history_prefix() {
+        let history = assistant_cell("older history");
+        let first = assistant_cell("first state cell");
+        let second = assistant_cell("second state cell");
+        let mut overlay =
+            TranscriptOverlayState::new(vec![history.clone(), first.clone()], Vec::new(), 1);
+        let state = DashboardState {
+            activity_cells: vec![first, second.clone()],
+            ..DashboardState::default()
+        };
+
+        overlay.sync_state(&state);
+
+        assert!(overlay.follow_bottom);
+        assert_eq!(
+            overlay.cells,
+            vec![history, state.activity_cells[0].clone(), second]
+        );
+    }
+
+    #[test]
+    fn transcript_overlay_manual_scroll_leaves_bottom_follow() {
+        let cells = (0..30)
+            .map(|index| assistant_cell(&format!("cell {index}")))
+            .collect::<Vec<_>>();
+        let mut overlay = TranscriptOverlayState::new(cells, Vec::new(), 30);
+        overlay.set_render_metrics(100, 20);
+
+        assert!(overlay.follow_bottom);
+        assert!(overlay.handle_key(KeyEvent::new(
+            KeyCode::Up,
+            crossterm::event::KeyModifiers::NONE
+        )));
+
+        assert!(!overlay.follow_bottom);
+
+        assert!(overlay.handle_key(KeyEvent::new(
+            KeyCode::End,
+            crossterm::event::KeyModifiers::NONE
+        )));
+
+        assert!(overlay.follow_bottom);
     }
 }

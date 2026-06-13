@@ -16,6 +16,7 @@ mod input_controller;
 pub mod render;
 pub mod renderable;
 mod terminal_hyperlinks;
+mod transcript_overlay;
 mod tui_animation;
 pub mod tui_event;
 #[cfg(feature = "tui-perf-cmd")]
@@ -92,6 +93,7 @@ pub(crate) use commands::execute_dashboard_action;
 use frame_profiler::{TuiFrameProfiler, TuiFrameTiming};
 use serde::{Deserialize, Serialize};
 use terminal_hyperlinks::{TerminalHyperlinkOverlay, collect_terminal_hyperlink_overlays};
+use transcript_overlay::render_transcript_overlay;
 use tui_animation::dashboard_state_needs_animation;
 use view_state::TuiViewState;
 
@@ -413,7 +415,11 @@ pub async fn run_tui_dashboard(
                                 continue;
                     }
                     tui_event::TuiEvent::MouseWheel { rows } => {
-                        if view.command_panel.is_none() && view.handle_activity_scroll_rows(rows) {
+                        if view.transcript_overlay.is_some() {
+                            if view.handle_transcript_overlay_scroll_rows(rows) {
+                                frame_requester.schedule_frame();
+                            }
+                        } else if view.command_panel.is_none() && view.handle_activity_scroll_rows(rows) {
                             frame_requester.schedule_frame();
                         }
                     }
@@ -442,6 +448,7 @@ pub async fn run_tui_dashboard(
 
         let state = rx.borrow_and_update();
         view.sync_visible_clear_from_state(&state);
+        view.sync_transcript_overlay(&state);
         if let Some(panel) = view.command_panel.as_mut() {
             panel.sync_state(&state);
         }
@@ -524,7 +531,8 @@ fn render_tui_dashboard_frame<B: Backend>(
     let prep_start = Instant::now();
     let pending_requests = state.pending_access_requests.clone();
     let expanded_thinking_count = view.expanded_thinking_count();
-    let panel_open = view.command_panel.is_some();
+    let overlay_open = view.transcript_overlay.is_some();
+    let panel_open = view.command_panel.is_some() || overlay_open;
     let live_command_feedback = if !panel_open {
         let command_context = DashboardCommandContext {
             requests: &pending_requests,
@@ -577,6 +585,31 @@ fn render_tui_dashboard_frame<B: Backend>(
     let mut command_elapsed = Duration::ZERO;
     let mut hyperlink_overlays = Vec::new();
     let draw_start = Instant::now();
+    if overlay_open {
+        terminal.draw(|f| {
+            view.last_cursor_pos = None;
+            let activity_start = Instant::now();
+            if let Some(overlay) = view.transcript_overlay.as_mut() {
+                render_transcript_overlay(f, f.area(), overlay);
+            }
+            activity_elapsed = activity_start.elapsed();
+            let area = f.area();
+            hyperlink_overlays = collect_terminal_hyperlink_overlays(f.buffer_mut(), area);
+        })?;
+        let draw_elapsed = draw_start.elapsed();
+        return Ok(TuiFrameRender {
+            timing: TuiFrameTiming {
+                committed_cells: committed_cell_count,
+                live_cells: live_cell_count,
+                frame: frame_start.elapsed(),
+                prep: prep_elapsed,
+                draw: draw_elapsed,
+                activity: activity_elapsed,
+                command: command_elapsed,
+            },
+            hyperlink_overlays,
+        });
+    }
     terminal.draw(|f| {
         let root = Layout::default()
             .direction(Direction::Vertical)
@@ -699,8 +732,9 @@ mod tests {
     }
 
     #[test]
-    fn transcript_panel_visual_snapshot() {
-        let cells = vec![
+    fn transcript_overlay_visual_snapshot() {
+        let state = DashboardState {
+            activity_cells: vec![
             assistant_activity_cell(
                 "## Result\nSee [docs](https://example.test/docs).\n\n```rust\nfn main() {}\n```",
             )
@@ -714,33 +748,42 @@ mod tests {
                 ],
             ))
             .expect("terminal cell"),
-        ];
-        let panel = command_panels::transcript_panel(cells, Vec::new(), 2);
+        ],
+            ..DashboardState::default()
+        };
+        let mut view = TuiViewState::new();
+        view.open_transcript_overlay(&state);
         let backend = TestBackend::new(72, 14);
         let mut terminal = Terminal::new(backend).expect("test terminal");
 
         terminal
-            .draw(|f| render_command_panel(f, f.area(), &panel))
-            .expect("draw transcript panel");
+            .draw(|f| {
+                let overlay = view
+                    .transcript_overlay
+                    .as_mut()
+                    .expect("transcript overlay");
+                render_transcript_overlay(f, f.area(), overlay);
+            })
+            .expect("draw transcript overlay");
 
         let output = trimmed_buffer_text(terminal.backend().buffer());
         assert_eq!(
             output,
             [
+                "T R A N S C R I P T  2 cells",
+                "ASSISTANT",
+                "  └ Result",
+                "    See docs (https://example.test/docs).",
+                "    fn main() {}",
                 "",
-                "  TRANSCRIPT",
-                "  styled per-cell transcript",
-                "  ASSISTANT",
-                "    └ Result",
-                "      See docs (https://example.test/docs).",
-                "      fn main() {}",
+                "COMMAND",
+                "  └ $ cargo check",
+                "  └ Finished dev profile",
+                "  └ ✓ exit=0",
+                "  └ main  exited  exit=0  cwd=C:/repo",
                 "",
-                "  COMMAND",
-                "    └ $ cargo check",
-                "    └ Finished dev profile",
-                "    └ ✓ exit=0",
-                "    └ main  exited  exit=0  cwd=C:/repo",
                 "",
+                "Esc/q close   Up/Down scroll   PgUp/PgDn page   Home/End jump",
             ]
             .join("\n")
         );

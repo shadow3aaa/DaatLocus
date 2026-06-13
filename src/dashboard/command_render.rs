@@ -7,7 +7,6 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::DashboardRuntimeActivity;
-use super::cells::activity_transcript_lines;
 use super::command_flow::{
     command_completion_body, dashboard_command_parts, dashboard_parts_open_panel,
     dashboard_parts_run_action, is_dashboard_command_input, matching_commands,
@@ -16,7 +15,7 @@ use super::command_flow::{
 use super::command_input::{command_input_display_text, cursor_display_row, cursor_display_xy};
 use super::command_panels::{
     CommandDetailPanel, CommandFeedback, CommandFeedbackLevel, CommandPanel, CommandSelectionPanel,
-    CommandTranscriptPanel, DashboardCommandContext, SkillsListPanel, SkillsTogglePanel,
+    DashboardCommandContext, SkillsListPanel, SkillsTogglePanel,
     TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS, TelegramAccessPicker,
 };
 use super::command_registry::dashboard_command_is_known;
@@ -29,11 +28,6 @@ impl CommandPanel {
             CommandPanel::Detail(panel) => {
                 let line_count = render_panel_text_lines(&panel.text).len() as u16;
                 line_count.saturating_add(3).clamp(5, 16)
-            }
-            CommandPanel::Transcript(panel) => {
-                let line_count =
-                    activity_transcript_lines(&panel.cells, &panel.live_cells, 80).len() as u16;
-                line_count.saturating_add(3).clamp(8, 20)
             }
             CommandPanel::Selection(panel) => {
                 let header = 1 + u16::from(panel.subtitle.is_some());
@@ -139,7 +133,6 @@ pub(super) fn render_command_panel(f: &mut Frame, area: Rect, panel: &CommandPan
     let inner = inset_rect(area, 1, 2);
     match panel {
         CommandPanel::Detail(detail) => render_detail_panel(f, inner, detail),
-        CommandPanel::Transcript(transcript) => render_transcript_panel(f, inner, transcript),
         CommandPanel::Selection(selection) => render_selection_panel(f, inner, selection),
         CommandPanel::SkillsList(skills) => render_skills_list_panel(f, inner, skills),
         CommandPanel::SkillsToggle(skills) => render_skills_toggle_panel(f, inner, skills),
@@ -551,26 +544,6 @@ fn render_detail_panel(f: &mut Frame, area: Rect, panel: &CommandDetailPanel) {
     let lines = render_panel_text_lines(&panel.text);
     let max_scroll = lines.len().saturating_sub(body.height as usize) as u16;
     let scroll = panel.scroll.min(max_scroll);
-    f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false }),
-        body,
-    );
-}
-
-fn render_transcript_panel(f: &mut Frame, area: Rect, panel: &CommandTranscriptPanel) {
-    let body = render_panel_title(f, area, &panel.title, Some("styled per-cell transcript"));
-    if body.height == 0 {
-        return;
-    }
-    let lines = activity_transcript_lines(&panel.cells, &panel.live_cells, body.width);
-    let max_scroll = lines.len().saturating_sub(body.height as usize) as u16;
-    let scroll = if panel.follow_bottom {
-        max_scroll
-    } else {
-        panel.scroll.min(max_scroll)
-    };
     f.render_widget(
         Paragraph::new(Text::from(lines))
             .scroll((scroll, 0))

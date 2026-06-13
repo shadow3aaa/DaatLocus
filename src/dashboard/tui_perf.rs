@@ -286,6 +286,7 @@ fn hit_rate(hits: u64, misses: u64) -> f64 {
 
 fn prepare_view_for_frame(state: &DashboardState, view: &mut TuiViewState) {
     view.sync_visible_clear_from_state(state);
+    view.sync_transcript_overlay(state);
     if let Some(panel) = view.command_panel.as_mut() {
         panel.sync_state(state);
     }

@@ -13,7 +13,6 @@ use super::command_input::{
 use super::command_panels::{
     CommandFeedback, CommandFeedbackLevel, CommandPanel, CommandPanelAction,
     DashboardCommandContext, SkillsListPanel, SkillsTogglePanel, handle_command_panel_key,
-    transcript_panel,
 };
 use super::view_state::{CtrlCReminder, TuiViewState};
 use std::path::{Path, PathBuf};
@@ -46,6 +45,11 @@ pub(super) fn handle_key_event(
     state: &DashboardState,
 ) -> TuiInputOutcome {
     let pending_requests = state.pending_access_requests.clone();
+
+    if view.transcript_overlay.is_some() {
+        view.handle_transcript_overlay_key(key);
+        return TuiInputOutcome::Continue;
+    }
 
     if view.command_panel.is_some() {
         if is_ctrl_c(key) {
@@ -116,13 +120,7 @@ pub(super) fn handle_key_event(
 
     if view.command_input.is_empty() {
         if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            let (cells, live_cells) = view.visible_activity_cells(state);
-            view.command_panel = Some(transcript_panel(
-                cells,
-                live_cells,
-                state.activity_cells.len(),
-            ));
-            view.command_feedback = None;
+            view.open_transcript_overlay(state);
             return TuiInputOutcome::Continue;
         }
         if key.code == KeyCode::Enter {
@@ -565,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_t_opens_transcript_panel() {
+    fn ctrl_t_opens_transcript_overlay() {
         let mut view = TuiViewState::new();
         let state = DashboardState::default();
         let outcome = handle_key_event(
@@ -575,14 +573,47 @@ mod tests {
         );
 
         assert!(matches!(outcome, TuiInputOutcome::Continue));
-        let Some(CommandPanel::Transcript(panel)) = view.command_panel else {
-            panic!("ctrl+t should open a transcript panel");
+        assert!(view.command_panel.is_none());
+        let Some(overlay) = view.transcript_overlay else {
+            panic!("ctrl+t should open a transcript overlay");
         };
-        assert_eq!(panel.title, "TRANSCRIPT");
-        assert!(panel.cells.is_empty());
-        assert!(panel.live_cells.is_empty());
-        assert!(panel.follow_bottom);
-        assert_eq!(panel.scroll, 0);
+        assert!(overlay.cells.is_empty());
+        assert!(overlay.live_cells.is_empty());
+        assert!(overlay.follow_bottom);
+        assert_eq!(overlay.scroll, 0);
+    }
+
+    #[test]
+    fn transcript_overlay_handles_close_and_scroll_keys_before_composer() {
+        let mut view = TuiViewState::new();
+        view.transcript_overlay = Some(crate::dashboard::view_state::TranscriptOverlayState::new(
+            Vec::new(),
+            Vec::new(),
+            0,
+        ));
+        let overlay = view.transcript_overlay.as_mut().expect("overlay");
+        overlay.set_render_metrics(100, 20);
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut view,
+            &DashboardState::default(),
+        );
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        let overlay = view.transcript_overlay.as_ref().expect("overlay");
+        assert!(!overlay.follow_bottom);
+        assert_eq!(overlay.scroll, 98);
+        assert!(view.command_input.is_empty());
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            &mut view,
+            &DashboardState::default(),
+        );
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert!(view.transcript_overlay.is_none());
     }
 
     #[test]
