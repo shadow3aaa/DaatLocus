@@ -296,35 +296,21 @@ impl TuiViewState {
     pub(super) fn handle_activity_scroll_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Up => {
-                if self.auto_scroll {
-                    self.auto_scroll = false;
-                    self.scroll_offset = self.max_scroll.saturating_sub(1);
-                } else {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(1);
-                }
+                self.handle_activity_scroll_rows(-1);
                 true
             }
             KeyCode::Down => {
-                self.scroll_offset = self.scroll_offset.saturating_add(1);
-                if self.scroll_offset >= self.max_scroll {
-                    self.auto_scroll = true;
-                }
+                self.handle_activity_scroll_rows(1);
                 true
             }
             KeyCode::PageUp => {
-                if self.auto_scroll {
-                    self.auto_scroll = false;
-                    self.scroll_offset = self.max_scroll.saturating_sub(self.page_height);
-                } else {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(self.page_height);
-                }
+                let page_height = self.page_height.min(i16::MAX as u16) as i16;
+                self.handle_activity_scroll_rows(-page_height);
                 true
             }
             KeyCode::PageDown => {
-                self.scroll_offset = self.scroll_offset.saturating_add(self.page_height);
-                if self.scroll_offset >= self.max_scroll {
-                    self.auto_scroll = true;
-                }
+                let page_height = self.page_height.min(i16::MAX as u16) as i16;
+                self.handle_activity_scroll_rows(page_height);
                 true
             }
             KeyCode::Home => {
@@ -339,5 +325,67 @@ impl TuiViewState {
             }
             _ => false,
         }
+    }
+
+    pub(super) fn handle_activity_scroll_rows(&mut self, rows: i16) -> bool {
+        match rows.cmp(&0) {
+            std::cmp::Ordering::Less => {
+                let rows = rows.unsigned_abs();
+                if self.auto_scroll {
+                    self.auto_scroll = false;
+                    self.scroll_offset = self.max_scroll.saturating_sub(rows);
+                } else {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(rows);
+                }
+                true
+            }
+            std::cmp::Ordering::Greater => {
+                let rows = rows as u16;
+                self.scroll_offset = self.scroll_offset.saturating_add(rows);
+                if self.scroll_offset >= self.max_scroll {
+                    self.auto_scroll = true;
+                }
+                true
+            }
+            std::cmp::Ordering::Equal => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scroll_rows_moves_up_from_auto_scroll_without_key_event() {
+        let mut view = TuiViewState::new();
+        view.max_scroll = 100;
+        view.auto_scroll = true;
+
+        assert!(view.handle_activity_scroll_rows(-3));
+
+        assert!(!view.auto_scroll);
+        assert_eq!(view.scroll_offset, 97);
+    }
+
+    #[test]
+    fn scroll_rows_reenters_auto_scroll_at_bottom() {
+        let mut view = TuiViewState::new();
+        view.max_scroll = 100;
+        view.auto_scroll = false;
+        view.scroll_offset = 98;
+
+        assert!(view.handle_activity_scroll_rows(3));
+
+        assert!(view.auto_scroll);
+    }
+
+    #[test]
+    fn zero_scroll_rows_are_ignored() {
+        let mut view = TuiViewState::new();
+
+        assert!(!view.handle_activity_scroll_rows(0));
+        assert!(view.auto_scroll);
+        assert_eq!(view.scroll_offset, 0);
     }
 }

@@ -235,7 +235,7 @@ enum DevTarget {
 #[cfg(feature = "tui-perf-cmd")]
 #[derive(Debug, Args)]
 struct TuiPerfCliArgs {
-    /// Scenario to render: mixed, long-history, live-activity, command-panels.
+    /// Scenario to render: mixed, long-history, scrolling, live-activity, command-panels.
     #[arg(long, default_value = "mixed")]
     scenario: String,
     /// Measured frame count after warmup.

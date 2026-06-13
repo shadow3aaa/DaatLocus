@@ -35,6 +35,7 @@ pub(crate) struct TuiPerfCommand {
 enum TuiPerfScenario {
     Mixed,
     LongHistory,
+    Scrolling,
     LiveActivity,
     CommandPanels,
 }
@@ -44,13 +45,14 @@ impl TuiPerfScenario {
         match self {
             Self::Mixed => "mixed",
             Self::LongHistory => "long-history",
+            Self::Scrolling => "scrolling",
             Self::LiveActivity => "live-activity",
             Self::CommandPanels => "command-panels",
         }
     }
 
     fn valid_values() -> &'static str {
-        "mixed, long-history, live-activity, command-panels"
+        "mixed, long-history, scrolling, live-activity, command-panels"
     }
 }
 
@@ -61,6 +63,7 @@ impl FromStr for TuiPerfScenario {
         match value.trim() {
             "mixed" => Ok(Self::Mixed),
             "long-history" => Ok(Self::LongHistory),
+            "scrolling" => Ok(Self::Scrolling),
             "live-activity" => Ok(Self::LiveActivity),
             "command-panels" => Ok(Self::CommandPanels),
             other => Err(miette!(
@@ -80,6 +83,9 @@ struct TuiPerfReport {
     height: u16,
     committed_cells: usize,
     live_cells: usize,
+    scroll_steps: usize,
+    final_scroll_offset: u16,
+    final_auto_scroll: bool,
     nonblank_cells: usize,
     frame_ms: TuiPerfTimingSummary,
     prep_ms: TuiPerfTimingSummary,
@@ -147,15 +153,20 @@ fn run_tui_perf(command: TuiPerfCommand) -> Result<TuiPerfReport> {
     let backend = TestBackend::new(command.width, command.height);
     let mut terminal = Terminal::new(backend).into_diagnostic()?;
 
-    for _ in 0..command.warmup {
+    for frame in 0..command.warmup {
         prepare_view_for_frame(&state, &mut view);
+        apply_perf_scroll_step(scenario, frame, &mut view);
         render_tui_dashboard_frame(&mut terminal, &mut view, &state).into_diagnostic()?;
     }
 
     view.cached_activity_lines.reset_stats();
     let mut timings = TuiPerfTimingAccumulator::default();
-    for _ in 0..command.frames {
+    let mut scroll_steps = 0;
+    for frame in 0..command.frames {
         prepare_view_for_frame(&state, &mut view);
+        if apply_perf_scroll_step(scenario, command.warmup + frame, &mut view) {
+            scroll_steps += 1;
+        }
         let timing =
             render_tui_dashboard_frame(&mut terminal, &mut view, &state).into_diagnostic()?;
         timings.record(timing);
@@ -177,6 +188,9 @@ fn run_tui_perf(command: TuiPerfCommand) -> Result<TuiPerfReport> {
         height: command.height,
         committed_cells: timings.committed_cells,
         live_cells: timings.live_cells,
+        scroll_steps,
+        final_scroll_offset: view.scroll_offset,
+        final_auto_scroll: view.auto_scroll,
         nonblank_cells,
         frame_ms: timings.summary(timings.frame, timings.max_frame, command.frames),
         prep_ms: timings.summary(timings.prep, timings.max_prep, command.frames),
@@ -201,6 +215,10 @@ fn print_text_report(report: &TuiPerfReport) {
     println!(
         "cells committed={} live={} nonblank={}",
         report.committed_cells, report.live_cells, report.nonblank_cells
+    );
+    println!(
+        "scroll steps={} final_offset={} auto_scroll={}",
+        report.scroll_steps, report.final_scroll_offset, report.final_auto_scroll
     );
     println!(
         "frame_ms avg={:.3} max={:.3}  prep avg={:.3} max={:.3}  draw avg={:.3} max={:.3}",
@@ -275,10 +293,23 @@ fn prepare_view_for_frame(state: &DashboardState, view: &mut TuiViewState) {
     view.sync_history_cursor_from_state(state);
 }
 
+fn apply_perf_scroll_step(
+    scenario: TuiPerfScenario,
+    frame_index: usize,
+    view: &mut TuiViewState,
+) -> bool {
+    if scenario != TuiPerfScenario::Scrolling {
+        return false;
+    }
+
+    let rows = if (frame_index / 18) % 2 == 0 { 4 } else { -4 };
+    view.handle_activity_scroll_rows(rows)
+}
+
 fn mock_dashboard_state(scenario: TuiPerfScenario) -> (DashboardState, TuiViewState) {
     let mut state = DashboardState {
         activity_cells: mock_activity_cells(match scenario {
-            TuiPerfScenario::LongHistory => 260,
+            TuiPerfScenario::LongHistory | TuiPerfScenario::Scrolling => 260,
             TuiPerfScenario::LiveActivity => 45,
             TuiPerfScenario::CommandPanels => 55,
             TuiPerfScenario::Mixed => 140,
@@ -319,6 +350,11 @@ fn mock_dashboard_state(scenario: TuiPerfScenario) -> (DashboardState, TuiViewSt
         TuiPerfScenario::LongHistory => {
             view.auto_scroll = false;
             view.scroll_offset = 80;
+        }
+        TuiPerfScenario::Scrolling => {
+            view.auto_scroll = false;
+            view.scroll_offset = 80;
+            view.max_scroll = u16::MAX;
         }
         TuiPerfScenario::LiveActivity => {
             view.command_input.set_text("/telegram approve".to_string());
@@ -581,6 +617,25 @@ mod tests {
         assert!(report.committed_cells > 0);
         assert!(report.nonblank_cells > 0);
         assert!(report.cache.occupied_entries > 0);
+        assert!(report.cache.hits > 0);
+    }
+
+    #[test]
+    fn tui_perf_scrolling_scenario_exercises_scroll_frames() {
+        let report = run_tui_perf(TuiPerfCommand {
+            scenario: "scrolling".to_string(),
+            frames: 8,
+            warmup: 1,
+            width: 100,
+            height: 32,
+            json: false,
+        })
+        .expect("perf report");
+
+        assert_eq!(report.scenario, "scrolling");
+        assert_eq!(report.scroll_steps, 8);
+        assert!(!report.final_auto_scroll);
+        assert_ne!(report.final_scroll_offset, 80);
         assert!(report.cache.hits > 0);
     }
 

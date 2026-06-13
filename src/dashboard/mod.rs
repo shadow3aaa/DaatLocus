@@ -49,8 +49,8 @@ use crossterm::cursor::SetCursorStyle;
 #[cfg(test)]
 use crossterm::event::KeyModifiers;
 use crossterm::event::{
-    KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableMouseCapture, EnableMouseCapture, KeyEventKind, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use futures_util::StreamExt;
 use ratatui::prelude::*;
@@ -350,6 +350,7 @@ pub async fn run_tui_dashboard(
         terminal.backend_mut(),
         crossterm::event::EnableBracketedPaste
     )?;
+    crossterm::execute!(terminal.backend_mut(), EnableMouseCapture)?;
     let keyboard_enhancement_enabled = crossterm::execute!(
         terminal.backend_mut(),
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
@@ -399,6 +400,11 @@ pub async fn run_tui_dashboard(
                                     break;
                                 }
                                 continue;
+                    }
+                    tui_event::TuiEvent::MouseWheel { rows } => {
+                        if view.command_panel.is_none() && view.handle_activity_scroll_rows(rows) {
+                            frame_requester.schedule_frame();
+                        }
                     }
                     tui_event::TuiEvent::Resize => {
                         frame_requester.schedule_frame();
@@ -481,6 +487,7 @@ pub async fn run_tui_dashboard(
     }
     crossterm::execute!(
         terminal.backend_mut(),
+        DisableMouseCapture,
         SetCursorStyle::DefaultUserShape,
         crossterm::terminal::LeaveAlternateScreen,
     )?;
