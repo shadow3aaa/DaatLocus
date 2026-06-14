@@ -60,6 +60,46 @@ Examples:
 If the user's next step is to choose, browse, toggle, or inspect something, it
 belongs in a bottom panel rather than in a visible slash subcommand.
 
+## WebUI Session Rendering
+
+These rules apply to session conversation and activity rendering only: the
+Agent session message list, live activity, transcript-like views, and slash
+command surfaces inside the session. Other WebUI pages such as navigation,
+login, settings, logs, global status, and sidebars are normal web product
+surfaces and do not need to mirror the TUI.
+
+The WebUI session surface should stay close to the current TUI renderer in
+information hierarchy, density, naming, and runtime semantics. Do not invent a
+separate visual language for session cells. When changing session cell
+appearance, first check the actual renderer in `src/dashboard/cells/tui.rs` and
+mirror its structure with web-native markup.
+
+Rules:
+
+- Render from structured `DashboardState`, `WebActivityItem`, and
+  `ActivityCell` data. Do not parse rendered TUI strings, bullet lists, status
+  prose, or command output back into web structure.
+- If WebUI needs structure that does not exist yet, add it to the
+  Manager/Session/dashboard contract. Do not add frontend regexes or string
+  split heuristics as the normal path.
+- Slash command output and interaction inside the session follow the same rule:
+  use web-native controls, lists, toggles, buttons, and detail surfaces backed
+  by structured data. Plain preformatted output is only acceptable for explicit
+  debug/raw views or unknown fallback content.
+- Keep visual parity with the TUI through the current renderer's spacing,
+  ordering, labels, status semantics, and progressive disclosure. Web controls
+  may improve interaction, but the default visual result must still read like
+  the TUI session feed.
+- The old per-kind TUI glyph icon system is deprecated for product UI. Do not
+  revive glyphs such as app-specific symbols for Browser, Coding, Patch, or
+  Primitive. The standard current TUI layout markers such as `•`, `›`, and
+  detail indentation are layout markers, not a per-kind icon system; mirror
+  them only when the current TUI renderer uses them.
+- Avoid nested cards in the session message list. Use flat activity rows,
+  sections, lists, tables, collapsibles, separators, and inline controls.
+- Raw text fallbacks must be isolated to unknown/debug cells. A supported
+  activity type should have a typed renderer that reads its structured payload.
+
 ## TUI Dashboard Architecture
 
 The TUI dashboard is an immediate-mode, full-frame terminal renderer driven by
