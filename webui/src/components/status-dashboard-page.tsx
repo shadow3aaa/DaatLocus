@@ -7,9 +7,17 @@ import {
   type ReactNode,
 } from "react";
 
-import { CheckIcon, ChevronRight, GripVerticalIcon, XIcon } from "lucide-react";
+import {
+  CheckIcon,
+  ChevronRight,
+  GripVerticalIcon,
+  TriangleAlertIcon,
+  XIcon,
+} from "lucide-react";
 import { Bar, BarChart, XAxis, YAxis } from "recharts";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -19,6 +27,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import {
   runDashboardCommand,
   fetchStatusSummary,
@@ -98,6 +112,8 @@ type SessionDashboardEntry = {
   session: SessionInfo;
   dashboard: SessionStatusDashboard;
 };
+
+type SessionStatusTone = "attention" | "active" | "ready" | "available";
 
 const STATUS_CARD_DEFINITIONS: Record<StatusCardId, StatusCardDefinition> = {
   sessions: {
@@ -237,12 +253,11 @@ export function StatusPage() {
       className="min-h-screen w-full px-6 pb-10 pt-20 md:pb-12 md:pt-8"
     >
       {loadError ? (
-        <div
-          role="alert"
-          className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-        >
-          {loadError.message}
-        </div>
+        <Alert variant="destructive" className="mb-4">
+          <TriangleAlertIcon aria-hidden="true" />
+          <AlertTitle>Unable to load status</AlertTitle>
+          <AlertDescription>{loadError.message}</AlertDescription>
+        </Alert>
       ) : null}
       <div className="grid w-full grid-cols-1 items-start gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {cardColumns.map((column, columnIndex) => (
@@ -366,7 +381,7 @@ function StatusCardDragHandle({
       onKeyDown={(event) => onKeyboardMove(event, cardId)}
       className="cursor-grab text-muted-foreground hover:text-foreground active:cursor-grabbing"
     >
-      <GripVerticalIcon className="size-4" />
+      <GripVerticalIcon data-icon="inline-start" aria-hidden="true" />
     </Button>
   );
 }
@@ -387,7 +402,7 @@ function SessionsCard({
         <CardTitle>Sessions</CardTitle>
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent className="flex flex-col gap-3">
         <div className="grid grid-cols-3 gap-2">
           <ContextCompositionMetric
             label="Daemon"
@@ -406,15 +421,16 @@ function SessionsCard({
           />
         </div>
         {sessions.length > 0 ? (
-          <div className="space-y-2">
+          <div className="flex flex-col gap-2">
             {sessions.map((entry) => (
               <SessionStatusLine key={entry.session.session_id} entry={entry} />
             ))}
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">
-            No sessions registered.
-          </p>
+          <DashboardEmptyState
+            title="No sessions registered"
+            description="Sessions will appear here after the manager starts or reconnects them."
+          />
         )}
       </CardContent>
     </Card>
@@ -423,7 +439,7 @@ function SessionsCard({
 
 function SessionStatusLine({ entry }: { entry: StatusSessionSummary }) {
   const runtime = entry.runtime_status;
-  const status = entry.error
+  const status: SessionStatusTone = entry.error
     ? "attention"
     : runtime?.active_runtime_turn
       ? "active"
@@ -444,9 +460,12 @@ function SessionStatusLine({ entry }: { entry: StatusSessionSummary }) {
         </div>
         <div className="truncate text-xs text-muted-foreground">{detail}</div>
       </div>
-      <span className="shrink-0 rounded-md border px-2 py-1 font-mono text-xs tabular-nums text-muted-foreground">
+      <Badge
+        variant={sessionStatusBadgeVariant(status)}
+        className="font-mono tabular-nums"
+      >
         {status}
-      </span>
+      </Badge>
     </div>
   );
 }
@@ -489,7 +508,7 @@ function TelegramApprovalCard({
       </CardHeader>
       <CardContent>
         {requests.length > 0 ? (
-          <div className="space-y-3">
+          <div className="flex flex-col gap-3">
             {requests.map((request) => {
               const isBusy = busyChatId === request.chat_id;
               const label = telegramApprovalDisplayName(request);
@@ -513,14 +532,13 @@ function TelegramApprovalCard({
                   <div className="flex items-center gap-1.5">
                     <Button
                       type="button"
-                      variant="outline"
+                      variant="default"
                       size="icon-sm"
                       aria-label={`Approve ${label}`}
                       disabled={busyChatId !== null}
                       onClick={() => handleRequestAction(request, "approve")}
-                      className="text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-600"
                     >
-                      <CheckIcon className="size-4" />
+                      <CheckIcon data-icon="inline-start" aria-hidden="true" />
                     </Button>
                     <Button
                       type="button"
@@ -530,7 +548,7 @@ function TelegramApprovalCard({
                       disabled={busyChatId !== null}
                       onClick={() => handleRequestAction(request, "reject")}
                     >
-                      <XIcon className="size-4" />
+                      <XIcon data-icon="inline-start" aria-hidden="true" />
                     </Button>
                   </div>
                   {isBusy ? <span className="sr-only">Processing</span> : null}
@@ -539,12 +557,15 @@ function TelegramApprovalCard({
             })}
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground">
-            No pending Telegram approvals.
-          </p>
+          <DashboardEmptyState
+            title="No pending Telegram approvals"
+            description="Incoming access requests will appear here when Telegram control needs review."
+          />
         )}
         {actionError ? (
-          <p className="mt-3 text-xs text-destructive">{actionError}</p>
+          <Alert variant="destructive" className="mt-3 px-2 py-1">
+            <AlertDescription className="text-xs">{actionError}</AlertDescription>
+          </Alert>
         ) : null}
       </CardContent>
     </Card>
@@ -619,9 +640,11 @@ function DailyTokenUsageCard({
           </BarChart>
         </ChartContainer>
         {hasUsage ? null : (
-          <p className="mt-2 text-xs text-muted-foreground">
-            No token usage recorded yet.
-          </p>
+          <DashboardEmptyState
+            title="No token usage recorded"
+            description="Usage bars appear after sessions make model requests."
+            compact
+          />
         )}
       </CardContent>
     </Card>
@@ -649,7 +672,7 @@ function ModelContextCompositionCard({
         <CardTitle>Model Context Composition</CardTitle>
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="flex flex-col gap-4">
         {entries.length > 0 ? (
           <>
             {entries.map((entry) => (
@@ -660,9 +683,10 @@ function ModelContextCompositionCard({
             ))}
           </>
         ) : (
-          <p className="text-sm text-muted-foreground">
-            Waiting for session model requests to capture context composition.
-          </p>
+          <DashboardEmptyState
+            title="Waiting for context captures"
+            description="Context composition appears after a session sends a model request."
+          />
         )}
       </CardContent>
     </Card>
@@ -685,7 +709,7 @@ function SessionContextComposition({
   }
 
   return (
-    <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+    <div className="flex flex-col gap-3 rounded-lg border bg-muted/20 p-3">
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="truncate text-sm font-medium">
           {sessionDisplayName(entry.session, entry.dashboard)}
@@ -836,9 +860,10 @@ function PrimitiveOptimizationCard({
           <CardAction>{dragHandle}</CardAction>
         </CardHeader>
         <CardContent>
-          <div className="flex h-32 items-center justify-center">
-            <p className="text-sm text-muted-foreground">No data</p>
-          </div>
+          <DashboardEmptyState
+            title="No primitive optimization data"
+            description="Optimization progress appears after primitive evidence is processed."
+          />
         </CardContent>
       </Card>
     );
@@ -851,7 +876,7 @@ function PrimitiveOptimizationCard({
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
-        <div className="space-y-4">
+        <div className="flex flex-col gap-4">
           {visibleRows.map((row) => (
             <OptimizationSessionRow
               key={row.entry.session.session_id}
@@ -893,9 +918,10 @@ function RuntimeOptimizationCard({
           <CardAction>{dragHandle}</CardAction>
         </CardHeader>
         <CardContent>
-          <div className="flex h-32 items-center justify-center">
-            <p className="text-sm text-muted-foreground">No data</p>
-          </div>
+          <DashboardEmptyState
+            title="No runtime optimization data"
+            description="Runtime optimization progress appears after error cases are processed."
+          />
         </CardContent>
       </Card>
     );
@@ -908,7 +934,7 @@ function RuntimeOptimizationCard({
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
-        <div className="space-y-4">
+        <div className="flex flex-col gap-4">
           {visibleRows.map((row) => (
             <OptimizationSessionRow
               key={row.entry.session.session_id}
@@ -936,7 +962,7 @@ function OptimizationSessionRow({
   config: OptimizationChartConfig;
 }) {
   return (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-2">
       <div className="flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground">
         <span className="truncate font-medium text-foreground">{label}</span>
         <span className="shrink-0 font-mono tabular-nums">
@@ -946,10 +972,29 @@ function OptimizationSessionRow({
       <OptimizationProgressBar data={data} total={total} config={config} />
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <span>Queued</span>
-        <ChevronRight className="h-3 w-3" />
+        <ChevronRight className="size-3" />
         <span>Applied</span>
       </div>
     </div>
+  );
+}
+
+function DashboardEmptyState({
+  title,
+  description,
+  compact = false,
+}: {
+  title: string;
+  description: string;
+  compact?: boolean;
+}) {
+  return (
+    <Empty className={cn("border-0", compact ? "py-3" : "min-h-32 py-6")}>
+      <EmptyHeader>
+        <EmptyTitle>{title}</EmptyTitle>
+        <EmptyDescription>{description}</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
   );
 }
 
@@ -996,6 +1041,21 @@ function sessionDisplayName(
     dashboard?.session_title?.title.trim() ||
     "Untitled session"
   );
+}
+
+function sessionStatusBadgeVariant(
+  status: SessionStatusTone,
+): "default" | "secondary" | "destructive" | "outline" | "ghost" {
+  switch (status) {
+    case "attention":
+      return "destructive";
+    case "active":
+      return "default";
+    case "ready":
+      return "secondary";
+    case "available":
+      return "outline";
+  }
 }
 
 function sessionScopeLabel(session: SessionInfo) {
@@ -1145,7 +1205,7 @@ function OptimizationProgressBar({
   }
 
   return (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-2">
       <div
         className="flex h-10 w-full overflow-hidden rounded-md border bg-muted/30"
         role="img"

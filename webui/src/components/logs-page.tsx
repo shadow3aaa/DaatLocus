@@ -8,15 +8,34 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDownIcon, SearchIcon } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from "@/components/ui/input-group";
 import {
   fetchLogSources,
   readLogSource,
   type LogReadResponse,
   type LogSource,
 } from "@/lib/daemon-api";
-import { cn } from "@/lib/utils";
 
 const LOG_READ_LIMIT = 1_000;
 const FOLLOW_POLL_MS = 1_500;
@@ -70,10 +89,7 @@ export function LogsPage() {
   const [levelFilter, setLevelFilter] = useState<LogLevelFilter>(
     readStoredLevelFilter,
   );
-  const [isSourceMenuOpen, setIsSourceMenuOpen] = useState(false);
-  const [isLevelMenuOpen, setIsLevelMenuOpen] = useState(false);
   const viewportRef = useRef<HTMLDivElement | null>(null);
-  const menuBarRef = useRef<HTMLDivElement | null>(null);
 
   const selectedSource =
     sources.find((source) => source.id === selectedSourceId) ?? null;
@@ -150,8 +166,6 @@ export function LogsPage() {
     setLines([]);
     setCursor(null);
     setReadError(null);
-    setIsSourceMenuOpen(false);
-    setIsLevelMenuOpen(false);
     if (!selectedSourceId) {
       return;
     }
@@ -183,37 +197,6 @@ export function LogsPage() {
       virtualizer.scrollToIndex(filteredEntries.length - 1, { align: "end" });
     });
   }, [filteredEntries.length, query, virtualizer]);
-
-  useEffect(() => {
-    if (!isSourceMenuOpen && !isLevelMenuOpen) {
-      return;
-    }
-
-    function closeOnOutsidePointer(event: MouseEvent) {
-      if (
-        menuBarRef.current &&
-        !menuBarRef.current.contains(event.target as Node)
-      ) {
-        setIsSourceMenuOpen(false);
-        setIsLevelMenuOpen(false);
-      }
-    }
-
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setIsSourceMenuOpen(false);
-        setIsLevelMenuOpen(false);
-      }
-    }
-
-    document.addEventListener("mousedown", closeOnOutsidePointer);
-    document.addEventListener("keydown", closeOnEscape);
-
-    return () => {
-      document.removeEventListener("mousedown", closeOnOutsidePointer);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [isLevelMenuOpen, isSourceMenuOpen]);
 
   useEffect(() => {
     try {
@@ -301,62 +284,42 @@ export function LogsPage() {
       aria-label="Logs"
       className="h-screen overflow-hidden bg-background pt-20"
     >
-      <div
-        ref={menuBarRef}
-        className="fixed top-4 left-16 z-50 flex items-start gap-2 md:top-6 md:left-[calc(18rem+1.5rem)]"
-      >
-        <div className="relative">
-          <Button
-            type="button"
-            variant="outline"
-            aria-haspopup="menu"
-            aria-expanded={isSourceMenuOpen}
-            disabled={sourceLoadState === "loading" && sources.length === 0}
-            onClick={() => {
-              setIsSourceMenuOpen((open) => !open);
-              setIsLevelMenuOpen(false);
-            }}
-            className="max-w-[36vw] rounded-full border-border/60 bg-background/70 px-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
-          >
-            <span className="truncate">
-              {selectedSource?.label ??
-                (sourceLoadState === "loading" ? "Loading logs" : "Logs")}
-            </span>
-            <ChevronDownIcon
-              className={cn(
-                "size-4 transition-transform",
-                isSourceMenuOpen && "rotate-180",
-              )}
-            />
-          </Button>
-
-          {isSourceMenuOpen ? (
-            <div
-              role="menu"
-              className="absolute top-full left-0 mt-2 max-h-[min(24rem,70vh)] w-72 max-w-[calc(100vw-2rem)] overflow-auto rounded-xl border border-border/70 bg-popover p-1 text-popover-foreground shadow-xl"
+      <div className="fixed top-4 left-16 z-50 flex items-start gap-2 md:top-6 md:left-[calc(18rem+1.5rem)]">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={sourceLoadState === "loading" && sources.length === 0}
+              className="max-w-[36vw] rounded-full border-border/60 bg-background/70 px-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
             >
-              {sourceLoadState === "error" ? (
-                <div className="px-3 py-2 text-sm text-destructive">
+              <span className="truncate">
+                {selectedSource?.label ??
+                  (sourceLoadState === "loading" ? "Loading logs" : "Logs")}
+              </span>
+              <ChevronDownIcon data-icon="inline-end" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent className="w-72 max-w-[calc(100vw-2rem)]">
+            {sourceLoadState === "error" ? (
+              <>
+                <DropdownMenuLabel className="text-destructive">
                   {sourceError ?? "Unable to load log sources."}
-                </div>
-              ) : null}
-
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+              </>
+            ) : null}
+            <DropdownMenuRadioGroup
+              value={selectedSourceId ?? ""}
+              onValueChange={setSelectedSourceId}
+            >
               {sources.map((source) => (
-                <button
+                <DropdownMenuRadioItem
                   key={source.id}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={source.id === selectedSourceId}
-                  onClick={() => {
-                    setSelectedSourceId(source.id);
-                    setIsSourceMenuOpen(false);
-                  }}
-                  className={cn(
-                    "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm transition hover:bg-muted",
-                    source.id === selectedSourceId && "bg-muted",
-                  )}
+                  value={source.id}
+                  className="items-start gap-3 py-2 pr-8"
                 >
-                  <span className="min-w-0">
+                  <span className="min-w-0 flex-1">
                     <span className="block truncate font-medium">
                       {source.label}
                     </span>
@@ -364,88 +327,62 @@ export function LogsPage() {
                       {source.description}
                     </span>
                   </span>
-                  <span
-                    aria-label={source.exists ? "available" : "missing"}
-                    className={cn(
-                      "size-2 shrink-0 rounded-full",
-                      source.exists
-                        ? "bg-emerald-500"
-                        : "bg-muted-foreground/35",
-                    )}
-                  />
-                </button>
+                  <Badge
+                    variant={source.exists ? "secondary" : "outline"}
+                    className="font-mono"
+                  >
+                    {source.exists ? "live" : "missing"}
+                  </Badge>
+                </DropdownMenuRadioItem>
               ))}
-            </div>
-          ) : null}
-        </div>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
 
-        <div className="relative">
-          <Button
-            type="button"
-            variant="outline"
-            aria-haspopup="menu"
-            aria-expanded={isLevelMenuOpen}
-            onClick={() => {
-              setIsLevelMenuOpen((open) => !open);
-              setIsSourceMenuOpen(false);
-            }}
-            className="rounded-full border-border/60 bg-background/70 px-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
-          >
-            <span>{displayLevel(levelFilter)}</span>
-            <ChevronDownIcon
-              className={cn(
-                "size-4 transition-transform",
-                isLevelMenuOpen && "rotate-180",
-              )}
-            />
-          </Button>
-
-          {isLevelMenuOpen ? (
-            <div
-              role="menu"
-              className="absolute top-full left-0 mt-2 w-40 rounded-xl border border-border/70 bg-popover p-1 text-popover-foreground shadow-xl"
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              className="rounded-full border-border/60 bg-background/70 px-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
+            >
+              <span>{displayLevel(levelFilter)}</span>
+              <ChevronDownIcon data-icon="inline-end" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent className="w-40">
+            <DropdownMenuRadioGroup
+              value={levelFilter}
+              onValueChange={(value) => {
+                const nextLevel = logLevelFilterFromValue(value);
+                if (nextLevel) {
+                  setLevelFilter(nextLevel);
+                }
+              }}
             >
               {LOG_LEVEL_FILTERS.map((level) => (
-                <button
-                  key={level.value}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={level.value === levelFilter}
-                  onClick={() => {
-                    setLevelFilter(level.value);
-                    setIsLevelMenuOpen(false);
-                  }}
-                  className={cn(
-                    "flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-medium transition hover:bg-muted",
-                    level.value === levelFilter && "bg-muted",
-                  )}
-                >
+                <DropdownMenuRadioItem key={level.value} value={level.value}>
                   {level.label}
-                  <span
-                    className={cn(
-                      "size-2 rounded-full",
-                      level.value === levelFilter
-                        ? "bg-primary"
-                        : "bg-muted-foreground/30",
-                    )}
-                  />
-                </button>
+                </DropdownMenuRadioItem>
               ))}
-            </div>
-          ) : null}
-        </div>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
       <div className="fixed top-4 right-4 z-50 md:top-6 md:right-6">
-        <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          type="search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search logs"
-          aria-label="Search logs"
-          className="h-10 w-[min(44vw,20rem)] rounded-full border-border/60 bg-background/70 pl-9 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
-        />
+        <InputGroup className="h-10 w-[min(44vw,20rem)] rounded-full border-border/60 bg-background/70 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55">
+          <InputGroupAddon align="inline-start">
+            <SearchIcon aria-hidden="true" />
+          </InputGroupAddon>
+          <InputGroupInput
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search logs"
+            aria-label="Search logs"
+          />
+        </InputGroup>
       </div>
 
       <div ref={viewportRef} className="h-full overflow-auto px-3 pb-6 md:px-6">
@@ -493,14 +430,12 @@ function LogEntryRow({ entry, query }: { entry: LogEntry; query: string }) {
         {entry.timestamp ?? "—"}
       </time>
       <div className="md:pt-0.5">
-        <span
-          className={cn(
-            "inline-flex rounded-full px-2 py-0.5 text-[0.68rem] font-semibold tracking-wide uppercase",
-            levelClassName(entry.level),
-          )}
+        <Badge
+          variant={levelBadgeVariant(entry.level)}
+          className="font-mono text-[0.68rem] uppercase tracking-wide"
         >
           {displayLevel(entry.level)}
-        </span>
+        </Badge>
       </div>
       <div className="min-w-0 truncate text-xs text-muted-foreground md:pt-1">
         {entry.target ?? "—"}
@@ -514,8 +449,13 @@ function LogEntryRow({ entry, query }: { entry: LogEntry; query: string }) {
 
 function EmptyLogState({ message }: { message: string }) {
   return (
-    <div className="absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
-      {message}
+    <div className="absolute inset-0 flex items-center justify-center px-4">
+      <Empty className="max-w-md border border-dashed bg-card/60">
+        <EmptyHeader>
+          <EmptyTitle>Logs</EmptyTitle>
+          <EmptyDescription>{message}</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
     </div>
   );
 }
@@ -700,20 +640,22 @@ function logLevelFilterFromValue(
   }
 }
 
-function levelClassName(level: string | null) {
+function levelBadgeVariant(
+  level: string | null,
+): "default" | "secondary" | "destructive" | "outline" | "ghost" {
   switch (normalizeLevel(level)) {
     case "error":
-      return "bg-destructive/15 text-destructive";
+      return "destructive";
     case "warn":
-      return "bg-amber-500/15 text-amber-700 dark:text-amber-300";
+      return "secondary";
     case "info":
-      return "bg-sky-500/15 text-sky-700 dark:text-sky-300";
+      return "outline";
     case "debug":
-      return "bg-violet-500/15 text-violet-700 dark:text-violet-300";
+      return "ghost";
     case "trace":
-      return "bg-muted text-muted-foreground";
+      return "secondary";
     default:
-      return "bg-secondary text-secondary-foreground";
+      return "secondary";
   }
 }
 

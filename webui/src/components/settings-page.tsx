@@ -12,6 +12,14 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
+import {
   fetchSettingsSummary,
   type SettingsCredentialStatus,
   type SettingsCredentialSummary,
@@ -75,7 +83,7 @@ export function SettingsPage() {
       <div className="flex w-full flex-col gap-4">
         {loadError ? (
           <Alert variant="destructive">
-            <TriangleAlertIcon className="size-4" aria-hidden="true" />
+            <TriangleAlertIcon aria-hidden="true" />
             <AlertTitle>Unable to load settings</AlertTitle>
             <AlertDescription>{loadError}</AlertDescription>
           </Alert>
@@ -123,10 +131,11 @@ function CoreCard({
             onClick={onRefresh}
             disabled={isLoading}
           >
-            <RefreshCwIcon
-              className={cn("size-4", isLoading && "animate-spin")}
-              aria-hidden="true"
-            />
+            {isLoading ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <RefreshCwIcon data-icon="inline-start" aria-hidden="true" />
+            )}
           </Button>
         </CardAction>
       </CardHeader>
@@ -296,7 +305,7 @@ function SettingList({ lines }: { lines: SettingLine[] }) {
 function SettingLineRow({ line }: { line: SettingLine }) {
   return (
     <div className="flex min-w-0 items-start justify-between gap-3 py-3 first:pt-0 last:pb-0">
-      <div className="min-w-0 space-y-1">
+      <div className="flex min-w-0 flex-col gap-1">
         <div className="text-xs uppercase tracking-wide text-muted-foreground">
           {line.label}
         </div>
@@ -344,7 +353,7 @@ function BadgeLine({ labels }: { labels: string[] }) {
 
 function StatusBadge({ tone, label }: { tone: Tone; label: string }) {
   return (
-    <Badge variant="outline" className={cn("rounded-full", toneClassName(tone))}>
+    <Badge variant={toneBadgeVariant(tone)} className="rounded-full">
       {label}
     </Badge>
   );
@@ -364,7 +373,14 @@ function CredentialBadge({
 }
 
 function EmptyState({ children }: { children: ReactNode }) {
-  return <div className="py-6 text-center text-sm text-muted-foreground">{children}</div>;
+  return (
+    <Empty className="border-0 py-6">
+      <EmptyHeader>
+        <EmptyTitle>{children}</EmptyTitle>
+        <EmptyDescription>Nothing is configured for this section.</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
+  );
 }
 
 function SettingsSkeleton() {
@@ -373,13 +389,13 @@ function SettingsSkeleton() {
       {Array.from({ length: 3 }, (_, index) => (
         <Card key={index} className="w-full">
           <CardHeader>
-            <div className="h-5 w-24 animate-pulse rounded bg-muted" />
+            <Skeleton className="h-5 w-24" />
           </CardHeader>
           <CardContent className="grid gap-4">
             {Array.from({ length: 6 }, (_, rowIndex) => (
-              <div key={rowIndex} className="space-y-2">
-                <div className="h-3 w-16 animate-pulse rounded bg-muted" />
-                <div className="h-4 w-3/4 animate-pulse rounded bg-muted" />
+              <div key={rowIndex} className="flex flex-col gap-2">
+                <Skeleton className="h-3 w-16" />
+                <Skeleton className="h-4 w-3/4" />
               </div>
             ))}
           </CardContent>
@@ -446,14 +462,16 @@ function credentialStatusLabel(status: SettingsCredentialStatus) {
   }
 }
 
-function toneClassName(tone: Tone) {
+function toneBadgeVariant(
+  tone: Tone,
+): "default" | "secondary" | "destructive" | "outline" | "ghost" {
   switch (tone) {
     case "good":
-      return "border-emerald-500/30 text-emerald-600 dark:text-emerald-400";
+      return "secondary";
     case "warn":
-      return "border-amber-500/30 text-amber-600 dark:text-amber-400";
+      return "destructive";
     default:
-      return "text-muted-foreground";
+      return "outline";
   }
 }
 
