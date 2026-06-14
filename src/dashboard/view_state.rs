@@ -706,6 +706,27 @@ mod tests {
     }
 
     #[test]
+    fn transcript_overlay_syncs_live_activity_cells() {
+        let first_live = LiveActivityCell {
+            key: "first".to_string(),
+            cell: assistant_cell("first live cell"),
+        };
+        let second_live = LiveActivityCell {
+            key: "second".to_string(),
+            cell: assistant_cell("second live cell"),
+        };
+        let mut overlay = TranscriptOverlayState::new(Vec::new(), vec![first_live], 0);
+        let state = DashboardState {
+            live_activity_cells: vec![second_live.clone()],
+            ..DashboardState::default()
+        };
+
+        overlay.sync_state(&state);
+
+        assert_eq!(overlay.live_cells, vec![second_live]);
+    }
+
+    #[test]
     fn transcript_overlay_manual_scroll_leaves_bottom_follow() {
         let cells = (0..30)
             .map(|index| assistant_cell(&format!("cell {index}")))

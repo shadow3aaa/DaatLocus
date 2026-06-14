@@ -51,6 +51,11 @@ pub(super) fn handle_key_event(
         return TuiInputOutcome::Continue;
     }
 
+    if is_ctrl_t(key) {
+        view.open_transcript_overlay(state);
+        return TuiInputOutcome::Continue;
+    }
+
     if view.command_panel.is_some() {
         if is_ctrl_c(key) {
             view.command_panel = None;
@@ -119,10 +124,6 @@ pub(super) fn handle_key_event(
     }
 
     if view.command_input.is_empty() {
-        if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            view.open_transcript_overlay(state);
-            return TuiInputOutcome::Continue;
-        }
         if key.code == KeyCode::Enter {
             view.toggle_thinking_expansion(&state.activity_cells);
             return TuiInputOutcome::Continue;
@@ -232,6 +233,10 @@ pub(super) fn handle_key_event(
 
 fn is_ctrl_c(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'c'))
+}
+
+fn is_ctrl_t(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'t'))
 }
 
 fn handle_ctrl_c_key(view: &mut TuiViewState, state: &DashboardState) -> TuiInputOutcome {
@@ -443,6 +448,10 @@ pub(super) async fn execute_input_outcome(
 }
 
 pub(super) fn handle_paste_event(text: &str, view: &mut TuiViewState) {
+    if view.transcript_overlay.is_some() {
+        return;
+    }
+
     if let Some(attachments) = image_attachments_from_paste(text) {
         let placeholders = attachments
             .iter()
@@ -584,6 +593,41 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_t_opens_transcript_overlay_from_command_panel() {
+        let mut view = TuiViewState::new();
+        let state = DashboardState::default();
+        view.command_panel = Some(CommandPanel::SkillsList(SkillsListPanel::from_state(
+            &state,
+        )));
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            &mut view,
+            &state,
+        );
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert!(view.command_panel.is_none());
+        assert!(view.transcript_overlay.is_some());
+    }
+
+    #[test]
+    fn ctrl_t_preserves_composer_draft_when_opening_transcript_overlay() {
+        let mut view = TuiViewState::new();
+        view.command_input.set_text("keep this draft".to_string());
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+            &mut view,
+            &DashboardState::default(),
+        );
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert!(view.transcript_overlay.is_some());
+        assert_eq!(view.command_input.as_str(), "keep this draft");
+    }
+
+    #[test]
     fn transcript_overlay_handles_close_and_scroll_keys_before_composer() {
         let mut view = TuiViewState::new();
         view.transcript_overlay = Some(crate::dashboard::view_state::TranscriptOverlayState::new(
@@ -614,6 +658,22 @@ mod tests {
 
         assert!(matches!(outcome, TuiInputOutcome::Continue));
         assert!(view.transcript_overlay.is_none());
+    }
+
+    #[test]
+    fn transcript_overlay_ignores_paste_before_composer() {
+        let mut view = TuiViewState::new();
+        view.transcript_overlay = Some(crate::dashboard::view_state::TranscriptOverlayState::new(
+            Vec::new(),
+            Vec::new(),
+            0,
+        ));
+
+        handle_paste_event("hidden draft", &mut view);
+
+        assert_eq!(view.command_input.as_str(), "");
+        assert!(view.pending_pastes.is_empty());
+        assert!(view.pending_image_attachments.is_empty());
     }
 
     #[test]

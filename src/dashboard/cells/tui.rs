@@ -2007,13 +2007,7 @@ fn render_reply_cell_lines(cell: &ReplyActivityCell, max_width: u16) -> Vec<Line
     if cell.disposition == crate::tool_ui::ReplyDisposition::Resolved
         && cell.subject == crate::tool_ui::ReplySubject::Message
     {
-        if cell.message_lines.is_empty() {
-            return Vec::new();
-        }
-        let joined = cell.message_lines.join("\n");
-        let md_lines =
-            render_markdown_with_width(&joined, Color::White, detail_markdown_width(max_width));
-        return user_prompt_lines(md_lines, max_width);
+        return render_agent_message_reply_lines(&cell.message_lines, max_width);
     }
 
     let (title, color) = match cell.disposition {
@@ -2033,6 +2027,27 @@ fn render_reply_cell_lines(cell: &ReplyActivityCell, max_width: u16) -> Vec<Line
         let md_lines =
             render_markdown_with_width(&joined, Color::White, detail_markdown_width(max_width));
         lines.extend(prefixed_detail_lines(md_lines, max_width));
+    }
+    lines
+}
+
+fn render_agent_message_reply_lines(
+    message_lines: &[String],
+    max_width: u16,
+) -> Vec<Line<'static>> {
+    if message_lines.is_empty() {
+        return Vec::new();
+    }
+
+    let joined = message_lines.join("\n");
+    let mut lines_iter = joined.trim_end_matches(['\r', '\n']).lines();
+    let title = lines_iter.next().unwrap_or_default().to_string();
+    let body = lines_iter.collect::<Vec<_>>().join("\n");
+    let mut lines = vec![codex_header(title)];
+    if !body.trim().is_empty() {
+        let md_lines =
+            render_markdown_with_width(&body, Color::White, body_markdown_width(max_width));
+        lines.extend(prefixed_body_lines(md_lines, max_width));
     }
     lines
 }
@@ -3189,7 +3204,7 @@ That's it.";
     }
 
     #[test]
-    fn reply_activity_cell_renders_full_message() {
+    fn reply_activity_cell_renders_agent_message_with_activity_marker() {
         let message_lines = (1..=12)
             .map(|index| format!("[定位段 {index:03}] marker-{index:03}"))
             .collect::<Vec<_>>();
@@ -3209,16 +3224,22 @@ That's it.";
         assert!(
             rendered
                 .first()
-                .is_some_and(|line| line.starts_with("› [定位段 001] marker-001")),
-            "resolved message reply should start with a prompt marker, not a title: {rendered:?}"
+                .is_some_and(|line| line.starts_with("• [定位段 001] marker-001")),
+            "resolved message reply should start with an agent activity marker, not a prompt marker: {rendered:?}"
         );
         let first_body_line = rendered
             .iter()
-            .find(|line| line.contains("marker-001"))
-            .expect("reply body should render the first message line");
+            .find(|line| line.contains("marker-002"))
+            .expect("reply body should render subsequent message lines");
         assert!(
-            first_body_line.starts_with(USER_PROMPT_PREFIX),
-            "resolved message reply should render like a prompt line: {rendered:?}"
+            first_body_line.starts_with(ACTIVITY_BODY_INDENT),
+            "resolved message body should use the agent body indent: {rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .all(|line| !line.starts_with(USER_PROMPT_PREFIX)),
+            "resolved message reply should not render like a user prompt: {rendered:?}"
         );
         assert!(
             !first_body_line.starts_with("   "),
