@@ -222,8 +222,6 @@ impl LuaWorkerRuntime {
             WorkerRequestOp::CallTool { name, arguments } => self
                 .call_tool(&name, arguments)
                 .map(WorkerResponsePayload::ToolResult),
-            WorkerRequestOp::OnFocus => self.on_focus().map(|()| WorkerResponsePayload::Unit),
-            WorkerRequestOp::OnBlur => self.on_blur().map(|()| WorkerResponsePayload::Unit),
             WorkerRequestOp::PollNotices => self.poll_notices().map(WorkerResponsePayload::Notice),
             WorkerRequestOp::Shutdown => Ok(WorkerResponsePayload::Unit),
         }
@@ -470,43 +468,6 @@ impl LuaWorkerRuntime {
             ui_lines: output.ui_lines,
             turn_boundary_reason: output.turn_boundary,
         })
-    }
-
-    fn on_focus(&mut self) -> Result<()> {
-        self.run_state_hook("on_focus")
-    }
-
-    fn on_blur(&mut self) -> Result<()> {
-        self.run_state_hook("on_blur")
-    }
-
-    fn run_state_hook(&mut self, name: &str) -> Result<()> {
-        let lua = &self.lua_runtime.lua;
-        let module = &self.lua_runtime.module;
-        let ctx = self.lua_context(lua)?;
-        let Some(hook_fn) = self.map_lua(
-            &format!("failed to resolve `{name}`"),
-            module.get::<Option<Function>>(name),
-        )?
-        else {
-            return Ok(());
-        };
-        let state_value = self.map_lua(
-            &format!("failed to encode runtime state for `{name}`"),
-            lua.to_value(&self.runtime.state),
-        )?;
-        let value = self.map_lua(
-            &format!("failed to execute `{name}`"),
-            hook_fn.call::<LuaValue>((ctx, state_value)),
-        )?;
-        if !matches!(value, LuaValue::Nil) {
-            self.runtime.state = self.map_lua(
-                &format!("failed to decode `{name}` result"),
-                lua.from_value(value),
-            )?;
-            self.persist_runtime_state()?;
-        }
-        Ok(())
     }
 
     fn poll_notices(&mut self) -> Result<Option<String>> {

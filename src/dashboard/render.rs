@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 use crate::{
-    app::AppId,
     context::Context,
     core::TokenUsageInfo,
     events::EventStatus,
@@ -33,7 +32,6 @@ pub fn sync_dashboard_state(
         let app_renders = context.apps.state_renders();
         state.agent_name = dashboard_agent_name();
         state.session_title = context.session_title.snapshot();
-        state.focused_app = context.apps.focused();
         state.status_output = render_status_command_output_for_dashboard(context, &app_renders);
         state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);
         state.inspect_telegram_output = render_telegram_status_for_dashboard(context);
@@ -180,24 +178,14 @@ pub fn render_dashboard_footer_context(
         .llm
         .model_name()
         .unwrap_or_else(|| context.config.main_model_config().model_id.clone());
-    let focused_app = context
-        .apps
-        .focused()
-        .map(|app| app.to_string())
-        .unwrap_or_else(|| "none".to_string());
     let effective_window = context
         .config
         .main_model_config()
         .effective_context_window_tokens()
         .max(1);
     let Some(info) = context.llm.token_usage_info() else {
-        return render_footer_context_with_usage(
-            &model,
-            estimated_input_tokens,
-            effective_window,
-            &focused_app,
-        )
-        .to_string();
+        return render_footer_context_with_usage(&model, estimated_input_tokens, effective_window)
+            .to_string();
     };
     let used = usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
     let calibrated = estimated_input_tokens.map(|est| {
@@ -214,16 +202,14 @@ pub fn render_dashboard_footer_context(
     };
     match footer_usage {
         Some((used, estimated)) => format!(
-            "{model} · {}{}/{} used · {}",
+            "{model} · {}{}/{} used",
             if estimated { "~" } else { "" },
             format_compact_tokens(used),
-            format_compact_tokens(effective_window),
-            focused_app
+            format_compact_tokens(effective_window)
         ),
         None => format!(
-            "{model} · {} window · {}",
-            format_compact_tokens(effective_window),
-            focused_app
+            "{model} · {} window",
+            format_compact_tokens(effective_window)
         ),
     }
 }
@@ -233,7 +219,6 @@ pub fn render_system_prompt_output_for_dashboard(context: &Context) -> String {
 }
 
 pub fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String, String)> {
-    let focused = context.apps.focused();
     context
         .apps
         .state_renders()
@@ -241,7 +226,7 @@ pub fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String
         .map(|(app_id, state)| {
             let usage = context.apps.usage(&app_id).unwrap_or(crate::app::AppUsage {
                 description: "No usage available.".to_string(),
-                when_to_focus: Vec::new(),
+                when_to_use: Vec::new(),
                 body_markdown: None,
             });
             let how_to_use = context
@@ -267,17 +252,10 @@ pub fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String
             ));
             lines.push(String::new());
             lines.push("[how_to_use]".to_string());
-            if focused.as_ref() == Some(&app_id) {
-                lines.push(crate::reasoning::prompts::build_app_how_to_use_prompt(
-                    app_id.clone(),
-                    &how_to_use,
-                ));
-            } else {
-                lines.push(crate::reasoning::prompts::build_app_pre_focus_note_prompt(
-                    app_id.clone(),
-                    &state,
-                ));
-            }
+            lines.push(crate::reasoning::prompts::build_app_how_to_use_prompt(
+                app_id.clone(),
+                &how_to_use,
+            ));
             (key, lines.join("\n"))
         })
         .collect()
@@ -287,19 +265,16 @@ fn render_footer_context_with_usage(
     model: &str,
     estimated_input_tokens: Option<usize>,
     effective_window: usize,
-    focused_app: &str,
 ) -> String {
     match estimated_input_tokens {
         Some(used) => format!(
-            "{model} · ~{}/{} used · {}",
+            "{model} · ~{}/{} used",
             format_compact_tokens(used),
-            format_compact_tokens(effective_window),
-            focused_app
+            format_compact_tokens(effective_window)
         ),
         None => format!(
-            "{model} · {} window · {}",
-            format_compact_tokens(effective_window),
-            focused_app
+            "{model} · {} window",
+            format_compact_tokens(effective_window)
         ),
     }
 }
@@ -577,15 +552,10 @@ fn trimmed_runtime_status_detail(status: &str) -> Option<String> {
 
 pub fn render_status_command_output_for_dashboard(
     context: &Context,
-    _: &[(AppId, crate::app::AppStateRender)],
+    _: &[(crate::app::AppId, crate::app::AppStateRender)],
 ) -> String {
     let mut sections = Vec::new();
 
-    let focused = context
-        .apps
-        .focused()
-        .map(|app| app.to_string())
-        .unwrap_or_else(|| "none".to_string());
     let active_plans = context.plan.active_steps().count();
     let event_summary = render_status_event_summary(context);
     let bound_primitive = context
@@ -601,7 +571,7 @@ pub fn render_status_command_output_for_dashboard(
         "idle".to_string()
     };
     sections.push(format!(
-        "Overview\nRuntime turn: {runtime_turn}\nFocused app: {focused}\nBound primitive: {bound_primitive}\nPlans: {active_plans}\nEvents: {event_summary}"
+        "Overview\nRuntime turn: {runtime_turn}\nBound primitive: {bound_primitive}\nPlans: {active_plans}\nEvents: {event_summary}"
     ));
 
     let usage_lines = render_status_usage_lines(context);

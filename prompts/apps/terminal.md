@@ -1,12 +1,12 @@
 ---
 description: Terminal is the local command execution and long-running process interaction surface.
-when_to_focus:
+when_to_use:
   - When local commands or scripts need to run.
   - When command output, errors, or filesystem inspection results are needed.
   - When an already-running process needs continued stdin interaction, output waiting, or termination.
 ---
 - Operate Terminal only through terminal tools; do not assume that plain assistant text is terminal input.
-- Use only the currently exposed Terminal tool names for terminal operations; app scope mangling exposes them as `terminal__terminal_exec / terminal__terminal_write_stdin / terminal__terminal_terminate`.
+- Use the namespaced Terminal tool names for terminal operations: `terminal__terminal_exec`, `terminal__terminal_write_stdin`, and `terminal__terminal_terminate`.
 - `terminal_exec` creates a new session when `session_id` is omitted and reuses an existing session only when `session_id` is explicitly provided.
 - If a command is still running, continue with `terminal_write_stdin` and explicitly provide the target `session_id`. Send empty text when you only want to wait for more output.
 - For `terminal_write_stdin`, omit `wait_mode` or use `any_output` to return after the next output update; use `timeout` to wait the full yield window or process exit without streaming intermediate progress updates.

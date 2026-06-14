@@ -312,22 +312,3 @@ fn daat_locus_home_override_lock() -> Arc<tokio::sync::Mutex<()>> {
     static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
     Arc::clone(LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(()))))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn eval_context_starts_without_focused_app() {
-        let home = tempfile::tempdir().expect("test home");
-        let _home_override = DaatLocusHomeOverride::set(home.path().to_path_buf()).await;
-
-        let context = build_eval_context_with_compiled(
-            crate::config::Config::default(),
-            CompiledPromptStore::from_entries(Vec::new()),
-        )
-        .await;
-
-        assert_eq!(context.apps.focused(), None);
-    }
-}

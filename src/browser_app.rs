@@ -1181,10 +1181,6 @@ impl App for BrowserApp {
         }
     }
 
-    async fn on_focus(&mut self) -> Result<()> {
-        self.ensure_ready().await
-    }
-
     async fn shutdown(&mut self) -> Result<()> {
         if let Some(context) = self.context.as_mut() {
             let _ = context.close().await;

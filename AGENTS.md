@@ -16,7 +16,7 @@ The goal is not to write abstract slogans. The goal is to give future changes to
 
 - Telegram is not an `App`; it is a transport and event source.
 - Normal event completion must not be plain text only. It must explicitly call `finish_and_send`.
-- Browser, Terminal, and Coding are built-in `App`s because they represent interactive surfaces that require focus and continued operation.
+- Browser, Terminal, and Coding are built-in `App`s because they represent stateful capability domains with their own tools, state, and lifecycle.
 - `App` and `Event` are parallel concepts. Do not collapse one into the other.
 - Let the model make semantic judgments. Do not make the model perform mechanical enumeration, lookup, deduplication, or freshness checks that code can already perform.
 
@@ -761,7 +761,7 @@ send normal Manager requests; the Manager transparently starts or reconnects the
 target Session when needed.
 
 `GET /status/summary` may include compact per-session runtime summaries, but
-those summaries are user-facing runtime facts such as ready, focused app,
+those summaries are user-facing runtime facts such as ready, active surface,
 pending work count, active turn, dashboard metrics, and errors. They must not
 leak registry lifecycle status or force clients to perform session process
 management.
@@ -837,43 +837,66 @@ A runtime turn usually contains these layers:
 Runtime context is split by lifetime:
 
 - `afterclaim_context`: claimed event/app-notice input and workflow primitive routing catalog
-- `preturn_context`: memory recall, sensory state, plan, bound workflow state, and app surface state
+- `preturn_context`: memory recall, sensory state, plan, bound workflow state, and project instruction context
 
-Therefore, when adding an agent-facing interface, first decide which layer it belongs to. Do not directly pile it into some app state.
+Therefore, when adding an agent-facing interface, first decide which layer it belongs to. Do not directly pile prompt instructions, routing catalogs, or durable task state into app-local state.
 
 ## Core Objects
 
 ### App
 
-An `App` is an interactive surface that only makes sense to operate after it has been focused.
+An `App` is a stateful capability domain. It owns a coherent set of tools,
+state, lifecycle hooks, and UI status for one interactive surface or long-lived
+runtime subsystem.
 
-The current implementation has these built-in apps:
+The current built-in apps are:
 
 - `Browser`
 - `Terminal`
 - `Coding`
 
-Something should be modeled as an `App` only if it satisfies all of these conditions:
+Something should be modeled as an `App` only if it satisfies all of these
+conditions:
 
-- The model must first shift attention to it before later operations make sense.
-- The visible information is naturally local and needs step-by-step exploration.
-- Operations have temporal semantics, such as waiting for loading, continuing an interaction, handling a session, or reading after the state stabilizes.
+- Its tools and state belong to a stable domain such as browsing, terminal
+  sessions, project-aware code operations, or a workspace extension surface.
+- It owns local runtime state that persists across tool calls.
+- Operations have temporal semantics, such as waiting for loading, continuing a
+  process, handling a page/session, or reading state after it stabilizes.
 
-Every `App` must expose three separate layers to the model:
+An `App` is not a permission gate. The model must not be required to activate,
+select, or switch to an app before calling that app's namespaced tools. App
+tools are exposed by domain namespace, such as:
 
-- `state`: current structured visible facts
-- `usage`: what the app is for and when it is worth focusing
-- `how_to_use`: how to operate it correctly after focus
+```text
+browser__browser_open_page
+browser__get_state
+terminal__terminal_exec
+terminal__get_state
+coding__open_project
+coding__get_state
+```
+
+Every `App` must expose three separate layers:
+
+- `state`: current structured domain facts, returned by the app's generated
+  `appid__get_state` tool and rendered in TUI/WebUI app-status surfaces
+- `usage`: what the app is for and when it is worth using
+- `how_to_use`: how to operate the app's tools correctly
 
 Do not mix these layers.
 
 - `state` is not an operating manual.
 - `usage` is not a full tutorial.
 - `how_to_use` is not world state.
+- Project or workspace instructions such as `AGENTS.md` are instruction context,
+  not app state.
 
-In the current code, this separation mainly appears in `App::render_state`, `usage()`, and `how_to_use()`.
-
-Do not put self-optimizable task execution procedures into an app's supplemental instruction layer. Reusable methods across tasks should be modeled as `Workflow` SOP primitives, not as app-local explanatory text.
+In code, keep this separation visible through `App::render_state`, `usage()`,
+`how_to_use()`, and the generated `appid__get_state` surface. Do not put
+self-optimizable task execution procedures into an app's supplemental
+instruction layer. Reusable methods across tasks should be modeled as `Workflow`
+SOP primitives, not as app-local explanatory text.
 
 ### Event
 
@@ -1035,7 +1058,7 @@ A `RuntimeErrorCase` may include:
 - `case_id`, `turn_id`, `occurred_at_ms`
 - `error_kind`, `severity`, and `detected_by`
 - task context: origin, event source, user request summary, claimed ids, bound workflow id, workflow origin
-- runtime context: phase, available tool names, focused app, plan summary, compact context summary
+- runtime context: phase, available tool names, active surface, plan summary, compact context summary
 - action context: assistant text summary, tool call summaries, tool result summaries, and a short previous-action window
 - error observation: expected behavior, actual behavior, evidence, recoverability, retry counts, and terminal status
 - relevant existing runtime contract references or hashes
@@ -1089,11 +1112,12 @@ It is an `App` not because the command line is important, but because:
 - sessions persist
 - output may need to be awaited
 - stdin may need further writes
-- foreground/background attention matters
+- unread output and process lifecycle need structured state
 
 Operational constraints:
 
-- Operate only through `terminal_exec`, `terminal_write_stdin`, and `terminal_terminate`.
+- Operate only through the Terminal app tools, exposed with the `terminal__`
+  namespace.
 - Do not treat interactive full-screen programs as the normal path.
 - Do not hand interactive login or authentication flows to the model.
 - Sessions are explicitly addressed; there is no hidden selected session.
@@ -1101,8 +1125,8 @@ Operational constraints:
 ### Static Runtime File Tools
 
 Plain file reading and plain file editing are static runtime tools, not an
-`App` and not a `global::*` namespace. They do not represent an interactive
-surface that needs focus. They are exposed as ordinary runtime tools:
+`App` and not a `global::*` namespace. They do not represent an app-owned
+interactive surface. They are exposed as ordinary runtime tools:
 
 ```text
 read_file
@@ -1160,8 +1184,8 @@ Rules:
   JSON, shell scripts, and unsupported file types.
 - `edit_file` does not run SCOPE propagation analysis and does not produce
   propagation review events.
-- When Coding is focused and the target is a SCOPE-owned source file,
-  `edit_file` must be rejected with an instruction to use `edit_code`.
+- When a project scope is open and the target is a SCOPE-owned source file,
+  `edit_file` must be rejected with an instruction to use `coding__edit_code`.
 
 `apply_patch` must not be a normal model-facing editing API. Patch-envelope or
 unified-diff parsing may remain as an internal implementation detail or
@@ -1193,26 +1217,36 @@ Operational constraints:
 It is an `App` because:
 
 - project state (open project, LSP connections) persists across tool calls
-- symbol lookups and propagation analysis require a focused project context
+- symbol lookups and propagation analysis require an open project context
 - the model needs to see propagation status to decide whether to continue editing
 
 **State rendering design:**
 
-Coding app must render its key state into `AppStateRender` so that:
+Coding must render its key state into `AppStateRender` so that:
 
-1. **Turn re-entry sees critical state immediately** — after context compression or turn interruption, the model can read the current project, LSP status, and pending propagation events from `<preturn_context>` or `<afterclaim_context>` without relying on conversation history.
+1. **State is available on demand** — the model can call `coding__get_state` to
+   read the current project, LSP status, and pending propagation events without
+   relying on conversation history.
 2. **Tool return values carry immediate feedback** — `search_code` returns stable read handles, `read_code` returns hash-anchored source lines, and `edit_code` returns propagation results so the model sees impact scope mid-turn.
-3. **Notice is NOT for propagation review** — Coding app uses `notice_reason()` only for background events like "LSP server crashed" or "project index ready". Propagation review is handled through tool return values and state rendering, not through notice-triggered turn interrupts.
+3. **Notice is NOT for propagation review** — Coding uses `notice_reason()` only
+   for background events like "LSP server crashed" or "project index ready".
+   Propagation review is handled through tool return values and state rendering,
+   not through notice-triggered turn interrupts.
 
 Operational constraints:
 
-- Coding tools (`search_code`, `read_code`, `edit_code`, and review tools) must go through the Coding app, requiring `focus_app("coding")` first.
+- Coding tools (`coding__search_code`, `coding__read_code`,
+  `coding__edit_code`, and review tools) are app-domain tools and must be
+  called directly through the `coding__` namespace.
 - Use `read_file` for explicit path/range reads. Do not make `read_code`
   support path/range compatibility.
-- Use `edit_file` for non-SCOPE files. When Coding is focused, `edit_file` must
-  reject SCOPE-owned source files and require `edit_code`.
-- Coding app `render_state()` must include: project_root, open_languages, lsp_status, propagation_pending_count, and up to N recent propagation events.
-- LSP process lifecycle (start, crash recovery, shutdown) belongs to Coding app internals, not to tool return values.
+- Use `edit_file` for non-SCOPE files. When the current project scope is open,
+  `edit_file` must reject SCOPE-owned source files and require
+  `coding__edit_code`.
+- Coding `render_state()` must include: project_root, open_languages,
+  lsp_status, propagation_pending_count, and up to N recent propagation events.
+- LSP process lifecycle (start, crash recovery, shutdown) belongs to Coding
+  internals, not to tool return values.
 
 ### Coding Search / Read / Edit Protocol
 
@@ -1304,27 +1338,29 @@ The read-handle registry belongs to the Coding session state, not shared/global
 state. It is cleared when the project changes and is not persisted as a
 long-term identity database. `read_file` does not use this registry.
 
-### App Composition
+### App Tool Domains
 
-An app may declare that it *contains* other apps, making their tools available when the composing app is focused.
+All app tools are model-facing through explicit app namespaces. Runtime tool
+spec construction should expose every installed app's valid tool specs, plus the
+generated `appid__get_state` tool for that app.
 
-When `Coding` is focused, the tool scope includes:
+Examples:
 
-- Coding's own tools: `search_code`, `read_code`, `edit_code`, review tools
-- Terminal's delegated tools: `terminal_exec`, `terminal_write_stdin`, `terminal_terminate`
-- Browser's tools: **not** available unless the model explicitly focuses Browser
-- Static runtime file tools such as `read_file` and `edit_file` are not owned by
-  any app. Their availability is governed by runtime policy and the SCOPE
-  boundary, not by app composition.
+- Coding tools: `coding__open_project`, `coding__search_code`,
+  `coding__read_code`, `coding__edit_code`, `coding__next_review`
+- Terminal tools: `terminal__terminal_exec`,
+  `terminal__terminal_write_stdin`, `terminal__terminal_terminate`
+- Browser tools: `browser__browser_open_page`, `browser__browser_snapshot`,
+  `browser__browser_click`
+- State tools: `coding__get_state`, `terminal__get_state`,
+  `browser__get_state`
 
-Implementation: each `App` can optionally expose `fn composed_apps() -> Vec<AppId>`. The runtime tool-scope check traverses this list so that focused-app restriction plus composition gives the correct tool availability.
+Static runtime file tools such as `read_file` and `edit_file` are not owned by
+any app. Their availability is governed by runtime policy and the SCOPE
+boundary, not by app tool domains.
 
-Rationale:
-
-- "I am coding" inherently includes "I need to run commands and edit non-SCOPE
-  files."
-- Forcing `focus_app("terminal")` back-and-forth would be an unnecessary interruption.
-- Composition preserves the attention model: `focus_app("coding")` means "I am in coding mode," and all tools needed for that mode are available.
+Do not reintroduce app composition as a tool-exposure mechanism. Cross-domain
+work should simply call the correct namespaced tool directly.
 
 ### SCOPE Current Boundary and Static File Tool Boundary
 
@@ -1343,9 +1379,10 @@ features as expected model-facing capabilities.
 
 **Static file edit boundary:**
 
-When Coding is focused and `edit_file` targets a source-code file that SCOPE
-owns (for example `.rs`, `.py`, `.go`, `.ts`, `.js`, `.java`, `.c`, `.cpp`,
-`.rb`, `.php`), Coding rejects the call and requires `edit_code` instead.
+When a project scope is open and `edit_file` targets a source-code file that
+SCOPE owns (for example `.rs`, `.py`, `.go`, `.ts`, `.js`, `.java`, `.c`,
+`.cpp`, `.rb`, `.php`), the runtime rejects the call and requires
+`coding__edit_code` instead.
 
 For non-source-code files (`.toml`, `.yaml`, `.md`, `.json`, `.sh`, etc.) or
 unsupported cases outside SCOPE responsibility, `edit_file` is allowed.
@@ -1382,8 +1419,8 @@ Minimal directory structure:
 Rules:
 
 - `runtime/app.lua` is the only Lua entry point.
-- `prompt/usage.md` is the pre-focus app description.
-- `prompt/how_to_use.md` is the post-focus app description.
+- `prompt/usage.md` is the capability-domain description.
+- `prompt/how_to_use.md` is the operation manual for the app's tools.
 - Third-party app packages do not carry self-optimizable workflow assets.
 
 ### `app.toml`
@@ -1572,16 +1609,24 @@ When designing a new event type, follow these principles:
 - Tool parameters should use explicit identifiers as much as possible instead of hidden prior selection.
 - A normal operation should complete in one explicit call when feasible.
 
-### App-Scoped Tools
+### App Domain Tools
 
-App-scoped tools may require `focus_app` first.
+App domain tools are exposed directly through namespaced tool names. The app id
+is part of the tool name and is the operation scope.
 
-This is not pointless ceremony. It preserves attention discipline:
+Rules:
 
-- The current foreground app determines available tool scope.
-- `focus_app` and `put_away_app` trigger a turn boundary and require a fresh world-state render.
-
-Therefore, do not design operations that clearly belong to Browser or Terminal but can secretly execute from any context.
+- Do not require a separate activation or selection tool before calling an app
+  domain tool.
+- Do not hide app operations behind global aliases when the app namespace makes
+  ownership clearer.
+- Every app should have a generated `appid__get_state` tool that returns its
+  current structured state.
+- State tools should be cheap, inspectable, and side-effect free except for
+  harmless cache refresh needed to report current state.
+- Operations should bind to explicit ids such as `page_id`, `session_id`,
+  project root, read handle, or app-specific object id. Do not rely on hidden
+  selected objects.
 
 ### Event Tools
 
@@ -1612,7 +1657,7 @@ Current rules:
 - `create_primitive_spec` may only create workspace primitive specs. It must not overwrite builtin primitives.
 - Do not make the model perform workflow semantic search or browse an expanded lexicographic workflow dump before continuing. The full ID vocabulary and relevant primitive details should be displayed directly in `afterclaim_context`.
 - Do not introduce explicit `log_workflow_outcome`. Daytime evidence should be written automatically by code into `PrimitiveRunRecord`.
-- Whether to bind a workflow is driven by task complexity and reusability, not by `focus_app`.
+- Whether to bind a workflow is driven by task complexity and reusability, not by app domain state.
 
 ## What Code Should Do
 
@@ -1626,7 +1671,7 @@ Code is responsible for:
 - claiming, releasing, and requeueing pending work
 - maintaining the outbox
 - loading structured runtime context
-- controlling tool scope
+- enforcing tool availability policy and app namespace collisions
 - recording traces
 - running prompt compile and workflow evolution separately
 
@@ -1648,7 +1693,8 @@ The model is responsible for:
 
 - understanding event semantics
 - judging whether a response is needed
-- choosing whether to focus an app
+- choosing the right tool domain
+- calling `appid__get_state` when current app state is needed
 - judging whether to create or bind a workflow
 - planning steps
 - choosing tools
@@ -1699,16 +1745,22 @@ It contains current execution state that may change after tools run:
 - memory recall for the turn
 - sensory state such as current time and machine status
 - current plan state
-- current app surface state, focused app state, and background app hints
+- current project instruction context when the session has a project scope
 - current bound primitive or temporary primitive graph execution context, including workflow id/origin when applicable and concise execution excerpt
 
 Rules:
 
 - Inject it before every model turn.
-- Preserve turn boundaries for operations that change the next context view, such as `activate_composed_primitive`, `focus_app`, `put_away_app`, `update_primitive_spec`, and workspace app dynamic tools that return a turn boundary.
+- Preserve turn boundaries for operations that change the next context view,
+  such as `activate_composed_primitive`, `update_primitive_spec`, project
+  instruction reloads, and workspace app dynamic tools that explicitly return a
+  turn boundary.
 - Treat runtime history compaction as the same kind of boundary: compact, end the current turn, and build a fresh `PreTurn Context` for the next turn.
 - It should enter runtime history as structured context, rather than being appended as a transient final user message outside history.
-- Keep it concise and structurally compressible; do not persist full raw app screens, huge memory excerpts, or repeated low-value status dumps.
+- Keep it concise and structurally compressible; do not persist full raw app
+  screens, huge memory excerpts, or repeated low-value status dumps.
+- Do not inject app state automatically. App state is read explicitly through
+  `appid__get_state` and displayed in client app-status surfaces.
 
 ### Capability Docs
 
@@ -1718,6 +1770,8 @@ Examples:
 
 - event completion rules belong in system/tool contract or a small event contract block
 - app usage and `how_to_use` are capability docs, not app state
+- project instructions such as `AGENTS.md` belong to project instruction
+  context, not Coding app state
 - workflow primitive routing catalog rules belong in workflow contract / AfterClaim routing context
 
 ### Workflow Context Split
@@ -1741,7 +1795,7 @@ Turn metadata should be able to record facts such as:
 - user request summary
 - bound workflow id and origin
 - workflow run id when available
-- focused app
+- last active app surface when useful for UI or diagnostics
 - final disposition or outcome
 - completed event ids
 - concise tool summary
@@ -1755,7 +1809,7 @@ When refactoring old snapshot parts, use this mapping:
 - old `recall_memories` -> `PreTurn.Recall`
 - old `sensory` -> `PreTurn.Environment`
 - old `plan` -> `PreTurn.TaskState`
-- old focused app state and background hints -> `PreTurn.AppSurface`
+- old app surface dump -> explicit `appid__get_state` tool result or dashboard app-status output
 - old app usage / how-to-use -> `CapabilityDocs.App`
 - old claimed events -> `AfterClaim.ClaimedInput`
 - old event queue summary -> `AfterClaim.EventQueueContext`
@@ -1776,7 +1830,8 @@ Avoid these designs:
 
 - Modeling transports such as Telegram, email, or notification centers as `App`s by default.
 - Forcing the model to "open a chat" before handling a known new message.
-- Storing `selected_chat`, `selected_thread`, or `opened_message` in app state.
+- Storing transport cursors such as `selected_chat`, `selected_thread`, or
+  `opened_message` in app state.
 - Making send or resolve depend on hidden viewport state.
 - Binding events only to container ids instead of event ids.
 - Designing workflow as app-local supplemental instruction or innate model capability.
@@ -1802,7 +1857,8 @@ Before adding an agent-facing interface, ask:
 5. Will this interface induce mechanical enumeration by the model?
 6. Is it compatible with the trace, workflow-run-record, and sleep evaluation loop?
 
-If the answer leans toward exploration and focus, model it as an `App`.
+If the answer leans toward a stateful capability domain with namespaced tools,
+model it as an `App`.
 
 If the answer leans toward arrived fact and resolution, model it as an `Event`.
 
@@ -1810,7 +1866,8 @@ If the answer leans toward driving the next round of processing, it usually belo
 
 ## In Short
 
-- `App` decides where attention goes and how to operate after focus.
+- `App` owns a namespaced tool domain, structured state, lifecycle hooks, and
+  client-visible status.
 - `Event` decides what happened, whether to respond, and how to complete it.
 - `PendingWork` decides what should drive the next turn.
 - `Workflow` supplies SOP primitives that runtime can compose for the current task and sleep can keep corrected.

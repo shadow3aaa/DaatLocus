@@ -4,8 +4,8 @@ use super::{
     prompt_doc::PromptDocument,
     prompt_parts::{
         AfterClaimContextInput, AfterClaimContextPart, AfterClaimInputPart,
-        AfterClaimWorkflowPrimitiveRoutingPart, PreTurnAppSurfacePart, PreTurnContextPart,
-        PreTurnPlanPart, PreTurnSensoryPart, PreTurnWorkflowStatePart,
+        AfterClaimWorkflowPrimitiveRoutingPart, PreTurnContextPart, PreTurnPlanPart,
+        PreTurnProjectInstructionsPart, PreTurnSensoryPart, PreTurnWorkflowStatePart,
     },
     prompts::{SYSTEM_CORE, build_app_how_to_use_prompt, build_app_usage_prompt},
     turn_compile::{
@@ -106,15 +106,14 @@ fn render_persona_section(
 
 fn render_app_docs_section(ctx: &Context) -> String {
     let mut sections = Vec::new();
-    let state_renders = ctx.apps.state_renders();
-    for (app_id, _state) in &state_renders {
-        if let Some(usage) = ctx.apps.usage(app_id) {
+    for app_id in ctx.apps.app_ids() {
+        if let Some(usage) = ctx.apps.usage(&app_id) {
             sections.push(format!(
                 "## {app_id} Usage\n\n{}",
                 build_app_usage_prompt(app_id.clone(), &usage)
             ));
         }
-        if let Some(how_to_use) = ctx.apps.how_to_use(app_id) {
+        if let Some(how_to_use) = ctx.apps.how_to_use(&app_id) {
             sections.push(format!(
                 "## {app_id} Operation\n\n{}",
                 build_app_how_to_use_prompt(app_id.clone(), &how_to_use)
@@ -167,9 +166,9 @@ impl PreTurnContextAssembler {
     pub fn default_runtime() -> Self {
         Self::new(vec![
             Box::new(PreTurnSensoryPart),
+            Box::new(PreTurnProjectInstructionsPart),
             Box::new(PreTurnPlanPart),
             Box::new(PreTurnWorkflowStatePart),
-            Box::new(PreTurnAppSurfacePart),
         ])
     }
 

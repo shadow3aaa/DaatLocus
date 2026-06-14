@@ -67,7 +67,7 @@ pub struct CodingNextReviewArgs {
 }
 
 #[derive(Debug, Clone)]
-struct ProjectInstructionDocument {
+pub(crate) struct ProjectInstructionDocument {
     path: PathBuf,
     scope_dir: PathBuf,
     name: String,
@@ -210,7 +210,9 @@ fn json_string(entry: &Value, key: &str) -> String {
         .to_string()
 }
 
-fn load_instruction_documents_in_dir(dir: &Path) -> Result<Vec<ProjectInstructionDocument>> {
+pub(crate) fn load_instruction_documents_in_dir(
+    dir: &Path,
+) -> Result<Vec<ProjectInstructionDocument>> {
     let mut documents = Vec::new();
     for name in PROJECT_INSTRUCTION_FILENAMES {
         let path = dir.join(name);
@@ -302,7 +304,10 @@ fn short_hash(hash: &str) -> &str {
     hash.get(..12).unwrap_or(hash)
 }
 
-fn render_project_instructions(label: &str, instructions: &[ProjectInstructionDocument]) -> String {
+pub(crate) fn render_project_instructions(
+    label: &str,
+    instructions: &[ProjectInstructionDocument],
+) -> String {
     let mut rendered = Vec::new();
     rendered.push(format!("<{label}>"));
     for instruction in instructions {
@@ -317,18 +322,6 @@ fn render_project_instructions(label: &str, instructions: &[ProjectInstructionDo
     }
     rendered.push(format!("</{label}>"));
     rendered.join("\n")
-}
-
-fn root_project_instruction_model_content(
-    instructions: &[ProjectInstructionDocument],
-    context: &AppToolExecutionContext,
-) -> String {
-    let content = if instructions.is_empty() {
-        "root_project_instructions=none".to_string()
-    } else {
-        render_project_instructions("root_project_instructions", instructions)
-    };
-    truncate_text_to_token_budget(&content, context.tool_output_max_tokens)
 }
 
 fn selector_path(selector: &str) -> &str {
@@ -469,11 +462,11 @@ impl CodingApp {
                     "status": "project_instructions_reloaded",
                     "project_root": project_root,
                     "root_project_instruction_fingerprint": root_instruction_fingerprint,
-                    "root_project_instructions": root_instructions.iter().map(instruction_payload).collect::<Vec<_>>(),
                 }),
-                model_content: Some(root_project_instruction_model_content(
-                    &root_instructions,
-                    context,
+                model_content: Some(format!(
+                    "status=project_instructions_reloaded\nproject_root={}\nroot_project_instruction_fingerprint={}\nproject_instruction_context=available_in_next_preturn_context",
+                    project_root.display(),
+                    root_instruction_fingerprint,
                 )),
                 ui_event: ToolUiEvent::coding_open_project(
                     project_root.display().to_string(),
@@ -496,13 +489,13 @@ impl CodingApp {
         self.delivered_scoped_instructions.clear();
         self.last_action = Some("opened project".to_string());
 
-        let mut model_parts = vec![config_hint_summary.model_content()];
-        if !root_instructions.is_empty() {
-            model_parts.push(render_project_instructions(
-                "root_project_instructions",
-                &root_instructions,
-            ));
-        }
+        let model_parts = [
+            config_hint_summary.model_content(),
+            format!(
+                "root_project_instruction_fingerprint={}\nproject_instruction_context=available_in_next_preturn_context",
+                root_instruction_fingerprint
+            ),
+        ];
         let model_content = truncate_text_to_token_budget(
             &model_parts.join("\n\n"),
             context.tool_output_max_tokens,
@@ -529,7 +522,6 @@ impl CodingApp {
                 "scope_response": response,
                 "config_hints": config_hints,
                 "root_project_instruction_fingerprint": root_instruction_fingerprint,
-                "root_project_instructions": root_instructions.iter().map(instruction_payload).collect::<Vec<_>>(),
             }),
             model_content: Some(model_content),
             ui_event: ToolUiEvent::coding_open_project(
@@ -724,7 +716,7 @@ impl CodingApp {
             return Ok(());
         }
         Err(miette!(
-            "edit_file is forbidden for SCOPE-owned source files while Coding is focused. Use edit_code instead. Blocked file(s): {}",
+            "edit_file is forbidden for SCOPE-owned source files while a Coding project scope is open. Use edit_code instead. Blocked file(s): {}",
             blocked.join(", ")
         ))
     }
@@ -747,13 +739,6 @@ impl App for CodingApp {
         ];
         if let Some(summary) = self.config_hint_summary.as_ref() {
             lines.extend(summary.state_lines());
-        }
-        if !self.root_instructions.is_empty() {
-            lines.extend(
-                render_project_instructions("root_project_instructions", &self.root_instructions)
-                    .lines()
-                    .map(ToString::to_string),
-            );
         }
         if let Some(last_action) = self.last_action.as_ref() {
             lines.push(format!("last_action={last_action}"));
@@ -778,10 +763,6 @@ impl App for CodingApp {
                 APP_CODING.how_to_use, scope_usage_md
             )),
         }
-    }
-
-    fn composed_apps(&self) -> Vec<AppId> {
-        vec![AppId::terminal()]
     }
 
     fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
@@ -865,7 +846,7 @@ impl App for CodingApp {
         call: &AgentToolCall,
         _context: &AppToolExecutionContext,
     ) -> Result<()> {
-        if call.name == "edit_file" {
+        if self.project_root.is_some() && call.name == "edit_file" {
             self.reject_scope_owned_edit_file(call)?;
         }
         Ok(())
@@ -1513,12 +1494,10 @@ mod tests {
                 &context,
             )
             .expect("first open");
-        assert!(
-            first
-                .model_content
-                .as_deref()
-                .is_some_and(|content| content.contains("Root rule v1"))
-        );
+        let first_model_content = first.model_content.as_deref().unwrap_or_default();
+        assert!(first_model_content.contains("root_project_instruction_fingerprint="));
+        assert!(first_model_content.contains("project_instruction_context="));
+        assert!(!first_model_content.contains("Root rule v1"));
         assert_eq!(
             app.scoped_instructions_for_path_once_per_turn("src/nested/file.rs", 7)
                 .expect("first scoped")
@@ -1603,12 +1582,10 @@ mod tests {
             second.payload.get("status").and_then(Value::as_str),
             Some("project_instructions_reloaded")
         );
-        assert!(
-            second
-                .model_content
-                .as_deref()
-                .is_some_and(|content| content.contains("Root rule v2"))
-        );
+        let second_model_content = second.model_content.as_deref().unwrap_or_default();
+        assert!(second_model_content.contains("root_project_instruction_fingerprint="));
+        assert!(second_model_content.contains("project_instruction_context="));
+        assert!(!second_model_content.contains("Root rule v2"));
         assert_eq!(app.scope.pending_review_count(), 1);
         assert!(
             app.scoped_instructions_for_path_once_per_turn("src/nested/file.rs", 7)

@@ -2569,7 +2569,6 @@ function webSlashStatusRows(
   const skills = snapshot?.skills ?? [];
   return [
     ["Runtime", snapshot?.runtime_status || runtimeActivity?.label || "Idle"],
-    ["Focused app", snapshot?.focused_app || "none"],
     ["Active turn", runtimeActivity?.active_runtime_turn ? "yes" : "no"],
     ["Phase", runtimeActivity?.active_runtime_phase],
     ["Current plan", snapshot?.current_plan_step?.step],
@@ -5190,11 +5189,6 @@ function agentChatActivityCellRenderForBubble(
     const render = agentChatTextActivityRender("user", user, "user");
     render.imageAttachments = imageAttachmentsValue(user.image_attachments);
     return render;
-  }
-
-  const appAttention = agentChatActivityCellPayload(cell, "AppAttention");
-  if (appAttention) {
-    return agentChatTextActivityRender("activity", appAttention, "Focused App");
   }
 
   const browser = agentChatActivityCellPayload(cell, "Browser");

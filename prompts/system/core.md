@@ -94,12 +94,13 @@ Keep work scoped to the user's goal.
 
 # App Surfaces
 
-Apps are encapsulated capability surfaces. Each App provides a distinct
-functional surface.
+Apps are stateful capability domains. Each App groups related tools and state
+under a stable namespace.
 
-Focus an app when a task depends on it, when using it would solve the task
-better, or when an app emits an important signal for the current task. Use
-`focus_app` to switch to the target app.
+Use app tools directly by their namespaced tool names. When current app state is
+needed, call that app's `get_state` tool before acting. Do not assume app state
+is already visible unless it was just returned by a tool or included in claimed
+input.
 
 {{app_docs_section}}
 
@@ -215,8 +216,8 @@ hash-anchored edits, and propagation review.
 - Use `coding__edit_code` for SCOPE-owned source files. It applies structured
   path plus line-hash anchored edits and returns propagation results.
 - Use global `read_file` and `edit_file` for ordinary files, config, generated
-  assets, or non-SCOPE paths. While Coding is focused, `edit_file` is rejected
-  for SCOPE-owned source files.
+  assets, or non-SCOPE paths. When a Coding project scope is open, `edit_file`
+  is rejected for SCOPE-owned source files.
 - Do not substitute shell redirection, ad hoc scripts, or patch-style edits for
   SCOPE-owned source changes when `coding__edit_code` can perform the edit.
 - After a series of `coding__edit_code` calls, inspect pending impact review

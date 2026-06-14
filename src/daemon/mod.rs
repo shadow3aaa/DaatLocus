@@ -123,7 +123,6 @@ pub struct StatusSessionSummary {
 #[derive(Serialize)]
 pub struct StatusSessionRuntimeSummary {
     pub ready: bool,
-    pub focused_app: Option<String>,
     pub pending_work_count: usize,
     pub active_runtime_turn: bool,
 }
@@ -132,7 +131,6 @@ impl From<session_ipc::SessionRuntimeStatus> for StatusSessionRuntimeSummary {
     fn from(status: session_ipc::SessionRuntimeStatus) -> Self {
         Self {
             ready: status.ready,
-            focused_app: status.focused_app,
             pending_work_count: status.pending_work_count,
             active_runtime_turn: status.active_runtime_turn,
         }

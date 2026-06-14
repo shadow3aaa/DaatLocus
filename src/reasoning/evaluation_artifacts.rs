@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn artifact_file_stem_is_bounded_and_non_empty() {
         let stem = artifact_file_stem(
-            "tool call when a app is already in foreground state do not call focus app with unknown app id parameter",
+            "tool call uses an unknown app id parameter and should be reported clearly",
         );
         assert!(!stem.is_empty());
         assert!(stem.len() <= MAX_ARTIFACT_FILE_STEM_LEN);

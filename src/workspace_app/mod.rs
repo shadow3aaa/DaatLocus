@@ -1114,7 +1114,7 @@ impl App for WorkspaceApp {
     fn usage(&self) -> AppUsage {
         AppUsage {
             description: markdown_summary_line(&self.usage_markdown),
-            when_to_focus: Vec::new(),
+            when_to_use: Vec::new(),
             body_markdown: Some(self.usage_markdown.clone()),
         }
     }
@@ -1156,32 +1156,6 @@ impl App for WorkspaceApp {
             state.last_error = Some(err.to_string());
         }
         Ok(result)
-    }
-
-    async fn on_focus(&mut self) -> Result<()> {
-        let mut state = self.handle_state.lock();
-        match state.worker.request(WorkerRequestOp::OnFocus) {
-            Ok(WorkerResponsePayload::Unit) => {}
-            Ok(other) => return Err(miette!("unexpected workspace app focus payload: {other:?}")),
-            Err(err) => {
-                state.last_error = Some(err.to_string());
-                return Err(err);
-            }
-        }
-        Self::refresh_worker_cache(&mut state)
-    }
-
-    async fn on_blur(&mut self) -> Result<()> {
-        let mut state = self.handle_state.lock();
-        match state.worker.request(WorkerRequestOp::OnBlur) {
-            Ok(WorkerResponsePayload::Unit) => {}
-            Ok(other) => return Err(miette!("unexpected workspace app blur payload: {other:?}")),
-            Err(err) => {
-                state.last_error = Some(err.to_string());
-                return Err(err);
-            }
-        }
-        Self::refresh_worker_cache(&mut state)
     }
 
     async fn refresh_notice(&mut self) -> Result<()> {
@@ -1918,8 +1892,19 @@ return app
             Some("Background sync needs review")
         );
 
-        apps.focus(app_id.clone()).await.expect("focus notifier");
-        apps.execute_dynamic_tool("ack_notice", serde_json::json!({}))
+        let app_context = crate::app::AppToolExecutionContext {
+            execution_cwd: root.path().to_path_buf(),
+            sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),
+            dashboard_tx: None,
+            tool_output_max_tokens: 4096,
+            turn_epoch: 0,
+        };
+        let call = crate::reasoning::runtime::AgentToolCall {
+            id: "ack_notice".to_string(),
+            name: "ack_notice".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        apps.execute_tool_for_app(&app_id, &call, &app_context)
             .await
             .expect("ack workspace notice");
         apps.refresh_notice_for(&app_id)
@@ -2057,15 +2042,25 @@ return app
             "bootstrap errors: {:?}",
             bootstrap.errors
         );
-        let mut apps = AppManager::new(
-            Some(AppId::from_workspace_folder("schema_input").expect("valid app id")),
-            bootstrap.apps,
-        )
-        .await
-        .expect("build app manager");
+        let app_id = AppId::from_workspace_folder("schema_input").expect("valid app id");
+        let mut apps = AppManager::new(None, bootstrap.apps)
+            .await
+            .expect("build app manager");
+        let app_context = crate::app::AppToolExecutionContext {
+            execution_cwd: root.path().to_path_buf(),
+            sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),
+            dashboard_tx: None,
+            tool_output_max_tokens: 4096,
+            turn_epoch: 0,
+        };
+        let call = crate::reasoning::runtime::AgentToolCall {
+            id: "typed_increment".to_string(),
+            name: "typed_increment".to_string(),
+            arguments: serde_json::json!({ "amount": "4" }),
+        };
 
         let err = apps
-            .execute_dynamic_tool("typed_increment", serde_json::json!({ "amount": "4" }))
+            .execute_tool_for_app(&app_id, &call, &app_context)
             .await
             .expect_err("schema mismatch should fail before lua call");
         let message = err.to_string();
@@ -2120,15 +2115,25 @@ return app
             "bootstrap errors: {:?}",
             bootstrap.errors
         );
-        let mut apps = AppManager::new(
-            Some(AppId::from_workspace_folder("schema_output").expect("valid app id")),
-            bootstrap.apps,
-        )
-        .await
-        .expect("build app manager");
+        let app_id = AppId::from_workspace_folder("schema_output").expect("valid app id");
+        let mut apps = AppManager::new(None, bootstrap.apps)
+            .await
+            .expect("build app manager");
+        let app_context = crate::app::AppToolExecutionContext {
+            execution_cwd: root.path().to_path_buf(),
+            sandbox_policy: crate::sandbox::RuntimeSandboxPolicy::disabled(),
+            dashboard_tx: None,
+            tool_output_max_tokens: 4096,
+            turn_epoch: 0,
+        };
+        let call = crate::reasoning::runtime::AgentToolCall {
+            id: "bad_payload".to_string(),
+            name: "bad_payload".to_string(),
+            arguments: serde_json::json!({}),
+        };
 
         let err = apps
-            .execute_dynamic_tool("bad_payload", serde_json::json!({}))
+            .execute_tool_for_app(&app_id, &call, &app_context)
             .await
             .expect_err("output schema mismatch should fail");
         let message = err.to_string();

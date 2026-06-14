@@ -217,7 +217,6 @@ async fn prepare_coding_project_app(
 ) -> Result<()> {
     let coding_id = AppId::coding();
 
-    apps.focus(coding_id.clone()).await?;
     if coding_project_root_is_open(apps, project_dir) {
         return Ok(());
     }
@@ -1171,7 +1170,6 @@ async fn record_runtime_error_case(context: &Context, input: RuntimeErrorRecordI
                 .active_runtime_phase
                 .map(|phase| phase.label().to_string()),
             available_tool_names: input.tools.iter().map(|tool| tool.name.clone()).collect(),
-            focused_app: context.apps.focused().map(|app| app.to_string()),
             plan_summary: context
                 .plan
                 .steps()
@@ -1655,7 +1653,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coding_project_prepare_focuses_and_opens_project() {
+    async fn coding_project_prepare_opens_project_scope() {
         let project = tempfile::tempdir().expect("project dir");
         let mut apps =
             crate::app::AppManager::new(None, vec![Box::new(crate::coding_app::CodingApp::new())])
@@ -1673,19 +1671,17 @@ mod tests {
             .await
             .expect("prepare coding app");
 
-        assert_eq!(apps.focused(), Some(AppId::coding()));
         assert!(coding_project_root_is_open(&apps, project.path()));
 
         prepare_coding_project_app(&mut apps, project.path(), &app_context)
             .await
             .expect("prepare coding app again");
 
-        assert_eq!(apps.focused(), Some(AppId::coding()));
         assert!(coding_project_root_is_open(&apps, project.path()));
     }
 
     #[tokio::test]
-    async fn coding_project_prepare_keeps_root_instructions_visible_without_duplication() {
+    async fn coding_project_prepare_does_not_render_root_instructions_in_app_state() {
         let project = tempfile::tempdir().expect("project dir");
         std::fs::write(
             project.path().join("AGENTS.md"),
@@ -1715,8 +1711,7 @@ mod tests {
             .state_render_for(&AppId::coding())
             .expect("coding state");
         let rendered_state = state.lines.join("\n");
-        assert!(rendered_state.contains("<root_project_instructions>"));
-        assert!(rendered_state.contains("AGENTS.md"));
-        assert_eq!(rendered_state.matches("Root instruction marker").count(), 1);
+        assert!(!rendered_state.contains("<root_project_instructions>"));
+        assert!(!rendered_state.contains("Root instruction marker"));
     }
 }

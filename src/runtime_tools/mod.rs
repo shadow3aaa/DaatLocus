@@ -2,11 +2,12 @@ use std::{collections::HashSet, future::Future, pin::Pin};
 
 use async_trait::async_trait;
 use miette::{Result, miette};
-use schemars::schema_for;
+use schemars::{JsonSchema, schema_for};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    app::{AppId, AppToolExecutionContext},
+    app::{AppHowToUse, AppId, AppStateRender, AppToolExecutionContext, AppUsage},
     context::Context,
     context_budget::truncate_text_to_token_budget_with_notice,
     live_progress::TelegramLiveStatus,
@@ -15,7 +16,7 @@ use crate::{
         runtime::{AgentToolCall, AgentToolInputSpec, AgentToolSpec},
     },
     schema_utils::normalize_openai_json_schema,
-    tool_ui::{AppAttentionUiAction, ToolCallUiEvent, ToolUiEvent, glyph},
+    tool_ui::{ToolCallUiEvent, ToolUiEvent, glyph},
 };
 
 mod files;
@@ -268,6 +269,234 @@ struct AppRuntimeTool {
     input_spec: AgentToolInputSpec,
 }
 
+const APP_GET_STATE_TOOL_NAME: &str = "get_state";
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum AppStateDetail {
+    #[default]
+    Summary,
+    Full,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+struct AppGetStateArgs {
+    /// State detail to return. Use full when exact visible facts are needed.
+    detail: Option<AppStateDetail>,
+    /// Include the app usage and operation manual alongside current state.
+    include_manual: Option<bool>,
+}
+
+struct AppGetStateRuntimeTool {
+    owner_app_id: AppId,
+    exposed_name: String,
+    input_spec: AgentToolInputSpec,
+}
+
+impl AppGetStateRuntimeTool {
+    fn new(owner_app_id: AppId, exposed_name: String) -> Self {
+        Self {
+            owner_app_id,
+            exposed_name,
+            input_spec: AgentToolInputSpec::JsonSchema {
+                schema: normalize_tool_input_schema(
+                    serde_json::to_value(schema_for!(AppGetStateArgs)).unwrap(),
+                ),
+            },
+        }
+    }
+}
+
+fn app_state_payload(
+    app_id: &AppId,
+    state: &AppStateRender,
+    detail: AppStateDetail,
+    usage: Option<&AppUsage>,
+    how_to_use: Option<&AppHowToUse>,
+) -> Value {
+    let mut payload = json!({
+        "app": app_id.to_string(),
+        "detail": match detail {
+            AppStateDetail::Summary => "summary",
+            AppStateDetail::Full => "full",
+        },
+        "state": state,
+    });
+
+    if let Value::Object(map) = &mut payload {
+        if let Some(usage) = usage {
+            map.insert(
+                "usage".to_string(),
+                json!({
+                    "description": &usage.description,
+                    "when_to_use": &usage.when_to_use,
+                    "body_markdown": &usage.body_markdown,
+                }),
+            );
+        }
+        if let Some(how_to_use) = how_to_use {
+            map.insert(
+                "how_to_use".to_string(),
+                json!({
+                    "lines": &how_to_use.lines,
+                    "body_markdown": &how_to_use.body_markdown,
+                }),
+            );
+        }
+    }
+    payload
+}
+
+fn render_app_get_state_model_content(
+    app_id: &AppId,
+    state: &AppStateRender,
+    usage: Option<&AppUsage>,
+    how_to_use: Option<&AppHowToUse>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("app={app_id}\n"));
+    out.push_str(&format!("state_title={}\n", state.title));
+    out.push_str("state:\n");
+    if state.lines.is_empty() {
+        out.push_str("- no visible state\n");
+    } else {
+        for line in &state.lines {
+            out.push_str("- ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    if let Some(usage) = usage {
+        out.push_str("usage:\n");
+        out.push_str("- description: ");
+        out.push_str(&usage.description);
+        out.push('\n');
+        for item in &usage.when_to_use {
+            out.push_str("- when_to_use: ");
+            out.push_str(item);
+            out.push('\n');
+        }
+        if let Some(body) = usage.body_markdown.as_deref()
+            && !body.trim().is_empty()
+        {
+            out.push_str("- notes:\n");
+            out.push_str(body.trim());
+            out.push('\n');
+        }
+    }
+
+    if let Some(how_to_use) = how_to_use {
+        out.push_str("how_to_use:\n");
+        for line in &how_to_use.lines {
+            out.push_str("- ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        if let Some(body) = how_to_use.body_markdown.as_deref()
+            && !body.trim().is_empty()
+        {
+            out.push_str(body.trim());
+            out.push('\n');
+        }
+    }
+
+    out.trim_end().to_string()
+}
+
+#[async_trait]
+impl RuntimeTool for AppGetStateRuntimeTool {
+    fn name(&self) -> &str {
+        &self.exposed_name
+    }
+
+    fn app_tool_name(&self) -> Option<&str> {
+        Some(APP_GET_STATE_TOOL_NAME)
+    }
+
+    fn description(&self) -> &str {
+        "Read the current state for this app capability domain. Set include_manual=true when you also need its usage and operation notes."
+    }
+
+    fn input_spec(&self) -> AgentToolInputSpec {
+        self.input_spec.clone()
+    }
+
+    fn summarize_action(&self, call: &AgentToolCall) -> miette::Result<EpisodeActionRecord> {
+        let args: AppGetStateArgs = parse_tool_args(call)?;
+        Ok(EpisodeActionRecord {
+            kind: self.exposed_name.clone(),
+            summary: format!(
+                "detail={} include_manual={}",
+                match args.detail.unwrap_or_default() {
+                    AppStateDetail::Summary => "summary",
+                    AppStateDetail::Full => "full",
+                },
+                args.include_manual.unwrap_or(false)
+            ),
+        })
+    }
+
+    fn call_ui_event(&self, call: &AgentToolCall) -> miette::Result<ToolCallUiEvent> {
+        let args: AppGetStateArgs = parse_tool_args(call)?;
+        let mut lines = vec![format!(
+            "detail={}",
+            match args.detail.unwrap_or_default() {
+                AppStateDetail::Summary => "summary",
+                AppStateDetail::Full => "full",
+            }
+        )];
+        if args.include_manual.unwrap_or(false) {
+            lines.push("include_manual=true".to_string());
+        }
+        Ok(ToolCallUiEvent::app(
+            AppId::render_exposed_tool_name(&self.exposed_name),
+            lines,
+        ))
+    }
+
+    async fn execute(
+        &self,
+        context: &mut Context,
+        call: &AgentToolCall,
+    ) -> miette::Result<ToolExecutionResult> {
+        let args: AppGetStateArgs = parse_tool_args(call)?;
+        let state = context
+            .apps
+            .state_render_for(&self.owner_app_id)
+            .ok_or_else(|| miette!("app missing for state read: {}", self.owner_app_id))?;
+        let include_manual = args.include_manual.unwrap_or(false);
+        let usage = include_manual
+            .then(|| context.apps.usage(&self.owner_app_id))
+            .flatten();
+        let how_to_use = include_manual
+            .then(|| context.apps.how_to_use(&self.owner_app_id))
+            .flatten();
+        let payload = app_state_payload(
+            &self.owner_app_id,
+            &state,
+            args.detail.unwrap_or_default(),
+            usage.as_ref(),
+            how_to_use.as_ref(),
+        );
+        let model_content = render_app_get_state_model_content(
+            &self.owner_app_id,
+            &state,
+            usage.as_ref(),
+            how_to_use.as_ref(),
+        );
+        Ok(ToolExecutionResult::new(
+            format!("read {} state", self.owner_app_id),
+            payload,
+            ToolUiEvent::app(
+                AppId::render_exposed_tool_name(&self.exposed_name),
+                state.lines.clone(),
+            ),
+        )
+        .with_model_content(model_content))
+    }
+}
+
 #[async_trait]
 impl RuntimeTool for AppRuntimeTool {
     fn name(&self) -> &str {
@@ -347,21 +576,21 @@ fn build_app_runtime_tools(
     let mut tools: Vec<Box<dyn RuntimeTool>> = Vec::new();
     let mut seen_names = reserved_names.clone();
 
-    let focused = context.apps.focused();
-    let Some(focused) = focused.as_ref() else {
-        return tools;
-    };
-
-    let mut allowed_apps: HashSet<AppId> = HashSet::new();
-    allowed_apps.insert(focused.clone());
-    for surface in context.apps.focused_composed_surfaces() {
-        allowed_apps.insert(surface.app_id);
-    }
-
     for (owner_app_id, app_tools) in context.apps.all_tool_specs() {
-        if !allowed_apps.contains(&owner_app_id) {
-            continue;
+        let get_state_exposed_name = owner_app_id.mangle_tool_name(APP_GET_STATE_TOOL_NAME);
+        if seen_names.insert(get_state_exposed_name.clone()) {
+            tools.push(Box::new(AppGetStateRuntimeTool::new(
+                owner_app_id.clone(),
+                get_state_exposed_name,
+            )));
+        } else {
+            tracing::warn!(
+                "skipping generated state tool for app `{}` because exposed name `{}` conflicts with another runtime tool",
+                owner_app_id,
+                get_state_exposed_name
+            );
         }
+
         for tool in &app_tools {
             if !is_valid_dynamic_tool_name(&tool.name) {
                 tracing::warn!(
@@ -604,17 +833,6 @@ pub fn render_telegram_tool_result_status(
                 )
             ),
         )),
-        "focus_app" => Some(telegram_status(
-            glyph::APP_ATTENTION,
-            format!(
-                "App Focused: {}",
-                compact_telegram_status_detail(
-                    focused_app_from_result(&result.ui_event)
-                        .or_else(|| call_arg_string(call, "app"))
-                        .unwrap_or_else(|| "unknown".to_string()),
-                )
-            ),
-        )),
         _ => Some(telegram_status(glyph::EXEC, "App Updated")),
     }
 }
@@ -641,15 +859,12 @@ fn canonical_runtime_tool_name(tool_name: &str) -> &str {
 }
 
 fn telegram_status_ignored_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "finish_and_send" | "notice_resolved" | "put_away_app"
-    )
+    matches!(tool_name, "finish_and_send" | "notice_resolved")
 }
 
 fn telegram_tool_failure_status(tool_name: &str) -> Option<TelegramLiveStatus> {
     match tool_name {
-        "finish_and_send" | "notice_resolved" | "put_away_app" => None,
+        "finish_and_send" | "notice_resolved" => None,
         "update_plan" => Some(telegram_status(glyph::ERROR, "Plan Update Failed")),
         "edit_file" => Some(telegram_status(glyph::ERROR, "File Edit Failed")),
         "terminal_exec" => Some(telegram_status(glyph::ERROR, "Command Failed")),
@@ -670,7 +885,6 @@ fn telegram_tool_failure_status(tool_name: &str) -> Option<TelegramLiveStatus> {
             glyph::ERROR,
             "Primitive Spec Update Failed",
         )),
-        "focus_app" => Some(telegram_status(glyph::ERROR, "App Focus Failed")),
         _ => Some(telegram_status(glyph::ERROR, "App Failed")),
     }
 }
@@ -694,17 +908,6 @@ fn workflow_id_from_result(event: &ToolUiEvent) -> Option<String> {
     match event {
         ToolUiEvent::CreatePrimitiveSpec(event) => Some(event.primitive_id.clone()),
         ToolUiEvent::ActivatePrimitive(event) => Some(event.primitive_id.clone()),
-        _ => None,
-    }
-}
-
-fn focused_app_from_result(event: &ToolUiEvent) -> Option<String> {
-    match event {
-        ToolUiEvent::AppAttention(event)
-            if matches!(&event.action, AppAttentionUiAction::Focus) =>
-        {
-            event.app.clone()
-        }
         _ => None,
     }
 }
@@ -781,13 +984,11 @@ mod tests {
         openskills::OpenSkillsCatalog,
         pending_work::PendingWorkQueue,
         plan::Plan,
-        preturn_state::PreTurnState,
         reasoning::{
             compiled::CompiledPromptStore,
             runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
         },
         runtime::bootstrap::DaatLocusHomeOverride,
-        runtime_context::build_preturn_context_text,
         sandbox::RuntimeSandboxPolicy,
         telegram_acl::TelegramAclHandle,
         telegram_transport::state::TelegramTransportState,
@@ -825,7 +1026,7 @@ mod tests {
     }
 
     impl IsolatedTestContext {
-        async fn new(focused: AppId) -> Self {
+        async fn new() -> Self {
             let home = tempfile::tempdir().expect("test home");
             let execution = tempfile::tempdir().expect("test execution cwd");
             let home_override = DaatLocusHomeOverride::set(home.path().to_path_buf()).await;
@@ -837,7 +1038,7 @@ mod tests {
                 Box::new(TerminalApp::new()),
                 Box::new(CodingApp::new()),
             ];
-            let apps = AppManager::new(Some(focused), apps).await.unwrap();
+            let apps = AppManager::new(None, apps).await.unwrap();
             let context = Context {
                 session_id: None,
                 llm: Box::new(UnusedLlm),
@@ -1018,7 +1219,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_write_stdin_tool_schema_does_not_use_schema_composition() {
-        let isolated = IsolatedTestContext::new(AppId::terminal()).await;
+        let isolated = IsolatedTestContext::new().await;
 
         let spec = build_runtime_tool_specs(&isolated.context)
             .into_iter()
@@ -1035,7 +1236,7 @@ mod tests {
 
     #[tokio::test]
     async fn coding_read_code_tool_schema_does_not_use_schema_composition() {
-        let isolated = IsolatedTestContext::new(AppId::coding()).await;
+        let isolated = IsolatedTestContext::new().await;
 
         let spec = build_runtime_tool_specs(&isolated.context)
             .into_iter()
@@ -1056,7 +1257,7 @@ mod tests {
 
     #[tokio::test]
     async fn structured_edit_tool_schemas_do_not_use_schema_composition() {
-        let isolated = IsolatedTestContext::new(AppId::coding()).await;
+        let isolated = IsolatedTestContext::new().await;
         let specs = build_runtime_tool_specs(&isolated.context);
 
         for tool_name in ["edit_file", "coding__edit_code"] {
@@ -1079,26 +1280,24 @@ mod tests {
 
     #[tokio::test]
     async fn exposed_runtime_tool_schemas_do_not_use_one_of() {
-        for focused in [AppId::terminal(), AppId::coding()] {
-            let isolated = IsolatedTestContext::new(focused).await;
-            for spec in build_runtime_tool_specs(&isolated.context) {
-                match spec.input_spec {
-                    AgentToolInputSpec::JsonSchema { schema } => {
-                        assert!(
-                            !json_contains_key(&schema, "oneOf"),
-                            "tool={} schema={schema:#}",
-                            spec.name
-                        );
-                    }
-                    AgentToolInputSpec::FreeformGrammar {
-                        fallback_schema, ..
-                    } => {
-                        assert!(
-                            !json_contains_key(&fallback_schema, "oneOf"),
-                            "tool={} fallback_schema={fallback_schema:#}",
-                            spec.name
-                        );
-                    }
+        let isolated = IsolatedTestContext::new().await;
+        for spec in build_runtime_tool_specs(&isolated.context) {
+            match spec.input_spec {
+                AgentToolInputSpec::JsonSchema { schema } => {
+                    assert!(
+                        !json_contains_key(&schema, "oneOf"),
+                        "tool={} schema={schema:#}",
+                        spec.name
+                    );
+                }
+                AgentToolInputSpec::FreeformGrammar {
+                    fallback_schema, ..
+                } => {
+                    assert!(
+                        !json_contains_key(&fallback_schema, "oneOf"),
+                        "tool={} fallback_schema={fallback_schema:#}",
+                        spec.name
+                    );
                 }
             }
         }
@@ -1106,7 +1305,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_returns_line_hash_anchored_lines() {
-        let mut isolated = IsolatedTestContext::new(AppId::terminal()).await;
+        let mut isolated = IsolatedTestContext::new().await;
         let root = isolated.context.execution_cwd.clone();
         std::fs::write(root.join("notes.txt"), "alpha\nbeta\ngamma\n").expect("write fixture");
 
@@ -1139,7 +1338,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_applies_structured_line_hash_edits() {
-        let mut isolated = IsolatedTestContext::new(AppId::terminal()).await;
+        let mut isolated = IsolatedTestContext::new().await;
         let root = isolated.context.execution_cwd.clone();
         std::fs::write(root.join("README.md"), "old\n").expect("write markdown fixture");
 
@@ -1176,8 +1375,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coding_focus_exposes_terminal_delegated_tools() {
-        let isolated = IsolatedTestContext::new(AppId::coding()).await;
+    async fn all_app_tools_are_exposed_by_namespace() {
+        let isolated = IsolatedTestContext::new().await;
 
         let specs = build_runtime_tool_specs(&isolated.context);
         let names = specs
@@ -1187,11 +1386,16 @@ mod tests {
 
         assert!(names.contains("read_file"));
         assert!(names.contains("edit_file"));
+        assert!(names.contains("browser__get_state"));
+        assert!(names.contains("browser__browser_open_page"));
+        assert!(names.contains("browser__browser_snapshot"));
+        assert!(names.contains("coding__get_state"));
         assert!(names.contains("coding__open_project"));
         assert!(names.contains("coding__search_code"));
         assert!(names.contains("coding__read_code"));
         assert!(names.contains("coding__edit_code"));
         assert!(names.contains("coding__next_review"));
+        assert!(names.contains("terminal__get_state"));
         assert!(names.contains("terminal__terminal_exec"));
         assert!(names.contains("terminal__terminal_write_stdin"));
         assert!(names.contains("terminal__terminal_terminate"));
@@ -1202,13 +1406,12 @@ mod tests {
         assert!(!names.contains("coding__coding_open_project"));
         assert!(!names.contains("coding_open_project"));
         assert!(!names.contains("terminal_exec"));
-        assert!(!names.contains("browser__browser_open_page"));
         assert!(!names.contains("browser_open_page"));
     }
 
     #[tokio::test]
-    async fn coding_focus_executes_terminal_owned_tool() {
-        let mut isolated = IsolatedTestContext::new(AppId::coding()).await;
+    async fn namespaced_terminal_tool_executes_directly() {
+        let mut isolated = IsolatedTestContext::new().await;
         let call = AgentToolCall {
             id: "call_1".to_string(),
             name: "terminal__terminal_exec".to_string(),
@@ -1231,8 +1434,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coding_focus_rejects_edit_file_for_scope_owned_source() {
-        let mut isolated = IsolatedTestContext::new(AppId::coding()).await;
+    async fn project_scope_rejects_file_tool_for_scope_owned_source() {
+        let mut isolated = IsolatedTestContext::new().await;
         let root = isolated.context.execution_cwd.clone();
         std::fs::write(root.join("lib.rs"), "pub fn value() -> i32 {\n    1\n}\n")
             .expect("write rust fixture");
@@ -1279,8 +1482,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coding_focus_allows_edit_file_for_non_scope_file() {
-        let mut isolated = IsolatedTestContext::new(AppId::coding()).await;
+    async fn project_scope_allows_file_tool_for_non_scope_file() {
+        let mut isolated = IsolatedTestContext::new().await;
         let root = isolated.context.execution_cwd.clone();
         std::fs::write(root.join("README.md"), "old\n").expect("write markdown fixture");
 
@@ -1321,44 +1524,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coding_focus_renders_terminal_as_composed_app_segment() {
-        let mut isolated = IsolatedTestContext::new(AppId::coding()).await;
+    async fn generated_get_state_tool_reads_app_state() {
+        let mut isolated = IsolatedTestContext::new().await;
         let call = AgentToolCall {
-            id: "call_1".to_string(),
-            name: "terminal__terminal_exec".to_string(),
-            arguments: json!({
-                "command": "printf '%s\\n' segmented-terminal-context",
-                "yield_time_ms": 100,
-            }),
+            id: "call_state".to_string(),
+            name: "terminal__get_state".to_string(),
+            arguments: json!({ "include_manual": true }),
         };
-        execute_agent_tool_call(&mut isolated.context, &call)
+
+        let result = execute_agent_tool_call(&mut isolated.context, &call)
             .await
             .unwrap();
 
-        let state = PreTurnState::new(&mut isolated.context).await;
-        let rendered = build_preturn_context_text(&isolated.context, &state);
-
-        assert!(rendered.contains("<focused_app>"), "{rendered}");
-        assert!(rendered.contains("<coding>"), "{rendered}");
-        assert!(rendered.contains("<composed_apps>"), "{rendered}");
-        assert!(rendered.contains("<terminal>"), "{rendered}");
-        assert!(rendered.contains("role: delegated_tools"), "{rendered}");
-        assert!(
-            rendered.contains(
-                "exposed_tools: [terminal__terminal_exec, terminal__terminal_write_stdin, terminal__terminal_terminate]"
-            ),
-            "{rendered}"
-        );
-        assert!(rendered.contains("kind=terminal"), "{rendered}");
-        assert!(
-            rendered.contains("segmented-terminal-context"),
-            "{rendered}"
-        );
+        assert!(result.model_content().contains("app=terminal"));
+        assert_eq!(result.payload["app"], "terminal");
+        assert!(result.payload.get("usage").is_some());
+        assert!(matches!(result.ui_event, ToolUiEvent::App(_)));
     }
 
     #[tokio::test]
-    async fn terminal_focus_does_not_expose_coding_tools() {
-        let isolated = IsolatedTestContext::new(AppId::terminal()).await;
+    async fn app_tools_do_not_expose_unscoped_aliases() {
+        let isolated = IsolatedTestContext::new().await;
 
         let names = build_runtime_tool_specs(&isolated.context)
             .into_iter()
@@ -1367,14 +1553,14 @@ mod tests {
 
         assert!(names.contains("read_file"));
         assert!(names.contains("edit_file"));
+        assert!(names.contains("browser__browser_open_page"));
+        assert!(names.contains("coding__open_project"));
         assert!(names.contains("terminal__terminal_exec"));
         assert!(!names.contains("apply_patch"));
         assert!(!names.contains("terminal_exec"));
-        assert!(!names.contains("coding__open_project"));
         assert!(!names.contains("open_project"));
         assert!(!names.contains("coding__coding_open_project"));
         assert!(!names.contains("coding_open_project"));
-        assert!(!names.contains("browser__browser_open_page"));
         assert!(!names.contains("browser_open_page"));
     }
 }

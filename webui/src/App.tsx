@@ -385,7 +385,6 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
     generated: true,
     updated_at_ms: MOCK_ACTIVITY_STARTED_AT,
   },
-  focused_app: "Coding",
   status_output: "",
   sleep_status_output: "",
   inspect_telegram_output: "",

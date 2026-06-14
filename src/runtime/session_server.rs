@@ -236,7 +236,6 @@ pub(crate) async fn run_session_serve(
         *state = DashboardState {
             agent_name: dashboard_agent_name(),
             session_title: context.session_title.snapshot(),
-            focused_app: context.apps.focused(),
             status_output: render_status_command_output_for_dashboard(&context, &app_renders),
             sleep_status_output: render_sleep_status_output_for_dashboard(&context, &sleep_status),
             inspect_telegram_output: render_telegram_status_for_dashboard(&context),
@@ -609,7 +608,6 @@ fn runtime_status_from_state(state: &SessionIpcServerState) -> SessionRuntimeSta
     SessionRuntimeStatus {
         ready: state.lifecycle.get() == DaemonLifecycleState::Ready,
         status: state.lifecycle.get().to_string(),
-        focused_app: snapshot.focused_app.as_ref().map(ToString::to_string),
         pending_work_count: state.pending_work.pending_count(),
         active_runtime_turn: matches!(
             snapshot.runtime_activity.status,

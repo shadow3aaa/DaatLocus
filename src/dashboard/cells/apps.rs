@@ -1,15 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::tool_ui::{
-    AppAttentionUiAction, AppAttentionUiData, BrowserUiAction, BrowserUiData, WebSearchUiAction,
-    WebSearchUiData,
-};
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AppAttentionActivityCell {
-    pub title: String,
-    pub body_lines: Vec<String>,
-}
+use crate::tool_ui::{BrowserUiAction, BrowserUiData, WebSearchUiAction, WebSearchUiData};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrowserActivityCell {
@@ -33,24 +24,6 @@ pub struct WebSearchActivityCell {
     pub query: String,
     pub url: Option<String>,
     pub body_lines: Vec<String>,
-}
-
-impl From<AppAttentionUiData> for AppAttentionActivityCell {
-    fn from(data: AppAttentionUiData) -> Self {
-        match data.action {
-            AppAttentionUiAction::Focus => {
-                let app = data.app.unwrap_or_else(|| "app".to_string());
-                Self {
-                    title: format!("Focused App: {app}"),
-                    body_lines: Vec::new(),
-                }
-            }
-            AppAttentionUiAction::PutAway => Self {
-                title: "put away focused app".to_string(),
-                body_lines: Vec::new(),
-            },
-        }
-    }
 }
 
 impl From<BrowserUiData> for BrowserActivityCell {

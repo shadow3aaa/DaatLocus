@@ -181,7 +181,6 @@ pub enum SessionIpcResponse {
 pub struct SessionRuntimeStatus {
     pub ready: bool,
     pub status: String,
-    pub focused_app: Option<String>,
     pub pending_work_count: usize,
     pub active_runtime_turn: bool,
 }
@@ -199,7 +198,6 @@ pub struct SessionStatusDashboard {
     pub agent_name: String,
     #[serde(default)]
     pub session_title: Option<DashboardSessionTitle>,
-    pub focused_app: Option<String>,
     pub last_cycle_elapsed_ms: Option<u64>,
     pub runtime_status: Option<String>,
     pub runtime_status_level: Option<DashboardRuntimeStatusLevel>,
@@ -216,7 +214,6 @@ impl SessionStatusDashboard {
         Self {
             agent_name: state.agent_name.clone(),
             session_title: state.session_title.clone(),
-            focused_app: state.focused_app.as_ref().map(ToString::to_string),
             last_cycle_elapsed_ms: state.last_cycle_elapsed_ms,
             runtime_status: state.runtime_status.clone(),
             runtime_status_level: state.runtime_status_level,
@@ -536,7 +533,6 @@ mod tests {
                         runtime_status: SessionRuntimeStatus {
                             ready: true,
                             status: "ready".to_string(),
-                            focused_app: None,
                             pending_work_count: 0,
                             active_runtime_turn: false,
                         },

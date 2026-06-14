@@ -48,7 +48,6 @@ pub struct RuntimeErrorTaskContext {
 pub struct RuntimeErrorRuntimeContext {
     pub phase: Option<String>,
     pub available_tool_names: Vec<String>,
-    pub focused_app: Option<String>,
     pub plan_summary: Vec<String>,
     #[serde(default, alias = "compact_snapshot_summary")]
     pub compact_context_summary: Option<String>,

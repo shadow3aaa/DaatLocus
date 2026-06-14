@@ -257,13 +257,6 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
             apply_final_message_separator_cell(&mut item, cell)
         }
         ActivityCell::User(cell) => apply_user_cell(&mut item, cell),
-        ActivityCell::AppAttention(cell) => apply_simple_tool_item(
-            &mut item,
-            "app_attention",
-            Some("App"),
-            cell.title.clone(),
-            cell.body_lines.clone(),
-        ),
         ActivityCell::Browser(cell) => apply_browser_cell(&mut item, cell),
         ActivityCell::LiveBrowser(cell) => apply_live_browser_cell(&mut item, cell),
         ActivityCell::WebSearch(cell) => apply_web_search_cell(&mut item, cell),
@@ -302,7 +295,6 @@ fn activity_cell_variant_name(cell: &ActivityCell) -> &'static str {
         ActivityCell::Assistant(_) => "Assistant",
         ActivityCell::FinalMessageSeparator(_) => "FinalMessageSeparator",
         ActivityCell::User(_) => "User",
-        ActivityCell::AppAttention(_) => "AppAttention",
         ActivityCell::Browser(_) => "Browser",
         ActivityCell::LiveBrowser(_) => "LiveBrowser",
         ActivityCell::WebSearch(_) => "WebSearch",

@@ -108,10 +108,6 @@ impl AppId {
         }
         format!("{app_id}::{app_tool_name}")
     }
-
-    pub fn is_terminal(&self) -> bool {
-        self.as_str() == Self::terminal().as_str()
-    }
 }
 
 impl Display for AppId {
@@ -129,7 +125,7 @@ pub struct AppStateRender {
 #[derive(Debug, Clone)]
 pub struct AppUsage {
     pub description: String,
-    pub when_to_focus: Vec<String>,
+    pub when_to_use: Vec<String>,
     pub body_markdown: Option<String>,
 }
 
@@ -160,13 +156,6 @@ pub struct AppToolSpec {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
-}
-
-#[derive(Debug, Clone)]
-pub struct AppComposedSurface {
-    pub app_id: AppId,
-    pub role: String,
-    pub exposed_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -227,11 +216,6 @@ pub trait App: Send + Sync {
     fn usage(&self) -> AppUsage;
 
     fn how_to_use(&self) -> AppHowToUse;
-
-    /// Apps whose tools become available when this app is focused.
-    fn composed_apps(&self) -> Vec<AppId> {
-        Vec::new()
-    }
 
     fn dynamic_tools(&self) -> Result<Vec<AppDynamicToolSpec>> {
         Ok(Vec::new())
@@ -296,14 +280,6 @@ pub trait App: Send + Sync {
         Err(miette!("unknown app tool"))
     }
 
-    async fn on_focus(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn on_blur(&mut self) -> Result<()> {
-        Ok(())
-    }
-
     async fn refresh_notice(&mut self) -> Result<()> {
         Ok(())
     }
@@ -322,7 +298,6 @@ pub trait App: Send + Sync {
 }
 
 pub struct AppManager {
-    focused: Option<AppId>,
     order: Vec<AppId>,
     apps: HashMap<AppId, Box<dyn App>>,
 }
@@ -334,7 +309,7 @@ pub enum AppInstallDisposition {
 }
 
 impl AppManager {
-    pub async fn new(focused: Option<AppId>, apps: Vec<Box<dyn App>>) -> Result<Self> {
+    pub async fn new(_initial_app: Option<AppId>, apps: Vec<Box<dyn App>>) -> Result<Self> {
         let mut order = Vec::with_capacity(apps.len());
         let mut table = HashMap::with_capacity(apps.len());
 
@@ -346,19 +321,7 @@ impl AppManager {
             order.push(id);
         }
 
-        let mut manager = Self {
-            focused: None,
-            order,
-            apps: table,
-        };
-        if let Some(id) = focused {
-            manager.focus(id).await?;
-        }
-        Ok(manager)
-    }
-
-    pub fn focused(&self) -> Option<AppId> {
-        self.focused.clone()
+        Ok(Self { order, apps: table })
     }
 
     pub fn state_renders(&self) -> Vec<(AppId, AppStateRender)> {
@@ -382,43 +345,6 @@ impl AppManager {
 
     pub fn how_to_use(&self, id: &AppId) -> Option<AppHowToUse> {
         self.apps.get(id).map(|app| app.how_to_use())
-    }
-
-    pub fn focused_composed_surfaces(&self) -> Vec<AppComposedSurface> {
-        let Some(focused) = self.focused.as_ref() else {
-            return Vec::new();
-        };
-        let composed_ids = self
-            .apps
-            .get(focused)
-            .map(|app| app.composed_apps())
-            .unwrap_or_default();
-
-        composed_ids
-            .iter()
-            .filter(|id| *id != focused)
-            .filter_map(|id| {
-                let app = self.apps.get(id)?;
-                let tool_specs = match app.tool_specs() {
-                    Ok(tools) => tools,
-                    Err(err) => {
-                        tracing::warn!("failed to list tools for app `{id}`: {err:?}");
-                        return None;
-                    }
-                };
-
-                let mut exposed_tools = Vec::new();
-                for tool in tool_specs {
-                    exposed_tools.push(id.mangle_tool_name(&tool.name));
-                }
-
-                (!exposed_tools.is_empty()).then(|| AppComposedSurface {
-                    app_id: id.clone(),
-                    role: "delegated_tools".to_string(),
-                    exposed_tools,
-                })
-            })
-            .collect()
     }
 
     pub fn app_ids(&self) -> Vec<AppId> {
@@ -468,14 +394,14 @@ impl AppManager {
         call: &AgentToolCall,
         context: &AppToolExecutionContext,
     ) -> Result<()> {
-        let Some(focused) = self.focused.as_ref() else {
-            return Ok(());
-        };
-        let Some(app) = self.apps.get(focused) else {
-            return Ok(());
-        };
-        let focused_call = self.demangle_call_for_app(focused, call);
-        app.before_runtime_tool_call(&focused_call, context)
+        for id in &self.order {
+            let Some(app) = self.apps.get(id) else {
+                continue;
+            };
+            let app_call = self.demangle_call_for_app(id, call);
+            app.before_runtime_tool_call(&app_call, context)?;
+        }
+        Ok(())
     }
 
     pub fn summarize_tool_call(&self, call: &AgentToolCall) -> Result<EpisodeActionRecord> {
@@ -526,88 +452,8 @@ impl AppManager {
         app.execute_tool(&app_call, context).await
     }
 
-    pub async fn focus(&mut self, id: AppId) -> Result<()> {
-        if self.focused.as_ref() == Some(&id) {
-            return Ok(());
-        }
-
-        if !self.apps.contains_key(&id) {
-            return Err(miette!("unknown app: {id}"));
-        }
-
-        let new_composed = self
-            .apps
-            .get(&id)
-            .map(|app| app.composed_apps())
-            .unwrap_or_default();
-
-        let old_composed = self
-            .focused
-            .as_ref()
-            .and_then(|focused| self.apps.get(focused))
-            .map(|app| app.composed_apps())
-            .unwrap_or_default();
-
-        // Blur old composed apps (excluding ones that also belong to the new target)
-        for composed_id in &old_composed {
-            if new_composed.contains(composed_id) {
-                continue;
-            }
-            if let Some(app) = self.apps.get_mut(composed_id) {
-                app.on_blur().await?;
-            }
-        }
-
-        if let Some(current) = self.focused.clone()
-            && let Some(app) = self.apps.get_mut(&current)
-        {
-            app.on_blur().await?;
-        }
-
-        self.focused = Some(id.clone());
-
-        // Focus new composed apps (excluding ones that were already focused)
-        for composed_id in &new_composed {
-            if old_composed.contains(composed_id) {
-                continue;
-            }
-            if let Some(app) = self.apps.get_mut(composed_id) {
-                app.on_focus().await?;
-            }
-        }
-
-        if let Some(app) = self.apps.get_mut(&id) {
-            app.on_focus().await?;
-        }
-        Ok(())
-    }
-
-    pub async fn put_away(&mut self) -> Result<()> {
-        let Some(current) = self.focused.take() else {
-            return Ok(());
-        };
-        let composed = self
-            .apps
-            .get(&current)
-            .map(|app| app.composed_apps())
-            .unwrap_or_default();
-        for composed_id in &composed {
-            if let Some(app) = self.apps.get_mut(composed_id) {
-                app.on_blur().await?;
-            }
-        }
-        if let Some(app) = self.apps.get_mut(&current) {
-            app.on_blur().await?;
-        }
-        Ok(())
-    }
-
-    pub async fn install_or_replace(
-        &mut self,
-        mut app: Box<dyn App>,
-    ) -> Result<AppInstallDisposition> {
+    pub async fn install_or_replace(&mut self, app: Box<dyn App>) -> Result<AppInstallDisposition> {
         let id = app.id();
-        let was_focused = self.focused.as_ref() == Some(&id);
         let disposition = if let Some(mut previous) = self.apps.remove(&id) {
             previous.shutdown().await?;
             AppInstallDisposition::Replaced
@@ -615,47 +461,29 @@ impl AppManager {
             self.order.push(id.clone());
             AppInstallDisposition::Added
         };
-        if was_focused {
-            app.on_focus().await?;
-        }
         self.apps.insert(id, app);
         Ok(disposition)
     }
 
     pub async fn remove(&mut self, id: &AppId) -> Result<bool> {
-        let was_focused = self.focused.as_ref() == Some(id);
-        if was_focused {
-            self.focused = None;
-        }
         let Some(mut app) = self.apps.remove(id) else {
             return Ok(false);
         };
         self.order.retain(|existing| existing != id);
-        if was_focused {
-            app.on_blur().await?;
-        }
         app.shutdown().await?;
         Ok(true)
     }
 
     pub async fn wait_until_settled(&self, silence_duration: Duration, timeout: Duration) -> bool {
-        let Some(focused) = self.focused.clone() else {
-            return true;
-        };
-        let Some(app) = self.apps.get(&focused) else {
-            return true;
-        };
-        app.wait_until_settled(silence_duration, timeout).await
-    }
-
-    #[cfg(test)]
-    fn focused_app_mut(&mut self) -> Result<&mut Box<dyn App>> {
-        let Some(focused) = self.focused.clone() else {
-            return Err(miette!("no focused app"));
-        };
-        self.apps
-            .get_mut(&focused)
-            .ok_or_else(|| miette!("focused app missing: {focused}"))
+        for id in &self.order {
+            let Some(app) = self.apps.get(id) else {
+                continue;
+            };
+            if !app.wait_until_settled(silence_duration, timeout).await {
+                return false;
+            }
+        }
+        true
     }
 
     fn app_tool_name_from_exposed(&self, exposed_tool_name: &str) -> Result<(AppId, String)> {
@@ -685,16 +513,6 @@ impl AppManager {
             .demangle_tool_name(&call.name)
             .map(|name| call.with_name(name))
             .unwrap_or_else(|| call.clone())
-    }
-
-    #[cfg(test)]
-    pub async fn execute_dynamic_tool(
-        &mut self,
-        name: &str,
-        arguments: Value,
-    ) -> Result<AppDynamicToolResult> {
-        let app = self.focused_app_mut()?;
-        app.execute_dynamic_tool(name, arguments).await
     }
 
     pub async fn shutdown(mut self) -> Result<()> {

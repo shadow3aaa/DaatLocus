@@ -1003,14 +1003,6 @@ fn summarize_tool_ui_event(event: &ToolUiEvent) -> String {
         ToolUiEvent::WebSearch(data) => {
             format!("web search {}", summarize_runtime_inline_text(&data.query))
         }
-        ToolUiEvent::AppAttention(data) => match data.action {
-            crate::tool_ui::AppAttentionUiAction::Focus => data
-                .app
-                .as_deref()
-                .map(|app| format!("focused app {app}"))
-                .unwrap_or_else(|| "focused app".to_string()),
-            crate::tool_ui::AppAttentionUiAction::PutAway => "put away focused app".to_string(),
-        },
         ToolUiEvent::Plan(PlanUiData { steps, .. }) => {
             format!("plan with {} step(s)", steps.len())
         }

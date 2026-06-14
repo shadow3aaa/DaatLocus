@@ -3,10 +3,7 @@
 use std::fmt::Display;
 
 use crate::{
-    app::{AppId, AppStateRender},
-    context::Context,
-    context_budget::truncate_text_to_token_budget,
-    plan::Plan,
+    context::Context, context_budget::truncate_text_to_token_budget, plan::Plan,
     system_info::SystemInfo,
 };
 
@@ -18,23 +15,13 @@ const PRETURN_PLAN_MAX_ITEMS: usize = 8;
 pub struct PreTurnState {
     sensory: Sensory,
     plan: Plan,
-    apps: AppPreTurnState,
-}
-
-#[derive(Clone)]
-pub struct PreTurnAppStateEntry {
-    pub app_id: String,
-    pub title: String,
-    pub lines: Vec<String>,
 }
 
 impl PreTurnState {
-    pub async fn new(context: &mut Context) -> Self {
-        let apps = AppPreTurnState::new(context);
+    pub async fn new(_context: &mut Context) -> Self {
         Self {
             sensory: Sensory::new(),
-            plan: context.plan.clone(),
-            apps,
+            plan: _context.plan.clone(),
         }
     }
 
@@ -62,18 +49,6 @@ impl PreTurnState {
         }
         truncate_text_to_token_budget(&lines.join("\n"), PRETURN_PLAN_MAX_TOKENS)
     }
-
-    pub fn focused_app_runtime_text(&self) -> String {
-        self.apps.focused_runtime_text()
-    }
-
-    pub fn app_state_entries(&self) -> Vec<PreTurnAppStateEntry> {
-        self.apps.focused_app_state_entries()
-    }
-
-    pub fn full_app_state_entry(&self, app_id: &AppId) -> Option<PreTurnAppStateEntry> {
-        self.apps.app_state_entry(app_id)
-    }
 }
 
 impl Display for PreTurnState {
@@ -81,9 +56,7 @@ impl Display for PreTurnState {
         writeln!(f, "Sensory:")?;
         writeln!(f, "{}", self.sensory)?;
         writeln!(f, "Plan:")?;
-        writeln!(f, "{}", self.plan)?;
-        writeln!(f, "Apps:")?;
-        write!(f, "{}", self.apps)
+        write!(f, "{}", self.plan)
     }
 }
 
@@ -109,114 +82,4 @@ impl Display for Sensory {
         writeln!(f, "Current time: {}", self.time)?;
         write!(f, "Machine status:\n{}", self.machine_status)
     }
-}
-
-struct AppPreTurnState {
-    focused_app: Option<AppId>,
-    states: Vec<(AppId, AppStateRender)>,
-}
-
-impl AppPreTurnState {
-    fn new(context: &Context) -> Self {
-        Self {
-            focused_app: context.apps.focused(),
-            states: context.apps.state_renders(),
-        }
-    }
-}
-
-impl Display for AppPreTurnState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.focused_app.as_ref() {
-            Some(app) => writeln!(f, "Focused app: {app}")?,
-            None => writeln!(f, "Focused app: none")?,
-        }
-
-        let attention_hints = self
-            .states
-            .iter()
-            .filter(|(id, _)| self.focused_app.as_ref() != Some(id))
-            .filter_map(|(id, state)| app_attention_hint(id.clone(), state));
-        let attention_hints = attention_hints.collect::<Vec<_>>();
-        if !attention_hints.is_empty() {
-            writeln!(f, "Background app notices:")?;
-            for hint in attention_hints {
-                writeln!(f, "- {hint}")?;
-            }
-        }
-
-        writeln!(f, "App structure state:")?;
-        for (id, state) in &self.states {
-            writeln!(f, "- {id} / {}：", state.title)?;
-            for line in &state.lines {
-                writeln!(f, "  {line}")?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl AppPreTurnState {
-    fn focused_runtime_text(&self) -> String {
-        match self.focused_app.as_ref() {
-            Some(app) => app.to_string(),
-            None => "none".to_string(),
-        }
-    }
-
-    fn focused_app_state_entries(&self) -> Vec<PreTurnAppStateEntry> {
-        let Some(focused) = self.focused_app.as_ref() else {
-            return Vec::new();
-        };
-
-        self.app_state_entry(focused).into_iter().collect()
-    }
-
-    fn app_state_entry(&self, app_id: &AppId) -> Option<PreTurnAppStateEntry> {
-        self.states
-            .iter()
-            .find(|(id, _)| id == app_id)
-            .map(|(id, state)| PreTurnAppStateEntry {
-                app_id: id.to_string(),
-                title: state.title.clone(),
-                lines: state.lines.clone(),
-            })
-    }
-}
-
-fn app_attention_hint(app_id: AppId, state: &AppStateRender) -> Option<String> {
-    if app_id.is_terminal() {
-        let session_id = state
-            .lines
-            .iter()
-            .find_map(|line| line.strip_prefix("session="))
-            .and_then(|line| line.split_whitespace().next())
-            .unwrap_or("unknown");
-        if list_field(&state.lines, "unread_sessions").is_empty() {
-            None
-        } else {
-            Some(format!("Terminal session {session_id} has unread output"))
-        }
-    } else {
-        None
-    }
-}
-
-fn list_field(lines: &[String], key: &str) -> Vec<String> {
-    lines
-        .iter()
-        .find_map(|line| line.strip_prefix(&format!("{key}=")))
-        .map(|value| {
-            if value == "none" {
-                Vec::new()
-            } else {
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                    .map(ToString::to_string)
-                    .collect()
-            }
-        })
-        .unwrap_or_default()
 }

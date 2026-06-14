@@ -449,7 +449,7 @@ function SessionStatusLine({ entry }: { entry: StatusSessionSummary }) {
   const detail = entry.error
     ? entry.error
     : runtime
-      ? `${runtime.pending_work_count} pending${runtime.focused_app ? ` · ${runtime.focused_app}` : ""}`
+      ? `${runtime.pending_work_count} pending`
       : sessionScopeLabel(entry.session);
 
   return (

@@ -26,8 +26,6 @@ pub(crate) enum WorkerRequestOp {
     RenderState,
     ListTools,
     CallTool { name: String, arguments: JsonValue },
-    OnFocus,
-    OnBlur,
     PollNotices,
     Shutdown,
 }

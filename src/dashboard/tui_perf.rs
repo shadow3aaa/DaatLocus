@@ -327,7 +327,7 @@ fn mock_dashboard_state(scenario: TuiPerfScenario) -> (DashboardState, TuiViewSt
             ),
             (
                 "terminal".to_string(),
-                "cwd=/Users/example/project\nsessions=2\nfocused=main".to_string(),
+                "cwd=/Users/example/project\nsessions=2\nactive=main".to_string(),
             ),
         ],
         runtime_status: Some(if scenario == TuiPerfScenario::LiveActivity {
@@ -335,7 +335,7 @@ fn mock_dashboard_state(scenario: TuiPerfScenario) -> (DashboardState, TuiViewSt
         } else {
             "Idle".to_string()
         }),
-        footer_context: "gpt-5.5 · 126.5k/258.4k used · coding".to_string(),
+        footer_context: "gpt-5.5 · 126.5k/258.4k used".to_string(),
         footer_estimated_input_tokens: Some(126_500),
         ..DashboardState::default()
     };

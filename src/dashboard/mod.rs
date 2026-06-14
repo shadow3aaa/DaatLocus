@@ -61,7 +61,6 @@ use ratatui::prelude::*;
 use ratatui::style::Color;
 
 use crate::{
-    app::AppId,
     core::TokenUsageInfo,
     openskills::{OpenSkillDashboardError, OpenSkillDashboardSummary},
     reasoning::turn_compile::load_prompt_persona_spec_sync,
@@ -274,7 +273,6 @@ pub struct DashboardState {
     pub agent_name: String,
     #[serde(default)]
     pub session_title: Option<DashboardSessionTitle>,
-    pub focused_app: Option<AppId>,
     pub status_output: String,
     pub sleep_status_output: String,
     pub inspect_telegram_output: String,

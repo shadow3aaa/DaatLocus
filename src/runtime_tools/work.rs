@@ -4,9 +4,8 @@ use serde_json::json;
 use crate::{
     context::Context,
     core::{
-        ActivateComposedPrimitiveArgs, CreatePrimitiveSpecArgs, EventResolveArgs, FocusAppArgs,
-        NoticeResolvedArgs, PutAwayAppArgs, ReadPrimitiveSpecArgs, UpdatePlanArgs,
-        UpdatePrimitiveSpecArgs,
+        ActivateComposedPrimitiveArgs, CreatePrimitiveSpecArgs, EventResolveArgs,
+        NoticeResolvedArgs, ReadPrimitiveSpecArgs, UpdatePlanArgs, UpdatePrimitiveSpecArgs,
     },
     dashboard::render::current_plan_step_for_dashboard,
     events::{EventDisposition, EventPayload, EventStatus},
@@ -26,20 +25,6 @@ use super::{
 
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![
-        Box::new(StaticRuntimeTool::new::<FocusAppArgs>(
-            "focus_app",
-            "Bring the specified app to the foreground.",
-            summarize_focus_app_tool,
-            render_focus_app_call_ui,
-            execute_focus_app_tool,
-        )),
-        Box::new(StaticRuntimeTool::new::<PutAwayAppArgs>(
-            "put_away_app",
-            "Put the current foreground app back into the background.",
-            summarize_put_away_app_tool,
-            render_put_away_app_call_ui,
-            execute_put_away_app_tool,
-        )),
         Box::new(StaticRuntimeTool::new::<EventResolveArgs>(
             "finish_and_send",
             "Explicitly finish an event and send the final reply when a user reply is needed. `resolved` and `failed` both require `reply_message`; `dismissed` silently ends without sending a message.",
@@ -113,78 +98,6 @@ fn disposition_requires_reply(disposition: EventDisposition) -> bool {
         disposition,
         EventDisposition::Resolved | EventDisposition::Failed
     )
-}
-
-fn summarize_focus_app_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: FocusAppArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "focus_app".to_string(),
-        summary: format!("app={}", args.app),
-    })
-}
-
-fn render_focus_app_call_ui(call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    let args: FocusAppArgs = parse_tool_args(call)?;
-    Ok(ToolCallUiEvent::app(
-        format!("focus_app {}", args.app),
-        Vec::new(),
-    ))
-}
-
-fn execute_focus_app_tool<'a>(context: &'a mut Context, call: &'a AgentToolCall) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: FocusAppArgs = parse_tool_args(call)?;
-        let app = args.app.clone();
-        context.apps.focus(app.clone()).await?;
-        Ok(ToolExecutionResult::new(
-            format!("focused app {}", app),
-            json!({ "app": app.to_string() }),
-            ToolUiEvent::focus_app(app.to_string()),
-        )
-        .with_turn_boundary(focus_app_turn_boundary_reason(&app)))
-    })
-}
-
-fn focus_app_turn_boundary_reason(app: &crate::app::AppId) -> String {
-    format!("focused app changed to {app}; re-render world state in a new turn")
-}
-
-fn summarize_put_away_app_tool(_call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    Ok(EpisodeActionRecord {
-        kind: "put_away_app".to_string(),
-        summary: "put away current focused app".to_string(),
-    })
-}
-
-fn render_put_away_app_call_ui(_call: &AgentToolCall) -> Result<ToolCallUiEvent> {
-    Ok(ToolCallUiEvent::app("put_away_app", Vec::new()))
-}
-
-fn execute_put_away_app_tool<'a>(
-    context: &'a mut Context,
-    _call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        context.apps.put_away().await?;
-        Ok(ToolExecutionResult::new(
-            "put away focused app",
-            json!({}),
-            ToolUiEvent::put_away_app(),
-        )
-        .with_turn_boundary("focused app was put away; re-render world state in a new turn"))
-    })
-}
-
-async fn put_away_focused_app_after_work_completion(context: &mut Context) -> Option<String> {
-    let focused = context.apps.focused()?;
-    if let Err(err) = context.apps.put_away().await {
-        tracing::warn!(
-            app = %focused,
-            "failed to automatically put away focused app after work completion: {err:?}"
-        );
-        return None;
-    }
-    Some(focused.to_string())
 }
 
 fn summarize_event_resolve_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
@@ -292,7 +205,6 @@ fn execute_event_resolve_tool<'a>(
         context.queue_active_primitive_run_for_flush(PrimitiveRunOutcome::Completed);
         context.bound_primitive_id = None;
         context.bound_primitive_composition = None;
-        let auto_put_away_app = put_away_focused_app_after_work_completion(context).await;
         let reply_lines = reply_message
             .as_deref()
             .map(|message| {
@@ -309,7 +221,6 @@ fn execute_event_resolve_tool<'a>(
             "disposition": event_disposition_kind(args.disposition),
             "reply_message": reply_message.clone(),
             "note": args.note.clone(),
-            "auto_put_away_app": auto_put_away_app,
         });
         Ok(ToolExecutionResult::new(
             summary.clone(),
@@ -377,7 +288,6 @@ fn execute_notice_resolved_tool<'a>(
         context.queue_active_primitive_run_for_flush(PrimitiveRunOutcome::Completed);
         context.bound_primitive_id = None;
         context.bound_primitive_composition = None;
-        let auto_put_away_app = put_away_focused_app_after_work_completion(context).await;
         let result_lines = vec![
             format!("App notice resolved: {}", key.app),
             format!("Reason: {}", summarize_inline_text(&key.reason)),
@@ -388,7 +298,6 @@ fn execute_notice_resolved_tool<'a>(
                 "app": key.app,
                 "reason": key.reason,
                 "note": args.note,
-                "auto_put_away_app": auto_put_away_app,
             }),
             ToolUiEvent::notice_reply(ReplyDisposition::Resolved, result_lines),
         ))
@@ -937,14 +846,6 @@ mod tests {
             }
             other => panic!("expected plan call ui, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn focus_app_tool_declares_turn_boundary_reason() {
-        assert_eq!(
-            focus_app_turn_boundary_reason(&crate::app::AppId::terminal()),
-            "focused app changed to terminal; re-render world state in a new turn"
-        );
     }
 
     #[test]

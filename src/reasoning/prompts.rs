@@ -1,7 +1,4 @@
-use crate::{
-    app::{AppHowToUse, AppId, AppStateRender, AppUsage},
-    context::Context,
-};
+use crate::app::{AppHowToUse, AppId, AppUsage};
 
 use super::prompt_text::{PromptTextBuilder, render_bullet_list};
 
@@ -23,7 +20,7 @@ pub(crate) fn prompt_bullet_lines(markdown: &str) -> Vec<String> {
 #[derive(Clone, Copy)]
 pub(crate) struct AppPrompt {
     pub description: &'static str,
-    pub when_to_focus: &'static [&'static str],
+    pub when_to_use: &'static [&'static str],
     pub how_to_use: &'static str,
 }
 
@@ -38,8 +35,8 @@ impl AppPrompt {
     pub(crate) fn usage(self) -> AppUsage {
         AppUsage {
             description: self.description.to_string(),
-            when_to_focus: self
-                .when_to_focus
+            when_to_use: self
+                .when_to_use
                 .iter()
                 .map(|item| (*item).to_string())
                 .collect(),
@@ -55,82 +52,6 @@ impl AppPrompt {
     }
 }
 
-pub fn build_runtime_background_hint_items(context: &Context) -> Vec<String> {
-    let focused = context.apps.focused();
-    let composed_app_ids = context
-        .apps
-        .focused_composed_surfaces()
-        .into_iter()
-        .map(|surface| surface.app_id)
-        .collect::<Vec<_>>();
-    context
-        .apps
-        .state_renders()
-        .into_iter()
-        .filter(|(app_id, _)| focused.as_ref() != Some(app_id))
-        .filter(|(app_id, _)| !composed_app_ids.contains(app_id))
-        .filter_map(|(app_id, state)| background_app_attention_hint(app_id, &state))
-        .collect()
-}
-
-pub fn build_app_pre_focus_note_prompt(app_id: AppId, state: &AppStateRender) -> String {
-    let mut builder = PromptTextBuilder::new();
-    builder.push_paragraph(format!(
-        "`{app_id}` is not currently focused. If you need to operate it, call `focus_app` first."
-    ));
-    if let Some(hint) = background_app_attention_hint(app_id, state) {
-        builder.push_paragraph(hint);
-    }
-    builder.build()
-}
-
-fn background_app_attention_hint(app_id: AppId, state: &AppStateRender) -> Option<String> {
-    if !app_requires_attention(app_id.clone(), state) {
-        return None;
-    }
-
-    if app_id.is_terminal() {
-        let summary = if !list_field(&state.lines, "unread_sessions").is_empty() {
-            "The background terminal has unread output.".to_string()
-        } else {
-            "The background terminal needs attention.".to_string()
-        };
-        return Some(format!(
-            "{} If you decide to handle the terminal, call `focus_app` with app=\"terminal\" first.",
-            summary
-        ));
-    }
-
-    None
-}
-
-fn list_field(lines: &[String], key: &str) -> Vec<String> {
-    lines
-        .iter()
-        .find_map(|line| line.strip_prefix(&format!("{key}=")))
-        .map(|value| {
-            if value == "none" {
-                Vec::new()
-            } else {
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                    .map(ToString::to_string)
-                    .collect()
-            }
-        })
-        .unwrap_or_default()
-}
-
-fn app_requires_attention(app_id: AppId, state: &AppStateRender) -> bool {
-    if app_id.is_terminal() {
-        !list_field(&state.lines, "unread_sessions").is_empty()
-    } else {
-        false
-    }
-}
-
 pub fn build_app_usage_prompt(_app_id: AppId, usage: &AppUsage) -> String {
     if let Some(body) = usage.body_markdown.as_deref()
         && !body.trim().is_empty()
@@ -139,11 +60,8 @@ pub fn build_app_usage_prompt(_app_id: AppId, usage: &AppUsage) -> String {
     }
     let mut builder = PromptTextBuilder::new();
     builder.push_labeled_section("description", usage.description.clone());
-    if !usage.when_to_focus.is_empty() {
-        builder.push_labeled_section(
-            "focus_guidance",
-            render_bullet_list(usage.when_to_focus.clone()),
-        );
+    if !usage.when_to_use.is_empty() {
+        builder.push_labeled_section("when_to_use", render_bullet_list(usage.when_to_use.clone()));
     }
     builder.build()
 }
@@ -194,7 +112,7 @@ mod tests {
     fn generated_app_prompt_structs_are_nonempty() {
         for prompt in [APP_BROWSER, APP_CODING, APP_TERMINAL] {
             assert!(!prompt.description.is_empty());
-            assert!(!prompt.when_to_focus.is_empty());
+            assert!(!prompt.when_to_use.is_empty());
             assert!(!prompt.how_to_use.is_empty());
         }
     }

@@ -253,7 +253,7 @@ enum PromptBindingKind {
 
 struct AppPromptBinding {
     description: String,
-    when_to_focus: Vec<String>,
+    when_to_use: Vec<String>,
     how_to_use: String,
 }
 
@@ -343,8 +343,8 @@ fn write_prompt_bindings(manifest_dir: &Path) {
                     prompt.const_name
                 ));
                 code.push_str(&format!("    description: {:?},\n", app.description));
-                code.push_str("    when_to_focus: &[\n");
-                for item in &app.when_to_focus {
+                code.push_str("    when_to_use: &[\n");
+                for item in &app.when_to_use {
                     code.push_str(&format!("        {:?},\n", item));
                 }
                 code.push_str("    ],\n");
@@ -494,7 +494,7 @@ fn parse_app_prompt_binding_inner(content: &str) -> Result<AppPromptBinding, Str
     let (frontmatter, body) = split_prompt_frontmatter(content)
         .ok_or_else(|| "expected leading frontmatter delimited by ---".to_string())?;
     let mut description = None::<String>;
-    let mut when_to_focus = Vec::<String>::new();
+    let mut when_to_use = Vec::<String>::new();
     let mut current_list_key = None::<&str>;
 
     for line in frontmatter.lines() {
@@ -511,13 +511,13 @@ fn parse_app_prompt_binding_inner(content: &str) -> Result<AppPromptBinding, Str
             current_list_key = None;
             continue;
         }
-        if trimmed == "when_to_focus:" {
-            current_list_key = Some("when_to_focus");
+        if trimmed == "when_to_use:" {
+            current_list_key = Some("when_to_use");
             continue;
         }
         if let Some(value) = trimmed.strip_prefix("- ") {
             match current_list_key {
-                Some("when_to_focus") => when_to_focus.push(value.trim().to_string()),
+                Some("when_to_use") => when_to_use.push(value.trim().to_string()),
                 _ => return Err(format!("list item without supported key: {line}")),
             }
             continue;
@@ -526,8 +526,8 @@ fn parse_app_prompt_binding_inner(content: &str) -> Result<AppPromptBinding, Str
     }
 
     let description = description.ok_or_else(|| "missing description".to_string())?;
-    if when_to_focus.is_empty() {
-        return Err("missing when_to_focus items".to_string());
+    if when_to_use.is_empty() {
+        return Err("missing when_to_use items".to_string());
     }
     let how_to_use = body.trim().to_string();
     if how_to_use.is_empty() {
@@ -535,7 +535,7 @@ fn parse_app_prompt_binding_inner(content: &str) -> Result<AppPromptBinding, Str
     }
     Ok(AppPromptBinding {
         description,
-        when_to_focus,
+        when_to_use,
         how_to_use,
     })
 }

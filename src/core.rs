@@ -17,14 +17,6 @@ use crate::{
 const MAX_DAILY_TOKEN_USAGE_DAYS: usize = 30;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct FocusAppArgs {
-    pub app: AppId,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct PutAwayAppArgs {}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TerminalExecArgs {
     pub command: String,
     /// Explicit session to reuse; omitted means create a new session.

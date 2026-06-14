@@ -351,7 +351,6 @@ export type ActivityCellPrimitive = {
 export type ActivityCellVariant =
   | { Assistant: ActivityCellCommon }
   | { User: ActivityCellUser }
-  | { AppAttention: ActivityCellCommon }
   | { Browser: ActivityCellBrowser }
   | { LiveBrowser: ActivityCellBrowser }
   | { GenericApp: ActivityCellCommon }
@@ -429,7 +428,6 @@ export type DashboardSkillError = {
 export type DashboardSnapshot = {
   agent_name: string;
   session_title?: DashboardSessionTitle | null;
-  focused_app: string | null;
   status_output: string;
   sleep_status_output: string;
   inspect_telegram_output: string;
@@ -463,7 +461,6 @@ export type DashboardSnapshot = {
 
 export type SessionRuntimeStatus = {
   ready: boolean;
-  focused_app: string | null;
   pending_work_count: number;
   active_runtime_turn: boolean;
 };
@@ -471,7 +468,6 @@ export type SessionRuntimeStatus = {
 export type SessionStatusDashboard = {
   agent_name: string;
   session_title?: DashboardSessionTitle | null;
-  focused_app: string | null;
   last_cycle_elapsed_ms: number | null;
   runtime_status: string | null;
   runtime_status_level: DashboardRuntimeStatusLevel | null;

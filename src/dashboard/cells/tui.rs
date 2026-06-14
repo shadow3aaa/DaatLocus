@@ -10,10 +10,7 @@ use unicode_width::UnicodeWidthChar;
 use super::markdown::render_markdown_with_width;
 use super::{
     ActivityCell, LiveActivityCell,
-    apps::{
-        AppAttentionActivityCell, BrowserActivityCell, LiveBrowserActivityCell,
-        WebSearchActivityCell,
-    },
+    apps::{BrowserActivityCell, LiveBrowserActivityCell, WebSearchActivityCell},
     common::{
         AssistantActivityCell, CodingEditActivityCell, CodingOpenProjectActivityCell,
         CodingReviewActivityCell, ErrorActivityCell, ExploredActivityCell,
@@ -329,7 +326,6 @@ fn render_activity_cell_lines(cell: &ActivityCell, max_width: u16) -> Vec<Line<'
             render_final_message_separator_cell_lines(cell, max_width)
         }
         ActivityCell::User(cell) => render_user_cell_lines(cell, max_width),
-        ActivityCell::AppAttention(cell) => render_app_attention_cell_lines(cell, max_width),
         ActivityCell::Browser(cell) => render_browser_cell_lines(cell, max_width),
         ActivityCell::LiveBrowser(cell) => render_live_browser_cell_lines(cell, max_width),
         ActivityCell::WebSearch(cell) => render_web_search_cell_lines(cell, max_width),
@@ -712,9 +708,6 @@ fn activity_cell_transcript_block(cell: &ActivityCell) -> String {
                 .clone()
                 .unwrap_or_else(|| primary_transcript_text(&cell.title, &cell.body_lines)),
         ),
-        ActivityCell::AppAttention(cell) => {
-            transcript_section(&cell.title, cell.body_lines.join("\n"))
-        }
         ActivityCell::Browser(cell) => {
             let mut lines = vec![format!(
                 "Captured URL: {}",
@@ -1745,13 +1738,6 @@ fn render_warning_cell_lines(cell: &ErrorActivityCell, max_width: u16) -> Vec<Li
         max_width,
     ));
     lines
-}
-
-fn render_app_attention_cell_lines(
-    cell: &AppAttentionActivityCell,
-    max_width: u16,
-) -> Vec<Line<'static>> {
-    render_text_activity_lines(&cell.title, &cell.body_lines, 6, false, max_width)
 }
 
 fn render_browser_cell_lines(cell: &BrowserActivityCell, max_width: u16) -> Vec<Line<'static>> {

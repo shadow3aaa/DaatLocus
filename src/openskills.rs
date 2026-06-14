@@ -887,7 +887,7 @@ fn is_common_env_var(name: &str) -> bool {
 const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r#"- Discovery: The list above is the OpenSkills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
 - Trigger rules: If the user names a skill with `$SkillName` or plain text, or the task clearly matches a skill description above, use that skill for the current turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
 - How to use a skill:
-  1. Before task actions that rely on a skill, focus Terminal or Coding as needed and read that skill's `SKILL.md` completely.
+  1. Before task actions that rely on a skill, use Terminal or Coding tools as needed and read that skill's `SKILL.md` completely.
   2. Resolve relative paths mentioned by `SKILL.md` relative to the directory containing that `SKILL.md`.
   3. Read only the referenced files needed for the task; avoid loading unrelated `references/`, `scripts/`, or `assets/`.
   4. Prefer running or adapting provided `scripts/` and reusing provided `assets/` or templates when applicable.
@@ -896,7 +896,7 @@ const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS: &str = r#"- Discovery: The list abo
 const SKILLS_HOW_TO_USE_WITH_ALIASES: &str = r#"- Discovery: The list above is the OpenSkills available in this session (name + description + short path). Expand short paths with the matching alias from `### Skill roots`.
 - Trigger rules: If the user names a skill with `$SkillName` or plain text, or the task clearly matches a skill description above, use that skill for the current turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
 - How to use a skill:
-  1. Expand the listed short `file` path with `### Skill roots`, then focus Terminal or Coding as needed and read that skill's `SKILL.md` completely before task actions that rely on it.
+  1. Expand the listed short `file` path with `### Skill roots`, then use Terminal or Coding tools as needed and read that skill's `SKILL.md` completely before task actions that rely on it.
   2. Resolve relative paths mentioned by `SKILL.md` relative to the directory containing that expanded `SKILL.md`.
   3. Read only the referenced files needed for the task; avoid loading unrelated `references/`, `scripts/`, or `assets/`.
   4. Prefer running or adapting provided `scripts/` and reusing provided `assets/` or templates when applicable.

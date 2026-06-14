@@ -1,14 +1,11 @@
 use crate::{
-    app::{AppComposedSurface, AppId},
+    app::AppId,
     context::Context,
     events::{EventPayload, EventView},
     preturn_state::PreTurnState,
 };
 
-use super::{
-    prompt_doc::{PromptBlock, PromptGroupDoc, PromptNode, PromptStateDoc},
-    prompts::build_runtime_background_hint_items,
-};
+use super::prompt_doc::{PromptBlock, PromptGroupDoc, PromptNode, PromptStateDoc};
 
 pub trait PreTurnContextPart: Send + Sync {
     fn key(&self) -> &'static str;
@@ -33,9 +30,9 @@ impl AfterClaimContextInput {
 }
 
 pub struct PreTurnSensoryPart;
+pub struct PreTurnProjectInstructionsPart;
 pub struct PreTurnPlanPart;
 pub struct PreTurnWorkflowStatePart;
-pub struct PreTurnAppSurfacePart;
 pub struct AfterClaimInputPart;
 pub struct AfterClaimWorkflowPrimitiveRoutingPart;
 
@@ -53,6 +50,37 @@ impl PreTurnContextPart for PreTurnSensoryPart {
             self.key(),
             vec![PromptBlock::Paragraph(text)],
         )))
+    }
+}
+
+impl PreTurnContextPart for PreTurnProjectInstructionsPart {
+    fn key(&self) -> &'static str {
+        "project_instructions"
+    }
+
+    fn build(&self, ctx: &Context, _state: &PreTurnState) -> Option<PromptNode> {
+        let project_dir = ctx.coding_project_dir.as_deref()?;
+        match crate::coding_app::load_instruction_documents_in_dir(project_dir) {
+            Ok(instructions) if instructions.is_empty() => None,
+            Ok(instructions) => Some(PromptNode::State(PromptStateDoc::new(
+                self.key(),
+                vec![PromptBlock::Paragraph(
+                    crate::coding_app::render_project_instructions(self.key(), &instructions),
+                )],
+            ))),
+            Err(err) => {
+                tracing::warn!(
+                    project_dir = %project_dir.display(),
+                    "failed to load project instruction context: {err:?}"
+                );
+                Some(PromptNode::State(PromptStateDoc::new(
+                    self.key(),
+                    vec![PromptBlock::Paragraph(format!(
+                        "project_instruction_error={err}"
+                    ))],
+                )))
+            }
+        }
     }
 }
 
@@ -168,122 +196,6 @@ impl PreTurnContextPart for PreTurnWorkflowStatePart {
 
         Some(PromptNode::State(PromptStateDoc::new(self.key(), blocks)))
     }
-}
-
-impl PreTurnContextPart for PreTurnAppSurfacePart {
-    fn key(&self) -> &'static str {
-        "app"
-    }
-
-    fn build(&self, ctx: &Context, state: &PreTurnState) -> Option<PromptNode> {
-        let mut children = Vec::new();
-
-        let focused = state.focused_app_runtime_text();
-        let composed_apps = ctx.apps.focused_composed_surfaces();
-
-        let mut other_app_children = Vec::new();
-
-        let background_hints = build_runtime_background_hint_items(ctx);
-        if !background_hints.is_empty() {
-            other_app_children.push(PromptNode::State(PromptStateDoc::new(
-                "background_hints",
-                vec![PromptBlock::BulletList(background_hints)],
-            )));
-        }
-
-        if !other_app_children.is_empty() {
-            children.push(PromptNode::Group(PromptGroupDoc::new(
-                "other_apps",
-                other_app_children,
-            )));
-        }
-
-        let mut focused_app_children = Vec::new();
-        let app_entries = state.app_state_entries();
-        if !app_entries.is_empty() {
-            let mut blocks = Vec::new();
-            for entry in app_entries {
-                blocks.push(PromptBlock::KeyValueList(vec![
-                    ("id".to_string(), entry.app_id),
-                    ("title".to_string(), entry.title),
-                ]));
-                if !entry.lines.is_empty() {
-                    blocks.push(PromptBlock::BulletList(entry.lines));
-                }
-            }
-            focused_app_children.push(PromptNode::State(PromptStateDoc::new("state", blocks)));
-        }
-
-        let composed_app_children = composed_apps
-            .iter()
-            .filter_map(|surface| build_composed_app_surface_node(ctx, state, surface))
-            .collect::<Vec<_>>();
-        if !composed_app_children.is_empty() {
-            focused_app_children.push(PromptNode::Group(PromptGroupDoc::new(
-                "composed_apps",
-                composed_app_children,
-            )));
-        }
-
-        if !focused_app_children.is_empty() {
-            children.push(PromptNode::Group(PromptGroupDoc::new(
-                "focused_app",
-                vec![PromptNode::Group(PromptGroupDoc::new(
-                    focused.clone(),
-                    focused_app_children,
-                ))],
-            )));
-        }
-
-        if children.is_empty() {
-            return None;
-        }
-
-        Some(PromptNode::Group(PromptGroupDoc::new(self.key(), children)))
-    }
-}
-
-fn build_composed_app_surface_node(
-    _ctx: &Context,
-    state: &PreTurnState,
-    surface: &AppComposedSurface,
-) -> Option<PromptNode> {
-    let mut children = Vec::new();
-    children.push(PromptNode::State(PromptStateDoc::new(
-        "composition",
-        vec![PromptBlock::KeyValueList(vec![
-            ("role".to_string(), surface.role.clone()),
-            (
-                "exposed_tools".to_string(),
-                render_bracketed_values(surface.exposed_tools.iter().cloned()),
-            ),
-        ])],
-    )));
-
-    if let Some(entry) = state.full_app_state_entry(&surface.app_id) {
-        let mut blocks = vec![PromptBlock::KeyValueList(vec![
-            ("id".to_string(), entry.app_id),
-            ("title".to_string(), entry.title),
-        ])];
-        if !entry.lines.is_empty() {
-            blocks.push(PromptBlock::BulletList(entry.lines));
-        }
-        children.push(PromptNode::State(PromptStateDoc::new("state", blocks)));
-    }
-
-    (!children.is_empty())
-        .then(|| PromptNode::Group(PromptGroupDoc::new(surface.app_id.to_string(), children)))
-}
-
-fn render_bracketed_values(values: impl IntoIterator<Item = String>) -> String {
-    format!(
-        "[{}]",
-        values
-            .into_iter()
-            .filter(|value| !value.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
 }
 
 impl AfterClaimContextPart for AfterClaimInputPart {

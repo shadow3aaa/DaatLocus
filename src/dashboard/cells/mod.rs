@@ -14,13 +14,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     events::{EventPayload, EventView},
     reasoning::runtime::{AgentContent, AgentContentPart, AgentMessage, HistoryMessage},
-    tool_ui::{AppAttentionUiAction, BrowserUiData, TerminalUiAction, ToolUiEvent},
+    tool_ui::{BrowserUiData, TerminalUiAction, ToolUiEvent},
 };
 
 use super::DashboardState;
-use apps::{
-    AppAttentionActivityCell, BrowserActivityCell, LiveBrowserActivityCell, WebSearchActivityCell,
-};
+use apps::{BrowserActivityCell, LiveBrowserActivityCell, WebSearchActivityCell};
 #[cfg(test)]
 pub(crate) use common::ExploredCallActivityCell;
 use common::{
@@ -61,7 +59,6 @@ pub enum ActivityCell {
     Assistant(AssistantActivityCell),
     FinalMessageSeparator(common::FinalMessageSeparatorActivityCell),
     User(UserActivityCell),
-    AppAttention(AppAttentionActivityCell),
     Browser(BrowserActivityCell),
     LiveBrowser(LiveBrowserActivityCell),
     WebSearch(WebSearchActivityCell),
@@ -273,10 +270,6 @@ pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> Option<Activit
         ToolUiEvent::Patch(event) => Some(ActivityCell::Patch(event.into())),
         ToolUiEvent::Telegram(event) => Some(ActivityCell::Telegram(event.into())),
         ToolUiEvent::Reply(event) => Some(ActivityCell::Reply(event.into())),
-        ToolUiEvent::AppAttention(event) => match event.action {
-            AppAttentionUiAction::Focus => Some(ActivityCell::AppAttention(event.into())),
-            AppAttentionUiAction::PutAway => None,
-        },
         ToolUiEvent::Plan(event) if event.steps.is_empty() => None,
         ToolUiEvent::Plan(event) => Some(ActivityCell::PlanResult(event.into())),
         ToolUiEvent::CreatePrimitiveSpec(event) => {

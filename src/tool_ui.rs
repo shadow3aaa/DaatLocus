@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 pub mod glyph {
-    pub const APP_ATTENTION: &str = "◉";
     pub const BROWSER: &str = "↗";
     pub const ERROR: &str = "!";
     pub const EXEC: &str = "•";
@@ -25,7 +24,6 @@ pub enum ToolUiEvent {
     Patch(PatchUiData),
     Telegram(TelegramUiData),
     Reply(ReplyUiData),
-    AppAttention(AppAttentionUiData),
     Plan(PlanUiData),
     WebSearch(WebSearchUiData),
     CreatePrimitiveSpec(CreatePrimitiveSpecUiData),
@@ -252,12 +250,6 @@ pub struct ReplyUiData {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AppAttentionUiData {
-    pub action: AppAttentionUiAction,
-    pub app: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanUiData {
     #[serde(default)]
     pub kind: PlanUiKind,
@@ -312,13 +304,6 @@ pub enum ReplySubject {
     #[default]
     Message,
     Notice,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AppAttentionUiAction {
-    Focus,
-    PutAway,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -430,20 +415,6 @@ impl ToolUiEvent {
             disposition,
             subject: ReplySubject::Notice,
             message_lines,
-        })
-    }
-
-    pub fn focus_app(app: impl Into<String>) -> Self {
-        Self::AppAttention(AppAttentionUiData {
-            action: AppAttentionUiAction::Focus,
-            app: Some(app.into()),
-        })
-    }
-
-    pub fn put_away_app() -> Self {
-        Self::AppAttention(AppAttentionUiData {
-            action: AppAttentionUiAction::PutAway,
-            app: None,
         })
     }
 

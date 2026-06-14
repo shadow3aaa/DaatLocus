@@ -1415,7 +1415,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn focus_clears_when_last_session_is_terminated() {
+    async fn session_list_clears_when_last_session_is_terminated() {
         let mut app = TerminalApp::new();
         let sandbox_policy = test_sandbox_policy();
 
