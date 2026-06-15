@@ -5,7 +5,6 @@ use std::{
 
 use async_trait::async_trait;
 use miette::{Result, miette};
-use schemars::schema_for;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use viewpoint_core::{AriaSnapshot, Browser, BrowserContext, DocumentLoadState, Page};
@@ -23,6 +22,7 @@ use crate::{
     },
     daat_locus_paths::daat_locus_paths_sync,
     reasoning::{episode::EpisodeActionRecord, prompts::APP_BROWSER, runtime::AgentToolCall},
+    schema_utils::model_schema_for,
     tool_ui::{BrowserUiAction, BrowserUiData, ToolCallUiEvent, ToolUiEvent},
 };
 
@@ -813,48 +813,48 @@ impl App for BrowserApp {
             AppToolSpec {
                 name: "browser_open_page".to_string(),
                 description: "Create a browser page, open the specified URL, and return the new `page_id`.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(BrowserOpenArgs)).unwrap(),
+                input_schema: model_schema_for::<BrowserOpenArgs>(),
             },
             AppToolSpec {
                 name: "browser_snapshot".to_string(),
                 description: "Read a compact semantic snapshot of the specified page, preserving high-value nodes and interactable element refs first."
                     .to_string(),
-                input_schema: serde_json::to_value(schema_for!(BrowserSnapshotArgs)).unwrap(),
+                input_schema: model_schema_for::<BrowserSnapshotArgs>(),
             },
             AppToolSpec {
                 name: "browser_wait".to_string(),
                 description: "Wait until the specified page reaches a stable state. `state` may be `dom` or `load`.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(BrowserWaitArgs)).unwrap(),
+                input_schema: model_schema_for::<BrowserWaitArgs>(),
             },
             AppToolSpec {
                 name: "browser_click".to_string(),
                 description: "Click a page element by `element_ref`; if page changes made the ref stale, the tool fails directly.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(BrowserClickArgs)).unwrap(),
+                input_schema: model_schema_for::<BrowserClickArgs>(),
             },
             AppToolSpec {
                 name: "browser_fill".to_string(),
                 description: "Fill an input by `element_ref`; if page changes made the ref stale, the tool fails directly.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(BrowserFillArgs)).unwrap(),
+                input_schema: model_schema_for::<BrowserFillArgs>(),
             },
             AppToolSpec {
                 name: "browser_back".to_string(),
                 description: "Navigate the specified page backward.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(BrowserBackArgs)).unwrap(),
+                input_schema: model_schema_for::<BrowserBackArgs>(),
             },
             AppToolSpec {
                 name: "browser_forward".to_string(),
                 description: "Navigate the specified page forward.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(BrowserForwardArgs)).unwrap(),
+                input_schema: model_schema_for::<BrowserForwardArgs>(),
             },
             AppToolSpec {
                 name: "browser_reload".to_string(),
                 description: "Reload the specified page.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(BrowserReloadArgs)).unwrap(),
+                input_schema: model_schema_for::<BrowserReloadArgs>(),
             },
             AppToolSpec {
                 name: "browser_close_page".to_string(),
                 description: "Close the specified browser page. Close pages that are no longer needed to save memory.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(BrowserClosePageArgs)).unwrap(),
+                input_schema: model_schema_for::<BrowserClosePageArgs>(),
             },
         ])
     }

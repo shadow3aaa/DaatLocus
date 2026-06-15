@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt::Display, path::Path, path::PathBuf, time::Duration};
 
 use async_trait::async_trait;
+use daat_locus_macros::model_schema;
 use miette::{Result, miette};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use crate::{
     tool_ui::{ToolCallUiEvent, ToolUiData, ToolUiEvent},
 };
 
+#[model_schema(transparent)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
 #[serde(transparent)]
 pub struct AppId(String);

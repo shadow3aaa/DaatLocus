@@ -1,5 +1,3 @@
-use schemars::schema_for;
-
 use crate::context::Context;
 use crate::reasoning::{
     examples::ProgramExample,
@@ -10,7 +8,6 @@ use crate::reasoning::{
     runtime::PromptRequest,
     signature::Signature,
 };
-use crate::schema_utils::normalize_openai_json_schema;
 
 use super::Renderer;
 
@@ -51,9 +48,7 @@ impl Renderer for OpenAIToolRenderer {
         PromptRequest {
             tool_name: program.name().to_string(),
             tool_description: program.description().to_string(),
-            output_schema: normalize_openai_json_schema(
-                serde_json::to_value(schema_for!(P::Output)).unwrap(),
-            ),
+            output_schema: program.output_schema(),
             system_messages: ir.system,
             long_term_memory_messages: Vec::new(),
             history_messages: if program.include_history_messages() {

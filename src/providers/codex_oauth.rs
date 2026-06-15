@@ -29,7 +29,6 @@ use crate::{
         AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
         AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage, PromptRequest,
     },
-    schema_utils::normalize_provider_function_schema,
 };
 
 use super::{
@@ -381,7 +380,7 @@ impl CodexResponsesClient {
     }
 
     async fn run_json(&self, context: &Context, request: PromptRequest) -> Result<Value> {
-        let output_schema = normalize_provider_function_schema(request.output_schema.clone());
+        let output_schema = request.output_schema.clone();
         let budget = estimate_prompt_request(&request, self.request_budget_limits());
         if !budget.within_context_window() {
             return Err(ContextBudgetExceededError::for_request(
@@ -1070,7 +1069,7 @@ fn agent_tool_to_responses_tool(tool: crate::reasoning::runtime::AgentToolSpec) 
             "name": tool.name,
             "description": tool.description,
             "strict": true,
-            "parameters": normalize_provider_function_schema(schema),
+            "parameters": schema,
         }),
         AgentToolInputSpec::FreeformGrammar {
             syntax,
@@ -1097,7 +1096,7 @@ fn agent_tool_to_responses_tool(tool: crate::reasoning::runtime::AgentToolSpec) 
                         tool.description
                     ),
                     "strict": false,
-                    "parameters": normalize_provider_function_schema(fallback_schema),
+                    "parameters": fallback_schema,
                 })
             }
         }
@@ -1695,10 +1694,8 @@ mod tests {
             name: "terminal__terminal_write_stdin".to_string(),
             description: "Continue terminal session".to_string(),
             input_spec: AgentToolInputSpec::JsonSchema {
-                schema: serde_json::to_value(schemars::schema_for!(
-                    crate::core::TerminalWriteStdinArgs
-                ))
-                .unwrap(),
+                schema: crate::schema_utils::model_schema_for::<crate::core::TerminalWriteStdinArgs>(
+                ),
             },
         };
 

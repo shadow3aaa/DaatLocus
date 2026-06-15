@@ -14,7 +14,6 @@ use crate::{
         WorkspaceAppConfigOutput, WorkspaceAppRuntimeState, WorkspaceLuaRuntime,
         WorkspaceNoticeOutput, WorkspaceRenderOutput, WorkspaceToolCallOutput,
         WorkspaceToolDescriptor, load_runtime_state, load_workspace_lua_runtime,
-        normalize_workspace_input_schema,
         protocol::{
             WorkerHello, WorkerRequest, WorkerRequestOp, WorkerResponse, WorkerResponsePayload,
             WorkerResponseResult,
@@ -379,16 +378,14 @@ impl LuaWorkerRuntime {
             "failed to execute `list_tools`",
             list_tools_fn.call::<LuaValue>((ctx, state_value)),
         )?;
-        let mut descriptors = match value {
+        let descriptors = match value {
             LuaValue::Nil => Vec::new(),
             value => self.map_lua(
                 "failed to decode `list_tools` result",
                 lua.from_value::<Vec<WorkspaceToolDescriptor>>(value),
             )?,
         };
-        for descriptor in &mut descriptors {
-            descriptor.input_schema =
-                normalize_workspace_input_schema(descriptor.input_schema.clone());
+        for descriptor in &descriptors {
             validate_workspace_tool_schema(
                 &descriptor.input_schema,
                 &format!("workspace app tool `{}` input_schema", descriptor.name),

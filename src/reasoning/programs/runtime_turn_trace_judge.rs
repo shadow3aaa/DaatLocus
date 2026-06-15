@@ -1,6 +1,7 @@
 //! Runtime turn-trace judge program used in offline evaluation.
 #![allow(dead_code)]
 
+use daat_locus_macros::model_schema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,7 @@ use crate::reasoning::{
 
 pub struct RuntimeTurnTraceJudgeProgram;
 
+#[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeTurnTraceJudgeOutput {
     pub passed: bool,

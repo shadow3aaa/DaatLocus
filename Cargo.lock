@@ -803,6 +803,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "daat-locus-macros",
  "diffy",
  "futures-util",
  "include_dir",
@@ -845,6 +846,15 @@ dependencies = [
  "viewpoint-core",
  "windows-sys 0.61.2",
  "zip 4.6.1",
+]
+
+[[package]]
+name = "daat-locus-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

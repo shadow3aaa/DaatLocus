@@ -12,7 +12,7 @@ use std::{
 
 use async_trait::async_trait;
 use miette::{Context as _, Result, miette};
-use mlua::{Lua, LuaOptions, StdLib, Table};
+use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Table};
 use notify::{Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ use crate::{
     daat_locus_paths::daat_locus_paths_sync,
     persistence::PersistenceStore,
     sandbox::{RuntimeSandboxPolicy, StrongFilesystemSandboxMode},
-    schema_utils::normalize_openai_json_schema,
+    schema_utils::validate_model_facing_schema,
 };
 use client::WorkspaceAppWorkerClient;
 use protocol::{WorkerRequestOp, WorkerResponsePayload};
@@ -696,6 +696,9 @@ fn configure_workspace_app_lua_runtime(lua: &Lua, app_dir: &Path) -> Result<()> 
     package
         .set("cpath", "")
         .map_err(|err| miette!("failed to disable package.cpath: {err}"))?;
+    globals
+        .set("array_mt", lua.array_metatable())
+        .map_err(|err| miette!("failed to expose array metatable helper: {err}"))?;
     Ok(())
 }
 
@@ -715,86 +718,11 @@ fn normalize_lua_path(path: &Path) -> String {
 }
 
 fn validate_workspace_tool_schema(schema: &JsonValue, label: &str) -> Result<()> {
-    validate_schema_definition(schema, label)
+    validate_model_facing_schema(schema).map_err(|err| miette!("{label}: {err}"))
 }
 
 fn validate_workspace_tool_value(value: &JsonValue, schema: &JsonValue, label: &str) -> Result<()> {
     validate_value_against_schema(value, schema, label)
-}
-
-fn validate_schema_definition(schema: &JsonValue, label: &str) -> Result<()> {
-    let object = schema
-        .as_object()
-        .ok_or_else(|| miette!("{label} must be a JSON object schema"))?;
-
-    if let Some(type_value) = object.get("type") {
-        let type_name = type_value
-            .as_str()
-            .ok_or_else(|| miette!("{label}.type must be a string"))?;
-        match type_name {
-            "object" | "array" | "string" | "integer" | "number" | "boolean" | "null" => {}
-            other => return Err(miette!("{label}.type uses unsupported type `{other}`")),
-        }
-    }
-
-    if let Some(required) = object.get("required") {
-        let required = required
-            .as_array()
-            .ok_or_else(|| miette!("{label}.required must be an array"))?;
-        for (index, item) in required.iter().enumerate() {
-            if item.as_str().is_none() {
-                return Err(miette!("{label}.required[{index}] must be a string"));
-            }
-        }
-    }
-
-    if let Some(properties) = object.get("properties") {
-        let properties = properties
-            .as_object()
-            .ok_or_else(|| miette!("{label}.properties must be an object"))?;
-        for (key, property_schema) in properties {
-            validate_schema_definition(property_schema, &format!("{label}.properties.{key}"))?;
-        }
-    }
-
-    if let Some(items) = object.get("items") {
-        validate_schema_definition(items, &format!("{label}.items"))?;
-    }
-
-    if let Some(additional) = object.get("additionalProperties")
-        && !additional.is_boolean()
-    {
-        validate_schema_definition(additional, &format!("{label}.additionalProperties"))?;
-    }
-
-    if let Some(enum_values) = object.get("enum")
-        && !enum_values.is_array()
-    {
-        return Err(miette!("{label}.enum must be an array"));
-    }
-
-    for key in ["minLength", "maxLength", "minItems", "maxItems"] {
-        if let Some(value) = object.get(key)
-            && value.as_u64().is_none()
-        {
-            return Err(miette!("{label}.{key} must be a non-negative integer"));
-        }
-    }
-
-    for key in ["minimum", "maximum"] {
-        if let Some(value) = object.get(key)
-            && value.as_f64().is_none()
-        {
-            return Err(miette!("{label}.{key} must be a number"));
-        }
-    }
-
-    Ok(())
-}
-
-fn normalize_workspace_input_schema(mut schema: JsonValue) -> JsonValue {
-    schema = normalize_openai_json_schema(schema);
-    schema
 }
 
 fn validate_value_against_schema(value: &JsonValue, schema: &JsonValue, label: &str) -> Result<()> {
@@ -811,25 +739,87 @@ fn validate_value_against_schema(value: &JsonValue, schema: &JsonValue, label: &
         }
     }
 
-    let type_name = object.get("type").and_then(|value| value.as_str());
-    match type_name {
-        Some("object") => validate_object_value(value, object, label)?,
-        Some("array") => validate_array_value(value, object, label)?,
-        Some("string") => validate_string_value(value, object, label)?,
-        Some("integer") => validate_integer_value(value, object, label)?,
-        Some("number") => validate_number_value(value, object, label)?,
-        Some("boolean") if !value.is_boolean() => {
-            return Err(miette!("{label} must be a boolean"));
+    let type_names = schema_type_names(object, label)?;
+    if value.is_null() {
+        if type_names.iter().any(|type_name| type_name == "null") {
+            return Ok(());
         }
-        Some("null") if !value.is_null() => {
-            return Err(miette!("{label} must be null"));
+        return Err(miette!("{label} must not be null"));
+    }
+
+    let mut matched = false;
+    for type_name in &type_names {
+        match type_name.as_str() {
+            "object" if value.is_object() => {
+                validate_object_value(value, object, label)?;
+                matched = true;
+            }
+            "array" if value.is_array() => {
+                validate_array_value(value, object, label)?;
+                matched = true;
+            }
+            "string" if value.is_string() => {
+                validate_string_value(value, object, label)?;
+                matched = true;
+            }
+            "integer" if value.as_i64().is_some() || value.as_u64().is_some() => {
+                validate_integer_value(value, object, label)?;
+                matched = true;
+            }
+            "number" if value.is_number() => {
+                validate_number_value(value, object, label)?;
+                matched = true;
+            }
+            "boolean" if value.is_boolean() => {
+                matched = true;
+            }
+            "null" => {}
+            _ => {}
         }
-        Some("boolean" | "null") => {}
-        Some(other) => return Err(miette!("{label} schema uses unsupported type `{other}`")),
-        None => {}
+    }
+    if !matched {
+        if type_names.len() == 1 {
+            match type_names[0].as_str() {
+                "object" => return Err(miette!("{label} must be an object")),
+                "array" => return Err(miette!("{label} must be an array")),
+                "string" => return Err(miette!("{label} must be a string")),
+                "integer" => return Err(miette!("{label} must be an integer")),
+                "number" => return Err(miette!("{label} must be a number")),
+                "boolean" => return Err(miette!("{label} must be a boolean")),
+                "null" => return Err(miette!("{label} must be null")),
+                _ => {}
+            }
+        }
+        return Err(miette!(
+            "{label} must match schema type {}",
+            type_names.join(" or ")
+        ));
     }
 
     Ok(())
+}
+
+fn schema_type_names(
+    object: &serde_json::Map<String, JsonValue>,
+    label: &str,
+) -> Result<Vec<String>> {
+    let type_value = object
+        .get("type")
+        .ok_or_else(|| miette!("{label}.type is required"))?;
+    match type_value {
+        JsonValue::String(value) => Ok(vec![value.clone()]),
+        JsonValue::Array(values) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .as_str()
+                    .map(ToString::to_string)
+                    .ok_or_else(|| miette!("{label}.type[{index}] must be a string"))
+            })
+            .collect(),
+        _ => Err(miette!("{label}.type must be a string or string array")),
+    }
 }
 
 fn validate_object_value(
@@ -1300,7 +1290,8 @@ function app.list_tools(ctx, state)
         properties = {
           amount = { type = "integer" }
         },
-        required = { "amount" }
+        required = { "amount" },
+        additionalProperties = false
       }
     }
   }
@@ -1501,7 +1492,9 @@ function app.list_tools(ctx, state)
       description = "Return the current module counter",
       input_schema = {
         type = "object",
-        properties = {}
+        properties = {},
+        required = setmetatable({}, array_mt),
+        additionalProperties = false
       }
     },
     {
@@ -1509,7 +1502,9 @@ function app.list_tools(ctx, state)
       description = "Run longer than the configured request timeout",
       input_schema = {
         type = "object",
-        properties = {}
+        properties = {},
+        required = setmetatable({}, array_mt),
+        additionalProperties = false
       }
     }
   }
@@ -1580,7 +1575,9 @@ function app.list_tools(ctx, state)
       description = "Return the current module counter",
       input_schema = {
         type = "object",
-        properties = {}
+        properties = {},
+        required = setmetatable({}, array_mt),
+        additionalProperties = false
       }
     },
     {
@@ -1588,7 +1585,9 @@ function app.list_tools(ctx, state)
       description = "Spin forever",
       input_schema = {
         type = "object",
-        properties = {}
+        properties = {},
+        required = setmetatable({}, array_mt),
+        additionalProperties = false
       }
     }
   }
@@ -1837,7 +1836,9 @@ function app.list_tools(ctx, state)
       description = "Acknowledge the current notice",
       input_schema = {
         type = "object",
-        properties = {}
+        properties = {},
+        required = setmetatable({}, array_mt),
+        additionalProperties = false
       }
     }
   }
@@ -2018,7 +2019,8 @@ function app.list_tools(ctx, state)
         properties = {
           amount = { type = "integer" }
         },
-        required = { "amount" }
+        required = { "amount" },
+        additionalProperties = false
       }
     }
   }
@@ -2084,14 +2086,17 @@ function app.list_tools(ctx, state)
       description = "Return a payload that violates the declared schema",
       input_schema = {
         type = "object",
-        properties = {}
+        properties = {},
+        required = setmetatable({}, array_mt),
+        additionalProperties = false
       },
       output_schema = {
         type = "object",
         properties = {
           count = { type = "integer" }
         },
-        required = { "count" }
+        required = { "count" },
+        additionalProperties = false
       }
     }
   }

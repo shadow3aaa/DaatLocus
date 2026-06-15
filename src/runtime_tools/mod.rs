@@ -1,8 +1,9 @@
 use std::{collections::HashSet, future::Future, pin::Pin};
 
 use async_trait::async_trait;
+use daat_locus_macros::model_schema;
 use miette::{Result, miette};
-use schemars::{JsonSchema, schema_for};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -15,7 +16,7 @@ use crate::{
         episode::EpisodeActionRecord,
         runtime::{AgentToolCall, AgentToolInputSpec, AgentToolSpec},
     },
-    schema_utils::normalize_openai_json_schema,
+    schema_utils::{model_schema, model_schema_for, validate_model_facing_schema},
     tool_ui::{ToolCallUiEvent, ToolUiEvent, glyph},
 };
 
@@ -52,11 +53,6 @@ pub(super) fn summarize_inline_text(text: &str) -> String {
     } else {
         summary
     }
-}
-
-fn normalize_tool_input_schema(mut schema: serde_json::Value) -> serde_json::Value {
-    schema = normalize_openai_json_schema(schema);
-    schema
 }
 
 #[derive(Clone, Debug)]
@@ -182,26 +178,6 @@ struct StaticRuntimeTool {
 }
 
 impl StaticRuntimeTool {
-    fn new<T: schemars::JsonSchema>(
-        name: &'static str,
-        description: &'static str,
-        summarize: ToolSummarizer,
-        call_ui: ToolCallUiBuilder,
-        execute: ToolExecutor,
-    ) -> Self {
-        Self {
-            name,
-            description,
-            input_spec: AgentToolInputSpec::JsonSchema {
-                schema: normalize_tool_input_schema(serde_json::to_value(schema_for!(T)).unwrap()),
-            },
-            availability: None,
-            summarize,
-            call_ui,
-            execute,
-        }
-    }
-
     fn new_with_schema(
         name: &'static str,
         description: &'static str,
@@ -214,7 +190,7 @@ impl StaticRuntimeTool {
             name,
             description,
             input_spec: AgentToolInputSpec::JsonSchema {
-                schema: normalize_tool_input_schema(schema),
+                schema: model_schema(schema),
             },
             availability: None,
             summarize,
@@ -271,6 +247,7 @@ struct AppRuntimeTool {
 
 const APP_GET_STATE_TOOL_NAME: &str = "get_state";
 
+#[model_schema]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum AppStateDetail {
@@ -279,6 +256,7 @@ enum AppStateDetail {
     Full,
 }
 
+#[model_schema]
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 struct AppGetStateArgs {
     /// State detail to return. Use full when exact visible facts are needed.
@@ -299,9 +277,7 @@ impl AppGetStateRuntimeTool {
             owner_app_id,
             exposed_name,
             input_spec: AgentToolInputSpec::JsonSchema {
-                schema: normalize_tool_input_schema(
-                    serde_json::to_value(schema_for!(AppGetStateArgs)).unwrap(),
-                ),
+                schema: model_schema_for::<AppGetStateArgs>(),
             },
         }
     }
@@ -610,13 +586,22 @@ fn build_app_runtime_tools(
                 );
                 continue;
             }
+            if let Err(err) = validate_model_facing_schema(&tool.input_schema) {
+                tracing::warn!(
+                    "skipping app tool `{}` from app `{}` because its input schema is invalid: {}",
+                    tool.name,
+                    owner_app_id,
+                    err
+                );
+                continue;
+            }
             tools.push(Box::new(AppRuntimeTool {
                 owner_app_id: owner_app_id.clone(),
                 exposed_name,
                 app_tool_name: tool.name.clone(),
                 description: tool.description.clone(),
                 input_spec: AgentToolInputSpec::JsonSchema {
-                    schema: normalize_tool_input_schema(tool.input_schema.clone()),
+                    schema: tool.input_schema.clone(),
                 },
             }));
         }
@@ -1229,6 +1214,7 @@ mod tests {
             panic!("terminal_write_stdin should use json schema");
         };
 
+        crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
         for key in ["oneOf", "anyOf", "allOf"] {
             assert!(!json_contains_key(&schema, key), "{schema:#}");
         }
@@ -1246,6 +1232,7 @@ mod tests {
             panic!("coding_read_code should use json schema");
         };
 
+        crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
         for key in ["oneOf", "anyOf", "allOf"] {
             assert!(!json_contains_key(&schema, key), "{schema:#}");
         }
@@ -1267,6 +1254,7 @@ mod tests {
             panic!("coding_search_code should use json schema");
         };
 
+        crate::schema_utils::validate_model_facing_schema(&schema).unwrap();
         let properties = schema
             .get("properties")
             .and_then(serde_json::Value::as_object)
@@ -1293,6 +1281,11 @@ mod tests {
             !properties.contains_key("case_mode"),
             "schema should expose `case`, not internal field name: {schema:#}"
         );
+        let required = schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("schema should have required fields: {schema:#}"));
+        assert_eq!(required.len(), properties.len(), "{schema:#}");
         for key in ["include", "exclude", "types", "type_not"] {
             assert_eq!(
                 properties
@@ -1319,6 +1312,7 @@ mod tests {
                 panic!("{tool_name} should use json schema");
             };
 
+            crate::schema_utils::validate_model_facing_schema(schema).unwrap();
             for key in ["oneOf", "anyOf", "allOf"] {
                 assert!(
                     !json_contains_key(schema, key),
@@ -1329,25 +1323,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exposed_runtime_tool_schemas_do_not_use_one_of() {
+    async fn exposed_runtime_tool_schemas_follow_model_facing_dialect() {
         let isolated = IsolatedTestContext::new().await;
         for spec in build_runtime_tool_specs(&isolated.context) {
             match spec.input_spec {
                 AgentToolInputSpec::JsonSchema { schema } => {
-                    assert!(
-                        !json_contains_key(&schema, "oneOf"),
-                        "tool={} schema={schema:#}",
-                        spec.name
+                    crate::schema_utils::validate_model_facing_schema(&schema).unwrap_or_else(
+                        |err| panic!("tool={} schema={schema:#}\n{err}", spec.name),
                     );
                 }
                 AgentToolInputSpec::FreeformGrammar {
                     fallback_schema, ..
                 } => {
-                    assert!(
-                        !json_contains_key(&fallback_schema, "oneOf"),
-                        "tool={} fallback_schema={fallback_schema:#}",
-                        spec.name
-                    );
+                    crate::schema_utils::validate_model_facing_schema(&fallback_schema)
+                        .unwrap_or_else(|err| {
+                            panic!(
+                                "tool={} fallback_schema={fallback_schema:#}\n{err}",
+                                spec.name
+                            )
+                        });
                 }
             }
         }

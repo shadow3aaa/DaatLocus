@@ -1,14 +1,20 @@
 use schemars::JsonSchema;
 use serde::{Serialize, de::DeserializeOwned};
 
+use crate::schema_utils::{ModelSchema, model_schema_for};
+
 use super::{examples::ProgramExample, optimizer::PromptTuningConfig, signature::Signature};
 
 pub trait Program {
-    type Output: DeserializeOwned + Serialize + JsonSchema + Clone;
+    type Output: DeserializeOwned + Serialize + JsonSchema + ModelSchema + Clone;
 
     fn name(&self) -> &'static str;
 
     fn description(&self) -> &'static str;
+
+    fn output_schema(&self) -> serde_json::Value {
+        model_schema_for::<Self::Output>()
+    }
 
     fn tuning_key(&self) -> String {
         self.name().to_string()

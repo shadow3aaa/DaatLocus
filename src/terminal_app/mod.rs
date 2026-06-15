@@ -10,7 +10,6 @@ use crate::terminal_app::process::{
 };
 use async_trait::async_trait;
 use miette::{Result, bail, miette};
-use schemars::schema_for;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -23,6 +22,7 @@ use crate::{
     dashboard::{DashboardActivityEvent, apply_activity_event},
     reasoning::{episode::EpisodeActionRecord, prompts::APP_TERMINAL, runtime::AgentToolCall},
     sandbox::RuntimeSandboxPolicy,
+    schema_utils::model_schema_for,
     tool_ui::{TerminalUiAction, ToolCallUiEvent, ToolUiEvent, compact_body_lines},
 };
 
@@ -653,17 +653,17 @@ impl App for TerminalApp {
             AppToolSpec {
                 name: "terminal_exec".to_string(),
                 description: "Start a terminal command and return output after the current output window ends. If `session_id` is provided, reuse that session; otherwise create a new session. If the command is still running, the result keeps the session so later calls can continue with terminal_write_stdin.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(TerminalExecArgs)).unwrap(),
+                input_schema: model_schema_for::<TerminalExecArgs>(),
             },
             AppToolSpec {
                 name: "terminal_write_stdin".to_string(),
                 description: "Continue a running terminal session. Send text to write stdin; send empty text to wait. By default `wait_mode=any_output` returns after new output, exit, or timeout; use `wait_mode=timeout` to wait for the full yield window or process exit without streaming intermediate progress.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(TerminalWriteStdinArgs)).unwrap(),
+                input_schema: model_schema_for::<TerminalWriteStdinArgs>(),
             },
             AppToolSpec {
                 name: "terminal_terminate".to_string(),
                 description: "Terminate the current foreground process in the specified terminal session and return the updated session state.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(TerminalTerminateArgs)).unwrap(),
+                input_schema: model_schema_for::<TerminalTerminateArgs>(),
             },
         ])
     }

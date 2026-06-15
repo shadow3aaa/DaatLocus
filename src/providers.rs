@@ -30,7 +30,6 @@ use crate::{
         AgentToolSpec, AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, PromptRequest,
         assistant_tool_call_protocol_char_count, summarize_assistant_tool_call_protocol,
     },
-    schema_utils::normalize_provider_function_schema,
 };
 
 mod copilot;
@@ -411,7 +410,7 @@ impl OpenAIClient {
 
     async fn call_tool_json(&self, request: PromptRequest) -> Result<serde_json::Value> {
         let url = self.url();
-        let output_schema = normalize_provider_function_schema(request.output_schema.clone());
+        let output_schema = request.output_schema.clone();
         let budget = estimate_prompt_request(&request, self.request_budget_limits());
         if !budget.within_context_window() {
             return Err(ContextBudgetExceededError::for_request(

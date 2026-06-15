@@ -1,4 +1,4 @@
-use super::model_driver::run_agent_turn_with_retry;
+use super::model_driver::{is_permanent_model_request_error, run_agent_turn_with_retry};
 use super::*;
 use crate::reasoning::prompt_parts::compact_horizontal_whitespace;
 use std::path::{Path, PathBuf};
@@ -641,12 +641,15 @@ pub(crate) async fn execute_agent_loop_step(
                     .await;
                 }
                 if !is_overflow && !overflow_fuse_tripped {
+                    let is_permanent_model_request =
+                        is_permanent_model_request_error(&err.to_string());
                     let model_request_fuse_tripped = handle_model_request_failure(
                         context,
                         claimed_input_fingerprint.as_deref(),
                         &claimed_event_ids,
                         &claimed_app_notice_entries,
                         &err.to_string(),
+                        !is_permanent_model_request,
                     );
                     if model_request_fuse_tripped {
                         record_runtime_error_case(
@@ -664,9 +667,21 @@ pub(crate) async fn execute_agent_loop_step(
                                 expected_behavior: "Model request should succeed or recover with adaptive retry. Repeated non-overflow failures should trip a fuse and terminate the claimed inputs instead of requeueing indefinitely.",
                                 actual_behavior: &format!("Model request failed repeatedly: {}", err),
                                 evidence: &err.to_string(),
-                                recoverability: "terminated_by_model_request_fuse",
-                                retry_count: 0,
-                                terminal_status: Some("fuse_tripped"),
+                                recoverability: if is_permanent_model_request {
+                                    "terminated_by_non_retryable_model_request"
+                                } else {
+                                    "terminated_by_model_request_fuse"
+                                },
+                                retry_count: if is_permanent_model_request {
+                                    0
+                                } else {
+                                    super::RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD
+                                },
+                                terminal_status: Some(if is_permanent_model_request {
+                                    "non_retryable"
+                                } else {
+                                    "fuse_tripped"
+                                }),
                                 assistant_text: None,
                                 tool_calls: &[],
                                 tool_results: &tool_results,

@@ -2,6 +2,7 @@ use std::borrow::Cow;
 
 use async_trait::async_trait;
 use chrono::Local;
+use daat_locus_macros::model_schema;
 use miette::{Result, miette};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use crate::{
 
 const MAX_DAILY_TOKEN_USAGE_DAYS: usize = 30;
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TerminalExecArgs {
     pub command: String,
@@ -26,6 +28,7 @@ pub struct TerminalExecArgs {
     pub max_chars: Option<usize>,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TerminalWriteStdinArgs {
     pub session_id: String,
@@ -36,6 +39,7 @@ pub struct TerminalWriteStdinArgs {
     pub max_chars: Option<usize>,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalWaitMode {
@@ -62,21 +66,25 @@ impl JsonSchema for TerminalWaitMode {
     }
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TerminalTerminateArgs {
     pub session_id: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserOpenArgs {
     pub url: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserSnapshotArgs {
     pub page_id: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserWaitArgs {
     pub page_id: String,
@@ -85,12 +93,14 @@ pub struct BrowserWaitArgs {
     pub timeout_ms: Option<u64>,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserClickArgs {
     pub page_id: String,
     pub element_ref: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserFillArgs {
     pub page_id: String,
@@ -98,26 +108,31 @@ pub struct BrowserFillArgs {
     pub value: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserBackArgs {
     pub page_id: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserForwardArgs {
     pub page_id: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserReloadArgs {
     pub page_id: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct BrowserClosePageArgs {
     pub page_id: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct EventResolveArgs {
     pub disposition: EventDisposition,
@@ -125,6 +140,7 @@ pub struct EventResolveArgs {
     pub note: Option<String>,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct NoticeResolvedArgs {
     pub app: AppId,
@@ -132,18 +148,21 @@ pub struct NoticeResolvedArgs {
     pub note: Option<String>,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct UpdatePlanStepArgs {
     pub step: String,
     pub status: PlanStatus,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct UpdatePlanArgs {
     pub explanation: Option<String>,
     pub plan: Vec<UpdatePlanStepArgs>,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct CreatePrimitiveSpecArgs {
     #[serde(rename = "primitive_id", alias = "id")]
@@ -160,6 +179,7 @@ pub struct CreatePrimitiveSpecArgs {
     pub recovery: Vec<String>,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ActivateComposedPrimitiveArgs {
     /// Single primitive id or a temporary composition encoded as existing primitive filenames joined by `-`.
@@ -167,12 +187,14 @@ pub struct ActivateComposedPrimitiveArgs {
     pub workflow_id: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ReadPrimitiveSpecArgs {
     #[serde(rename = "primitive_id", alias = "workflow_id")]
     pub workflow_id: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct UpdatePrimitiveSpecArgs {
     #[serde(rename = "primitive_id", alias = "workflow_id")]

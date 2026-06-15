@@ -6,8 +6,9 @@ use std::{
 };
 
 use async_trait::async_trait;
+use daat_locus_macros::model_schema;
 use miette::{Result, miette};
-use schemars::{JsonSchema, schema_for};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -20,7 +21,7 @@ use crate::{
     context_budget::truncate_text_to_token_budget,
     reasoning::{episode::EpisodeActionRecord, prompts::APP_CODING, runtime::AgentToolCall},
     runtime::scope_client::ScopeClient,
-    schema_utils::structured_edit_args_schema,
+    schema_utils::{model_schema_for, structured_edit_args_schema},
     tool_ui::{
         CodingEditUiData, EXPLORED_STABLE_ID, ExploredCallUiAction, ExploredCallUiData,
         PatchDiffLineKind, PatchDiffLineUiData, PatchFileOperation, PatchFileUiData,
@@ -32,12 +33,14 @@ const MAX_RENDERED_LSP_SETUP_HINTS: usize = 5;
 const PROJECT_INSTRUCTION_FILENAMES: &[&str] =
     &["AGENTS.override.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md"];
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CodingOpenProjectArgs {
     pub project_root: String,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CodingReadCodeArgs {
@@ -52,12 +55,53 @@ pub struct CodingEditCodeArgs {
     pub edits: Vec<scope_engine::api::StructuredEdit>,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct CodingNextReviewArgs {
     /// Maximum number of review events to acknowledge and return.
     /// Omitted means one event to preserve existing behavior.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[allow(dead_code)]
+#[model_schema]
+#[derive(Serialize, Deserialize)]
+struct CodingSearchCodeArgsSchema {
+    query: String,
+    mode: CodingSearchModeSchema,
+    path: Option<String>,
+    include: Vec<String>,
+    exclude: Vec<String>,
+    types: Vec<String>,
+    type_not: Vec<String>,
+    #[serde(rename = "case")]
+    case_mode: CodingSearchCaseSchema,
+    word: bool,
+    line: bool,
+    hidden: bool,
+    respect_ignore: bool,
+    follow: bool,
+    limit: Option<usize>,
+}
+
+#[allow(dead_code)]
+#[model_schema]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CodingSearchModeSchema {
+    Literal,
+    Regex,
+}
+
+#[allow(dead_code)]
+#[model_schema]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CodingSearchCaseSchema {
+    Sensitive,
+    Insensitive,
+    Smart,
 }
 
 #[derive(Debug, Clone)]
@@ -758,17 +802,17 @@ impl App for CodingApp {
             AppToolSpec {
                 name: "open_project".to_string(),
                 description: "Open a project for semantic code operations using scope-engine.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(CodingOpenProjectArgs)).unwrap(),
+                input_schema: model_schema_for::<CodingOpenProjectArgs>(),
             },
             AppToolSpec {
                 name: "search_code".to_string(),
                 description: "Search source content and return stable read handles plus target labels.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(scope_engine::api::SearchCodeRequest)).unwrap(),
+                input_schema: model_schema_for::<CodingSearchCodeArgsSchema>(),
             },
             AppToolSpec {
                 name: "read_code".to_string(),
                 description: "Read a stable search handle and return hash-anchored source lines.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(CodingReadCodeArgs)).unwrap(),
+                input_schema: model_schema_for::<CodingReadCodeArgs>(),
             },
             AppToolSpec {
                 name: "edit_code".to_string(),
@@ -778,7 +822,7 @@ impl App for CodingApp {
             AppToolSpec {
                 name: "next_review".to_string(),
                 description: "Acknowledge and return accumulated scope-engine propagation review events, optionally batched with limit.".to_string(),
-                input_schema: serde_json::to_value(schema_for!(CodingNextReviewArgs)).unwrap(),
+                input_schema: model_schema_for::<CodingNextReviewArgs>(),
             },
         ])
     }

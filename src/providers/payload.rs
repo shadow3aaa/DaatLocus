@@ -23,7 +23,7 @@ pub(super) fn build_agent_turn_payload_common(
             let (description, parameters, strict) = match tool.input_spec {
                 AgentToolInputSpec::JsonSchema { schema } => (
                     tool.description,
-                    normalize_provider_function_schema(schema),
+                    schema,
                     true,
                 ),
                 AgentToolInputSpec::FreeformGrammar {
@@ -35,7 +35,7 @@ pub(super) fn build_agent_turn_payload_common(
                         "{}\n\nThis is a FREEFORM grammar tool. The current provider falls back to single-string input: put the complete tool input in the `input` field.\nsyntax={syntax}\ndefinition=\n{definition}",
                         tool.description
                     ),
-                    normalize_provider_function_schema(fallback_schema),
+                    fallback_schema,
                     false,
                 ),
             };

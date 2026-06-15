@@ -1,3 +1,4 @@
+use daat_locus_macros::model_schema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +14,7 @@ use crate::reasoning::{
 
 pub struct WorkflowMergePlannerProgram;
 
+#[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowMergePlannerOutput {
     pub should_merge: bool,

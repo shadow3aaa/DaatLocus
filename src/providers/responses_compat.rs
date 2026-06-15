@@ -8,6 +8,13 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tracing::warn;
 
+use super::io::{
+    default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
+    non_empty_string, normalize_sse_buffer, parse_retry_after_seconds, take_next_sse_event,
+    truncate_for_error, truncate_for_json_error,
+};
+use super::payload::{flatten_tool_result_as_assistant_text, image_part_data_url};
+use super::{extract_json_value_from_content, shared_request_rate_limiter};
 use crate::context::Context;
 use crate::context_budget::{
     ContextBudgetExceededError, RequestBudgetLimits, estimate_agent_turn_request,
@@ -19,15 +26,6 @@ use crate::reasoning::runtime::{
     AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec, AgentToolSpec,
     AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, HistoryMessage, PromptRequest,
 };
-use crate::schema_utils::normalize_provider_function_schema;
-
-use super::io::{
-    default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
-    non_empty_string, normalize_sse_buffer, parse_retry_after_seconds, take_next_sse_event,
-    truncate_for_error, truncate_for_json_error,
-};
-use super::payload::{flatten_tool_result_as_assistant_text, image_part_data_url};
-use super::{extract_json_value_from_content, shared_request_rate_limiter};
 
 pub(crate) struct ResponsesCompatibleClient {
     client: reqwest::Client,
@@ -438,7 +436,7 @@ impl Llm for ResponsesCompatibleClient {
                 "type": "json_schema",
                 "name": sanitize_text_format_name(&request.tool_name),
                 "strict": true,
-                "schema": normalize_provider_function_schema(request.output_schema.clone()),
+                "schema": request.output_schema.clone(),
             }
         });
         let response = self
@@ -744,7 +742,7 @@ fn agent_tool_to_responses_tool(tool: AgentToolSpec) -> Value {
             "type": "function",
             "name": tool.name,
             "description": tool.description,
-            "parameters": normalize_provider_function_schema(schema),
+            "parameters": schema,
         }),
         AgentToolInputSpec::FreeformGrammar {
             syntax,
@@ -759,7 +757,7 @@ fn agent_tool_to_responses_tool(tool: AgentToolSpec) -> Value {
                     "{}\n\nThis is a FREEFORM grammar tool. Put the complete tool input in the `input` field.\nsyntax={syntax}\ndefinition=\n{definition}",
                     tool.description
                 ),
-                "parameters": normalize_provider_function_schema(fallback_schema),
+                "parameters": fallback_schema,
             })
         }
     }

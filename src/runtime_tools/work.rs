@@ -11,6 +11,7 @@ use crate::{
     events::{EventDisposition, EventPayload, EventStatus},
     plan::{Plan, PlanStatus, PlanStep},
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
+    schema_utils::model_schema_for,
     tool_ui::{
         PlanStepUiData, PlanStepUiStatus, PlanUiData, PlanUiKind, ReplyDisposition,
         ToolCallUiEvent, ToolUiEvent,
@@ -25,51 +26,58 @@ use super::{
 
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![
-        Box::new(StaticRuntimeTool::new::<EventResolveArgs>(
+        Box::new(StaticRuntimeTool::new_with_schema(
             "finish_and_send",
             "Explicitly finish an event and send the final reply when a user reply is needed. `resolved` and `failed` both require `reply_message`; `dismissed` silently ends without sending a message.",
+            model_schema_for::<EventResolveArgs>(),
             summarize_event_resolve_tool,
             render_event_resolve_call_ui,
             execute_event_resolve_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<NoticeResolvedArgs>(
+        Box::new(StaticRuntimeTool::new_with_schema(
             "notice_resolved",
             "Explicitly resolve an app notice claimed by the current turn. This completes the notice without sending an external reply.",
+            model_schema_for::<NoticeResolvedArgs>(),
             summarize_notice_resolved_tool,
             render_notice_resolved_call_ui,
             execute_notice_resolved_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<UpdatePlanArgs>(
+        Box::new(StaticRuntimeTool::new_with_schema(
             "update_plan",
             "Submit the complete step-by-step plan for the current task.",
+            model_schema_for::<UpdatePlanArgs>(),
             summarize_update_plan_tool,
             render_update_plan_call_ui,
             execute_update_plan_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<CreatePrimitiveSpecArgs>(
+        Box::new(StaticRuntimeTool::new_with_schema(
             "create_primitive_spec",
             "Create an initial reusable SOP primitive draft when no reusable primitive fits.",
+            model_schema_for::<CreatePrimitiveSpecArgs>(),
             summarize_create_primitive_spec_tool,
             render_create_primitive_spec_call_ui,
             execute_create_primitive_spec_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<ActivateComposedPrimitiveArgs>(
+        Box::new(StaticRuntimeTool::new_with_schema(
             "activate_composed_primitive",
             "Bind one existing SOP primitive or a temporary composition of existing primitives to the current task.",
+            model_schema_for::<ActivateComposedPrimitiveArgs>(),
             summarize_activate_primitive_tool,
             render_activate_primitive_call_ui,
             execute_activate_primitive_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<ReadPrimitiveSpecArgs>(
+        Box::new(StaticRuntimeTool::new_with_schema(
             "read_primitive_spec",
             "Read the complete SOP primitive spec for a primitive id, including origin and backing file path when it is a workspace primitive.",
+            model_schema_for::<ReadPrimitiveSpecArgs>(),
             summarize_read_workflow_tool,
             render_read_workflow_call_ui,
             execute_read_workflow_tool,
         )),
-        Box::new(StaticRuntimeTool::new::<UpdatePrimitiveSpecArgs>(
+        Box::new(StaticRuntimeTool::new_with_schema(
             "update_primitive_spec",
             "Replace a workspace SOP primitive spec with a complete cleaned version. Use this for user-requested primitive maintenance; builtin primitives are read-only.",
+            model_schema_for::<UpdatePrimitiveSpecArgs>(),
             summarize_update_workflow_tool,
             render_update_workflow_call_ui,
             execute_update_workflow_tool,

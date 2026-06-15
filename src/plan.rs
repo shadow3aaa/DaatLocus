@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt::Display};
 
 use chrono::Utc;
+use daat_locus_macros::model_schema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -28,6 +29,7 @@ pub struct PlanStep {
     pub last_updated_at_ms: i64,
 }
 
+#[model_schema]
 #[derive(Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanStatus {

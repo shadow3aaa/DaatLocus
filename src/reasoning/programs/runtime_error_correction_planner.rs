@@ -1,3 +1,4 @@
+use daat_locus_macros::model_schema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +14,7 @@ use crate::reasoning::{
 
 pub struct RuntimeErrorCorrectionPlannerProgram;
 
+#[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeErrorCorrectionReflection {
     pub title: String,
@@ -26,6 +28,7 @@ pub struct RuntimeErrorCorrectionReflection {
     pub confidence: f64,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeErrorCorrectionCandidate {
     pub title: String,
@@ -36,6 +39,7 @@ pub struct RuntimeErrorCorrectionCandidate {
     pub source_reflection_titles: Vec<String>,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeErrorCorrectionCandidateEvaluation {
     pub candidate_title: String,
@@ -46,6 +50,7 @@ pub struct RuntimeErrorCorrectionCandidateEvaluation {
     pub regressions_detected: usize,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeErrorCorrectionPlannerOutput {
     #[serde(default)]

@@ -256,16 +256,27 @@ pub(super) fn handle_model_request_failure(
     event_ids: &[String],
     app_notices: &[AppNoticeKey],
     error_text: &str,
+    retryable: bool,
 ) -> bool {
     let Some(fingerprint) = fingerprint else {
-        if !event_ids.is_empty() {
+        if retryable && !event_ids.is_empty() {
             requeue_claimed_runtime_events(context, event_ids);
+            return false;
         }
-        return false;
+        terminate_model_request_failure(
+            context,
+            None,
+            1,
+            event_ids,
+            app_notices,
+            error_text,
+            "non_retryable",
+        );
+        return true;
     };
 
     let attempts = context.record_model_request_failure(fingerprint);
-    if attempts < super::RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD {
+    if retryable && attempts < super::RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD {
         tracing::warn!(
             model_request_failure_attempt = attempts,
             model_request_fuse_threshold = super::RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD,
@@ -301,7 +312,36 @@ pub(super) fn handle_model_request_failure(
         return false;
     }
 
-    let failure_note = format!("model request failed after {attempts} attempts: {error_text}");
+    terminate_model_request_failure(
+        context,
+        Some(fingerprint),
+        attempts,
+        event_ids,
+        app_notices,
+        error_text,
+        if retryable {
+            "fuse_tripped"
+        } else {
+            "non_retryable"
+        },
+    );
+    true
+}
+
+fn terminate_model_request_failure(
+    context: &mut Context,
+    fingerprint: Option<&str>,
+    attempts: usize,
+    event_ids: &[String],
+    app_notices: &[AppNoticeKey],
+    error_text: &str,
+    terminal_reason: &str,
+) {
+    let failure_note = if terminal_reason == "non_retryable" {
+        format!("model request failed with non-retryable error: {error_text}")
+    } else {
+        format!("model request failed after {attempts} attempts: {error_text}")
+    };
     for event_id in event_ids {
         if let Err(err) =
             context
@@ -341,10 +381,13 @@ pub(super) fn handle_model_request_failure(
         }
     }
 
-    context.clear_model_request_failure(fingerprint);
+    if let Some(fingerprint) = fingerprint {
+        context.clear_model_request_failure(fingerprint);
+    }
     tracing::error!(
         model_request_failure_attempts = attempts,
         model_request_fuse_threshold = super::RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD,
+        terminal_reason,
         suppression_secs = super::APP_NOTICE_OVERFLOW_SUPPRESSION.as_secs(),
         claimed_events = event_ids.join(","),
         claimed_app_notices = app_notices
@@ -352,9 +395,8 @@ pub(super) fn handle_model_request_failure(
             .map(|notice| notice.app.to_string())
             .collect::<Vec<_>>()
             .join(","),
-        "model request failure fuse tripped; claimed inputs were terminated instead of requeued"
+        "model request failure terminated claimed inputs instead of requeueing"
     );
-    true
 }
 
 pub(super) fn finalize_claimed_runtime_events(

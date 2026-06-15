@@ -28,10 +28,11 @@ use crate::{
             summarize_assistant_tool_call_protocol,
         },
     },
-    schema_utils::normalize_openai_json_schema,
+    schema_utils::model_schema_for,
 };
 use chrono::Utc;
-use schemars::{JsonSchema, schema_for};
+use daat_locus_macros::model_schema;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use tracing::{error, warn};
@@ -41,6 +42,7 @@ pub const MID_TURN_COMPACTION_MAX_RECOVERIES: usize = 3;
 const RUNTIME_COMPACTION_EVENT_FILE_NAME: &str = "runtime_compaction_events.jsonl";
 static RUNTIME_COMPACTION_IO_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
+#[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct HistoryCompactionOutput {
     summary: String,
@@ -181,9 +183,7 @@ fn build_history_compaction_request(messages: Vec<HistoryMessage>) -> Option<Pro
     Some(PromptRequest {
         tool_name: "history_compaction_summary".to_string(),
         tool_description: HISTORY_COMPACTION_TOOL_DESCRIPTION.to_string(),
-        output_schema: normalize_openai_json_schema(
-            serde_json::to_value(schema_for!(HistoryCompactionOutput)).ok()?,
-        ),
+        output_schema: model_schema_for::<HistoryCompactionOutput>(),
         system_messages: vec![HISTORY_COMPACTION_PROMPT.to_string()],
         long_term_memory_messages: Vec::new(),
         history_messages: messages,
@@ -664,7 +664,7 @@ mod tests {
             reserved_output_tokens: 16,
         };
         let messages = vec![
-            HistoryMessage::assistant("a".repeat(800)),
+            HistoryMessage::assistant("a".repeat(8000)),
             HistoryMessage::user("user one"),
             HistoryMessage::assistant("b".repeat(24)),
             HistoryMessage::user("user two"),

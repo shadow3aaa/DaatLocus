@@ -196,7 +196,7 @@ pub fn assistant_activity_cell(content: &str) -> Option<ActivityCell> {
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.starts_with("tool invocation failed") || trimmed.starts_with("tool loop failed") {
+    if assistant_text_is_error(trimmed) {
         let title =
             render_exposed_tool_names(first_line_or_fallback(trimmed, "tool invocation error"));
         return Some(ActivityCell::Error(error_cell(
@@ -335,16 +335,7 @@ fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<ActivityCe
             let mut cells = Vec::new();
             let is_tool_protocol_placeholder =
                 content.trim().starts_with("assistant tool-call protocol:");
-            if !content.trim().is_empty() && !is_tool_protocol_placeholder {
-                cells.push(ActivityCell::Assistant(assistant_cell_with_body(
-                    first_line_or_fallback(content, "assistant"),
-                    remaining_lines_with_limit(content, 8),
-                    Some(content.trim().to_string()),
-                )));
-            }
-            if content.starts_with("tool invocation failed")
-                || content.starts_with("tool loop failed")
-            {
+            if assistant_text_is_error(content.trim()) {
                 let title = render_exposed_tool_names(first_line_or_fallback(
                     content,
                     "tool invocation error",
@@ -353,6 +344,13 @@ fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<ActivityCe
                     title,
                     render_exposed_tool_names_in_lines(remaining_lines_with_limit(content, 24)),
                 ))];
+            }
+            if !content.trim().is_empty() && !is_tool_protocol_placeholder {
+                cells.push(ActivityCell::Assistant(assistant_cell_with_body(
+                    first_line_or_fallback(content, "assistant"),
+                    remaining_lines_with_limit(content, 8),
+                    Some(content.trim().to_string()),
+                )));
             }
             cells
         }
@@ -367,6 +365,12 @@ fn activity_cells_from_prompt_message(message: HistoryMessage) -> Vec<ActivityCe
         }
         AgentMessage::System { .. } => Vec::new(),
     }
+}
+
+fn assistant_text_is_error(trimmed: &str) -> bool {
+    trimmed.starts_with("tool invocation failed")
+        || trimmed.starts_with("tool loop failed")
+        || trimmed.starts_with("agent turn failed")
 }
 
 fn user_cell_from_agent_content(content: &AgentContent) -> UserActivityCell {
@@ -757,6 +761,25 @@ mod tests {
             ActivityCell::Error(cell) => {
                 assert_eq!(cell.title, "tool invocation failed: coding::edit_code");
                 assert_eq!(cell.body_lines, vec!["hunk old text not found"]);
+            }
+            _ => panic!("expected error activity cell"),
+        }
+    }
+
+    #[test]
+    fn assistant_model_request_failures_render_as_error_cells() {
+        let cell = assistant_activity_cell(
+            "agent turn failed: Codex Responses returned HTTP 400 Bad Request\ninvalid schema",
+        )
+        .expect("assistant error cell");
+
+        match cell {
+            ActivityCell::Error(cell) => {
+                assert_eq!(
+                    cell.title,
+                    "agent turn failed: Codex Responses returned HTTP 400 Bad Request"
+                );
+                assert_eq!(cell.body_lines, vec!["invalid schema"]);
             }
             _ => panic!("expected error activity cell"),
         }

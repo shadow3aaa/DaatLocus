@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use daat_locus_macros::model_schema;
 use miette::{Result, miette};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -11,7 +12,7 @@ use crate::{
     runtime_tools::{
         RuntimeTool, StaticRuntimeTool, ToolExecutionResult, ToolFuture, parse_tool_args,
     },
-    schema_utils::structured_edit_args_schema,
+    schema_utils::{model_schema_for, structured_edit_args_schema},
     tool_ui::{
         EXPLORED_STABLE_ID, ExploredCallUiAction, ExploredCallUiData, PatchDiffLineKind,
         PatchDiffLineUiData, PatchFileOperation, PatchFileUiData, ToolCallUiEvent, ToolUiEvent,
@@ -20,6 +21,7 @@ use crate::{
 
 const DEFAULT_READ_LINE_COUNT: usize = 80;
 
+#[model_schema]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadFileArgs {
@@ -38,9 +40,10 @@ struct EditFileArgs {
 
 pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![
-        Box::new(StaticRuntimeTool::new::<ReadFileArgs>(
+        Box::new(StaticRuntimeTool::new_with_schema(
             "read_file",
             "Read a file path or path range and return line-hash anchored source lines.",
+            model_schema_for::<ReadFileArgs>(),
             summarize_read_file_tool,
             render_read_file_call_ui,
             execute_read_file_runtime_tool,

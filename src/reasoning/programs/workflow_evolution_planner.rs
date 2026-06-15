@@ -1,3 +1,4 @@
+use daat_locus_macros::model_schema;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +14,7 @@ use crate::reasoning::{
 
 pub struct WorkflowEvolutionPlannerProgram;
 
+#[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowPlannerReflection {
     pub rationale: String,
@@ -29,6 +31,7 @@ pub struct WorkflowPlannerReflection {
     pub confidence: f64,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowPlannerPatchCandidate {
     pub title: String,
@@ -46,6 +49,7 @@ pub struct WorkflowPlannerPatchCandidate {
     pub confidence: f64,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowPlannerCandidateEvaluation {
     pub candidate_title: String,
@@ -55,6 +59,7 @@ pub struct WorkflowPlannerCandidateEvaluation {
     pub selected: bool,
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowEvolutionPlannerOutput {
     pub should_optimize: bool,

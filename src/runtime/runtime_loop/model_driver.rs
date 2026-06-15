@@ -126,10 +126,10 @@ fn should_retry_agent_turn_error(err: &miette::Report) -> bool {
     if is_context_budget_exceeded(err) {
         return false;
     }
-    !looks_like_permanent_model_request_error(&err.to_string())
+    !is_permanent_model_request_error(&err.to_string())
 }
 
-fn looks_like_permanent_model_request_error(error: &str) -> bool {
+pub(super) fn is_permanent_model_request_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("http 400 bad request")
         || lower.contains("invalid_request_error")

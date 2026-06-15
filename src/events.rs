@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt::Display, path::PathBuf, sync::Arc};
 
 use chrono::Utc;
+use daat_locus_macros::model_schema;
 use miette::{Result, miette};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -75,6 +76,7 @@ impl EventStatus {
     }
 }
 
+#[model_schema]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventDisposition {

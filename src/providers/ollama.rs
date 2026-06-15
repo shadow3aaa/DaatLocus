@@ -32,7 +32,6 @@ use crate::{
         AgentContent, AgentContentPart, AgentMessage, AgentToolCall, AgentToolInputSpec,
         AgentTurnItem, AgentTurnRequest, AgentTurnStreamResult, PromptRequest,
     },
-    schema_utils::normalize_provider_function_schema,
 };
 
 const DEFAULT_OLLAMA_HOST: &str = "http://127.0.0.1:11434";
@@ -838,7 +837,7 @@ impl Llm for OllamaClient {
         }
 
         let request_context = summarize_prompt_request(&request, Some(&budget));
-        let output_schema = normalize_provider_function_schema(request.output_schema.clone());
+        let output_schema = request.output_schema.clone();
         let mut payload = json!({
             "model": self.model,
             "messages": prompt_request_to_ollama_messages(&request),
@@ -911,7 +910,7 @@ impl Llm for OllamaClient {
                 let (description, parameters) = match &tool.input_spec {
                     AgentToolInputSpec::JsonSchema { schema } => (
                         tool.description.clone(),
-                        normalize_provider_function_schema(schema.clone()),
+                        schema.clone(),
                     ),
                     AgentToolInputSpec::FreeformGrammar {
                         syntax,
@@ -922,7 +921,7 @@ impl Llm for OllamaClient {
                             "{}\n\nThis is a FREEFORM grammar tool. Put the complete tool input in the `input` field.\nsyntax={syntax}\ndefinition=\n{definition}",
                             tool.description
                         ),
-                        normalize_provider_function_schema(fallback_schema.clone()),
+                        fallback_schema.clone(),
                     ),
                 };
                 json!({
