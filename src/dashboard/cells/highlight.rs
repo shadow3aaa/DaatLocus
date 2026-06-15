@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::{path::Path, sync::OnceLock};
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -7,11 +7,10 @@ use ratatui::{
 
 use syntect::{
     easy::HighlightLines,
-    highlighting::{FontStyle, Highlighter, Theme},
+    highlighting::{FontStyle, Highlighter, Theme, ThemeSet},
     parsing::{Scope, SyntaxReference, SyntaxSet},
     util::LinesWithEndings,
 };
-use two_face::theme::EmbeddedThemeName;
 
 #[cfg(test)]
 use std::str::FromStr;
@@ -19,132 +18,64 @@ use std::str::FromStr;
 use syntect::highlighting::{StyleModifier, ThemeItem, ThemeSettings};
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
-static THEME: OnceLock<Theme> = OnceLock::new();
-static COLOR_LEVEL: OnceLock<ColorLevel> = OnceLock::new();
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ColorLevel {
-    TrueColor,
-    Ansi256,
-    Ansi16,
-}
+static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
 fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
 }
 
 fn theme() -> &'static Theme {
-    THEME.get_or_init(|| {
-        two_face::theme::extra()
-            .get(EmbeddedThemeName::TwoDark)
-            .clone()
-    })
-}
-
-fn color_level() -> ColorLevel {
-    *COLOR_LEVEL.get_or_init(detect_color_level)
-}
-
-fn detect_color_level() -> ColorLevel {
-    detect_color_level_from_env(
-        std::env::var("COLORTERM").ok().as_deref(),
-        std::env::var("TERM").ok().as_deref(),
-    )
-}
-
-fn detect_color_level_from_env(colorterm: Option<&str>, term: Option<&str>) -> ColorLevel {
-    let colorterm = colorterm.unwrap_or_default().to_ascii_lowercase();
-    let term = term.unwrap_or_default().to_ascii_lowercase();
-    if colorterm.contains("truecolor") || colorterm.contains("24bit") {
-        ColorLevel::TrueColor
-    } else if term.contains("256color") {
-        ColorLevel::Ansi256
-    } else {
-        ColorLevel::Ansi16
-    }
+    THEME_SET
+        .get_or_init(ThemeSet::load_defaults)
+        .themes
+        .get("base16-ocean.dark")
+        .expect("syntect default themes include base16-ocean.dark")
 }
 
 fn find_syntax_for_path(path: &str) -> Option<&'static SyntaxReference> {
     let ss = syntax_set();
-    let extension = path.rsplit('.').next()?;
-    let patched = match extension {
+    let path = Path::new(path);
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    if let Some(syntax) = file_name.and_then(|name| ss.find_syntax_by_extension(name)) {
+        return Some(syntax);
+    }
+    let syntax_name = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .or(file_name)?;
+    let lower = syntax_name.to_ascii_lowercase();
+    let patched = match lower.as_str() {
         "csharp" => "c#",
         "golang" => "go",
+        "jsx" => "JavaScript (Babel)",
+        "objc" => "Objective-C",
+        "objcpp" => "Objective-C++",
         "python3" => "python",
+        "pwsh" => "PowerShell",
         "shell" => "bash",
-        other => other,
+        "tsx" => "TypescriptReact",
+        "asm" => "Assembly (x86_64)",
+        _ => syntax_name,
     };
     ss.find_syntax_by_token(patched)
         .or_else(|| ss.find_syntax_by_extension(patched))
         .or_else(|| ss.find_syntax_by_name(patched))
+        .or_else(|| {
+            if patched == syntax_name {
+                None
+            } else {
+                ss.find_syntax_by_token(syntax_name)
+                    .or_else(|| ss.find_syntax_by_extension(syntax_name))
+                    .or_else(|| ss.find_syntax_by_name(syntax_name))
+            }
+        })
 }
 
 fn convert_color(color: syntect::highlighting::Color) -> Option<Color> {
     match color.a {
-        0 => Some(Color::Indexed(color.r)),
-        1 => None,
-        _ => Some(convert_rgb_for_level(
-            (color.r, color.g, color.b),
-            color_level(),
-        )),
+        0 => None,
+        _ => Some(Color::Rgb(color.r, color.g, color.b)),
     }
-}
-
-fn convert_rgb_for_level(rgb: (u8, u8, u8), level: ColorLevel) -> Color {
-    match level {
-        ColorLevel::TrueColor => Color::Rgb(rgb.0, rgb.1, rgb.2),
-        ColorLevel::Ansi256 => Color::Indexed(rgb_to_ansi256(rgb)),
-        ColorLevel::Ansi16 => rgb_to_ansi16(rgb),
-    }
-}
-
-fn rgb_to_ansi256((r, g, b): (u8, u8, u8)) -> u8 {
-    if r == g && g == b {
-        if r < 8 {
-            return 16;
-        }
-        if r > 248 {
-            return 231;
-        }
-        return 232 + ((u16::from(r) - 8) / 10) as u8;
-    }
-    let r = ((u16::from(r) * 5) / 255) as u8;
-    let g = ((u16::from(g) * 5) / 255) as u8;
-    let b = ((u16::from(b) * 5) / 255) as u8;
-    16 + 36 * r + 6 * g + b
-}
-
-fn rgb_to_ansi16(rgb: (u8, u8, u8)) -> Color {
-    const ANSI16_PALETTE: &[(Color, (u8, u8, u8))] = &[
-        (Color::Black, (0, 0, 0)),
-        (Color::Red, (205, 49, 49)),
-        (Color::Green, (13, 188, 121)),
-        (Color::Yellow, (229, 229, 16)),
-        (Color::Blue, (36, 114, 200)),
-        (Color::Magenta, (188, 63, 188)),
-        (Color::Cyan, (17, 168, 205)),
-        (Color::Gray, (229, 229, 229)),
-        (Color::DarkGray, (102, 102, 102)),
-        (Color::LightRed, (241, 76, 76)),
-        (Color::LightGreen, (35, 209, 139)),
-        (Color::LightYellow, (245, 245, 67)),
-        (Color::LightBlue, (59, 142, 234)),
-        (Color::LightMagenta, (214, 112, 214)),
-        (Color::LightCyan, (41, 184, 219)),
-        (Color::White, (255, 255, 255)),
-    ];
-    ANSI16_PALETTE
-        .iter()
-        .min_by_key(|(_, candidate)| color_distance_squared(rgb, *candidate))
-        .map(|(color, _)| *color)
-        .unwrap_or(Color::White)
-}
-
-fn color_distance_squared((r1, g1, b1): (u8, u8, u8), (r2, g2, b2): (u8, u8, u8)) -> u32 {
-    let dr = i32::from(r1) - i32::from(r2);
-    let dg = i32::from(g1) - i32::from(g2);
-    let db = i32::from(b1) - i32::from(b2);
-    (dr * dr + dg * dg + db * db) as u32
 }
 
 fn convert_style(style: syntect::highlighting::Style) -> Style {
@@ -254,10 +185,7 @@ fn diff_scope_backgrounds_for_theme(theme: &Theme) -> DiffScopeBackgrounds {
 fn scope_background_color(highlighter: &Highlighter<'_>, scope_name: &str) -> Option<Color> {
     let scope = Scope::new(scope_name).ok()?;
     let background = highlighter.style_mod_for_stack(&[scope]).background?;
-    Some(convert_rgb_for_level(
-        (background.r, background.g, background.b),
-        color_level(),
-    ))
+    convert_color(background)
 }
 
 #[cfg(test)]
@@ -295,8 +223,8 @@ mod tests {
     use ratatui::style::Color;
 
     use super::{
-        ColorLevel, detect_color_level_from_env, diff_scope_backgrounds_for_theme,
-        highlight_patch_lines, rgb_to_ansi16, rgb_to_ansi256, theme_with_diff_backgrounds,
+        diff_scope_backgrounds_for_theme, find_syntax_for_path, highlight_patch_lines,
+        theme_with_diff_backgrounds,
     };
     use crate::tool_ui::{PatchDiffLineKind, PatchDiffLineUiData};
 
@@ -323,24 +251,67 @@ mod tests {
     }
 
     #[test]
-    fn detects_truecolor_and_256color_from_env() {
-        assert_eq!(
-            detect_color_level_from_env(Some("truecolor"), Some("xterm-256color")),
-            ColorLevel::TrueColor
+    fn rust_patch_lines_use_truecolor_spans() {
+        let highlighted = highlight_patch_lines(
+            "src/main.rs",
+            &[PatchDiffLineUiData {
+                kind: PatchDiffLineKind::Context,
+                old_lineno: Some(1),
+                new_lineno: Some(1),
+                text: "let message = \"hello\";".to_string(),
+            }],
         );
-        assert_eq!(
-            detect_color_level_from_env(None, Some("screen-256color")),
-            ColorLevel::Ansi256
-        );
-        assert_eq!(
-            detect_color_level_from_env(None, Some("xterm")),
-            ColorLevel::Ansi16
+        let spans = highlighted[0].as_ref().expect("expected highlight spans");
+        assert!(
+            spans
+                .iter()
+                .any(|span| matches!(span.style.fg, Some(Color::Rgb(_, _, _))))
         );
     }
 
     #[test]
-    fn rgb_quantizes_to_limited_palettes() {
-        assert_eq!(rgb_to_ansi256((255, 0, 0)), 196);
-        assert_eq!(rgb_to_ansi16((255, 0, 0)), Color::Red);
+    fn extended_syntax_set_covers_common_frontend_and_named_files() {
+        for path in [
+            "webui/src/components/status-page.tsx",
+            "webui/src/lib/daemon-api.ts",
+            "webui/package.json",
+            "Dockerfile",
+            ".bashrc",
+        ] {
+            assert!(
+                find_syntax_for_path(path).is_some(),
+                "expected syntax for {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_fence_aliases_cover_common_short_tokens() {
+        for syntax_name in ["pwsh", "jsx", "tsx", "objc", "objcpp", "asm"] {
+            assert!(
+                find_syntax_for_path(syntax_name).is_some(),
+                "expected syntax alias for {syntax_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn typescript_react_patch_lines_receive_highlighted_spans() {
+        let highlighted = highlight_patch_lines(
+            "webui/src/components/status-page.tsx",
+            &[PatchDiffLineUiData {
+                kind: PatchDiffLineKind::Context,
+                old_lineno: Some(1),
+                new_lineno: Some(1),
+                text: "const element = <Button className=\"primary\">Save</Button>;".to_string(),
+            }],
+        );
+        let spans = highlighted[0]
+            .as_ref()
+            .expect("expected TSX highlight spans");
+        assert!(
+            spans.iter().any(|span| span.style.fg.is_some()),
+            "expected TSX spans to carry syntax colours: {spans:?}"
+        );
     }
 }

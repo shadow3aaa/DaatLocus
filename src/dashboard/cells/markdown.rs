@@ -70,6 +70,7 @@ struct MarkdownWriter {
     in_code_block: bool,
     code_block_language: Option<String>,
     code_block_indent: String,
+    code_block_buffer: String,
     link: Option<String>,
     wrap_width: Option<usize>,
 }
@@ -91,6 +92,7 @@ impl MarkdownWriter {
             in_code_block: false,
             code_block_language: None,
             code_block_indent: String::new(),
+            code_block_buffer: String::new(),
             link: None,
             wrap_width: wrap_width.map(usize::from).filter(|width| *width > 0),
         }
@@ -118,7 +120,9 @@ impl MarkdownWriter {
             Event::End(tag) => self.end_tag(tag),
             Event::Text(text) => self.push_text(text.as_ref()),
             Event::Code(code) => self.push_span(Span::styled(code.to_string(), self.styles.code)),
+            Event::SoftBreak if self.in_code_block => self.push_code_text("\n"),
             Event::SoftBreak => self.push_text(" "),
+            Event::HardBreak if self.in_code_block => self.push_code_text("\n"),
             Event::HardBreak => self.flush_current(),
             Event::Rule => {
                 self.flush_current();
@@ -189,10 +193,12 @@ impl MarkdownWriter {
             }
             TagEnd::CodeBlock => {
                 self.flush_current();
+                self.flush_code_block();
                 self.in_code_block = false;
                 self.current_code_block = false;
                 self.code_block_language = None;
                 self.code_block_indent.clear();
+                self.code_block_buffer.clear();
                 self.current_style = self.styles.base;
             }
             TagEnd::List(_) => {
@@ -250,6 +256,7 @@ impl MarkdownWriter {
         self.in_code_block = true;
         self.current_code_block = true;
         self.current_style = self.styles.code;
+        self.code_block_buffer.clear();
         self.code_block_language = match kind {
             CodeBlockKind::Fenced(info) => {
                 let language = info.split_whitespace().next().unwrap_or_default().trim();
@@ -296,23 +303,43 @@ impl MarkdownWriter {
 
     fn push_text(&mut self, text: &str) {
         if self.in_code_block {
-            let mut parts = text.split('\n').peekable();
-            while let Some(part) = parts.next() {
-                if !part.is_empty() {
-                    self.push_code_line(part);
-                }
-                if parts.peek().is_some() {
-                    if part.is_empty() {
-                        self.push_code_line("");
-                    }
-                }
-            }
+            self.push_code_text(text);
             return;
         }
         self.push_span(Span::styled(text.to_string(), self.current_inline_style()));
     }
 
-    fn push_code_line(&mut self, text: &str) {
+    fn push_code_text(&mut self, text: &str) {
+        self.code_block_buffer.push_str(text);
+    }
+
+    fn flush_code_block(&mut self) {
+        let text = std::mem::take(&mut self.code_block_buffer);
+        let highlighted = self
+            .code_block_language
+            .as_deref()
+            .and_then(|language| highlight_block(&text, language));
+        if let Some(highlighted_lines) = highlighted {
+            for line_spans in highlighted_lines {
+                self.push_code_spans(line_spans, true);
+            }
+            return;
+        }
+
+        let mut parts = text.split('\n').peekable();
+        while let Some(part) = parts.next() {
+            let part = part.trim_end_matches('\r');
+            if part.is_empty() && parts.peek().is_none() {
+                continue;
+            }
+            self.push_code_spans(
+                vec![Span::styled(part.to_string(), self.styles.code)],
+                false,
+            );
+        }
+    }
+
+    fn push_code_spans(&mut self, line_spans: Vec<Span<'static>>, highlighted: bool) {
         let mut spans = Vec::new();
         if !self.code_block_indent.is_empty() {
             spans.push(Span::styled(
@@ -320,18 +347,15 @@ impl MarkdownWriter {
                 self.styles.code,
             ));
         }
-        let highlighted = self
-            .code_block_language
-            .as_deref()
-            .and_then(|language| highlight_block(text, language))
-            .and_then(|mut lines| lines.pop());
-        match highlighted {
-            Some(line_spans) => spans.extend(line_spans),
-            None if text.is_empty() => spans.push(Span::raw(String::new())),
-            None => spans.push(Span::styled(text.to_string(), self.styles.code)),
+        if line_spans.is_empty() {
+            spans.push(Span::raw(String::new()));
+        } else {
+            spans.extend(line_spans);
         }
         let mut line = Line::from(spans);
-        line.style = self.styles.code;
+        if !highlighted {
+            line.style = self.styles.code;
+        }
         self.push_line(line, true);
     }
 
@@ -485,6 +509,18 @@ mod tests {
 
         assert!(joined.contains("fn main() {}"));
         assert!(!joined.contains("```"));
+    }
+
+    #[test]
+    fn fenced_code_blocks_use_syntax_highlight_spans() {
+        let lines = render_markdown("```rust\nlet message = \"hello\";\n```", Color::White);
+
+        assert!(
+            lines.iter().flat_map(|line| &line.spans).any(|span| {
+                matches!(span.style.fg, Some(Color::Rgb(_, _, _))) && span.content.contains("hello")
+            }),
+            "fenced code blocks should keep truecolor syntax spans: {lines:?}"
+        );
     }
 
     #[test]
