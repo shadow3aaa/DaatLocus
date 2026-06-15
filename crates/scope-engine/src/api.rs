@@ -235,6 +235,7 @@ pub enum PropagationSource {
 #[derive(Debug, Clone, Serialize)]
 pub struct PropagationResponse {
     pub propagation_results: Vec<PropagationResult>,
+    pub applied_summary: AppliedStructuredEditSummary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -250,6 +251,28 @@ pub struct PropagationResult {
     pub file_snippet: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_files: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppliedStructuredEditOperation {
+    Add,
+    Update,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AppliedStructuredEditFile {
+    pub path: String,
+    pub operation: AppliedStructuredEditOperation,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+    pub original_content: String,
+    pub new_content: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AppliedStructuredEditSummary {
+    pub files: Vec<AppliedStructuredEditFile>,
 }
 
 #[derive(Debug, Clone, Serialize)]

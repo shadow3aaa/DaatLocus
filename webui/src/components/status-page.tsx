@@ -4085,15 +4085,15 @@ function AgentChatPatchFileBlock({
     <div className="flex min-w-0 max-w-full flex-col gap-1">
       {!hideHeader ? (
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <p className="min-w-0 break-all font-mono text-xs font-semibold text-foreground/90">
-          {file.path}
-        </p>
-        <span className="text-[0.68rem] font-medium leading-none text-muted-foreground">
-          {file.operation}
-        </span>
-        <span className="font-mono text-[0.7rem] text-muted-foreground">
-          +{file.added_lines} -{file.removed_lines}
-        </span>
+          <p className="min-w-0 break-all font-mono text-xs font-semibold text-foreground/90">
+            {file.path}
+          </p>
+          <span className="text-[0.68rem] font-medium leading-none text-muted-foreground">
+            {file.operation}
+          </span>
+          <span className="font-mono text-[0.7rem] text-muted-foreground">
+            +{file.added_lines} -{file.removed_lines}
+          </span>
         </div>
       ) : null}
       {visibleLines.length > 0 ? (
@@ -4155,8 +4155,7 @@ function AgentChatPatchDiffRow({
       className={cn(
         "grid min-w-0 grid-cols-[var(--old-width)_var(--new-width)_1rem_minmax(0,1fr)] gap-1 px-2 py-0.5 sm:min-w-max sm:gap-2 sm:px-3",
         "[--new-width:2.5rem] [--old-width:2.5rem]",
-        line.kind === "add" && "bg-muted/30",
-        line.kind === "delete" && "bg-muted/20",
+        agentChatDiffRowToneClassName(line.kind),
       )}
     >
       <span className="select-none text-right text-muted-foreground/65">
@@ -4165,7 +4164,12 @@ function AgentChatPatchDiffRow({
       <span className="select-none text-right text-muted-foreground/65">
         {newLineNumber}
       </span>
-      <span className="select-none font-semibold text-muted-foreground">
+      <span
+        className={cn(
+          "select-none font-semibold text-muted-foreground",
+          agentChatDiffGutterToneClassName(line.kind),
+        )}
+      >
         {gutter}
       </span>
       <span className="whitespace-pre-wrap break-words text-foreground/85 sm:whitespace-pre">
@@ -4189,6 +4193,26 @@ function agentChatDiffLinePrefix(line: AgentChatDiffLine) {
     return "  ";
   }
   return line.kind === "add" ? "+ " : line.kind === "delete" ? "- " : "  ";
+}
+
+function agentChatDiffRowToneClassName(kind: string) {
+  if (kind === "add") {
+    return "bg-emerald-500/10";
+  }
+  if (kind === "delete") {
+    return "bg-red-500/10";
+  }
+  return "";
+}
+
+function agentChatDiffGutterToneClassName(kind: string) {
+  if (kind === "add") {
+    return "text-emerald-400/90";
+  }
+  if (kind === "delete") {
+    return "text-red-400/90";
+  }
+  return "";
 }
 
 function AgentChatMessageActivityLine({
@@ -4990,13 +5014,25 @@ function AgentChatDiffBlockFile({
       <pre className="max-h-72 min-w-0 max-w-full overflow-auto whitespace-pre-wrap px-2 leading-5 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin] sm:whitespace-pre sm:px-3">
         {visibleLines.map((line, lineIndex) => (
           <Fragment key={`${file.path}-legacy-diff-${lineIndex}`}>
-            <span className="text-muted-foreground">
-              {agentChatDiffLinePrefix(line)}
+            <span
+              className={cn(
+                "inline-block min-w-full",
+                agentChatDiffRowToneClassName(line.kind),
+              )}
+            >
+              <span
+                className={cn(
+                  "text-muted-foreground",
+                  agentChatDiffGutterToneClassName(line.kind),
+                )}
+              >
+                {agentChatDiffLinePrefix(line)}
+              </span>
+              <AgentChatHighlightedInline
+                tokens={highlighted?.lines[lineIndex]}
+                fallback={line.text}
+              />
             </span>
-            <AgentChatHighlightedInline
-              tokens={highlighted?.lines[lineIndex]}
-              fallback={line.text}
-            />
             {lineIndex < visibleLines.length - 1 ? "\n" : null}
           </Fragment>
         ))}
@@ -5493,6 +5529,17 @@ function agentChatActivityCellRenderForBubble(
     };
   }
 
+  const codingEdit = agentChatActivityCellPayload(cell, "CodingEdit");
+  if (codingEdit) {
+    const files = agentChatCodingEditFilesFromActivityCell(codingEdit);
+    return {
+      kind: "patch",
+      icon: "activity",
+      title: agentChatCodingEditTitle(codingEdit, files),
+      files,
+    };
+  }
+
   const patch = agentChatActivityCellPayload(cell, "Patch");
   if (patch) {
     const files = agentChatPatchFilesFromActivityCell(patch);
@@ -5763,8 +5810,18 @@ function compactAgentChatBrowserUrl(value: string) {
 function agentChatPatchFilesFromActivityCell(
   cell: Record<string, unknown>,
 ): AgentChatDiffFile[] {
+  return agentChatPatchFilesFromValue(cell.files);
+}
+
+function agentChatCodingEditFilesFromActivityCell(
+  cell: Record<string, unknown>,
+): AgentChatDiffFile[] {
+  return agentChatPatchFilesFromValue(cell.diff_files);
+}
+
+function agentChatPatchFilesFromValue(value: unknown): AgentChatDiffFile[] {
   return diffFilesValue(
-    arrayValue(cell.files).map((file) => {
+    arrayValue(value).map((file) => {
       const record = asRecord(file);
       return record
         ? {
@@ -5774,6 +5831,24 @@ function agentChatPatchFilesFromActivityCell(
         : file;
     }),
   );
+}
+
+function agentChatCodingEditTitle(
+  cell: Record<string, unknown>,
+  files: AgentChatDiffFile[],
+) {
+  if (files.length > 0) {
+    return agentChatPatchTitle(files);
+  }
+
+  const file = nullableStringValue(cell.file);
+  const addedLines = numberValue(cell.added_lines, 0);
+  const removedLines = numberValue(cell.removed_lines, 0);
+  if (file) {
+    return `Edited ${file} (+${addedLines} -${removedLines})`;
+  }
+
+  return `Edited Code (+${addedLines} -${removedLines})`;
 }
 
 function agentChatPatchTitle(files: AgentChatDiffFile[]) {

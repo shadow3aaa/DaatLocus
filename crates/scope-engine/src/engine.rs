@@ -634,7 +634,7 @@ pub fn edit_code(
     lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
 ) -> Result<PropagationResponse, String> {
     match patch::edit_code_apply(&params.edits, project_root, lsp_analyzer) {
-        Ok(results) => {
+        Ok((results, applied_summary)) => {
             if !results.is_empty()
                 && let Ok(mut state) = propagation_state.lock()
             {
@@ -642,6 +642,7 @@ pub fn edit_code(
             }
             Ok(PropagationResponse {
                 propagation_results: results,
+                applied_summary,
             })
         }
         Err(e) => Err(e),

@@ -2,6 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::analyzer::Analyzer;
+pub use crate::api::{
+    AppliedStructuredEditFile, AppliedStructuredEditOperation, AppliedStructuredEditSummary,
+};
 use crate::api::{EditOp, PropagationResult, PropagationSource, StructuredEdit};
 use crate::treesitter::TreeSitterAnalyzer;
 use sha2::{Digest, Sha256};
@@ -13,27 +16,6 @@ struct PlannedEdit {
     old_count: usize,
     replacement: Vec<String>,
     primary_symbol_name: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppliedStructuredEditOperation {
-    Add,
-    Update,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppliedStructuredEditFile {
-    pub path: String,
-    pub operation: AppliedStructuredEditOperation,
-    pub added_lines: usize,
-    pub removed_lines: usize,
-    pub original_content: String,
-    pub new_content: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppliedStructuredEditSummary {
-    pub files: Vec<AppliedStructuredEditFile>,
 }
 
 struct PreparedFileEdits {
@@ -257,9 +239,10 @@ pub fn edit_code_apply(
     edits: &[StructuredEdit],
     project_root: &Path,
     lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
-) -> Result<Vec<PropagationResult>, String> {
+) -> Result<(Vec<PropagationResult>, AppliedStructuredEditSummary), String> {
     let analyzer = TreeSitterAnalyzer::new();
     let prepared = prepare_structured_edits(edits, project_root, &analyzer, true)?;
+    let applied_summary = applied_summary_from_prepared(&prepared);
     write_prepared_structured_edits(&prepared, Some(lsp_analyzer))?;
 
     let mut results = Vec::new();
@@ -277,7 +260,7 @@ pub fn edit_code_apply(
         ));
     }
 
-    Ok(results)
+    Ok((results, applied_summary))
 }
 
 pub fn edit_file_apply(
@@ -555,8 +538,18 @@ mod e2e_tests {
             ])),
         }];
         let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
-        let propagation = edit_code_apply(&edits, dir.path(), &lsp).unwrap();
+        let (propagation, applied_summary) = edit_code_apply(&edits, dir.path(), &lsp).unwrap();
         assert!(!propagation.is_empty(), "Should have propagation results");
+        assert_eq!(applied_summary.files.len(), 1);
+        assert_eq!(applied_summary.files[0].path, "src/lib.rs");
+        assert_eq!(applied_summary.files[0].added_lines, 3);
+        assert_eq!(applied_summary.files[0].removed_lines, 3);
+        assert!(
+            applied_summary.files[0]
+                .original_content
+                .contains("\"hello\"")
+        );
+        assert!(applied_summary.files[0].new_content.contains("hello world"));
 
         let modified = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
         assert!(modified.contains("hello world"));
@@ -594,7 +587,10 @@ mod e2e_tests {
             },
         ];
         let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
-        edit_code_apply(&edits, dir.path(), &lsp).unwrap();
+        let (_propagation, applied_summary) = edit_code_apply(&edits, dir.path(), &lsp).unwrap();
+        assert_eq!(applied_summary.files.len(), 1);
+        assert_eq!(applied_summary.files[0].added_lines, 4);
+        assert_eq!(applied_summary.files[0].removed_lines, 3);
 
         let modified = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
         assert!(modified.contains("pub fn added()"));
@@ -624,6 +620,14 @@ mod e2e_tests {
             result.is_ok(),
             "new file creation should succeed: {result:?}"
         );
+        let (_propagation, applied_summary) = result.unwrap();
+        assert_eq!(applied_summary.files.len(), 1);
+        assert_eq!(
+            applied_summary.files[0].operation,
+            AppliedStructuredEditOperation::Add
+        );
+        assert_eq!(applied_summary.files[0].added_lines, 3);
+        assert_eq!(applied_summary.files[0].removed_lines, 0);
 
         let created = std::fs::read_to_string(dir.path().join("src/new_file.rs")).unwrap();
         assert!(created.contains("pub fn created()"));

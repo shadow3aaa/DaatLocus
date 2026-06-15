@@ -39,6 +39,8 @@ const USER_PROMPT_PREFIX: &str = "›";
 const DETAIL_INITIAL_PREFIX: &str = "  └ ";
 const DETAIL_SUBSEQUENT_PREFIX: &str = "    ";
 const COMMAND_CONTINUATION_PREFIX: &str = "  │ ";
+const PATCH_DIFF_ADD_BACKGROUND: Color = Color::Rgb(20, 74, 42);
+const PATCH_DIFF_DELETE_BACKGROUND: Color = Color::Rgb(88, 34, 38);
 
 // ---------------------------------------------------------------------------
 // Viewport-culled rendering
@@ -1637,47 +1639,23 @@ fn render_coding_edit_cell_lines(
         .len()
         .max(1);
 
-    let title = if cell.title.trim().is_empty() {
-        "Edited Code".to_string()
-    } else {
-        cell.title.clone()
-    };
-    let mut lines = vec![codex_header(title)];
-    let mut detail = vec![Line::from(Span::styled(
-        cell.selector.clone(),
-        Style::default().fg(Color::Gray),
-    ))];
-
-    let mut stats = Vec::new();
-    if let Some(file) = cell.file.as_deref() {
-        stats.push(format!("file {file}"));
-    }
-    stats.push(format!("+{} -{}", cell.added_lines, cell.removed_lines));
-    stats.push(format!("{} propagation review(s)", cell.propagation_count));
-    detail.push(Line::from(Span::styled(stats.join(" · "), dim_style())));
-
-    if !cell.impact_lines.is_empty() {
-        detail.push(Line::from(Span::styled("Impact", dim_style())));
-        for impact in cell.impact_lines.iter().take(4) {
-            detail.push(Line::from(Span::styled(
-                format!("  {impact}"),
-                Style::default().fg(Color::Gray),
-            )));
-        }
-    }
-    lines.extend(prefixed_detail_lines(detail, max_width));
+    let mut lines = vec![codex_header(coding_edit_title(cell))];
 
     for (index, file) in visible_files.iter().enumerate() {
         if index > 0 {
             lines.push(Line::from(""));
         }
-        let mut file_lines = vec![render_patch_file_header(file)];
+        let mut file_lines = if cell.diff_files.len() == 1 {
+            Vec::new()
+        } else {
+            vec![render_patch_file_header(file)]
+        };
         file_lines.extend(render_patch_file_diff_lines(
             file,
             diff_backgrounds,
             old_lineno_width,
             new_lineno_width,
-            12,
+            18,
         ));
         lines.extend(prefixed_detail_lines(file_lines, max_width));
     }
@@ -1695,6 +1673,33 @@ fn render_coding_edit_cell_lines(
     }
 
     lines
+}
+
+fn coding_edit_title(cell: &CodingEditActivityCell) -> String {
+    if let [file] = cell.diff_files.as_slice() {
+        return patch_single_file_title(file);
+    }
+
+    if !cell.diff_files.is_empty() {
+        let file_noun = if cell.diff_files.len() == 1 {
+            "File"
+        } else {
+            "Files"
+        };
+        return format!("Edited {} {}", cell.diff_files.len(), file_noun);
+    }
+
+    if let Some(file) = cell.file.as_deref().filter(|file| !file.trim().is_empty()) {
+        return format!(
+            "Edited {} (+{} -{})",
+            file, cell.added_lines, cell.removed_lines
+        );
+    }
+
+    format!(
+        "Edited Code (+{} -{})",
+        cell.added_lines, cell.removed_lines
+    )
 }
 
 fn render_terminal_wait_cell_lines(
@@ -2369,7 +2374,7 @@ fn render_patch_file_diff_lines(
 fn render_patch_diff_line(
     line: &PatchDiffLineUiData,
     highlighted_spans: Option<Vec<Span<'static>>>,
-    diff_backgrounds: DiffScopeBackgrounds,
+    _diff_backgrounds: DiffScopeBackgrounds,
     old_lineno_width: usize,
     new_lineno_width: usize,
 ) -> Line<'static> {
@@ -2391,12 +2396,12 @@ fn render_patch_diff_line(
         PatchDiffLineKind::Delete => (
             "-",
             Style::default().fg(Color::LightRed),
-            diff_backgrounds.deleted.or(Some(Color::Rgb(58, 24, 24))),
+            Some(PATCH_DIFF_DELETE_BACKGROUND),
         ),
         PatchDiffLineKind::Add => (
             "+",
             Style::default().fg(Color::LightGreen),
-            diff_backgrounds.inserted.or(Some(Color::Rgb(22, 44, 30))),
+            Some(PATCH_DIFF_ADD_BACKGROUND),
         ),
         PatchDiffLineKind::HunkBreak => unreachable!(),
     };
@@ -2412,33 +2417,39 @@ fn render_patch_diff_line(
     let mut spans = vec![
         Span::styled(
             format!("{old_lineno:>old_width$}", old_width = old_lineno_width),
-            Style::default().fg(Color::DarkGray),
+            patch_diff_style(Style::default().fg(Color::DarkGray), background),
         ),
-        Span::raw(" "),
+        Span::styled(" ", patch_diff_style(Style::default(), background)),
         Span::styled(
             format!("{new_lineno:>new_width$}", new_width = new_lineno_width),
-            Style::default().fg(Color::DarkGray),
+            patch_diff_style(Style::default().fg(Color::DarkGray), background),
         ),
-        Span::raw(" "),
-        Span::styled(gutter, text_style.add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
+        Span::styled(" ", patch_diff_style(Style::default(), background)),
+        Span::styled(
+            gutter,
+            patch_diff_style(text_style.add_modifier(Modifier::BOLD), background),
+        ),
+        Span::styled(" ", patch_diff_style(Style::default(), background)),
     ];
     if let Some(highlighted_spans) = highlighted_spans {
         for span in highlighted_spans {
-            let style = match background {
-                Some(color) => span.style.bg(color),
-                None => span.style,
-            };
+            let style = patch_diff_style(span.style, background);
             spans.push(Span::styled(span.content.to_string(), style));
         }
     } else {
-        let style = match background {
-            Some(color) => text_style.bg(color),
-            None => text_style,
-        };
+        let style = patch_diff_style(text_style, background);
         spans.push(Span::styled(line.text.clone(), style));
     }
-    Line::from(spans)
+    let mut line = Line::from(spans);
+    line.style = patch_diff_style(Style::default(), background);
+    line
+}
+
+fn patch_diff_style(style: Style, background: Option<Color>) -> Style {
+    match background {
+        Some(color) => style.bg(color),
+        None => style,
+    }
 }
 
 fn compact_browser_url(url: &str) -> String {
@@ -2846,6 +2857,112 @@ That's it.";
         assert!(rendered.iter().any(|line| line.contains("1 1   fn main()")));
         assert!(rendered.iter().any(|line| line.contains("2   -")));
         assert!(rendered.iter().any(|line| line.contains(" 2 +")));
+    }
+
+    #[test]
+    fn coding_edit_cell_renders_compact_diff_without_internal_details() {
+        let cell = CodingEditActivityCell {
+            stable_id: "edit-1".to_string(),
+            title: "Code Edit".to_string(),
+            selector: "hash-anchored edit".to_string(),
+            file: Some("src/app.rs".to_string()),
+            added_lines: 1,
+            removed_lines: 1,
+            propagation_count: 7,
+            impact_lines: vec!["src/app.rs::run - propagation review".to_string()],
+            diff_files: vec![PatchFileUiData {
+                path: "src/app.rs".to_string(),
+                operation: PatchFileOperation::Update,
+                added_lines: 1,
+                removed_lines: 1,
+                diff_lines: vec![
+                    PatchDiffLineUiData {
+                        kind: PatchDiffLineKind::Delete,
+                        old_lineno: Some(1),
+                        new_lineno: None,
+                        text: "old();".to_string(),
+                    },
+                    PatchDiffLineUiData {
+                        kind: PatchDiffLineKind::Add,
+                        old_lineno: None,
+                        new_lineno: Some(1),
+                        text: "new();".to_string(),
+                    },
+                ],
+            }],
+        };
+
+        let lines = render_coding_edit_cell_lines(&cell, 80);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("• Edited src/app.rs (+1 -1)"))
+        );
+        assert!(rendered.iter().any(|line| line.contains("1   - old();")));
+        assert!(rendered.iter().any(|line| line.contains(" 1 + new();")));
+        assert!(
+            rendered.iter().all(|line| !line.contains("hash-anchored")),
+            "selector should not be visible in compact edit cell: {rendered:?}"
+        );
+        assert!(
+            rendered.iter().all(|line| !line.contains("propagation")),
+            "review impact should not be visible in compact edit cell: {rendered:?}"
+        );
+        assert!(
+            rendered.iter().all(|line| !line.contains("Impact")),
+            "impact heading should not be visible in compact edit cell: {rendered:?}"
+        );
+        for pattern in ["1   - old();", " 1 + new();"] {
+            let line = lines
+                .iter()
+                .find(|line| line_text(line).contains(pattern))
+                .expect("changed line should be rendered");
+            assert!(
+                line.style.bg.is_some() || line.spans.iter().any(|span| span.style.bg.is_some()),
+                "changed line should keep diff background: {:?}",
+                line
+            );
+        }
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 12));
+        let mut cache = CachedActivityLines::new();
+        render_activity_feed_cached(
+            &mut buffer,
+            Rect::new(0, 0, 80, 12),
+            &[ActivityCell::CodingEdit(cell)],
+            &[],
+            0,
+            &mut cache,
+            0,
+        );
+
+        for (pattern, expected_bg) in [
+            ("old();", PATCH_DIFF_DELETE_BACKGROUND),
+            ("new();", PATCH_DIFF_ADD_BACKGROUND),
+        ] {
+            let y = (0..buffer.area.height)
+                .find(|y| buffer_row_text(&buffer, *y).contains(pattern))
+                .expect("changed row should be rendered into buffer");
+            assert!(
+                (0..buffer.area.width).any(|x| buffer
+                    .cell((x, y))
+                    .is_some_and(|cell| cell.bg == expected_bg)),
+                "changed buffer row should keep diff background: {}",
+                buffer_row_text(&buffer, y)
+            );
+        }
+    }
+
+    fn buffer_row_text(buffer: &Buffer, y: u16) -> String {
+        let mut out = String::new();
+        for x in 0..buffer.area.width {
+            if let Some(cell) = buffer.cell((x, y)) {
+                out.push_str(cell.symbol());
+            }
+        }
+        out
     }
 
     #[test]

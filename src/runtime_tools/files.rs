@@ -231,8 +231,8 @@ fn execute_edit_file_runtime_tool<'a>(
                     json!({
                         "path": file.path,
                         "operation": match file.operation {
-                            scope_engine::patch::AppliedStructuredEditOperation::Add => "add",
-                            scope_engine::patch::AppliedStructuredEditOperation::Update => "update",
+                            scope_engine::api::AppliedStructuredEditOperation::Add => "add",
+                            scope_engine::api::AppliedStructuredEditOperation::Update => "update",
                         },
                         "added_lines": file.added_lines,
                         "removed_lines": file.removed_lines,

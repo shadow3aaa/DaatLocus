@@ -325,6 +325,18 @@ export type ActivityCellPatch = {
   files?: ActivityCellPatchFile[];
 };
 
+export type ActivityCellCodingEdit = {
+  stable_id: string;
+  title: string;
+  selector: string;
+  file?: string | null;
+  added_lines: number;
+  removed_lines: number;
+  propagation_count: number;
+  impact_lines?: string[];
+  diff_files?: ActivityCellPatchFile[];
+};
+
 export type ActivityCellTelegram = {
   title: string;
   detail_lines?: string[];
@@ -360,6 +372,7 @@ export type ActivityCellVariant =
   | { ActivatePrimitiveResult: ActivityCellPrimitive }
   | { ExecResult: ActivityCellExecResult }
   | { LiveExec: ActivityCellLiveExec }
+  | { CodingEdit: ActivityCellCodingEdit }
   | { Patch: ActivityCellPatch }
   | { Telegram: ActivityCellTelegram }
   | { Reply: ActivityCellReply }

@@ -16,6 +16,11 @@ use scope_engine::language::LanguageRegistry;
 use scope_engine::state::{PropagationState, ReadHandleRegistry};
 use scope_engine::treesitter::TreeSitterAnalyzer;
 
+pub struct ScopeEditCodeResult {
+    pub propagation_results: Vec<api::PropagationResult>,
+    pub applied_summary: api::AppliedStructuredEditSummary,
+}
+
 /// In-process SCOPE engine client.
 ///
 /// Wraps the scope-engine library to provide:
@@ -134,9 +139,9 @@ impl ScopeClient {
 
     /// Apply structured edits via scope-engine.
     #[allow(dead_code)]
-    pub fn edit_code(&self, edits: &[api::StructuredEdit]) -> Result<Vec<api::PropagationResult>> {
+    pub fn edit_code(&self, edits: &[api::StructuredEdit]) -> Result<ScopeEditCodeResult> {
         let root = self.require_project_root()?;
-        engine::edit_code(
+        let response = engine::edit_code(
             root,
             &api::EditCodeRequest {
                 edits: edits.to_vec(),
@@ -144,8 +149,11 @@ impl ScopeClient {
             &self.propagation_state,
             &self.lsp_analyzer,
         )
-        .map(|response| response.propagation_results)
-        .map_err(|err| miette!("scope-engine edit_code failed: {err}"))
+        .map_err(|err| miette!("scope-engine edit_code failed: {err}"))?;
+        Ok(ScopeEditCodeResult {
+            propagation_results: response.propagation_results,
+            applied_summary: response.applied_summary,
+        })
     }
 
     /// Return whether SCOPE owns semantic source operations for a path.
