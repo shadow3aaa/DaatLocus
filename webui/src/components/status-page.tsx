@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -2824,6 +2825,54 @@ function AgentChatBubbles({
     () => foldCompletedAgentChatActivity(bubbles),
     [bubbles],
   );
+  const [openFoldedActivityGroups, setOpenFoldedActivityGroups] = useState<
+    Record<string, boolean>
+  >({});
+  const displayItemElementsRef = useRef(new Map<string, HTMLDivElement>());
+  const pendingFoldCollapseAnchorRef = useRef<{
+    id: string;
+    top: number;
+  } | null>(null);
+  const registerDisplayItemElement = useCallback(
+    (id: string, node: HTMLDivElement | null) => {
+      if (node) {
+        displayItemElementsRef.current.set(id, node);
+      } else {
+        displayItemElementsRef.current.delete(id);
+      }
+    },
+    [],
+  );
+  const handleFoldedActivityGroupOpenChange = useCallback(
+    (id: string, nextOpen: boolean) => {
+      if (!nextOpen) {
+        const panel = panelRef.current;
+        const element = displayItemElementsRef.current.get(id);
+        const header = element?.querySelector<HTMLElement>(
+          "[data-agent-chat-fold-header='true']",
+        );
+        if (panel && element) {
+          pendingFoldCollapseAnchorRef.current = {
+            id,
+            top: (header ?? element).getBoundingClientRect().top,
+          };
+        }
+      }
+
+      setOpenFoldedActivityGroups((current) => {
+        if (Boolean(current[id]) === nextOpen) {
+          return current;
+        }
+        if (!nextOpen) {
+          const next = { ...current };
+          delete next[id];
+          return next;
+        }
+        return { ...current, [id]: true };
+      });
+    },
+    [panelRef],
+  );
 
   function scrollToChatBottom(behavior: ScrollBehavior = "auto") {
     const panel = panelRef.current;
@@ -3015,6 +3064,46 @@ function AgentChatBubbles({
       void loadOlderHistory();
     }
   }, [hasMoreBefore, isLoadingHistory, loadOlderHistory, panelRef]);
+  useEffect(() => {
+    const foldedIds = new Set(
+      displayItems
+        .filter((item) => item.kind === "foldedActivityGroup")
+        .map((item) => item.id),
+    );
+
+    setOpenFoldedActivityGroups((current) => {
+      let changed = false;
+      const next: Record<string, boolean> = {};
+      for (const [id, open] of Object.entries(current)) {
+        if (foldedIds.has(id)) {
+          next[id] = open;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [displayItems]);
+
+  useLayoutEffect(() => {
+    const anchor = pendingFoldCollapseAnchorRef.current;
+    if (!anchor) {
+      return;
+    }
+    pendingFoldCollapseAnchorRef.current = null;
+
+    const panel = panelRef.current;
+    const element = displayItemElementsRef.current.get(anchor.id);
+    if (!panel || !element) {
+      return;
+    }
+
+    const nextTop = element.getBoundingClientRect().top;
+    panel.scrollTop += nextTop - anchor.top;
+    lastFocusedScrollTopRef.current = panel.scrollTop;
+    updateScrollButtonVisibility(panel);
+  }, [openFoldedActivityGroups, panelRef]);
+
 
   return (
     <>
@@ -3061,20 +3150,26 @@ function AgentChatBubbles({
                   ) : null}
                 </div>
               ) : null}
-              {displayItems.map((item) =>
-                item.kind === "bubble" ? (
-                  <AgentChatBubbleItem
-                    key={item.id}
-                    bubble={item.bubble}
-                  />
-                ) : (
-                  <AgentChatFoldedActivityGroup
-                    key={item.id}
-                    id={item.id}
-                    bubbles={item.bubbles}
-                  />
-                ),
-              )}
+              {displayItems.map((item) => (
+                <div
+                  key={item.id}
+                  ref={(node) => registerDisplayItemElement(item.id, node)}
+                  className="min-w-0 max-w-full"
+                >
+                  {item.kind === "bubble" ? (
+                    <AgentChatBubbleItem bubble={item.bubble} />
+                  ) : (
+                    <AgentChatFoldedActivityGroup
+                      id={item.id}
+                      bubbles={item.bubbles}
+                      open={Boolean(openFoldedActivityGroups[item.id])}
+                      onOpenChange={(nextOpen) =>
+                        handleFoldedActivityGroupOpenChange(item.id, nextOpen)
+                      }
+                    />
+                  )}
+                </div>
+              ))}
             </div>
           ) : (
             <div className="mx-auto flex min-h-[40vh] w-full min-w-0 max-w-3xl items-center justify-center px-6 text-center">
@@ -3122,13 +3217,17 @@ function AgentChatBubbles({
 function AgentChatFoldedActivityGroup({
   id,
   bubbles,
+  open,
+  onOpenChange,
   isFocused = true,
 }: {
   id: string;
   bubbles: AgentChatBubble[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   isFocused?: boolean;
 }) {
-  const { open, toggle } = useCollapsibleState(false);
+  const { toggle } = useCollapsibleState(false, open, onOpenChange);
   const activityCount = bubbles.length;
   const workedDurationLabel = formatAgentChatWorkedDuration(bubbles);
 
@@ -3144,11 +3243,20 @@ function AgentChatFoldedActivityGroup({
       )}
     >
       <div className="min-w-0 max-w-full">
-        <AgentChatWorkedDivider
-          label={`Worked for ${workedDurationLabel}`}
-          open={open}
-          onToggle={isFocused ? toggle : undefined}
-        />
+        <div
+          data-agent-chat-fold-header="true"
+          className={cn(
+            "min-w-0 max-w-full",
+            open &&
+              "sticky top-2 z-20 rounded-md bg-background/95 shadow-sm shadow-background/30 backdrop-blur-xl supports-[backdrop-filter]:bg-background/80",
+          )}
+        >
+          <AgentChatWorkedDivider
+            label={`Worked for ${workedDurationLabel}`}
+            open={open}
+            onToggle={isFocused ? toggle : undefined}
+          />
+        </div>
         {isFocused && open ? (
           <div className="min-w-0 pt-2">
             {bubbles.map((bubble) => (
