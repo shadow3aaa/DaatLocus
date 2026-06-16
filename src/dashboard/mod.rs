@@ -96,7 +96,7 @@ use transcript_overlay::render_transcript_overlay;
 use tui_animation::dashboard_state_needs_animation;
 use view_state::TuiViewState;
 
-const TUI_ANIMATION_INTERVAL: Duration = Duration::from_millis(200);
+const TUI_ANIMATION_INTERVAL: Duration = Duration::from_millis(32);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DashboardPlanStep {

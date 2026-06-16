@@ -828,6 +828,7 @@ dependencies = [
  "serde_path_to_error",
  "serde_yaml",
  "sha2",
+ "supports-color",
  "syntect",
  "sysinfo",
  "tempfile",
