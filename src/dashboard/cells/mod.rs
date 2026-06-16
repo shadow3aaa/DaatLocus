@@ -31,7 +31,7 @@ use common::{
     ExploredActivityCell, ThinkingActivityCell,
 };
 use common::{render_exposed_tool_names, render_exposed_tool_names_in_lines, thinking_cell};
-use exec::{ExecResultActivityCell, LiveExecActivityCell, live_exec_cell};
+use exec::{ExecResultActivityCell, LiveExecActivityCell, is_output_metadata_line, live_exec_cell};
 use messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell};
 use plan::PlanActivityCell;
 use primitive::{ActivatePrimitiveActivityCell, CreatePrimitiveSpecActivityCell};
@@ -242,11 +242,13 @@ pub fn user_activity_cell_from_event(event: &EventView) -> Option<ActivityCell> 
 pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> Option<ActivityCell> {
     match ui_event {
         ToolUiEvent::Exec(event) => Some(ActivityCell::ExecResult(event.into())),
-        ToolUiEvent::Terminal(event) => Some(if matches!(event.action, TerminalUiAction::Poll) {
-            ActivityCell::TerminalWait(terminal_wait_cell(event.title, event.body_lines))
-        } else {
-            ActivityCell::ExecResult(event.into())
-        }),
+        ToolUiEvent::Terminal(event) => {
+            if matches!(event.action, TerminalUiAction::Poll) {
+                terminal_wait_activity_cell_from_terminal_event(event)
+            } else {
+                Some(ActivityCell::ExecResult(event.into()))
+            }
+        }
         ToolUiEvent::Browser(event) => match event.action {
             crate::tool_ui::BrowserUiAction::Snapshot => Some(ActivityCell::Browser(event.into())),
             crate::tool_ui::BrowserUiAction::OpenPage
@@ -280,6 +282,33 @@ pub fn activity_cell_from_tool_ui_event(ui_event: ToolUiEvent) -> Option<Activit
         ToolUiEvent::Warning(event) => Some(ActivityCell::Warning(event.into())),
         ToolUiEvent::Error(event) => Some(ActivityCell::Error(event.into())),
     }
+}
+
+fn terminal_wait_activity_cell_from_terminal_event(
+    event: crate::tool_ui::TerminalUiData,
+) -> Option<ActivityCell> {
+    let mut body_lines = event.body_lines;
+    let meta = body_lines
+        .first()
+        .filter(|line| is_terminal_poll_meta_line(line))
+        .cloned();
+    if meta.is_some() {
+        body_lines.remove(0);
+    }
+    body_lines.retain(|line| !is_output_metadata_line(line));
+    if body_lines.is_empty() {
+        return None;
+    }
+    Some(ActivityCell::TerminalWait(terminal_wait_cell(
+        event.title,
+        meta,
+        body_lines,
+    )))
+}
+
+fn is_terminal_poll_meta_line(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("terminal-session-") && line.contains("  exit=") && line.contains("  cwd=")
 }
 
 fn user_agent_content_from_event(event: &EventView) -> Option<AgentContent> {
@@ -592,7 +621,7 @@ fn current_time_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool_ui::{PlanUiData, ToolUiEvent};
+    use crate::tool_ui::{PlanUiData, TerminalUiAction, TerminalUiData, ToolUiEvent};
 
     fn terminal_event_view_with_attachment() -> EventView {
         EventView {
@@ -646,6 +675,48 @@ mod tests {
         }));
 
         assert!(cell.is_none());
+    }
+
+    #[test]
+    fn terminal_poll_without_output_does_not_create_activity_cell() {
+        let cell = activity_cell_from_tool_ui_event(ToolUiEvent::Terminal(TerminalUiData {
+            action: TerminalUiAction::Poll,
+            origin: None,
+            title: "cargo test dashboard::command_render::tests".to_string(),
+            body_lines: vec![
+                r"terminal-session-8  running  exit=-  cwd=\\?\C:\Users\13940\DaatLocus"
+                    .to_string(),
+            ],
+        }));
+
+        assert!(cell.is_none());
+    }
+
+    #[test]
+    fn terminal_poll_strips_session_metadata_from_visible_body() {
+        let cell = activity_cell_from_tool_ui_event(ToolUiEvent::Terminal(TerminalUiData {
+            action: TerminalUiAction::Poll,
+            origin: None,
+            title: "cargo test dashboard::command_render::tests".to_string(),
+            body_lines: vec![
+                r"terminal-session-8  running  exit=-  cwd=\\?\C:\Users\13940\DaatLocus"
+                    .to_string(),
+                "output_missed_bytes=0 output_dropped_bytes=12 output_retained_bytes=256 output_buffer_capacity=1024".to_string(),
+                "Compiling reqwest v0.12.28".to_string(),
+            ],
+        }))
+        .expect("terminal wait cell");
+
+        match cell {
+            ActivityCell::TerminalWait(cell) => {
+                assert_eq!(
+                    cell.meta.as_deref(),
+                    Some(r"terminal-session-8  running  exit=-  cwd=\\?\C:\Users\13940\DaatLocus")
+                );
+                assert_eq!(cell.body_lines, vec!["Compiling reqwest v0.12.28"]);
+            }
+            _ => panic!("expected terminal wait activity cell"),
+        }
     }
 
     #[test]

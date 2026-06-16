@@ -848,7 +848,7 @@ fn activity_cell_transcript_block(cell: &ActivityCell) -> String {
             transcript_section(title, cell.message_lines.join("\n"))
         }
         ActivityCell::TerminalWait(cell) => {
-            transcript_section(&cell.title, cell.body_lines.join("\n"))
+            transcript_section(&cell.title, terminal_wait_transcript_text(cell))
         }
         ActivityCell::Warning(cell) => transcript_section(
             "WARNING",
@@ -873,6 +873,15 @@ fn transcript_section(title: &str, body: String) -> String {
 fn primary_transcript_text(title: &str, body_lines: &[String]) -> String {
     let mut lines = vec![title.to_string()];
     lines.extend(body_lines.iter().cloned());
+    lines.join("\n")
+}
+
+fn terminal_wait_transcript_text(cell: &TerminalWaitActivityCell) -> String {
+    let mut lines = Vec::new();
+    if let Some(meta) = cell.meta.as_deref().filter(|meta| !meta.trim().is_empty()) {
+        lines.push(format!("meta: {meta}"));
+    }
+    lines.extend(cell.body_lines.iter().cloned());
     lines.join("\n")
 }
 

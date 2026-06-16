@@ -517,6 +517,7 @@ fn apply_terminal_wait_cell(item: &mut WebActivityItem, cell: &TerminalWaitActiv
         affected_files: Vec::new(),
     });
     item.blocks = text_blocks(cell.body_lines.clone());
+    item.detail_blocks = kv_block(optional_kv_entries(vec![("meta", cell.meta.clone())]));
 }
 
 fn apply_browser_cell(item: &mut WebActivityItem, cell: &BrowserActivityCell) {

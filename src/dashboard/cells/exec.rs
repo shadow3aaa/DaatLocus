@@ -183,7 +183,7 @@ impl From<ToolUiData> for ExecResultActivityCell {
     }
 }
 
-fn is_output_metadata_line(line: &str) -> bool {
+pub(super) fn is_output_metadata_line(line: &str) -> bool {
     line.contains("output_missed_bytes=")
         || line.contains("output_dropped_bytes=")
         || line.contains("output_retained_bytes=")

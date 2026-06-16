@@ -128,6 +128,8 @@ pub struct ExploredCallActivityCell {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TerminalWaitActivityCell {
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<String>,
     pub body_lines: Vec<String>,
 }
 
@@ -177,10 +179,12 @@ pub fn generic_app_cell(
 
 pub fn terminal_wait_cell(
     title: impl Into<String>,
+    meta: Option<String>,
     body_lines: Vec<String>,
 ) -> TerminalWaitActivityCell {
     TerminalWaitActivityCell {
         title: title.into(),
+        meta,
         body_lines,
     }
 }
