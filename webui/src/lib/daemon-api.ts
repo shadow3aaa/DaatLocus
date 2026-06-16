@@ -356,6 +356,13 @@ export type ActivityCellPlan = {
   }>;
 };
 
+export type ActivityCellRuntimeStatus = {
+  label: string;
+  detail?: string | null;
+  active_runtime_started_at_ms?: number | null;
+  reduced_motion?: "Full" | "Reduced" | (string & {});
+};
+
 export type ActivityCellPrimitive = {
   primitive_id: string;
 };
@@ -379,6 +386,7 @@ export type ActivityCellVariant =
   | { TerminalWait: ActivityCellCommon }
   | { Error: ActivityCellCommon }
   | { Thinking: ActivityCellCommon & { full_body?: string | null } }
+  | { RuntimeStatus: ActivityCellRuntimeStatus }
   | Record<string, unknown>;
 
 export type WebActivityItem = {

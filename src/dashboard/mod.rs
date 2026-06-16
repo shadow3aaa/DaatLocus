@@ -613,7 +613,7 @@ fn render_tui_dashboard_frame<B: Backend>(
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(6),
-                Constraint::Length(2 + input_lines + panel_rows + popup_rows + feedback_rows),
+                Constraint::Length(1 + input_lines + panel_rows + popup_rows + feedback_rows),
             ])
             .split(f.area());
         // max_scroll now returned directly from render (no double traversal)
@@ -642,8 +642,6 @@ fn render_tui_dashboard_frame<B: Backend>(
                     requests: &pending_requests,
                     state,
                 },
-                runtime_status: state.runtime_status.as_deref(),
-                runtime_activity: &state.runtime_activity,
                 footer_context: &state.footer_context,
                 pending_paste_count: view.pending_pastes.len(),
                 pending_image_attachment_count: view.pending_image_attachments.len(),

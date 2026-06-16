@@ -12,8 +12,8 @@ use super::{
     common::{
         AssistantActivityCell, CodingEditActivityCell, CodingOpenProjectActivityCell,
         CodingReviewActivityCell, ErrorActivityCell, ExploredActivityCell,
-        FinalMessageSeparatorActivityCell, GenericAppActivityCell, TerminalWaitActivityCell,
-        ThinkingActivityCell, UserActivityCell,
+        FinalMessageSeparatorActivityCell, GenericAppActivityCell, RuntimeStatusActivityCell,
+        TerminalWaitActivityCell, ThinkingActivityCell, UserActivityCell,
     },
     exec::{ExecResultActivityCell, LiveExecActivityCell},
     messages::{PatchActivityCell, ReplyActivityCell, TelegramActivityCell},
@@ -37,7 +37,9 @@ pub fn sync_web_activity_state(state: &mut crate::dashboard::DashboardState) {
     state.web_activity_version = WEB_ACTIVITY_VERSION;
     state.web_activity_items = state.activity_history.items.clone();
 
-    let mut live_items = render_live_web_activity_items(&state.live_activity_cells);
+    let mut live_cells = state.live_activity_cells.clone();
+    super::append_runtime_status_live_cell(&mut live_cells, state);
+    let mut live_items = render_live_web_activity_items(&live_cells);
     for entry in &mut live_items {
         preserve_item_timestamps(&mut entry.item, &previous_live_items);
     }
@@ -281,6 +283,7 @@ pub fn web_activity_item_from_cell(cell: &ActivityCell, id: &str, live: bool) ->
         ActivityCell::Warning(cell) => apply_warning_cell(&mut item, cell),
         ActivityCell::Error(cell) => apply_error_cell(&mut item, cell),
         ActivityCell::Thinking(cell) => apply_thinking_cell(&mut item, cell),
+        ActivityCell::RuntimeStatus(cell) => apply_runtime_status_cell(&mut item, cell),
     }
     item.ui_hint = Some(activity_cell_variant_name(cell).to_string());
 
@@ -315,6 +318,7 @@ fn activity_cell_variant_name(cell: &ActivityCell) -> &'static str {
         ActivityCell::Warning(_) => "Warning",
         ActivityCell::Error(_) => "Error",
         ActivityCell::Thinking(_) => "Thinking",
+        ActivityCell::RuntimeStatus(_) => "RuntimeStatus",
     }
 }
 
@@ -863,6 +867,23 @@ fn apply_file_edit_cell(item: &mut WebActivityItem, cell: &PatchActivityCell) {
     }];
 }
 
+fn apply_runtime_status_cell(item: &mut WebActivityItem, cell: &RuntimeStatusActivityCell) {
+    item.kind = WebActivityKind::App;
+    item.actor = Some(WebActivityActor::System);
+    item.status = WebActivityStatus::Running;
+    item.title = if cell.label.trim().is_empty() {
+        "Working".to_string()
+    } else {
+        cell.label.trim().to_string()
+    };
+    item.blocks = cell
+        .detail
+        .as_deref()
+        .filter(|detail| !detail.trim().is_empty())
+        .map(|detail| text_blocks(vec![detail.to_string()]))
+        .unwrap_or_default();
+}
+
 fn apply_error_cell(item: &mut WebActivityItem, cell: &ErrorActivityCell) {
     item.kind = WebActivityKind::Error;
     item.actor = Some(WebActivityActor::Tool);
@@ -1091,7 +1112,26 @@ fn format_patch_summary(files: &[PatchFileUiData]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::{DashboardRuntimeActivity, DashboardState};
 
+    #[test]
+    fn sync_web_activity_adds_runtime_status_live_item() {
+        let mut state = DashboardState {
+            runtime_activity: DashboardRuntimeActivity::default()
+                .with_runtime_turn(Some("model request".to_string()), Some(1_000)),
+            ..DashboardState::default()
+        };
+
+        sync_web_activity_state(&mut state);
+
+        assert!(state.web_activity_items.is_empty());
+        assert_eq!(state.live_web_activity_items.len(), 1);
+        let live_item = &state.live_web_activity_items[0];
+        assert_eq!(live_item.key, "runtime-status");
+        assert_eq!(live_item.item.title, "Working");
+        assert_eq!(live_item.item.status, WebActivityStatus::Running);
+        assert_eq!(live_item.item.ui_hint.as_deref(), Some("RuntimeStatus"));
+    }
     #[test]
     fn web_activity_tool_duration_json_round_trips() {
         let tool = WebActivityTool {

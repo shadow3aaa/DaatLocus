@@ -45,7 +45,6 @@ pub fn sync_dashboard_state(
         } else {
             activity_cells_from_history_items(&state.activity_history.items)
         };
-        crate::dashboard::sync_web_activity_state(state);
         state.last_cycle_elapsed_ms = last_cycle_elapsed_ms.map(duration_millis_to_u64);
         state.runtime_activity = runtime_activity_for_dashboard(
             context,
@@ -53,6 +52,7 @@ pub fn sync_dashboard_state(
             state.runtime_status.as_deref(),
             state.runtime_status_level,
         );
+        crate::dashboard::sync_web_activity_state(state);
         state.footer_context =
             render_dashboard_footer_context(context, state.footer_estimated_input_tokens);
         state.current_plan_step = current_plan_step_for_dashboard(context);

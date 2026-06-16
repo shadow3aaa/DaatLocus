@@ -15,7 +15,8 @@ use super::{
         AssistantActivityCell, CodingEditActivityCell, CodingOpenProjectActivityCell,
         CodingReviewActivityCell, ErrorActivityCell, ExploredActivityCell,
         ExploredCallActivityCell, FinalMessageSeparatorActivityCell, GenericAppActivityCell,
-        MessageImageAttachment, TerminalWaitActivityCell, ThinkingActivityCell, UserActivityCell,
+        MessageImageAttachment, ReducedMotion, RuntimeStatusActivityCell, TerminalWaitActivityCell,
+        ThinkingActivityCell, UserActivityCell,
     },
     exec::{ExecResultActivityCell, LiveExecActivityCell, TerminalExecutionMeta},
     highlight::{
@@ -352,6 +353,7 @@ fn render_activity_cell_lines(cell: &ActivityCell, max_width: u16) -> Vec<Line<'
         ActivityCell::Warning(cell) => render_warning_cell_lines(cell, max_width),
         ActivityCell::Error(cell) => render_error_cell_lines(cell, max_width),
         ActivityCell::Thinking(cell) => render_thinking_cell_lines(cell, max_width),
+        ActivityCell::RuntimeStatus(cell) => render_runtime_status_cell_lines(cell, max_width),
     }
 }
 
@@ -849,6 +851,9 @@ fn activity_cell_transcript_block(cell: &ActivityCell) -> String {
         }
         ActivityCell::TerminalWait(cell) => {
             transcript_section(&cell.title, terminal_wait_transcript_text(cell))
+        }
+        ActivityCell::RuntimeStatus(cell) => {
+            transcript_section(&cell.label, cell.detail.clone().unwrap_or_default())
         }
         ActivityCell::Warning(cell) => transcript_section(
             "WARNING",
@@ -1701,6 +1706,63 @@ fn coding_edit_title(cell: &CodingEditActivityCell) -> String {
     format!(
         "Edited Code (+{} -{})",
         cell.added_lines, cell.removed_lines
+    )
+}
+
+fn render_runtime_status_cell_lines(
+    cell: &RuntimeStatusActivityCell,
+    max_width: u16,
+) -> Vec<Line<'static>> {
+    let elapsed_seconds = cell
+        .active_runtime_started_at_ms
+        .map(|started_at_ms| {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            now_ms.saturating_sub(started_at_ms).max(0) as u64 / 1000
+        })
+        .unwrap_or(0);
+    runtime_status_cell_lines_at(cell, elapsed_seconds, max_width)
+}
+
+fn runtime_status_cell_lines_at(
+    cell: &RuntimeStatusActivityCell,
+    elapsed_seconds: u64,
+    max_width: u16,
+) -> Vec<Line<'static>> {
+    let marker = if cell.reduced_motion == ReducedMotion::Full {
+        activity_marker(cell.active_runtime_started_at_ms)
+    } else {
+        Span::raw(ACTIVITY_BULLET)
+    };
+    let title = if cell.label.trim().is_empty() {
+        "Working"
+    } else {
+        cell.label.trim()
+    };
+    let mut spans = vec![
+        Span::styled(title.to_string(), bold_style()),
+        Span::styled(
+            format!(" ({} • ", format_elapsed_seconds_compact(elapsed_seconds)),
+            dim_style(),
+        ),
+        Span::styled("esc", bold_style()),
+        Span::styled(" to interrupt)", dim_style()),
+    ];
+    if let Some(detail) = cell
+        .detail
+        .as_deref()
+        .filter(|detail| !detail.trim().is_empty())
+    {
+        spans.push(Span::styled(" — ", dim_style()));
+        spans.push(Span::styled(detail.trim().to_string(), dim_style()));
+    }
+    prefixed_wrapped_line(
+        Line::from(spans),
+        vec![marker, Span::raw(ACTIVITY_TITLE_GAP)],
+        vec![Span::styled(COMMAND_CONTINUATION_PREFIX, dim_style())],
+        max_width,
     )
 }
 
@@ -2835,6 +2897,25 @@ That's it.";
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    #[test]
+    fn runtime_status_cell_renders_working_tail_indicator() {
+        let cell = RuntimeStatusActivityCell {
+            label: String::new(),
+            detail: Some("model request".to_string()),
+            active_runtime_started_at_ms: Some(1_000),
+            reduced_motion: ReducedMotion::Reduced,
+        };
+        let rendered = runtime_status_cell_lines_at(&cell, 82, 80)
+            .into_iter()
+            .map(|line| line_text(&line))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec!["• Working (1m 22s • esc to interrupt) — model request"]
+        );
     }
 
     fn line_display_width(line: &str) -> usize {

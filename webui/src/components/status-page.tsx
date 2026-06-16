@@ -389,6 +389,13 @@ type AgentChatActivityCellRender =
       bodyLines: string[];
       fullBody?: string | null;
       bodyLimit: number;
+    }
+  | {
+      kind: "runtimeStatus";
+      icon: AgentChatActivityMarkerKind;
+      title: string;
+      detail?: string | null;
+      startedAtMs?: number | null;
     };
 
 type AgentChatExploredCallAction = "read" | "list" | "search" | "run" | "unknown";
@@ -3433,6 +3440,17 @@ function AgentChatActivityCellView({
     );
   }
 
+  if (render.kind === "runtimeStatus") {
+    return (
+      <AgentChatRuntimeStatusCell
+        icon={render.icon}
+        title={render.title}
+        detail={render.detail}
+        startedAtMs={render.startedAtMs}
+      />
+    );
+  }
+
   if (render.kind === "browser") {
     return (
       <AgentChatActivityTextCell
@@ -3641,6 +3659,56 @@ function AgentChatDetailRows({
           </div>
         </Fragment>
       ))}
+    </div>
+  );
+}
+
+function AgentChatRuntimeStatusCell({
+  icon,
+  title,
+  detail,
+  startedAtMs,
+}: {
+  icon: AgentChatActivityMarkerKind;
+  title: string;
+  detail?: string | null;
+  startedAtMs?: number | null;
+}) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const elapsedText = formatAgentChatDuration(
+    startedAtMs ? Math.max(0, nowMs - startedAtMs) : 0,
+  );
+  const detailText = detail?.trim();
+
+  useEffect(() => {
+    if (!startedAtMs) {
+      return;
+    }
+
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [startedAtMs]);
+
+  return (
+    <div className="grid min-w-0 grid-cols-[0.75rem_minmax(0,1fr)] items-start gap-x-3 px-2 text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere] sm:gap-x-[16px] sm:px-3">
+      <AgentChatActivityMarker
+        icon={icon}
+        className="motion-safe:animate-pulse text-primary"
+      />
+      <p className="min-w-0 break-words">
+        <span className="font-semibold text-foreground">
+          <AgentChatMarkdownInline text={title} />
+        </span>{" "}
+        <span className="text-muted-foreground">({elapsedText} • </span>
+        <span className="font-semibold text-foreground">esc</span>
+        <span className="text-muted-foreground"> to interrupt)</span>
+        {detailText ? (
+          <>
+            <span className="text-muted-foreground"> — </span>
+            <span className="text-muted-foreground">{detailText}</span>
+          </>
+        ) : null}
+      </p>
     </div>
   );
 }
@@ -5602,6 +5670,17 @@ function agentChatActivityCellRenderForBubble(
       bodyLines: stringArrayValue(thinking.body_lines),
       fullBody: nullableStringValue(thinking.full_body),
       bodyLimit: AGENT_CHAT_THINKING_PREVIEW_LINE_LIMIT,
+    };
+  }
+
+  const runtimeStatus = agentChatActivityCellPayload(cell, "RuntimeStatus");
+  if (runtimeStatus) {
+    return {
+      kind: "runtimeStatus",
+      icon: "activity",
+      title: stringValue(runtimeStatus.label, "Working"),
+      detail: nullableStringValue(runtimeStatus.detail),
+      startedAtMs: nullableNumberValue(runtimeStatus.active_runtime_started_at_ms),
     };
   }
 

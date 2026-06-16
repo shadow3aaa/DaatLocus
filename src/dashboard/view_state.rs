@@ -6,6 +6,7 @@ use super::command_panels::{CommandFeedback, CommandPanel};
 use super::{
     ActivityCell, CachedActivityLines, DashboardActivityHistoryPage, DashboardCommandAttachment,
     DashboardState, LiveActivityCell, activity_cells_from_history_items,
+    cells::append_runtime_status_live_cell,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,7 +132,9 @@ impl TranscriptOverlayState {
             .collect::<Vec<_>>();
         next_cells.extend(state.activity_cells.clone());
         self.cells = next_cells;
-        self.live_cells = state.live_activity_cells.clone();
+        let mut live_cells = state.live_activity_cells.clone();
+        append_runtime_status_live_cell(&mut live_cells, state);
+        self.live_cells = live_cells;
         self.clamp_scroll();
     }
 
@@ -437,11 +440,12 @@ impl TuiViewState {
                 thinking.expanded = self.expanded_thinking.contains(&i);
             }
         }
-        let live_cells = if self.visible_activity_cleared {
+        let mut live_cells = if self.visible_activity_cleared {
             Vec::new()
         } else {
             state.live_activity_cells.clone()
         };
+        append_runtime_status_live_cell(&mut live_cells, state);
         (committed_cells, live_cells)
     }
 
@@ -610,8 +614,28 @@ impl TuiViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dashboard::assistant_activity_cell;
+    use crate::dashboard::{DashboardRuntimeActivity, assistant_activity_cell};
 
+    #[test]
+    fn visible_activity_cells_adds_runtime_status_live_cell() {
+        let view = TuiViewState::new();
+        let state = DashboardState {
+            runtime_activity: DashboardRuntimeActivity::default()
+                .with_runtime_turn(Some("model request".to_string()), Some(1_000)),
+            ..DashboardState::default()
+        };
+
+        let (_, live_cells) = view.visible_activity_cells(&state);
+
+        assert!(state.live_activity_cells.is_empty());
+        assert_eq!(live_cells.len(), 1);
+        assert_eq!(live_cells[0].key, "runtime-status");
+        let ActivityCell::RuntimeStatus(cell) = &live_cells[0].cell else {
+            panic!("expected runtime status live cell");
+        };
+        assert_eq!(cell.label, "Working");
+        assert_eq!(cell.active_runtime_started_at_ms, Some(1_000));
+    }
     #[test]
     fn scroll_rows_moves_up_from_auto_scroll_without_key_event() {
         let mut view = TuiViewState::new();

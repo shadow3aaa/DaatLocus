@@ -23,8 +23,9 @@ use apps::{BrowserActivityCell, LiveBrowserActivityCell, WebSearchActivityCell};
 pub(crate) use common::ExploredCallActivityCell;
 use common::{
     AssistantActivityCell, ErrorActivityCell, GenericAppActivityCell, MessageImageAttachment,
-    TerminalWaitActivityCell, UserActivityCell, assistant_cell_with_body, error_cell,
-    final_message_separator_cell, terminal_wait_cell, user_cell,
+    RuntimeStatusActivityCell, TerminalWaitActivityCell, UserActivityCell,
+    assistant_cell_with_body, error_cell, final_message_separator_cell, terminal_wait_cell,
+    user_cell,
 };
 use common::{
     CodingEditActivityCell, CodingOpenProjectActivityCell, CodingReviewActivityCell,
@@ -78,6 +79,28 @@ pub enum ActivityCell {
     Warning(ErrorActivityCell),
     Error(ErrorActivityCell),
     Thinking(ThinkingActivityCell),
+    RuntimeStatus(RuntimeStatusActivityCell),
+}
+
+const RUNTIME_STATUS_LIVE_CELL_KEY: &str = "runtime-status";
+
+pub(super) fn append_runtime_status_live_cell(
+    live_cells: &mut Vec<LiveActivityCell>,
+    state: &DashboardState,
+) {
+    if !state.runtime_activity.active_runtime_turn {
+        return;
+    }
+
+    live_cells.push(LiveActivityCell {
+        key: RUNTIME_STATUS_LIVE_CELL_KEY.to_string(),
+        cell: ActivityCell::RuntimeStatus(RuntimeStatusActivityCell {
+            label: "Working".to_string(),
+            detail: state.runtime_activity.detail.clone(),
+            active_runtime_started_at_ms: state.runtime_activity.active_runtime_started_at_ms,
+            reduced_motion: state.reduced_motion.clone(),
+        }),
+    });
 }
 
 #[derive(Clone)]

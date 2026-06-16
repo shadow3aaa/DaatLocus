@@ -1,6 +1,3 @@
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
-
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
@@ -23,161 +20,6 @@ use super::command_panels::{
 use super::command_registry::dashboard_command_is_known;
 use super::command_text::{truncate_command_text, truncate_display_width};
 use super::view_state::CtrlCReminder;
-use super::{DashboardRuntimeActivity, ReducedMotion};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MotionMode {
-    Animated,
-    Reduced,
-}
-
-impl MotionMode {
-    fn from_reduced_motion(reduced_motion: &ReducedMotion) -> Self {
-        if *reduced_motion == ReducedMotion::Full {
-            Self::Animated
-        } else {
-            Self::Reduced
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReducedMotionIndicator {
-    Hidden,
-    StaticBullet,
-}
-
-static PROCESS_START: OnceLock<Instant> = OnceLock::new();
-
-fn elapsed_since_start() -> Duration {
-    let start = PROCESS_START.get_or_init(Instant::now);
-    start.elapsed()
-}
-
-fn activity_indicator(
-    start_time: Option<Instant>,
-    motion_mode: MotionMode,
-    reduced_motion_indicator: ReducedMotionIndicator,
-) -> Option<Span<'static>> {
-    match motion_mode {
-        MotionMode::Animated => Some(animated_activity_indicator(start_time)),
-        MotionMode::Reduced => match reduced_motion_indicator {
-            ReducedMotionIndicator::Hidden => None,
-            ReducedMotionIndicator::StaticBullet => Some(Span::styled(
-                "•",
-                Style::default().add_modifier(Modifier::DIM),
-            )),
-        },
-    }
-}
-
-fn shimmer_text(text: &str, motion_mode: MotionMode) -> Vec<Span<'static>> {
-    match motion_mode {
-        MotionMode::Animated => shimmer_spans(text),
-        MotionMode::Reduced => {
-            if text.is_empty() {
-                Vec::new()
-            } else {
-                vec![Span::raw(text.to_string())]
-            }
-        }
-    }
-}
-
-fn animated_activity_indicator(start_time: Option<Instant>) -> Span<'static> {
-    let elapsed = start_time.map(|st| st.elapsed()).unwrap_or_default();
-    if supports_color::on_cached(supports_color::Stream::Stdout)
-        .map(|level| level.has_16m)
-        .unwrap_or(false)
-    {
-        shimmer_spans("•")
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| Span::raw("•"))
-    } else {
-        let blink_on = (elapsed.as_millis() / 600).is_multiple_of(2);
-        if blink_on {
-            Span::raw("•")
-        } else {
-            Span::styled("◦", Style::default().add_modifier(Modifier::DIM))
-        }
-    }
-}
-
-fn shimmer_spans(text: &str) -> Vec<Span<'static>> {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return Vec::new();
-    }
-    let padding = 10usize;
-    let period = chars.len() + padding * 2;
-    let sweep_seconds = 2.0f32;
-    let pos_f =
-        (elapsed_since_start().as_secs_f32() % sweep_seconds) / sweep_seconds * (period as f32);
-    let pos = pos_f as usize;
-    let has_true_color = supports_color::on_cached(supports_color::Stream::Stdout)
-        .map(|level| level.has_16m)
-        .unwrap_or(false);
-    let band_half_width = 5.0;
-
-    let mut spans = Vec::with_capacity(chars.len());
-    let base_color = (128, 128, 128);
-    let highlight_color = (255, 255, 255);
-    for (i, ch) in chars.iter().enumerate() {
-        let i_pos = i as isize + padding as isize;
-        let pos = pos as isize;
-        let dist = (i_pos - pos).abs() as f32;
-
-        let intensity = if dist <= band_half_width {
-            let x = std::f32::consts::PI * (dist / band_half_width);
-            0.5 * (1.0 + x.cos())
-        } else {
-            0.0
-        };
-        let style = if has_true_color {
-            let highlight = intensity.clamp(0.0, 1.0);
-            let (r, g, b) = blend(highlight_color, base_color, highlight * 0.9);
-            #[allow(clippy::disallowed_methods)]
-            {
-                Style::default()
-                    .fg(Color::Rgb(r, g, b))
-                    .add_modifier(Modifier::BOLD)
-            }
-        } else {
-            color_for_level(intensity)
-        };
-        spans.push(Span::styled(ch.to_string(), style));
-    }
-    spans
-}
-
-fn color_for_level(intensity: f32) -> Style {
-    if intensity < 0.2 {
-        Style::default().add_modifier(Modifier::DIM)
-    } else if intensity < 0.6 {
-        Style::default()
-    } else {
-        Style::default().add_modifier(Modifier::BOLD)
-    }
-}
-
-fn blend(fg: (u8, u8, u8), bg: (u8, u8, u8), alpha: f32) -> (u8, u8, u8) {
-    let r = (fg.0 as f32 * alpha + bg.0 as f32 * (1.0 - alpha)) as u8;
-    let g = (fg.1 as f32 * alpha + bg.1 as f32 * (1.0 - alpha)) as u8;
-    let b = (fg.2 as f32 * alpha + bg.2 as f32 * (1.0 - alpha)) as u8;
-    (r, g, b)
-}
-
-fn runtime_start_instant(
-    runtime_started_at_ms: Option<i64>,
-    now_ms: i64,
-    now: Instant,
-) -> Option<Instant> {
-    let started_at_ms = runtime_started_at_ms?;
-    let elapsed_ms = now_ms.saturating_sub(started_at_ms).max(0) as u64;
-    now.checked_sub(Duration::from_millis(elapsed_ms))
-}
 
 impl CommandPanel {
     pub(super) fn desired_height(&self) -> u16 {
@@ -224,8 +66,6 @@ pub(super) struct CommandBarRenderState<'a> {
     pub(super) cursor_pos: usize,
     pub(super) context: &'a DashboardCommandContext<'a>,
     pub(super) feedback: Option<&'a CommandFeedback>,
-    pub(super) runtime_status: Option<&'a str>,
-    pub(super) runtime_activity: &'a DashboardRuntimeActivity,
     pub(super) footer_context: &'a str,
     pub(super) pending_paste_count: usize,
     pub(super) pending_image_attachment_count: usize,
@@ -248,7 +88,7 @@ pub(super) fn command_panel_row_count(
     let Some(panel) = panel else {
         return 0;
     };
-    let base_rows = 2u16
+    let base_rows = 1u16
         .saturating_add(input_lines)
         .saturating_add(popup_rows)
         .saturating_add(feedback_rows);
@@ -304,8 +144,6 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
         input_lines,
         context,
         feedback,
-        runtime_status,
-        runtime_activity,
         footer_context,
         pending_paste_count,
         pending_image_attachment_count,
@@ -340,7 +178,6 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
             if panel_rows > 0 {
                 c.push(Constraint::Length(panel_rows));
             }
-            c.push(Constraint::Length(1));
             if feedback_rows > 0 {
                 c.push(Constraint::Length(feedback_rows));
             }
@@ -359,13 +196,6 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
         render_command_panel(f, rows[row_index], panel);
         row_index += 1;
     }
-    let status_line = render_runtime_status_line(
-        runtime_status,
-        runtime_activity,
-        &context.state.reduced_motion,
-    );
-    f.render_widget(Paragraph::new(status_line), rows[row_index]);
-    row_index += 1;
     if let Some(feedback) = feedback
         && feedback_rows > 0
     {
@@ -1028,86 +858,6 @@ fn render_telegram_access_panel(f: &mut Frame, area: Rect, picker: &TelegramAcce
     );
 }
 
-fn render_working_status_line(
-    runtime_started_at_ms: Option<i64>,
-    reduced_motion: &ReducedMotion,
-) -> Line<'static> {
-    let now = Instant::now();
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    render_working_status_line_at(
-        runtime_started_at_ms,
-        now_ms,
-        MotionMode::from_reduced_motion(reduced_motion),
-        runtime_start_instant(runtime_started_at_ms, now_ms, now),
-    )
-}
-
-fn render_working_status_line_at(
-    runtime_started_at_ms: Option<i64>,
-    now_ms: i64,
-    motion_mode: MotionMode,
-    start_time: Option<Instant>,
-) -> Line<'static> {
-    let elapsed_secs = runtime_started_at_ms
-        .map(|started_at_ms| now_ms.saturating_sub(started_at_ms).max(0) as u64 / 1000)
-        .unwrap_or(0);
-    let pretty_elapsed = fmt_elapsed_compact(elapsed_secs);
-    let mut spans = Vec::with_capacity(7);
-    if let Some(indicator) =
-        activity_indicator(start_time, motion_mode, ReducedMotionIndicator::Hidden)
-    {
-        spans.push(indicator);
-        spans.push(Span::raw(" "));
-    }
-    spans.extend(shimmer_text("Working", motion_mode));
-    if !spans.is_empty() {
-        spans.push(Span::raw(" "));
-    }
-    spans.extend(vec![
-        Span::styled(
-            format!("({pretty_elapsed} • "),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
-            "esc",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" to interrupt)", Style::default().fg(Color::DarkGray)),
-    ]);
-    Line::from(spans)
-}
-
-fn fmt_elapsed_compact(elapsed_secs: u64) -> String {
-    if elapsed_secs < 60 {
-        return format!("{elapsed_secs}s");
-    }
-    if elapsed_secs < 3600 {
-        let minutes = elapsed_secs / 60;
-        let seconds = elapsed_secs % 60;
-        return format!("{minutes}m {seconds:02}s");
-    }
-    let hours = elapsed_secs / 3600;
-    let minutes = (elapsed_secs % 3600) / 60;
-    let seconds = elapsed_secs % 60;
-    format!("{hours}h {minutes:02}m {seconds:02}s")
-}
-
-fn render_runtime_status_line(
-    _runtime_status: Option<&str>,
-    runtime_activity: &DashboardRuntimeActivity,
-    reduced_motion: &ReducedMotion,
-) -> Line<'static> {
-    if runtime_activity.active_runtime_turn {
-        return render_working_status_line(
-            runtime_activity.active_runtime_started_at_ms,
-            reduced_motion,
-        );
-    }
-    Line::from("")
-}
-
 fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
     let matches = matching_commands(input, context);
     if !is_dashboard_command_input(input) {
@@ -1193,71 +943,5 @@ mod tests {
     fn footer_line_can_show_ctrl_c_interrupt_reminder() {
         let line = render_footer_line("", "Enter send.", 0, 0, Some(CtrlCReminder::Interrupt), 120);
         assert_eq!(line_text(&line), "ctrl + c again to interrupt");
-    }
-
-    #[test]
-    fn runtime_status_line_hides_internal_phase_text() {
-        let activity = DashboardRuntimeActivity::default();
-        let line = render_runtime_status_line(
-            Some("processing: runtime turn / preflight: preturn context"),
-            &activity,
-            &ReducedMotion::Full,
-        );
-        assert_eq!(line_text(&line), "");
-    }
-
-    #[test]
-    fn runtime_status_line_keeps_working_indicator_with_interrupt_hint() {
-        let activity = DashboardRuntimeActivity::default()
-            .with_runtime_turn(Some("model request".to_string()), Some(1_000));
-        let line = render_working_status_line_at(
-            activity.active_runtime_started_at_ms,
-            83_000,
-            MotionMode::Animated,
-            None,
-        );
-        assert_eq!(line_text(&line), "• Working (1m 22s • esc to interrupt)");
-    }
-
-    #[test]
-    fn runtime_status_line_hides_animation_in_reduced_motion() {
-        let activity = DashboardRuntimeActivity::default()
-            .with_runtime_turn(Some("model request".to_string()), Some(1_000));
-        let line = render_working_status_line_at(
-            activity.active_runtime_started_at_ms,
-            83_000,
-            MotionMode::Reduced,
-            None,
-        );
-        assert_eq!(line_text(&line), "Working (1m 22s • esc to interrupt)");
-    }
-
-    #[test]
-    fn reduced_motion_activity_indicator_uses_explicit_fallback() {
-        assert_eq!(
-            activity_indicator(None, MotionMode::Reduced, ReducedMotionIndicator::Hidden),
-            None
-        );
-        assert_eq!(
-            activity_indicator(
-                None,
-                MotionMode::Reduced,
-                ReducedMotionIndicator::StaticBullet,
-            ),
-            Some(Span::styled(
-                "•",
-                Style::default().add_modifier(Modifier::DIM),
-            ))
-        );
-    }
-
-    #[test]
-    fn fmt_elapsed_compact_formats_seconds_minutes_hours() {
-        assert_eq!(fmt_elapsed_compact(0), "0s");
-        assert_eq!(fmt_elapsed_compact(59), "59s");
-        assert_eq!(fmt_elapsed_compact(60), "1m 00s");
-        assert_eq!(fmt_elapsed_compact(61), "1m 01s");
-        assert_eq!(fmt_elapsed_compact(3600), "1h 00m 00s");
-        assert_eq!(fmt_elapsed_compact(3661), "1h 01m 01s");
     }
 }

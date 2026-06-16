@@ -37,6 +37,16 @@ pub enum ReducedMotion {
     /// Animations mostly disabled; static indicators preferred.
     Reduced,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeStatusActivityCell {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_runtime_started_at_ms: Option<i64>,
+    #[serde(default)]
+    pub reduced_motion: ReducedMotion,
+}
 
 /// Thinking / reasoning content produced by the model.
 /// Rendered truncated by default; press Enter to expand.
