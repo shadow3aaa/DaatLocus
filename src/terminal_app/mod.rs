@@ -87,6 +87,7 @@ impl TerminalApp {
     const MAX_WRITE_STDIN_YIELD_TIME_MS: u64 = 30_000;
     const MAX_WAIT_YIELD_TIME_MS: u64 = 120_000;
     const TRAILING_OUTPUT_DRAIN_GRACE_MS: u64 = 100;
+    const FAST_EXIT_OBSERVATION_GRACE_MS: u64 = 500;
     const MAX_EXITED_SESSION_TOMBSTONES: usize = 4;
 
     pub fn new() -> Self {
@@ -219,6 +220,13 @@ impl TerminalApp {
                 break;
             }
         }
+        wait_for_fast_exit_after_short_initial_yield(
+            session,
+            start_offset,
+            timeout,
+            Duration::from_millis(Self::FAST_EXIT_OBSERVATION_GRACE_MS),
+        )
+        .await;
         wait_for_trailing_terminal_output(session).await;
         refresh_terminal_session(session);
         let chunk = session
@@ -1130,6 +1138,39 @@ fn refresh_terminal_session(session: &mut TerminalSession) {
         } else {
             "idle".to_string()
         };
+    }
+}
+
+async fn wait_for_fast_exit_after_short_initial_yield(
+    session: &mut TerminalSession,
+    start_offset: usize,
+    initial_yield: Duration,
+    grace: Duration,
+) {
+    if initial_yield > grace || session.state.status != "running" {
+        return;
+    }
+    let Some(process) = session.process.as_ref() else {
+        return;
+    };
+    if process.output_len() > start_offset {
+        return;
+    }
+
+    let started_at = Instant::now();
+    loop {
+        refresh_terminal_session(session);
+        if session.state.status != "running" {
+            return;
+        }
+        let Some(process) = session.process.as_ref() else {
+            return;
+        };
+        if process.output_len() > start_offset || started_at.elapsed() >= grace {
+            return;
+        }
+        let remaining = grace.saturating_sub(started_at.elapsed());
+        tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
     }
 }
 
