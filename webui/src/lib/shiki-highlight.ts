@@ -2,10 +2,16 @@ import {
   bundledLanguages,
   codeToTokensBase,
   type BundledLanguage,
+  type BundledTheme,
   type ThemedToken,
 } from "shiki";
 
-const SHIKI_THEME = "github-dark-default";
+export type ShikiColorScheme = "light" | "dark";
+
+const SHIKI_THEME_BY_SCHEME: Record<ShikiColorScheme, BundledTheme> = {
+  light: "github-light-default",
+  dark: "github-dark-default",
+};
 const SHIKI_MAX_CODE_CHARS = 200_000;
 const SHIKI_MAX_CODE_LINES = 5_000;
 const SHIKI_MAX_LINE_LENGTH = 2_000;
@@ -40,6 +46,7 @@ export type ShikiHighlightedCode = {
 export async function highlightCodeWithShiki(
   code: string,
   languageOrPath: string,
+  colorScheme: ShikiColorScheme = "light",
 ): Promise<ShikiHighlightedCode | null> {
   const language = resolveShikiLanguage(languageOrPath);
   if (!language || !isHighlightableCode(code)) {
@@ -49,7 +56,7 @@ export async function highlightCodeWithShiki(
   try {
     const lines = await codeToTokensBase(code, {
       lang: language,
-      theme: SHIKI_THEME,
+      theme: SHIKI_THEME_BY_SCHEME[colorScheme],
       tokenizeMaxLineLength: SHIKI_MAX_LINE_LENGTH,
       tokenizeTimeLimit: SHIKI_TOKENIZE_TIME_LIMIT_MS,
     });

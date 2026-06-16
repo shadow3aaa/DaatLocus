@@ -68,6 +68,7 @@ import {
 } from "@/lib/daemon-api";
 import {
   highlightCodeWithShiki,
+  type ShikiColorScheme,
   type ShikiHighlightedCode,
   type ShikiHighlightToken,
 } from "@/lib/shiki-highlight";
@@ -4203,20 +4204,20 @@ function agentChatDiffLinePrefix(line: AgentChatDiffLine) {
 
 function agentChatDiffRowToneClassName(kind: string) {
   if (kind === "add") {
-    return "bg-emerald-500/10";
+    return "bg-emerald-50/90 dark:bg-emerald-500/10";
   }
   if (kind === "delete") {
-    return "bg-red-500/10";
+    return "bg-red-50/90 dark:bg-red-500/10";
   }
   return "";
 }
 
 function agentChatDiffGutterToneClassName(kind: string) {
   if (kind === "add") {
-    return "text-emerald-400/90";
+    return "text-emerald-700 dark:text-emerald-300/90";
   }
   if (kind === "delete") {
-    return "text-red-400/90";
+    return "text-red-700 dark:text-red-300/90";
   }
   return "";
 }
@@ -4791,6 +4792,7 @@ function AgentChatImageAttachment({
 }
 
 function useShikiHighlightedCode(code: string, languageOrPath: string) {
+  const colorScheme = useAgentChatCodeColorScheme();
   const [highlighted, setHighlighted] = useState<ShikiHighlightedCode | null>(
     null,
   );
@@ -4798,17 +4800,48 @@ function useShikiHighlightedCode(code: string, languageOrPath: string) {
   useEffect(() => {
     let cancelled = false;
     setHighlighted(null);
-    void highlightCodeWithShiki(code, languageOrPath).then((nextHighlighted) => {
-      if (!cancelled) {
-        setHighlighted(nextHighlighted);
-      }
-    });
+    void highlightCodeWithShiki(code, languageOrPath, colorScheme).then(
+      (nextHighlighted) => {
+        if (!cancelled) {
+          setHighlighted(nextHighlighted);
+        }
+      },
+    );
     return () => {
       cancelled = true;
     };
-  }, [code, languageOrPath]);
+  }, [code, colorScheme, languageOrPath]);
 
   return highlighted;
+}
+
+function useAgentChatCodeColorScheme(): ShikiColorScheme {
+  const [colorScheme, setColorScheme] = useState(agentChatCodeColorScheme);
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    const root = document.documentElement;
+    const update = () => setColorScheme(agentChatCodeColorScheme());
+    const observer = new MutationObserver(update);
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] });
+
+    return () => observer.disconnect();
+  }, []);
+
+  return colorScheme;
+}
+
+function agentChatCodeColorScheme(): ShikiColorScheme {
+  if (
+    typeof document !== "undefined" &&
+    document.documentElement.classList.contains("dark")
+  ) {
+    return "dark";
+  }
+  return "light";
 }
 
 const AgentChatCodeBlock = memo(function AgentChatCodeBlock({
