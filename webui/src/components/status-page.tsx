@@ -67,6 +67,7 @@ import {
   type WebActivityBlock,
   type WebActivityItem,
 } from "@/lib/daemon-api";
+import { foldCompletedAgentChatActivity } from "@/lib/agent-chat-folding";
 import {
   highlightCodeWithShiki,
   type ShikiColorScheme,
@@ -416,18 +417,6 @@ type AgentChatActivityCellViewProps = {
   bubbleId: string;
   render: AgentChatActivityCellRender;
 };
-
-type AgentChatDisplayItem =
-  | {
-      kind: "bubble";
-      id: string;
-      bubble: AgentChatBubble;
-    }
-  | {
-      kind: "foldedActivityGroup";
-      id: string;
-      bubbles: AgentChatBubble[];
-    };
 
 function AgentChatComposer({
   sessionId,
@@ -2822,7 +2811,10 @@ function AgentChatBubbles({
     [historyBubbles, snapshotBubbles],
   );
   const displayItems = useMemo(
-    () => foldCompletedAgentChatActivity(bubbles),
+    () =>
+      foldCompletedAgentChatActivity(bubbles, {
+        isOutputBoundary: agentChatBubbleIsOutputBoundary,
+      }),
     [bubbles],
   );
   const [openFoldedActivityGroups, setOpenFoldedActivityGroups] = useState<
@@ -5307,83 +5299,8 @@ function mergeAgentChatBubbles(
   return Array.from(merged.values());
 }
 
-function foldCompletedAgentChatActivity(
-  bubbles: AgentChatBubble[],
-): AgentChatDisplayItem[] {
-  const items: AgentChatDisplayItem[] = [];
-  let activeInput: AgentChatBubble | null = null;
-  let pendingActivity: AgentChatBubble[] = [];
-
-  function pushBubble(bubble: AgentChatBubble) {
-    items.push({ kind: "bubble", id: bubble.id, bubble });
-  }
-
-  function flushPendingActivity() {
-    for (const bubble of pendingActivity) {
-      pushBubble(bubble);
-    }
-    pendingActivity = [];
-  }
-
-  function pushFoldedActivity(outputBubble: AgentChatBubble) {
-    if (pendingActivity.length === 0) {
-      return;
-    }
-
-    const first = pendingActivity[0];
-    const last = pendingActivity[pendingActivity.length - 1];
-    items.push({
-      kind: "foldedActivityGroup",
-      id: `folded-${activeInput?.id ?? "input"}-${outputBubble.id}-${first.id}-${last.id}`,
-      bubbles: pendingActivity,
-    });
-    pendingActivity = [];
-  }
-
-  for (const bubble of bubbles) {
-    if (agentChatBubbleIsUserInputBoundary(bubble)) {
-      flushPendingActivity();
-      pushBubble(bubble);
-      activeInput = bubble;
-      continue;
-    }
-
-    if (activeInput && agentChatBubbleIsOutputBoundary(bubble)) {
-      pushFoldedActivity(bubble);
-      pushBubble(bubble);
-      activeInput = null;
-      continue;
-    }
-
-    if (activeInput && agentChatBubbleCanFoldWithCompletedWork(bubble)) {
-      pendingActivity.push(bubble);
-      continue;
-    }
-
-    flushPendingActivity();
-    pushBubble(bubble);
-  }
-
-  flushPendingActivity();
-  return items;
-}
-
-function agentChatBubbleIsUserInputBoundary(bubble: AgentChatBubble) {
-  return (
-    agentChatBubbleIsConversationMessage(bubble) &&
-    (bubble.role === "user" || bubble.role === "telegram")
-  );
-}
-
 function agentChatBubbleIsOutputBoundary(bubble: AgentChatBubble) {
   return agentChatBubbleHasActivityCellVariant(bubble, "Reply");
-}
-
-function agentChatBubbleCanFoldWithCompletedWork(bubble: AgentChatBubble) {
-  // A terminal tool result can describe a still-running session after the
-  // tool call itself completed. Once it is committed history (not a live
-  // snapshot row), keep it eligible for the completed-work fold.
-  return !bubble.live;
 }
 
 function agentChatBubbleHasActivityCellVariant(
