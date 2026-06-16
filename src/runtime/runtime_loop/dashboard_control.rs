@@ -159,14 +159,17 @@ pub(crate) async fn handle_dashboard_control_command(
         }
         DashboardControlCommand::InterruptRuntime => {
             if context.active_runtime_turn {
-                crate::runtime::runtime_loop::reset_cancelled_runtime_turn(
+                let outcome = crate::runtime::runtime_loop::interrupt_active_runtime_turn(
                     context,
                     "dashboard interrupt",
                 );
                 set_runtime_status(
                     Some(tx),
                     RuntimeStatusLevel::Info,
-                    "runtime turn interrupted",
+                    format!(
+                        "runtime turn interrupted (events={}, app_notices={})",
+                        outcome.failed_events, outcome.suppressed_app_notices
+                    ),
                 );
             } else {
                 set_runtime_status(

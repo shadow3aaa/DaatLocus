@@ -81,7 +81,9 @@ mod workflow_evidence;
 mod workspace_apps;
 
 pub(crate) use dashboard_control::handle_dashboard_control_command;
-pub(crate) use scheduler::{daat_locus_loop, reset_cancelled_runtime_turn};
+pub(crate) use scheduler::{
+    daat_locus_loop, interrupt_active_runtime_turn, reset_cancelled_runtime_turn,
+};
 pub(crate) use sleep_driver::{SleepTaskResult, handle_sleep_task_result};
 pub(crate) use turn::execute_agent_loop_step;
 pub(crate) use workflow_evidence::{AgentLoopStepExecution, AgentLoopStepOutput};
@@ -103,6 +105,257 @@ const RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS: u64 = 60;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{collections::HashMap, sync::Arc, time::Instant};
+
+    use async_trait::async_trait;
+    use miette::{Result, miette};
+    use tempfile::TempDir;
+
+    use crate::{
+        app::{App, AppManager},
+        config::Config,
+        context_budget::TokenEstimateBaseline,
+        core::Llm,
+        memory::Memory,
+        openskills::OpenSkillsCatalog,
+        plan::Plan,
+        reasoning::{compiled::CompiledPromptStore, runtime::PromptRequest},
+        runtime::bootstrap::DaatLocusHomeOverride,
+        sandbox::RuntimeSandboxPolicy,
+        telegram_acl::TelegramAclHandle,
+        telegram_transport::state::TelegramTransportState,
+        workflow::PrimitiveStore,
+        workspace_app::WorkspaceAppRegistry,
+    };
+
+    struct UnusedLlm;
+
+    #[async_trait]
+    impl Llm for UnusedLlm {
+        async fn run_json(
+            &self,
+            _context: &Context,
+            _request: PromptRequest,
+        ) -> Result<serde_json::Value> {
+            Err(miette!("unused test llm"))
+        }
+
+        async fn run_agent_turn(
+            &self,
+            _context: &Context,
+            _request: AgentTurnRequest,
+        ) -> Result<AgentTurnStreamResult> {
+            Err(miette!("unused test llm"))
+        }
+    }
+
+    struct IsolatedRuntimeContext {
+        context: Context,
+        _home_override: DaatLocusHomeOverride,
+        _home: TempDir,
+        _execution: TempDir,
+    }
+
+    impl IsolatedRuntimeContext {
+        async fn new() -> Self {
+            let home = tempfile::tempdir().expect("test home");
+            let execution = tempfile::tempdir().expect("test execution cwd");
+            let home_override = DaatLocusHomeOverride::set(home.path().to_path_buf()).await;
+            let telegram = TelegramTransportState::new();
+            let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();
+            let apps = AppManager::new(None, Vec::<Box<dyn App>>::new())
+                .await
+                .expect("app manager");
+            let context = Context {
+                session_id: None,
+                llm: Box::new(UnusedLlm),
+                judge_llm: Box::new(UnusedLlm),
+                efficient_llm: Box::new(UnusedLlm),
+                config: Config::default(),
+                memory: Memory::new().await,
+                plan: Plan::new().await,
+                events: crate::events::EventStore::new().await,
+                pending_work: crate::pending_work::PendingWorkQueue::new().await,
+                workflows: PrimitiveStore::new().await,
+                openskills: OpenSkillsCatalog::default(),
+                bound_primitive_id: None,
+                bound_primitive_composition: None,
+                active_primitive_run: None,
+                pending_primitive_run_flushes: Vec::new(),
+                current_work_origin: None,
+                workflow_step_started_bound_id: None,
+                apps,
+                workspace_apps: WorkspaceAppRegistry::default(),
+                telegram: telegram.handle(),
+                telegram_acl: TelegramAclHandle::load().await,
+                compiled_prompts: CompiledPromptStore::from_entries(Vec::new()),
+                execution_cwd: execution.path().to_path_buf(),
+                coding_project_dir: None,
+                sandbox_policy: RuntimeSandboxPolicy::disabled(),
+                dashboard_tx: None,
+                dashboard_history: None,
+                daemon_control_tx,
+                latest_context_composition: None,
+                active_runtime_turn: false,
+                active_runtime_phase: None,
+                runtime_turn_started_at: None,
+                runtime_turn_started_at_ms: None,
+                runtime_turn_epoch: 0,
+                active_app_notices: HashMap::new(),
+                runtime_overflow_failures: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                runtime_model_request_failures: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                suppressed_app_notices: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                live_progress_tx: Arc::new(parking_lot::Mutex::new(None)),
+                telegram_live_drafts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                claimed_event_ids: Vec::new(),
+                claimed_app_notices: Vec::new(),
+                afterclaim_context_fingerprint: None,
+                idle_since: None,
+                last_idle_sleep_at: None,
+                session_title: crate::runtime::session_title::SessionTitleState::default(),
+                token_estimate_baseline: TokenEstimateBaseline::default(),
+            };
+            Self {
+                context,
+                _home_override: home_override,
+                _home: home,
+                _execution: execution,
+            }
+        }
+    }
+
+    fn terminal_event(text: &str) -> crate::events::TerminalIncomingEvent {
+        crate::events::TerminalIncomingEvent {
+            origin: "test".to_string(),
+            incoming_text: text.to_string(),
+            attachments: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn user_interrupt_terminates_claimed_event_without_requeueing() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let context = &mut isolated.context;
+        let event_id = context
+            .events
+            .register_terminal_incoming(terminal_event("interrupt me"))
+            .expect("register event");
+        context
+            .pending_work
+            .enqueue(PendingWork::Event { event_id })
+            .expect("enqueue event");
+
+        let claimed = claim_pending_runtime_inputs(context, 1);
+        assert_eq!(claimed.len(), 1);
+        context.claimed_event_ids = vec![event_id.to_string()];
+        context.active_runtime_turn = true;
+        context.runtime_turn_started_at = Some(Instant::now());
+        context.runtime_turn_started_at_ms = Some(42);
+
+        let outcome = interrupt_active_runtime_turn(context, "test interrupt");
+
+        assert_eq!(outcome.failed_events, 1);
+        assert_eq!(outcome.suppressed_app_notices, 0);
+        assert!(!context.active_runtime_turn);
+        assert!(context.runtime_turn_started_at.is_none());
+        assert!(context.claimed_event_ids.is_empty());
+        let event = context
+            .events
+            .view(&event_id.to_string())
+            .expect("event view");
+        assert_eq!(event.status, EventStatus::Failed);
+        assert!(
+            event
+                .last_error
+                .as_deref()
+                .is_some_and(|note| note.contains("interrupted by user"))
+        );
+        assert_eq!(context.pending_work.pending_count(), 0);
+        assert!(
+            context
+                .pending_work
+                .claim_batch(1)
+                .expect("claim after interrupt")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn user_interrupt_suppresses_claimed_app_notice_without_requeueing() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let context = &mut isolated.context;
+        let notice = AppNoticeKey::new(AppId::terminal(), "busy");
+        context.activate_app_notice(notice.app.clone(), notice.reason.clone());
+        context
+            .pending_work
+            .enqueue(PendingWork::AppNotice {
+                app: notice.app.clone(),
+                reason: notice.reason.clone(),
+            })
+            .expect("enqueue notice");
+
+        let claimed = context.pending_work.claim_batch(1).expect("claim notice");
+        assert_eq!(claimed.len(), 1);
+        context.claimed_app_notices = vec![notice.clone()];
+        context.active_runtime_turn = true;
+        context.runtime_turn_started_at = Some(Instant::now());
+        context.runtime_turn_started_at_ms = Some(42);
+
+        let outcome = interrupt_active_runtime_turn(context, "test interrupt");
+
+        assert_eq!(outcome.failed_events, 0);
+        assert_eq!(outcome.suppressed_app_notices, 1);
+        assert!(!context.active_runtime_turn);
+        assert!(context.claimed_app_notices.is_empty());
+        assert_eq!(context.pending_work.pending_count(), 0);
+        assert!(
+            context
+                .pending_work
+                .claim_batch(1)
+                .expect("claim after interrupt")
+                .is_empty()
+        );
+        assert!(context.is_app_notice_suppressed(&notice.app, &notice.reason));
+        assert!(!context.active_app_notices.contains_key(&notice));
+    }
+
+    #[tokio::test]
+    async fn cancelled_turn_reset_still_requeues_claimed_event() {
+        let mut isolated = IsolatedRuntimeContext::new().await;
+        let context = &mut isolated.context;
+        let event_id = context
+            .events
+            .register_terminal_incoming(terminal_event("recover me"))
+            .expect("register event");
+        context
+            .pending_work
+            .enqueue(PendingWork::Event { event_id })
+            .expect("enqueue event");
+
+        let claimed = claim_pending_runtime_inputs(context, 1);
+        assert_eq!(claimed.len(), 1);
+        context.claimed_event_ids = vec![event_id.to_string()];
+        context.active_runtime_turn = true;
+        context.runtime_turn_started_at = Some(Instant::now());
+        context.runtime_turn_started_at_ms = Some(42);
+
+        reset_cancelled_runtime_turn(context, "test stale reset");
+
+        assert!(!context.active_runtime_turn);
+        assert!(context.claimed_event_ids.is_empty());
+        let event = context
+            .events
+            .view(&event_id.to_string())
+            .expect("event view");
+        assert_eq!(event.status, EventStatus::Pending);
+        assert_eq!(context.pending_work.pending_count(), 1);
+        let reclaimed = context
+            .pending_work
+            .claim_batch(1)
+            .expect("claim after reset");
+        assert_eq!(reclaimed.len(), 1);
+        assert!(matches!(reclaimed[0], PendingWork::Event { event_id: id } if id == event_id));
+    }
 
     #[test]
     fn claimed_terminal_status_depends_only_on_statuses() {

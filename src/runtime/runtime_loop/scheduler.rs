@@ -1,6 +1,8 @@
 use super::sleep_driver::{maybe_start_forced_sleep, maybe_start_idle_sleep};
 use super::*;
 
+const USER_INTERRUPT_APP_NOTICE_SUPPRESSION: Duration = Duration::from_secs(30);
+
 pub(crate) async fn daat_locus_loop(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
@@ -234,6 +236,95 @@ pub(crate) fn reset_cancelled_runtime_turn(context: &mut Context, reason: &str) 
     context.set_runtime_phase(None);
     context.runtime_turn_started_at = None;
     context.runtime_turn_started_at_ms = None;
+}
+
+pub(crate) struct RuntimeInterruptOutcome {
+    pub(crate) failed_events: usize,
+    pub(crate) suppressed_app_notices: usize,
+}
+
+pub(crate) fn interrupt_active_runtime_turn(
+    context: &mut Context,
+    reason: &str,
+) -> RuntimeInterruptOutcome {
+    let mut claimed_event_ids = std::mem::take(&mut context.claimed_event_ids);
+    if claimed_event_ids.is_empty() {
+        claimed_event_ids = context
+            .events
+            .driver_event_statuses()
+            .into_iter()
+            .filter(|(_, status)| matches!(status, EventStatus::Claimed))
+            .map(|(event_id, _)| event_id.to_string())
+            .collect();
+    }
+    let mut failed_events = 0usize;
+    for event_id in claimed_event_ids {
+        if let Err(err) = context.events.set_status(
+            &event_id,
+            EventStatus::Failed,
+            Some(format!("runtime turn interrupted by user: {reason}")),
+        ) {
+            tracing::error!("failed to mark interrupted runtime event {event_id} failed: {err:?}");
+        } else {
+            failed_events += 1;
+        }
+        if let Ok(parsed_event_id) = uuid::Uuid::parse_str(&event_id)
+            && let Err(err) = context.pending_work.consume(PendingWork::Event {
+                event_id: parsed_event_id,
+            })
+        {
+            tracing::error!(
+                "failed to consume interrupted runtime event driver {event_id}: {err:?}"
+            );
+        }
+    }
+
+    let claimed_app_notices = std::mem::take(&mut context.claimed_app_notices);
+    let mut suppressed_app_notices = 0usize;
+    for notice in claimed_app_notices {
+        let work = PendingWork::AppNotice {
+            app: notice.app.clone(),
+            reason: notice.reason.clone(),
+        };
+        if let Err(err) = context.pending_work.consume(work) {
+            let app = &notice.app;
+            tracing::error!("failed to consume interrupted app notice driver for {app}: {err:?}");
+        }
+        context.suppress_app_notice(
+            &notice.app,
+            notice.reason.clone(),
+            USER_INTERRUPT_APP_NOTICE_SUPPRESSION,
+        );
+        context.clear_active_app_notice(&notice.app);
+        suppressed_app_notices += 1;
+    }
+
+    if failed_events > 0 || suppressed_app_notices > 0 {
+        tracing::warn!(
+            reason,
+            failed_events,
+            suppressed_app_notices,
+            "interrupted active runtime turn and terminated claimed inputs"
+        );
+    } else {
+        tracing::warn!(
+            reason,
+            "interrupted active runtime turn with no claimed inputs"
+        );
+    }
+
+    context.install_live_progress(None);
+    context.current_work_origin = None;
+    context.workflow_step_started_bound_id = None;
+    context.active_runtime_turn = false;
+    context.set_runtime_phase(None);
+    context.runtime_turn_started_at = None;
+    context.runtime_turn_started_at_ms = None;
+
+    RuntimeInterruptOutcome {
+        failed_events,
+        suppressed_app_notices,
+    }
 }
 
 fn enqueue_app_notice_work(context: &mut Context) {
