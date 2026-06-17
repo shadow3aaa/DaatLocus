@@ -404,7 +404,7 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
     {
       name: "rust-crate-lints",
       description: "Review a Rust crate after formatter, clippy, and tests pass.",
-      path: "C:/Users/13940/.codex/skills/rust-crate-lints/SKILL.md",
+      path: "C:/Users/13940/.agents/skills/rust-crate-lints/SKILL.md",
       scope: "user",
       allow_implicit_invocation: true,
       user_disabled: true,

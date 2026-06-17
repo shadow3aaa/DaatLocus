@@ -46,7 +46,7 @@ const LARGE_PASTE_CHAR_THRESHOLD: usize = 500;
 
 /// Decide whether a paste should be collapsed into a placeholder block.
 ///
-/// Rules (matching codex behaviour):
+/// Rules for paste placeholders:
 /// - Pastes exceeding `LARGE_PASTE_CHAR_THRESHOLD` chars -> placeholder
 /// - Pastes containing newlines and > 10 chars -> placeholder
 /// - Otherwise -> insert inline as normal text

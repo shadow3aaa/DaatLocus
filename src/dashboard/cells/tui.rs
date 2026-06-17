@@ -1016,23 +1016,23 @@ fn user_message_style() -> Style {
     Style::default()
 }
 
-fn codex_header(title: impl Into<String>) -> Line<'static> {
-    codex_header_with_styles(title, dim_style(), bold_style())
+fn activity_header(title: impl Into<String>) -> Line<'static> {
+    activity_header_with_styles(title, dim_style(), bold_style())
 }
 
-fn codex_header_with_styles(
+fn activity_header_with_styles(
     title: impl Into<String>,
     bullet_style: Style,
     title_style: Style,
 ) -> Line<'static> {
-    codex_header_with_marker(
+    activity_header_with_marker(
         Span::styled(ACTIVITY_BULLET, bullet_style),
         title,
         title_style,
     )
 }
 
-fn codex_header_with_marker(
+fn activity_header_with_marker(
     marker: Span<'static>,
     title: impl Into<String>,
     title_style: Style,
@@ -1312,7 +1312,7 @@ fn render_assistant_cell_lines(cell: &AssistantActivityCell, max_width: u16) -> 
             .skip(1) // first line is the title, already rendered above
             .collect::<Vec<_>>()
             .join("\n");
-        let mut lines = vec![codex_header(cell.title.clone())];
+        let mut lines = vec![activity_header(cell.title.clone())];
         let md_lines =
             render_markdown_with_width(&body_text, Color::White, body_markdown_width(max_width));
         lines.extend(prefixed_body_lines(md_lines, max_width));
@@ -1322,7 +1322,7 @@ fn render_assistant_cell_lines(cell: &AssistantActivityCell, max_width: u16) -> 
 }
 
 fn render_thinking_cell_lines(cell: &ThinkingActivityCell, max_width: u16) -> Vec<Line<'static>> {
-    let mut lines = vec![codex_header_with_styles(
+    let mut lines = vec![activity_header_with_styles(
         cell.title.clone(),
         dim_style(),
         Style::default().add_modifier(Modifier::BOLD | Modifier::ITALIC),
@@ -1457,7 +1457,7 @@ fn image_attachment_kind(uri: &str) -> &'static str {
 }
 
 fn render_generic_app_cell_lines(cell: &GenericAppActivityCell) -> Vec<Line<'static>> {
-    vec![codex_header(format!("App: {}", cell.title))]
+    vec![activity_header(format!("App: {}", cell.title))]
 }
 
 fn render_coding_open_project_cell_lines(
@@ -1465,7 +1465,7 @@ fn render_coding_open_project_cell_lines(
     max_width: u16,
 ) -> Vec<Line<'static>> {
     let title = format!("Opened Project: {}", cell.project_root);
-    let mut lines = vec![codex_header(title)];
+    let mut lines = vec![activity_header(title)];
     let detail = cell
         .detail_lines
         .iter()
@@ -1478,7 +1478,7 @@ fn render_coding_open_project_cell_lines(
 }
 
 fn render_explored_cell_lines(cell: &ExploredActivityCell, max_width: u16) -> Vec<Line<'static>> {
-    let mut lines = vec![codex_header(cell.title.clone())];
+    let mut lines = vec![activity_header(cell.title.clone())];
     let mut detail = Vec::new();
     let mut index = 0;
     while index < cell.calls.len() {
@@ -1646,7 +1646,7 @@ fn render_coding_edit_cell_lines(
         .len()
         .max(1);
 
-    let mut lines = vec![codex_header(coding_edit_title(cell))];
+    let mut lines = vec![activity_header(coding_edit_title(cell))];
 
     for (index, file) in visible_files.iter().enumerate() {
         if index > 0 {
@@ -1810,7 +1810,7 @@ fn render_warning_cell_lines(cell: &ErrorActivityCell, max_width: u16) -> Vec<Li
 }
 
 fn render_browser_cell_lines(cell: &BrowserActivityCell, max_width: u16) -> Vec<Line<'static>> {
-    let mut lines = vec![codex_header(format!(
+    let mut lines = vec![activity_header(format!(
         "Captured URL: {}",
         cell.url
             .as_deref()
@@ -1845,7 +1845,7 @@ fn render_live_browser_cell_lines(
         .as_deref()
         .map(|url| format!("Opening URL: {}", compact_browser_url(url)))
         .unwrap_or_else(|| cell.title.clone());
-    let mut lines = vec![codex_header_with_marker(
+    let mut lines = vec![activity_header_with_marker(
         activity_marker(None),
         title,
         bold_style(),
@@ -1874,7 +1874,7 @@ fn render_web_search_cell_lines(
         WebSearchUiAction::Searching => activity_marker(None),
         WebSearchUiAction::Searched => Span::styled(ACTIVITY_BULLET, dim_style()),
     };
-    let mut lines = vec![codex_header_with_marker(marker, title, bold_style())];
+    let mut lines = vec![activity_header_with_marker(marker, title, bold_style())];
     let mut detail = Vec::new();
     if let Some(url) = cell.url.as_deref() {
         detail.push(Line::from(Span::styled(
@@ -2003,14 +2003,14 @@ fn render_patch_cell_lines(cell: &PatchActivityCell, max_width: u16) -> Vec<Line
         .len()
         .max(1);
     let mut lines = if let [file] = cell.files.as_slice() {
-        vec![codex_header(patch_single_file_title(file))]
+        vec![activity_header(patch_single_file_title(file))]
     } else {
         let file_noun = if cell.files.len() == 1 {
             "File"
         } else {
             "Files"
         };
-        vec![codex_header(format!(
+        vec![activity_header(format!(
             "Edited {} {}",
             cell.files.len(),
             file_noun
@@ -2072,7 +2072,7 @@ fn render_reply_cell_lines(cell: &ReplyActivityCell, max_width: u16) -> Vec<Line
         crate::tool_ui::ReplyDisposition::Dismissed => ("Dismissed", Color::DarkGray),
         crate::tool_ui::ReplyDisposition::Failed => ("Failed", Color::Red),
     };
-    let mut lines = vec![codex_header_with_styles(
+    let mut lines = vec![activity_header_with_styles(
         title,
         Style::default().fg(color).add_modifier(Modifier::BOLD),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -2098,7 +2098,7 @@ fn render_agent_message_reply_lines(
     let mut lines_iter = joined.trim_end_matches(['\r', '\n']).lines();
     let title = lines_iter.next().unwrap_or_default().to_string();
     let body = lines_iter.collect::<Vec<_>>().join("\n");
-    let mut lines = vec![codex_header(title)];
+    let mut lines = vec![activity_header(title)];
     if !body.trim().is_empty() {
         let md_lines =
             render_markdown_with_width(&body, Color::White, body_markdown_width(max_width));
@@ -2179,12 +2179,12 @@ fn render_plan_cell_lines(cell: &PlanActivityCell, max_width: u16) -> Vec<Line<'
 
 fn plan_header_line(kind: PlanUiKind) -> Line<'static> {
     match kind {
-        PlanUiKind::Proposed => codex_header_with_styles(
+        PlanUiKind::Proposed => activity_header_with_styles(
             "Proposed Plan",
             dim_style().bg(Color::Rgb(42, 47, 55)),
             bold_style().bg(Color::Rgb(42, 47, 55)),
         ),
-        PlanUiKind::Updated => codex_header("Updated Plan"),
+        PlanUiKind::Updated => activity_header("Updated Plan"),
     }
 }
 
@@ -2201,7 +2201,7 @@ fn render_activate_primitive_cell_lines(
 }
 
 fn render_primitive_line(title: String) -> Vec<Line<'static>> {
-    vec![codex_header(title)]
+    vec![activity_header(title)]
 }
 
 fn render_text_activity_lines(
@@ -2211,7 +2211,7 @@ fn render_text_activity_lines(
     markdown: bool,
     max_width: u16,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![codex_header(title.to_string())];
+    let mut lines = vec![activity_header(title.to_string())];
 
     if markdown && !body_lines.is_empty() {
         let joined = body_lines
@@ -2251,7 +2251,7 @@ fn render_message_activity_lines(
     markdown: bool,
     max_width: u16,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![codex_header(title.to_string())];
+    let mut lines = vec![activity_header(title.to_string())];
     lines.extend(prefixed_body_lines(
         detail_lines
             .iter()
@@ -2300,7 +2300,7 @@ fn render_wait_activity_lines(
     limit: usize,
     max_width: u16,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![codex_header(title.to_string())];
+    let mut lines = vec![activity_header(title.to_string())];
     lines.extend(prefixed_detail_lines(
         body_lines
             .iter()
@@ -2363,7 +2363,7 @@ fn render_coding_review_cell_lines(cell: &CodingReviewActivityCell) -> Vec<Line<
     } else {
         cell.title.clone()
     };
-    vec![codex_header(title)]
+    vec![activity_header(title)]
 }
 
 fn render_patch_file_header(file: &PatchFileUiData) -> Line<'static> {
@@ -2738,7 +2738,7 @@ That's it.";
                 .iter()
                 .skip(1)
                 .all(|line| line.starts_with(ACTIVITY_BODY_INDENT)),
-            "every body and continuation line should keep the Codex body prefix: {rendered:?}"
+            "every body and continuation line should keep the activity body prefix: {rendered:?}"
         );
         assert!(
             rendered
@@ -2775,7 +2775,7 @@ That's it.";
                 .iter()
                 .skip(1)
                 .all(|line| line.starts_with(ACTIVITY_BODY_INDENT)),
-            "every wide-unicode continuation line should keep the Codex body prefix: {rendered:?}"
+            "every wide-unicode continuation line should keep the activity body prefix: {rendered:?}"
         );
         assert!(
             rendered
@@ -2787,7 +2787,7 @@ That's it.";
     }
 
     #[test]
-    fn explored_renders_codex_style_exploration_lines() {
+    fn explored_renders_activity_exploration_lines() {
         let cell = ExploredActivityCell {
             stable_id: "explored".to_string(),
             title: "Explored".to_string(),
@@ -3208,7 +3208,7 @@ That's it.";
     }
 
     #[test]
-    fn error_activity_cell_uses_codex_error_marker() {
+    fn error_activity_cell_uses_error_marker() {
         let rendered = render_error_cell_lines(
             &ErrorActivityCell {
                 title: "Command failed".to_string(),

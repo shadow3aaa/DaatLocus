@@ -1,5 +1,4 @@
-//!
-//! Based on the codex renderable.rs pattern but adapted for DaatLocus:
+//! Lightweight renderable layout primitives for dashboard cells:
 //! - Renderable: minimal trait (render + desired_height), no cursor support for now.
 //! - FlexRenderable: column with flex factors, allocates remaining space proportionally.
 //! - ViewportCulledColumn: wraps a column, renders only children overlapping the viewport.

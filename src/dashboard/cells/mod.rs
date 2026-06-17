@@ -888,7 +888,7 @@ mod tests {
     #[test]
     fn assistant_model_request_failures_render_as_error_cells() {
         let cell = assistant_activity_cell(
-            "agent turn failed: Codex Responses returned HTTP 400 Bad Request\ninvalid schema",
+            "agent turn failed: model provider returned HTTP 400 Bad Request\ninvalid schema",
         )
         .expect("assistant error cell");
 
@@ -896,7 +896,7 @@ mod tests {
             ActivityCell::Error(cell) => {
                 assert_eq!(
                     cell.title,
-                    "agent turn failed: Codex Responses returned HTTP 400 Bad Request"
+                    "agent turn failed: model provider returned HTTP 400 Bad Request"
                 );
                 assert_eq!(cell.body_lines, vec!["invalid schema"]);
             }
