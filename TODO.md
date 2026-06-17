@@ -48,9 +48,9 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
 - [x] Consider optional strong sandbox backends for Linux and Windows
   - [x] Keep strong sandboxing out of the default path; the default policy remains a lightweight self-protection guard.
   - [x] Scope the strong sandbox to filesystem permissions only; network/web restrictions are out of scope.
-  - [x] Select Codex-style Linux bubblewrap as the primary filesystem backend direction.
+  - [x] Select Linux bubblewrap as the primary filesystem backend direction.
   - [x] Keep Linux Landlock as a legacy or fallback reference, not the primary backend.
-  - [x] Select Codex-style Windows restricted-token, capability SID, ACL, and Job Object design as the Windows direction.
+  - [x] Select Windows restricted-token, capability SID, ACL, and Job Object design as the Windows direction.
   - [x] Document platform support and failure-mode expectations before implementation.
   - [x] Add a platform-neutral strong sandbox spawn layer for Terminal and workspace app worker processes.
   - [x] Route Terminal and workspace app worker process creation through sandbox-owned launch wrappers.
@@ -159,7 +159,7 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] Document when a project-level `NOTICE` file becomes necessary.
 
 - [x] TUI：引入 cell 级视口裁剪替代全量 Vec<Line> 渲染
-  - [x] 实现 Renderable trait 和 ColumnRenderable 组合器（参考 codex renderable.rs）。
+  - [x] 实现 Renderable trait 和 ColumnRenderable 组合器。
   - [x] 每个 ActivityCell 实现 desired_height / render，视口外 cell 跳过绘制。
   - [x] 用 FlexRenderable 将活动列表、命令输入框、弹窗组合为布局树。
   - [x] 保留 CachedActivityLines 作为 cell 内 markdown 行缓存。
@@ -179,7 +179,7 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
   - [x] 移除手动的 needs_render / poll_timeout / next_animation_deadline 轮询逻辑。
 
 - [x] TUI：实现 history_cell 级 markdown 增量渲染
-  - [x] 参考 codex history_cell.rs 的 display_lines(width) 模式。
+  - [x] 采用 history cell 的 display_lines(width) 增量渲染模式。
   - [x] 将 render_markdown 输入改为按 cell 调用，而非拼接全部 body_lines。
   - [x] 为 Assistant 消息 cell 添加 Rich / Raw 双模式支持。
   - [x] 加入 ReducedMotionIndicator 控制动画行为。

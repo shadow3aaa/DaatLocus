@@ -1454,7 +1454,7 @@ silently receive the same propagation analysis as `edit_code`.
 
 ## Third-Party App Package
 
-Future third-party `App` extensions use a source-first design. Do not copy Codex plugin or connector structure.
+Future third-party `App` extensions use a source-first design. Do not copy another product's plugin or connector structure.
 
 ### Directory Placement
 
