@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    future::IntoFuture,
     time::Duration,
 };
 
@@ -27,6 +28,10 @@ use crate::{
 };
 
 const BROWSER_SNAPSHOT_MAX_DEPTH: usize = 6;
+const BROWSER_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+const BROWSER_ACTION_TIMEOUT: Duration = Duration::from_secs(15);
+const BROWSER_OPERATION_TIMEOUT_GRACE: Duration = Duration::from_secs(2);
+const BROWSER_STATE_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct BrowserApp {
     browser: Option<Browser>,
     context: Option<BrowserContext>,
@@ -103,21 +108,37 @@ impl BrowserApp {
             self.init_error = Some(reason.clone());
             return Err(miette!(reason));
         }
-        let browser = Browser::launch()
-            .executable_path(executable)
-            .headless(true)
-            .launch()
-            .await
-            .map_err(|err| {
-                let reason = format!("failed to launch browser backend: {err}");
+        let browser = match browser_operation_timeout(
+            "failed to launch browser backend",
+            BROWSER_OPEN_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+            Browser::launch()
+                .executable_path(executable)
+                .headless(true)
+                .launch(),
+        )
+        .await
+        {
+            Ok(browser) => browser,
+            Err(err) => {
+                let reason = err.to_string();
                 self.init_error = Some(reason.clone());
-                miette!(reason)
-            })?;
-        let context = browser.new_context().await.map_err(|err| {
-            let reason = format!("failed to create browser context: {err}");
-            self.init_error = Some(reason.clone());
-            miette!(reason)
-        })?;
+                return Err(miette!(reason));
+            }
+        };
+        let context = match browser_operation_timeout(
+            "failed to create browser context",
+            BROWSER_STATE_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+            browser.new_context(),
+        )
+        .await
+        {
+            Ok(context) => context,
+            Err(err) => {
+                let reason = err.to_string();
+                self.init_error = Some(reason.clone());
+                return Err(miette!(reason));
+            }
+        };
         self.browser = Some(browser);
         self.context = Some(context);
         self.init_error = None;
@@ -133,11 +154,7 @@ impl BrowserApp {
 
     async fn find_page(&mut self, page_id: &str) -> Result<Page> {
         self.ensure_ready().await?;
-        let pages = self
-            .context_ref()?
-            .pages()
-            .await
-            .map_err(|err| miette!("failed to list browser pages: {err}"))?;
+        let pages = list_browser_pages(self.context_ref()?).await?;
         pages
             .into_iter()
             .find(|page| page.target_id() == page_id)
@@ -145,14 +162,20 @@ impl BrowserApp {
     }
 
     async fn capture_page_state(&self, page: &Page) -> BrowserPageState {
-        let title = page
-            .title()
-            .await
-            .unwrap_or_else(|_| "(untitled)".to_string());
-        let url = page
-            .url()
-            .await
-            .unwrap_or_else(|_| "about:blank".to_string());
+        let title = browser_operation_timeout(
+            "failed to read browser page title",
+            BROWSER_STATE_TIMEOUT,
+            page.title(),
+        )
+        .await
+        .unwrap_or_else(|_| "(untitled)".to_string());
+        let url = browser_operation_timeout(
+            "failed to read browser page url",
+            BROWSER_STATE_TIMEOUT,
+            page.url(),
+        )
+        .await
+        .unwrap_or_else(|_| "about:blank".to_string());
         BrowserPageState {
             page_id: page.target_id().to_string(),
             title: summarize_state_text(&title),
@@ -187,11 +210,7 @@ impl BrowserApp {
         if self.context.is_none() {
             return Ok(());
         }
-        let pages = self
-            .context_ref()?
-            .pages()
-            .await
-            .map_err(|err| miette!("failed to list browser pages: {err}"))?;
+        let pages = list_browser_pages(self.context_ref()?).await?;
         self.pages.clear();
         let mut updated = BTreeMap::new();
         for page in pages {
@@ -204,16 +223,21 @@ impl BrowserApp {
 
     pub async fn open_page(&mut self, url: &str) -> Result<BrowserOpenResult> {
         self.ensure_ready().await?;
-        let page = self
-            .context_ref()?
-            .new_page()
-            .await
-            .map_err(|err| miette!("failed to create browser page: {err}"))?;
-        page.goto(url)
-            .wait_until(DocumentLoadState::Load)
-            .goto()
-            .await
-            .map_err(|err| miette!("failed to open `{url}`: {err}"))?;
+        let mut page = browser_operation_timeout(
+            "failed to create browser page",
+            BROWSER_STATE_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+            self.context_ref()?.new_page(),
+        )
+        .await?;
+        if let Err(err) = navigate_page_to(&page, url).await {
+            let _ = browser_operation_timeout(
+                "failed to close browser page after open failure",
+                BROWSER_STATE_TIMEOUT,
+                page.close(),
+            )
+            .await;
+            return Err(err);
+        }
         let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
         self.refresh_pages().await?;
@@ -227,10 +251,13 @@ impl BrowserApp {
 
     pub async fn snapshot_page(&mut self, page_id: &str) -> Result<BrowserSnapshotResult> {
         let page = self.find_page(page_id).await?;
-        let snapshot = page
-            .aria_snapshot()
-            .await
-            .map_err(|err| miette!("failed to inspect page `{page_id}`: {err}"))?;
+        let action = format!("failed to inspect page `{page_id}`");
+        let snapshot = browser_operation_timeout(
+            &action,
+            BROWSER_ACTION_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+            page.aria_snapshot(),
+        )
+        .await?;
         let state = self.replace_page_state(&page).await;
         let (snapshot, stats) = compact_browser_snapshot(&snapshot);
         Ok(BrowserSnapshotResult {
@@ -251,13 +278,13 @@ impl BrowserApp {
         let page = self.find_page(page_id).await?;
         let (wait_state, expression) = Self::normalize_wait_state(state)?;
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(15_000).max(1));
-        page.wait_for_function(expression)
-            .timeout(timeout)
-            .wait()
-            .await
-            .map_err(|err| {
-                miette!("failed to wait for `{wait_state}` on page `{page_id}`: {err}")
-            })?;
+        let action = format!("failed to wait for `{wait_state}` on page `{page_id}`");
+        browser_operation_timeout(
+            &action,
+            timeout + BROWSER_OPERATION_TIMEOUT_GRACE,
+            page.wait_for_function(expression).timeout(timeout).wait(),
+        )
+        .await?;
         let state = self.replace_page_state(&page).await;
         Ok(BrowserWaitResult {
             page: state,
@@ -267,10 +294,13 @@ impl BrowserApp {
 
     pub async fn click(&mut self, page_id: &str, element_ref: &str) -> Result<BrowserActionResult> {
         let page = self.find_page(page_id).await?;
-        page.locator_from_ref(element_ref)
-            .click()
-            .await
-            .map_err(|err| miette!("failed to click `{element_ref}` on page `{page_id}`: {err}"))?;
+        let action = format!("failed to click `{element_ref}` on page `{page_id}`");
+        browser_operation_timeout(
+            &action,
+            BROWSER_ACTION_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+            page.locator_from_ref(element_ref).click(),
+        )
+        .await?;
         let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
         Ok(BrowserActionResult { page: state })
@@ -283,10 +313,13 @@ impl BrowserApp {
         value: &str,
     ) -> Result<BrowserActionResult> {
         let page = self.find_page(page_id).await?;
-        page.locator_from_ref(element_ref)
-            .fill(value)
-            .await
-            .map_err(|err| miette!("failed to fill `{element_ref}` on page `{page_id}`: {err}"))?;
+        let action = format!("failed to fill `{element_ref}` on page `{page_id}`");
+        browser_operation_timeout(
+            &action,
+            BROWSER_ACTION_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+            page.locator_from_ref(element_ref).fill(value),
+        )
+        .await?;
         let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
         Ok(BrowserActionResult { page: state })
@@ -294,9 +327,13 @@ impl BrowserApp {
 
     pub async fn go_back(&mut self, page_id: &str) -> Result<BrowserActionResult> {
         let page = self.find_page(page_id).await?;
-        page.go_back()
-            .await
-            .map_err(|err| miette!("failed to go back on page `{page_id}`: {err}"))?;
+        let action = format!("failed to go back on page `{page_id}`");
+        browser_operation_timeout(
+            &action,
+            BROWSER_ACTION_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+            page.go_back(),
+        )
+        .await?;
         let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
         Ok(BrowserActionResult { page: state })
@@ -304,9 +341,13 @@ impl BrowserApp {
 
     pub async fn go_forward(&mut self, page_id: &str) -> Result<BrowserActionResult> {
         let page = self.find_page(page_id).await?;
-        page.go_forward()
-            .await
-            .map_err(|err| miette!("failed to go forward on page `{page_id}`: {err}"))?;
+        let action = format!("failed to go forward on page `{page_id}`");
+        browser_operation_timeout(
+            &action,
+            BROWSER_ACTION_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+            page.go_forward(),
+        )
+        .await?;
         let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
         Ok(BrowserActionResult { page: state })
@@ -314,9 +355,13 @@ impl BrowserApp {
 
     pub async fn reload(&mut self, page_id: &str) -> Result<BrowserActionResult> {
         let page = self.find_page(page_id).await?;
-        page.reload()
-            .await
-            .map_err(|err| miette!("failed to reload page `{page_id}`: {err}"))?;
+        let action = format!("failed to reload page `{page_id}`");
+        browser_operation_timeout(
+            &action,
+            BROWSER_ACTION_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+            page.reload(),
+        )
+        .await?;
         let state = self.capture_page_state(&page).await;
         self.pages.insert(state.page_id.clone(), state.clone());
         Ok(BrowserActionResult { page: state })
@@ -329,9 +374,8 @@ impl BrowserApp {
             .get(page_id)
             .cloned()
             .ok_or_else(|| miette!("unknown browser page `{page_id}`"))?;
-        page.close()
-            .await
-            .map_err(|err| miette!("failed to close page `{page_id}`: {err}"))?;
+        let action = format!("failed to close page `{page_id}`");
+        browser_operation_timeout(&action, BROWSER_STATE_TIMEOUT, page.close()).await?;
         self.pages.remove(page_id);
         self.refresh_pages().await?;
         Ok(BrowserActionResult { page: state })
@@ -670,6 +714,48 @@ fn summarize_state_text(text: &str) -> String {
     }
 }
 
+async fn navigate_page_to(page: &Page, url: &str) -> Result<()> {
+    let action = format!("failed to open `{url}`");
+    browser_operation_timeout(
+        &action,
+        BROWSER_OPEN_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+        page.goto(url)
+            .wait_until(DocumentLoadState::DomContentLoaded)
+            .timeout(BROWSER_OPEN_TIMEOUT)
+            .goto(),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn list_browser_pages(context: &BrowserContext) -> Result<Vec<Page>> {
+    browser_operation_timeout(
+        "failed to list browser pages",
+        BROWSER_STATE_TIMEOUT,
+        context.pages(),
+    )
+    .await
+}
+
+async fn browser_operation_timeout<T, E, Op>(
+    action: &str,
+    timeout: Duration,
+    operation: Op,
+) -> Result<T>
+where
+    Op: IntoFuture<Output = std::result::Result<T, E>>,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(timeout, operation.into_future()).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(miette!("{action}: {err}")),
+        Err(_) => Err(miette!(
+            "{action} timed out after {}ms",
+            timeout.as_millis()
+        )),
+    }
+}
+
 fn parse_browser_tool_args<T: for<'de> Deserialize<'de>>(call: &AgentToolCall) -> Result<T> {
     serde_json::from_value(call.arguments.clone()).map_err(|err| {
         miette!(
@@ -742,6 +828,40 @@ fn browser_action_result(
             ref_count: None,
         }),
         turn_boundary_reason: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn browser_operation_timeout_returns_instead_of_hanging() {
+        let started = Instant::now();
+        let err = browser_operation_timeout(
+            "test browser operation",
+            Duration::from_millis(10),
+            std::future::pending::<std::result::Result<(), &'static str>>(),
+        )
+        .await
+        .expect_err("pending operation should time out");
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(err.to_string().contains("timed out after"));
+    }
+
+    #[tokio::test]
+    async fn browser_operation_timeout_preserves_operation_errors() {
+        let err = browser_operation_timeout(
+            "test browser operation",
+            Duration::from_secs(1),
+            std::future::ready(std::result::Result::<(), _>::Err("boom")),
+        )
+        .await
+        .expect_err("operation error should propagate");
+
+        assert!(err.to_string().contains("test browser operation: boom"));
     }
 }
 
@@ -1183,10 +1303,20 @@ impl App for BrowserApp {
 
     async fn shutdown(&mut self) -> Result<()> {
         if let Some(context) = self.context.as_mut() {
-            let _ = context.close().await;
+            let _ = browser_operation_timeout(
+                "failed to close browser context",
+                BROWSER_STATE_TIMEOUT,
+                context.close(),
+            )
+            .await;
         }
         if let Some(browser) = self.browser.as_ref() {
-            let _ = browser.close().await;
+            let _ = browser_operation_timeout(
+                "failed to close browser backend",
+                BROWSER_STATE_TIMEOUT,
+                browser.close(),
+            )
+            .await;
         }
         self.context = None;
         self.browser = None;

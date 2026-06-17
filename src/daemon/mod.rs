@@ -77,6 +77,8 @@ pub const DAEMON_HOST_DISPLAY: &str = "0.0.0.0";
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const DAEMON_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const DAEMON_CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const SESSION_IPC_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const SESSION_PROCESS_TERM_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_PROCESS_KILL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -2332,30 +2334,35 @@ pub struct DaemonClient {
     http: reqwest::Client,
     auth_token: Option<DaemonAuthToken>,
     session_id: Option<String>,
+    control_timeout: Duration,
+}
+
+fn daemon_http_client() -> std::result::Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(DAEMON_HTTP_CONNECT_TIMEOUT)
+        .build()
 }
 
 impl DaemonClient {
     pub fn new(port: u16) -> Self {
         Self {
             port,
-            http: reqwest::Client::builder()
-                .no_proxy()
-                .build()
-                .expect("build daemon http client"),
+            http: daemon_http_client().expect("build daemon http client"),
             auth_token: None,
             session_id: None,
+            control_timeout: DAEMON_CONTROL_REQUEST_TIMEOUT,
         }
     }
 
     pub async fn authenticated(port: u16) -> Result<Self> {
         Ok(Self {
             port,
-            http: reqwest::Client::builder()
-                .no_proxy()
-                .build()
+            http: daemon_http_client()
                 .map_err(|err| miette!("build daemon http client failed: {err}"))?,
             auth_token: Some(load_daemon_auth_token().await?),
             session_id: None,
+            control_timeout: DAEMON_CONTROL_REQUEST_TIMEOUT,
         })
     }
 
@@ -2365,6 +2372,12 @@ impl DaemonClient {
 
     pub fn with_session(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    #[cfg(test)]
+    fn with_control_timeout(mut self, timeout: Duration) -> Self {
+        self.control_timeout = timeout;
         self
     }
 
@@ -2389,6 +2402,10 @@ impl DaemonClient {
         Ok(request.bearer_auth(token.as_str()))
     }
 
+    fn control_request(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        request.timeout(self.control_timeout)
+    }
+
     fn websocket_request(&self) -> Result<axum::http::Request<()>> {
         let token = self
             .auth_token
@@ -2407,6 +2424,7 @@ impl DaemonClient {
     pub async fn status(&self) -> Result<StatusResponse> {
         self.http
             .get(format!("{}/status", self.base_url()))
+            .timeout(self.control_timeout)
             .send()
             .await
             .map_err(|err| miette!("daemon status request failed: {err}"))?
@@ -2423,7 +2441,7 @@ impl DaemonClient {
             url.push_str("?session_id=");
             url.push_str(session_id);
         }
-        self.with_auth(self.http.get(url))?
+        self.with_auth(self.control_request(self.http.get(url)))?
             .send()
             .await
             .map_err(|err| miette!("dashboard snapshot request failed: {err}"))?
@@ -2447,13 +2465,15 @@ impl DaemonClient {
         let attachments = command_attachment_requests(attachments).await?;
         let response = self
             .with_auth(
-                self.http
-                    .post(format!("{}/commands/run", self.base_url()))
-                    .json(&CommandRequest {
-                        command: command.to_string(),
-                        attachments,
-                        session_id: self.session_id.clone(),
-                    }),
+                self.control_request(
+                    self.http
+                        .post(format!("{}/commands/run", self.base_url()))
+                        .json(&CommandRequest {
+                            command: command.to_string(),
+                            attachments,
+                            session_id: self.session_id.clone(),
+                        }),
+                ),
             )?
             .send()
             .await
@@ -2472,12 +2492,14 @@ impl DaemonClient {
     ) -> Result<DashboardActionResult> {
         let response = self
             .with_auth(
-                self.http
-                    .post(format!("{}/dashboard/action", self.base_url()))
-                    .json(&DashboardActionRequest {
-                        action,
-                        session_id: self.session_id.clone(),
-                    }),
+                self.control_request(
+                    self.http
+                        .post(format!("{}/dashboard/action", self.base_url()))
+                        .json(&DashboardActionRequest {
+                            action,
+                            session_id: self.session_id.clone(),
+                        }),
+                ),
             )?
             .send()
             .await
@@ -2536,15 +2558,17 @@ impl DaemonClient {
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<session::SessionSummary>> {
-        self.with_auth(self.http.get(format!("{}/sessions", self.base_url())))?
-            .send()
-            .await
-            .map_err(|err| miette!("list sessions request failed: {err}"))?
-            .error_for_status()
-            .map_err(|err| miette!("list sessions returned error: {err}"))?
-            .json::<Vec<session::SessionSummary>>()
-            .await
-            .map_err(|err| miette!("decode session list failed: {err}"))
+        self.with_auth(
+            self.control_request(self.http.get(format!("{}/sessions", self.base_url()))),
+        )?
+        .send()
+        .await
+        .map_err(|err| miette!("list sessions request failed: {err}"))?
+        .error_for_status()
+        .map_err(|err| miette!("list sessions returned error: {err}"))?
+        .json::<Vec<session::SessionSummary>>()
+        .await
+        .map_err(|err| miette!("decode session list failed: {err}"))
     }
 
     pub async fn create_session(
@@ -2557,9 +2581,11 @@ impl DaemonClient {
             "title": title,
         });
         self.with_auth(
-            self.http
-                .post(format!("{}/sessions", self.base_url()))
-                .json(&body),
+            self.control_request(
+                self.http
+                    .post(format!("{}/sessions", self.base_url()))
+                    .json(&body),
+            ),
         )?
         .send()
         .await
@@ -2573,8 +2599,10 @@ impl DaemonClient {
 
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
         self.with_auth(
-            self.http
-                .delete(format!("{}/sessions/{session_id}", self.base_url())),
+            self.control_request(
+                self.http
+                    .delete(format!("{}/sessions/{session_id}", self.base_url())),
+            ),
         )?
         .send()
         .await
@@ -2586,9 +2614,11 @@ impl DaemonClient {
 
     pub async fn set_session_title(&self, session_id: &str, title: &str) -> Result<()> {
         self.with_auth(
-            self.http
-                .post(format!("{}/sessions/{session_id}/title", self.base_url()))
-                .json(&serde_json::json!({ "title": title })),
+            self.control_request(
+                self.http
+                    .post(format!("{}/sessions/{session_id}/title", self.base_url()))
+                    .json(&serde_json::json!({ "title": title })),
+            ),
         )?
         .send()
         .await
@@ -2615,7 +2645,7 @@ impl DaemonClient {
             url.push_str("&session_id=");
             url.push_str(session_id);
         }
-        self.with_auth(self.http.get(&url))?
+        self.with_auth(self.control_request(self.http.get(&url)))?
             .send()
             .await
             .map_err(|err| miette!("activity history request failed: {err}"))?
@@ -2628,8 +2658,10 @@ impl DaemonClient {
 
     pub async fn shutdown(&self) -> Result<()> {
         self.with_auth(
-            self.http
-                .post(format!("{}/daemon/shutdown", self.base_url())),
+            self.control_request(
+                self.http
+                    .post(format!("{}/daemon/shutdown", self.base_url())),
+            ),
         )?
         .send()
         .await
@@ -2641,8 +2673,10 @@ impl DaemonClient {
 
     pub async fn restart(&self) -> Result<()> {
         self.with_auth(
-            self.http
-                .post(format!("{}/daemon/restart", self.base_url())),
+            self.control_request(
+                self.http
+                    .post(format!("{}/daemon/restart", self.base_url())),
+            ),
         )?
         .send()
         .await
@@ -3078,6 +3112,27 @@ mod tests {
 
         assert_eq!(client.base_url(), "http://localhost:53825");
         assert_eq!(client.ws_url(), "ws://localhost:53825/dashboard/stream");
+    }
+
+    #[tokio::test]
+    async fn daemon_status_times_out_when_port_accepts_without_response() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind hanging daemon test listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        let accept_task = tokio::spawn(async move {
+            if let Ok((_socket, _addr)) = listener.accept().await {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+
+        let client = DaemonClient::new(port).with_control_timeout(Duration::from_millis(50));
+        let started = Instant::now();
+        let err = client.status().await.expect_err("status should time out");
+        accept_task.abort();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(err.to_string().contains("daemon status request failed"));
     }
 
     #[test]
