@@ -1,9 +1,9 @@
 # SCOPE Usage
 
 SCOPE is the semantic code search, read, edit, and propagation engine behind the
-Coding app. The model should not write SCOPE positioning syntax. SCOPE produces
-stable read handles from search results; the model copies those handles into
-`read_code` and copies read line anchors into `edit_code`.
+Coding app. Search returns matched source lines with line-hash anchors. The
+model reads follow-up context by passing `path + line#hash` to `read_code`, then
+copies read line anchors into `edit_code`.
 
 ## `search_code`
 
@@ -41,39 +41,38 @@ Common options mirror the useful parts of `rg`:
 - `types` and `type_not` filter by SCOPE language type or known extension.
 - `hidden`, `respect_ignore`, and `follow` correspond to `rg --hidden`, default ignore behavior, and `rg -L`.
 
-Search returns compact read targets:
+Search returns compact matched-line hits:
 
 ```text
-1268#k7Qp|src/dashboard/mod.rs::fn run_tui_dashboard #L1268-L1320
-286#b91Z|src/dashboard/mod.rs::trait DashboardHistoryLoader #L286-L302
-1#a0F2|src/dashboard/mod.rs#L1-L24
+src/dashboard/mod.rs|1268#7a|fn run_tui_dashboard(...) {
+src/dashboard/mod.rs|1291#c1|    render_dashboard(...);
 ```
-
-The left side is a stable read handle. Its format is `start_line#hash4`.
 
 Rules:
 
-- The handle is a read capability for the canonical target label, not a content
-  fingerprint.
-- The four-character hash is derived only from the canonical target label.
-- The handle must not include target body text, search query, session salt, file
-  mtime, read timestamp, line hashes, or freshness data.
-- Search results inside an AST symbol point at that symbol's canonical target
-  label.
-- Search results outside an AST symbol point at a small canonical line range.
-- Multiple matches inside the same target are deduplicated.
+- Each result is the actual matched line, not an enclosing declaration.
+- The path plus `line#hash` anchor is the follow-up read target.
+- `line#hash` is file-local. Do not use it without the path.
+- Search does not return separate target identities, canonical target labels, or
+  enclosing metadata.
 
 ## `read_code`
 
-The normal read path uses a search handle:
+The normal read path uses a path plus line-hash anchor:
 
 ```json
-{ "ref": "1268#k7Qp" }
+{ "path": "src/dashboard/mod.rs", "anchor": "1268#7a", "mode": "full" }
 ```
 
 Explicit path ranges for imports, top-level code, search misses, and
 user-specified locations belong to the runtime `read_file` tool, not to
 SCOPE `read_code`.
+
+`mode` has exactly two values:
+
+- `around` returns a fixed local window around the anchor.
+- `full` automatically returns the enclosing AST symbol when one is recognized,
+  otherwise it falls back to `around`.
 
 Read output is source text with per-line edit anchors:
 
@@ -82,9 +81,8 @@ Read output is source text with per-line edit anchors:
 1269#c1|    ...
 ```
 
-Do not repeat the search handle, canonical target label, or path in model-facing
-read output when the model already obtained them from search. The structured
-response may still carry the path for UI and scoped-instruction plumbing.
+The structured read response returns only `content`. It does not repeat `path`,
+`mode`, resolved range, or enclosing metadata.
 
 ## `edit_code`
 
@@ -111,9 +109,9 @@ Operations:
 - `append` inserts `content` after `start`.
 - `prepend` inserts `content` before `start`.
 
-Line anchors use `line#hash2`, where `hash2` is a two-character hex prefix of
-the current line content. Line hashes are stale-edit guards, not target
-identity. SCOPE verifies anchors against the current file before writing,
+Line anchors use `line#hash`, where the hash is a short prefix of the current
+line content. Line hashes are stale-edit guards, not target identity. SCOPE
+verifies anchors against the current file before reading or writing,
 rejects mismatches, applies edits transactionally per call, reparses modified
 source, and returns propagation results.
 

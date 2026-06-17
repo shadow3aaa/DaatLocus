@@ -44,8 +44,9 @@ pub struct CodingOpenProjectArgs {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CodingReadCodeArgs {
-    #[serde(rename = "ref", alias = "handle")]
-    pub ref_handle: String,
+    pub path: String,
+    pub anchor: String,
+    pub mode: CodingReadCodeMode,
 }
 
 type CodingSearchCodeArgs = scope_engine::api::SearchCodeRequest;
@@ -62,6 +63,14 @@ pub struct CodingNextReviewArgs {
     /// Omitted means one event to preserve existing behavior.
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[model_schema]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CodingReadCodeMode {
+    Around,
+    Full,
 }
 
 #[model_schema]
@@ -803,12 +812,12 @@ impl App for CodingApp {
             },
             AppToolSpec {
                 name: "search_code".to_string(),
-                description: "Search source content and return stable read handles plus target labels.".to_string(),
+                description: "Search source content and return path-scoped line-hash hits.".to_string(),
                 input_schema: model_schema_for::<CodingSearchCodeArgsSchema>(),
             },
             AppToolSpec {
                 name: "read_code".to_string(),
-                description: "Read a stable search handle and return hash-anchored source lines.".to_string(),
+                description: "Read code by path plus line-hash anchor in around or full mode.".to_string(),
                 input_schema: model_schema_for::<CodingReadCodeArgs>(),
             },
             AppToolSpec {
@@ -915,9 +924,9 @@ impl App for CodingApp {
                         summarize_coding_inline_text(&args.types.join(", "))
                     ));
                 }
-                let model_content = format_search_targets_for_model(&result.targets);
+                let model_content = format_search_hits_for_model(&result.matches);
                 let mut output = AppToolExecutionResult {
-                    summary: format!("found {} targets", result.targets.len()),
+                    summary: format!("found {} matches", result.matches.len()),
                     payload: serde_json::to_value(&result).unwrap(),
                     model_content: Some(truncate_text_to_token_budget(
                         &model_content,
@@ -931,9 +940,9 @@ impl App for CodingApp {
                         coding_pattern_result_summary(
                             &args.query,
                             args.path.as_deref(),
-                            result.targets.len(),
-                            "target",
-                            "targets",
+                            result.matches.len(),
+                            "match",
+                            "matches",
                         ),
                         detail_lines,
                     ),
@@ -949,7 +958,12 @@ impl App for CodingApp {
                 let args: CodingReadCodeArgs = parse_coding_tool_args(call)?;
                 let summary_target = read_args_summary(&args);
                 let request = scope_engine::api::ReadCodeRequest {
-                    ref_handle: args.ref_handle.clone(),
+                    path: args.path.clone(),
+                    anchor: args.anchor.clone(),
+                    mode: match args.mode {
+                        CodingReadCodeMode::Around => scope_engine::api::ReadCodeMode::Around,
+                        CodingReadCodeMode::Full => scope_engine::api::ReadCodeMode::Full,
+                    },
                 };
                 let result = self.scope.read_code(request)?;
                 self.last_action = Some(format!("read {summary_target}"));
@@ -962,9 +976,9 @@ impl App for CodingApp {
                     ui_event: self.explored_event(
                         "Read",
                         ExploredCallUiAction::Read,
-                        Some(result.path.clone()),
+                        Some(args.path.clone()),
                         None,
-                        coding_target_summary(&result.path),
+                        coding_target_summary(&args.path),
                         vec![format!(
                             "{} lines",
                             coding_count_label(result.content.lines().count(), "line", "lines")
@@ -972,7 +986,7 @@ impl App for CodingApp {
                     ),
                     turn_boundary_reason: None,
                 };
-                self.append_scoped_instructions_to_result(&mut output, &result.path, context)?;
+                self.append_scoped_instructions_to_result(&mut output, &args.path, context)?;
                 Ok(output)
             }
             "edit_code" => {
@@ -1300,16 +1314,16 @@ fn diff_line_text(text: &str) -> String {
     text.trim_end_matches(['\r', '\n']).to_string()
 }
 
-fn format_search_targets_for_model(targets: &[scope_engine::api::SearchTarget]) -> String {
-    targets
+fn format_search_hits_for_model(matches: &[scope_engine::api::SearchHit]) -> String {
+    matches
         .iter()
-        .map(|target| format!("{}|{}", target.handle, target.label))
+        .map(|hit| format!("{}|{}", hit.path, hit.hit))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 fn read_args_summary(args: &CodingReadCodeArgs) -> String {
-    args.ref_handle.clone()
+    format!("{} {}", args.path, args.anchor)
 }
 
 fn coding_pattern_result_summary(

@@ -14,13 +14,13 @@ pub fn protocol_schema() -> Vec<ScopeProtocolItemSchema> {
             item: "search_code".to_string(),
             syntax: r#"{"query":"matching_commands(","mode":"literal","path":"src/dashboard","include":["*.rs"],"exclude":["target/**"],"types":["rust"],"case":"smart","word":false,"line":false,"hidden":false,"respect_ignore":true,"follow":false,"limit":20}"#
                 .to_string(),
-            notes: "Searches source content and returns stable read handles plus canonical target labels. Query defaults to literal matching with smart case; use mode:\"regex\" only for regular expressions."
+            notes: "Searches source content and returns matched-line hits with path plus line-hash anchors. Query defaults to literal matching with smart case; use mode:\"regex\" only for regular expressions."
                 .to_string(),
         },
         ScopeProtocolItemSchema {
-            item: "read_code_ref".to_string(),
-            syntax: r##"{"ref":"1268#k7Qp"}"##.to_string(),
-            notes: "Reads a target located by a stable search handle and returns only hash-anchored source lines."
+            item: "read_code".to_string(),
+            syntax: r##"{"path":"src/foo.rs","anchor":"42#ab","mode":"full"}"##.to_string(),
+            notes: "Reads a path plus line-hash anchor in around or full mode and returns only hash-anchored source lines."
                 .to_string(),
         },
         ScopeProtocolItemSchema {

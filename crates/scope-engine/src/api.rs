@@ -22,27 +22,33 @@ pub struct OpenProjectResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadCodeRequest {
-    #[serde(rename = "ref", alias = "handle")]
-    pub ref_handle: String,
+    pub path: String,
+    pub anchor: String,
+    pub mode: ReadCodeMode,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadCodeMode {
+    Around,
+    Full,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReadCodeResponse {
-    /// Relative file path from project root.
-    pub path: String,
     /// File content with per-line hash prefix: `line#hash|original_text\n`
     pub content: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SearchCodeResponse {
-    pub targets: Vec<SearchTarget>,
+    pub matches: Vec<SearchHit>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct SearchTarget {
-    pub handle: String,
-    pub label: String,
+pub struct SearchHit {
+    pub path: String,
+    pub hit: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]

@@ -204,15 +204,15 @@ Use the most direct capability surface for the job.
 # Coding App Workflow
 
 Coding is the project-aware App for source work. It includes Terminal
-capability plus SCOPE engine operations for semantic search, stable reads,
+capability plus SCOPE engine operations for semantic search, line-anchor reads,
 hash-anchored edits, and propagation review.
 
 - Open the target project with `coding__open_project` before using SCOPE-backed
   project operations.
-- Use `coding__search_code` to find source targets. Its results are stable read
-  handles plus labels; do not invent handles.
-- Use `coding__read_code` with a returned handle to get hash-anchored source
-  lines before editing.
+- Use `coding__search_code` to find source lines. Its results are path-scoped
+  `line#hash` hits; do not invent anchors.
+- Use `coding__read_code` with a path plus returned line anchor to get
+  hash-anchored source lines before editing.
 - Use `coding__edit_code` for SCOPE-owned source files. It applies structured
   path plus line-hash anchored edits and returns propagation results.
 - Use global `read_file` and `edit_file` for ordinary files, config, generated

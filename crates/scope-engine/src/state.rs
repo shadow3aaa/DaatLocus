@@ -1,92 +1,5 @@
-use crate::api::{PropagationResult, PropagationSource, Reference, ReviewEvent, SearchTarget};
-use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadHandleTarget {
-    pub label: String,
-    pub path: String,
-    pub start_line: usize,
-    pub end_line: usize,
-}
-
-impl ReadHandleTarget {
-    pub fn new(
-        label: impl Into<String>,
-        path: impl Into<String>,
-        start_line: usize,
-        end_line: usize,
-    ) -> Self {
-        Self {
-            label: label.into(),
-            path: path.into(),
-            start_line,
-            end_line,
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct ReadHandleRegistry {
-    by_handle: HashMap<String, ReadHandleTarget>,
-    by_label: HashMap<String, String>,
-}
-
-impl ReadHandleRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn clear(&mut self) {
-        self.by_handle.clear();
-        self.by_label.clear();
-    }
-
-    pub fn intern(&mut self, target: ReadHandleTarget) -> Result<SearchTarget, String> {
-        if let Some(handle) = self.by_label.get(&target.label) {
-            return Ok(SearchTarget {
-                handle: handle.clone(),
-                label: target.label,
-            });
-        }
-
-        let handle = format!("{}#{}", target.start_line, target_hash4(&target.label));
-        if let Some(existing) = self.by_handle.get(&handle)
-            && existing != &target
-        {
-            return Err(format!(
-                "read handle collision for {handle}: `{}` and `{}`",
-                existing.label, target.label
-            ));
-        }
-
-        self.by_handle.insert(handle.clone(), target.clone());
-        self.by_label.insert(target.label.clone(), handle.clone());
-        Ok(SearchTarget {
-            handle,
-            label: target.label,
-        })
-    }
-
-    pub fn resolve(&self, handle: &str) -> Option<&ReadHandleTarget> {
-        self.by_handle.get(handle)
-    }
-}
-
-fn target_hash4(label: &str) -> String {
-    const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-
-    let mut hasher = Sha256::new();
-    hasher.update(label.as_bytes());
-    let digest = hasher.finalize();
-    let mut value = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) as usize;
-    let mut chars = [b'0'; 4];
-    for slot in chars.iter_mut().rev() {
-        *slot = ALPHABET[value % ALPHABET.len()];
-        value /= ALPHABET.len();
-    }
-    String::from_utf8(chars.to_vec()).expect("base62 hash should be utf8")
-}
+use crate::api::{PropagationResult, PropagationSource, Reference, ReviewEvent};
+use std::collections::HashSet;
 
 pub struct PropagationState {
     pending: Vec<PropagationResult>,
@@ -187,28 +100,6 @@ mod tests {
             file_snippet: Some("fn foo() {}".to_string()),
             project_files: Some(vec!["src/lib.rs".to_string()]),
         }
-    }
-
-    #[test]
-    fn read_handle_registry_generates_stable_start_line_handles() {
-        let mut registry = ReadHandleRegistry::new();
-        let target = ReadHandleTarget::new(
-            "src/dashboard/mod.rs::fn run_tui_dashboard #L1268-L1320",
-            "src/dashboard/mod.rs",
-            1268,
-            1320,
-        );
-
-        let first = registry.intern(target.clone()).unwrap();
-        let second = registry.intern(target).unwrap();
-
-        assert_eq!(first, second);
-        assert!(first.handle.starts_with("1268#"));
-        assert_eq!(first.handle.len(), "1268#".len() + 4);
-        assert_eq!(
-            registry.resolve(&first.handle).unwrap().label,
-            "src/dashboard/mod.rs::fn run_tui_dashboard #L1268-L1320"
-        );
     }
 
     #[test]

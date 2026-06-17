@@ -1211,14 +1211,15 @@ Rules:
 
 - `read_file` accepts a path plus optional `start_line` and `line_count`.
 - Paths may be workspace-relative or absolute paths allowed by the sandbox.
-- `read_file` output lines use the same `line#hash2|source line` format used by
+- `read_file` output lines use the same `line#hash|source line` format used by
   Coding reads.
 - Line hashes are stale-edit guards. They are not long-term identities and
   should stay short.
 - `read_file` is the fallback for imports, top-level code, search misses,
   user-specified locations, and non-source/config/document files.
-- Do not put explicit path/range read compatibility into `read_code`; that
-  belongs here.
+- Do not put arbitrary path/range read compatibility into `read_code`; that
+  belongs here. `read_code` accepts only a path plus a line-hash anchor and an
+  `around`/`full` mode.
 
 `edit_file` is the model-visible primitive for plain file edits:
 
@@ -1236,7 +1237,7 @@ edit_file({
 
 Rules:
 
-- `edit_file` uses the same structured edit schema and `line#hash2` anchors as
+- `edit_file` uses the same structured edit schema and `line#hash` anchors as
   `edit_code`.
 - `edit_file` verifies line hashes before writing.
 - The model-visible edit schema should be flat and must not use JSON Schema
@@ -1289,7 +1290,10 @@ Coding must render its key state into `AppStateRender` so that:
 1. **State is available on demand** — the model can call `coding__get_state` to
    read the current project, LSP status, and pending propagation events without
    relying on conversation history.
-2. **Tool return values carry immediate feedback** — `search_code` returns stable read handles, `read_code` returns hash-anchored source lines, and `edit_code` returns propagation results so the model sees impact scope mid-turn.
+2. **Tool return values carry immediate feedback** — `search_code` returns
+   path-scoped line-hash hits, `read_code` verifies a path plus line anchor and
+   returns hash-anchored source lines, and `edit_code` returns propagation
+   results so the model sees impact scope mid-turn.
 3. **Notice is NOT for propagation review** — Coding uses `notice_reason()` only
    for background events like "LSP server crashed" or "project index ready".
    Propagation review is handled through tool return values and state rendering,
@@ -1301,7 +1305,7 @@ Operational constraints:
   `coding__edit_code`, and review tools) are app-domain tools and must be
   called directly through the `coding__` namespace.
 - Use `read_file` for explicit path/range reads. Do not make `read_code`
-  support path/range compatibility.
+  support arbitrary path/range compatibility.
 - Use `edit_file` for non-SCOPE files. When the current project scope is open,
   `edit_file` must reject SCOPE-owned source files and require
   `coding__edit_code`.
@@ -1312,67 +1316,76 @@ Operational constraints:
 
 ### Coding Search / Read / Edit Protocol
 
-The Coding tool protocol must not require the model to write SCOPE positioning
-syntax. Canonical target labels remain an internal and display-level positioning
-format, but model operations should use stable handles produced by code.
+The Coding tool protocol uses one source-location vocabulary:
+`path + line#hash`. A `line#hash` anchor is meaningful only inside one file.
+Do not introduce a second model-facing target identity or session-local target
+registry for search/read flows.
 
 `search_code` is the model-visible search primitive. It replaces separate
-model-visible `grep` and `glob` tools.
+model-visible `grep` and `glob` tools while staying aligned with `rg`
+semantics. Inputs should cover the useful `rg` shape: `query`, `path`, `mode`,
+`case`, `word`, `line`, `include`, `exclude`, `types`, `type_not`, `hidden`,
+`respect_ignore`, `follow`, and `limit`.
 
-Search input is content-oriented, with optional narrowing fields such as path,
-include pattern, and limit. Search output must be a compact list of stable read
-handles plus display labels:
+Search output is an array of hits:
 
-```text
-code::search("run_tui_dashboard")
--> 1268#k7Qp|src/dashboard/mod.rs::fn run_tui_dashboard #L1268-L1320
--> 286#b91Z|src/dashboard/mod.rs::trait DashboardHistoryLoader #L286-L302
--> 1#a0F2|src/dashboard/mod.rs#L1-L24
+```json
+{
+  "matches": [
+    {
+      "path": "src/foo.rs",
+      "hit": "42#ab|    call_target();"
+    }
+  ]
+}
 ```
 
 Rules:
 
-- The handle format is `start_line#hash4`, for example `1268#k7Qp`.
-- The handle is a read capability for a canonical target, not a content
-  fingerprint.
-- The hash input is only the canonical target label, such as
-  `src/dashboard/mod.rs::fn run_tui_dashboard #L1268-L1320` or
-  `src/dashboard/mod.rs#L1-L24`.
-- The handle must not include the target body, search query, session salt, file
-  mtime, read timestamp, line hashes, or any other freshness material.
-- The line number is part of handle identity. Do not add salted collision
-  fallback, random suffixes, or automatic hash extension logic.
-- The same canonical target in the same project must produce the same handle.
-- Search results inside an AST symbol should point at that canonical symbol
-  target label.
-- Search results outside an AST symbol, such as imports or top-level statements,
-  should point at a small canonical line-range target.
-- Multiple matches inside the same target should be deduplicated before
-  rendering.
-- The display label is for human/model reading and for copying the path into
-  `edit_code`; it is not syntax the model is expected to author.
+- Return one match object per matched line.
+- `hit` must be exactly one `line#hash|source line`.
+- Return the actual matched line. If a match is inside a function, method, type,
+  or other AST symbol, the search hit is still the matched line, not the
+  enclosing declaration line.
+- Do not split or repeat `line_number`, `hash`, `text`, `label`, `enclosing`,
+  or other metadata already encoded by the line anchor and source line.
+- `path + line#hash` is the target identity for follow-up reads. `line#hash`
+  alone is file-local and not globally unique.
+- Search may use ASTs internally for ranking, filtering, or presentation, but
+  it must not replace the visible hit with an enclosing symbol target.
 
-`read_code` reads a search handle only:
+`read_code` reads a path-scoped line anchor:
 
-```text
-code::read("1268#k7Qp")
--> 1268#7a|fn run_tui_dashboard(...) {
-   1269#c1|    ...
+```json
+{
+  "path": "src/foo.rs",
+  "anchor": "42#ab",
+  "mode": "full"
+}
 ```
 
 Rules:
 
-- `read_code` output should not repeat the read handle, canonical target label,
-  or path when the model already obtained them from search.
-- `read_code` output lines use the existing `line#hash2|source line` format.
-- Line hashes stay short. They are stale-edit guards, not identity handles.
-- Read-handle freshness and edit freshness are separate. Search handles locate
-  targets; line hashes guard edits against stale source.
-- `read_code` must not accept `path`, `start_line`, or `line_count`. Those
-  fields belong to `read_file`.
-- Avoid JSON Schema `oneOf`/`anyOf`. `read_code` should expose one clear handle
-  field such as `ref`/`handle`, not a flat schema that pretends to support
-  multiple modes.
+- `read_code` accepts any syntactically valid `line#hash` anchor with a path. It
+  must not require the anchor to have been produced by a prior `search_code`
+  call.
+- Before reading, verify that the current file line still matches the supplied
+  hash. On mismatch, return a stale-anchor error and tell the model to search or
+  read again.
+- `mode` has exactly two values: `around` and `full`.
+- `around` returns a fixed local window around the anchor, roughly a dozen lines
+  above and below. It does not perform AST expansion and has no tunable context
+  parameters.
+- `full` automatically returns the enclosing AST symbol when the anchor is
+  inside a recognizable symbol. If no enclosing symbol is recognizable, it
+  falls back to `around`.
+- Do not add manual `enclosing`, `selector`, `context_before`,
+  `context_after`, path/range, or other compatibility fields to `read_code`.
+- `read_code` output should be minimal: `{ "content": "..." }`.
+- `content` lines use the existing `line#hash|source line` format. Do not
+  repeat `path`, `mode`, resolved range, enclosing symbol metadata, or other
+  values the caller already supplied or that are implementation detail.
+- Line hashes stay short. They are stale-edit guards, not long-term identities.
 
 `edit_code` uses the same structured edit schema as `edit_file`, but with SCOPE
 propagation analysis and review:
@@ -1389,16 +1402,13 @@ code::edit({
 })
 ```
 
-The model copies `path` from the search display label and copies `start`/`end`
-line anchors from `read_code`. Existing replace/append/prepend semantics, line
-hash verification, parse validation, and propagation analysis remain unchanged.
-`edit_code` must not accept read handles as edit targets.
+The model copies `path` from the search hit and copies `start`/`end` line
+anchors from `read_code.content`. Existing replace/append/prepend semantics,
+line hash verification, parse validation, and propagation analysis remain
+unchanged. `edit_code` must not accept opaque target handles or search result
+objects as edit targets.
 Like `edit_file`, `edit_code` must expose a flat structured-edit schema without
 JSON Schema `oneOf`/`anyOf`.
-
-The read-handle registry belongs to the Coding session state, not shared/global
-state. It is cleared when the project changes and is not persisted as a
-long-term identity database. `read_file` does not use this registry.
 
 ### App Tool Domains
 
@@ -1432,8 +1442,8 @@ features as expected model-facing capabilities.
 
 | Capability | SCOPE Status | Boundary |
 |---|---|---|
-| Target discovery | ✅ `search_code` | Content search returns stable read handles plus display labels; the model must not author target syntax. |
-| Read code | ✅ `read_code` | Reads a search handle only and returns hash-anchored source lines. Explicit path/range reads belong to `read_file`. |
+| Target discovery | ✅ `search_code` | Content search returns path-scoped matched-line hits in `line#hash|source line` form. |
+| Read code | ✅ `read_code` | Reads a path plus line-hash anchor in `around` or `full` mode and returns hash-anchored source lines. Explicit path/range reads belong to `read_file`. |
 | Edit code | ✅ `edit_code` | Applies the same structured hash-anchored edits as `edit_file`, plus SCOPE parse validation and propagation review. |
 | Propagation review | ✅ review tools | Edit impact is surfaced through propagation results and review events. |
 | New source files | ⚠️ explicit supported creation paths | Use supported creation/edit paths; SCOPE has no template system. |
@@ -1687,7 +1697,7 @@ Rules:
 - State tools should be cheap, inspectable, and side-effect free except for
   harmless cache refresh needed to report current state.
 - Operations should bind to explicit ids such as `page_id`, `session_id`,
-  project root, read handle, or app-specific object id. Do not rely on hidden
+  project root, path plus line anchor, or app-specific object id. Do not rely on hidden
   selected objects.
 
 ### Event Tools

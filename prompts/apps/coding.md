@@ -15,4 +15,4 @@ After each edit, the tool automatically evaluates the impact of your changes and
 
 SCOPE engine configuration hints are returned by `coding__open_project` and are visible through `coding__get_state`, including available tree-sitter languages plus visible per-language `lsp_setup_hint` lines for LSP language/server setup guidance.
 
-Coding app keeps app-level usage rules here. Search handle, read, and edit protocol details are owned by SCOPE and appended below from SCOPE's compiled usage interface.
+Coding app keeps app-level usage rules here. Search, read, and edit protocol details are owned by SCOPE and appended below from SCOPE's compiled usage interface.

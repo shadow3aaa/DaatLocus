@@ -1236,8 +1236,11 @@ mod tests {
         for key in ["oneOf", "anyOf", "allOf"] {
             assert!(!json_contains_key(&schema, key), "{schema:#}");
         }
-        assert!(json_contains_key(&schema, "ref"), "{schema:#}");
-        assert!(!json_contains_key(&schema, "path"), "{schema:#}");
+        assert!(!json_contains_key(&schema, "ref"), "{schema:#}");
+        assert!(!json_contains_key(&schema, "handle"), "{schema:#}");
+        assert!(json_contains_key(&schema, "path"), "{schema:#}");
+        assert!(json_contains_key(&schema, "anchor"), "{schema:#}");
+        assert!(json_contains_key(&schema, "mode"), "{schema:#}");
         assert!(!json_contains_key(&schema, "start_line"), "{schema:#}");
         assert!(!json_contains_key(&schema, "line_count"), "{schema:#}");
     }

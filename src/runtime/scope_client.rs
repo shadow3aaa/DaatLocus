@@ -13,7 +13,7 @@ use scope_engine::analyzer::Analyzer;
 use scope_engine::api;
 use scope_engine::engine;
 use scope_engine::language::LanguageRegistry;
-use scope_engine::state::{PropagationState, ReadHandleRegistry};
+use scope_engine::state::PropagationState;
 use scope_engine::treesitter::TreeSitterAnalyzer;
 
 pub struct ScopeEditCodeResult {
@@ -24,7 +24,7 @@ pub struct ScopeEditCodeResult {
 /// In-process SCOPE engine client.
 ///
 /// Wraps the scope-engine library to provide:
-/// - Stable-handle code search and reading
+/// - Path plus line-hash code search and reading
 /// - Hash-anchored code editing and deletion
 /// - Propagation review events
 /// - Tree-sitter symbol lookup
@@ -32,7 +32,6 @@ pub struct ScopeEditCodeResult {
 pub struct ScopeClient {
     project_root: Option<PathBuf>,
     propagation_state: Mutex<PropagationState>,
-    read_handles: Mutex<ReadHandleRegistry>,
     lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>>,
     tree_sitter: TreeSitterAnalyzer,
 }
@@ -44,7 +43,6 @@ impl ScopeClient {
         Self {
             project_root: None,
             propagation_state: Mutex::new(PropagationState::new()),
-            read_handles: Mutex::new(ReadHandleRegistry::new()),
             lsp_analyzer: Mutex::new(None),
             tree_sitter: TreeSitterAnalyzer::new(),
         }
@@ -70,10 +68,6 @@ impl ScopeClient {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *state = PropagationState::new();
-            self.read_handles
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clear();
         }
         self.project_root = Some(project_root);
         Ok(response)
@@ -113,27 +107,19 @@ impl ScopeClient {
             .find_containing_symbol(file_path, line_number, root)
     }
 
-    /// Read code using a stable search handle.
+    /// Read code using a path plus line-hash anchor.
     #[allow(dead_code)]
     pub fn read_code(&self, request: api::ReadCodeRequest) -> Result<api::ReadCodeResponse> {
         let root = self.require_project_root()?;
-        let handles = self
-            .read_handles
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        engine::read_code(root, &request, &handles)
+        engine::read_code(root, &request)
             .map_err(|err| miette!("scope-engine read_code failed: {err}"))
     }
 
-    /// Search code and return stable read handles.
+    /// Search code and return matched line-hash hits.
     #[allow(dead_code)]
     pub fn search_code(&self, request: api::SearchCodeRequest) -> Result<api::SearchCodeResponse> {
         let root = self.require_project_root()?;
-        let mut handles = self
-            .read_handles
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        engine::search_code(root, &request, &mut handles)
+        engine::search_code(root, &request)
             .map_err(|err| miette!("scope-engine search_code failed: {err}"))
     }
 

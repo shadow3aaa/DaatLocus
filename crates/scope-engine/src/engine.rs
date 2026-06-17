@@ -10,7 +10,7 @@ use crate::lsp::{
     GoplsConfig, JdtlsConfig, LspAnalyzer, LspServerConfig, PyrightConfig, RustAnalyzerConfig,
 };
 use crate::patch;
-use crate::state::{PropagationState, ReadHandleRegistry, ReadHandleTarget};
+use crate::state::PropagationState;
 use crate::treesitter::TreeSitterAnalyzer;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder};
@@ -22,7 +22,7 @@ const MAX_SEARCH_LIMIT: usize = 1000;
 const DEFAULT_REVIEW_LIMIT: usize = 1;
 const MAX_REVIEW_LIMIT: usize = 100;
 const MAX_LSP_DID_OPEN_FILES: usize = 500;
-const SEARCH_FALLBACK_CONTEXT_LINES: usize = 12;
+const READ_AROUND_CONTEXT_LINES: usize = 12;
 
 fn lsp_config_for_language(lsp_lang: &str) -> Option<Box<dyn LspServerConfig>> {
     match lsp_lang {
@@ -207,7 +207,6 @@ pub fn open_project(
 pub fn search_code(
     project_root: &Path,
     params: &SearchCodeRequest,
-    read_handles: &mut ReadHandleRegistry,
 ) -> Result<SearchCodeResponse, String> {
     if params.query.is_empty() {
         return Err("query is required".to_string());
@@ -215,9 +214,8 @@ pub fn search_code(
 
     let limit = normalize_search_limit(params.limit);
     let target = project_relative_arg(project_root, params.path.as_deref())?;
-    let targets =
-        search_project_targets(project_root, params, target.as_deref(), limit, read_handles)?;
-    Ok(SearchCodeResponse { targets })
+    let matches = search_project_matches(project_root, params, target.as_deref(), limit)?;
+    Ok(SearchCodeResponse { matches })
 }
 
 pub fn is_responsible_source(
@@ -262,18 +260,15 @@ fn normalize_search_limit(limit: Option<usize>) -> usize {
         .clamp(1, MAX_SEARCH_LIMIT)
 }
 
-fn search_project_targets(
+fn search_project_matches(
     project_root: &Path,
     params: &SearchCodeRequest,
     target: Option<&str>,
     limit: usize,
-    read_handles: &mut ReadHandleRegistry,
-) -> Result<Vec<SearchTarget>, String> {
+) -> Result<Vec<SearchHit>, String> {
     let regex = build_search_regex(params)?;
     let filters = SearchFileFilters::from_request(params)?;
-    let analyzer = TreeSitterAnalyzer::new();
-    let mut targets = Vec::new();
-    let mut seen_labels = std::collections::HashSet::new();
+    let mut matches = Vec::new();
 
     for entry in project_files(project_root, target, &filters)? {
         let path = entry.path();
@@ -285,24 +280,22 @@ fn search_project_targets(
         let Ok(content) = fs::read_to_string(path) else {
             continue;
         };
-        let line_count = content.lines().count().max(1);
         for (line_index, text) in content.lines().enumerate() {
             if !regex.is_match(text) {
                 continue;
             }
             let line = line_index + 1;
-            let target =
-                search_target_for_match(&analyzer, project_root, path, &relative, line, line_count);
-            if seen_labels.insert(target.label.clone()) {
-                targets.push(read_handles.intern(target)?);
-            }
-            if targets.len() >= limit {
-                return Ok(targets);
+            matches.push(SearchHit {
+                path: relative.clone(),
+                hit: format_line_with_hash(line, text),
+            });
+            if matches.len() >= limit {
+                return Ok(matches);
             }
         }
     }
 
-    Ok(targets)
+    Ok(matches)
 }
 
 fn build_search_regex(params: &SearchCodeRequest) -> Result<Regex, String> {
@@ -331,29 +324,6 @@ fn build_search_regex(params: &SearchCodeRequest) -> Result<Regex, String> {
                 format!("search regex error: {err}; use mode=\"literal\" for code fragments")
             }
         })
-}
-
-fn search_target_for_match(
-    analyzer: &TreeSitterAnalyzer,
-    project_root: &Path,
-    path: &Path,
-    relative: &str,
-    line: usize,
-    line_count: usize,
-) -> ReadHandleTarget {
-    if let Some(symbol) = analyzer.find_containing_symbol_match(path, line) {
-        let label = symbol.canonical_selector(path, project_root);
-        return ReadHandleTarget::new(label, relative, symbol.start_line, symbol.end_line);
-    }
-
-    let start_line = line.saturating_sub(SEARCH_FALLBACK_CONTEXT_LINES).max(1);
-    let end_line = (line + SEARCH_FALLBACK_CONTEXT_LINES).min(line_count);
-    ReadHandleTarget::new(
-        format!("{relative}#L{start_line}-L{end_line}"),
-        relative,
-        start_line,
-        end_line,
-    )
 }
 
 struct SearchFileFilters {
@@ -581,43 +551,91 @@ fn read_line_range(content: &str, start_line: usize, end_line: usize) -> String 
 pub fn read_code(
     project_root: &Path,
     params: &ReadCodeRequest,
-    read_handles: &ReadHandleRegistry,
 ) -> Result<ReadCodeResponse, String> {
-    let target = resolve_read_target(params, read_handles)?;
-    let full_path = project_root.join(&target.path);
+    let relative = project_relative_arg(project_root, Some(&params.path))?
+        .ok_or_else(|| "path is required".to_string())?;
+    let full_path = project_root.join(&relative);
     let file_content = fs::read_to_string(&full_path)
         .map_err(|e| format!("Failed to read {}: {e}", full_path.display()))?;
+    let (anchor_line, anchor_hash) = parse_line_anchor(&params.anchor)?;
+    verify_anchor_line(&file_content, anchor_line, &anchor_hash)?;
     let line_count = file_content.lines().count().max(1);
-    let (start_line, end_line) = clamp_range(target.start_line, target.end_line, line_count)?;
+    let (start_line, end_line) =
+        read_range_for_mode(params.mode, &full_path, anchor_line, line_count)?;
     let raw_content = read_line_range(&file_content, start_line, end_line);
     let prefixed_content = prefix_lines_with_hash(&raw_content, start_line);
 
     Ok(ReadCodeResponse {
-        path: target.path,
         content: prefixed_content,
     })
 }
 
-fn resolve_read_target(
-    params: &ReadCodeRequest,
-    read_handles: &ReadHandleRegistry,
-) -> Result<ReadHandleTarget, String> {
-    let handle = params.ref_handle.as_str();
-    read_handles
-        .resolve(handle)
-        .cloned()
-        .ok_or_else(|| format!("unknown read handle `{handle}`; search again"))
+fn read_range_for_mode(
+    mode: ReadCodeMode,
+    full_path: &Path,
+    anchor_line: usize,
+    line_count: usize,
+) -> Result<(usize, usize), String> {
+    match mode {
+        ReadCodeMode::Around => {
+            let start_line = anchor_line.saturating_sub(READ_AROUND_CONTEXT_LINES).max(1);
+            let end_line = (anchor_line + READ_AROUND_CONTEXT_LINES).min(line_count);
+            clamp_range(start_line, end_line, line_count)
+        }
+        ReadCodeMode::Full => {
+            let analyzer = TreeSitterAnalyzer::new();
+            if let Some(symbol) = analyzer.find_containing_symbol_match(full_path, anchor_line) {
+                return clamp_range(symbol.start_line, symbol.end_line, line_count);
+            }
+            read_range_for_mode(ReadCodeMode::Around, full_path, anchor_line, line_count)
+        }
+    }
+}
+
+fn parse_line_anchor(anchor: &str) -> Result<(usize, String), String> {
+    let (line_str, hash_str) = anchor
+        .split_once('#')
+        .ok_or_else(|| format!("invalid anchor (expected line#hash): {anchor}"))?;
+    let line = line_str
+        .parse::<usize>()
+        .map_err(|_| format!("invalid line number in anchor: {anchor}"))?;
+    if line == 0 {
+        return Err(format!("line number must be >= 1 in anchor: {anchor}"));
+    }
+    if hash_str.is_empty() {
+        return Err(format!("missing hash in anchor: {anchor}"));
+    }
+    Ok((line, hash_str.to_string()))
+}
+
+fn verify_anchor_line(content: &str, line_num: usize, expected_hash: &str) -> Result<(), String> {
+    let lines: Vec<&str> = content.lines().collect();
+    if line_num > lines.len() {
+        return Err(format!(
+            "line {line_num} out of bounds (file has {} lines); search or read again",
+            lines.len()
+        ));
+    }
+    let actual = lines[line_num - 1];
+    let actual_hash = patch::line_hash(actual);
+    if actual_hash != expected_hash {
+        return Err(format!(
+            "line {line_num} hash mismatch: expected {expected_hash}, got {actual_hash} — file may have changed; search or read again"
+        ));
+    }
+    Ok(())
+}
+
+fn format_line_with_hash(line_num: usize, line: &str) -> String {
+    let hash = patch::line_hash(line);
+    format!("{line_num}#{hash}|{line}")
 }
 
 fn prefix_lines_with_hash(content: &str, start_line: usize) -> String {
     content
         .lines()
         .enumerate()
-        .map(|(i, line)| {
-            let line_num = start_line + i;
-            let hash = patch::line_hash(line);
-            format!("{line_num}#{hash}|{line}")
-        })
+        .map(|(i, line)| format_line_with_hash(start_line + i, line))
         .collect::<Vec<_>>()
         .join("\n")
         + if content.ends_with('\n') || content.is_empty() {
@@ -769,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn search_code_returns_deduped_read_handles() {
+    fn search_code_returns_matched_line_hits() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src/nested")).unwrap();
         std::fs::create_dir_all(dir.path().join("tests")).unwrap();
@@ -789,7 +807,6 @@ mod tests {
         )
         .unwrap();
 
-        let mut handles = ReadHandleRegistry::new();
         let response = search_code(
             dir.path(),
             &SearchCodeRequest {
@@ -798,30 +815,27 @@ mod tests {
                 include: vec!["*.rs".to_string()],
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
 
-        let labels = response
-            .targets
+        let hits = response
+            .matches
             .iter()
-            .map(|item| item.label.as_str())
+            .map(|item| (item.path.clone(), item.hit.clone()))
             .collect::<Vec<_>>();
         assert_eq!(
-            labels,
+            hits,
             vec![
-                "src/lib.rs::fn lib #L1-L1",
-                "src/nested/mod.rs::fn nested #L1-L1"
+                (
+                    "src/lib.rs".to_string(),
+                    format_line_with_hash(1, "pub fn lib() { let needle = true; }")
+                ),
+                (
+                    "src/nested/mod.rs".to_string(),
+                    format_line_with_hash(1, "pub fn nested() { let needle = true; }")
+                )
             ]
         );
-        for target in &response.targets {
-            assert!(
-                target.handle.starts_with("1#"),
-                "handle should include start line: {}",
-                target.handle
-            );
-            assert_eq!(target.handle.len(), "1#".len() + 4);
-        }
     }
 
     #[test]
@@ -833,21 +847,17 @@ mod tests {
         )
         .unwrap();
 
-        let mut handles = ReadHandleRegistry::new();
         let response = search_code(
             dir.path(),
             &SearchCodeRequest {
                 query: "matching_commands(".to_string(),
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
-        assert_eq!(response.targets.len(), 1);
-        assert_eq!(
-            response.targets[0].label,
-            "lib.rs::fn matching_commands #L1-L1"
-        );
+        assert_eq!(response.matches.len(), 1);
+        assert_eq!(response.matches[0].path, "lib.rs");
+        assert!(response.matches[0].hit.contains("matching_commands"));
 
         let response = search_code(
             dir.path(),
@@ -855,10 +865,9 @@ mod tests {
                 query: "needle".to_string(),
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
-        assert_eq!(response.targets.len(), 1);
+        assert_eq!(response.matches.len(), 1);
     }
 
     #[test]
@@ -866,17 +875,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("lib.rs"), "let needle = true;\n").unwrap();
 
-        let mut handles = ReadHandleRegistry::new();
         let literal_response = search_code(
             dir.path(),
             &SearchCodeRequest {
                 query: r"needle\s+=\s+true".to_string(),
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
-        assert!(literal_response.targets.is_empty());
+        assert!(literal_response.matches.is_empty());
 
         let regex_response = search_code(
             dir.path(),
@@ -885,10 +892,9 @@ mod tests {
                 mode: SearchMode::Regex,
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
-        assert_eq!(regex_response.targets.len(), 1);
+        assert_eq!(regex_response.matches.len(), 1);
     }
 
     #[test]
@@ -899,17 +905,15 @@ mod tests {
         std::fs::write(dir.path().join("plural.rs"), "let needles = true;\n").unwrap();
         std::fs::write(dir.path().join("line.rs"), "needle extra\nneedle\n").unwrap();
 
-        let mut handles = ReadHandleRegistry::new();
         let smart_lower = search_code(
             dir.path(),
             &SearchCodeRequest {
                 query: "needle".to_string(),
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
-        assert_eq!(smart_lower.targets.len(), 4);
+        assert_eq!(smart_lower.matches.len(), 5);
 
         let smart_upper = search_code(
             dir.path(),
@@ -917,16 +921,15 @@ mod tests {
                 query: "Needle".to_string(),
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
         assert_eq!(
             smart_upper
-                .targets
+                .matches
                 .iter()
-                .map(|target| target.label.as_str())
+                .map(|hit| hit.path.as_str())
                 .collect::<Vec<_>>(),
-            vec!["upper.rs#L1-L1"]
+            vec!["upper.rs"]
         );
 
         let word = search_code(
@@ -937,15 +940,12 @@ mod tests {
                 case_mode: SearchCase::Sensitive,
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
         assert!(
-            word.targets
-                .iter()
-                .all(|target| !target.label.starts_with("plural.rs")),
+            word.matches.iter().all(|hit| hit.path != "plural.rs"),
             "word search should not match plural.rs: {:?}",
-            word.targets
+            word.matches
         );
 
         let line = search_code(
@@ -956,15 +956,14 @@ mod tests {
                 case_mode: SearchCase::Sensitive,
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
         assert_eq!(
-            line.targets
+            line.matches
                 .iter()
-                .map(|target| target.label.as_str())
+                .map(|hit| (hit.path.clone(), hit.hit.clone()))
                 .collect::<Vec<_>>(),
-            vec!["line.rs#L1-L2"]
+            vec![("line.rs".to_string(), format_line_with_hash(2, "needle"))]
         );
     }
 
@@ -984,7 +983,6 @@ mod tests {
         .unwrap();
         std::fs::write(dir.path().join("src/main.ts"), "let needle = true;\n").unwrap();
 
-        let mut handles = ReadHandleRegistry::new();
         let filtered = search_code(
             dir.path(),
             &SearchCodeRequest {
@@ -995,16 +993,15 @@ mod tests {
                 types: vec!["rust".to_string()],
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
         assert_eq!(
             filtered
-                .targets
+                .matches
                 .iter()
-                .map(|target| target.label.as_str())
+                .map(|hit| hit.path.as_str())
                 .collect::<Vec<_>>(),
-            vec!["src/lib.rs#L1-L1"]
+            vec!["src/lib.rs"]
         );
 
         let default_visibility = search_code(
@@ -1016,10 +1013,9 @@ mod tests {
                 exclude: vec!["src/**".to_string()],
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
-        assert!(default_visibility.targets.is_empty());
+        assert!(default_visibility.matches.is_empty());
 
         let unrestricted_visibility = search_code(
             dir.path(),
@@ -1032,16 +1028,15 @@ mod tests {
                 respect_ignore: false,
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
         assert_eq!(
             unrestricted_visibility
-                .targets
+                .matches
                 .iter()
-                .map(|target| target.label.as_str())
+                .map(|hit| hit.path.as_str())
                 .collect::<Vec<_>>(),
-            vec![".hidden.rs#L1-L1", "ignored.rs#L1-L1"]
+            vec![".hidden.rs", "ignored.rs"]
         );
     }
 
@@ -1068,7 +1063,6 @@ mod tests {
         )
         .unwrap();
 
-        let mut handles = ReadHandleRegistry::new();
         let response = search_code(
             dir.path(),
             &SearchCodeRequest {
@@ -1076,10 +1070,9 @@ mod tests {
                 limit: Some(2),
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
-        assert_eq!(response.targets.len(), 2);
+        assert_eq!(response.matches.len(), 2);
     }
 
     #[test]
@@ -1091,7 +1084,6 @@ mod tests {
         )
         .unwrap();
 
-        let mut handles = ReadHandleRegistry::new();
         let response = search_code(
             dir.path(),
             &SearchCodeRequest {
@@ -1099,61 +1091,63 @@ mod tests {
                 limit: Some(0),
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
-        assert_eq!(response.targets.len(), 1);
+        assert_eq!(response.matches.len(), 1);
     }
 
     #[test]
-    fn search_code_falls_back_to_line_range_for_top_level_matches() {
+    fn search_code_returns_top_level_matched_line() {
         let dir = tempfile::tempdir().unwrap();
         let source = "use std::fmt;\n\npub fn second() {\n    println!(\"second\");\n}\n";
         std::fs::write(dir.path().join("lib.rs"), source).unwrap();
 
-        let mut handles = ReadHandleRegistry::new();
         let response = search_code(
             dir.path(),
             &SearchCodeRequest {
                 query: "std::fmt".to_string(),
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
 
-        assert_eq!(response.targets.len(), 1);
-        assert_eq!(response.targets[0].label, "lib.rs#L1-L5");
-        assert!(
-            response.targets[0].handle.starts_with("1#"),
-            "handle should include range start line"
+        assert_eq!(response.matches.len(), 1);
+        assert_eq!(response.matches[0].path, "lib.rs");
+        assert_eq!(
+            response.matches[0].hit,
+            format_line_with_hash(1, "use std::fmt;")
         );
     }
 
     #[test]
-    fn read_code_reads_search_handle_without_selector_input() {
+    fn read_code_full_reads_enclosing_symbol_from_line_anchor() {
         let dir = tempfile::tempdir().unwrap();
         let source = "pub fn first() {\n    println!(\"first\");\n}\n\npub fn second() {\n    println!(\"second\");\n}\n";
         std::fs::write(dir.path().join("lib.rs"), source).unwrap();
 
-        let mut handles = ReadHandleRegistry::new();
         let search = search_code(
             dir.path(),
             &SearchCodeRequest {
                 query: "second".to_string(),
                 ..SearchCodeRequest::default()
             },
-            &mut handles,
         )
         .unwrap();
-        let handle = search.targets[0].handle.clone();
+        let anchor = search.matches[0]
+            .hit
+            .split_once('|')
+            .expect("line anchor")
+            .0
+            .to_string();
         let result = read_code(
             dir.path(),
-            &ReadCodeRequest { ref_handle: handle },
-            &handles,
+            &ReadCodeRequest {
+                path: "lib.rs".to_string(),
+                anchor,
+                mode: ReadCodeMode::Full,
+            },
         )
         .unwrap();
-        assert_eq!(result.path, "lib.rs");
         let content = result.content.as_str();
         assert!(
             content.contains("pub fn second()"),
@@ -1170,6 +1164,52 @@ mod tests {
             }),
             "each line should have line#hash| prefix, got: {content}"
         );
+    }
+
+    #[test]
+    fn read_code_around_reads_fixed_context_without_enclosing_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = String::new();
+        for line in 1..=40 {
+            source.push_str(&format!("let value_{line} = {line};\n"));
+        }
+        std::fs::write(dir.path().join("lib.rs"), source).unwrap();
+        let anchor = format!("20#{}", patch::line_hash("let value_20 = 20;"));
+
+        let result = read_code(
+            dir.path(),
+            &ReadCodeRequest {
+                path: "lib.rs".to_string(),
+                anchor,
+                mode: ReadCodeMode::Around,
+            },
+        )
+        .unwrap();
+
+        assert!(result.content.starts_with("8#"));
+        assert!(result.content.contains("|let value_20 = 20;"));
+        assert!(result.content.contains("|let value_32 = 32;"));
+        assert!(!result.content.contains("|let value_7 = 7;"));
+        assert!(!result.content.contains("|let value_33 = 33;"));
+    }
+
+    #[test]
+    fn read_code_rejects_stale_line_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "let current = true;\n").unwrap();
+
+        let err = read_code(
+            dir.path(),
+            &ReadCodeRequest {
+                path: "lib.rs".to_string(),
+                anchor: "1#00".to_string(),
+                mode: ReadCodeMode::Around,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.contains("hash mismatch"), "{err}");
+        assert!(err.contains("search or read again"), "{err}");
     }
 
     #[test]
@@ -1225,14 +1265,14 @@ mod tests {
             result["usage_markdown"]
                 .as_str()
                 .unwrap()
-                .contains("stable read handles")
+                .contains("matched source lines with line-hash anchors")
         );
         assert!(
             result["protocol_items"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|item| item["item"] == "read_code_ref")
+                .any(|item| item["item"] == "read_code")
         );
     }
 
