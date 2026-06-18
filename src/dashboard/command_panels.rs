@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{DashboardAction, DashboardState, command_text::skill_status_description};
+use super::{
+    DashboardAction, DashboardPendingUserInput, DashboardPendingUserInputMoveDirection,
+    DashboardState, command_text::skill_status_description,
+};
 use crate::{
     openskills::{OpenSkillDashboardError, OpenSkillDashboardSummary},
     telegram_acl::PendingAccessRequest,
@@ -81,6 +84,12 @@ pub(super) struct SkillsTogglePanelItem {
     pub(super) user_disabled: bool,
     pub(super) auto_use_enabled: bool,
 }
+pub(super) struct PendingUserInputQueuePanel {
+    pub(super) inputs: Vec<DashboardPendingUserInput>,
+    pub(super) selected: usize,
+    pub(super) scroll: usize,
+    pub(super) feedback: Option<CommandFeedback>,
+}
 
 pub(super) enum CommandPanel {
     Detail(CommandDetailPanel),
@@ -88,6 +97,7 @@ pub(super) enum CommandPanel {
     SkillsList(SkillsListPanel),
     SkillsToggle(SkillsTogglePanel),
     TelegramAccess(TelegramAccessPicker),
+    PendingUserInputQueue(PendingUserInputQueuePanel),
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +135,10 @@ pub(super) enum CommandPanelAction {
     OpenSkillsList,
     OpenSkillsToggle,
     OpenTelegramAccess(TelegramAccessAction),
+    EditPendingUserInput {
+        event_id: String,
+        incoming_text: String,
+    },
     RunAction {
         title: String,
         action: DashboardAction,
@@ -171,6 +185,7 @@ impl CommandPanel {
         match self {
             CommandPanel::SkillsList(panel) => panel.sync_state(state),
             CommandPanel::SkillsToggle(panel) => panel.sync_state(state),
+            CommandPanel::PendingUserInputQueue(panel) => panel.sync_state(state),
             CommandPanel::Detail(_)
             | CommandPanel::Selection(_)
             | CommandPanel::TelegramAccess(_) => {}
@@ -195,19 +210,31 @@ impl CommandPanel {
                     "Enter reject selected   ↑/↓ move   PgUp/PgDn page   Esc cancel"
                 }
             },
+            CommandPanel::PendingUserInputQueue(_) => {
+                "Enter edit   d discard   Shift+↑/↓ reorder   c clear   Esc close"
+            }
         }
     }
 
     pub(super) fn set_error_feedback(&mut self, feedback: CommandFeedback) {
-        if let CommandPanel::SkillsToggle(panel) = self {
-            panel.feedback =
-                matches!(feedback.level, CommandFeedbackLevel::Error).then_some(feedback);
+        match self {
+            CommandPanel::SkillsToggle(panel) => {
+                panel.feedback =
+                    matches!(feedback.level, CommandFeedbackLevel::Error).then_some(feedback);
+            }
+            CommandPanel::PendingUserInputQueue(panel) => {
+                panel.feedback =
+                    matches!(feedback.level, CommandFeedbackLevel::Error).then_some(feedback);
+            }
+            _ => {}
         }
     }
 
     pub(super) fn clear_feedback(&mut self) {
-        if let CommandPanel::SkillsToggle(panel) = self {
-            panel.feedback = None;
+        match self {
+            CommandPanel::SkillsToggle(panel) => panel.feedback = None,
+            CommandPanel::PendingUserInputQueue(panel) => panel.feedback = None,
+            _ => {}
         }
     }
 }
@@ -309,6 +336,45 @@ impl SkillsListPanelItem {
             scope: skill.scope.clone(),
             status: skill_status_description(skill),
         }
+    }
+}
+impl PendingUserInputQueuePanel {
+    pub(super) fn from_state(state: &DashboardState) -> Option<Self> {
+        if state.pending_user_inputs.is_empty() {
+            return None;
+        }
+        Some(Self {
+            inputs: state.pending_user_inputs.clone(),
+            selected: 0,
+            scroll: 0,
+            feedback: None,
+        })
+    }
+
+    pub(super) fn sync_state(&mut self, state: &DashboardState) {
+        let selected_event_id = self
+            .inputs
+            .get(self.selected)
+            .map(|input| input.event_id.clone());
+        self.inputs = state.pending_user_inputs.clone();
+        if let Some(selected_event_id) = selected_event_id
+            && let Some(index) = self
+                .inputs
+                .iter()
+                .position(|input| input.event_id == selected_event_id)
+        {
+            self.selected = index;
+        }
+        self.clamp_selection();
+    }
+
+    fn selected_input(&self) -> Option<&DashboardPendingUserInput> {
+        self.inputs.get(self.selected)
+    }
+
+    fn clamp_selection(&mut self) {
+        self.selected = self.selected.min(self.inputs.len().saturating_sub(1));
+        self.scroll = adjusted_list_scroll(self.scroll, self.selected, self.inputs.len(), 8);
     }
 }
 
@@ -432,6 +498,9 @@ pub(super) fn handle_command_panel_key(
         CommandPanel::SkillsList(skills) => handle_skills_list_panel_key(skills, key),
         CommandPanel::SkillsToggle(skills) => handle_skills_toggle_panel_key(skills, key),
         CommandPanel::TelegramAccess(picker) => handle_telegram_access_panel_key(picker, key),
+        CommandPanel::PendingUserInputQueue(queue) => {
+            handle_pending_user_input_queue_panel_key(queue, key)
+        }
     }
 }
 
@@ -532,6 +601,117 @@ fn handle_selection_panel_key(
                 }
             }
         }
+        _ => CommandPanelAction::None,
+    }
+}
+fn handle_pending_user_input_queue_panel_key(
+    panel: &mut PendingUserInputQueuePanel,
+    key: KeyEvent,
+) -> CommandPanelAction {
+    match key.code {
+        KeyCode::Char('q') => CommandPanelAction::Close,
+        KeyCode::Esc => {
+            let Some(input) = panel.selected_input() else {
+                return CommandPanelAction::None;
+            };
+            let Ok(event_id) = input.event_id.parse() else {
+                return CommandPanelAction::None;
+            };
+            CommandPanelAction::RunAction {
+                title: "Run queued input now".to_string(),
+                action: DashboardAction::PreemptPendingUserInput { event_id },
+                keep_panel: false,
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            let Some(input) = panel.selected_input() else {
+                return CommandPanelAction::None;
+            };
+            let Ok(event_id) = input.event_id.parse() else {
+                return CommandPanelAction::None;
+            };
+            CommandPanelAction::RunAction {
+                title: "Move queued input".to_string(),
+                action: DashboardAction::MovePendingUserInput {
+                    event_id,
+                    direction: DashboardPendingUserInputMoveDirection::Up,
+                },
+                keep_panel: true,
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            let Some(input) = panel.selected_input() else {
+                return CommandPanelAction::None;
+            };
+            let Ok(event_id) = input.event_id.parse() else {
+                return CommandPanelAction::None;
+            };
+            CommandPanelAction::RunAction {
+                title: "Move queued input".to_string(),
+                action: DashboardAction::MovePendingUserInput {
+                    event_id,
+                    direction: DashboardPendingUserInputMoveDirection::Down,
+                },
+                keep_panel: true,
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            panel.selected = panel.selected.saturating_sub(1);
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            panel.selected = (panel.selected + 1).min(panel.inputs.len().saturating_sub(1));
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::PageUp => {
+            panel.selected = panel.selected.saturating_sub(8);
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::PageDown => {
+            panel.selected = (panel.selected + 8).min(panel.inputs.len().saturating_sub(1));
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::Home => {
+            panel.selected = 0;
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::End => {
+            panel.selected = panel.inputs.len().saturating_sub(1);
+            panel.clamp_selection();
+            CommandPanelAction::None
+        }
+        KeyCode::Enter | KeyCode::Char('e') => {
+            let Some(input) = panel.selected_input() else {
+                return CommandPanelAction::None;
+            };
+            CommandPanelAction::EditPendingUserInput {
+                event_id: input.event_id.clone(),
+                incoming_text: input.incoming_text.clone(),
+            }
+        }
+        KeyCode::Char('d') | KeyCode::Delete | KeyCode::Backspace => {
+            let Some(input) = panel.selected_input() else {
+                return CommandPanelAction::None;
+            };
+            let Ok(event_id) = input.event_id.parse() else {
+                return CommandPanelAction::None;
+            };
+            CommandPanelAction::RunAction {
+                title: "Discard queued input".to_string(),
+                action: DashboardAction::DismissPendingUserInput { event_id },
+                keep_panel: true,
+            }
+        }
+        KeyCode::Char('c') => CommandPanelAction::RunAction {
+            title: "Clear queued inputs".to_string(),
+            action: DashboardAction::ClearPendingUserInputs,
+            keep_panel: true,
+        },
         _ => CommandPanelAction::None,
     }
 }

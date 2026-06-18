@@ -84,7 +84,7 @@ pub(crate) use command_registry::remote_dashboard_commands;
 use command_render::render_command_panel;
 use command_render::{
     CommandBarRenderState, command_feedback_row_count, command_panel_row_count,
-    command_popup_row_count, render_command_bar,
+    command_popup_row_count, pending_user_input_preview_row_count, render_command_bar,
 };
 #[cfg(test)]
 use command_text::{render_pending_access_requests, render_skills_list};
@@ -458,6 +458,7 @@ pub async fn run_tui_dashboard(
         let state = rx.borrow_and_update();
         view.sync_visible_clear_from_state(&state);
         view.sync_transcript_overlay(&state);
+        view.sync_pending_user_input_edit(&state);
         if let Some(panel) = view.command_panel.as_mut() {
             panel.sync_state(&state);
         }
@@ -541,7 +542,8 @@ fn render_tui_dashboard_frame<B: Backend>(
     let pending_requests = state.pending_access_requests.clone();
     let expanded_thinking_count = view.expanded_thinking_count();
     let overlay_open = view.transcript_overlay.is_some();
-    let panel_open = view.command_panel.is_some() || overlay_open;
+    let panel_open =
+        view.command_panel.is_some() || view.editing_pending_user_input.is_some() || overlay_open;
     let live_command_feedback = if !panel_open {
         let command_context = DashboardCommandContext {
             requests: &pending_requests,
@@ -551,7 +553,9 @@ fn render_tui_dashboard_frame<B: Backend>(
     } else {
         None
     };
-    let active_command_feedback = if !panel_open {
+    let active_command_feedback = if view.editing_pending_user_input.is_some() {
+        view.command_feedback.as_ref()
+    } else if !panel_open {
         live_command_feedback
             .as_ref()
             .or(view.command_feedback.as_ref())
@@ -571,10 +575,18 @@ fn render_tui_dashboard_frame<B: Backend>(
     let term_size = terminal.size().ok();
     let term_width = term_size.map(|size| size.width).unwrap_or(80);
     let term_height = term_size.map(|size| size.height).unwrap_or(24);
+    let pending_user_input_rows =
+        if view.command_panel.is_none() && view.editing_pending_user_input.is_none() {
+            pending_user_input_preview_row_count(&state.pending_user_inputs)
+        } else {
+            0
+        };
     let input_lines = command_input_display_height(
         wrapped_input_height(view.command_input.as_str(), term_width),
         term_height,
-        popup_rows.saturating_add(feedback_rows),
+        popup_rows
+            .saturating_add(feedback_rows)
+            .saturating_add(pending_user_input_rows),
     );
     let panel_rows = command_panel_row_count(
         view.command_panel.as_ref(),
@@ -624,7 +636,13 @@ fn render_tui_dashboard_frame<B: Backend>(
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(6),
-                Constraint::Length(1 + input_lines + panel_rows + popup_rows + feedback_rows),
+                Constraint::Length(
+                    1 + input_lines
+                        + panel_rows
+                        + popup_rows
+                        + feedback_rows
+                        + pending_user_input_rows,
+                ),
             ])
             .split(f.area());
         // max_scroll now returned directly from render (no double traversal)
@@ -656,7 +674,9 @@ fn render_tui_dashboard_frame<B: Backend>(
                 footer_context: &state.footer_context,
                 pending_paste_count: view.pending_pastes.len(),
                 pending_image_attachment_count: view.pending_image_attachments.len(),
+                pending_user_inputs: &state.pending_user_inputs,
                 ctrl_c_reminder: view.ctrl_c_reminder,
+                editing_pending_user_input: view.editing_pending_user_input.is_some(),
                 panel: view.command_panel.as_ref(),
                 panel_rows,
                 popup_selection: view.command_popup_selection,
@@ -1265,6 +1285,7 @@ mod tests {
         assert!(commands.contains(&"app_status"));
         assert!(commands.contains(&"restart"));
         assert!(commands.contains(&"skills"));
+        assert!(!commands.contains(&"pending"));
         assert!(!commands.contains(&"snapshot"));
         assert!(!commands.contains(&"system_prompt"));
         assert!(!commands.contains(&"quit"));

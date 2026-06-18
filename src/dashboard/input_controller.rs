@@ -12,7 +12,8 @@ use super::command_input::{
 };
 use super::command_panels::{
     CommandFeedback, CommandFeedbackLevel, CommandPanel, CommandPanelAction,
-    DashboardCommandContext, SkillsListPanel, SkillsTogglePanel, handle_command_panel_key,
+    DashboardCommandContext, PendingUserInputQueuePanel, SkillsListPanel, SkillsTogglePanel,
+    handle_command_panel_key,
 };
 use super::view_state::{CtrlCReminder, TuiViewState};
 use std::path::{Path, PathBuf};
@@ -32,6 +33,10 @@ pub(super) enum TuiInputOutcome {
         title: String,
         action: DashboardAction,
         quiet_success: bool,
+    },
+    SavePendingUserInputEdit {
+        event_id: uuid::Uuid,
+        incoming_text: String,
     },
     SubmitText {
         input: String,
@@ -54,6 +59,13 @@ pub(super) fn handle_key_event(
     if is_ctrl_t(key) {
         view.open_transcript_overlay(state);
         return TuiInputOutcome::Continue;
+    }
+    if view.editing_pending_user_input.is_some() {
+        return handle_pending_user_input_edit_key(key, view);
+    }
+
+    if is_ctrl_p(key) {
+        return open_pending_user_input_queue_panel(view, state);
     }
 
     if view.command_panel.is_some() {
@@ -88,6 +100,12 @@ pub(super) fn handle_key_event(
             }
             CommandPanelAction::OpenTelegramAccess(action) => {
                 view.command_panel = Some(telegram_access_command_panel(action, &pending_requests));
+            }
+            CommandPanelAction::EditPendingUserInput {
+                event_id,
+                incoming_text,
+            } => {
+                view.begin_pending_user_input_edit(event_id, incoming_text);
             }
             CommandPanelAction::RunAction {
                 title,
@@ -238,6 +256,9 @@ fn is_ctrl_c(key: KeyEvent) -> bool {
 fn is_ctrl_t(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'t'))
 }
+fn is_ctrl_p(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.eq_ignore_ascii_case(&'p'))
+}
 
 fn handle_ctrl_c_key(view: &mut TuiViewState, state: &DashboardState) -> TuiInputOutcome {
     if composer_has_input(view) {
@@ -284,6 +305,110 @@ fn ctrl_c_reminder_for_state(state: &DashboardState) -> Option<CtrlCReminder> {
     } else {
         None
     }
+}
+
+fn open_pending_user_input_queue_panel(
+    view: &mut TuiViewState,
+    state: &DashboardState,
+) -> TuiInputOutcome {
+    if let Some(panel) = PendingUserInputQueuePanel::from_state(state) {
+        view.command_panel = Some(CommandPanel::PendingUserInputQueue(panel));
+        view.command_feedback = None;
+    } else {
+        view.command_feedback = Some(CommandFeedback {
+            title: "QUEUED INPUTS".to_string(),
+            message: "no queued follow-up inputs".to_string(),
+            detail: None,
+            level: CommandFeedbackLevel::Info,
+        });
+    }
+    view.clear_ctrl_c_reminder();
+    view.reset_command_history_navigation();
+    view.reset_command_popup();
+    TuiInputOutcome::Continue
+}
+
+fn handle_pending_user_input_edit_key(key: KeyEvent, view: &mut TuiViewState) -> TuiInputOutcome {
+    if should_insert_newline_on_enter(key.modifiers) && key.code == KeyCode::Enter {
+        view.command_input.insert_char('\n');
+        view.command_feedback = None;
+        view.reset_command_history_navigation();
+        view.reset_command_popup();
+        return TuiInputOutcome::Continue;
+    }
+
+    if key.code == KeyCode::Esc || is_ctrl_c(key) {
+        view.cancel_pending_user_input_edit();
+        return TuiInputOutcome::Continue;
+    }
+
+    match key.code {
+        KeyCode::Char(c) => {
+            view.command_input.insert_char(c);
+            view.command_feedback = None;
+            view.reset_command_history_navigation();
+            view.reset_command_popup();
+        }
+        KeyCode::Backspace => {
+            view.command_input.delete_before_cursor();
+            view.command_feedback = None;
+            view.reset_command_history_navigation();
+            view.reset_command_popup();
+        }
+        KeyCode::Enter => {
+            if !view.pending_image_attachments.is_empty() {
+                view.command_feedback = Some(CommandFeedback {
+                    title: "QUEUED INPUTS".to_string(),
+                    message: "pending input edits cannot add image attachments".to_string(),
+                    detail: Some("Remove image placeholders before saving the edit.".to_string()),
+                    level: CommandFeedbackLevel::Error,
+                });
+                return TuiInputOutcome::Continue;
+            }
+            if !view.pending_pastes.is_empty() {
+                view.command_input.set_text(expand_paste_placeholders(
+                    view.command_input.as_str(),
+                    &view.pending_pastes,
+                ));
+                view.pending_pastes.clear();
+            }
+            let Some(editing) = view.editing_pending_user_input.as_ref() else {
+                return TuiInputOutcome::Continue;
+            };
+            let Ok(event_id) = editing.event_id.parse() else {
+                view.command_feedback = Some(CommandFeedback {
+                    title: "QUEUED INPUTS".to_string(),
+                    message: "queued input id is invalid".to_string(),
+                    detail: Some(editing.event_id.clone()),
+                    level: CommandFeedbackLevel::Error,
+                });
+                return TuiInputOutcome::Continue;
+            };
+            return TuiInputOutcome::SavePendingUserInputEdit {
+                event_id,
+                incoming_text: view.command_input.as_str().to_string(),
+            };
+        }
+        KeyCode::Left => {
+            view.command_input.move_left();
+            view.reset_command_popup();
+        }
+        KeyCode::Right => {
+            view.command_input.move_right();
+            view.reset_command_popup();
+        }
+        KeyCode::Home => {
+            view.command_input.move_home();
+            view.reset_command_popup();
+        }
+        KeyCode::End => {
+            view.command_input.move_end();
+            view.reset_command_popup();
+        }
+        _ => {}
+    }
+
+    TuiInputOutcome::Continue
 }
 
 fn handle_enter_key(
@@ -434,6 +559,34 @@ pub(super) async fn execute_input_outcome(
             view.reset_command_popup();
             false
         }
+        TuiInputOutcome::SavePendingUserInputEdit {
+            event_id,
+            incoming_text,
+        } => {
+            let result = command_runner
+                .run_action(
+                    DashboardAction::UpdatePendingUserInput {
+                        event_id,
+                        incoming_text,
+                    },
+                    state,
+                )
+                .await;
+            if result.success {
+                view.editing_pending_user_input = None;
+                view.command_feedback = None;
+                view.command_input.clear();
+                view.pending_pastes.clear();
+                view.pending_image_attachments.clear();
+                view.reset_command_popup();
+            } else {
+                view.command_feedback = Some(command_feedback_from_action_result(
+                    "Edit queued input".to_string(),
+                    result,
+                ));
+            }
+            false
+        }
         TuiInputOutcome::SubmitText { input, attachments } => {
             let _ = command_runner.run_command(&input, attachments, state).await;
             view.record_command_history(&input);
@@ -453,6 +606,15 @@ pub(super) fn handle_paste_event(text: &str, view: &mut TuiViewState) {
     }
 
     if let Some(attachments) = image_attachments_from_paste(text) {
+        if view.editing_pending_user_input.is_some() {
+            view.command_feedback = Some(CommandFeedback {
+                title: "QUEUED INPUTS".to_string(),
+                message: "pending input edits cannot add image attachments".to_string(),
+                detail: Some("Paste plain text while editing a queued input.".to_string()),
+                level: CommandFeedbackLevel::Error,
+            });
+            return;
+        }
         let placeholders = attachments
             .iter()
             .map(|attachment| attachment.placeholder.as_str())
@@ -568,6 +730,28 @@ mod tests {
         DashboardState {
             runtime_activity: crate::dashboard::DashboardRuntimeActivity::default()
                 .with_runtime_turn(Some("model request".to_string()), Some(1_000)),
+            ..DashboardState::default()
+        }
+    }
+
+    fn pending_user_input(
+        event_id: uuid::Uuid,
+        text: &str,
+    ) -> crate::dashboard::DashboardPendingUserInput {
+        crate::dashboard::DashboardPendingUserInput {
+            event_id: event_id.to_string(),
+            origin: "tui".to_string(),
+            incoming_text: text.to_string(),
+            arrived_at_ms: 1_000,
+            attachment_count: 0,
+        }
+    }
+
+    fn state_with_pending_user_inputs(
+        inputs: Vec<crate::dashboard::DashboardPendingUserInput>,
+    ) -> DashboardState {
+        DashboardState {
+            pending_user_inputs: inputs,
             ..DashboardState::default()
         }
     }
@@ -912,5 +1096,203 @@ mod tests {
 
         assert!(matches!(outcome, TuiInputOutcome::Continue));
         assert_eq!(view.ctrl_c_reminder, None);
+    }
+
+    #[test]
+    fn ctrl_p_opens_pending_user_input_queue_panel() {
+        let event_id = uuid::Uuid::from_u128(1);
+        let state = state_with_pending_user_inputs(vec![pending_user_input(event_id, "queued")]);
+        let mut view = TuiViewState::new();
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &mut view,
+            &state,
+        );
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        match view.command_panel.as_ref() {
+            Some(CommandPanel::PendingUserInputQueue(panel)) => {
+                assert_eq!(panel.inputs.len(), 1);
+                assert_eq!(panel.inputs[0].event_id, event_id.to_string());
+            }
+            _ => panic!("ctrl+p should open the queued input panel"),
+        }
+    }
+
+    #[test]
+    fn ctrl_p_without_pending_inputs_shows_feedback() {
+        let mut view = TuiViewState::new();
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &mut view,
+            &DashboardState::default(),
+        );
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert!(view.command_panel.is_none());
+        assert_eq!(
+            view.command_feedback
+                .as_ref()
+                .map(|feedback| feedback.message.as_str()),
+            Some("no queued follow-up inputs")
+        );
+    }
+
+    #[test]
+    fn pending_input_queue_discard_shortcut_runs_action() {
+        let event_id = uuid::Uuid::from_u128(2);
+        let state =
+            state_with_pending_user_inputs(vec![pending_user_input(event_id, "discard me")]);
+        let mut view = TuiViewState::new();
+        let _ = handle_key_event(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &mut view,
+            &state,
+        );
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &mut view,
+            &state,
+        );
+
+        match outcome {
+            TuiInputOutcome::RunPanelAction {
+                action, keep_panel, ..
+            } => {
+                assert!(keep_panel);
+                assert_eq!(
+                    action,
+                    DashboardAction::DismissPendingUserInput { event_id }
+                );
+            }
+            _ => panic!("d should discard the selected queued input"),
+        }
+    }
+
+    #[test]
+    fn pending_input_queue_edit_shortcut_loads_composer() {
+        let event_id = uuid::Uuid::from_u128(3);
+        let state = state_with_pending_user_inputs(vec![pending_user_input(event_id, "edit me")]);
+        let mut view = TuiViewState::new();
+        let _ = handle_key_event(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &mut view,
+            &state,
+        );
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut view,
+            &state,
+        );
+
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert!(view.command_panel.is_none());
+        assert_eq!(view.command_input.as_str(), "edit me");
+        assert_eq!(
+            view.editing_pending_user_input
+                .as_ref()
+                .map(|editing| editing.event_id.as_str()),
+            Some(event_id.to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn pending_input_queue_esc_preempts_selected_input() {
+        let event_id = uuid::Uuid::from_u128(6);
+        let state = state_with_pending_user_inputs(vec![pending_user_input(event_id, "run now")]);
+        let mut view = TuiViewState::new();
+        let _ = handle_key_event(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &mut view,
+            &state,
+        );
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut view,
+            &state,
+        );
+
+        match outcome {
+            TuiInputOutcome::RunPanelAction {
+                action, keep_panel, ..
+            } => {
+                assert!(!keep_panel);
+                assert_eq!(
+                    action,
+                    DashboardAction::PreemptPendingUserInput { event_id }
+                );
+            }
+            _ => panic!("esc should preempt the selected queued input"),
+        }
+    }
+
+    #[test]
+    fn pending_input_queue_reorder_shortcut_runs_action() {
+        let event_id = uuid::Uuid::from_u128(4);
+        let state = state_with_pending_user_inputs(vec![pending_user_input(event_id, "move me")]);
+        let mut view = TuiViewState::new();
+        let _ = handle_key_event(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &mut view,
+            &state,
+        );
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+            &mut view,
+            &state,
+        );
+
+        match outcome {
+            TuiInputOutcome::RunPanelAction {
+                action, keep_panel, ..
+            } => {
+                assert!(keep_panel);
+                assert_eq!(
+                    action,
+                    DashboardAction::MovePendingUserInput {
+                        event_id,
+                        direction: crate::dashboard::DashboardPendingUserInputMoveDirection::Down,
+                    }
+                );
+            }
+            _ => panic!("shift+down should reorder the selected queued input"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_input_edit_enter_saves_update_action() {
+        let event_id = uuid::Uuid::from_u128(5);
+        let state = state_with_pending_user_inputs(vec![pending_user_input(event_id, "old")]);
+        let mut view = TuiViewState::new();
+        view.begin_pending_user_input_edit(event_id.to_string(), "old".to_string());
+        view.command_input.set_text("updated".to_string());
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut view,
+            &state,
+        );
+
+        match &outcome {
+            TuiInputOutcome::SavePendingUserInputEdit {
+                event_id: saved_event_id,
+                incoming_text,
+            } => {
+                assert_eq!(*saved_event_id, event_id);
+                assert_eq!(incoming_text, "updated");
+            }
+            _ => panic!("enter should save the queued input edit"),
+        }
+
+        let should_exit = execute_input_outcome(outcome, &mut view, &state, &OkRunner).await;
+        assert!(!should_exit);
+        assert!(view.editing_pending_user_input.is_none());
+        assert!(view.command_input.is_empty());
     }
 }

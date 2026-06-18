@@ -6,6 +6,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use super::DashboardPendingUserInput;
 use super::command_flow::{
     command_completion_body, dashboard_command_parts, dashboard_parts_open_panel,
     dashboard_parts_run_action, is_dashboard_command_input, matching_commands,
@@ -14,7 +15,7 @@ use super::command_flow::{
 use super::command_input::{command_input_display_text, cursor_display_row, cursor_display_xy};
 use super::command_panels::{
     CommandDetailPanel, CommandFeedback, CommandFeedbackLevel, CommandPanel, CommandSelectionPanel,
-    DashboardCommandContext, SkillsListPanel, SkillsTogglePanel,
+    DashboardCommandContext, PendingUserInputQueuePanel, SkillsListPanel, SkillsTogglePanel,
     TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS, TelegramAccessPicker,
 };
 use super::command_registry::dashboard_command_is_known;
@@ -57,6 +58,12 @@ impl CommandPanel {
                         .min(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS) as u16,
                 )
                 .clamp(6, 15),
+            CommandPanel::PendingUserInputQueue(panel) => {
+                let feedback_rows = command_feedback_row_count(panel.feedback.as_ref());
+                4u16.saturating_add(panel.inputs.len().min(8) as u16)
+                    .saturating_add(feedback_rows)
+                    .clamp(6, 15)
+            }
         }
     }
 }
@@ -69,7 +76,9 @@ pub(super) struct CommandBarRenderState<'a> {
     pub(super) footer_context: &'a str,
     pub(super) pending_paste_count: usize,
     pub(super) pending_image_attachment_count: usize,
+    pub(super) pending_user_inputs: &'a [DashboardPendingUserInput],
     pub(super) ctrl_c_reminder: Option<CtrlCReminder>,
+    pub(super) editing_pending_user_input: bool,
     pub(super) panel: Option<&'a CommandPanel>,
     pub(super) panel_rows: u16,
     pub(super) popup_selection: usize,
@@ -123,6 +132,15 @@ pub(super) fn command_feedback_row_count(feedback: Option<&CommandFeedback>) -> 
     }
 }
 
+pub(super) fn pending_user_input_preview_row_count(inputs: &[DashboardPendingUserInput]) -> u16 {
+    if inputs.is_empty() {
+        return 0;
+    }
+    let visible = inputs.len().min(PENDING_USER_INPUT_PREVIEW_LIMIT);
+    let overflow = usize::from(inputs.len() > PENDING_USER_INPUT_PREVIEW_LIMIT);
+    (1 + visible + overflow) as u16
+}
+
 pub(super) fn render_command_panel(f: &mut Frame, area: Rect, panel: &CommandPanel) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -134,6 +152,9 @@ pub(super) fn render_command_panel(f: &mut Frame, area: Rect, panel: &CommandPan
         CommandPanel::SkillsList(skills) => render_skills_list_panel(f, inner, skills),
         CommandPanel::SkillsToggle(skills) => render_skills_toggle_panel(f, inner, skills),
         CommandPanel::TelegramAccess(picker) => render_telegram_access_panel(f, inner, picker),
+        CommandPanel::PendingUserInputQueue(panel) => {
+            render_pending_user_input_queue_panel(f, inner, panel)
+        }
     }
 }
 
@@ -147,7 +168,9 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
         footer_context,
         pending_paste_count,
         pending_image_attachment_count,
+        pending_user_inputs,
         ctrl_c_reminder,
+        editing_pending_user_input,
         panel,
         panel_rows,
         popup_selection,
@@ -155,13 +178,17 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
         last_cursor_pos,
     } = state;
 
-    let completion = if panel.is_none() {
+    let completion = if panel.is_none() && !editing_pending_user_input {
         selected_command_completion(input, 0, context)
     } else {
         None
     };
-    let hint = command_hint(input, context);
-    let popup_rows = if panel.is_some() {
+    let hint = if editing_pending_user_input {
+        String::new()
+    } else {
+        command_hint(input, context)
+    };
+    let popup_rows = if panel.is_some() || editing_pending_user_input {
         0
     } else {
         command_popup_row_count(input, context)
@@ -170,6 +197,11 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
         0
     } else {
         command_feedback_row_count(feedback)
+    };
+    let pending_user_input_rows = if panel.is_none() && !editing_pending_user_input {
+        pending_user_input_preview_row_count(pending_user_inputs)
+    } else {
+        0
     };
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -180,6 +212,9 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
             }
             if feedback_rows > 0 {
                 c.push(Constraint::Length(feedback_rows));
+            }
+            if pending_user_input_rows > 0 {
+                c.push(Constraint::Length(pending_user_input_rows));
             }
             c.push(Constraint::Length(input_lines));
             if popup_rows > 0 {
@@ -200,6 +235,10 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
         && feedback_rows > 0
     {
         render_command_feedback(f, rows[row_index], feedback);
+        row_index += 1;
+    }
+    if pending_user_input_rows > 0 {
+        render_pending_user_input_preview(f, rows[row_index], pending_user_inputs);
         row_index += 1;
     }
     let input_row_index = row_index;
@@ -239,7 +278,16 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
     } else {
         rows[popup_row_index]
     };
-    let footer_line = if let Some(panel) = panel {
+    let footer_line = if editing_pending_user_input {
+        Line::from(vec![
+            Span::styled("editing queued input", Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+            Span::styled(
+                "Enter save   Shift+Enter newline   Esc cancel",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
+    } else if let Some(panel) = panel {
         Line::from(vec![
             Span::styled("panel", Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
@@ -304,6 +352,175 @@ fn render_footer_line(
         text,
         Style::default().fg(Color::DarkGray),
     )])
+}
+
+const PENDING_USER_INPUT_PREVIEW_LIMIT: usize = 3;
+
+fn render_pending_user_input_preview(
+    f: &mut Frame,
+    area: Rect,
+    inputs: &[DashboardPendingUserInput],
+) {
+    if area.height == 0 || area.width == 0 || inputs.is_empty() {
+        return;
+    }
+    f.render_widget(
+        Paragraph::new(Text::from(pending_user_input_preview_lines(
+            inputs,
+            area.width as usize,
+        ))),
+        area,
+    );
+}
+
+fn pending_user_input_preview_lines(
+    inputs: &[DashboardPendingUserInput],
+    width: usize,
+) -> Vec<Line<'static>> {
+    if inputs.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![Line::from(vec![
+        Span::styled("•", Style::default().fg(Color::Cyan)),
+        Span::raw(" "),
+        Span::styled(
+            format!("Queued follow-up inputs ({})  Ctrl+P manage", inputs.len()),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])];
+    let preview_width = width.saturating_sub(4);
+    lines.extend(
+        inputs
+            .iter()
+            .take(PENDING_USER_INPUT_PREVIEW_LIMIT)
+            .map(|input| {
+                Line::from(vec![
+                    Span::styled("  ↳ ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        truncate_display_width(
+                            &pending_user_input_preview_text(input),
+                            preview_width,
+                        ),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ])
+            }),
+    );
+    if inputs.len() > PENDING_USER_INPUT_PREVIEW_LIMIT {
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                "  … {} more queued inputs",
+                inputs.len() - PENDING_USER_INPUT_PREVIEW_LIMIT
+            ),
+            Style::default().fg(Color::DarkGray),
+        )]));
+    }
+    lines
+}
+
+fn render_pending_user_input_queue_panel(
+    f: &mut Frame,
+    area: Rect,
+    panel: &PendingUserInputQueuePanel,
+) {
+    let mut rest = render_panel_title(
+        f,
+        area,
+        "Queued inputs",
+        Some("Esc run selected now. Enter edit. d discard. Shift+Up/Down reorder. q close."),
+    );
+    if rest.height == 0 {
+        return;
+    }
+    if let Some(feedback) = panel.feedback.as_ref() {
+        let rows = command_feedback_row_count(Some(feedback)).min(rest.height);
+        if rows > 0 {
+            render_command_feedback(
+                f,
+                Rect {
+                    height: rows,
+                    ..rest
+                },
+                feedback,
+            );
+            rest.y = rest.y.saturating_add(rows);
+            rest.height = rest.height.saturating_sub(rows);
+        }
+    }
+    if rest.height == 0 {
+        return;
+    }
+    let row_width = rest.width as usize;
+    let lines = panel
+        .inputs
+        .iter()
+        .skip(panel.scroll)
+        .take(rest.height as usize)
+        .enumerate()
+        .map(|(visible_idx, input)| {
+            let idx = panel.scroll + visible_idx;
+            let selected = idx == panel.selected;
+            let marker = if selected { "›" } else { " " };
+            let index_text = format!("{}.", idx + 1);
+            let fixed_width = 1usize
+                .saturating_add(1)
+                .saturating_add(UnicodeWidthStr::width(index_text.as_str()))
+                .saturating_add(1);
+            let preview_width = row_width.saturating_sub(fixed_width.saturating_add(2));
+            let preview =
+                truncate_display_width(&pending_user_input_preview_text(input), preview_width);
+            let preview_style = if selected {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+                Span::styled(index_text, Style::default().fg(Color::DarkGray)),
+                Span::raw(" "),
+                Span::styled(preview, preview_style),
+            ])
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+        rest,
+    );
+}
+
+fn pending_user_input_preview_text(input: &DashboardPendingUserInput) -> String {
+    let message = input
+        .incoming_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut text = if message.is_empty() {
+        if input.attachment_count > 0 {
+            "attachment-only input".to_string()
+        } else {
+            "empty input".to_string()
+        }
+    } else {
+        message
+    };
+    if input.attachment_count > 0 && !input.incoming_text.trim().is_empty() {
+        if input.attachment_count == 1 {
+            text.push_str(" +1 attachment");
+        } else {
+            text.push_str(&format!(" +{} attachments", input.attachment_count));
+        }
+    }
+    let origin = input.origin.trim();
+    if origin.is_empty() {
+        text
+    } else {
+        format!("{origin} | {text}")
+    }
 }
 
 fn render_panel_text_lines(text: &str) -> Vec<Line<'static>> {
@@ -874,7 +1091,7 @@ fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
                 .join(" | ");
         }
         if input.trim().is_empty() {
-            return "Enter send. Shift+Enter newline. Prefix / for commands. Esc clear."
+            return "Enter send. Shift+Enter newline. Ctrl+P queued inputs. Prefix / for commands. Esc clear."
                 .to_string();
         }
         return "Enter send. Shift+Enter newline. Prefix / for commands.".to_string();
@@ -937,6 +1154,25 @@ mod tests {
         assert!(text.contains("2 pasted blocks queued"));
         assert!(text.contains("1 image attachment queued"));
         assert!(text.contains("Enter send."));
+    }
+
+    #[test]
+    fn pending_user_input_preview_lines_show_first_inputs() {
+        let inputs = vec![crate::dashboard::DashboardPendingUserInput {
+            event_id: uuid::Uuid::nil().to_string(),
+            origin: "tui".to_string(),
+            incoming_text: "queued follow-up".to_string(),
+            arrived_at_ms: 42,
+            attachment_count: 0,
+        }];
+        let text = pending_user_input_preview_lines(&inputs, 120)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("Queued follow-up inputs (1)"));
+        assert!(text.contains("tui | queued follow-up"));
     }
 
     #[test]

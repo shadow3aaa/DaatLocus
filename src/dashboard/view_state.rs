@@ -13,6 +13,10 @@ use super::{
 pub(super) enum CtrlCReminder {
     Interrupt,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PendingUserInputEditState {
+    pub(super) event_id: String,
+}
 
 /// Editable input string with cursor tracking for in-place editing.
 #[derive(Debug)]
@@ -227,6 +231,7 @@ pub(super) struct TuiViewState {
     pub(super) transcript_overlay: Option<TranscriptOverlayState>,
     pub(super) command_feedback: Option<CommandFeedback>,
     pub(super) ctrl_c_reminder: Option<CtrlCReminder>,
+    pub(super) editing_pending_user_input: Option<PendingUserInputEditState>,
     command_history: Vec<String>,
     command_history_cursor: Option<usize>,
     command_history_recalled_text: Option<String>,
@@ -259,6 +264,7 @@ impl TuiViewState {
             transcript_overlay: None,
             command_feedback: None,
             ctrl_c_reminder: None,
+            editing_pending_user_input: None,
             command_history: Vec::new(),
             command_history_cursor: None,
             command_history_recalled_text: None,
@@ -323,6 +329,52 @@ impl TuiViewState {
 
     pub(super) fn clear_ctrl_c_reminder(&mut self) {
         self.ctrl_c_reminder = None;
+    }
+
+    pub(super) fn begin_pending_user_input_edit(
+        &mut self,
+        event_id: String,
+        incoming_text: String,
+    ) {
+        self.command_input.set_text(incoming_text);
+        self.pending_pastes.clear();
+        self.pending_image_attachments.clear();
+        self.command_panel = None;
+        self.command_feedback = None;
+        self.ctrl_c_reminder = None;
+        self.editing_pending_user_input = Some(PendingUserInputEditState { event_id });
+        self.reset_command_history_navigation();
+        self.reset_command_popup();
+    }
+
+    pub(super) fn cancel_pending_user_input_edit(&mut self) {
+        self.editing_pending_user_input = None;
+        self.command_input.clear();
+        self.pending_pastes.clear();
+        self.pending_image_attachments.clear();
+        self.command_feedback = None;
+        self.reset_command_history_navigation();
+        self.reset_command_popup();
+    }
+
+    pub(super) fn sync_pending_user_input_edit(&mut self, state: &DashboardState) {
+        let Some(editing) = self.editing_pending_user_input.as_ref() else {
+            return;
+        };
+        if state
+            .pending_user_inputs
+            .iter()
+            .any(|input| input.event_id == editing.event_id)
+        {
+            return;
+        }
+        self.editing_pending_user_input = None;
+        self.command_input.clear();
+        self.pending_pastes.clear();
+        self.pending_image_attachments.clear();
+        self.command_feedback = None;
+        self.reset_command_history_navigation();
+        self.reset_command_popup();
     }
 
     pub(super) fn record_command_history(&mut self, text: &str) {
