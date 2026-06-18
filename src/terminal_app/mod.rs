@@ -1652,7 +1652,7 @@ mod tests {
         let output_delay_ms = if cfg!(windows) {
             TerminalApp::WINDOWS_INITIAL_EXEC_YIELD_FLOOR_MS + 500
         } else {
-            500
+            2_000
         };
 
         let started = app
