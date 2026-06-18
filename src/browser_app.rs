@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, HashMap},
     future::IntoFuture,
+    path::PathBuf,
+    thread,
     time::Duration,
 };
 
@@ -32,11 +34,57 @@ const BROWSER_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 const BROWSER_ACTION_TIMEOUT: Duration = Duration::from_secs(15);
 const BROWSER_OPERATION_TIMEOUT_GRACE: Duration = Duration::from_secs(2);
 const BROWSER_STATE_TIMEOUT: Duration = Duration::from_secs(3);
+// Browser launch can overflow the already-deep agent turn stack on Windows.
+// Keep Viewpoint's runtime alive on a dedicated stack until the browser drops.
+const BROWSER_RUNTIME_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 pub struct BrowserApp {
-    browser: Option<Browser>,
     context: Option<BrowserContext>,
+    backend: Option<BrowserBackend>,
     pages: BTreeMap<String, BrowserPageState>,
     init_error: Option<String>,
+}
+
+struct BrowserBackend {
+    browser: Option<Browser>,
+    runtime_guard: Option<BrowserRuntimeGuard>,
+}
+
+impl BrowserBackend {
+    fn new(browser: Browser, runtime_guard: BrowserRuntimeGuard) -> Self {
+        Self {
+            browser: Some(browser),
+            runtime_guard: Some(runtime_guard),
+        }
+    }
+
+    fn browser(&self) -> &Browser {
+        self.browser
+            .as_ref()
+            .expect("browser backend should own a browser while alive")
+    }
+}
+
+impl Drop for BrowserBackend {
+    fn drop(&mut self) {
+        drop(self.browser.take());
+        drop(self.runtime_guard.take());
+    }
+}
+
+struct BrowserRuntimeGuard {
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for BrowserRuntimeGuard {
+    fn drop(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        if let Some(join_handle) = self.join_handle.take() {
+            let _ = join_handle.join();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,8 +135,8 @@ struct RenderedSnapshotLines {
 impl BrowserApp {
     pub fn new() -> Self {
         Self {
-            browser: None,
             context: None,
+            backend: None,
             pages: BTreeMap::new(),
             init_error: None,
         }
@@ -108,17 +156,8 @@ impl BrowserApp {
             self.init_error = Some(reason.clone());
             return Err(miette!(reason));
         }
-        let browser = match browser_operation_timeout(
-            "failed to launch browser backend",
-            BROWSER_OPEN_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
-            Browser::launch()
-                .executable_path(executable)
-                .headless(true)
-                .launch(),
-        )
-        .await
-        {
-            Ok(browser) => browser,
+        let backend = match launch_browser_backend(executable).await {
+            Ok(backend) => backend,
             Err(err) => {
                 let reason = err.to_string();
                 self.init_error = Some(reason.clone());
@@ -128,7 +167,7 @@ impl BrowserApp {
         let context = match browser_operation_timeout(
             "failed to create browser context",
             BROWSER_STATE_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
-            browser.new_context(),
+            backend.browser().new_context(),
         )
         .await
         {
@@ -139,8 +178,8 @@ impl BrowserApp {
                 return Err(miette!(reason));
             }
         };
-        self.browser = Some(browser);
         self.context = Some(context);
+        self.backend = Some(backend);
         self.init_error = None;
         self.pages.clear();
         Ok(())
@@ -756,6 +795,69 @@ where
     }
 }
 
+async fn launch_browser_backend(executable: PathBuf) -> Result<BrowserBackend> {
+    let (result_tx, result_rx) =
+        std::sync::mpsc::sync_channel::<std::result::Result<Browser, String>>(1);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let join_handle = thread::Builder::new()
+        .name("daat-browser-runtime".to_string())
+        .stack_size(BROWSER_RUNTIME_THREAD_STACK_BYTES)
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    let _ = result_tx.send(Err(format!("failed to build browser runtime: {err}")));
+                    return;
+                }
+            };
+
+            let launch_result = runtime.block_on(async {
+                browser_operation_timeout(
+                    "failed to launch browser backend",
+                    BROWSER_OPEN_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+                    Browser::launch()
+                        .executable_path(executable)
+                        .headless(true)
+                        .launch(),
+                )
+                .await
+                .map_err(|err| err.to_string())
+            });
+            let launch_succeeded = launch_result.is_ok();
+            if result_tx.send(launch_result).is_err() {
+                return;
+            }
+            if launch_succeeded {
+                runtime.block_on(async {
+                    let _ = shutdown_rx.await;
+                });
+            }
+        })
+        .map_err(|err| miette!("spawn browser runtime thread failed: {err}"))?;
+
+    let launch_result = tokio::task::spawn_blocking(move || result_rx.recv())
+        .await
+        .map_err(|err| miette!("join browser launch receiver failed: {err}"))?
+        .map_err(|err| miette!("browser runtime thread ended before launch result: {err}"))?;
+
+    match launch_result {
+        Ok(browser) => Ok(BrowserBackend::new(
+            browser,
+            BrowserRuntimeGuard {
+                shutdown_tx: Some(shutdown_tx),
+                join_handle: Some(join_handle),
+            },
+        )),
+        Err(err) => {
+            let _ = join_handle.join();
+            Err(miette!(err))
+        }
+    }
+}
+
 fn parse_browser_tool_args<T: for<'de> Deserialize<'de>>(call: &AgentToolCall) -> Result<T> {
     serde_json::from_value(call.arguments.clone()).map_err(|err| {
         miette!(
@@ -1276,16 +1378,16 @@ impl App for BrowserApp {
             )
             .await;
         }
-        if let Some(browser) = self.browser.as_ref() {
+        if let Some(backend) = self.backend.as_ref() {
             let _ = browser_operation_timeout(
                 "failed to close browser backend",
                 BROWSER_STATE_TIMEOUT,
-                browser.close(),
+                backend.browser().close(),
             )
             .await;
         }
         self.context = None;
-        self.browser = None;
+        self.backend = None;
         Ok(())
     }
 }
@@ -1321,5 +1423,27 @@ mod tests {
         .expect_err("operation error should propagate");
 
         assert!(err.to_string().contains("test browser operation: boom"));
+    }
+
+    #[tokio::test]
+    async fn launch_browser_backend_keeps_connection_runtime_alive() {
+        let executable = daat_locus_paths_sync().browser_executable_path();
+        if !executable.exists() {
+            return;
+        }
+
+        let backend = launch_browser_backend(executable)
+            .await
+            .expect("launch browser backend");
+        let context = browser_operation_timeout(
+            "test browser context creation",
+            BROWSER_STATE_TIMEOUT + BROWSER_OPERATION_TIMEOUT_GRACE,
+            backend.browser().new_context(),
+        )
+        .await
+        .expect("create browser context");
+
+        drop(context);
+        drop(backend);
     }
 }
