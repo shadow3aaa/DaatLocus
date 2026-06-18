@@ -45,9 +45,21 @@ pub enum DashboardAction {
     DismissPendingUserInput {
         event_id: Uuid,
     },
+    ClearPendingUserInputs,
+    UpdatePendingUserInput {
+        event_id: Uuid,
+        incoming_text: String,
+    },
     MovePendingUserInput {
         event_id: Uuid,
         direction: DashboardPendingUserInputMoveDirection,
+    },
+    MovePendingUserInputToPosition {
+        event_id: Uuid,
+        target_position: usize,
+    },
+    PreemptPendingUserInput {
+        event_id: Uuid,
     },
 }
 
@@ -162,7 +174,11 @@ pub(crate) fn execute_dashboard_action(
             Err(err) => DashboardActionResult::error(format!("reject failed for {chat_id}: {err}")),
         },
         DashboardAction::DismissPendingUserInput { .. }
-        | DashboardAction::MovePendingUserInput { .. } => {
+        | DashboardAction::ClearPendingUserInputs
+        | DashboardAction::UpdatePendingUserInput { .. }
+        | DashboardAction::MovePendingUserInput { .. }
+        | DashboardAction::MovePendingUserInputToPosition { .. }
+        | DashboardAction::PreemptPendingUserInput { .. } => {
             DashboardActionResult::error("pending user input actions require a target session")
         }
     }

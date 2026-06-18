@@ -1455,11 +1455,33 @@ fn append_committed_activity_cells_with_ids(
     }
 }
 
+fn refresh_pending_user_inputs_for_dashboard(
+    context: &Context,
+    tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
+) {
+    let Some(tx) = tx else {
+        return;
+    };
+    tx.send_modify(|state| {
+        state.pending_user_inputs = crate::dashboard::render::pending_user_inputs_from_sources(
+            &context.events,
+            &context.pending_work,
+        );
+    });
+}
+
 fn append_claimed_input_activity_cells(
     context: &Context,
     tx: Option<&tokio::sync::watch::Sender<DashboardState>>,
     inputs: &[ClaimedRuntimeInput],
 ) {
+    if inputs
+        .iter()
+        .any(|input| matches!(input, ClaimedRuntimeInput::Event(_)))
+    {
+        refresh_pending_user_inputs_for_dashboard(context, tx);
+    }
+
     let mut cells = Vec::new();
     let mut stable_ids = Vec::new();
     for input in inputs {

@@ -635,12 +635,56 @@ fn execute_session_dashboard_action(
             }
             result
         }
+        DashboardAction::ClearPendingUserInputs => {
+            let result = clear_pending_user_inputs(&state.events, &state.pending_work);
+            if result.success {
+                refresh_pending_user_inputs(state);
+            }
+            result
+        }
+        DashboardAction::UpdatePendingUserInput {
+            event_id,
+            incoming_text,
+        } => {
+            let result = update_pending_user_input(&state.events, event_id, incoming_text);
+            if result.success {
+                refresh_pending_user_inputs(state);
+            }
+            result
+        }
         DashboardAction::MovePendingUserInput {
             event_id,
             direction,
         } => {
             let result =
                 move_pending_user_input(&state.events, &state.pending_work, event_id, direction);
+            if result.success {
+                refresh_pending_user_inputs(state);
+            }
+            result
+        }
+        DashboardAction::MovePendingUserInputToPosition {
+            event_id,
+            target_position,
+        } => {
+            let result = move_pending_user_input_to_position(
+                &state.events,
+                &state.pending_work,
+                event_id,
+                target_position,
+            );
+            if result.success {
+                refresh_pending_user_inputs(state);
+            }
+            result
+        }
+        DashboardAction::PreemptPendingUserInput { event_id } => {
+            let result = preempt_pending_user_input(
+                &state.events,
+                &state.pending_work,
+                &state.runtime_interrupt_tx,
+                event_id,
+            );
             if result.success {
                 refresh_pending_user_inputs(state);
             }
@@ -693,6 +737,81 @@ fn dismiss_pending_user_input(
     }
 }
 
+fn clear_pending_user_inputs(
+    events: &EventStore,
+    pending_work: &PendingWorkQueue,
+) -> crate::dashboard::DashboardActionResult {
+    let mut dismissed = 0usize;
+    let mut first_error: Option<String> = None;
+    for event_id in pending_work.pending_event_ids() {
+        if let Err(err) = validate_pending_terminal_event(events, event_id) {
+            tracing::debug!("skipping non-user pending input during queue clear: {err:?}");
+            continue;
+        }
+        match pending_work.consume(PendingWork::Event { event_id }) {
+            Ok(true) => {
+                match events.set_status(&event_id.to_string(), EventStatus::Dismissed, None) {
+                    Ok(()) => dismissed += 1,
+                    Err(err) => {
+                        first_error.get_or_insert_with(|| format!("{err:?}"));
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(err) => {
+                first_error.get_or_insert_with(|| format!("{err:?}"));
+            }
+        }
+    }
+
+    if let Some(err) = first_error {
+        return crate::dashboard::DashboardActionResult {
+            success: false,
+            message: format!("cleared {dismissed} pending input(s), but some could not be cleared"),
+            detail: Some(err),
+        };
+    }
+
+    crate::dashboard::DashboardActionResult {
+        success: true,
+        message: if dismissed == 0 {
+            "no pending inputs to clear".to_string()
+        } else {
+            format!("cleared {dismissed} pending input(s)")
+        },
+        detail: None,
+    }
+}
+
+fn update_pending_user_input(
+    events: &EventStore,
+    event_id: uuid::Uuid,
+    incoming_text: String,
+) -> crate::dashboard::DashboardActionResult {
+    match validate_pending_terminal_event(events, event_id) {
+        Ok(()) => {}
+        Err(err) => {
+            return crate::dashboard::DashboardActionResult {
+                success: false,
+                message: "pending input is not editable".to_string(),
+                detail: Some(format!("{err:?}")),
+            };
+        }
+    }
+    match events.update_terminal_incoming_text(&event_id.to_string(), incoming_text) {
+        Ok(()) => crate::dashboard::DashboardActionResult {
+            success: true,
+            message: "updated pending input".to_string(),
+            detail: None,
+        },
+        Err(err) => crate::dashboard::DashboardActionResult {
+            success: false,
+            message: "failed to update pending input".to_string(),
+            detail: Some(format!("{err:?}")),
+        },
+    }
+}
+
 fn move_pending_user_input(
     events: &EventStore,
     pending_work: &PendingWorkQueue,
@@ -714,6 +833,87 @@ fn move_pending_user_input(
         DashboardPendingUserInputMoveDirection::Down => PendingEventMoveDirection::Down,
     };
     match pending_work.move_pending_event(event_id, direction) {
+        Ok(true) => crate::dashboard::DashboardActionResult {
+            success: true,
+            message: "moved pending input".to_string(),
+            detail: None,
+        },
+        Ok(false) => crate::dashboard::DashboardActionResult {
+            success: true,
+            message: "pending input order unchanged".to_string(),
+            detail: None,
+        },
+        Err(err) => crate::dashboard::DashboardActionResult {
+            success: false,
+            message: "failed to move pending input".to_string(),
+            detail: Some(format!("{err:?}")),
+        },
+    }
+}
+
+fn preempt_pending_user_input(
+    events: &EventStore,
+    pending_work: &PendingWorkQueue,
+    runtime_interrupt_tx: &mpsc::UnboundedSender<()>,
+    event_id: uuid::Uuid,
+) -> crate::dashboard::DashboardActionResult {
+    match validate_pending_terminal_event(events, event_id) {
+        Ok(()) => {}
+        Err(err) => {
+            return crate::dashboard::DashboardActionResult {
+                success: false,
+                message: "pending input is not runnable".to_string(),
+                detail: Some(format!("{err:?}")),
+            };
+        }
+    }
+
+    let moved = match pending_work.move_pending_event_to_front(event_id) {
+        Ok(moved) => moved,
+        Err(err) => {
+            return crate::dashboard::DashboardActionResult {
+                success: false,
+                message: "failed to prioritize pending input".to_string(),
+                detail: Some(format!("{err:?}")),
+            };
+        }
+    };
+
+    match runtime_interrupt_tx.send(()) {
+        Ok(()) => crate::dashboard::DashboardActionResult {
+            success: true,
+            message: if moved {
+                "prioritized pending input and queued runtime interrupt".to_string()
+            } else {
+                "pending input already first; queued runtime interrupt".to_string()
+            },
+            detail: None,
+        },
+        Err(err) => crate::dashboard::DashboardActionResult {
+            success: false,
+            message: "failed to queue runtime interrupt".to_string(),
+            detail: Some(format!("{err}")),
+        },
+    }
+}
+
+fn move_pending_user_input_to_position(
+    events: &EventStore,
+    pending_work: &PendingWorkQueue,
+    event_id: uuid::Uuid,
+    target_position: usize,
+) -> crate::dashboard::DashboardActionResult {
+    match validate_pending_terminal_event(events, event_id) {
+        Ok(()) => {}
+        Err(err) => {
+            return crate::dashboard::DashboardActionResult {
+                success: false,
+                message: "pending input is not movable".to_string(),
+                detail: Some(format!("{err:?}")),
+            };
+        }
+    }
+    match pending_work.move_pending_event_to_position(event_id, target_position) {
         Ok(true) => crate::dashboard::DashboardActionResult {
             success: true,
             message: "moved pending input".to_string(),

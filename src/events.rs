@@ -381,6 +381,22 @@ impl EventStore {
             Ok(())
         })
     }
+    pub fn update_terminal_incoming_text(
+        &self,
+        event_id: &str,
+        incoming_text: String,
+    ) -> Result<()> {
+        self.with_event_mut_from_str(event_id, |event| {
+            if !matches!(event.status, EventStatus::Pending) {
+                return Err(miette!("event {event_id} is not pending"));
+            }
+            let EventPayload::TerminalIncoming(payload) = &mut event.payload else {
+                return Err(miette!("event {event_id} is not a user input event"));
+            };
+            payload.incoming_text = incoming_text;
+            Ok(())
+        })
+    }
 
     pub fn requeue_if_claimed(&self, event_id: &str) -> Result<bool> {
         self.with_event_mut_from_str(event_id, |event| {

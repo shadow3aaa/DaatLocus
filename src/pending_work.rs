@@ -251,6 +251,73 @@ impl PendingWorkQueue {
         persist_locked(&inner)?;
         Ok(true)
     }
+    pub fn move_pending_event_to_position(
+        &self,
+        event_id: Uuid,
+        target_position: usize,
+    ) -> Result<bool> {
+        let mut inner = self.inner.lock();
+        let event_indices = pending_event_indices(&inner.state.queue);
+        let Some(position) = event_indices.iter().position(|index| {
+            matches!(
+                inner.state.queue[*index].work,
+                PendingWork::Event { event_id: current } if current == event_id
+            )
+        }) else {
+            return Ok(false);
+        };
+        if event_indices.len() <= 1 {
+            return Ok(false);
+        }
+        let target_position = target_position.min(event_indices.len() - 1);
+        if position == target_position {
+            return Ok(false);
+        }
+
+        let source_index = event_indices[position];
+        let Some(entry) = inner.state.queue.remove(source_index) else {
+            return Ok(false);
+        };
+        let adjusted_event_indices = pending_event_indices(&inner.state.queue);
+        let insert_index = if target_position >= adjusted_event_indices.len() {
+            adjusted_event_indices
+                .last()
+                .map_or(inner.state.queue.len(), |index| index + 1)
+        } else {
+            adjusted_event_indices[target_position]
+        };
+        inner.state.queue.insert(insert_index, entry);
+        persist_locked(&inner)?;
+        Ok(true)
+    }
+
+    pub fn move_pending_event_to_front(&self, event_id: Uuid) -> Result<bool> {
+        let mut inner = self.inner.lock();
+        let event_indices = pending_event_indices(&inner.state.queue);
+        let Some(position) = event_indices.iter().position(|index| {
+            matches!(
+                inner.state.queue[*index].work,
+                PendingWork::Event { event_id: current } if current == event_id
+            )
+        }) else {
+            return Ok(false);
+        };
+        if position == 0 {
+            return Ok(false);
+        }
+
+        let source_index = event_indices[position];
+        let Some(entry) = inner.state.queue.remove(source_index) else {
+            return Ok(false);
+        };
+        let insert_index = pending_event_indices(&inner.state.queue)
+            .first()
+            .copied()
+            .unwrap_or(inner.state.queue.len());
+        inner.state.queue.insert(insert_index, entry);
+        persist_locked(&inner)?;
+        Ok(true)
+    }
 
     pub fn clear_events(&self) -> Result<usize> {
         let mut inner = self.inner.lock();
@@ -573,6 +640,105 @@ mod tests {
         assert_eq!(
             queue.pending_event_ids(),
             vec![third_event_id, first_event_id, second_event_id]
+        );
+    }
+
+    #[test]
+    fn pending_events_move_to_absolute_position() {
+        let queue = test_queue();
+        let first_event_id = Uuid::new_v4();
+        let second_event_id = Uuid::new_v4();
+        let third_event_id = Uuid::new_v4();
+        queue
+            .enqueue(PendingWork::Event {
+                event_id: first_event_id,
+            })
+            .expect("enqueue first event");
+        queue
+            .enqueue(PendingWork::AppNotice {
+                app: AppId::terminal(),
+                reason: "terminal changed".to_string(),
+            })
+            .expect("enqueue app notice");
+        queue
+            .enqueue(PendingWork::Event {
+                event_id: second_event_id,
+            })
+            .expect("enqueue second event");
+        queue
+            .enqueue(PendingWork::Event {
+                event_id: third_event_id,
+            })
+            .expect("enqueue third event");
+
+        assert!(
+            queue
+                .move_pending_event_to_position(first_event_id, 2)
+                .expect("move first event to end")
+        );
+        assert_eq!(
+            queue.pending_event_ids(),
+            vec![second_event_id, third_event_id, first_event_id]
+        );
+        assert!(
+            queue
+                .move_pending_event_to_position(first_event_id, 0)
+                .expect("move first event to start")
+        );
+        assert_eq!(
+            queue.pending_event_ids(),
+            vec![first_event_id, second_event_id, third_event_id]
+        );
+        assert!(
+            !queue
+                .move_pending_event_to_position(second_event_id, 1)
+                .expect("move event to current position")
+        );
+    }
+    #[test]
+    fn pending_events_move_to_front_preserves_non_event_order() {
+        let queue = test_queue();
+        let first_event_id = Uuid::new_v4();
+        let second_event_id = Uuid::new_v4();
+        queue
+            .enqueue(PendingWork::Event {
+                event_id: first_event_id,
+            })
+            .expect("enqueue first event");
+        queue
+            .enqueue(PendingWork::AppNotice {
+                app: AppId::terminal(),
+                reason: "terminal changed".to_string(),
+            })
+            .expect("enqueue app notice");
+        queue
+            .enqueue(PendingWork::Event {
+                event_id: second_event_id,
+            })
+            .expect("enqueue second event");
+
+        assert!(
+            queue
+                .move_pending_event_to_front(second_event_id)
+                .expect("move second event to front")
+        );
+        assert_eq!(
+            queue.pending_event_ids(),
+            vec![second_event_id, first_event_id]
+        );
+        let claimed = queue.claim_batch(3).expect("claim reordered work");
+        assert!(matches!(
+            claimed.as_slice(),
+            [
+                PendingWork::Event { event_id: first_claimed },
+                PendingWork::Event { event_id: second_claimed },
+                PendingWork::AppNotice { .. }
+            ] if *first_claimed == second_event_id && *second_claimed == first_event_id
+        ));
+        assert!(
+            !queue
+                .move_pending_event_to_front(second_event_id)
+                .expect("claimed event is no longer movable")
         );
     }
 }
