@@ -946,56 +946,41 @@ pub(crate) async fn execute_agent_loop_step(
                         .collect(),
                 );
                 tool_results.push(format!("{} => {}", call.name, result.summary));
-                if let Some(reason) = result.turn_boundary_reason.clone() {
-                    break 'agent_loop AgentLoopStepOutput {
-                        observation: if tool_results.is_empty() {
-                            reason.clone()
-                        } else {
-                            tool_results.join("\n")
-                        },
-                        description: format!(
-                            "A tool changed the context view needed for subsequent work; the current turn ends immediately at this boundary and the world state will be re-rendered in a new turn. reason: {reason}"
-                        ),
-                        current_doing: "waiting for next tool decision".to_string(),
-                        actions: actions.clone(),
-                    };
-                }
                 if claimed_events_are_terminal(context, &claimed_event_ids) {
-                    if actions.is_empty() {
-                        actions.push(EpisodeActionRecord {
-                            kind: "claimed_events_completed".to_string(),
-                            summary: "claimed events reached terminal state".to_string(),
-                        });
-                    }
+                    let mut terminal_actions = actions.clone();
+                    terminal_actions.push(EpisodeActionRecord {
+                        kind: "finished".to_string(),
+                        summary: "claimed events reached terminal state".to_string(),
+                    });
                     break 'agent_loop AgentLoopStepOutput {
                         observation: if tool_results.is_empty() {
                             "claimed events reached terminal state".to_string()
                         } else {
                             tool_results.join("\n")
                         },
-                        description: "Claimed events for this turn reached a terminal or handoff state, so the turn ends immediately after the relevant tool."
+                        description: "Finished: claimed events for this turn reached a terminal or handoff state."
                             .to_string(),
                         current_doing: "waiting for next tool decision".to_string(),
-                        actions: actions.clone(),
+                        actions: terminal_actions,
                     };
                 }
                 if context.claimed_app_notices_are_resolved() {
-                    if actions.is_empty() {
-                        actions.push(EpisodeActionRecord {
-                            kind: "claimed_app_notices_completed".to_string(),
-                            summary: "claimed app notices were explicitly resolved".to_string(),
-                        });
-                    }
+                    let mut terminal_actions = actions.clone();
+                    terminal_actions.push(EpisodeActionRecord {
+                        kind: "finished".to_string(),
+                        summary: "claimed app notices were explicitly resolved".to_string(),
+                    });
                     break 'agent_loop AgentLoopStepOutput {
                         observation: if tool_results.is_empty() {
                             "claimed app notices were explicitly resolved".to_string()
                         } else {
                             tool_results.join("\n")
                         },
-                        description: "Claimed app notices for this turn were explicitly resolved, so the turn ends immediately after the relevant tool."
-                            .to_string(),
+                        description:
+                            "Finished: claimed app notices for this turn were explicitly resolved."
+                                .to_string(),
                         current_doing: "waiting for next tool decision".to_string(),
-                        actions: actions.clone(),
+                        actions: terminal_actions,
                     };
                 }
             }
@@ -1016,11 +1001,46 @@ pub(crate) async fn execute_agent_loop_step(
                      breaking the loop",
                     count = consecutive_empty_reasoning_loops
                 );
+                let observation = "agent turn failed: model produced reasoning but no text output for multiple consecutive iterations";
+                record_runtime_error_case(
+                    context,
+                    RuntimeErrorRecordInput {
+                        turn_id: &runtime_turn_id,
+                        claimed_inputs: &claimed_inputs,
+                        claimed_event_ids: &claimed_event_ids,
+                        claimed_app_notices: &claimed_app_notice_entries,
+                        tools: &tools,
+                        context_text: &runtime_context_text,
+                        error_kind: RuntimeErrorKind::ModelEmptyReasoningOutput,
+                        severity: 2,
+                        detected_by: "runtime_empty_reasoning_fuse",
+                        expected_behavior: "The model should either call a tool or return user-visible assistant text.",
+                        actual_behavior: "The model repeatedly returned reasoning content without assistant text or tool calls.",
+                        evidence: response.last_reasoning_content.as_deref().unwrap_or(""),
+                        recoverability: "terminated_by_empty_reasoning_fuse",
+                        retry_count: consecutive_empty_reasoning_loops,
+                        terminal_status: Some("fuse_tripped"),
+                        assistant_text: None,
+                        tool_calls: &[],
+                        tool_results: &tool_results,
+                        actions: &actions,
+                    },
+                )
+                .await;
+                let mut terminal_actions = actions.clone();
+                terminal_actions.push(EpisodeActionRecord {
+                    kind: "agent_turn_failed".to_string(),
+                    summary: observation.to_string(),
+                });
+                runtime_step.push_history_message(HistoryMessage::assistant(observation));
+                if let Some(cell) = assistant_activity_cell(observation) {
+                    append_committed_activity_cells(context, tx, vec![cell]);
+                }
                 break 'agent_loop AgentLoopStepOutput {
-                    observation: String::new(),
-                    description: "The model produced reasoning but no text output for multiple consecutive iterations.".to_string(),
+                    observation: observation.to_string(),
+                    description: "Error: model produced reasoning but no text output for multiple consecutive iterations.".to_string(),
                     current_doing: "idle".to_string(),
-                    actions: actions.clone(),
+                    actions: terminal_actions,
                 };
             }
             continue 'agent_loop;
@@ -1320,6 +1340,9 @@ fn runtime_error_contract_refs(kind: RuntimeErrorKind) -> Vec<String> {
         }
         RuntimeErrorKind::ModelRequestRepeatedFailure => {
             vec!["model request fuse".to_string()]
+        }
+        RuntimeErrorKind::ModelEmptyReasoningOutput => {
+            vec!["model output contract".to_string()]
         }
     }
 }

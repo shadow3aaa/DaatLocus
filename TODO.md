@@ -128,7 +128,7 @@ This file tracks hardening work for making Daat Locus a reliable long-running lo
 
 - [x] Add tests for pending work recovery paths
   - [x] Cover event claim, requeue, overflow fuse, and terminal resolution paths.
-  - [x] Audit turn-boundary behavior after focus/app/tool changes.
+  - [x] Audit turn stop behavior after focus/app/tool changes.
   - [x] Ensure unresolved claimed inputs are requeued or failed with explicit reason.
 
 - [x] Document model catalog source and update process

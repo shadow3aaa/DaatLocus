@@ -169,7 +169,6 @@ struct WorkspaceToolCallOutput {
     #[serde(default)]
     ui_lines: Vec<String>,
     state: Option<JsonValue>,
-    turn_boundary: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]

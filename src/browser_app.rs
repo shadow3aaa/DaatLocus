@@ -929,7 +929,6 @@ fn browser_action_result(
             line_count: None,
             ref_count: None,
         }),
-        turn_boundary_reason: None,
     }
 }
 
@@ -960,7 +959,6 @@ fn browser_wait_result(result: &BrowserWaitResult, max_tokens: usize) -> AppTool
             line_count: None,
             ref_count: None,
         }),
-        turn_boundary_reason: None,
     }
 }
 
@@ -1250,7 +1248,6 @@ impl App for BrowserApp {
                         line_count: None,
                         ref_count: None,
                     }),
-                    turn_boundary_reason: None,
                 })
             }
             "browser_snapshot" => {
@@ -1284,7 +1281,6 @@ impl App for BrowserApp {
                         line_count: Some(result.line_count),
                         ref_count: Some(result.ref_count),
                     }),
-                    turn_boundary_reason: None,
                 })
             }
             "browser_wait" => {

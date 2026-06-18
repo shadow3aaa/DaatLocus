@@ -1802,11 +1802,37 @@ It is not a per-turn status dump.
 Rules:
 
 - Inject it when new work is claimed.
-- Runtime history compaction is a turn boundary. If compaction happens while claimed work is still in progress, release/reclaim the work and inject `AfterClaim Context` in the new turn instead of trying to restore it inside the old turn.
+- Runtime history compaction is a `Compacted` turn stop reason. If compaction
+  happens while claimed work is still in progress, release/reclaim the work and
+  inject `AfterClaim Context` in the new turn instead of trying to restore it
+  inside the old turn.
 - Do not repeat it every turn unless compaction made reinjection necessary.
 - Event input belongs here, not in a generic world snapshot.
 - Workflow primitive routing catalog belongs here, not in per-turn execution state.
 - It should enter runtime history as structured context so later tool calls and assistant messages can build on a stable prefix.
+
+### Runtime Turn Stop Reasons
+
+Keep runtime turn termination reasons minimal. A turn should stop only for one
+of these reasons:
+
+- `Finished`: the work is complete. This includes ordinary assistant final text
+  when no external input is claimed, `finish_and_send` for claimed events, and
+  `notice_resolved` for claimed app notices.
+- `Error`: the runtime cannot safely continue the current turn because of a
+  preflight failure, unrecoverable model/tool failure, fuse trip, or dead-loop
+  protection.
+- `Compacted`: runtime history was compacted and the next model request must be
+  built from the compacted history.
+- `Interrupt`: the active turn was interrupted by the user or client. This is
+  the spelling to use. It covers TUI `Esc`, TUI `Ctrl-C`, WebUI
+  `interrupt_runtime`, and process-level interrupt signals routed through the
+  runtime interrupt path.
+
+Do not introduce new turn stop reasons for ordinary context changes. If a tool
+changes what the model needs to know next, return the new facts in the tool
+result or insert a structured context-refresh message before the next model
+request. Context refresh is not itself a turn stop reason.
 
 ### PreTurn Context
 
@@ -1823,11 +1849,14 @@ It contains current execution state that may change after tools run:
 Rules:
 
 - Inject it before every model turn.
-- Preserve turn boundaries for operations that change the next context view,
-  such as `activate_composed_primitive`, `update_primitive_spec`, project
-  instruction reloads, and workspace app dynamic tools that explicitly return a
-  turn boundary.
-- Treat runtime history compaction as the same kind of boundary: compact, end the current turn, and build a fresh `PreTurn Context` for the next turn.
+- Operations that change the next context view, such as
+  `activate_composed_primitive`, `update_primitive_spec`, project instruction
+  reloads, and workspace app dynamic tools, should continue the current turn by
+  returning structured tool output or inserting a structured context-refresh
+  message before the next model request. They should not end the turn unless
+  they also satisfy `Finished`, `Error`, `Compacted`, or `Interrupt`.
+- Treat runtime history compaction as a `Compacted` stop reason: compact, end
+  the current turn, and build a fresh `PreTurn Context` for the next turn.
 - It should enter runtime history as structured context, rather than being appended as a transient final user message outside history.
 - Keep it concise and structurally compressible; do not persist full raw app
   screens, huge memory excerpts, or repeated low-value status dumps.

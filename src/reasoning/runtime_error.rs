@@ -29,6 +29,7 @@ pub enum RuntimeErrorKind {
     ClaimedInputLeftUnresolved,
     TransportCompletionViolation,
     ModelRequestRepeatedFailure,
+    ModelEmptyReasoningOutput,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

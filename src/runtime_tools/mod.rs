@@ -61,7 +61,6 @@ pub struct ToolExecutionResult {
     pub payload: Value,
     pub model_content_override: Option<String>,
     pub ui_event: ToolUiEvent,
-    pub turn_boundary_reason: Option<String>,
 }
 
 impl ToolExecutionResult {
@@ -71,17 +70,11 @@ impl ToolExecutionResult {
             payload,
             model_content_override: None,
             ui_event,
-            turn_boundary_reason: None,
         }
     }
 
     pub fn with_model_content(mut self, model_content: impl Into<String>) -> Self {
         self.model_content_override = Some(model_content.into());
-        self
-    }
-
-    pub fn with_turn_boundary(mut self, reason: impl Into<String>) -> Self {
-        self.turn_boundary_reason = Some(reason.into());
         self
     }
 
@@ -530,9 +523,6 @@ impl RuntimeTool for AppRuntimeTool {
             ToolExecutionResult::new(result.summary.clone(), result.payload, result.ui_event);
         if let Some(model_content) = result.model_content {
             output = output.with_model_content(model_content);
-        }
-        if let Some(reason) = result.turn_boundary_reason {
-            output = output.with_turn_boundary(reason);
         }
         Ok(output)
     }

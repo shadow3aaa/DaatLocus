@@ -150,7 +150,6 @@ pub struct AppDynamicToolResult {
     pub payload: Value,
     pub model_content: Option<String>,
     pub ui_lines: Vec<String>,
-    pub turn_boundary_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -166,7 +165,6 @@ pub struct AppToolExecutionResult {
     pub payload: Value,
     pub model_content: Option<String>,
     pub ui_event: ToolUiEvent,
-    pub turn_boundary_reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -270,7 +268,6 @@ pub trait App: Send + Sync {
             payload: result.payload,
             model_content: result.model_content,
             ui_event: ToolUiEvent::app(call.name.clone(), result.ui_lines),
-            turn_boundary_reason: result.turn_boundary_reason,
         })
     }
 

@@ -464,7 +464,6 @@ impl CodingApp {
                             ),
                         ],
                     ),
-                    turn_boundary_reason: None,
                 });
             }
 
@@ -510,7 +509,6 @@ impl CodingApp {
                     project_root.display().to_string(),
                     ui_lines,
                 ),
-                turn_boundary_reason: None,
             });
         }
 
@@ -566,7 +564,6 @@ impl CodingApp {
                 project_root.display().to_string(),
                 ui_lines,
             ),
-            turn_boundary_reason: None,
         })
     }
 
@@ -946,7 +943,6 @@ impl App for CodingApp {
                         ),
                         detail_lines,
                     ),
-                    turn_boundary_reason: None,
                 };
                 if let Some(path) = args.path.as_deref() {
                     self.append_scoped_instructions_to_result(&mut output, path, context)?;
@@ -984,7 +980,6 @@ impl App for CodingApp {
                             coding_count_label(result.content.lines().count(), "line", "lines")
                         )],
                     ),
-                    turn_boundary_reason: None,
                 };
                 self.append_scoped_instructions_to_result(&mut output, &args.path, context)?;
                 Ok(output)
@@ -1024,7 +1019,6 @@ impl App for CodingApp {
                         impact_lines,
                         diff_files,
                     }),
-                    turn_boundary_reason: None,
                 };
                 self.append_scoped_instructions_to_result(
                     &mut output,
@@ -1067,7 +1061,6 @@ impl App for CodingApp {
                         review_summary,
                         review_present,
                     ),
-                    turn_boundary_reason: None,
                 })
             }
             _ => Err(miette!("unknown coding tool `{}`", call.name)),

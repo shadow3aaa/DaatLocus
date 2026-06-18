@@ -101,7 +101,8 @@ When adding or changing a model-facing tool:
 - require explicit identifiers where stale state can exist
 - validate schemas at declaration and execution time
 - use the conservative model-facing JSON Schema dialect
-- decide whether the tool creates a turn boundary
+- do not create a turn stop reason outside `Finished`, `Error`, `Compacted`,
+  or `Interrupt`
 - test invalid arguments and tool availability
 - add runtime error evidence only when misuse is code-detectable
 

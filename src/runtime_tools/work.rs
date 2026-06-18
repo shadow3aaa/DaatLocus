@@ -530,13 +530,8 @@ fn execute_activate_primitive_tool<'a>(
                 "is_composition": is_composition,
             }),
             ToolUiEvent::activate_primitive(workflow_id),
-        )
-        .with_turn_boundary(activate_primitive_turn_boundary_reason()))
+        ))
     })
-}
-
-fn activate_primitive_turn_boundary_reason() -> &'static str {
-    "primitive binding changed; re-render world state in a new turn before continuing"
 }
 
 fn summarize_read_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
@@ -660,8 +655,7 @@ fn execute_update_workflow_tool<'a>(
                     format!("summary={summary}"),
                 ],
             ),
-        )
-        .with_turn_boundary("primitive spec updated; re-render world state in a new turn"))
+        ))
     })
 }
 
@@ -854,13 +848,5 @@ mod tests {
             }
             other => panic!("expected plan call ui, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn activate_composed_primitive_declares_turn_boundary_reason() {
-        assert_eq!(
-            activate_primitive_turn_boundary_reason(),
-            "primitive binding changed; re-render world state in a new turn before continuing"
-        );
     }
 }

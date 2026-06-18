@@ -463,7 +463,6 @@ impl LuaWorkerRuntime {
             payload: output.payload,
             model_content: output.model_content,
             ui_lines: output.ui_lines,
-            turn_boundary_reason: output.turn_boundary,
         })
     }
 

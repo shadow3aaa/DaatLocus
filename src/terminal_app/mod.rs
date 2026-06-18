@@ -897,7 +897,6 @@ impl App for TerminalApp {
                             body
                         },
                     ),
-                    turn_boundary_reason: None,
                 })
             }
             "terminal_write_stdin" => {
@@ -1038,7 +1037,6 @@ impl App for TerminalApp {
                             body
                         },
                     ),
-                    turn_boundary_reason: None,
                 })
             }
             "terminal_terminate" => {
@@ -1055,7 +1053,6 @@ impl App for TerminalApp {
                         ),
                         vec![terminal_session_meta(&session)],
                     ),
-                    turn_boundary_reason: None,
                 })
             }
             _ => Err(miette!("unknown terminal tool `{}`", call.name)),
