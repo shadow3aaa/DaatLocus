@@ -1,16 +1,21 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+#[cfg(target_os = "windows")]
 use std::{
     process::{Command, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
     thread,
     time::{Duration, Instant},
 };
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+#[cfg(target_os = "windows")]
+use tokio::sync::oneshot;
 
-use crate::daemon::{DAEMON_CLIENT_HOST, DaemonControlCommand};
+#[cfg(target_os = "windows")]
+use crate::daemon::DAEMON_CLIENT_HOST;
+use crate::daemon::DaemonControlCommand;
 
 #[cfg(target_os = "windows")]
 mod platform_tray {
@@ -229,32 +234,5 @@ fn open_url(url: &str) -> std::io::Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn open_url(url: &str) -> std::io::Result<()> {
-    Command::new("open")
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn open_url(url: &str) -> std::io::Result<()> {
-    Command::new("xdg-open")
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
-fn open_url(_url: &str) -> std::io::Result<()> {
     Ok(())
 }
