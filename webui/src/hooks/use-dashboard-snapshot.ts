@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   subscribeDashboardSnapshots,
@@ -11,21 +11,32 @@ type UseDashboardSnapshotOptions = {
   disabled?: boolean;
   initialSnapshot?: DashboardSnapshot | null;
 };
+type DashboardSnapshotState = {
+  sessionId: string;
+  snapshot: DashboardSnapshot | null;
+};
 
 export function useDashboardSnapshot(
   sessionId: string,
   options: UseDashboardSnapshotOptions = {},
 ) {
   const { disabled = false, initialSnapshot = null } = options;
-  const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(
-    initialSnapshot,
+  const [snapshotState, setSnapshotState] = useState<DashboardSnapshotState>(
+    () => ({
+      sessionId,
+      snapshot: initialSnapshot,
+    }),
+  );
+  const snapshot = useMemo(
+    () => (snapshotState.sessionId === sessionId ? snapshotState.snapshot : null),
+    [sessionId, snapshotState],
   );
   const [isLoading, setIsLoading] = useState(!disabled && !initialSnapshot);
   const [loadError, setLoadError] = useState<Error | null>(null);
 
   useEffect(() => {
     if (disabled) {
-      setSnapshot(initialSnapshot);
+      setSnapshotState({ sessionId, snapshot: initialSnapshot });
       setIsLoading(false);
       setLoadError(null);
       return;
@@ -45,7 +56,7 @@ export function useDashboardSnapshot(
               return;
             }
 
-            setSnapshot(nextSnapshot);
+            setSnapshotState({ sessionId, snapshot: nextSnapshot });
             setLoadError(null);
             setIsLoading(false);
           },
@@ -102,5 +113,9 @@ export function useDashboardSnapshot(
     };
   }, [disabled, initialSnapshot, sessionId]);
 
-  return { isLoading, loadError, snapshot };
+  return {
+    isLoading: isLoading || snapshotState.sessionId !== sessionId,
+    loadError,
+    snapshot,
+  };
 }

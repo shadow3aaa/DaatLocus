@@ -260,7 +260,7 @@ function renderAuthenticatedPage(
     case "agent":
     default:
       return selectedSessionId ? (
-        <AgentPage sessionId={selectedSessionId} />
+        <AgentPage key={selectedSessionId} sessionId={selectedSessionId} />
       ) : (
         <NoSessionPage {...sessionState} />
       );
