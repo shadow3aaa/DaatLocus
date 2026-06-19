@@ -1,4 +1,4 @@
-use std::{env, ffi::OsStr, fs, io::Read, sync::Arc};
+use std::{env, ffi::OsStr, fs, io::Read, path::Path, sync::Arc};
 
 use crate::{
     commands::reset::{run_compile_reset, run_memory_reset, run_reset_all, run_state_reset},
@@ -82,22 +82,19 @@ fn webui_help_url() -> String {
 
 fn configured_help_daemon_port() -> u16 {
     let default_port = crate::config::DaemonConfig::default().port;
-    let config_path =
-        crate::persistence::PersistenceStore::runtime_sync().config_file("config.toml");
-    let Ok(content) = fs::read_to_string(config_path) else {
-        return default_port;
-    };
-    let Ok(value) = content.parse::<toml::Value>() else {
-        return default_port;
-    };
+    let config_path = crate::daat_locus_paths::daat_locus_paths_sync().config_file("config.toml");
+    configured_help_daemon_port_from_path(&config_path).unwrap_or(default_port)
+}
 
-    value
-        .get("daemon")
-        .and_then(|daemon| daemon.get("port"))
-        .and_then(toml::Value::as_integer)
-        .and_then(|port| u16::try_from(port).ok())
-        .filter(|port| *port > 0)
-        .unwrap_or(default_port)
+fn configured_help_daemon_port_from_path(config_path: &Path) -> Option<u16> {
+    let Ok(content) = fs::read_to_string(config_path) else {
+        return None;
+    };
+    let Ok(config) = toml::from_str::<crate::config::Config>(&content) else {
+        return None;
+    };
+    config.validate().ok()?;
+    Some(config.daemon.port)
 }
 
 const HELP_STYLES: Styles = Styles::styled()
@@ -140,6 +137,30 @@ mod tests {
         assert!(help.contains("\x1b[96mrun"));
         assert!(!help.contains("long-running local agent runtime"));
         assert!(!help.contains('╭'));
+    }
+
+    #[test]
+    fn help_daemon_port_reads_config_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        fs::write(&config_path, "[daemon]\nport = 53826\n").expect("write config");
+
+        assert_eq!(
+            configured_help_daemon_port_from_path(&config_path),
+            Some(53826)
+        );
+    }
+
+    #[test]
+    fn help_daemon_port_missing_config_uses_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("missing-config.toml");
+
+        assert_eq!(
+            configured_help_daemon_port_from_path(&config_path)
+                .unwrap_or_else(|| crate::config::DaemonConfig::default().port),
+            crate::config::DaemonConfig::default().port
+        );
     }
 }
 
