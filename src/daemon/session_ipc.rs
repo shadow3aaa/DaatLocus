@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::{
     dashboard::{
-        DashboardAction, DashboardActionResult, DashboardActivityHistoryPage,
-        DashboardContextCompositionSnapshot, DashboardPlanStep,
+        DashboardAction, DashboardActionResult, DashboardActivityHistoryCount,
+        DashboardActivityHistoryPage, DashboardContextCompositionSnapshot, DashboardPlanStep,
         DashboardPrimitiveOptimizationSnapshot, DashboardRuntimeActivity,
         DashboardRuntimeOptimizationSnapshot, DashboardRuntimeStatusLevel, DashboardSessionTitle,
         DashboardState, DashboardTokenUsageSnapshot,
@@ -77,6 +77,7 @@ pub enum SessionIpcRequest {
         after: Option<i64>,
         limit: usize,
     },
+    DashboardHistoryCount,
     DrainTelegramOutbox,
     RecordTelegramDelivery {
         event_id: String,
@@ -163,6 +164,9 @@ pub enum SessionIpcResponse {
     },
     DashboardHistoryPage {
         page: DashboardActivityHistoryPage,
+    },
+    DashboardHistoryCount {
+        count: DashboardActivityHistoryCount,
     },
     TelegramOutbox {
         messages: Vec<PendingOutboundMessage>,

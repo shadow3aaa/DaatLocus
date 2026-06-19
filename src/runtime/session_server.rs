@@ -528,6 +528,20 @@ async fn handle_ipc_connection(
                 true,
             ),
         },
+        SessionIpcRequest::DashboardHistoryCount => {
+            match state.dashboard_history.query_user_input_count() {
+                Ok(count) => IpcResponseEnvelope::ok(
+                    request_id,
+                    SessionIpcResponse::DashboardHistoryCount { count },
+                ),
+                Err(err) => IpcResponseEnvelope::error(
+                    request_id,
+                    "dashboard_history_count_failed",
+                    format!("{err:?}"),
+                    true,
+                ),
+            }
+        }
         SessionIpcRequest::DrainTelegramOutbox => IpcResponseEnvelope::ok(
             request_id,
             SessionIpcResponse::TelegramOutbox {

@@ -102,6 +102,8 @@ import { cn } from "@/lib/utils";
 export { StatusPage } from "@/components/status-dashboard-page";
 
 const AGENT_CHAT_HISTORY_PAGE_LIMIT = 80;
+const AGENT_CHAT_NAV_HISTORY_PAGE_LIMIT = 40;
+const AGENT_CHAT_QUICK_NAV_MAX_ITEMS = 120;
 const AGENT_CHAT_MESSAGE_LINE_LIMIT = 5;
 const AGENT_CHAT_ACTIVITY_BLOCK_LINE_LIMIT = 12;
 const AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT = Number.MAX_SAFE_INTEGER;
@@ -126,6 +128,8 @@ const AGENT_CHAT_COMPOSER_DEFAULT_HEIGHT_PX = 60;
 const AGENT_CHAT_COMPOSER_BOTTOM_GAP_PX = 16;
 const AGENT_CHAT_PENDING_INPUT_VISIBLE_DELAY_MS = 200;
 const AGENT_CHAT_MAX_QUEUED_INPUTS = 5;
+const AGENT_CHAT_QUICK_NAV_COLLAPSED_ITEM_LIMIT = 14;
+const AGENT_CHAT_QUICK_NAV_SCROLL_OFFSET_PX = 16;
 export function AgentPage({
   sessionId,
   mockSnapshot,
@@ -213,6 +217,12 @@ type AgentChatBubble = {
   appName?: string;
   sourceLabel?: string;
   cell?: ActivityCellVariant | null;
+};
+
+type AgentChatQuickNavItem = {
+  id: string;
+  label: string;
+  order: number;
 };
 
 type AgentChatPlanStepStatus =
@@ -3354,6 +3364,12 @@ function AgentChatBubbles({
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [navHistoryBubbles, setNavHistoryBubbles] = useState<AgentChatBubble[]>([]);
+  const [navOldestCursor, setNavOldestCursor] = useState<number | null>(null);
+  const [hasMoreNavBefore, setHasMoreNavBefore] = useState(false);
+  const [isLoadingNavHistory, setIsLoadingNavHistory] = useState(false);
+  const [navHistoryError, setNavHistoryError] = useState<string | null>(null);
+  const navHistoryAbortRef = useRef<AbortController | null>(null);
   const lastFocusedScrollTopRef = useRef(0);
   const hasFocusedScrollPositionRef = useRef(false);
   const shouldRestoreFocusScrollRef = useRef(false);
@@ -3362,6 +3378,10 @@ function AgentChatBubbles({
     scrollHeight: number;
     scrollTop: number;
   } | null>(null);
+  const historySessionIdRef = useRef<string | null>(null);
+  const loadedOlderHistoryRef = useRef(false);
+  const navHistorySessionIdRef = useRef<string | null>(null);
+  const navHistoryInitializedRef = useRef(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const bubbles = useMemo(
     () => mergeAgentChatBubbles(historyBubbles, snapshotBubbles),
@@ -3377,7 +3397,36 @@ function AgentChatBubbles({
   const [openFoldedActivityGroups, setOpenFoldedActivityGroups] = useState<
     Record<string, boolean>
   >({});
+  const [activeQuickNavItemId, setActiveQuickNavItemId] = useState<
+    string | null
+  >(null);
+  const quickNavItems = useMemo(() => {
+    const allNavBubbles = mergeAgentChatBubbles(navHistoryBubbles, bubbles);
+    return allNavBubbles
+      .flatMap((bubble): AgentChatQuickNavItem[] => {
+        const label = agentChatQuickNavLabelForBubble(bubble);
+        return label
+          ? [
+              {
+                id: bubble.id,
+                label,
+                order: agentChatQuickNavOrderForBubble(bubble),
+              },
+            ]
+          : [];
+      })
+      .sort(agentChatQuickNavItemCompare);
+  }, [bubbles, navHistoryBubbles]);
+  const visibleQuickNavItems = useMemo(
+    () => quickNavItems.slice(-AGENT_CHAT_QUICK_NAV_MAX_ITEMS),
+    [quickNavItems],
+  );
+  const navReachedMax = quickNavItems.length >= AGENT_CHAT_QUICK_NAV_MAX_ITEMS;
   const displayItemElementsRef = useRef(new Map<string, HTMLDivElement>());
+
+  const [pendingQuickNavTargetId, setPendingQuickNavTargetId] = useState<
+    string | null
+  >(null);
   const pendingFoldCollapseAnchorRef = useRef<{
     id: string;
     top: number;
@@ -3391,6 +3440,44 @@ function AgentChatBubbles({
       }
     },
     [],
+  );
+
+  const updateQuickNavActiveItem = useCallback(
+    (panel: HTMLDivElement) => {
+      if (visibleQuickNavItems.length === 0) {
+        setActiveQuickNavItemId((current) => (current === null ? current : null));
+        return;
+      }
+
+      const panelRect = panel.getBoundingClientRect();
+      const targetY = panelRect.top + Math.min(panelRect.height * 0.38, 240);
+      let nextActiveId: string | null = null;
+      let bestDistance = Number.POSITIVE_INFINITY;
+
+      for (const item of visibleQuickNavItems) {
+        const element = displayItemElementsRef.current.get(item.id);
+        if (!element) {
+          continue;
+        }
+
+        const rect = element.getBoundingClientRect();
+        if (rect.bottom < panelRect.top || rect.top > panelRect.bottom) {
+          continue;
+        }
+
+        const distance = Math.abs(rect.top - targetY);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          nextActiveId = item.id;
+        }
+      }
+
+      nextActiveId ??= visibleQuickNavItems[0]?.id ?? null;
+      setActiveQuickNavItemId((current) =>
+        current === nextActiveId ? current : nextActiveId,
+      );
+    },
+    [visibleQuickNavItems],
   );
   const handleFoldedActivityGroupOpenChange = useCallback(
     (id: string, nextOpen: boolean) => {
@@ -3423,17 +3510,20 @@ function AgentChatBubbles({
     [panelRef],
   );
 
-  function scrollToChatBottom(behavior: ScrollBehavior = "auto") {
-    const panel = panelRef.current;
-    if (!panel) {
-      return;
-    }
+  const scrollToChatBottom = useCallback(
+    (behavior: ScrollBehavior = "auto") => {
+      const panel = panelRef.current;
+      if (!panel) {
+        return;
+      }
 
-    panel.scrollTo({
-      top: panel.scrollHeight,
-      behavior,
-    });
-  }
+      panel.scrollTo({
+        top: panel.scrollHeight,
+        behavior,
+      });
+    },
+    [panelRef],
+  );
 
   function updateScrollButtonVisibility(panel: HTMLDivElement) {
     const distanceFromBottom =
@@ -3452,6 +3542,7 @@ function AgentChatBubbles({
       distanceFromBottom <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX;
 
     setShowScrollToBottom(distanceFromBottom > AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX);
+    updateQuickNavActiveItem(panel);
     if (
       panel.scrollTop <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX &&
       hasMoreBefore &&
@@ -3466,6 +3557,59 @@ function AgentChatBubbles({
     scrollToChatBottom("smooth");
     setShowScrollToBottom(false);
   }
+
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) {
+      return;
+    }
+
+    updateQuickNavActiveItem(panel);
+  }, [visibleQuickNavItems, panelRef, updateQuickNavActiveItem]);
+
+  const scrollToQuickNavTarget = useCallback(
+    (id: string, behavior: ScrollBehavior = "smooth") => {
+      const panel = panelRef.current;
+      const element = displayItemElementsRef.current.get(id);
+      if (!panel || !element) {
+        return false;
+      }
+
+      const panelRect = panel.getBoundingClientRect();
+      const elementRect = element.getBoundingClientRect();
+      const top = Math.max(
+        0,
+        panel.scrollTop +
+          elementRect.top -
+          panelRect.top -
+          AGENT_CHAT_QUICK_NAV_SCROLL_OFFSET_PX,
+      );
+      const distanceFromBottom = panel.scrollHeight - panel.clientHeight - top;
+
+      isFocusedNearBottomRef.current =
+        distanceFromBottom <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX;
+      lastFocusedScrollTopRef.current = top;
+      setActiveQuickNavItemId(id);
+      setShowScrollToBottom(
+        distanceFromBottom > AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX,
+      );
+      panel.scrollTo({ top, behavior });
+      return true;
+    },
+    [panelRef],
+  );
+
+  const handleQuickNavSelect = useCallback(
+    (id: string) => {
+      setActiveQuickNavItemId(id);
+      if (scrollToQuickNavTarget(id)) {
+        setPendingQuickNavTargetId(null);
+        return;
+      }
+      setPendingQuickNavTargetId(id);
+    },
+    [scrollToQuickNavTarget],
+  );
 
   const loadOlderHistory = useCallback(async () => {
     if (
@@ -3492,11 +3636,26 @@ function AgentChatBubbles({
         limit: AGENT_CHAT_HISTORY_PAGE_LIMIT,
         sessionId,
       });
+      const olderBubbles = agentChatBubblesFromHistoryPage(page);
+      if (olderBubbles.length > 0) {
+        loadedOlderHistoryRef.current = true;
+      }
       setHistoryBubbles((current) =>
-        mergeAgentChatBubbles(agentChatBubblesFromHistoryPage(page), current),
+        mergeAgentChatBubbles(olderBubbles, current),
+      );
+      setNavHistoryBubbles((current) =>
+        mergeAgentChatBubbles(olderBubbles, current),
       );
       setOldestCursor(page.oldest_cursor ?? oldestCursor);
+      setNavOldestCursor((current) => {
+        const nextCursor = page.oldest_cursor ?? current;
+        if (nextCursor === null) {
+          return null;
+        }
+        return current === null ? nextCursor : Math.min(current, nextCursor);
+      });
       setHasMoreBefore(page.has_more_before);
+      setHasMoreNavBefore(page.has_more_before);
     } catch (error) {
       restoreAfterPrependRef.current = null;
       setHistoryError(error instanceof Error ? error.message : String(error));
@@ -3508,6 +3667,82 @@ function AgentChatBubbles({
     isLoadingHistory,
     oldestCursor,
     panelRef,
+    sessionId,
+  ]);
+
+  useEffect(() => {
+    if (!pendingQuickNavTargetId) {
+      return;
+    }
+
+    if (scrollToQuickNavTarget(pendingQuickNavTargetId)) {
+      setPendingQuickNavTargetId(null);
+      return;
+    }
+
+    if (!hasMoreBefore || isLoadingHistory || oldestCursor === null) {
+      if (!hasMoreBefore) {
+        setPendingQuickNavTargetId(null);
+      }
+      return;
+    }
+
+    void loadOlderHistory();
+  }, [
+    displayItems.length,
+    hasMoreBefore,
+    isLoadingHistory,
+    loadOlderHistory,
+    oldestCursor,
+    pendingQuickNavTargetId,
+    scrollToQuickNavTarget,
+  ]);
+
+  const loadOlderNavHistory = useCallback(async () => {
+    if (
+      isLoadingNavHistory ||
+      !hasMoreNavBefore ||
+      navOldestCursor === null ||
+      navReachedMax
+    ) {
+      return;
+    }
+
+    navHistoryAbortRef.current?.abort();
+    const controller = new AbortController();
+    navHistoryAbortRef.current = controller;
+    setIsLoadingNavHistory(true);
+    setNavHistoryError(null);
+    try {
+      const page = await fetchDashboardActivityHistory({
+        before: navOldestCursor,
+        limit: AGENT_CHAT_NAV_HISTORY_PAGE_LIMIT,
+        sessionId,
+        signal: controller.signal,
+      });
+      const olderBubbles = agentChatBubblesFromHistoryPage(page);
+      setNavHistoryBubbles((current) =>
+        mergeAgentChatBubbles(olderBubbles, current),
+      );
+      setNavOldestCursor(page.oldest_cursor ?? navOldestCursor);
+      setHasMoreNavBefore(page.has_more_before);
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setNavHistoryError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (navHistoryAbortRef.current === controller) {
+        navHistoryAbortRef.current = null;
+      }
+      if (!controller.signal.aborted) {
+        setIsLoadingNavHistory(false);
+      }
+    }
+  }, [
+    hasMoreNavBefore,
+    isLoadingNavHistory,
+    navOldestCursor,
+    navReachedMax,
     sessionId,
   ]);
 
@@ -3526,13 +3761,80 @@ function AgentChatBubbles({
   }, [panelRef]);
 
   useEffect(() => {
+    navHistoryAbortRef.current?.abort();
+    navHistoryAbortRef.current = null;
+    navHistorySessionIdRef.current = null;
+    navHistoryInitializedRef.current = false;
+    setPendingQuickNavTargetId(null);
+    setNavHistoryBubbles([]);
+    setNavOldestCursor(null);
+    setHasMoreNavBefore(false);
+    setIsLoadingNavHistory(false);
+    setNavHistoryError(null);
+  }, [sessionId]);
+
+  useEffect(() => {
     const historyWindow = snapshot?.activity_history;
-    setHistoryBubbles(agentChatCommittedBubblesFromSnapshot(snapshot));
-    setOldestCursor(historyWindow?.oldest_cursor ?? null);
-    setHasMoreBefore(Boolean(historyWindow?.has_more_before));
+    const committedBubbles = agentChatCommittedBubblesFromSnapshot(snapshot);
+    const snapshotOldestCursor = historyWindow?.oldest_cursor ?? null;
+    const snapshotNewestCursor = historyWindow?.newest_cursor ?? null;
+    const sessionChanged = historySessionIdRef.current !== sessionId;
+    const historyCleared =
+      committedBubbles.length === 0 && snapshotNewestCursor === null;
+
+    historySessionIdRef.current = sessionId;
+
+    if (sessionChanged || historyCleared || !loadedOlderHistoryRef.current) {
+      loadedOlderHistoryRef.current = false;
+      setHistoryBubbles(committedBubbles);
+      setOldestCursor(snapshotOldestCursor);
+      setHasMoreBefore(Boolean(historyWindow?.has_more_before));
+    } else {
+      setHistoryBubbles((current) =>
+        mergeAgentChatBubbles(current, committedBubbles),
+      );
+      setOldestCursor((current) => {
+        if (snapshotOldestCursor === null) {
+          return current;
+        }
+        if (current === null) {
+          return snapshotOldestCursor;
+        }
+        return Math.min(current, snapshotOldestCursor);
+      });
+    }
+
+    const navSessionChanged = navHistorySessionIdRef.current !== sessionId;
+    navHistorySessionIdRef.current = sessionId;
+    if (navSessionChanged || historyCleared || !navHistoryInitializedRef.current) {
+      navHistoryInitializedRef.current = true;
+      setNavHistoryBubbles(committedBubbles);
+      setNavOldestCursor(snapshotOldestCursor);
+      setHasMoreNavBefore(Boolean(historyWindow?.has_more_before));
+    } else {
+      setNavHistoryBubbles((current) =>
+        mergeAgentChatBubbles(current, committedBubbles),
+      );
+      setNavOldestCursor((current) => {
+        if (snapshotOldestCursor === null) {
+          return current;
+        }
+        if (current === null) {
+          return snapshotOldestCursor;
+        }
+        return Math.min(current, snapshotOldestCursor);
+      });
+      setHasMoreNavBefore((current) =>
+        current || Boolean(historyWindow?.has_more_before),
+      );
+    }
+
     setHistoryError(null);
+    setNavHistoryError(null);
     restoreAfterPrependRef.current = null;
   }, [sessionId, snapshot?.activity_history?.newest_cursor]);
+
+
 
   useEffect(() => {
     const restore = restoreAfterPrependRef.current;
@@ -3550,9 +3852,10 @@ function AgentChatBubbles({
         panel.scrollHeight - restore.scrollHeight + restore.scrollTop;
       lastFocusedScrollTopRef.current = panel.scrollTop;
       updateScrollButtonVisibility(panel);
+      updateQuickNavActiveItem(panel);
       restoreAfterPrependRef.current = null;
     });
-  }, [historyBubbles.length, panelRef]);
+  }, [historyBubbles.length, panelRef, updateQuickNavActiveItem]);
 
   useEffect(() => {
     const panel = panelRef.current;
@@ -3576,6 +3879,7 @@ function AgentChatBubbles({
           );
         }
         updateScrollButtonVisibility(latestPanel);
+        updateQuickNavActiveItem(latestPanel);
         isFocusedNearBottomRef.current =
           latestPanel.scrollHeight -
             latestPanel.clientHeight -
@@ -3596,7 +3900,7 @@ function AgentChatBubbles({
         distanceFromBottom > AGENT_CHAT_SCROLL_BUTTON_THRESHOLD_PX,
       );
     }
-  }, [bubbles.length, panelRef]);
+  }, [bubbles.length, panelRef, scrollToChatBottom, updateQuickNavActiveItem]);
 
   useEffect(() => {
     const panel = panelRef.current;
@@ -3651,7 +3955,8 @@ function AgentChatBubbles({
     panel.scrollTop += nextTop - anchor.top;
     lastFocusedScrollTopRef.current = panel.scrollTop;
     updateScrollButtonVisibility(panel);
-  }, [openFoldedActivityGroups, panelRef]);
+    updateQuickNavActiveItem(panel);
+  }, [openFoldedActivityGroups, panelRef, updateQuickNavActiveItem]);
 
 
   return (
@@ -3674,21 +3979,13 @@ function AgentChatBubbles({
                 "mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-3 overflow-x-hidden px-2 py-4 sm:px-4 md:px-6",
               )}
             >
-              {hasMoreBefore || isLoadingHistory || historyError ? (
+              {isLoadingHistory || historyError ? (
                 <div className="flex justify-center py-1">
-                  {hasMoreBefore ? (
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      disabled={isLoadingHistory}
-                      onClick={() => {
-                        void loadOlderHistory();
-                      }}
-                      className="rounded-full border border-border/70 bg-background/80 px-3 text-xs text-muted-foreground shadow-sm backdrop-blur-xl"
-                    >
-                      {isLoadingHistory ? "Loading…" : "Load older messages"}
-                    </Button>
+                  {isLoadingHistory ? (
+                    <div className="flex items-center gap-2 rounded-full border border-border/70 bg-background/80 px-3 py-1 text-xs text-muted-foreground shadow-sm backdrop-blur-xl">
+                      <Spinner data-icon="inline-start" />
+                      Loading older…
+                    </div>
                   ) : null}
                   {historyError ? (
                     <Alert variant="destructive" className="max-w-xl px-2 py-1">
@@ -3735,6 +4032,17 @@ function AgentChatBubbles({
           )}
         </div>
       </div>
+      <AgentChatQuickNavigation
+        items={visibleQuickNavItems}
+        activeItemId={activeQuickNavItemId}
+        hasMoreBefore={hasMoreNavBefore && !navReachedMax}
+        isLoadingHistory={isLoadingNavHistory}
+        historyError={navHistoryError}
+        onNearTop={() => {
+          void loadOlderNavHistory();
+        }}
+        onSelect={handleQuickNavSelect}
+      />
       <Button
         type="button"
         variant="secondary"
@@ -3760,6 +4068,115 @@ function AgentChatBubbles({
         <ArrowDownIcon data-icon="inline-start" aria-hidden="true" />
       </Button>
     </>
+  );
+}
+
+function AgentChatQuickNavigation({
+  items,
+  activeItemId,
+  hasMoreBefore,
+  isLoadingHistory,
+  historyError,
+  onNearTop,
+  onSelect,
+}: {
+  items: AgentChatQuickNavItem[];
+  activeItemId: string | null;
+  hasMoreBefore: boolean;
+  isLoadingHistory: boolean;
+  historyError: string | null;
+  onNearTop: () => void;
+  onSelect: (id: string) => void;
+}) {
+  const navListRef = useRef<HTMLDivElement>(null);
+  const collapsedItems = useMemo(
+    () => agentChatQuickNavCollapsedItems(items, activeItemId),
+    [activeItemId, items],
+  );
+
+  const handleNavScroll = useCallback(() => {
+    const list = navListRef.current;
+    if (!list || isLoadingHistory || !hasMoreBefore) {
+      return;
+    }
+
+    if (list.scrollTop <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX) {
+      onNearTop();
+    }
+  }, [hasMoreBefore, isLoadingHistory, onNearTop]);
+
+  useEffect(() => {
+    handleNavScroll();
+  }, [handleNavScroll, items.length]);
+
+  if (items.length === 0 && !hasMoreBefore && !isLoadingHistory && !historyError) {
+    return null;
+  }
+
+  return (
+    <nav
+      aria-label="User message quick navigation"
+      className="group fixed top-1/2 right-4 z-50 flex h-[min(26rem,calc(100vh-1rem))] -translate-y-1/2 items-center justify-end"
+    >
+      {items.length > 0 || hasMoreBefore || isLoadingHistory ? (
+        <div
+          aria-hidden="true"
+          className="flex h-full max-h-[calc(100vh-1rem)] w-10 flex-col items-end justify-center gap-2.5 rounded-full px-2 py-2.5 transition-opacity duration-150 group-hover:opacity-0 group-focus-within:opacity-0"
+        >
+          {collapsedItems.length > 0 ? (
+            collapsedItems.map((item) => (
+              <span
+                key={item.id}
+                className={cn(
+                  "h-[3px] w-6 rounded-full bg-muted-foreground/45 transition-colors",
+                  item.id === activeItemId && "bg-foreground",
+                )}
+              />
+            ))
+          ) : (
+            <span className="h-[3px] w-6 rounded-full bg-muted-foreground/45" />
+          )}
+        </div>
+      ) : null}
+      <div className="pointer-events-none absolute top-1/2 right-0 w-[min(17rem,calc(100vw-1rem))] -translate-y-1/2 overflow-hidden rounded-lg border border-border/70 bg-background opacity-0 shadow-lg shadow-background/20 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+        <div
+          ref={navListRef}
+          onScroll={handleNavScroll}
+          className="flex max-h-[min(26rem,calc(100vh-1rem))] flex-col gap-1 overflow-y-auto p-1.5"
+        >
+          {isLoadingHistory ? (
+            <div className="flex min-h-9 items-center gap-2 rounded-md px-2.5 py-1.5 text-sm leading-5 text-muted-foreground">
+              <Spinner data-icon="inline-start" />
+              Loading older…
+            </div>
+          ) : null}
+          {historyError ? (
+            <div className="rounded-md px-2.5 py-1.5 text-sm text-destructive">
+              {historyError}
+            </div>
+          ) : null}
+          {items.map((item) => {
+            const active = item.id === activeItemId;
+
+            return (
+              <button
+                key={item.id}
+                type="button"
+                aria-current={active ? "location" : undefined}
+                title={item.label}
+                onClick={() => onSelect(item.id)}
+                className={cn(
+                  "min-h-8 w-full rounded-md px-2.5 py-1.5 text-left text-sm leading-5 text-foreground/90 transition-colors hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
+                  active && "bg-muted text-foreground",
+                )}
+              >
+                <span className="block truncate">{item.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </nav>
   );
 }
 
@@ -6116,6 +6533,180 @@ function agentChatBubbleIsConversationMessage(bubble: AgentChatBubble) {
       bubble.role === "user" ||
       bubble.role === "telegram")
   );
+}
+
+function agentChatBubbleIsUserInput(bubble: AgentChatBubble) {
+  return (
+    bubble.kind === "message" &&
+    (bubble.role === "user" || bubble.role === "telegram") &&
+    !agentChatBubbleHasActivityCellVariant(bubble, "Assistant") &&
+    !agentChatBubbleHasActivityCellVariant(bubble, "Reply") &&
+    !agentChatBubbleHasActivityCellVariant(bubble, "Thinking")
+  );
+}
+
+function agentChatQuickNavLabelForBubble(bubble: AgentChatBubble) {
+  if (
+    bubble.uiHint === "final-message-separator" ||
+    !agentChatBubbleIsUserInput(bubble)
+  ) {
+    return null;
+  }
+
+  const cell = bubble.cell;
+  const user = agentChatActivityCellPayload(cell, "User");
+  if (user) {
+    return agentChatQuickNavLabelFromPayload(user, bubble.title);
+  }
+
+  const telegram = agentChatActivityCellPayload(cell, "Telegram");
+  if (telegram) {
+    return agentChatQuickNavLabelFromPayload(telegram, bubble.title);
+  }
+
+  return agentChatQuickNavNormalizeLabel(
+    agentChatQuickNavLabelFromBlocks(bubble.blocks) ?? bubble.title,
+  );
+}
+
+function agentChatQuickNavOrderForBubble(bubble: AgentChatBubble) {
+  const historySequence = agentChatHistorySequenceFromId(bubble.id);
+  if (historySequence !== null) {
+    return historySequence;
+  }
+
+  if (Number.isFinite(bubble.createdAt) && bubble.createdAt > 0) {
+    return bubble.createdAt;
+  }
+
+  if (Number.isFinite(bubble.updatedAt) && bubble.updatedAt > 0) {
+    return bubble.updatedAt;
+  }
+
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function agentChatQuickNavItemCompare(
+  left: AgentChatQuickNavItem,
+  right: AgentChatQuickNavItem,
+) {
+  if (left.order !== right.order) {
+    return left.order - right.order;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
+function agentChatHistorySequenceFromId(id: string) {
+  const match = /^history-(\d+)$/.exec(id);
+  if (!match) {
+    return null;
+  }
+
+  const sequence = Number(match[1]);
+  return Number.isFinite(sequence) ? sequence : null;
+}
+
+function agentChatQuickNavLabelFromPayload(
+  payload: Record<string, unknown>,
+  fallback: string,
+) {
+  const candidates = [
+    nullableStringValue(payload.full_body),
+    ...stringArrayValue(payload.message_lines),
+    nullableStringValue(payload.title),
+    ...stringArrayValue(payload.body_lines),
+    fallback,
+  ];
+
+  for (const candidate of candidates) {
+    const label = agentChatQuickNavNormalizeLabel(candidate);
+    if (label) {
+      return label;
+    }
+  }
+
+  return null;
+}
+
+function agentChatQuickNavLabelFromBlocks(blocks: WebActivityBlock[]) {
+  for (const block of blocks) {
+    const record = asRecord(block);
+    if (record?.type !== "text") {
+      continue;
+    }
+
+    const label = agentChatQuickNavNormalizeLabel(nullableStringValue(record.text));
+    if (label) {
+      return label;
+    }
+  }
+
+  return null;
+}
+
+function agentChatQuickNavNormalizeLabel(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const firstLine = value.split(/\r?\n/).find((line) => line.trim());
+  if (!firstLine) {
+    return null;
+  }
+
+  const normalized = firstLine.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized.length > 180
+    ? `${normalized.slice(0, 177).trimEnd()}...`
+    : normalized;
+}
+
+function agentChatQuickNavCollapsedItems(
+  items: AgentChatQuickNavItem[],
+  activeItemId: string | null,
+) {
+  if (items.length <= AGENT_CHAT_QUICK_NAV_COLLAPSED_ITEM_LIMIT) {
+    return items;
+  }
+
+  const lastIndex = items.length - 1;
+  const activeIndex = activeItemId
+    ? items.findIndex((item) => item.id === activeItemId)
+    : -1;
+  const indexes = new Set<number>();
+
+  for (let index = 0; index < AGENT_CHAT_QUICK_NAV_COLLAPSED_ITEM_LIMIT; index += 1) {
+    indexes.add(
+      Math.round(
+        (index * lastIndex) / (AGENT_CHAT_QUICK_NAV_COLLAPSED_ITEM_LIMIT - 1),
+      ),
+    );
+  }
+
+  if (activeIndex > -1 && !indexes.has(activeIndex)) {
+    const sortedIndexes = Array.from(indexes).sort((left, right) => left - right);
+    const replaceableIndexes = sortedIndexes.filter(
+      (index) => index !== 0 && index !== lastIndex,
+    );
+    const replaceIndex = replaceableIndexes.reduce(
+      (nearest, index) =>
+        Math.abs(index - activeIndex) < Math.abs(nearest - activeIndex)
+          ? index
+          : nearest,
+      replaceableIndexes[0] ?? sortedIndexes[0],
+    );
+    indexes.delete(replaceIndex);
+    indexes.add(activeIndex);
+  }
+
+  return Array.from(indexes)
+    .sort((left, right) => left - right)
+    .map((index) => items[index])
+    .filter((item): item is AgentChatQuickNavItem => Boolean(item));
 }
 
 function agentChatDisplayBlocksForBubble(

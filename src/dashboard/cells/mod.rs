@@ -47,7 +47,7 @@ pub use tui::CachedActivityLines;
 pub(super) use tui::activity_transcript_lines;
 pub use tui::render_activity_feed_cached;
 pub use web_activity::{
-    LiveWebActivityItem, WebActivityItem, WebActivityKind, WebActivityStatus,
+    LiveWebActivityItem, WebActivityActor, WebActivityItem, WebActivityKind, WebActivityStatus,
     default_web_activity_version, sync_web_activity_state, web_activity_item_from_cell,
 };
 

@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
     dashboard::{
-        ActivityCell, WebActivityItem, default_web_activity_version, web_activity_item_from_cell,
+        ActivityCell, WebActivityActor, WebActivityItem, WebActivityKind,
+        default_web_activity_version, web_activity_item_from_cell,
     },
 };
 
@@ -51,6 +52,12 @@ impl DashboardActivityHistoryWindow {
         }
         self.newest_cursor = None;
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DashboardActivityHistoryCount {
+    pub matching_items: usize,
+    pub total_items: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -192,6 +199,37 @@ impl DashboardActivityHistoryStore {
             .into_diagnostic()
             .wrap_err("decode dashboard activity history after failed")?;
         self.page_from_rows(rows)
+    }
+
+    pub fn query_user_input_count(&self) -> Result<DashboardActivityHistoryCount> {
+        let conn = self.open_connection()?;
+        let mut statement = conn
+            .prepare("SELECT item_json FROM dashboard_activity")
+            .into_diagnostic()
+            .wrap_err("prepare dashboard activity history count query failed")?;
+        let rows = statement
+            .query_map([], |row| {
+                let item_json: String = row.get(0)?;
+                Ok(serde_json::from_str::<WebActivityItem>(&item_json).ok())
+            })
+            .into_diagnostic()
+            .wrap_err("query dashboard activity history count failed")?;
+
+        let mut matching_items = 0;
+        let mut total_items = 0;
+        for item in rows {
+            if let Some(item) = item.into_diagnostic()? {
+                total_items += 1;
+                if history_item_is_user_input(&item) {
+                    matching_items += 1;
+                }
+            }
+        }
+
+        Ok(DashboardActivityHistoryCount {
+            matching_items,
+            total_items,
+        })
     }
 
     fn initialize(&self) -> Result<()> {
@@ -353,6 +391,24 @@ impl DashboardActivityHistoryStore {
 
 fn clamp_history_limit(limit: usize) -> usize {
     limit.clamp(1, DASHBOARD_ACTIVITY_HISTORY_LIMIT_MAX)
+}
+
+fn history_item_is_user_input(item: &WebActivityItem) -> bool {
+    item.kind == WebActivityKind::Message
+        && matches!(
+            item.actor,
+            Some(WebActivityActor::User | WebActivityActor::Telegram)
+        )
+        && !matches!(
+            item.cell,
+            Some(
+                ActivityCell::Assistant(_)
+                    | ActivityCell::Reply(_)
+                    | ActivityCell::Thinking(_)
+                    | ActivityCell::FinalMessageSeparator(_)
+            )
+        )
+        && item.ui_hint.as_deref() != Some("final-message-separator")
 }
 
 fn decode_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, WebActivityItem)> {

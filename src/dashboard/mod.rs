@@ -25,9 +25,9 @@ mod view_state;
 
 pub use cells::{
     ActivityCell, CachedActivityLines, DashboardActivityEvent, LiveActivityCell,
-    LiveWebActivityItem, ReducedMotion, WebActivityItem, activity_cell_from_tool_ui_event,
-    activity_cells_from_history_items, apply_activity_event, assistant_activity_cell,
-    default_web_activity_version, final_message_separator_activity_cell,
+    LiveWebActivityItem, ReducedMotion, WebActivityActor, WebActivityItem, WebActivityKind,
+    activity_cell_from_tool_ui_event, activity_cells_from_history_items, apply_activity_event,
+    assistant_activity_cell, default_web_activity_version, final_message_separator_activity_cell,
     render_activity_feed_cached, render_activity_from_messages, sync_web_activity_state,
     thinking_activity_cell, user_activity_cell_from_event, web_activity_item_from_cell,
 };
@@ -37,7 +37,8 @@ pub use commands::{
     DashboardControlCommand, DashboardPendingUserInputMoveDirection,
 };
 pub use history::{
-    DashboardActivityHistoryPage, DashboardActivityHistoryStore, DashboardActivityHistoryWindow,
+    DashboardActivityHistoryCount, DashboardActivityHistoryPage, DashboardActivityHistoryStore,
+    DashboardActivityHistoryWindow,
 };
 
 #[cfg(test)]

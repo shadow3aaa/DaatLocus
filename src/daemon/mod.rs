@@ -393,6 +393,12 @@ struct DashboardActivityHistoryQuery {
     session_id: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct DashboardActivityHistoryCountResponse {
+    matching_items: usize,
+    total_items: usize,
+}
+
 #[derive(Debug, Deserialize)]
 struct DashboardSnapshotQuery {
     session_id: Option<String>,
@@ -600,6 +606,10 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/dashboard/snapshot", get(snapshot_handler))
         .route("/dashboard/stream", get(stream_handler))
         .route("/dashboard/activity-history", get(activity_history_handler))
+        .route(
+            "/dashboard/activity-history/count",
+            get(activity_history_count_handler),
+        )
         .route("/dashboard/action", post(dashboard_action_handler))
         .route(
             "/dashboard/attachments/{encoded_path}",
@@ -1171,6 +1181,49 @@ async fn activity_history_handler(
             "session_id is required for dashboard activity history",
         )
             .into_response()
+    }
+}
+
+async fn activity_history_count_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(query): Query<DashboardSnapshotQuery>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let Some(session_id) = query.session_id.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "session_id is required for dashboard activity history count",
+        )
+            .into_response();
+    };
+
+    match session_client_for_request(&state, session_id).await {
+        Ok(client) => match client
+            .request(session_ipc::SessionIpcRequest::DashboardHistoryCount)
+            .await
+        {
+            Ok(session_ipc::SessionIpcResponse::DashboardHistoryCount { count }) => {
+                Json(DashboardActivityHistoryCountResponse {
+                    matching_items: count.matching_items,
+                    total_items: count.total_items,
+                })
+                .into_response()
+            }
+            Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => {
+                (StatusCode::BAD_GATEWAY, message).into_response()
+            }
+            Ok(_) => (
+                StatusCode::BAD_GATEWAY,
+                "unexpected session IPC dashboard history count response",
+            )
+                .into_response(),
+            Err(err) => (StatusCode::BAD_GATEWAY, format!("{err:?}")).into_response(),
+        },
+        Err(err) => (StatusCode::NOT_FOUND, format!("{err:?}")).into_response(),
     }
 }
 

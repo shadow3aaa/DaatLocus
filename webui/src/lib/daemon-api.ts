@@ -463,6 +463,11 @@ export type DashboardActivityHistoryPage = {
   has_more_after: boolean;
 };
 
+export type DashboardActivityHistoryCount = {
+  matching_items: number;
+  total_items: number;
+};
+
 export type DashboardSkillSummary = {
   name: string;
   description: string;
@@ -850,6 +855,37 @@ export async function fetchDashboardActivityHistory({
   return parseJsonResponse<DashboardActivityHistoryPage>(
     response,
     "Dashboard activity history",
+  );
+}
+
+export async function fetchDashboardActivityHistoryCount({
+  signal,
+  token = getStoredDaemonToken(),
+  sessionId,
+}: FetchOptions & {
+  sessionId: string;
+}): Promise<DashboardActivityHistoryCount> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for dashboard activity history count.");
+  }
+
+  const url = new URL("/dashboard/activity-history/count", window.location.href);
+  url.searchParams.set("session_id", sessionId);
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  return parseJsonResponse<DashboardActivityHistoryCount>(
+    response,
+    "Dashboard activity history count",
   );
 }
 
