@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sysinfo::{Pid, Signal, System};
 use tokio::{
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
@@ -79,6 +79,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const DAEMON_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const DAEMON_PORT_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const SESSION_IPC_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const SESSION_PROCESS_TERM_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_PROCESS_KILL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -3133,13 +3134,35 @@ pub async fn connect_existing_daemon() -> Result<DaemonClient> {
 pub async fn connect_or_start_daemon() -> Result<DaemonClient> {
     match connect_existing_daemon().await {
         Ok(client) => Ok(client),
-        Err(_) => {
+        Err(connect_err) => {
+            let port = configured_daemon_port().await?;
+            fail_if_daemon_port_accepts_without_status(port, &connect_err).await?;
             spawn_detached_daemon_process().await?;
             let status = wait_for_daemon_ready().await?;
             let client = DaemonClient::authenticated(status.port).await?;
             Ok(client)
         }
     }
+}
+
+async fn fail_if_daemon_port_accepts_without_status(
+    port: u16,
+    status_error: &miette::Report,
+) -> Result<()> {
+    let connected = tokio::time::timeout(
+        DAEMON_PORT_PROBE_TIMEOUT,
+        TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok());
+    if connected {
+        return Err(miette!(
+            "daemon port {}:{} accepts TCP connections but did not return a usable /status; refusing to start a second daemon on the same port. status error: {status_error}. Try stopping the stale listener, rebooting Windows, or changing [daemon].port in config.toml.",
+            DAEMON_CLIENT_HOST,
+            port
+        ));
+    }
+    Ok(())
 }
 
 pub fn status_summary(status: &StatusResponse) -> String {
@@ -3205,6 +3228,34 @@ mod tests {
 
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(err.to_string().contains("daemon status request failed"));
+    }
+
+    #[tokio::test]
+    async fn daemon_port_probe_rejects_unresponsive_listener_before_spawn() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind unresponsive daemon test listener");
+        let port = listener.local_addr().expect("listener addr").port();
+        let accept_task = tokio::spawn(async move {
+            if let Ok((_socket, _addr)) = listener.accept().await {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+
+        let err = fail_if_daemon_port_accepts_without_status(
+            port,
+            &miette!("daemon status request failed: timeout"),
+        )
+        .await
+        .expect_err("accepted but unresponsive port should be rejected");
+        accept_task.abort();
+
+        assert!(err.to_string().contains("accepts TCP connections"));
+        assert!(err.to_string().contains("usable /status"));
+        assert!(
+            err.to_string()
+                .contains("refusing to start a second daemon")
+        );
     }
 
     #[tokio::test]
