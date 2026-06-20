@@ -3008,8 +3008,10 @@ pub async fn spawn_detached_daemon_process() -> Result<()> {
         .arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(stderr_file)
-        .env(DAEMONIZE_ENV, "1");
+        .stderr(stderr_file);
+    if !crate::daemon_tray::should_attempt_daemon_tray() {
+        command.env(DAEMONIZE_ENV, "1");
+    }
     #[cfg(windows)]
     {
         const DETACHED_PROCESS: u32 = 0x00000008;

@@ -2,27 +2,56 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use std::{
     process::{Command, Stdio},
-    thread,
     time::{Duration, Instant},
 };
 
-use tokio::sync::mpsc;
-#[cfg(target_os = "windows")]
-use tokio::sync::oneshot;
+use miette::Result;
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+use miette::miette;
+use tokio::sync::{mpsc, oneshot};
 
-#[cfg(target_os = "windows")]
-use crate::daemon::DAEMON_CLIENT_HOST;
 use crate::daemon::DaemonControlCommand;
 
-#[cfg(target_os = "windows")]
+pub(crate) const NO_TRAY_ENV: &str = "DAAT_LOCUS_NO_TRAY";
+
+#[derive(Clone)]
+pub(crate) struct DaemonTrayHandle {
+    shutdown: Arc<AtomicBool>,
+}
+
+impl DaemonTrayHandle {
+    pub(crate) fn new() -> Self {
+        Self {
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+}
+
+pub(crate) struct DaemonTrayStartup {
+    pub(crate) port: u16,
+    pub(crate) control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
+}
+
+pub(crate) fn should_attempt_daemon_tray() -> bool {
+    std::env::var_os(NO_TRAY_ENV).is_none() && platform_tray::gui_session_available()
+}
+
+pub(crate) fn run_daemon_tray(startup: DaemonTrayStartup, handle: DaemonTrayHandle) -> Result<()> {
+    platform_tray::run_tray_loop(startup.port, startup.control_tx, handle.shutdown)
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 mod platform_tray {
     use super::*;
-    use miette::{Result, miette};
     use tao::{
-        event::Event,
+        event::{Event, StartCause},
         event_loop::{ControlFlow, EventLoopBuilder},
         platform::run_return::EventLoopExtRunReturn,
     };
@@ -30,11 +59,6 @@ mod platform_tray {
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
         menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     };
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    use tao::platform::unix::EventLoopBuilderExtUnix;
-    #[cfg(target_os = "windows")]
-    use tao::platform::windows::EventLoopBuilderExtWindows;
 
     const OPEN_WEBUI_ID: &str = "open-webui";
     const EXIT_DAEMON_ID: &str = "exit-daemon";
@@ -45,28 +69,23 @@ mod platform_tray {
         TrayIcon(TrayIconEvent),
     }
 
-    pub(super) fn spawn(
-        port: u16,
-        control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
-        shutdown: Arc<AtomicBool>,
-    ) {
-        let _ = thread::Builder::new()
-            .name("daat-locus-tray".to_string())
-            .spawn(move || {
-                if let Err(err) = run_tray_loop(port, control_tx, shutdown) {
-                    tracing::warn!("daemon tray stopped: {err:?}");
-                }
-            });
+    pub(super) fn gui_session_available() -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
     }
 
-    fn run_tray_loop(
+    pub(super) fn run_tray_loop(
         port: u16,
         control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
         shutdown: Arc<AtomicBool>,
     ) -> Result<()> {
-        let mut builder = EventLoopBuilder::<TrayEvent>::with_user_event();
-        allow_event_loop_on_tray_thread(&mut builder);
-        let mut event_loop = builder.build();
+        let mut event_loop = EventLoopBuilder::<TrayEvent>::with_user_event().build();
         let proxy = event_loop.create_proxy();
         TrayIconEvent::set_event_handler(Some({
             let proxy = proxy.clone();
@@ -78,9 +97,9 @@ mod platform_tray {
             let _ = proxy.send_event(TrayEvent::Menu(event));
         }));
 
-        let _tray = build_tray_icon(port)?;
-
-        event_loop.run_return(move |event, _, control_flow| {
+        let mut tray = None;
+        let mut startup_error = None;
+        event_loop.run_return(|event, _, control_flow| {
             *control_flow = ControlFlow::WaitUntil(Instant::now() + TRAY_POLL_INTERVAL);
             if shutdown.load(Ordering::Relaxed) {
                 *control_flow = ControlFlow::Exit;
@@ -88,6 +107,15 @@ mod platform_tray {
             }
 
             match event {
+                Event::NewEvents(StartCause::Init) if tray.is_none() => {
+                    match build_tray_icon(port) {
+                        Ok(tray_icon) => tray = Some(tray_icon),
+                        Err(err) => {
+                            startup_error = Some(err);
+                            *control_flow = ControlFlow::Exit;
+                        }
+                    }
+                }
                 Event::UserEvent(TrayEvent::Menu(event)) => {
                     if event.id == OPEN_WEBUI_ID {
                         open_webui(port);
@@ -110,17 +138,11 @@ mod platform_tray {
                 _ => {}
             }
         });
+
+        if let Some(err) = startup_error {
+            return Err(err);
+        }
         Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    fn allow_event_loop_on_tray_thread(builder: &mut EventLoopBuilder<TrayEvent>) {
-        builder.with_any_thread(true);
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    fn allow_event_loop_on_tray_thread(builder: &mut EventLoopBuilder<TrayEvent>) {
-        builder.with_any_thread(true);
     }
 
     fn build_tray_icon(port: u16) -> Result<TrayIcon> {
@@ -137,37 +159,42 @@ mod platform_tray {
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
             .with_icon(daemon_icon()?)
+            .with_icon_as_template(true)
             .build()
             .map_err(|err| miette!("failed to create tray icon: {err}"))
     }
 
-    const TRAY_ICON_BYTES: &[u8] = include_bytes!("../assets/tray-icon.ico");
-
     fn daemon_icon() -> Result<Icon> {
-        let path = materialize_tray_icon()?;
-        Icon::from_path(&path, Some((32, 32)))
-            .map_err(|err| miette!("failed to load tray icon {}: {err}", path.display()))
+        let (rgba, width, height) = daemon_icon_rgba()?;
+        Icon::from_rgba(rgba, width, height)
+            .map_err(|err| miette!("failed to build daemon tray icon: {err}"))
     }
 
-    fn materialize_tray_icon() -> Result<std::path::PathBuf> {
-        let path = std::env::temp_dir().join("daat-locus-tray-icon.ico");
-        let should_write = match std::fs::read(&path) {
-            Ok(current) => current != TRAY_ICON_BYTES,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
-            Err(err) => {
-                return Err(miette!(
-                    "failed to read tray icon {}: {err}",
-                    path.display()
-                ));
-            }
-        };
+    const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 
-        if should_write {
-            std::fs::write(&path, TRAY_ICON_BYTES)
-                .map_err(|err| miette!("failed to write tray icon {}: {err}", path.display()))?;
+    fn daemon_icon_rgba() -> Result<(Vec<u8>, u32, u32)> {
+        let decoder = png::Decoder::new(std::io::Cursor::new(TRAY_ICON_PNG));
+        let mut reader = decoder
+            .read_info()
+            .map_err(|err| miette!("failed to read daemon tray icon png: {err}"))?;
+        let buffer_size = reader
+            .output_buffer_size()
+            .ok_or_else(|| miette!("daemon tray icon png is too large to decode"))?;
+        let mut rgba = vec![0; buffer_size];
+        let output = reader
+            .next_frame(&mut rgba)
+            .map_err(|err| miette!("failed to decode daemon tray icon png: {err}"))?;
+        rgba.truncate(output.buffer_size());
+
+        if output.color_type != png::ColorType::Rgba || output.bit_depth != png::BitDepth::Eight {
+            return Err(miette!(
+                "daemon tray icon png must be 8-bit RGBA, got {:?} {:?}",
+                output.color_type,
+                output.bit_depth
+            ));
         }
 
-        Ok(path)
+        Ok((rgba, output.width, output.height))
     }
 
     fn request_daemon_shutdown(control_tx: &mpsc::UnboundedSender<DaemonControlCommand>) {
@@ -181,55 +208,56 @@ mod platform_tray {
     }
 
     fn open_webui(port: u16) {
-        let url = format!("http://{}:{}", DAEMON_CLIENT_HOST, port);
+        let url = format!("http://{}:{}", crate::daemon::DAEMON_CLIENT_HOST, port);
         if let Err(err) = open_url(&url) {
             tracing::warn!("daemon tray failed to open WebUI: {err}");
         }
     }
 }
 
-pub(crate) struct DaemonTrayHandle {
-    shutdown: Arc<AtomicBool>,
-}
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+mod platform_tray {
+    use super::*;
 
-impl DaemonTrayHandle {
-    pub(crate) fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+    pub(super) fn gui_session_available() -> bool {
+        false
     }
-}
 
-pub(crate) fn spawn_daemon_tray(
-    port: u16,
-    control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
-) -> Option<DaemonTrayHandle> {
-    let shutdown = Arc::new(AtomicBool::new(false));
-    spawn_platform_tray(port, control_tx, shutdown.clone())?;
-    Some(DaemonTrayHandle { shutdown })
-}
-
-#[cfg(target_os = "windows")]
-fn spawn_platform_tray(
-    port: u16,
-    control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
-    shutdown: Arc<AtomicBool>,
-) -> Option<()> {
-    platform_tray::spawn(port, control_tx, shutdown);
-    Some(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn spawn_platform_tray(
-    _port: u16,
-    _control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
-    _shutdown: Arc<AtomicBool>,
-) -> Option<()> {
-    None
+    pub(super) fn run_tray_loop(
+        _port: u16,
+        _control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
+        _shutdown: Arc<AtomicBool>,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "windows")]
 fn open_url(url: &str) -> std::io::Result<()> {
     Command::new("cmd")
         .args(["/C", "start", "", url])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_url(url: &str) -> std::io::Result<()> {
+    Command::new("open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn open_url(url: &str) -> std::io::Result<()> {
+    Command::new("xdg-open")
+        .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

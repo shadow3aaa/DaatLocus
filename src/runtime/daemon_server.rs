@@ -10,6 +10,7 @@ use crate::{
         session_client_for_id, session_ipc, spawn_detached_daemon_process, start_server,
         terminate_process_backed_sessions,
     },
+    daemon_tray::{DaemonTrayHandle, DaemonTrayStartup},
     dashboard::{
         DashboardControlCommand, DashboardRuntimeActivity, DashboardRuntimeActivityStatus,
         DashboardRuntimeStatusLevel, DashboardState, dashboard_agent_name, sync_web_activity_state,
@@ -263,6 +264,22 @@ fn session_scope_label(scope: &session::SessionScope) -> String {
 }
 
 pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()> {
+    run_daemon_serve_inner(config, None, None).await
+}
+
+pub(crate) async fn run_daemon_serve_with_tray(
+    config: crate::config::Config,
+    tray_handle: DaemonTrayHandle,
+    tray_startup_tx: oneshot::Sender<DaemonTrayStartup>,
+) -> Result<()> {
+    run_daemon_serve_inner(config, Some(tray_handle), Some(tray_startup_tx)).await
+}
+
+async fn run_daemon_serve_inner(
+    config: crate::config::Config,
+    tray_handle: Option<DaemonTrayHandle>,
+    tray_startup_tx: Option<oneshot::Sender<DaemonTrayStartup>>,
+) -> Result<()> {
     let mut lock = DaemonLock::acquire().await?;
     let daemon_token_registry = crate::daemon::load_or_create_daemon_token_registry().await?;
     let daemon_lifecycle = DaemonLifecycleHandle::new(DaemonLifecycleState::Initializing);
@@ -299,8 +316,12 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
         "[manager] listening on http://{}:{}",
         DAEMON_HOST_DISPLAY, daemon_server.port
     ));
-    let daemon_tray =
-        crate::daemon_tray::spawn_daemon_tray(daemon_server.port, daemon_control_tx.clone());
+    if let Some(tray_startup_tx) = tray_startup_tx {
+        let _ = tray_startup_tx.send(DaemonTrayStartup {
+            port: daemon_server.port,
+            control_tx: daemon_control_tx.clone(),
+        });
+    }
 
     tokio::spawn(async {
         if let Err(err) = crate::model_catalog::refresh_models_dev_cache().await {
@@ -410,8 +431,8 @@ pub(crate) async fn run_daemon_serve(config: crate::config::Config) -> Result<()
     }
 
     daemon_lifecycle.mark_stopping();
-    if let Some(tray) = &daemon_tray {
-        tray.shutdown();
+    if let Some(tray_handle) = &tray_handle {
+        tray_handle.shutdown();
     }
     if let Some(server_shutdown_tx) = server_shutdown_tx.take() {
         let _ = server_shutdown_tx.send(());

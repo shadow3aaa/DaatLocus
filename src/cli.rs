@@ -513,7 +513,7 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
             .await?;
             return Ok(());
         }
-        crate::runtime::daemon_server::run_daemon_serve(config).await?;
+        run_daemon_serve_command(config).await?;
         return Ok(());
     }
 
@@ -528,6 +528,38 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
         return Ok(());
     }
     Ok(())
+}
+
+async fn run_daemon_serve_command(config: crate::config::Config) -> Result<()> {
+    if !crate::daemon_tray::should_attempt_daemon_tray() {
+        return crate::runtime::daemon_server::run_daemon_serve(config).await;
+    }
+
+    let tray_handle = crate::daemon_tray::DaemonTrayHandle::new();
+    let (tray_startup_tx, tray_startup_rx) = tokio::sync::oneshot::channel();
+    let mut manager_task = tokio::spawn(crate::runtime::daemon_server::run_daemon_serve_with_tray(
+        config,
+        tray_handle.clone(),
+        tray_startup_tx,
+    ));
+
+    let tray_startup = tokio::select! {
+        startup = tray_startup_rx => match startup {
+            Ok(startup) => startup,
+            Err(_) => return flatten_daemon_task_result(manager_task.await),
+        },
+        result = &mut manager_task => return flatten_daemon_task_result(result),
+    };
+
+    if let Err(err) = crate::daemon_tray::run_daemon_tray(tray_startup, tray_handle.clone()) {
+        tracing::warn!("daemon tray unavailable; continuing without tray: {err:?}");
+    }
+    tray_handle.shutdown();
+    flatten_daemon_task_result(manager_task.await)
+}
+
+fn flatten_daemon_task_result(result: Result<Result<()>, tokio::task::JoinError>) -> Result<()> {
+    result.map_err(|err| miette!("daemon task failed: {err}"))?
 }
 
 async fn run_code_command(project_dir: PathBuf) -> Result<()> {
