@@ -90,7 +90,10 @@ import {
   type WebActivityBlock,
   type WebActivityItem,
 } from "@/lib/daemon-api";
-import { foldCompletedAgentChatActivity } from "@/lib/agent-chat-folding";
+import {
+  foldCompletedAgentChatActivity,
+  type AgentChatFoldDisplayItem,
+} from "@/lib/agent-chat-folding";
 import {
   highlightCodeWithShiki,
   type ShikiColorScheme,
@@ -223,6 +226,11 @@ type AgentChatQuickNavItem = {
   id: string;
   label: string;
   order: number;
+};
+
+type AgentChatQuickNavDisplayTarget = {
+  id: string;
+  quickNavItemId: string;
 };
 
 type AgentChatPlanStepStatus =
@@ -3422,6 +3430,20 @@ function AgentChatBubbles({
     () => quickNavItems.slice(-AGENT_CHAT_QUICK_NAV_MAX_ITEMS),
     [quickNavItems],
   );
+  const displayQuickNavTargets = useMemo(() => {
+    const visibleQuickNavItemIds = new Set(
+      visibleQuickNavItems.map((item) => item.id),
+    );
+    return displayItems
+      .map((item): AgentChatQuickNavDisplayTarget | null => {
+        const quickNavItemId = agentChatFoldDisplayItemQuickNavTargetId(item);
+        if (!quickNavItemId || !visibleQuickNavItemIds.has(quickNavItemId)) {
+          return null;
+        }
+        return { id: item.id, quickNavItemId };
+      })
+      .filter((item): item is AgentChatQuickNavDisplayTarget => Boolean(item));
+  }, [displayItems, visibleQuickNavItems]);
   const navReachedMax = quickNavItems.length >= AGENT_CHAT_QUICK_NAV_MAX_ITEMS;
   const displayItemElementsRef = useRef(new Map<string, HTMLDivElement>());
 
@@ -3455,8 +3477,8 @@ function AgentChatBubbles({
       let nextActiveId: string | null = null;
       let bestDistance = Number.POSITIVE_INFINITY;
 
-      for (const item of visibleQuickNavItems) {
-        const element = displayItemElementsRef.current.get(item.id);
+      for (const target of displayQuickNavTargets) {
+        const element = displayItemElementsRef.current.get(target.id);
         if (!element) {
           continue;
         }
@@ -3469,7 +3491,7 @@ function AgentChatBubbles({
         const distance = Math.abs(rect.top - targetY);
         if (distance < bestDistance) {
           bestDistance = distance;
-          nextActiveId = item.id;
+          nextActiveId = target.quickNavItemId;
         }
       }
 
@@ -3478,7 +3500,7 @@ function AgentChatBubbles({
         current === nextActiveId ? current : nextActiveId,
       );
     },
-    [visibleQuickNavItems],
+    [displayQuickNavTargets, visibleQuickNavItems],
   );
   const handleFoldedActivityGroupOpenChange = useCallback(
     (id: string, nextOpen: boolean) => {
@@ -6544,6 +6566,24 @@ function agentChatBubbleIsUserInput(bubble: AgentChatBubble) {
     !agentChatBubbleHasActivityCellVariant(bubble, "Reply") &&
     !agentChatBubbleHasActivityCellVariant(bubble, "Thinking")
   );
+}
+
+function agentChatFoldDisplayItemQuickNavTargetId(
+  item: AgentChatFoldDisplayItem<AgentChatBubble>,
+) {
+  if (item.inputBoundaryId) {
+    return item.inputBoundaryId;
+  }
+
+  if (
+    item.kind === "bubble" &&
+    item.bubble.uiHint !== "final-message-separator" &&
+    agentChatBubbleIsUserInput(item.bubble)
+  ) {
+    return item.id;
+  }
+
+  return null;
 }
 
 function agentChatQuickNavLabelForBubble(bubble: AgentChatBubble) {

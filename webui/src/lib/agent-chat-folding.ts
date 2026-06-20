@@ -16,11 +16,13 @@ export type AgentChatFoldDisplayItem<TBubble extends AgentChatFoldBubble> =
       kind: "bubble";
       id: string;
       bubble: TBubble;
+      inputBoundaryId?: string;
     }
   | {
       kind: "foldedActivityGroup";
       id: string;
       bubbles: TBubble[];
+      inputBoundaryId?: string;
     };
 
 type AgentChatFoldOptions<TBubble extends AgentChatFoldBubble> = {
@@ -45,7 +47,13 @@ export function foldCompletedAgentChatActivity<
   let stillAtLeadingWindowActivity = true;
 
   function pushBubble(bubble: TBubble) {
-    items.push({ kind: "bubble", id: bubble.id, bubble });
+    const inputBoundaryId =
+      activeInput && bubble.id !== activeInput.id ? activeInput.id : undefined;
+    items.push(
+      inputBoundaryId
+        ? { kind: "bubble", id: bubble.id, bubble, inputBoundaryId }
+        : { kind: "bubble", id: bubble.id, bubble },
+    );
     stillAtLeadingWindowActivity = false;
   }
 
@@ -61,11 +69,21 @@ export function foldCompletedAgentChatActivity<
       return;
     }
 
-    items.push({
-      kind: "foldedActivityGroup",
-      id: `folded-${outputBubble.id}`,
-      bubbles: pendingActivity,
-    });
+    const inputBoundaryId = activeInput?.id;
+    items.push(
+      inputBoundaryId
+        ? {
+            kind: "foldedActivityGroup",
+            id: `folded-${outputBubble.id}`,
+            bubbles: pendingActivity,
+            inputBoundaryId,
+          }
+        : {
+            kind: "foldedActivityGroup",
+            id: `folded-${outputBubble.id}`,
+            bubbles: pendingActivity,
+          },
+    );
     pendingActivity = [];
     stillAtLeadingWindowActivity = false;
   }

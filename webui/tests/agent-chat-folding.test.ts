@@ -78,4 +78,25 @@ describe("foldCompletedAgentChatActivity", () => {
       },
     ]);
   });
+
+  test("tags live activity after a user input with its input boundary", () => {
+    const displayItems = fold([
+      bubble("user-prompt", "user"),
+      bubble("running-tool", "tool", { live: true }),
+    ]);
+
+    expect(displayItems).toEqual([
+      {
+        kind: "bubble",
+        id: "user-prompt",
+        bubble: bubble("user-prompt", "user"),
+      },
+      {
+        kind: "bubble",
+        id: "running-tool",
+        bubble: bubble("running-tool", "tool", { live: true }),
+        inputBoundaryId: "user-prompt",
+      },
+    ]);
+  });
 });
