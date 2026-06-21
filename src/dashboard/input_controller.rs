@@ -23,6 +23,9 @@ use super::{DashboardAction, DashboardCommandAttachment, DashboardCommandRunner,
 pub(super) enum TuiInputOutcome {
     Continue,
     Exit,
+    CopySelection {
+        text: String,
+    },
     RunPanelAction {
         title: String,
         action: DashboardAction,
@@ -50,6 +53,16 @@ pub(super) fn handle_key_event(
     state: &DashboardState,
 ) -> TuiInputOutcome {
     let pending_requests = state.pending_access_requests.clone();
+
+    if is_ctrl_c(key)
+        && let Some(text) = view.selected_text()
+    {
+        return TuiInputOutcome::CopySelection { text };
+    }
+
+    if key.code == KeyCode::Esc && view.clear_selection() {
+        return TuiInputOutcome::Continue;
+    }
 
     if view.transcript_overlay.is_some() {
         view.handle_transcript_overlay_key(key);
@@ -185,35 +198,43 @@ pub(super) fn handle_key_event(
             view.reset_command_popup();
         }
         KeyCode::Up => {
-            let matches = matching_commands(view.command_input.as_str(), &command_context);
-            if !matches.is_empty() {
-                view.command_popup_selection = view
-                    .command_popup_selection
-                    .saturating_sub(1)
-                    .min(matches.len() - 1);
-                view.command_popup_scroll = adjusted_popup_scroll(
-                    view.command_popup_scroll,
-                    view.command_popup_selection,
-                    matches.len(),
-                );
-            } else if view.navigate_command_history_up() {
-                view.command_feedback = None;
-                view.clear_ctrl_c_reminder();
+            if view.command_input.move_up_line() {
+                view.reset_command_popup();
+            } else {
+                let matches = matching_commands(view.command_input.as_str(), &command_context);
+                if !matches.is_empty() {
+                    view.command_popup_selection = view
+                        .command_popup_selection
+                        .saturating_sub(1)
+                        .min(matches.len() - 1);
+                    view.command_popup_scroll = adjusted_popup_scroll(
+                        view.command_popup_scroll,
+                        view.command_popup_selection,
+                        matches.len(),
+                    );
+                } else if view.navigate_command_history_up() {
+                    view.command_feedback = None;
+                    view.clear_ctrl_c_reminder();
+                }
             }
         }
         KeyCode::Down => {
-            let matches = matching_commands(view.command_input.as_str(), &command_context);
-            if !matches.is_empty() {
-                view.command_popup_selection =
-                    (view.command_popup_selection + 1).min(matches.len() - 1);
-                view.command_popup_scroll = adjusted_popup_scroll(
-                    view.command_popup_scroll,
-                    view.command_popup_selection,
-                    matches.len(),
-                );
-            } else if view.navigate_command_history_down() {
-                view.command_feedback = None;
-                view.clear_ctrl_c_reminder();
+            if view.command_input.move_down_line() {
+                view.reset_command_popup();
+            } else {
+                let matches = matching_commands(view.command_input.as_str(), &command_context);
+                if !matches.is_empty() {
+                    view.command_popup_selection =
+                        (view.command_popup_selection + 1).min(matches.len() - 1);
+                    view.command_popup_scroll = adjusted_popup_scroll(
+                        view.command_popup_scroll,
+                        view.command_popup_selection,
+                        matches.len(),
+                    );
+                } else if view.navigate_command_history_down() {
+                    view.command_feedback = None;
+                    view.clear_ctrl_c_reminder();
+                }
             }
         }
         KeyCode::Esc => {
@@ -354,6 +375,16 @@ fn handle_pending_user_input_edit_key(key: KeyEvent, view: &mut TuiViewState) ->
             view.command_feedback = None;
             view.reset_command_history_navigation();
             view.reset_command_popup();
+        }
+        KeyCode::Up => {
+            if view.command_input.move_up_line() {
+                view.reset_command_popup();
+            }
+        }
+        KeyCode::Down => {
+            if view.command_input.move_down_line() {
+                view.reset_command_popup();
+            }
         }
         KeyCode::Enter => {
             if !view.pending_image_attachments.is_empty() {
@@ -515,6 +546,7 @@ pub(super) async fn execute_input_outcome(
     match outcome {
         TuiInputOutcome::Continue => false,
         TuiInputOutcome::Exit => true,
+        TuiInputOutcome::CopySelection { .. } => false,
         TuiInputOutcome::RunPanelAction {
             title,
             action,
@@ -699,6 +731,10 @@ fn media_type_for_image_path(path: &Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::command_input::command_input_selectable_region;
+    use crate::dashboard::selection::{SelectableId, SelectableRegion};
+    use crate::dashboard::tui_event::TuiMouseSelectionKind;
+    use ratatui::layout::Rect;
 
     struct OkRunner;
 
@@ -972,6 +1008,8 @@ mod tests {
             &OkRunner,
         )
         .await;
+        view.max_scroll = 100;
+        view.auto_scroll = true;
 
         let outcome = handle_key_event(
             KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
@@ -1034,6 +1072,72 @@ mod tests {
     }
 
     #[test]
+    fn up_down_move_cursor_between_multiline_composer_lines() {
+        let mut view = TuiViewState::new();
+        let state = DashboardState::default();
+        view.command_input.set_text("hello".to_string());
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            &mut view,
+            &state,
+        );
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert_eq!(view.command_input.as_str(), "hello\n");
+
+        for ch in "world".chars() {
+            let outcome = handle_key_event(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut view,
+                &state,
+            );
+            assert!(matches!(outcome, TuiInputOutcome::Continue));
+        }
+        assert_eq!(view.command_input.as_str(), "hello\nworld");
+        assert_eq!(view.command_input.cursor_pos, "hello\nworld".len());
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut view,
+            &state,
+        );
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert_eq!(view.command_input.cursor_pos, "hello".len());
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut view,
+            &state,
+        );
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert_eq!(view.command_input.cursor_pos, "hello\nworld".len());
+    }
+
+    #[test]
+    fn pending_input_edit_up_down_move_multiline_cursor() {
+        let event_id = uuid::Uuid::from_u128(7);
+        let state = state_with_pending_user_inputs(vec![pending_user_input(event_id, "old")]);
+        let mut view = TuiViewState::new();
+        view.begin_pending_user_input_edit(event_id.to_string(), "hello\nworld".to_string());
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut view,
+            &state,
+        );
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert_eq!(view.command_input.cursor_pos, "hello".len());
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut view,
+            &state,
+        );
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert_eq!(view.command_input.cursor_pos, "hello\nworld".len());
+    }
+
+    #[test]
     fn ctrl_c_clears_nonempty_composer_before_interrupting() {
         let mut view = TuiViewState::new();
         view.command_input.set_text("draft".to_string());
@@ -1048,6 +1152,73 @@ mod tests {
         assert!(matches!(outcome, TuiInputOutcome::Continue));
         assert!(view.command_input.is_empty());
         assert_eq!(view.ctrl_c_reminder, Some(CtrlCReminder::Interrupt));
+    }
+
+    #[test]
+    fn mouse_selection_updates_local_selection_state() {
+        let mut view = TuiViewState::new();
+        view.set_selectable_regions(vec![SelectableRegion::new(
+            SelectableId::new("test"),
+            Rect::new(0, 0, 20, 1),
+            vec!["selectable text".to_string()],
+            0,
+        )]);
+
+        assert!(view.handle_selection_mouse_event(TuiMouseSelectionKind::Down, 0, 0));
+        assert!(view.handle_selection_mouse_event(TuiMouseSelectionKind::Drag, 10, 0));
+        assert!(view.handle_selection_mouse_event(TuiMouseSelectionKind::Up, 10, 0));
+
+        assert_eq!(view.selected_text().as_deref(), Some("selectable"));
+    }
+
+    #[test]
+    fn ctrl_c_copies_selection_before_interrupting_runtime() {
+        let mut view = TuiViewState::new();
+        view.set_selectable_regions(vec![SelectableRegion::new(
+            SelectableId::new("test"),
+            Rect::new(0, 0, 20, 1),
+            vec!["copy this".to_string()],
+            0,
+        )]);
+        assert!(view.handle_selection_mouse_event(TuiMouseSelectionKind::Down, 0, 0));
+        assert!(view.handle_selection_mouse_event(TuiMouseSelectionKind::Drag, 9, 0));
+        assert!(view.handle_selection_mouse_event(TuiMouseSelectionKind::Up, 9, 0));
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut view,
+            &state_with_active_runtime_turn(),
+        );
+
+        match outcome {
+            TuiInputOutcome::CopySelection { text } => assert_eq!(text, "copy this"),
+            _ => panic!("ctrl-c should copy an active selection before interrupting"),
+        }
+    }
+
+    #[test]
+    fn ctrl_c_copies_command_input_selection_without_clearing_composer() {
+        let mut view = TuiViewState::new();
+        view.command_input.set_text("hello".to_string());
+        view.set_selectable_regions(vec![
+            command_input_selectable_region(view.command_input.as_str(), Rect::new(0, 0, 20, 1), 0)
+                .expect("non-empty command input should be selectable"),
+        ]);
+        assert!(view.handle_selection_mouse_event(TuiMouseSelectionKind::Down, 0, 0));
+        assert!(view.handle_selection_mouse_event(TuiMouseSelectionKind::Drag, 7, 0));
+        assert!(view.handle_selection_mouse_event(TuiMouseSelectionKind::Up, 7, 0));
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut view,
+            &DashboardState::default(),
+        );
+
+        match outcome {
+            TuiInputOutcome::CopySelection { text } => assert_eq!(text, "hello"),
+            _ => panic!("ctrl-c should copy the command input selection"),
+        }
+        assert_eq!(view.command_input.as_str(), "hello");
     }
 
     #[test]
@@ -1201,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_input_queue_esc_preempts_selected_input() {
+    fn pending_input_queue_esc_closes_without_preempting_selected_input() {
         let event_id = uuid::Uuid::from_u128(6);
         let state = state_with_pending_user_inputs(vec![pending_user_input(event_id, "run now")]);
         let mut view = TuiViewState::new();
@@ -1217,6 +1388,27 @@ mod tests {
             &state,
         );
 
+        assert!(matches!(outcome, TuiInputOutcome::Continue));
+        assert!(view.command_panel.is_none());
+    }
+
+    #[test]
+    fn pending_input_queue_run_shortcut_preempts_selected_input() {
+        let event_id = uuid::Uuid::from_u128(7);
+        let state = state_with_pending_user_inputs(vec![pending_user_input(event_id, "run now")]);
+        let mut view = TuiViewState::new();
+        let _ = handle_key_event(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &mut view,
+            &state,
+        );
+
+        let outcome = handle_key_event(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut view,
+            &state,
+        );
+
         match outcome {
             TuiInputOutcome::RunPanelAction {
                 action, keep_panel, ..
@@ -1227,7 +1419,7 @@ mod tests {
                     DashboardAction::PreemptPendingUserInput { event_id }
                 );
             }
-            _ => panic!("esc should preempt the selected queued input"),
+            _ => panic!("r should preempt the selected queued input"),
         }
     }
 

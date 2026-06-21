@@ -28,6 +28,9 @@ use super::{
     primitive::{ActivatePrimitiveActivityCell, CreatePrimitiveSpecActivityCell},
 };
 use crate::dashboard::renderable::{FlexRenderable, Renderable, ViewportCulledColumn};
+use crate::dashboard::selection::{
+    SelectableId, SelectableRegion, SelectionRegistry, line_plain_text,
+};
 use crate::tool_ui::{
     ExploredCallUiAction, PatchDiffLineKind, PatchDiffLineUiData, PatchFileUiData, PlanUiKind,
     TerminalUiAction, TerminalUiOrigin, WebSearchUiAction,
@@ -218,15 +221,31 @@ fn cached_lines_height(lines: &[Line<'static>], width: u16) -> u16 {
 ///
 /// `scroll_offset` of `u16::MAX` means auto-scroll (pin to bottom).
 /// Returns `max_scroll`.
+pub struct ActivityFeedRenderArgs<'a> {
+    pub cells: &'a [ActivityCell],
+    pub live_cells: &'a [LiveActivityCell],
+    pub scroll_offset: u16,
+    pub cache: &'a mut CachedActivityLines,
+    pub user_hyperlink_areas: &'a mut Vec<Rect>,
+    pub selection: &'a SelectionRegistry,
+    pub selectable_regions: &'a mut Vec<SelectableRegion>,
+}
+
 pub fn render_activity_feed_cached(
     buf: &mut Buffer,
     area: Rect,
-    cells: &[ActivityCell],
-    live_cells: &[LiveActivityCell],
-    scroll_offset: u16,
-    cache: &mut CachedActivityLines,
-    _expanded_count: usize,
+    args: ActivityFeedRenderArgs<'_>,
 ) -> u16 {
+    let ActivityFeedRenderArgs {
+        cells,
+        live_cells,
+        scroll_offset,
+        cache,
+        user_hyperlink_areas,
+        selection,
+        selectable_regions,
+    } = args;
+    user_hyperlink_areas.clear();
     let inner = Rect {
         x: area.x.saturating_add(1),
         y: area.y,
@@ -246,6 +265,9 @@ pub fn render_activity_feed_cached(
     cache.ensure_capacity(total_cells);
 
     let mut column = ViewportCulledColumn::new();
+    let mut column_rows = 0u16;
+    let mut user_cell_rows = Vec::new();
+    let mut selectable_cell_rows = Vec::new();
 
     let spacer_line = CachedCellLines {
         lines: vec![Line::from("")],
@@ -260,10 +282,22 @@ pub fn render_activity_feed_cached(
             let lines = render_activity_cell_lines(cell, inner.width);
             cache.set(i, inner.width, cell.clone(), lines)
         };
+        let cached_height = cached.height;
+        if matches!(cell, ActivityCell::User(_)) {
+            user_cell_rows.push((column_rows, cached_height));
+        }
+        selectable_cell_rows.push(SelectableActivityCellRows {
+            id: committed_activity_selectable_id(cell),
+            start: column_rows,
+            height: cached_height,
+            lines: cached.lines.iter().map(line_plain_text).collect(),
+        });
         column.push(cached);
+        column_rows = column_rows.saturating_add(cached_height);
         // Blank line spacing between adjacent cells (matches old Vec<Line> behavior).
         if !live_cells.is_empty() || i + 1 < cells.len() {
             column.push(spacer_line.clone());
+            column_rows = column_rows.saturating_add(spacer_line.height);
         }
     }
 
@@ -272,17 +306,29 @@ pub fn render_activity_feed_cached(
         let idx = cells.len() + i;
         let lines = render_activity_cell_lines(&lc.cell, inner.width);
         let cached = cache.set(idx, inner.width, lc.cell.clone(), lines);
+        let cached_height = cached.height;
+        if matches!(&lc.cell, ActivityCell::User(_)) {
+            user_cell_rows.push((column_rows, cached_height));
+        }
+        selectable_cell_rows.push(SelectableActivityCellRows {
+            id: SelectableId::new(format!("activity-live:{}", lc.key)),
+            start: column_rows,
+            height: cached_height,
+            lines: cached.lines.iter().map(line_plain_text).collect(),
+        });
         column.push(cached);
+        column_rows = column_rows.saturating_add(cached_height);
         // Blank line spacing between adjacent cells.
         if i + 1 < live_cells.len() {
             column.push(spacer_line.clone());
+            column_rows = column_rows.saturating_add(spacer_line.height);
         }
     }
 
+    let total_height = column.desired_height(inner.width);
     // Auto-scroll (u16::MAX): precompute total height and pin to bottom.
     let effective_scroll = if scroll_offset == u16::MAX {
-        let total = column.desired_height(inner.width);
-        total.saturating_sub(inner.height)
+        total_height.saturating_sub(inner.height)
     } else {
         scroll_offset
     };
@@ -293,15 +339,120 @@ pub fn render_activity_feed_cached(
     // overrides render_skip with Paragraph::scroll((n,0)), so cells whose
     // top rows have scrolled above the viewport render correctly without
     // sticky-header artefacts.
-    let max_scroll = column
-        .desired_height(inner.width)
-        .saturating_sub(inner.height.saturating_sub(1));
+    let max_scroll = total_height.saturating_sub(inner.height.saturating_sub(1));
+
+    push_visible_user_hyperlink_areas(
+        user_hyperlink_areas,
+        inner,
+        effective_scroll,
+        total_height.min(inner.height),
+        &user_cell_rows,
+    );
+    let visible_selectable_regions = visible_activity_selectable_regions(
+        inner,
+        effective_scroll,
+        total_height.min(inner.height),
+        &selectable_cell_rows,
+    );
 
     let mut flex = FlexRenderable::new();
     flex.push(1, column);
     flex.render(inner, buf);
+    for region in &visible_selectable_regions {
+        if let Some(range) = selection.region_selection(&region.id) {
+            region.highlight(&range, buf);
+        }
+    }
+    selectable_regions.extend(visible_selectable_regions);
 
     max_scroll
+}
+
+struct SelectableActivityCellRows {
+    id: SelectableId,
+    start: u16,
+    height: u16,
+    lines: Vec<String>,
+}
+
+fn visible_activity_selectable_regions(
+    area: Rect,
+    scroll: u16,
+    viewport_height: u16,
+    cells: &[SelectableActivityCellRows],
+) -> Vec<SelectableRegion> {
+    if area.width == 0 || viewport_height == 0 {
+        return Vec::new();
+    }
+    let viewport_top = scroll;
+    let viewport_bottom = scroll.saturating_add(viewport_height);
+    let mut regions = Vec::new();
+    for cell in cells {
+        let end = cell.start.saturating_add(cell.height);
+        if end <= viewport_top || cell.start >= viewport_bottom {
+            continue;
+        }
+        let skip = viewport_top.saturating_sub(cell.start);
+        let screen_y = area
+            .y
+            .saturating_add(cell.start.saturating_sub(viewport_top));
+        let screen_offset = screen_y.saturating_sub(area.y);
+        let visible_height = cell
+            .height
+            .saturating_sub(skip)
+            .min(viewport_height.saturating_sub(screen_offset));
+        if visible_height > 0 {
+            regions.push(SelectableRegion::new(
+                cell.id.clone(),
+                Rect::new(area.x, screen_y, area.width, visible_height),
+                cell.lines.clone(),
+                skip,
+            ));
+        }
+    }
+    regions
+}
+
+fn committed_activity_selectable_id(cell: &ActivityCell) -> SelectableId {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+
+    let bytes = serde_json::to_vec(cell).unwrap_or_else(|_| format!("{cell:?}").into_bytes());
+    let digest = Sha256::digest(bytes);
+    let mut id = String::from("activity:");
+    for byte in digest.iter().take(12) {
+        let _ = write!(id, "{byte:02x}");
+    }
+    SelectableId::new(id)
+}
+
+fn push_visible_user_hyperlink_areas(
+    out: &mut Vec<Rect>,
+    area: Rect,
+    scroll: u16,
+    viewport_height: u16,
+    user_rows: &[(u16, u16)],
+) {
+    if area.width == 0 || viewport_height == 0 {
+        return;
+    }
+    let viewport_top = scroll;
+    let viewport_bottom = scroll.saturating_add(viewport_height);
+    for &(start, height) in user_rows {
+        let end = start.saturating_add(height);
+        if end <= viewport_top || start >= viewport_bottom {
+            continue;
+        }
+        let skip = viewport_top.saturating_sub(start);
+        let screen_y = area.y.saturating_add(start.saturating_sub(viewport_top));
+        let screen_offset = screen_y.saturating_sub(area.y);
+        let visible_height = height
+            .saturating_sub(skip)
+            .min(viewport_height.saturating_sub(screen_offset));
+        if visible_height > 0 {
+            out.push(Rect::new(area.x, screen_y, area.width, visible_height));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -690,7 +841,6 @@ fn patch_transcript_styled_lines(
             diff_backgrounds,
             old_lineno_width,
             new_lineno_width,
-            usize::MAX,
         ));
         lines.extend(prefixed_detail_lines(file_lines, width));
     }
@@ -1711,9 +1861,9 @@ fn render_coding_edit_cell_lines(
     cell: &CodingEditActivityCell,
     max_width: u16,
 ) -> Vec<Line<'static>> {
-    let visible_files = limit_patch_files(&cell.diff_files, 3);
+    let diff_files = cell.diff_files.as_slice();
     let diff_backgrounds = diff_scope_backgrounds();
-    let old_lineno_width = visible_files
+    let old_lineno_width = diff_files
         .iter()
         .flat_map(|file| file.diff_lines.iter().filter_map(|line| line.old_lineno))
         .max()
@@ -1721,7 +1871,7 @@ fn render_coding_edit_cell_lines(
         .to_string()
         .len()
         .max(1);
-    let new_lineno_width = visible_files
+    let new_lineno_width = diff_files
         .iter()
         .flat_map(|file| file.diff_lines.iter().filter_map(|line| line.new_lineno))
         .max()
@@ -1732,7 +1882,7 @@ fn render_coding_edit_cell_lines(
 
     let mut lines = vec![activity_header(coding_edit_title(cell))];
 
-    for (index, file) in visible_files.iter().enumerate() {
+    for (index, file) in diff_files.iter().enumerate() {
         if index > 0 {
             lines.push(Line::from(""));
         }
@@ -1746,21 +1896,8 @@ fn render_coding_edit_cell_lines(
             diff_backgrounds,
             old_lineno_width,
             new_lineno_width,
-            18,
         ));
         lines.extend(prefixed_detail_lines(file_lines, max_width));
-    }
-    if cell.diff_files.len() > visible_files.len() {
-        lines.extend(prefixed_detail_lines(
-            vec![Line::from(Span::styled(
-                format!(
-                    "… {} more files",
-                    cell.diff_files.len() - visible_files.len()
-                ),
-                dim_style(),
-            ))],
-            max_width,
-        ));
     }
 
     lines
@@ -2072,9 +2209,9 @@ fn highlighted_shell_command_line(command: &str) -> Line<'static> {
 }
 
 fn render_patch_cell_lines(cell: &PatchActivityCell, max_width: u16) -> Vec<Line<'static>> {
-    let visible_files = limit_patch_files(&cell.files, 4);
+    let files = cell.files.as_slice();
     let diff_backgrounds = diff_scope_backgrounds();
-    let old_lineno_width = visible_files
+    let old_lineno_width = files
         .iter()
         .flat_map(|file| file.diff_lines.iter().filter_map(|line| line.old_lineno))
         .max()
@@ -2082,7 +2219,7 @@ fn render_patch_cell_lines(cell: &PatchActivityCell, max_width: u16) -> Vec<Line
         .to_string()
         .len()
         .max(1);
-    let new_lineno_width = visible_files
+    let new_lineno_width = files
         .iter()
         .flat_map(|file| file.diff_lines.iter().filter_map(|line| line.new_lineno))
         .max()
@@ -2104,7 +2241,7 @@ fn render_patch_cell_lines(cell: &PatchActivityCell, max_width: u16) -> Vec<Line
             file_noun
         ))]
     };
-    for (index, file) in visible_files.iter().enumerate() {
+    for (index, file) in files.iter().enumerate() {
         if index > 0 {
             lines.push(Line::from(""));
         }
@@ -2118,18 +2255,8 @@ fn render_patch_cell_lines(cell: &PatchActivityCell, max_width: u16) -> Vec<Line
             diff_backgrounds,
             old_lineno_width,
             new_lineno_width,
-            18,
         ));
         lines.extend(prefixed_detail_lines(file_lines, max_width));
-    }
-    if cell.files.len() > visible_files.len() {
-        lines.extend(prefixed_detail_lines(
-            vec![Line::from(Span::styled(
-                format!("… {} more files", cell.files.len() - visible_files.len()),
-                dim_style(),
-            ))],
-            max_width,
-        ));
     }
     lines
 }
@@ -2438,13 +2565,6 @@ fn render_error_lines(
     lines
 }
 
-fn limit_patch_files(files: &[PatchFileUiData], limit: usize) -> Vec<PatchFileUiData> {
-    if files.len() <= limit {
-        return files.to_vec();
-    }
-    files.iter().take(limit).cloned().collect()
-}
-
 fn render_coding_review_cell_lines(cell: &CodingReviewActivityCell) -> Vec<Line<'static>> {
     let title = if cell.title.trim().is_empty() {
         "Review".to_string()
@@ -2487,11 +2607,9 @@ fn render_patch_file_diff_lines(
     diff_backgrounds: DiffScopeBackgrounds,
     old_lineno_width: usize,
     new_lineno_width: usize,
-    line_limit: usize,
 ) -> Vec<Line<'static>> {
     let highlighted = highlight_patch_lines(&file.path, &file.diff_lines);
-    let visible_lines = file.diff_lines.iter().take(line_limit).collect::<Vec<_>>();
-    let mut lines = visible_lines
+    file.diff_lines
         .iter()
         .enumerate()
         .map(|(index, line)| {
@@ -2506,21 +2624,7 @@ fn render_patch_file_diff_lines(
                 new_lineno_width,
             )
         })
-        .collect::<Vec<_>>();
-    if file.diff_lines.len() > visible_lines.len() {
-        lines.push(Line::from(vec![
-            Span::styled("…", Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled(
-                format!(
-                    "{} more line(s)",
-                    file.diff_lines.len() - visible_lines.len()
-                ),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-    }
-    lines
+        .collect()
 }
 
 fn render_patch_diff_line(
@@ -2668,6 +2772,7 @@ fn truncate_prefixed_lines_middle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::assistant_activity_cell;
     use crate::tool_ui::{PatchDiffLineKind, PatchFileOperation, ReplyDisposition, ReplySubject};
 
     /// Verify that fenced code blocks inside an assistant cell hide their
@@ -3106,6 +3211,113 @@ That's it.";
     }
 
     #[test]
+    fn patch_and_coding_edit_cells_render_all_diff_lines() {
+        let diff_lines = (1..=24)
+            .map(|line_no| PatchDiffLineUiData {
+                kind: PatchDiffLineKind::Add,
+                old_lineno: None,
+                new_lineno: Some(line_no),
+                text: format!("added_line_{line_no}();"),
+            })
+            .collect::<Vec<_>>();
+        let file = PatchFileUiData {
+            path: "src/large.rs".to_string(),
+            operation: PatchFileOperation::Update,
+            added_lines: diff_lines.len(),
+            removed_lines: 0,
+            diff_lines,
+        };
+        let patch_cell = PatchActivityCell {
+            summary_line: "1 file changed".to_string(),
+            files: vec![file.clone()],
+        };
+        let coding_cell = CodingEditActivityCell {
+            stable_id: "edit-large".to_string(),
+            title: "Code Edit".to_string(),
+            tool_name: Some("edit_code".to_string()),
+            tool_app: Some("Coding".to_string()),
+            selector: "hash-anchored edit".to_string(),
+            file: Some("src/large.rs".to_string()),
+            added_lines: file.added_lines,
+            removed_lines: 0,
+            propagation_count: 0,
+            impact_lines: Vec::new(),
+            diff_files: vec![file],
+        };
+
+        for rendered in [
+            render_patch_cell_lines(&patch_cell, 80),
+            render_coding_edit_cell_lines(&coding_cell, 80),
+        ]
+        .into_iter()
+        .map(|lines| lines.iter().map(line_text).collect::<Vec<_>>())
+        {
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("added_line_24();")),
+                "last diff line should render instead of being truncated: {rendered:?}"
+            );
+            assert!(
+                rendered.iter().all(|line| !line.contains("more line")),
+                "diff cells should not render a hidden-line summary: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn patch_and_coding_edit_cells_render_all_files() {
+        let files = (1..=5)
+            .map(|file_no| PatchFileUiData {
+                path: format!("src/file_{file_no}.rs"),
+                operation: PatchFileOperation::Update,
+                added_lines: 1,
+                removed_lines: 0,
+                diff_lines: vec![PatchDiffLineUiData {
+                    kind: PatchDiffLineKind::Add,
+                    old_lineno: None,
+                    new_lineno: Some(1),
+                    text: format!("file_{file_no}();"),
+                }],
+            })
+            .collect::<Vec<_>>();
+        let patch_cell = PatchActivityCell {
+            summary_line: "5 files changed".to_string(),
+            files: files.clone(),
+        };
+        let coding_cell = CodingEditActivityCell {
+            stable_id: "edit-many-files".to_string(),
+            title: "Code Edit".to_string(),
+            tool_name: Some("edit_code".to_string()),
+            tool_app: Some("Coding".to_string()),
+            selector: "hash-anchored edit".to_string(),
+            file: None,
+            added_lines: 5,
+            removed_lines: 0,
+            propagation_count: 0,
+            impact_lines: Vec::new(),
+            diff_files: files,
+        };
+
+        for rendered in [
+            render_patch_cell_lines(&patch_cell, 80),
+            render_coding_edit_cell_lines(&coding_cell, 80),
+        ]
+        .into_iter()
+        .map(|lines| lines.iter().map(line_text).collect::<Vec<_>>())
+        {
+            assert!(
+                rendered.iter().any(|line| line.contains("src/file_5.rs")),
+                "last file should render instead of being truncated: {rendered:?}"
+            );
+            assert!(
+                rendered.iter().all(|line| !line.contains("more files")),
+                "diff cells should not render a hidden-file summary: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
     fn coding_edit_cell_renders_compact_diff_without_internal_details() {
         let cell = CodingEditActivityCell {
             stable_id: "edit-1".to_string(),
@@ -3176,14 +3388,20 @@ That's it.";
 
         let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 12));
         let mut cache = CachedActivityLines::new();
+        let mut user_hyperlink_areas = Vec::new();
+        let mut selectable_regions = Vec::new();
         render_activity_feed_cached(
             &mut buffer,
             Rect::new(0, 0, 80, 12),
-            &[ActivityCell::CodingEdit(cell)],
-            &[],
-            0,
-            &mut cache,
-            0,
+            ActivityFeedRenderArgs {
+                cells: &[ActivityCell::CodingEdit(cell)],
+                live_cells: &[],
+                scroll_offset: 0,
+                cache: &mut cache,
+                user_hyperlink_areas: &mut user_hyperlink_areas,
+                selection: &SelectionRegistry::default(),
+                selectable_regions: &mut selectable_regions,
+            },
         );
 
         for (pattern, expected_bg) in [
@@ -3211,6 +3429,127 @@ That's it.";
             }
         }
         out
+    }
+
+    #[test]
+    fn activity_feed_registers_selectable_regions_for_visible_cells() {
+        let cell = assistant_activity_cell("selectable activity text").expect("assistant cell");
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 6));
+        let mut cache = CachedActivityLines::new();
+        let mut user_hyperlink_areas = Vec::new();
+        let mut selectable_regions = Vec::new();
+
+        render_activity_feed_cached(
+            &mut buffer,
+            Rect::new(0, 0, 60, 6),
+            ActivityFeedRenderArgs {
+                cells: &[cell],
+                live_cells: &[],
+                scroll_offset: 0,
+                cache: &mut cache,
+                user_hyperlink_areas: &mut user_hyperlink_areas,
+                selection: &SelectionRegistry::default(),
+                selectable_regions: &mut selectable_regions,
+            },
+        );
+
+        assert!(!selectable_regions.is_empty());
+        let mut registry = SelectionRegistry::default();
+        registry.set_regions(selectable_regions);
+        assert!(registry.begin(1, 0));
+        assert!(registry.drag_to(16, 0));
+        assert!(
+            registry
+                .selected_text()
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+        );
+    }
+
+    #[test]
+    fn activity_cell_selection_id_survives_partial_scroll() {
+        let cell =
+            assistant_activity_cell("first line\nsecond line\nthird line").expect("assistant cell");
+        let mut cache = CachedActivityLines::new();
+
+        let mut top_regions = Vec::new();
+        render_activity_feed_cached(
+            &mut Buffer::empty(Rect::new(0, 0, 60, 3)),
+            Rect::new(0, 0, 60, 3),
+            ActivityFeedRenderArgs {
+                cells: std::slice::from_ref(&cell),
+                live_cells: &[],
+                scroll_offset: 0,
+                cache: &mut cache,
+                user_hyperlink_areas: &mut Vec::new(),
+                selection: &SelectionRegistry::default(),
+                selectable_regions: &mut top_regions,
+            },
+        );
+
+        let mut scrolled_regions = Vec::new();
+        render_activity_feed_cached(
+            &mut Buffer::empty(Rect::new(0, 0, 60, 3)),
+            Rect::new(0, 0, 60, 3),
+            ActivityFeedRenderArgs {
+                cells: &[cell],
+                live_cells: &[],
+                scroll_offset: 1,
+                cache: &mut cache,
+                user_hyperlink_areas: &mut Vec::new(),
+                selection: &SelectionRegistry::default(),
+                selectable_regions: &mut scrolled_regions,
+            },
+        );
+
+        assert_eq!(top_regions[0].id, scrolled_regions[0].id);
+    }
+
+    #[test]
+    fn activity_selection_highlight_survives_redraw() {
+        let cell = assistant_activity_cell("selectable activity text").expect("assistant cell");
+        let mut cache = CachedActivityLines::new();
+        let mut regions = Vec::new();
+        render_activity_feed_cached(
+            &mut Buffer::empty(Rect::new(0, 0, 60, 6)),
+            Rect::new(0, 0, 60, 6),
+            ActivityFeedRenderArgs {
+                cells: std::slice::from_ref(&cell),
+                live_cells: &[],
+                scroll_offset: 0,
+                cache: &mut cache,
+                user_hyperlink_areas: &mut Vec::new(),
+                selection: &SelectionRegistry::default(),
+                selectable_regions: &mut regions,
+            },
+        );
+        let mut registry = SelectionRegistry::default();
+        registry.set_regions(regions);
+        assert!(registry.begin(1, 0));
+        assert!(registry.drag_to(20, 0));
+        assert!(registry.end_drag());
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 6));
+        let mut next_regions = Vec::new();
+        render_activity_feed_cached(
+            &mut buffer,
+            Rect::new(0, 0, 60, 6),
+            ActivityFeedRenderArgs {
+                cells: &[cell],
+                live_cells: &[],
+                scroll_offset: 0,
+                cache: &mut cache,
+                user_hyperlink_areas: &mut Vec::new(),
+                selection: &registry,
+                selectable_regions: &mut next_regions,
+            },
+        );
+
+        assert!(
+            (0..buffer.area.height).any(|y| (0..buffer.area.width).any(|x| buffer
+                .cell((x, y))
+                .is_some_and(|cell| cell.bg == Color::DarkGray)))
+        );
     }
 
     #[test]

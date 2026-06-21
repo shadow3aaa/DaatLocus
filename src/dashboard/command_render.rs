@@ -1,3 +1,5 @@
+#[cfg(test)]
+use ratatui::backend::TestBackend;
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
@@ -12,7 +14,10 @@ use super::command_flow::{
     dashboard_parts_run_action, is_dashboard_command_input, matching_commands,
     selected_command_completion,
 };
-use super::command_input::{command_input_display_text, cursor_display_row, cursor_display_xy};
+use super::command_input::{
+    command_input_display_text_for_width, command_input_selectable_region, cursor_display_row,
+    cursor_display_xy,
+};
 use super::command_panels::{
     CommandDetailPanel, CommandFeedback, CommandFeedbackLevel, CommandPanel, CommandSelectionPanel,
     DashboardCommandContext, PendingUserInputQueuePanel, SkillsListPanel, SkillsTogglePanel,
@@ -20,6 +25,7 @@ use super::command_panels::{
 };
 use super::command_registry::dashboard_command_is_known;
 use super::command_text::{truncate_command_text, truncate_display_width};
+use super::selection::{SelectableId, SelectableRegion, SelectionRegistry, line_plain_text};
 use super::view_state::CtrlCReminder;
 
 impl CommandPanel {
@@ -85,6 +91,8 @@ pub(super) struct CommandBarRenderState<'a> {
     pub(super) popup_scroll: usize,
     pub(super) last_cursor_pos: &'a mut Option<(u16, u16)>,
     pub(super) input_lines: u16,
+    pub(super) selection: &'a SelectionRegistry,
+    pub(super) selectable_regions: &'a mut Vec<SelectableRegion>,
 }
 
 pub(super) fn command_panel_row_count(
@@ -158,6 +166,140 @@ pub(super) fn render_command_panel(f: &mut Frame, area: Rect, panel: &CommandPan
     }
 }
 
+fn command_panel_selectable_region(panel: &CommandPanel, area: Rect) -> Option<SelectableRegion> {
+    if area.height == 0 || area.width == 0 {
+        return None;
+    }
+    let inner = inset_rect(area, 1, 2);
+    if inner.height == 0 || inner.width == 0 {
+        return None;
+    }
+    let (lines, scroll) = command_panel_copy_lines(panel);
+    Some(SelectableRegion::new(
+        SelectableId::new("command-panel"),
+        inner,
+        lines,
+        scroll,
+    ))
+}
+
+fn command_panel_copy_lines(panel: &CommandPanel) -> (Vec<String>, u16) {
+    match panel {
+        CommandPanel::Detail(panel) => {
+            let mut lines = vec![panel.title.clone()];
+            lines.extend(
+                render_panel_text_lines(&panel.text)
+                    .iter()
+                    .skip(panel.scroll as usize)
+                    .map(line_plain_text),
+            );
+            (lines, 0)
+        }
+        CommandPanel::Selection(panel) => {
+            let mut lines = vec![panel.title.clone()];
+            if let Some(subtitle) = panel.subtitle.as_ref() {
+                lines.push(subtitle.clone());
+            }
+            lines.extend(
+                panel
+                    .items
+                    .iter()
+                    .skip(panel.scroll)
+                    .map(|item| format!("{}  {}", item.name, item.description)),
+            );
+            (lines, 0)
+        }
+        CommandPanel::SkillsList(panel) => {
+            let mut lines = vec!["Skills".to_string()];
+            lines.push(if panel.items.is_empty() {
+                "No skills loaded.".to_string()
+            } else {
+                format!("{} loaded. Choose a skill to inspect.", panel.items.len())
+            });
+            lines.push(if panel.search.is_empty() {
+                "> Type to search skills".to_string()
+            } else {
+                format!("> {}", panel.search)
+            });
+            lines.extend(
+                panel
+                    .errors
+                    .iter()
+                    .map(|error| format!("! {}  {}", error.path, error.message)),
+            );
+            lines.extend(
+                panel
+                    .visible_indices()
+                    .into_iter()
+                    .skip(panel.scroll)
+                    .filter_map(|idx| {
+                        let item = panel.items.get(idx)?;
+                        Some(format!(
+                            "{}  {}  {}  {}",
+                            item.name, item.status, item.scope, item.description
+                        ))
+                    }),
+            );
+            (lines, 0)
+        }
+        CommandPanel::SkillsToggle(panel) => {
+            let mut lines = vec!["Skills".to_string()];
+            lines.push(if panel.items.is_empty() {
+                "No skills loaded.".to_string()
+            } else {
+                "Toggle automatic use for loaded skills.".to_string()
+            });
+            lines.push(if panel.search.is_empty() {
+                "> Type to search skills".to_string()
+            } else {
+                format!("> {}", panel.search)
+            });
+            lines.extend(
+                panel
+                    .visible_indices()
+                    .into_iter()
+                    .skip(panel.scroll)
+                    .filter_map(|idx| {
+                        let item = panel.items.get(idx)?;
+                        let checkbox = if item.auto_use_enabled { "[x]" } else { "[ ]" };
+                        Some(format!(
+                            "{} {}  {}  {}",
+                            checkbox,
+                            item.name,
+                            item.scope,
+                            item.status_description()
+                        ))
+                    }),
+            );
+            (lines, 0)
+        }
+        CommandPanel::TelegramAccess(picker) => {
+            let mut lines = vec![
+                picker.action.title().to_string(),
+                format!("Select a pending request to {}.", picker.action.verb()),
+            ];
+            lines.extend(picker.requests.iter().skip(picker.scroll).map(|request| {
+                format!(
+                    "{}  {}  {}  {}",
+                    request.chat_id, request.title, request.sender, request.last_message_preview
+                )
+            }));
+            (lines, 0)
+        }
+        CommandPanel::PendingUserInputQueue(panel) => {
+            let mut lines = vec!["Queued inputs".to_string()];
+            lines.extend(
+                panel
+                    .inputs
+                    .iter()
+                    .skip(panel.scroll)
+                    .map(pending_user_input_preview_text),
+            );
+            (lines, 0)
+        }
+    }
+}
+
 pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRenderState<'_>) {
     let CommandBarRenderState {
         input,
@@ -176,6 +318,8 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
         popup_selection,
         popup_scroll,
         last_cursor_pos,
+        selection,
+        selectable_regions,
     } = state;
 
     let completion = if panel.is_none() && !editing_pending_user_input {
@@ -228,7 +372,14 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
     if let Some(panel) = panel
         && panel_rows > 0
     {
-        render_command_panel(f, rows[row_index], panel);
+        let panel_area = rows[row_index];
+        render_command_panel(f, panel_area, panel);
+        if let Some(region) = command_panel_selectable_region(panel, panel_area) {
+            if let Some(range) = selection.region_selection(&region.id) {
+                region.highlight(&range, f.buffer_mut());
+            }
+            selectable_regions.push(region);
+        }
         row_index += 1;
     }
     if let Some(feedback) = feedback
@@ -243,26 +394,35 @@ pub(super) fn render_command_bar(f: &mut Frame, area: Rect, state: CommandBarRen
     }
     let input_row_index = row_index;
     let available_width = area.width.saturating_sub(2).max(1) as usize;
-    let cursor_total_row = cursor_display_row(input, cursor_pos, available_width);
+    let wrap_width = area.width.saturating_sub(2).max(1) as usize;
+    let cursor_total_row = cursor_display_row(input, cursor_pos, available_width, wrap_width);
     let input_scroll =
         cursor_total_row.saturating_sub(rows[input_row_index].height.saturating_sub(1));
-    let input_para = Paragraph::new(command_input_display_text(input, completion.as_deref()))
-        .wrap(Wrap { trim: false })
-        .scroll((input_scroll, 0));
+    let input_para = Paragraph::new(command_input_display_text_for_width(
+        input,
+        completion.as_deref(),
+        area.width,
+    ))
+    .scroll((input_scroll, 0));
     f.render_widget(input_para, rows[input_row_index]);
+    if let Some(region) =
+        command_input_selectable_region(input, rows[input_row_index], input_scroll)
+    {
+        if let Some(range) = selection.region_selection(&region.id) {
+            region.highlight(&range, f.buffer_mut());
+        }
+        selectable_regions.push(region);
+    }
 
     let (cursor_x, cursor_y) = cursor_display_xy(
         input,
         cursor_pos,
         available_width,
+        wrap_width,
         2,
         rows[input_row_index],
         input_scroll,
     );
-    f.set_cursor_position(Position {
-        x: cursor_x,
-        y: cursor_y,
-    });
     *last_cursor_pos = Some((cursor_x, cursor_y));
     let popup_row_index = input_row_index + 1;
     let footer_row = if popup_rows > 0 {
@@ -429,7 +589,7 @@ fn render_pending_user_input_queue_panel(
         f,
         area,
         "Queued inputs",
-        Some("Esc run selected now. Enter edit. d discard. Shift+Up/Down reorder. q close."),
+        Some("Esc/q close. Enter edit. r run now. d discard. Shift+Up/Down reorder."),
     );
     if rest.height == 0 {
         return;
@@ -515,12 +675,7 @@ fn pending_user_input_preview_text(input: &DashboardPendingUserInput) -> String 
             text.push_str(&format!(" +{} attachments", input.attachment_count));
         }
     }
-    let origin = input.origin.trim();
-    if origin.is_empty() {
-        text
-    } else {
-        format!("{origin} | {text}")
-    }
+    text
 }
 
 fn render_panel_text_lines(text: &str) -> Vec<Line<'static>> {
@@ -1141,6 +1296,20 @@ mod tests {
             .collect::<String>()
     }
 
+    fn trimmed_buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+        let mut lines = Vec::new();
+        for y in 0..buffer.area.height {
+            let mut line = String::new();
+            for x in 0..buffer.area.width {
+                if let Some(cell) = buffer.cell((x, y)) {
+                    line.push_str(cell.symbol());
+                }
+            }
+            lines.push(line.trim_end().to_string());
+        }
+        lines
+    }
+
     #[test]
     fn footer_line_combines_context_queue_and_hint() {
         let line = render_footer_line("gpt-5.5 · 10k/100k used", "Enter send.", 2, 1, None, 120);
@@ -1157,7 +1326,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_user_input_preview_lines_show_first_inputs() {
+    fn pending_user_input_preview_lines_show_first_inputs_without_origin() {
         let inputs = vec![crate::dashboard::DashboardPendingUserInput {
             event_id: uuid::Uuid::nil().to_string(),
             origin: "tui".to_string(),
@@ -1172,7 +1341,415 @@ mod tests {
             .join("\n");
 
         assert!(text.contains("Queued follow-up inputs (1)"));
-        assert!(text.contains("tui | queued follow-up"));
+        assert!(text.contains("queued follow-up"));
+        assert!(!text.contains("tui |"));
+        assert!(!text.contains("webui |"));
+    }
+
+    #[test]
+    fn command_bar_wraps_long_input_after_prompt_column() {
+        let backend = TestBackend::new(10, 4);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let state = crate::dashboard::DashboardState::default();
+        let context = DashboardCommandContext {
+            requests: &[],
+            state: &state,
+        };
+        let mut last_cursor_pos = None;
+        let selection = SelectionRegistry::default();
+        let mut selectable_regions = Vec::new();
+        let input = "abcdefghijklmnopqr";
+
+        terminal
+            .draw(|f| {
+                render_command_bar(
+                    f,
+                    f.area(),
+                    CommandBarRenderState {
+                        input,
+                        cursor_pos: input.len(),
+                        context: &context,
+                        feedback: None,
+                        footer_context: "",
+                        pending_paste_count: 0,
+                        pending_image_attachment_count: 0,
+                        pending_user_inputs: &[],
+                        ctrl_c_reminder: None,
+                        editing_pending_user_input: false,
+                        panel: None,
+                        panel_rows: 0,
+                        popup_selection: 0,
+                        popup_scroll: 0,
+                        last_cursor_pos: &mut last_cursor_pos,
+                        input_lines: 3,
+                        selection: &selection,
+                        selectable_regions: &mut selectable_regions,
+                    },
+                );
+            })
+            .expect("draw command bar");
+
+        let lines = trimmed_buffer_lines(terminal.backend().buffer());
+        assert_eq!(lines[0], "› abcdefgh");
+        assert_eq!(
+            lines[1], "  ijklmnop",
+            "wrapped input continuation must stay aligned after the prompt"
+        );
+        assert_eq!(
+            lines[2], "  qr",
+            "long input tail must not be truncated after wrapping"
+        );
+        assert_eq!(last_cursor_pos, Some((4, 2)));
+    }
+    #[test]
+    fn command_bar_records_cursor_overlay_position() {
+        let backend = TestBackend::new(10, 4);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let state = crate::dashboard::DashboardState::default();
+        let context = DashboardCommandContext {
+            requests: &[],
+            state: &state,
+        };
+        let mut last_cursor_pos = None;
+        let selection = SelectionRegistry::default();
+        let mut selectable_regions = Vec::new();
+
+        terminal
+            .draw(|f| {
+                render_command_bar(
+                    f,
+                    f.area(),
+                    CommandBarRenderState {
+                        input: "hello",
+                        cursor_pos: 5,
+                        context: &context,
+                        feedback: None,
+                        footer_context: "",
+                        pending_paste_count: 0,
+                        pending_image_attachment_count: 0,
+                        pending_user_inputs: &[],
+                        ctrl_c_reminder: None,
+                        editing_pending_user_input: false,
+                        panel: None,
+                        panel_rows: 0,
+                        popup_selection: 0,
+                        popup_scroll: 0,
+                        last_cursor_pos: &mut last_cursor_pos,
+                        input_lines: 1,
+                        selection: &selection,
+                        selectable_regions: &mut selectable_regions,
+                    },
+                );
+            })
+            .expect("draw command bar");
+
+        assert_eq!(last_cursor_pos, Some((7, 0)));
+    }
+
+    #[test]
+    fn command_input_selection_ignores_prompt_prefix() {
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let state = crate::dashboard::DashboardState::default();
+        let context = DashboardCommandContext {
+            requests: &[],
+            state: &state,
+        };
+        let mut last_cursor_pos = None;
+        let selection = SelectionRegistry::default();
+        let mut selectable_regions = Vec::new();
+
+        terminal
+            .draw(|f| {
+                render_command_bar(
+                    f,
+                    f.area(),
+                    CommandBarRenderState {
+                        input: "hello",
+                        cursor_pos: 5,
+                        context: &context,
+                        feedback: None,
+                        footer_context: "",
+                        pending_paste_count: 0,
+                        pending_image_attachment_count: 0,
+                        pending_user_inputs: &[],
+                        ctrl_c_reminder: None,
+                        editing_pending_user_input: false,
+                        panel: None,
+                        panel_rows: 0,
+                        popup_selection: 0,
+                        popup_scroll: 0,
+                        last_cursor_pos: &mut last_cursor_pos,
+                        input_lines: 1,
+                        selection: &selection,
+                        selectable_regions: &mut selectable_regions,
+                    },
+                );
+            })
+            .expect("draw command bar");
+
+        let mut registry = SelectionRegistry::default();
+        registry.set_regions(selectable_regions);
+        assert!(registry.begin(0, 0));
+        assert!(registry.drag_to(7, 0));
+
+        assert_eq!(registry.selected_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn command_input_selection_across_wrap_copies_logical_input() {
+        let backend = TestBackend::new(10, 4);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let state = crate::dashboard::DashboardState::default();
+        let context = DashboardCommandContext {
+            requests: &[],
+            state: &state,
+        };
+        let mut last_cursor_pos = None;
+        let selection = SelectionRegistry::default();
+        let mut selectable_regions = Vec::new();
+        let input = "abcdefghijklmnopqr";
+
+        terminal
+            .draw(|f| {
+                render_command_bar(
+                    f,
+                    f.area(),
+                    CommandBarRenderState {
+                        input,
+                        cursor_pos: input.len(),
+                        context: &context,
+                        feedback: None,
+                        footer_context: "",
+                        pending_paste_count: 0,
+                        pending_image_attachment_count: 0,
+                        pending_user_inputs: &[],
+                        ctrl_c_reminder: None,
+                        editing_pending_user_input: false,
+                        panel: None,
+                        panel_rows: 0,
+                        popup_selection: 0,
+                        popup_scroll: 0,
+                        last_cursor_pos: &mut last_cursor_pos,
+                        input_lines: 3,
+                        selection: &selection,
+                        selectable_regions: &mut selectable_regions,
+                    },
+                );
+            })
+            .expect("draw command bar");
+
+        let mut registry = SelectionRegistry::default();
+        registry.set_regions(selectable_regions);
+        assert!(registry.begin(2, 0));
+        assert!(registry.drag_to(4, 2));
+
+        assert_eq!(registry.selected_text().as_deref(), Some(input));
+    }
+
+    #[test]
+    fn command_input_selection_preserves_manual_newlines() {
+        let backend = TestBackend::new(20, 4);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let state = crate::dashboard::DashboardState::default();
+        let context = DashboardCommandContext {
+            requests: &[],
+            state: &state,
+        };
+        let mut last_cursor_pos = None;
+        let selection = SelectionRegistry::default();
+        let mut selectable_regions = Vec::new();
+
+        terminal
+            .draw(|f| {
+                render_command_bar(
+                    f,
+                    f.area(),
+                    CommandBarRenderState {
+                        input: "hello\nworld",
+                        cursor_pos: "hello\nworld".len(),
+                        context: &context,
+                        feedback: None,
+                        footer_context: "",
+                        pending_paste_count: 0,
+                        pending_image_attachment_count: 0,
+                        pending_user_inputs: &[],
+                        ctrl_c_reminder: None,
+                        editing_pending_user_input: false,
+                        panel: None,
+                        panel_rows: 0,
+                        popup_selection: 0,
+                        popup_scroll: 0,
+                        last_cursor_pos: &mut last_cursor_pos,
+                        input_lines: 2,
+                        selection: &selection,
+                        selectable_regions: &mut selectable_regions,
+                    },
+                );
+            })
+            .expect("draw command bar");
+
+        let mut registry = SelectionRegistry::default();
+        registry.set_regions(selectable_regions);
+        assert!(registry.begin(2, 0));
+        assert!(registry.drag_to(7, 1));
+
+        assert_eq!(registry.selected_text().as_deref(), Some("hello\nworld"));
+    }
+
+    #[test]
+    fn command_input_selection_uses_scrolled_visible_rows() {
+        let backend = TestBackend::new(10, 2);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let state = crate::dashboard::DashboardState::default();
+        let context = DashboardCommandContext {
+            requests: &[],
+            state: &state,
+        };
+        let mut last_cursor_pos = None;
+        let selection = SelectionRegistry::default();
+        let mut selectable_regions = Vec::new();
+        let input = "abcdefghijklmnopqr";
+
+        terminal
+            .draw(|f| {
+                render_command_bar(
+                    f,
+                    f.area(),
+                    CommandBarRenderState {
+                        input,
+                        cursor_pos: input.len(),
+                        context: &context,
+                        feedback: None,
+                        footer_context: "",
+                        pending_paste_count: 0,
+                        pending_image_attachment_count: 0,
+                        pending_user_inputs: &[],
+                        ctrl_c_reminder: None,
+                        editing_pending_user_input: false,
+                        panel: None,
+                        panel_rows: 0,
+                        popup_selection: 0,
+                        popup_scroll: 0,
+                        last_cursor_pos: &mut last_cursor_pos,
+                        input_lines: 1,
+                        selection: &selection,
+                        selectable_regions: &mut selectable_regions,
+                    },
+                );
+            })
+            .expect("draw command bar");
+
+        let lines = trimmed_buffer_lines(terminal.backend().buffer());
+        assert_eq!(lines[0], "  qr");
+
+        let mut registry = SelectionRegistry::default();
+        registry.set_regions(selectable_regions);
+        assert!(registry.begin(2, 0));
+        assert!(registry.drag_to(4, 0));
+
+        assert_eq!(registry.selected_text().as_deref(), Some("qr"));
+    }
+
+    #[test]
+    fn command_input_selection_highlight_survives_redraw() {
+        let state = crate::dashboard::DashboardState::default();
+        let context = DashboardCommandContext {
+            requests: &[],
+            state: &state,
+        };
+        let input = "hello";
+        let mut registry = SelectionRegistry::default();
+        let mut last_cursor_pos = None;
+        let mut initial_regions = Vec::new();
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|f| {
+                render_command_bar(
+                    f,
+                    f.area(),
+                    CommandBarRenderState {
+                        input,
+                        cursor_pos: input.len(),
+                        context: &context,
+                        feedback: None,
+                        footer_context: "",
+                        pending_paste_count: 0,
+                        pending_image_attachment_count: 0,
+                        pending_user_inputs: &[],
+                        ctrl_c_reminder: None,
+                        editing_pending_user_input: false,
+                        panel: None,
+                        panel_rows: 0,
+                        popup_selection: 0,
+                        popup_scroll: 0,
+                        last_cursor_pos: &mut last_cursor_pos,
+                        input_lines: 1,
+                        selection: &SelectionRegistry::default(),
+                        selectable_regions: &mut initial_regions,
+                    },
+                );
+            })
+            .expect("initial draw command bar");
+        registry.set_regions(initial_regions);
+        assert!(registry.begin(2, 0));
+        assert!(registry.drag_to(7, 0));
+        assert!(registry.end_drag());
+
+        let mut redraw_regions = Vec::new();
+        terminal
+            .draw(|f| {
+                render_command_bar(
+                    f,
+                    f.area(),
+                    CommandBarRenderState {
+                        input,
+                        cursor_pos: input.len(),
+                        context: &context,
+                        feedback: None,
+                        footer_context: "",
+                        pending_paste_count: 0,
+                        pending_image_attachment_count: 0,
+                        pending_user_inputs: &[],
+                        ctrl_c_reminder: None,
+                        editing_pending_user_input: false,
+                        panel: None,
+                        panel_rows: 0,
+                        popup_selection: 0,
+                        popup_scroll: 0,
+                        last_cursor_pos: &mut last_cursor_pos,
+                        input_lines: 1,
+                        selection: &registry,
+                        selectable_regions: &mut redraw_regions,
+                    },
+                );
+            })
+            .expect("redraw command bar");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(2, 0)].style().bg, Some(Color::DarkGray));
+        assert_eq!(buffer[(6, 0)].style().bg, Some(Color::DarkGray));
+        assert_ne!(buffer[(0, 0)].style().bg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn command_detail_panel_registers_selectable_region() {
+        let panel = CommandPanel::Detail(CommandDetailPanel {
+            title: "Details".to_string(),
+            text: "First line\nSecond line".to_string(),
+            scroll: 0,
+        });
+        let region = command_panel_selectable_region(&panel, Rect::new(0, 0, 40, 6))
+            .expect("panel should be selectable");
+        let mut registry = SelectionRegistry::default();
+        registry.set_regions(vec![region]);
+
+        assert!(registry.begin(2, 2));
+        assert!(registry.drag_to(8, 2));
+
+        assert_eq!(registry.selected_text().as_deref(), Some("First "));
     }
 
     #[test]

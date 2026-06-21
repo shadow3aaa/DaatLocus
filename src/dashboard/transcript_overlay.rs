@@ -5,12 +5,18 @@ use ratatui::{
     widgets::{Clear, Paragraph, Wrap},
 };
 
-use super::{cells::activity_transcript_lines, view_state::TranscriptOverlayState};
+use super::{
+    cells::activity_transcript_lines,
+    selection::{SelectableId, SelectableRegion, SelectionRegistry, line_plain_text},
+    view_state::TranscriptOverlayState,
+};
 
 pub(super) fn render_transcript_overlay(
     f: &mut Frame,
     area: Rect,
     overlay: &mut TranscriptOverlayState,
+    selection: &SelectionRegistry,
+    selectable_regions: &mut Vec<SelectableRegion>,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -43,17 +49,28 @@ pub(super) fn render_transcript_overlay(
 
     let body = rows[1];
     let lines = activity_transcript_lines(&overlay.cells, &overlay.live_cells, body.width);
+    let plain_lines = lines.iter().map(line_plain_text).collect::<Vec<_>>();
     let max_scroll = lines
         .len()
         .saturating_sub(body.height as usize)
         .min(u16::MAX as usize) as u16;
     overlay.set_render_metrics(max_scroll, body.height);
+    let selectable_region = SelectableRegion::new(
+        SelectableId::new("transcript"),
+        body,
+        plain_lines,
+        overlay.effective_scroll(),
+    );
     f.render_widget(
         Paragraph::new(Text::from(lines))
             .scroll((overlay.effective_scroll(), 0))
             .wrap(Wrap { trim: false }),
         body,
     );
+    if let Some(range) = selection.region_selection(&selectable_region.id) {
+        selectable_region.highlight(&range, f.buffer_mut());
+    }
+    selectable_regions.push(selectable_region);
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(

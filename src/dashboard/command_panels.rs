@@ -609,8 +609,8 @@ fn handle_pending_user_input_queue_panel_key(
     key: KeyEvent,
 ) -> CommandPanelAction {
     match key.code {
-        KeyCode::Char('q') => CommandPanelAction::Close,
-        KeyCode::Esc => {
+        KeyCode::Esc | KeyCode::Char('q') => CommandPanelAction::Close,
+        KeyCode::Char('r') => {
             let Some(input) = panel.selected_input() else {
                 return CommandPanelAction::None;
             };

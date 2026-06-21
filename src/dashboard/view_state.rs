@@ -1,13 +1,18 @@
 use std::collections::HashSet;
 
 use crossterm::event::{KeyCode, KeyEvent};
+use unicode_width::UnicodeWidthChar;
 
 use super::command_panels::{CommandFeedback, CommandPanel};
+use super::selection::{SelectableRegion, SelectionRegistry};
+use super::tui_event::TuiMouseSelectionKind;
 use super::{
     ActivityCell, CachedActivityLines, DashboardActivityHistoryPage, DashboardCommandAttachment,
     DashboardState, LiveActivityCell, activity_cells_from_history_items,
     cells::append_runtime_status_live_cell,
 };
+
+use super::terminal_hyperlinks::TerminalHyperlinkOverlay;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CtrlCReminder {
@@ -78,6 +83,103 @@ impl InputState {
             }
             self.cursor_pos = pos;
         }
+    }
+
+    pub(super) fn move_up_line(&mut self) -> bool {
+        self.move_to_adjacent_line(false)
+    }
+
+    pub(super) fn move_down_line(&mut self) -> bool {
+        self.move_to_adjacent_line(true)
+    }
+
+    fn move_to_adjacent_line(&mut self, down: bool) -> bool {
+        let (line_start, line_end) = self.current_line_bounds();
+        let target_col = self.display_width(line_start, self.cursor_pos);
+        let target_bounds = if down {
+            self.next_line_bounds(line_end)
+        } else {
+            self.previous_line_bounds(line_start)
+        };
+        let Some((target_start, target_end)) = target_bounds else {
+            return false;
+        };
+        self.cursor_pos = self.byte_pos_for_display_col(target_start, target_end, target_col);
+        true
+    }
+
+    fn current_line_bounds(&self) -> (usize, usize) {
+        let cursor_pos = self.cursor_pos.min(self.text.len());
+        let line_start = self.text[..cursor_pos]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let line_end = self.text[cursor_pos..]
+            .find('\n')
+            .map(|index| cursor_pos + index)
+            .unwrap_or(self.text.len());
+        (line_start, line_end)
+    }
+
+    fn previous_line_bounds(&self, line_start: usize) -> Option<(usize, usize)> {
+        if line_start == 0 {
+            return None;
+        }
+        let previous_line_end = line_start - 1;
+        let previous_line_start = self.text[..previous_line_end]
+            .rfind('\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        Some((previous_line_start, previous_line_end))
+    }
+
+    fn next_line_bounds(&self, line_end: usize) -> Option<(usize, usize)> {
+        if line_end >= self.text.len() {
+            return None;
+        }
+        let next_line_start = line_end + 1;
+        let next_line_end = self.text[next_line_start..]
+            .find('\n')
+            .map(|index| next_line_start + index)
+            .unwrap_or(self.text.len());
+        Some((next_line_start, next_line_end))
+    }
+
+    fn display_width(&self, start: usize, end: usize) -> usize {
+        self.text[start..end]
+            .chars()
+            .map(|ch| ch.width().unwrap_or(0))
+            .sum()
+    }
+
+    fn byte_pos_for_display_col(
+        &self,
+        line_start: usize,
+        line_end: usize,
+        target_col: usize,
+    ) -> usize {
+        if target_col == 0 {
+            return line_start;
+        }
+
+        let mut width = 0usize;
+        for (offset, ch) in self.text[line_start..line_end].char_indices() {
+            let next_width = width + ch.width().unwrap_or(0);
+            if next_width >= target_col {
+                if next_width == target_col {
+                    return line_start + offset + ch.len_utf8();
+                }
+                let before_distance = target_col.saturating_sub(width);
+                let after_distance = next_width.saturating_sub(target_col);
+                if before_distance < after_distance {
+                    return line_start + offset;
+                }
+                return line_start + offset + ch.len_utf8();
+            }
+            width = next_width;
+        }
+
+        line_end
     }
 
     pub(super) fn move_home(&mut self) {
@@ -240,6 +342,8 @@ pub(super) struct TuiViewState {
     pub(super) max_scroll: u16,
     pub(super) page_height: u16,
     pub(super) last_cursor_pos: Option<(u16, u16)>,
+    pub(super) previous_hyperlink_overlays: Vec<TerminalHyperlinkOverlay>,
+    pub(super) selection: SelectionRegistry,
     pub(super) extra_history_cells: Vec<ActivityCell>,
     pub(super) oldest_cursor: Option<i64>,
     pub(super) has_more_before: bool,
@@ -273,6 +377,8 @@ impl TuiViewState {
             max_scroll: 0,
             page_height: 20,
             last_cursor_pos: None,
+            previous_hyperlink_overlays: Vec::new(),
+            selection: SelectionRegistry::default(),
             extra_history_cells: Vec::new(),
             oldest_cursor: None,
             has_more_before: false,
@@ -300,6 +406,7 @@ impl TuiViewState {
         self.command_panel = None;
         self.command_feedback = None;
         self.reset_command_popup();
+        self.selection.clear_selection();
     }
 
     pub(super) fn sync_transcript_overlay(&mut self, state: &DashboardState) {
@@ -311,6 +418,9 @@ impl TuiViewState {
     pub(super) fn handle_transcript_overlay_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
+                if self.selection.clear_selection() {
+                    return true;
+                }
                 self.transcript_overlay = None;
                 true
             }
@@ -501,10 +611,6 @@ impl TuiViewState {
         (committed_cells, live_cells)
     }
 
-    pub(super) fn expanded_thinking_count(&self) -> usize {
-        self.expanded_thinking.len()
-    }
-
     pub(super) fn tick_history_load_cooldown(&mut self) {
         self.load_cooldown = self.load_cooldown.saturating_sub(1);
     }
@@ -590,6 +696,39 @@ impl TuiViewState {
         self.scroll_offset = 0;
         self.visible_activity_cleared = true;
         self.transcript_overlay = None;
+        self.selection.clear_regions();
+    }
+
+    pub(super) fn set_selectable_regions(&mut self, regions: Vec<SelectableRegion>) {
+        self.selection.set_regions(regions);
+    }
+
+    pub(super) fn handle_selection_mouse_event(
+        &mut self,
+        kind: TuiMouseSelectionKind,
+        x: u16,
+        y: u16,
+    ) -> bool {
+        match kind {
+            TuiMouseSelectionKind::Down => self.selection.begin(x, y),
+            TuiMouseSelectionKind::Drag => self.selection.drag_to(x, y),
+            TuiMouseSelectionKind::Up => {
+                let moved = self.selection.drag_to(x, y);
+                self.selection.end_drag() || moved
+            }
+        }
+    }
+
+    pub(super) fn selected_text(&self) -> Option<String> {
+        self.selection.selected_text()
+    }
+
+    pub(super) fn clear_selection(&mut self) -> bool {
+        self.selection.clear_selection()
+    }
+
+    pub(super) fn selection_dragging(&self) -> bool {
+        self.selection.is_dragging()
     }
 
     pub(super) fn toggle_thinking_expansion(&mut self, activity_cells: &[ActivityCell]) -> bool {
@@ -616,20 +755,24 @@ impl TuiViewState {
         match key.code {
             KeyCode::PageUp => {
                 let page_height = self.page_height.min(i16::MAX as u16) as i16;
-                self.handle_activity_scroll_rows(-page_height);
-                true
+                self.handle_activity_scroll_rows(-page_height)
             }
             KeyCode::PageDown => {
                 let page_height = self.page_height.min(i16::MAX as u16) as i16;
-                self.handle_activity_scroll_rows(page_height);
-                true
+                self.handle_activity_scroll_rows(page_height)
             }
             KeyCode::Home => {
+                if self.max_scroll == 0 || (!self.auto_scroll && self.scroll_offset == 0) {
+                    return false;
+                }
                 self.auto_scroll = false;
                 self.scroll_offset = 0;
                 true
             }
             KeyCode::End => {
+                if self.auto_scroll {
+                    return false;
+                }
                 self.auto_scroll = true;
                 self.scroll_offset = 0;
                 true
@@ -639,24 +782,35 @@ impl TuiViewState {
     }
 
     pub(super) fn handle_activity_scroll_rows(&mut self, rows: i16) -> bool {
+        if rows == 0 || self.max_scroll == 0 {
+            return false;
+        }
+
         match rows.cmp(&0) {
             std::cmp::Ordering::Less => {
                 let rows = rows.unsigned_abs();
                 if self.auto_scroll {
                     self.auto_scroll = false;
                     self.scroll_offset = self.max_scroll.saturating_sub(rows);
-                } else {
-                    self.scroll_offset = self.scroll_offset.saturating_sub(rows);
+                    return true;
                 }
-                true
+
+                let previous_scroll = self.scroll_offset;
+                self.scroll_offset = self.scroll_offset.saturating_sub(rows);
+                self.scroll_offset != previous_scroll
             }
             std::cmp::Ordering::Greater => {
+                if self.auto_scroll {
+                    return false;
+                }
+
+                let previous_scroll = self.scroll_offset;
                 let rows = rows as u16;
                 self.scroll_offset = self.scroll_offset.saturating_add(rows);
                 if self.scroll_offset >= self.max_scroll {
                     self.auto_scroll = true;
                 }
-                true
+                self.auto_scroll || self.scroll_offset != previous_scroll
             }
             std::cmp::Ordering::Equal => false,
         }
@@ -666,7 +820,9 @@ impl TuiViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::selection::{SelectableId, SelectableRegion};
     use crate::dashboard::{DashboardRuntimeActivity, assistant_activity_cell};
+    use ratatui::layout::Rect;
 
     #[test]
     fn visible_activity_cells_adds_runtime_status_live_cell() {
@@ -698,6 +854,23 @@ mod tests {
 
         assert!(!view.auto_scroll);
         assert_eq!(view.scroll_offset, 97);
+    }
+
+    #[test]
+    fn selection_dragging_tracks_mouse_gesture_lifetime() {
+        let mut view = TuiViewState::new();
+        view.set_selectable_regions(vec![SelectableRegion::new(
+            SelectableId::new("drag"),
+            Rect::new(0, 0, 20, 1),
+            vec!["drag selection".to_string()],
+            0,
+        )]);
+
+        assert!(view.handle_selection_mouse_event(TuiMouseSelectionKind::Down, 0, 0));
+        assert!(view.selection_dragging());
+        assert!(view.handle_selection_mouse_event(TuiMouseSelectionKind::Up, 4, 0));
+        assert!(!view.selection_dragging());
+        assert_eq!(view.selected_text().as_deref(), Some("drag"));
     }
 
     #[test]

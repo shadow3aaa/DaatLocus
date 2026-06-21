@@ -5,10 +5,24 @@ pub enum TuiEvent {
     Key(crossterm::event::KeyEvent),
     /// Vertical mouse-wheel movement in activity-feed rows. Positive scrolls down.
     MouseWheel { rows: i16 },
+    /// Mouse selection gesture inside selectable TUI components.
+    MouseSelection {
+        kind: TuiMouseSelectionKind,
+        x: u16,
+        y: u16,
+        modifiers: crossterm::event::KeyModifiers,
+    },
     /// A bracketed paste payload.
     Paste(String),
     /// Terminal resized.
     Resize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TuiMouseSelectionKind {
+    Down,
+    Drag,
+    Up,
 }
 
 const MOUSE_WHEEL_ROWS: i16 = 3;
@@ -25,6 +39,30 @@ impl TuiEvent {
                 crossterm::event::MouseEventKind::ScrollDown => Some(TuiEvent::MouseWheel {
                     rows: MOUSE_WHEEL_ROWS,
                 }),
+                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                    Some(TuiEvent::MouseSelection {
+                        kind: TuiMouseSelectionKind::Down,
+                        x: mouse.column,
+                        y: mouse.row,
+                        modifiers: mouse.modifiers,
+                    })
+                }
+                crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                    Some(TuiEvent::MouseSelection {
+                        kind: TuiMouseSelectionKind::Drag,
+                        x: mouse.column,
+                        y: mouse.row,
+                        modifiers: mouse.modifiers,
+                    })
+                }
+                crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                    Some(TuiEvent::MouseSelection {
+                        kind: TuiMouseSelectionKind::Up,
+                        x: mouse.column,
+                        y: mouse.row,
+                        modifiers: mouse.modifiers,
+                    })
+                }
                 _ => None,
             },
             crossterm::event::Event::Paste(data) => Some(TuiEvent::Paste(data)),
@@ -80,8 +118,39 @@ mod tests {
             None
         );
         assert_eq!(
-            TuiEvent::from_crossterm(mouse_event(MouseEventKind::Down(MouseButton::Left))),
+            TuiEvent::from_crossterm(mouse_event(MouseEventKind::Down(MouseButton::Right))),
             None
+        );
+    }
+
+    #[test]
+    fn left_mouse_gesture_maps_to_selection_events() {
+        assert_eq!(
+            TuiEvent::from_crossterm(mouse_event(MouseEventKind::Down(MouseButton::Left))),
+            Some(TuiEvent::MouseSelection {
+                kind: TuiMouseSelectionKind::Down,
+                x: 10,
+                y: 4,
+                modifiers: KeyModifiers::NONE,
+            })
+        );
+        assert_eq!(
+            TuiEvent::from_crossterm(mouse_event(MouseEventKind::Drag(MouseButton::Left))),
+            Some(TuiEvent::MouseSelection {
+                kind: TuiMouseSelectionKind::Drag,
+                x: 10,
+                y: 4,
+                modifiers: KeyModifiers::NONE,
+            })
+        );
+        assert_eq!(
+            TuiEvent::from_crossterm(mouse_event(MouseEventKind::Up(MouseButton::Left))),
+            Some(TuiEvent::MouseSelection {
+                kind: TuiMouseSelectionKind::Up,
+                x: 10,
+                y: 4,
+                modifiers: KeyModifiers::NONE,
+            })
         );
     }
 }

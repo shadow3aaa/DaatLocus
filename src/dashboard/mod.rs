@@ -15,6 +15,7 @@ pub mod history;
 mod input_controller;
 pub mod render;
 pub mod renderable;
+mod selection;
 mod terminal_hyperlinks;
 mod transcript_overlay;
 mod tui_animation;
@@ -24,12 +25,13 @@ pub(crate) mod tui_perf;
 mod view_state;
 
 pub use cells::{
-    ActivityCell, CachedActivityLines, DashboardActivityEvent, LiveActivityCell,
-    LiveWebActivityItem, ReducedMotion, WebActivityActor, WebActivityItem, WebActivityKind,
-    activity_cell_from_tool_ui_event, activity_cells_from_history_items, apply_activity_event,
-    assistant_activity_cell, default_web_activity_version, final_message_separator_activity_cell,
-    render_activity_feed_cached, render_activity_from_messages, sync_web_activity_state,
-    thinking_activity_cell, user_activity_cell_from_event, web_activity_item_from_cell,
+    ActivityCell, ActivityFeedRenderArgs, CachedActivityLines, DashboardActivityEvent,
+    LiveActivityCell, LiveWebActivityItem, ReducedMotion, WebActivityActor, WebActivityItem,
+    WebActivityKind, activity_cell_from_tool_ui_event, activity_cells_from_history_items,
+    apply_activity_event, assistant_activity_cell, default_web_activity_version,
+    final_message_separator_activity_cell, render_activity_feed_cached,
+    render_activity_from_messages, sync_web_activity_state, thinking_activity_cell,
+    user_activity_cell_from_event, web_activity_item_from_cell,
 };
 pub(crate) use command_flow::execute_control_command;
 pub use commands::{
@@ -49,7 +51,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use crossterm::cursor::SetCursorStyle;
+use crossterm::cursor::{MoveTo, SetCursorStyle, Show};
 #[cfg(test)]
 use crossterm::event::KeyModifiers;
 use crossterm::event::{
@@ -68,11 +70,11 @@ use crate::{
     telegram_acl::PendingAccessRequest,
 };
 use command_flow::command_live_feedback;
-use command_input::{command_input_display_height, wrapped_input_height};
+use command_input::{command_input_display_height, command_input_required_height};
 #[cfg(test)]
 use command_input::{
     command_input_display_text, cursor_display_xy, push_command_input_display_text,
-    should_insert_newline_on_enter,
+    should_insert_newline_on_enter, wrapped_input_height,
 };
 use command_panels::DashboardCommandContext;
 #[cfg(test)]
@@ -92,7 +94,10 @@ use command_text::{render_pending_access_requests, render_skills_list};
 pub(crate) use commands::execute_dashboard_action;
 use frame_profiler::{TuiFrameProfiler, TuiFrameTiming};
 use serde::{Deserialize, Serialize};
-use terminal_hyperlinks::{TerminalHyperlinkOverlay, collect_terminal_hyperlink_overlays};
+use terminal_hyperlinks::{
+    TerminalHyperlinkOverlay, collect_removed_terminal_hyperlink_clears,
+    collect_terminal_hyperlink_overlays,
+};
 use transcript_overlay::render_transcript_overlay;
 use tui_animation::dashboard_state_needs_animation;
 use view_state::TuiViewState;
@@ -411,6 +416,11 @@ pub async fn run_tui_dashboard(
                                     &mut view,
                                     &state,
                                 );
+                                if let input_controller::TuiInputOutcome::CopySelection { text } = outcome {
+                                    selection::write_osc52_clipboard(terminal.backend_mut(), &text)?;
+                                    frame_requester.schedule_frame();
+                                    continue;
+                                }
                                 let should_exit = input_controller::execute_input_outcome(
                                     outcome,
                                     &mut view,
@@ -425,11 +435,19 @@ pub async fn run_tui_dashboard(
                                 continue;
                     }
                     tui_event::TuiEvent::MouseWheel { rows } => {
+                        if view.selection_dragging() {
+                            continue;
+                        }
                         if view.transcript_overlay.is_some() {
                             if view.handle_transcript_overlay_scroll_rows(rows) {
                                 frame_requester.schedule_frame();
                             }
                         } else if view.command_panel.is_none() && view.handle_activity_scroll_rows(rows) {
+                            frame_requester.schedule_frame();
+                        }
+                    }
+                    tui_event::TuiEvent::MouseSelection { kind, x, y, .. } => {
+                        if view.handle_selection_mouse_event(kind, x, y) {
                             frame_requester.schedule_frame();
                         }
                     }
@@ -503,12 +521,14 @@ pub async fn run_tui_dashboard(
         // On first iteration, sync cursor from state
         view.sync_history_cursor_from_state(&state);
 
+        terminal.hide_cursor()?;
         let frame_render = render_tui_dashboard_frame(&mut terminal, &mut view, &state)?;
         terminal_hyperlinks::write_terminal_hyperlink_overlays(
             terminal.backend_mut(),
+            &frame_render.hyperlink_clears,
             &frame_render.hyperlink_overlays,
-            view.last_cursor_pos,
         )?;
+        restore_terminal_cursor(&mut terminal, view.last_cursor_pos)?;
         frame_profiler.record(frame_render.timing);
         if dashboard_state_needs_animation(&state) {
             frame_requester.schedule_frame_in(TUI_ANIMATION_INTERVAL);
@@ -528,8 +548,21 @@ pub async fn run_tui_dashboard(
     Ok(())
 }
 
+fn restore_terminal_cursor<W: std::io::Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    cursor_pos: Option<(u16, u16)>,
+) -> std::io::Result<()> {
+    if let Some((x, y)) = cursor_pos {
+        crossterm::execute!(terminal.backend_mut(), MoveTo(x, y), Show)?;
+    } else {
+        terminal.hide_cursor()?;
+    }
+    Ok(())
+}
+
 struct TuiFrameRender {
     timing: TuiFrameTiming,
+    hyperlink_clears: Vec<terminal_hyperlinks::TerminalPlainTextOverlay>,
     hyperlink_overlays: Vec<TerminalHyperlinkOverlay>,
 }
 
@@ -541,7 +574,6 @@ fn render_tui_dashboard_frame<B: Backend>(
     let frame_start = Instant::now();
     let prep_start = Instant::now();
     let pending_requests = state.pending_access_requests.clone();
-    let expanded_thinking_count = view.expanded_thinking_count();
     let overlay_open = view.transcript_overlay.is_some();
     let panel_open =
         view.command_panel.is_some() || view.editing_pending_user_input.is_some() || overlay_open;
@@ -583,7 +615,11 @@ fn render_tui_dashboard_frame<B: Backend>(
             0
         };
     let input_lines = command_input_display_height(
-        wrapped_input_height(view.command_input.as_str(), term_width),
+        command_input_required_height(
+            view.command_input.as_str(),
+            view.command_input.cursor_pos,
+            term_width,
+        ),
         term_height,
         popup_rows
             .saturating_add(feedback_rows)
@@ -606,18 +642,33 @@ fn render_tui_dashboard_frame<B: Backend>(
     let mut activity_elapsed = Duration::ZERO;
     let mut command_elapsed = Duration::ZERO;
     let mut hyperlink_overlays = Vec::new();
+    let mut hyperlink_clears = Vec::new();
+    let mut user_hyperlink_areas = Vec::new();
+    let mut selectable_regions = Vec::new();
+    let selection = view.selection.clone();
     let draw_start = Instant::now();
     if overlay_open {
         terminal.draw(|f| {
             view.last_cursor_pos = None;
             let activity_start = Instant::now();
             if let Some(overlay) = view.transcript_overlay.as_mut() {
-                render_transcript_overlay(f, f.area(), overlay);
+                render_transcript_overlay(
+                    f,
+                    f.area(),
+                    overlay,
+                    &selection,
+                    &mut selectable_regions,
+                );
+                hyperlink_clears = collect_removed_terminal_hyperlink_clears(
+                    f.buffer_mut(),
+                    &view.previous_hyperlink_overlays,
+                    &[],
+                );
+                view.previous_hyperlink_overlays.clear();
             }
             activity_elapsed = activity_start.elapsed();
-            let area = f.area();
-            hyperlink_overlays = collect_terminal_hyperlink_overlays(f.buffer_mut(), area);
         })?;
+        view.set_selectable_regions(selectable_regions);
         let draw_elapsed = draw_start.elapsed();
         return Ok(TuiFrameRender {
             timing: TuiFrameTiming {
@@ -629,6 +680,7 @@ fn render_tui_dashboard_frame<B: Backend>(
                 activity: activity_elapsed,
                 command: command_elapsed,
             },
+            hyperlink_clears,
             hyperlink_overlays,
         });
     }
@@ -651,11 +703,15 @@ fn render_tui_dashboard_frame<B: Backend>(
         view.max_scroll = render_activity_feed_cached(
             f.buffer_mut(),
             root[0],
-            &combined_cells,
-            &live_activity_cells,
-            display_scroll,
-            &mut view.cached_activity_lines,
-            expanded_thinking_count,
+            ActivityFeedRenderArgs {
+                cells: &combined_cells,
+                live_cells: &live_activity_cells,
+                scroll_offset: display_scroll,
+                cache: &mut view.cached_activity_lines,
+                user_hyperlink_areas: &mut user_hyperlink_areas,
+                selection: &selection,
+                selectable_regions: &mut selectable_regions,
+            },
         );
         activity_elapsed = activity_start.elapsed();
         // Update page height for PageUp/PageDown
@@ -685,12 +741,30 @@ fn render_tui_dashboard_frame<B: Backend>(
                 last_cursor_pos: &mut view.last_cursor_pos,
                 input_lines,
                 feedback: active_command_feedback,
+                selection: &selection,
+                selectable_regions: &mut selectable_regions,
             },
         );
         command_elapsed = command_start.elapsed();
-        let area = f.area();
-        hyperlink_overlays = collect_terminal_hyperlink_overlays(f.buffer_mut(), area);
+        if selection.has_selection() {
+            hyperlink_clears = collect_removed_terminal_hyperlink_clears(
+                f.buffer_mut(),
+                &view.previous_hyperlink_overlays,
+                &[],
+            );
+            view.previous_hyperlink_overlays.clear();
+        } else {
+            hyperlink_overlays =
+                collect_terminal_hyperlink_overlays(f.buffer_mut(), &user_hyperlink_areas);
+            hyperlink_clears = collect_removed_terminal_hyperlink_clears(
+                f.buffer_mut(),
+                &view.previous_hyperlink_overlays,
+                &hyperlink_overlays,
+            );
+            view.previous_hyperlink_overlays = hyperlink_overlays.clone();
+        }
     })?;
+    view.set_selectable_regions(selectable_regions);
     let draw_elapsed = draw_start.elapsed();
     Ok(TuiFrameRender {
         timing: TuiFrameTiming {
@@ -702,6 +776,7 @@ fn render_tui_dashboard_frame<B: Backend>(
             activity: activity_elapsed,
             command: command_elapsed,
         },
+        hyperlink_clears,
         hyperlink_overlays,
     })
 }
@@ -713,6 +788,7 @@ mod tests {
         dashboard_action_for_input, dashboard_command_body, is_clear_command_input,
         matching_commands, telegram_access_picker_for_input,
     };
+    use super::selection::{SelectableId, SelectableRegion};
     use super::*;
     use crate::tool_ui::{
         PatchDiffLineKind, PatchDiffLineUiData, PatchFileOperation, PatchFileUiData, PatchUiData,
@@ -790,7 +866,15 @@ mod tests {
                     .transcript_overlay
                     .as_mut()
                     .expect("transcript overlay");
-                render_transcript_overlay(f, f.area(), overlay);
+                let selection = selection::SelectionRegistry::default();
+                let mut selectable_regions = Vec::new();
+                render_transcript_overlay(
+                    f,
+                    f.area(),
+                    overlay,
+                    &selection,
+                    &mut selectable_regions,
+                );
             })
             .expect("draw transcript overlay");
 
@@ -905,6 +989,90 @@ mod tests {
                 "gpt-5.5 · 10k/100k used  ·  1 image attachment queued  ·  Enter send. Shift+E...",
             ]
             .join("\n")
+        );
+    }
+
+    #[test]
+    fn dashboard_hyperlinks_only_cover_user_messages() {
+        let mut activity_cells = vec![
+            assistant_activity_cell(
+                "Assistant path src/dashboard/command_render.rs and https://assistant.test",
+            )
+            .expect("assistant cell"),
+        ];
+        activity_cells.extend(render_activity_from_messages(vec![
+            crate::reasoning::runtime::HistoryMessage::user(
+                "See src/dashboard/mod.rs:42 and https://example.com/docs",
+            ),
+        ]));
+        let state = DashboardState {
+            activity_cells,
+            footer_context: "gpt-5.5 · 126.5k/258.4k used".to_string(),
+            ..DashboardState::default()
+        };
+        let mut view = TuiViewState::new();
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        let frame_render =
+            render_tui_dashboard_frame(&mut terminal, &mut view, &state).expect("render frame");
+
+        assert!(
+            frame_render
+                .hyperlink_overlays
+                .iter()
+                .any(|overlay| overlay.text == "src/dashboard/mod.rs:42"),
+            "user file path should be linked: {:?}",
+            frame_render.hyperlink_overlays
+        );
+        assert!(
+            frame_render
+                .hyperlink_overlays
+                .iter()
+                .any(|overlay| overlay.target == "https://example.com/docs"),
+            "user URL should be linked: {:?}",
+            frame_render.hyperlink_overlays
+        );
+        assert!(
+            frame_render.hyperlink_overlays.iter().all(|overlay| {
+                !overlay.text.contains("command_render")
+                    && !overlay.target.contains("assistant.test")
+                    && !overlay.text.contains("126.5k/258.4k")
+            }),
+            "assistant, tool/status, and footer rows must not be linked: {:?}",
+            frame_render.hyperlink_overlays
+        );
+    }
+
+    #[test]
+    fn dashboard_hyperlinks_are_suppressed_while_selection_is_active() {
+        let state = DashboardState {
+            activity_cells: render_activity_from_messages(vec![
+                crate::reasoning::runtime::HistoryMessage::user(
+                    "See src/dashboard/mod.rs:42 and https://example.com/docs",
+                ),
+            ]),
+            ..DashboardState::default()
+        };
+        let mut view = TuiViewState::new();
+        view.set_selectable_regions(vec![SelectableRegion::new(
+            SelectableId::new("preselect"),
+            Rect::new(0, 0, 20, 1),
+            vec!["selected text".to_string()],
+            0,
+        )]);
+        assert!(view.handle_selection_mouse_event(tui_event::TuiMouseSelectionKind::Down, 0, 0));
+        assert!(view.handle_selection_mouse_event(tui_event::TuiMouseSelectionKind::Drag, 8, 0));
+        assert!(view.handle_selection_mouse_event(tui_event::TuiMouseSelectionKind::Up, 8, 0));
+
+        let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let frame_render =
+            render_tui_dashboard_frame(&mut terminal, &mut view, &state).expect("render frame");
+
+        assert!(
+            frame_render.hyperlink_overlays.is_empty(),
+            "hyperlink overlay writes must not overwrite active selection highlight"
         );
     }
 
@@ -1239,6 +1407,8 @@ mod tests {
         assert_eq!(wrapped_input_height("hello", 80), 1);
         assert_eq!(wrapped_input_height("hello\n", 80), 2);
         assert_eq!(wrapped_input_height("hello\nworld", 80), 2);
+        assert_eq!(wrapped_input_height("abcdefghi", 10), 2);
+        assert_eq!(wrapped_input_height("abcdefghijklmnopqr", 10), 3);
     }
 
     #[test]
@@ -1247,12 +1417,24 @@ mod tests {
     }
 
     #[test]
+    fn command_input_required_height_includes_natural_wrap_cursor_row() {
+        assert_eq!(command_input_required_height("abcdefgh", 8, 10), 2);
+    }
+
+    #[test]
     fn cursor_display_xy_moves_after_trailing_newline() {
         let area = Rect::new(0, 0, 80, 10);
         assert_eq!(
-            cursor_display_xy("hello\n", "hello\n".len(), 78, 2, area, 0),
+            cursor_display_xy("hello\n", "hello\n".len(), 78, 80, 2, area, 0),
             (2, 1)
         );
+    }
+
+    #[test]
+    fn cursor_display_xy_places_natural_wrap_cursor_on_visual_line() {
+        let area = Rect::new(0, 0, 10, 4);
+        assert_eq!(cursor_display_xy("abcdefgh", 8, 8, 8, 2, area, 0), (2, 1));
+        assert_eq!(cursor_display_xy("abcdefghi", 9, 8, 8, 2, area, 0), (3, 1));
     }
 
     #[test]
