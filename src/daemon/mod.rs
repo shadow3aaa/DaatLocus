@@ -241,8 +241,14 @@ pub struct CommandRequest {
     pub command: String,
     #[serde(default)]
     pub attachments: Vec<CommandAttachmentRequest>,
+    #[serde(default = "default_command_origin")]
+    pub origin: session_ipc::UserInputOrigin,
     #[serde(default)]
     pub session_id: Option<String>,
+}
+
+fn default_command_origin() -> session_ipc::UserInputOrigin {
+    session_ipc::UserInputOrigin::WebUi
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1350,7 +1356,7 @@ async fn command_handler(
         }
         let response = client
             .request(session_ipc::SessionIpcRequest::SubmitUserInput {
-                origin: session_ipc::UserInputOrigin::WebUi,
+                origin: request.origin,
                 text: request.command,
                 attachments: attachments
                     .into_iter()
@@ -2530,6 +2536,19 @@ impl DaemonClient {
             .await
     }
 
+    fn tui_command_request(
+        &self,
+        command: &str,
+        attachments: Vec<CommandAttachmentRequest>,
+    ) -> CommandRequest {
+        CommandRequest {
+            command: command.to_string(),
+            attachments,
+            origin: session_ipc::UserInputOrigin::Tui,
+            session_id: self.session_id.clone(),
+        }
+    }
+
     pub async fn send_command_with_attachments(
         &self,
         command: &str,
@@ -2541,11 +2560,7 @@ impl DaemonClient {
                 self.control_request(
                     self.http
                         .post(format!("{}/commands/run", self.base_url()))
-                        .json(&CommandRequest {
-                            command: command.to_string(),
-                            attachments,
-                            session_id: self.session_id.clone(),
-                        }),
+                        .json(&self.tui_command_request(command, attachments)),
                 ),
             )?
             .send()
@@ -3209,6 +3224,25 @@ mod tests {
 
         assert_eq!(client.base_url(), "http://localhost:53825");
         assert_eq!(client.ws_url(), "ws://localhost:53825/dashboard/stream");
+    }
+    #[test]
+    fn command_request_defaults_to_webui_origin_for_compatibility() {
+        let request: CommandRequest = serde_json::from_value(serde_json::json!({
+            "command": "hello"
+        }))
+        .expect("deserialize command request");
+
+        assert_eq!(request.origin, session_ipc::UserInputOrigin::WebUi);
+    }
+
+    #[test]
+    fn daemon_client_command_requests_use_tui_origin() {
+        let request = DaemonClient::new(53825)
+            .with_session("session-test")
+            .tui_command_request("hello", Vec::new());
+
+        assert_eq!(request.origin, session_ipc::UserInputOrigin::Tui);
+        assert_eq!(request.session_id.as_deref(), Some("session-test"));
     }
 
     #[tokio::test]

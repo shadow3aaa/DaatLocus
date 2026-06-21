@@ -942,10 +942,12 @@ export async function runDashboardCommand(
   const body: {
     command: string;
     attachments: DashboardCommandAttachment[];
+    origin: "web_ui";
     session_id?: string;
   } = {
     command,
     attachments,
+    origin: "web_ui",
   };
   if (sessionId) {
     body.session_id = sessionId;

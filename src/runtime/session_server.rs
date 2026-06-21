@@ -1046,7 +1046,7 @@ fn register_terminal_event(
     attachments: Vec<InputAttachment>,
 ) -> Result<uuid::Uuid> {
     let event_id = events.register_terminal_incoming(TerminalIncomingEvent {
-        origin: format!("{origin:?}").to_ascii_lowercase(),
+        origin: origin.terminal_origin_label().to_string(),
         incoming_text,
         attachments: attachments
             .into_iter()

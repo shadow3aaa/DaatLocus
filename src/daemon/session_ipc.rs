@@ -101,6 +101,16 @@ pub enum UserInputOrigin {
     CliSend,
 }
 
+impl UserInputOrigin {
+    pub fn terminal_origin_label(self) -> &'static str {
+        match self {
+            Self::WebUi => "webui",
+            Self::Tui => "tui",
+            Self::CliSend => "cli_send",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputAttachment {
     pub media_type: String,
@@ -452,6 +462,12 @@ mod tests {
         assert_eq!(value["body"]["origin"], "web_ui");
         assert_eq!(value["body"]["attachments"], serde_json::json!([]));
         assert_eq!(value["body"]["wait_for_reply"], false);
+    }
+    #[test]
+    fn user_input_origin_labels_match_terminal_event_sources() {
+        assert_eq!(UserInputOrigin::WebUi.terminal_origin_label(), "webui");
+        assert_eq!(UserInputOrigin::Tui.terminal_origin_label(), "tui");
+        assert_eq!(UserInputOrigin::CliSend.terminal_origin_label(), "cli_send");
     }
 
     #[tokio::test]
