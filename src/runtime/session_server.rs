@@ -22,7 +22,7 @@ use crate::{
         render_sleep_status_output_for_dashboard, render_status_command_output_for_dashboard,
         render_system_prompt_output_for_dashboard, render_telegram_status_for_dashboard,
         runtime_activity_for_dashboard, runtime_optimization_snapshot_for_dashboard,
-        token_usage_snapshot_for_dashboard,
+        status_command_snapshot_for_dashboard, token_usage_snapshot_for_dashboard,
     },
     dashboard::{
         DashboardAction, DashboardActivityHistoryStore, DashboardControlCommand,
@@ -266,6 +266,7 @@ pub(crate) async fn run_session_serve(
             agent_name: dashboard_agent_name(),
             session_title: context.session_title.snapshot(),
             status_output: render_status_command_output_for_dashboard(&context, &app_renders),
+            status_command: status_command_snapshot_for_dashboard(&context),
             sleep_status_output: render_sleep_status_output_for_dashboard(&context, &sleep_status),
             inspect_telegram_output: render_telegram_status_for_dashboard(&context),
             system_prompt_output: render_system_prompt_output_for_dashboard(&context),

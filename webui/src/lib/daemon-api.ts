@@ -39,6 +39,13 @@ export type DashboardPlanStep = {
   status: "pending" | "in_progress" | "completed";
   step: string;
 };
+export type DashboardStatusCommandSnapshot = {
+  runtime_turn: string;
+  bound_primitive: string;
+  active_plans: number;
+  events: string;
+  plan_steps: DashboardPlanStep[];
+};
 
 export type TokenUsage = {
   input_tokens: number;
@@ -487,6 +494,7 @@ export type DashboardSnapshot = {
   agent_name: string;
   session_title?: DashboardSessionTitle | null;
   status_output: string;
+  status_command?: DashboardStatusCommandSnapshot | null;
   sleep_status_output: string;
   inspect_telegram_output: string;
   system_prompt_output: string;

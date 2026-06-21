@@ -15,8 +15,9 @@ use super::{
     DashboardContextCompositionSnapshot, DashboardPendingUserInput, DashboardPlanStep,
     DashboardPrimitiveOptimizationSnapshot, DashboardRuntimeActivity,
     DashboardRuntimeActivityStatus, DashboardRuntimeOptimizationSnapshot,
-    DashboardRuntimeStatusLevel, DashboardState, DashboardTokenUsageSnapshot,
-    activity_cells_from_history_items, dashboard_agent_name, render_activity_from_messages,
+    DashboardRuntimeStatusLevel, DashboardState, DashboardStatusCommandSnapshot,
+    DashboardTokenUsageSnapshot, activity_cells_from_history_items, dashboard_agent_name,
+    render_activity_from_messages,
 };
 
 /// Sleep-related constants used in dashboard rendering.
@@ -35,6 +36,7 @@ pub fn sync_dashboard_state(
         state.agent_name = dashboard_agent_name();
         state.session_title = context.session_title.snapshot();
         state.status_output = render_status_command_output_for_dashboard(context, &app_renders);
+        state.status_command = status_command_snapshot_for_dashboard(context);
         state.sleep_status_output = render_sleep_status_output_for_dashboard(context, sleep_status);
         state.inspect_telegram_output = render_telegram_status_for_dashboard(context);
         state.system_prompt_output = render_system_prompt_output_for_dashboard(context);
@@ -553,34 +555,61 @@ fn trimmed_runtime_status_detail(status: &str) -> Option<String> {
     (!status.is_empty()).then(|| status.to_string())
 }
 
+pub fn status_command_snapshot_for_dashboard(context: &Context) -> DashboardStatusCommandSnapshot {
+    let active_plans = context.plan.active_steps().count();
+    let events = render_status_event_summary(context);
+    let bound_primitive = context
+        .bound_primitive_id
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
+    let runtime_turn = status_command_runtime_turn(context);
+    let plan_steps = context
+        .plan
+        .steps()
+        .iter()
+        .take(6)
+        .map(|step| DashboardPlanStep {
+            status: step.status.to_string(),
+            step: step.step.clone(),
+        })
+        .collect();
+
+    DashboardStatusCommandSnapshot {
+        runtime_turn,
+        bound_primitive,
+        active_plans,
+        events,
+        plan_steps,
+    }
+}
+
+fn status_command_runtime_turn(context: &Context) -> String {
+    if context.active_runtime_turn {
+        return context
+            .active_runtime_phase
+            .map(|phase| format!("running ({})", phase.label()))
+            .unwrap_or_else(|| "running".to_string());
+    }
+
+    "idle".to_string()
+}
+
 pub fn render_status_command_output_for_dashboard(
     context: &Context,
     _: &[(crate::app::AppId, crate::app::AppStateRender)],
 ) -> String {
     let mut sections = Vec::new();
+    let status = status_command_snapshot_for_dashboard(context);
 
-    let active_plans = context.plan.active_steps().count();
-    let event_summary = render_status_event_summary(context);
-    let bound_primitive = context
-        .bound_primitive_id
-        .clone()
-        .unwrap_or_else(|| "none".to_string());
-    let runtime_turn = if context.active_runtime_turn {
-        context
-            .active_runtime_phase
-            .map(|phase| format!("running ({})", phase.label()))
-            .unwrap_or_else(|| "running".to_string())
-    } else {
-        "idle".to_string()
-    };
     sections.push(format!(
-        "Overview\nRuntime turn: {runtime_turn}\nBound primitive: {bound_primitive}\nPlans: {active_plans}\nEvents: {event_summary}"
+        "Overview\nRuntime turn: {}\nBound primitive: {}\nPlans: {}\nEvents: {}",
+        status.runtime_turn, status.bound_primitive, status.active_plans, status.events
     ));
 
     let usage_lines = render_status_usage_lines(context);
     sections.push(format!("Model usage\n{}", usage_lines.join("\n")));
 
-    let plan_lines = render_status_plan_lines(context);
+    let plan_lines = render_status_plan_lines(&status);
     sections.push(format!("Plan\n{}", plan_lines.join("\n")));
 
     sections.join("\n\n")
@@ -746,14 +775,14 @@ fn context_bar(used: i64, window: i64) -> String {
     }
 }
 
-fn render_status_plan_lines(context: &Context) -> Vec<String> {
-    let steps = context.plan.steps();
-    if steps.is_empty() {
+fn render_status_plan_lines(status: &DashboardStatusCommandSnapshot) -> Vec<String> {
+    if status.plan_steps.is_empty() {
         return vec!["No active plan items.".to_string()];
     }
-    steps
+
+    status
+        .plan_steps
         .iter()
-        .take(6)
         .map(|step| format!("• {}  [{}]", step.step, step.status))
         .collect()
 }

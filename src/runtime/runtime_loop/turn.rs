@@ -16,6 +16,8 @@ fn enter_runtime_phase(
         tx.send_modify(|state| {
             state.status_output =
                 crate::dashboard::render::render_status_command_output_for_dashboard(context, &[]);
+            state.status_command =
+                crate::dashboard::render::status_command_snapshot_for_dashboard(context);
         });
     }
     set_runtime_status_only(tx, format!("processing: runtime turn / {}", phase.label()));

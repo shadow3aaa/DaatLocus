@@ -130,6 +130,15 @@ pub struct DashboardTokenUsageSnapshot {
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
+pub struct DashboardStatusCommandSnapshot {
+    pub runtime_turn: String,
+    pub bound_primitive: String,
+    pub active_plans: usize,
+    pub events: String,
+    pub plan_steps: Vec<DashboardPlanStep>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardPrimitiveOptimizationSnapshot {
     pub running: bool,
     pub current_trigger: Option<String>,
@@ -289,6 +298,8 @@ pub struct DashboardState {
     #[serde(default)]
     pub session_title: Option<DashboardSessionTitle>,
     pub status_output: String,
+    #[serde(default)]
+    pub status_command: DashboardStatusCommandSnapshot,
     pub sleep_status_output: String,
     pub inspect_telegram_output: String,
     pub system_prompt_output: String,

@@ -36,6 +36,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   CollapsibleTrigger,
@@ -86,6 +87,8 @@ import {
   type DashboardCommandAttachment,
   type DashboardPendingUserInput,
   type DashboardSnapshot,
+  type DashboardPlanStep,
+  type TokenUsageInfo,
   type ActivityCellVariant,
   type WebActivityBlock,
   type WebActivityItem,
@@ -1865,7 +1868,8 @@ function WebSlashStatusPanel({
   snapshot: DashboardSnapshot | null;
   onClose: () => void;
 }) {
-  const rows = webSlashStatusRows(snapshot);
+  const status = webSlashStatusSnapshot(snapshot);
+  const tokenUsageSections = webSlashStatusTokenUsageSections(snapshot);
 
   return (
     <WebSlashPanelShell
@@ -1873,8 +1877,141 @@ function WebSlashStatusPanel({
       subtitle="Current session runtime facts."
       onClose={onClose}
     >
-      <WebSlashKeyValueRows rows={rows} />
+      <div className="flex max-h-72 flex-col gap-3 overflow-auto">
+        {!snapshot ? (
+          <Alert className="px-2 py-1">
+            <InfoIcon className="size-4" aria-hidden="true" />
+            <AlertDescription className="text-xs">
+              Status snapshot is still loading; showing placeholder values.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+
+        <section className="flex flex-col gap-2" aria-label="Model usage">
+          <p className="text-sm font-medium text-foreground">Model usage</p>
+          <div className="flex flex-col gap-3">
+            {tokenUsageSections.length > 0 ? (
+              tokenUsageSections.map((section, index) => (
+                <Fragment key={section.role}>
+                  <WebSlashStatusTokenUsageSection section={section} />
+                  {index < tokenUsageSections.length - 1 ? <Separator /> : null}
+                </Fragment>
+              ))
+            ) : (
+              <Empty className="py-3">
+                <EmptyHeader>
+                  <EmptyTitle>No token usage recorded yet.</EmptyTitle>
+                </EmptyHeader>
+              </Empty>
+            )}
+          </div>
+        </section>
+
+        <Separator />
+
+        <section className="flex flex-col gap-2" aria-label="Plan">
+          <p className="text-sm font-medium text-foreground">Plan</p>
+          {status.planSteps.length > 0 ? (
+            <ul className="flex flex-col gap-1">
+              {status.planSteps.map((step, index) => (
+                <li
+                  key={`${index}-${step.step}`}
+                  className="flex min-w-0 items-start gap-2 text-sm"
+                >
+                  <span className="shrink-0 text-muted-foreground" aria-hidden="true">
+                    •
+                  </span>
+                  <span className="min-w-0 flex-1 break-words text-foreground">
+                    {step.step}
+                  </span>
+                  <Badge
+                    variant={webSlashPlanStatusBadgeVariant(step.status)}
+                    className="shrink-0"
+                  >
+                    {step.status}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Empty className="py-3">
+              <EmptyHeader>
+                <EmptyTitle>No active plan items.</EmptyTitle>
+              </EmptyHeader>
+            </Empty>
+          )}
+        </section>
+      </div>
     </WebSlashPanelShell>
+  );
+}
+
+type WebSlashBadgeVariant =
+  | "default"
+  | "secondary"
+  | "destructive"
+  | "outline"
+  | "ghost";
+
+type WebSlashStatusSnapshotView = {
+  planSteps: DashboardPlanStep[];
+};
+
+type WebSlashStatusTokenUsageSectionData = {
+  role: string;
+  model: string;
+  context: {
+    percent: number;
+    text: string;
+  } | null;
+  lastTurnParts: string[];
+  totalText: string;
+  cachedText: string | null;
+};
+
+
+function WebSlashStatusTokenUsageSection({
+  section,
+}: {
+  section: WebSlashStatusTokenUsageSectionData;
+}) {
+  return (
+    <section className="flex flex-col gap-2" aria-label={`${section.role} model usage`}>
+      <div className="flex min-w-0 items-center gap-2">
+        <Badge variant="outline" className="shrink-0">
+          {section.role}
+        </Badge>
+        <span className="min-w-0 truncate text-sm font-medium text-foreground">
+          {section.model}
+        </span>
+      </div>
+      {section.context ? (
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span>Context</span>
+            <span>{section.context.text}</span>
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary"
+              style={{
+                width: `${Math.min(Math.max(section.context.percent, 0), 1) * 100}%`,
+              }}
+            />
+          </div>
+        </div>
+      ) : null}
+      {section.lastTurnParts.length > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Last turn: {section.lastTurnParts.join(" · ")}
+        </p>
+      ) : null}
+      <p className="text-xs text-muted-foreground">
+        Total: {section.totalText}
+        {section.cachedText ? ` · ${section.cachedText}` : ""}
+      </p>
+    </section>
   );
 }
 
@@ -3134,27 +3271,104 @@ function webSlashAvailableAppsText(snapshot: DashboardSnapshot | null) {
     : "No app state is currently available.";
 }
 
-function webSlashStatusRows(
+function webSlashStatusSnapshot(
   snapshot: DashboardSnapshot | null,
-): Array<[string, string | number | null | undefined]> {
-  const runtimeActivity = snapshot?.runtime_activity;
+): WebSlashStatusSnapshotView {
+  const structured = snapshot?.status_command;
+
+  return {
+    planSteps:
+      structured?.plan_steps ??
+      (snapshot?.current_plan_step ? [snapshot.current_plan_step] : []),
+  };
+}
+
+function webSlashStatusTokenUsageSections(
+  snapshot: DashboardSnapshot | null,
+): WebSlashStatusTokenUsageSectionData[] {
   const tokenUsage = snapshot?.token_usage;
-  const context = snapshot?.context_composition;
-  const skills = snapshot?.skills ?? [];
   return [
-    ["Runtime", snapshot?.runtime_status || runtimeActivity?.label || "Idle"],
-    ["Active turn", runtimeActivity?.active_runtime_turn ? "yes" : "no"],
-    ["Phase", runtimeActivity?.active_runtime_phase],
-    ["Current plan", snapshot?.current_plan_step?.step],
-    ["Last cycle", formatWebSlashDuration(snapshot?.last_cycle_elapsed_ms)],
-    ["Input tokens", snapshot?.footer_estimated_input_tokens],
-    ["Main model", tokenUsage?.main_model],
-    ["Efficient model", tokenUsage?.efficient_model],
-    ["Context model", context?.model],
-    ["Context tokens", context?.total_estimated_tokens],
-    ["Skills", `${skills.length} loaded`],
-    ["Telegram pending", snapshot?.pending_access_requests.length ?? 0],
+    webSlashStatusTokenUsageSection("main", tokenUsage?.main_model, tokenUsage?.main),
+    webSlashStatusTokenUsageSection("judge", tokenUsage?.judge_model, tokenUsage?.judge),
+  ].filter((section): section is WebSlashStatusTokenUsageSectionData => Boolean(section));
+}
+
+function webSlashStatusTokenUsageSection(
+  role: string,
+  model: string | null | undefined,
+  info: TokenUsageInfo | null | undefined,
+): WebSlashStatusTokenUsageSectionData | null {
+  if (!info || webSlashTokenUsageIsZero(info.total_token_usage)) {
+    return null;
+  }
+
+  const used = Math.max(0, info.last_token_usage.input_tokens);
+  const window = info.model_context_window;
+  const context =
+    typeof window === "number" && window > 0
+      ? {
+          percent: used / window,
+          text: `${formatWebSlashCompactNumber(used)} of ${formatWebSlashCompactNumber(window)}`,
+        }
+      : null;
+  const lastTurnParts = webSlashTokenUsageParts(info.last_token_usage);
+  const totalTokens = Math.max(0, info.total_token_usage.total_tokens);
+  const cachedText =
+    info.total_token_usage.input_tokens > 0
+      ? `${Math.round(
+          (info.total_token_usage.cached_input_tokens /
+            info.total_token_usage.input_tokens) *
+            100,
+        )}% cached`
+      : null;
+
+  return {
+    role,
+    model: model?.trim() || "<unknown>",
+    context,
+    lastTurnParts,
+    totalText: `${formatWebSlashCompactNumber(totalTokens)} Used`,
+    cachedText,
+  };
+}
+
+function webSlashTokenUsageParts(usage: {
+  input_tokens: number;
+  output_tokens: number;
+  reasoning_output_tokens: number;
+  total_tokens: number;
+}) {
+  if (webSlashTokenUsageIsZero(usage)) {
+    return [];
+  }
+
+  const parts = [
+    `${formatWebSlashNumber(Math.max(0, usage.input_tokens))} in`,
+    `${formatWebSlashNumber(Math.max(0, usage.output_tokens))} out`,
   ];
+  if (usage.reasoning_output_tokens > 0) {
+    parts.push(
+      `${formatWebSlashNumber(Math.max(0, usage.reasoning_output_tokens))} reasoning`,
+    );
+  }
+  return parts;
+}
+
+function webSlashTokenUsageIsZero(usage: { total_tokens: number }) {
+  return Math.max(0, usage.total_tokens) === 0;
+}
+
+
+function webSlashPlanStatusBadgeVariant(
+  status: DashboardPlanStep["status"],
+): WebSlashBadgeVariant {
+  if (status === "in_progress") {
+    return "default";
+  }
+  if (status === "completed") {
+    return "secondary";
+  }
+  return "outline";
 }
 
 function webSlashRuntimeOptimizationRows(
@@ -3290,19 +3504,18 @@ function formatWebSlashValue(value: string | number | null | undefined) {
   }
   return String(value);
 }
-
-function formatWebSlashDuration(durationMs: number | null | undefined) {
-  if (durationMs === null || durationMs === undefined) {
-    return null;
-  }
-  if (durationMs < 1000) {
-    return `${durationMs}ms`;
-  }
-  const totalSeconds = Math.floor(durationMs / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+function formatWebSlashCompactNumber(value: number) {
+  return new Intl.NumberFormat("en", {
+    compactDisplay: "short",
+    maximumFractionDigits: value >= 1000 ? 1 : 0,
+    notation: "compact",
+  }).format(value);
 }
+
+function formatWebSlashNumber(value: number) {
+  return new Intl.NumberFormat("en").format(value);
+}
+
 
 function formatWebSlashTimestamp(timestampMs: number | null | undefined) {
   if (timestampMs === null || timestampMs === undefined) {

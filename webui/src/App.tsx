@@ -456,6 +456,18 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
     updated_at_ms: MOCK_ACTIVITY_STARTED_AT,
   },
   status_output: "",
+  status_command: {
+    runtime_turn: "running (tool execution)",
+    bound_primitive:
+      "inspect-repository-status-modify-local-project-run-required-checks-report-result",
+    active_plans: 3,
+    events: "1 active (claimed=1)",
+    plan_steps: [
+      { status: "completed", step: "Read current WebUI and TUI data flow" },
+      { status: "in_progress", step: "Reshape Agent page into activity workbench" },
+      { status: "pending", step: "Verify responsive desktop and mobile layouts" },
+    ],
+  },
   sleep_status_output: "",
   inspect_telegram_output: "",
   system_prompt_output: "",
