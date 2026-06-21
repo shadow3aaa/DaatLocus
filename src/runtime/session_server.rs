@@ -42,8 +42,10 @@ use crate::{
     preturn_state::PreTurnState,
     providers::build_llm,
     runtime::bootstrap::{
-        bootstrap_telegram_transport_state_from_acl, build_runtime_apps, emit_startup_progress,
-        load_compiled_prompts_only, load_token_estimate_baseline, sandbox_policy_for_runtime,
+        PersistentTokenUsageRole, bootstrap_telegram_transport_state_from_acl, build_runtime_apps,
+        emit_startup_progress, load_compiled_prompts_only, load_persistent_token_usage_store,
+        load_token_estimate_baseline, sandbox_policy_for_runtime,
+        wrap_llm_with_persistent_token_usage,
     },
     runtime::runtime_loop::{
         SleepTaskResult, daat_locus_loop, handle_dashboard_control_command,
@@ -138,15 +140,39 @@ pub(crate) async fn run_session_serve(
     let memory = Memory::with_session(session_id.as_str()).await;
     let plan = Plan::with_session(session_id.as_str()).await;
     let workflows = PrimitiveStore::new().await;
+    let token_usage_store = load_persistent_token_usage_store(Some(session_id.as_str())).await;
     let client = build_llm(&config.main_model, &config)?;
+    let client = wrap_llm_with_persistent_token_usage(
+        PersistentTokenUsageRole::Main,
+        config.main_model_config().model_id.clone(),
+        client,
+        token_usage_store.clone(),
+    );
     let judge_model_key = config
         .judge
         .model
         .as_deref()
         .unwrap_or(&config.main_model)
         .to_string();
+    let judge_model_id = config
+        .models
+        .get(&judge_model_key)
+        .map(|model| model.model_id.clone())
+        .unwrap_or_else(|| judge_model_key.clone());
     let judge_client = build_llm(&judge_model_key, &config)?;
+    let judge_client = wrap_llm_with_persistent_token_usage(
+        PersistentTokenUsageRole::Judge,
+        judge_model_id,
+        judge_client,
+        token_usage_store.clone(),
+    );
     let efficient_client = build_llm(&config.efficient_model, &config)?;
+    let efficient_client = wrap_llm_with_persistent_token_usage(
+        PersistentTokenUsageRole::Efficient,
+        config.efficient_model_config().model_id.clone(),
+        efficient_client,
+        token_usage_store,
+    );
     let coding_project_dir = args.project_dir;
     let execution_cwd = if let Some(project_dir) = coding_project_dir.as_ref() {
         if !project_dir.is_dir() {

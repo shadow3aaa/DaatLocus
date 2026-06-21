@@ -258,8 +258,32 @@ impl TokenUsageInfo {
         self.last_token_usage = last;
     }
 
+    pub fn merged_with_process_usage(&self, process: &TokenUsageInfo) -> Self {
+        let mut merged = self.clone();
+        merged
+            .total_token_usage
+            .add_assign(&process.total_token_usage);
+        if let Some(window) = process.model_context_window {
+            merged.model_context_window = Some(window);
+        }
+        if !process.last_token_usage.is_zero() {
+            merged.last_token_usage = process.last_token_usage.clone();
+        }
+        for day in &process.daily_token_usage {
+            merged.append_daily_usage_for_date(&day.date, &day.usage);
+        }
+        merged
+    }
+
     fn append_daily_usage(&mut self, usage: &TokenUsage) {
         let date = Local::now().date_naive().to_string();
+        self.append_daily_usage_for_date(&date, usage);
+    }
+
+    fn append_daily_usage_for_date(&mut self, date: &str, usage: &TokenUsage) {
+        if usage.is_zero() {
+            return;
+        }
 
         if let Some(day) = self
             .daily_token_usage
@@ -269,11 +293,15 @@ impl TokenUsageInfo {
             day.usage.add_assign(usage);
         } else {
             self.daily_token_usage.push(DailyTokenUsage {
-                date,
+                date: date.to_string(),
                 usage: usage.clone(),
             });
         }
 
+        self.trim_daily_usage();
+    }
+
+    fn trim_daily_usage(&mut self) {
         if self.daily_token_usage.len() > MAX_DAILY_TOKEN_USAGE_DAYS {
             let excess = self.daily_token_usage.len() - MAX_DAILY_TOKEN_USAGE_DAYS;
             self.daily_token_usage.drain(0..excess);

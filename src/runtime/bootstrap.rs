@@ -5,6 +5,8 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::sync::OwnedMutexGuard;
 
 use crate::{
@@ -13,6 +15,7 @@ use crate::{
     coding_app::CodingApp,
     context::Context,
     context_budget::TokenEstimateBaseline,
+    core::{Llm, TokenUsageInfo},
     daat_locus_paths::daat_locus_paths,
     events::EventStore,
     memory::Memory,
@@ -21,9 +24,12 @@ use crate::{
     persistence::PersistenceStore,
     plan::Plan,
     providers::build_llm,
-    reasoning::compiled::{
-        CompiledPromptStore, load_all_compiled_programs_for_model,
-        load_compiled_runtime_system_prompt_for_model,
+    reasoning::{
+        compiled::{
+            CompiledPromptStore, load_all_compiled_programs_for_model,
+            load_compiled_runtime_system_prompt_for_model,
+        },
+        runtime::{AgentTurnRequest, AgentTurnStreamResult, PromptRequest},
     },
     sandbox::{RuntimeSandboxPolicy, WritableRoot},
     telegram_acl::TelegramAclHandle,
@@ -44,6 +50,221 @@ pub(crate) fn emit_startup_progress(message: impl AsRef<str>) {
 }
 
 const TOKEN_ESTIMATE_BASELINE_FILE: &str = "token_estimate_baseline.json";
+const TOKEN_USAGE_FILE: &str = "token_usage.json";
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PersistentTokenUsageRole {
+    Main,
+    Judge,
+    Efficient,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct PersistedTokenUsageSnapshot {
+    #[serde(default)]
+    main: PersistedTokenUsageRole,
+    #[serde(default)]
+    judge: PersistedTokenUsageRole,
+    #[serde(default)]
+    efficient: PersistedTokenUsageRole,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct PersistedTokenUsageRole {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    usage: Option<TokenUsageInfo>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PersistentTokenUsageStore {
+    persistence: PersistenceStore,
+    snapshot: parking_lot::Mutex<PersistedTokenUsageSnapshot>,
+}
+
+pub(crate) async fn load_persistent_token_usage_store(
+    session_id: Option<&str>,
+) -> Arc<PersistentTokenUsageStore> {
+    let persistence = PersistenceStore::for_session(session_id).await;
+    let snapshot = persistence
+        .read_json_state_or_default(TOKEN_USAGE_FILE, "token usage")
+        .await;
+    Arc::new(PersistentTokenUsageStore {
+        persistence,
+        snapshot: parking_lot::Mutex::new(snapshot),
+    })
+}
+
+pub(crate) fn wrap_llm_with_persistent_token_usage(
+    role: PersistentTokenUsageRole,
+    configured_model: String,
+    inner: Box<dyn Llm + Send + Sync>,
+    store: Arc<PersistentTokenUsageStore>,
+) -> Box<dyn Llm + Send + Sync> {
+    Box::new(PersistentTokenUsageLlm::new(
+        role,
+        configured_model,
+        inner,
+        store,
+    ))
+}
+
+struct PersistentTokenUsageLlm {
+    role: PersistentTokenUsageRole,
+    configured_model: String,
+    baseline: TokenUsageInfo,
+    inner: Box<dyn Llm + Send + Sync>,
+    store: Arc<PersistentTokenUsageStore>,
+}
+
+impl PersistentTokenUsageLlm {
+    fn new(
+        role: PersistentTokenUsageRole,
+        configured_model: String,
+        inner: Box<dyn Llm + Send + Sync>,
+        store: Arc<PersistentTokenUsageStore>,
+    ) -> Self {
+        let actual_model = inner
+            .model_name()
+            .unwrap_or_else(|| configured_model.clone());
+        let baseline = store.baseline_for_role(role, &actual_model);
+        Self {
+            role,
+            configured_model,
+            baseline,
+            inner,
+            store,
+        }
+    }
+
+    fn actual_model(&self) -> String {
+        self.inner
+            .model_name()
+            .unwrap_or_else(|| self.configured_model.clone())
+    }
+
+    fn merged_token_usage_info(&self) -> Option<TokenUsageInfo> {
+        let process_usage = self.inner.token_usage_info();
+        match process_usage {
+            Some(process_usage) => Some(self.baseline.merged_with_process_usage(&process_usage)),
+            None if !self.baseline.total_token_usage.is_zero()
+                || !self.baseline.last_token_usage.is_zero()
+                || !self.baseline.daily_token_usage.is_empty() =>
+            {
+                Some(self.baseline.clone())
+            }
+            None => None,
+        }
+    }
+
+    async fn persist_current_usage(&self) {
+        if let Some(usage) = self.merged_token_usage_info() {
+            self.store
+                .persist_role(self.role, self.actual_model(), usage)
+                .await;
+        }
+    }
+}
+
+#[async_trait]
+impl Llm for PersistentTokenUsageLlm {
+    async fn run_json(
+        &self,
+        context: &Context,
+        request: PromptRequest,
+    ) -> miette::Result<serde_json::Value> {
+        let result = self.inner.run_json(context, request).await;
+        self.persist_current_usage().await;
+        result
+    }
+
+    async fn run_agent_turn(
+        &self,
+        context: &Context,
+        request: AgentTurnRequest,
+    ) -> miette::Result<AgentTurnStreamResult> {
+        let result = self.inner.run_agent_turn(context, request).await;
+        self.persist_current_usage().await;
+        result
+    }
+
+    fn token_usage_info(&self) -> Option<TokenUsageInfo> {
+        self.merged_token_usage_info()
+    }
+
+    fn model_name(&self) -> Option<String> {
+        self.inner
+            .model_name()
+            .or_else(|| Some(self.configured_model.clone()))
+    }
+}
+
+impl PersistentTokenUsageStore {
+    fn baseline_for_role(
+        &self,
+        role: PersistentTokenUsageRole,
+        current_model: &str,
+    ) -> TokenUsageInfo {
+        self.snapshot
+            .lock()
+            .role(role)
+            .usage_for_model(current_model)
+            .unwrap_or_default()
+    }
+
+    async fn persist_role(
+        &self,
+        role: PersistentTokenUsageRole,
+        model: String,
+        usage: TokenUsageInfo,
+    ) {
+        let snapshot = {
+            let mut snapshot = self.snapshot.lock();
+            *snapshot.role_mut(role) = PersistedTokenUsageRole {
+                model: Some(model),
+                usage: Some(usage),
+            };
+            snapshot.clone()
+        };
+
+        if let Err(err) = self
+            .persistence
+            .write_json_state(TOKEN_USAGE_FILE, &snapshot)
+            .await
+        {
+            tracing::warn!("failed to persist token usage: {err}");
+        }
+    }
+}
+
+impl PersistedTokenUsageSnapshot {
+    fn role(&self, role: PersistentTokenUsageRole) -> &PersistedTokenUsageRole {
+        match role {
+            PersistentTokenUsageRole::Main => &self.main,
+            PersistentTokenUsageRole::Judge => &self.judge,
+            PersistentTokenUsageRole::Efficient => &self.efficient,
+        }
+    }
+
+    fn role_mut(&mut self, role: PersistentTokenUsageRole) -> &mut PersistedTokenUsageRole {
+        match role {
+            PersistentTokenUsageRole::Main => &mut self.main,
+            PersistentTokenUsageRole::Judge => &mut self.judge,
+            PersistentTokenUsageRole::Efficient => &mut self.efficient,
+        }
+    }
+}
+
+impl PersistedTokenUsageRole {
+    fn usage_for_model(&self, current_model: &str) -> Option<TokenUsageInfo> {
+        let usage = self.usage.clone()?;
+        match self.model.as_deref() {
+            Some(model) if model != current_model => None,
+            _ => Some(usage),
+        }
+    }
+}
 
 pub(crate) async fn load_token_estimate_baseline() -> TokenEstimateBaseline {
     let persistence = PersistenceStore::runtime().await;
@@ -163,18 +384,42 @@ pub(crate) async fn build_eval_context_with_compiled(
     bootstrap_telegram_transport_state_from_acl(&telegram_handle, &telegram_acl);
     let runtime_apps = build_runtime_apps(&execution_cwd, &sandbox_policy);
     let apps = AppManager::new(None, runtime_apps.apps).await.unwrap();
+    let token_usage_store = load_persistent_token_usage_store(None).await;
     let client = build_llm(&config.main_model, &config)
         .unwrap_or_else(|err| panic!("failed to construct main LLM client: {err:?}"));
+    let client = wrap_llm_with_persistent_token_usage(
+        PersistentTokenUsageRole::Main,
+        config.main_model_config().model_id.clone(),
+        client,
+        token_usage_store.clone(),
+    );
     let judge_model_key = config
         .judge
         .model
         .as_deref()
         .unwrap_or(&config.main_model)
         .to_string();
+    let judge_model_id = config
+        .models
+        .get(&judge_model_key)
+        .map(|model| model.model_id.clone())
+        .unwrap_or_else(|| judge_model_key.clone());
     let judge_client = build_llm(&judge_model_key, &config)
         .unwrap_or_else(|err| panic!("failed to construct judge LLM client: {err:?}"));
+    let judge_client = wrap_llm_with_persistent_token_usage(
+        PersistentTokenUsageRole::Judge,
+        judge_model_id,
+        judge_client,
+        token_usage_store.clone(),
+    );
     let efficient_client = build_llm(&config.efficient_model, &config)
         .unwrap_or_else(|err| panic!("failed to construct efficient LLM client: {err:?}"));
+    let efficient_client = wrap_llm_with_persistent_token_usage(
+        PersistentTokenUsageRole::Efficient,
+        config.efficient_model_config().model_id.clone(),
+        efficient_client,
+        token_usage_store,
+    );
     let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();
 
     Context {
@@ -311,4 +556,68 @@ impl Drop for DaatLocusHomeOverride {
 fn daat_locus_home_override_lock() -> Arc<tokio::sync::Mutex<()>> {
     static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
     Arc::clone(LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(()))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{DailyTokenUsage, TokenUsage};
+
+    fn sample_usage(total_tokens: i64) -> TokenUsageInfo {
+        let usage = TokenUsage {
+            input_tokens: total_tokens - 1,
+            cached_input_tokens: 1,
+            output_tokens: 1,
+            reasoning_output_tokens: 0,
+            total_tokens,
+        };
+        TokenUsageInfo {
+            total_token_usage: usage.clone(),
+            last_token_usage: usage.clone(),
+            model_context_window: Some(1000),
+            daily_token_usage: vec![DailyTokenUsage {
+                date: "2026-06-21".to_string(),
+                usage,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_token_usage_store_round_trips_session_role() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+        let store = load_persistent_token_usage_store(Some("session-a")).await;
+        store
+            .persist_role(
+                PersistentTokenUsageRole::Main,
+                "model-a".to_string(),
+                sample_usage(42),
+            )
+            .await;
+
+        let reloaded = load_persistent_token_usage_store(Some("session-a")).await;
+        let restored = reloaded.baseline_for_role(PersistentTokenUsageRole::Main, "model-a");
+        assert_eq!(restored.total_token_usage.total_tokens, 42);
+        assert_eq!(restored.last_token_usage.total_tokens, 42);
+        assert_eq!(restored.daily_token_usage.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn persistent_token_usage_store_ignores_other_models() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+        let store = load_persistent_token_usage_store(Some("session-b")).await;
+        store
+            .persist_role(
+                PersistentTokenUsageRole::Judge,
+                "model-a".to_string(),
+                sample_usage(24),
+            )
+            .await;
+
+        let reloaded = load_persistent_token_usage_store(Some("session-b")).await;
+        let ignored = reloaded.baseline_for_role(PersistentTokenUsageRole::Judge, "model-b");
+        assert!(ignored.total_token_usage.is_zero());
+        assert!(ignored.daily_token_usage.is_empty());
+    }
 }
