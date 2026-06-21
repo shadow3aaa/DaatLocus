@@ -113,8 +113,6 @@ const AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT = Number.MAX_SAFE_INTEGER;
 const AGENT_CHAT_PLAN_STEP_LIMIT = 8;
 const AGENT_CHAT_TERMINAL_OUTPUT_HEAD_LINES = 4;
 const AGENT_CHAT_TERMINAL_OUTPUT_TAIL_LINES = 4;
-const AGENT_CHAT_PATCH_FILE_LIMIT = 4;
-const AGENT_CHAT_PATCH_DIFF_LINE_LIMIT = 18;
 const AGENT_CHAT_TELEGRAM_DETAIL_LIMIT = 6;
 const AGENT_CHAT_TELEGRAM_MESSAGE_LIMIT = 6;
 const AGENT_CHAT_TERMINAL_WAIT_LINE_LIMIT = 6;
@@ -5183,22 +5181,13 @@ function AgentChatPatchActivityPanel({
   title: string;
   files: AgentChatDiffFile[];
 }) {
-  const visibleFiles = files.slice(0, AGENT_CHAT_PATCH_FILE_LIMIT);
-  const hiddenFileCount = files.length - visibleFiles.length;
-  const rows = visibleFiles.map((file, index) => (
+  const rows = files.map((file, index) => (
     <AgentChatPatchFileBlock
       key={`${file.path}-${index}`}
       file={file}
       hideHeader={files.length === 1}
     />
   ));
-  if (hiddenFileCount > 0) {
-    rows.push(
-      <p className="text-xs text-muted-foreground">
-        … {hiddenFileCount} more files
-      </p>,
-    );
-  }
 
   return (
     <div className="flex min-w-0 max-w-full flex-col gap-1.5 text-sm [overflow-wrap:anywhere]">
@@ -5208,7 +5197,7 @@ function AgentChatPatchActivityPanel({
           {title}
         </p>
       </div>
-      {visibleFiles.length > 0 ? (
+      {files.length > 0 ? (
         <AgentChatDetailRows rows={rows} />
       ) : (
         <p className="px-2 text-xs text-muted-foreground sm:px-3">No file changes</p>
@@ -5224,12 +5213,10 @@ function AgentChatPatchFileBlock({
   file: AgentChatDiffFile;
   hideHeader?: boolean;
 }) {
-  const visibleLines = file.lines.slice(0, AGENT_CHAT_PATCH_DIFF_LINE_LIMIT);
-  const hiddenLineCount = file.lines.length - visibleLines.length;
-  const oldWidth = agentChatDiffLineNumberWidth(visibleLines, "old_lineno");
-  const newWidth = agentChatDiffLineNumberWidth(visibleLines, "new_lineno");
+  const oldWidth = agentChatDiffLineNumberWidth(file.lines, "old_lineno");
+  const newWidth = agentChatDiffLineNumberWidth(file.lines, "new_lineno");
   const highlighted = useShikiHighlightedCode(
-    agentChatDiffHighlightSource(visibleLines),
+    agentChatDiffHighlightSource(file.lines),
     file.path,
   );
 
@@ -5248,9 +5235,9 @@ function AgentChatPatchFileBlock({
           </span>
         </div>
       ) : null}
-      {visibleLines.length > 0 ? (
+      {file.lines.length > 0 ? (
         <div className="min-w-0 max-w-full overflow-x-auto font-mono text-xs leading-5 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
-          {visibleLines.map((line, index) => (
+          {file.lines.map((line, index) => (
             <AgentChatPatchDiffRow
               key={`patch-line-${index}`}
               line={line}
@@ -5260,11 +5247,6 @@ function AgentChatPatchFileBlock({
             />
           ))}
         </div>
-      ) : null}
-      {hiddenLineCount > 0 ? (
-        <p className="text-xs text-muted-foreground">
-          … {hiddenLineCount} more line(s)
-        </p>
       ) : null}
     </div>
   );
@@ -5565,11 +5547,7 @@ function AgentChatBlock({
 
   if (type === "diff") {
     return (
-      <AgentChatDiffBlock
-        id={blockId}
-        files={diffFilesValue(record.files)}
-        limit={lineLimit}
-      />
+      <AgentChatDiffBlock id={blockId} files={diffFilesValue(record.files)} />
     );
   }
 
@@ -6192,50 +6170,30 @@ function agentChatCodeLanguageLabel(language: string) {
 function AgentChatDiffBlock({
   id,
   files,
-  limit,
-  fileLimit = 3,
 }: {
   id: string;
   files: AgentChatDiffFile[];
-  limit: number;
-  fileLimit?: number;
 }) {
   if (files.length === 0) {
     return null;
   }
 
-  const visibleFiles = files.slice(0, fileLimit);
-  const hiddenFileCount = files.length - visibleFiles.length;
-
   return (
     <div className="flex min-w-0 max-w-full flex-col gap-2 font-mono text-xs">
-      {visibleFiles.map((file, fileIndex) => (
-        <AgentChatDiffBlockFile
-          key={`${id}-file-${fileIndex}`}
-          file={file}
-          limit={limit}
-        />
+      {files.map((file, fileIndex) => (
+        <AgentChatDiffBlockFile key={`${id}-file-${fileIndex}`} file={file} />
       ))}
-      {hiddenFileCount > 0 ? (
-        <p className="font-sans text-xs text-muted-foreground">
-          … +{hiddenFileCount} more file(s)
-        </p>
-      ) : null}
     </div>
   );
 }
 
 function AgentChatDiffBlockFile({
   file,
-  limit,
 }: {
   file: AgentChatDiffFile;
-  limit: number;
 }) {
-  const visibleLines = file.lines.slice(0, limit);
-  const hiddenLines = file.lines.slice(limit);
   const highlighted = useShikiHighlightedCode(
-    agentChatDiffHighlightSource(visibleLines),
+    agentChatDiffHighlightSource(file.lines),
     file.path,
   );
 
@@ -6249,7 +6207,7 @@ function AgentChatDiffBlockFile({
         </span>
       </div>
       <pre className="max-h-72 min-w-0 max-w-full overflow-auto whitespace-pre-wrap px-2 leading-5 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin] sm:whitespace-pre sm:px-3">
-        {visibleLines.map((line, lineIndex) => (
+        {file.lines.map((line, lineIndex) => (
           <Fragment key={`${file.path}-legacy-diff-${lineIndex}`}>
             <span
               className={cn(
@@ -6270,15 +6228,10 @@ function AgentChatDiffBlockFile({
                 fallback={line.text}
               />
             </span>
-            {lineIndex < visibleLines.length - 1 ? "\n" : null}
+            {lineIndex < file.lines.length - 1 ? "\n" : null}
           </Fragment>
         ))}
       </pre>
-      {hiddenLines.length > 0 ? (
-        <p className="px-2 font-sans text-xs text-muted-foreground sm:px-3">
-          … +{hiddenLines.length} more diff line(s)
-        </p>
-      ) : null}
     </div>
   );
 }
