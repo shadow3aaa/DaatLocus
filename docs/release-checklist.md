@@ -72,6 +72,9 @@ Use this checklist before tagging a Daat Locus release.
 
 ## Release Notes
 
+- Write `docs/releases/<tag>.md` before tagging; use the exact tag name such as
+  `docs/releases/v0.2.0.md`. The `Release Binaries` workflow reads this file as
+  the GitHub Release body and fails if it is missing.
 - Document user-visible config changes.
 - Document state migration behavior.
 - Document any supply-chain pinning gaps.

@@ -79,6 +79,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Resolve release tag
         id: release
         shell: bash
@@ -91,6 +94,18 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve release notes
+        id: release_notes
+        shell: bash
+        run: |
+          notes="docs/releases/${{ steps.release.outputs.tag }}.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::Missing release notes file: $notes"
+            echo "::error::Create docs/releases/${{ steps.release.outputs.tag }}.md before publishing."
+            exit 1
+          fi
+          echo "path=$notes" >> "$GITHUB_OUTPUT"
+
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
@@ -102,4 +117,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}
+          body_path: ${{ steps.release_notes.outputs.path }}
           files: dist-artifacts/*.tar.zst
