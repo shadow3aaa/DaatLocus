@@ -69,6 +69,11 @@ pub struct DashboardActivityHistoryPage {
     pub has_more_after: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DashboardInputHistory {
+    pub entries: Vec<String>,
+}
+
 impl DashboardActivityHistoryStore {
     #[allow(dead_code)]
     pub async fn new() -> Result<Self> {
@@ -230,6 +235,47 @@ impl DashboardActivityHistoryStore {
             matching_items,
             total_items,
         })
+    }
+
+    pub fn query_recent_user_inputs(&self, limit: usize) -> Result<DashboardInputHistory> {
+        let limit = clamp_history_limit(limit);
+        let conn = self.open_connection()?;
+        let mut statement = conn
+            .prepare("SELECT item_json FROM dashboard_activity ORDER BY seq DESC")
+            .into_diagnostic()
+            .wrap_err("prepare dashboard input history query failed")?;
+        let mut rows = statement
+            .query([])
+            .into_diagnostic()
+            .wrap_err("query dashboard input history failed")?;
+        let mut entries = Vec::new();
+
+        while let Some(row) = rows
+            .next()
+            .into_diagnostic()
+            .wrap_err("read dashboard input history row failed")?
+        {
+            let item_json: String = row
+                .get(0)
+                .into_diagnostic()
+                .wrap_err("read dashboard input history item json failed")?;
+            let Some(item) = serde_json::from_str::<WebActivityItem>(&item_json).ok() else {
+                continue;
+            };
+            let Some(text) = history_item_user_input_text(&item) else {
+                continue;
+            };
+            if entries.last().is_some_and(|previous| previous == &text) {
+                continue;
+            }
+            entries.push(text);
+            if entries.len() >= limit {
+                break;
+            }
+        }
+
+        entries.reverse();
+        Ok(DashboardInputHistory { entries })
     }
 
     fn initialize(&self) -> Result<()> {
@@ -411,6 +457,29 @@ fn history_item_is_user_input(item: &WebActivityItem) -> bool {
         && item.ui_hint.as_deref() != Some("final-message-separator")
 }
 
+fn history_item_user_input_text(item: &WebActivityItem) -> Option<String> {
+    if item.kind != WebActivityKind::Message
+        || !matches!(item.actor.as_ref(), Some(WebActivityActor::User))
+    {
+        return None;
+    }
+    let Some(ActivityCell::User(cell)) = item.cell.as_ref() else {
+        return None;
+    };
+    let text = cell
+        .full_body
+        .clone()
+        .unwrap_or_else(|| {
+            std::iter::once(cell.title.as_str())
+                .chain(cell.body_lines.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .trim()
+        .to_string();
+    (!text.is_empty()).then_some(text)
+}
+
 fn decode_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, WebActivityItem)> {
     let seq: i64 = row.get(0)?;
     let item_json: String = row.get(1)?;
@@ -545,6 +614,7 @@ fn dedupe_activity_items_keep_latest(items: Vec<WebActivityItem>) -> Vec<WebActi
 mod tests {
     use super::*;
     use crate::dashboard::cells::{ActivityCell, WebActivityKind, WebActivityStatus};
+    use crate::reasoning::runtime::HistoryMessage;
     use crate::tool_ui::{ExploredCallUiData, ExploredUiData};
 
     fn activity_item(id: &str, cell: Option<ActivityCell>) -> WebActivityItem {
@@ -566,6 +636,16 @@ mod tests {
             metadata: None,
             cell,
         }
+    }
+
+    fn user_input_item(id: &str, text: &str) -> WebActivityItem {
+        let cell = crate::dashboard::render_activity_from_messages(vec![HistoryMessage::user(
+            text.to_string(),
+        )])
+        .into_iter()
+        .next()
+        .expect("user activity cell");
+        web_activity_item_from_cell(&cell, id, false)
     }
 
     fn explored_group(stable_id: &str, summary: &str) -> ActivityCell {
@@ -591,6 +671,28 @@ mod tests {
             }
             .into(),
         )
+    }
+
+    #[test]
+    fn recent_user_input_query_returns_chronological_command_history() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store =
+            DashboardActivityHistoryStore::open_at_path(temp.path().join("history.sqlite3"))
+                .expect("history store");
+        let items = vec![
+            user_input_item("user-1", "first"),
+            activity_item("non-user", None),
+            user_input_item("user-2", "second"),
+            user_input_item("user-2-duplicate", "second"),
+            user_input_item("user-3", "third"),
+        ];
+        store.append_items(&items).expect("append history items");
+
+        let history = store
+            .query_recent_user_inputs(3)
+            .expect("recent user inputs");
+
+        assert_eq!(history.entries, vec!["first", "second", "third"]);
     }
 
     #[test]

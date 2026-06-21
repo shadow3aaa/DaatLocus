@@ -48,8 +48,8 @@ use crate::{
     dashboard::{
         DashboardAction, DashboardActionResult, DashboardActivityHistoryPage,
         DashboardCommandAttachment, DashboardCommandRunner, DashboardControlCommand,
-        DashboardHistoryLoader, DashboardIncomingAttachment, DashboardSessionTitle, DashboardState,
-        execute_control_command, execute_dashboard_action,
+        DashboardHistoryLoader, DashboardIncomingAttachment, DashboardInputHistory,
+        DashboardSessionTitle, DashboardState, execute_control_command, execute_dashboard_action,
     },
     model_catalog::catalog_model_capacity,
     sandbox::StrongFilesystemSandboxMode,
@@ -400,6 +400,12 @@ struct DashboardActivityHistoryQuery {
     session_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DashboardInputHistoryQuery {
+    limit: Option<usize>,
+    session_id: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct DashboardActivityHistoryCountResponse {
     matching_items: usize,
@@ -613,6 +619,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/dashboard/snapshot", get(snapshot_handler))
         .route("/dashboard/stream", get(stream_handler))
         .route("/dashboard/activity-history", get(activity_history_handler))
+        .route("/dashboard/input-history", get(input_history_handler))
         .route(
             "/dashboard/activity-history/count",
             get(activity_history_count_handler),
@@ -1188,6 +1195,47 @@ async fn activity_history_handler(
             "session_id is required for dashboard activity history",
         )
             .into_response()
+    }
+}
+
+async fn input_history_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(query): Query<DashboardInputHistoryQuery>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let Some(session_id) = query.session_id.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "session_id is required for dashboard input history",
+        )
+            .into_response();
+    };
+
+    match session_client_for_request(&state, session_id).await {
+        Ok(client) => match client
+            .request(session_ipc::SessionIpcRequest::DashboardInputHistory {
+                limit: query.limit.unwrap_or(100),
+            })
+            .await
+        {
+            Ok(session_ipc::SessionIpcResponse::DashboardInputHistory { history }) => {
+                Json(history).into_response()
+            }
+            Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => {
+                (StatusCode::BAD_GATEWAY, message).into_response()
+            }
+            Ok(_) => (
+                StatusCode::BAD_GATEWAY,
+                "unexpected session IPC dashboard input history response",
+            )
+                .into_response(),
+            Err(err) => (StatusCode::BAD_GATEWAY, format!("{err:?}")).into_response(),
+        },
+        Err(err) => (StatusCode::NOT_FOUND, format!("{err:?}")).into_response(),
     }
 }
 
@@ -2744,6 +2792,27 @@ impl DaemonClient {
             .map_err(|err| miette!("decode activity history response failed: {err}"))
     }
 
+    pub async fn input_history(&self, limit: usize) -> Result<DashboardInputHistory> {
+        let mut url = format!(
+            "{}/dashboard/input-history?limit={}",
+            self.base_url(),
+            limit
+        );
+        if let Some(session_id) = self.session_id.as_deref() {
+            url.push_str("&session_id=");
+            url.push_str(session_id);
+        }
+        self.with_auth(self.control_request(self.http.get(&url)))?
+            .send()
+            .await
+            .map_err(|err| miette!("input history request failed: {err}"))?
+            .error_for_status()
+            .map_err(|err| miette!("input history returned error: {err}"))?
+            .json::<DashboardInputHistory>()
+            .await
+            .map_err(|err| miette!("decode input history response failed: {err}"))
+    }
+
     pub async fn shutdown(&self) -> Result<()> {
         self.with_auth(
             self.control_request(
@@ -2879,6 +2948,12 @@ impl DashboardHistoryLoader for DaemonClient {
         limit: usize,
     ) -> Result<DashboardActivityHistoryPage, String> {
         self.activity_history_before(before, limit)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    async fn load_recent_user_inputs(&self, limit: usize) -> Result<DashboardInputHistory, String> {
+        self.input_history(limit)
             .await
             .map_err(|err| err.to_string())
     }

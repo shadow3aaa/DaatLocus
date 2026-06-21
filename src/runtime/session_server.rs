@@ -555,6 +555,20 @@ async fn handle_ipc_connection(
                 true,
             ),
         },
+        SessionIpcRequest::DashboardInputHistory { limit } => {
+            match state.dashboard_history.query_recent_user_inputs(limit) {
+                Ok(history) => IpcResponseEnvelope::ok(
+                    request_id,
+                    SessionIpcResponse::DashboardInputHistory { history },
+                ),
+                Err(err) => IpcResponseEnvelope::error(
+                    request_id,
+                    "dashboard_input_history_failed",
+                    format!("{err:?}"),
+                    true,
+                ),
+            }
+        }
         SessionIpcRequest::DashboardHistoryCount => {
             match state.dashboard_history.query_user_input_count() {
                 Ok(count) => IpcResponseEnvelope::ok(

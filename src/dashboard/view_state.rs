@@ -8,7 +8,7 @@ use super::selection::{SelectableRegion, SelectionRegistry};
 use super::tui_event::TuiMouseSelectionKind;
 use super::{
     ActivityCell, CachedActivityLines, DashboardActivityHistoryPage, DashboardCommandAttachment,
-    DashboardState, LiveActivityCell, activity_cells_from_history_items,
+    DashboardState, LiveActivityCell, WebActivityItem, activity_cells_from_history_items,
     cells::append_runtime_status_live_cell,
 };
 
@@ -492,6 +492,32 @@ impl TuiViewState {
             return;
         }
         self.reset_command_history_navigation();
+        self.push_command_history_entry(text);
+    }
+
+    pub(super) fn replace_command_history(&mut self, entries: Vec<String>) {
+        self.command_history.clear();
+        self.extend_command_history(entries);
+        self.reset_command_history_navigation();
+    }
+
+    pub(super) fn seed_command_history_from_state(&mut self, state: &DashboardState) {
+        if !self.command_history.is_empty() {
+            return;
+        }
+        self.extend_command_history(command_history_entries_from_state(state));
+    }
+
+    fn extend_command_history(&mut self, entries: impl IntoIterator<Item = String>) {
+        for entry in entries {
+            self.push_command_history_entry(&entry);
+        }
+    }
+
+    fn push_command_history_entry(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
         if self
             .command_history
             .last()
@@ -817,12 +843,54 @@ impl TuiViewState {
     }
 }
 
+fn command_history_entries_from_state(state: &DashboardState) -> Vec<String> {
+    let items = if state.activity_history.items.is_empty() {
+        state.web_activity_items.as_slice()
+    } else {
+        state.activity_history.items.as_slice()
+    };
+    items
+        .iter()
+        .filter_map(command_history_text_from_activity_item)
+        .collect()
+}
+
+fn command_history_text_from_activity_item(item: &WebActivityItem) -> Option<String> {
+    let Some(ActivityCell::User(cell)) = item.cell.as_ref() else {
+        return None;
+    };
+    let text = cell
+        .full_body
+        .clone()
+        .unwrap_or_else(|| {
+            std::iter::once(cell.title.as_str())
+                .chain(cell.body_lines.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .trim()
+        .to_string();
+    (!text.is_empty()).then_some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dashboard::selection::{SelectableId, SelectableRegion};
-    use crate::dashboard::{DashboardRuntimeActivity, assistant_activity_cell};
+    use crate::dashboard::{
+        DashboardActivityHistoryWindow, DashboardRuntimeActivity, assistant_activity_cell,
+        render_activity_from_messages, web_activity_item_from_cell,
+    };
+    use crate::reasoning::runtime::HistoryMessage;
     use ratatui::layout::Rect;
+
+    fn user_history_item(id: &str, text: &str) -> WebActivityItem {
+        let cell = render_activity_from_messages(vec![HistoryMessage::user(text.to_string())])
+            .into_iter()
+            .next()
+            .expect("user activity cell");
+        web_activity_item_from_cell(&cell, id, false)
+    }
 
     #[test]
     fn visible_activity_cells_adds_runtime_status_live_cell() {
@@ -843,6 +911,30 @@ mod tests {
         };
         assert_eq!(cell.label, "Working");
         assert_eq!(cell.active_runtime_started_at_ms, Some(1_000));
+    }
+
+    #[test]
+    fn command_history_seeds_from_activity_history() {
+        let mut view = TuiViewState::new();
+        let state = DashboardState {
+            activity_history: DashboardActivityHistoryWindow {
+                items: vec![
+                    user_history_item("history-1", "first command"),
+                    user_history_item("history-2", "second command"),
+                ],
+                ..DashboardActivityHistoryWindow::default()
+            },
+            ..DashboardState::default()
+        };
+
+        view.seed_command_history_from_state(&state);
+
+        assert!(view.navigate_command_history_up());
+        assert_eq!(view.command_input.as_str(), "second command");
+        assert!(view.navigate_command_history_up());
+        assert_eq!(view.command_input.as_str(), "first command");
+        assert!(view.navigate_command_history_down());
+        assert_eq!(view.command_input.as_str(), "second command");
     }
     #[test]
     fn scroll_rows_moves_up_from_auto_scroll_without_key_event() {

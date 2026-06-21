@@ -40,7 +40,7 @@ pub use commands::{
 };
 pub use history::{
     DashboardActivityHistoryCount, DashboardActivityHistoryPage, DashboardActivityHistoryStore,
-    DashboardActivityHistoryWindow,
+    DashboardActivityHistoryWindow, DashboardInputHistory,
 };
 
 #[cfg(test)]
@@ -103,6 +103,7 @@ use tui_animation::dashboard_state_needs_animation;
 use view_state::TuiViewState;
 
 const TUI_ANIMATION_INTERVAL: Duration = Duration::from_millis(32);
+const TUI_COMMAND_HISTORY_LIMIT: usize = 100;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DashboardPlanStep {
@@ -365,6 +366,8 @@ pub trait DashboardHistoryLoader: Send + Sync {
         before: Option<i64>,
         limit: usize,
     ) -> Result<DashboardActivityHistoryPage, String>;
+
+    async fn load_recent_user_inputs(&self, limit: usize) -> Result<DashboardInputHistory, String>;
 }
 
 #[derive(Clone)]
@@ -379,6 +382,21 @@ pub async fn run_tui_dashboard(
     command_runner: &dyn DashboardCommandRunner,
     history_loader: Option<Arc<dyn DashboardHistoryLoader>>,
 ) -> Result<(), std::io::Error> {
+    let initial_command_history = if let Some(loader) = history_loader.as_ref() {
+        match loader
+            .load_recent_user_inputs(TUI_COMMAND_HISTORY_LIMIT)
+            .await
+        {
+            Ok(history) => history.entries,
+            Err(err) => {
+                tracing::warn!("TUI command history load failed: {err}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen,)?;
@@ -396,6 +414,8 @@ pub async fn run_tui_dashboard(
     )
     .is_ok();
     let mut view = TuiViewState::new();
+    view.replace_command_history(initial_command_history);
+    view.seed_command_history_from_state(&rx.borrow());
 
     // Async event loop: terminal input, dashboard state updates, and scheduled draw requests.
     let mut event_stream = crossterm::event::EventStream::new();
@@ -487,6 +507,7 @@ pub async fn run_tui_dashboard(
 
         let state = rx.borrow_and_update();
         view.sync_visible_clear_from_state(&state);
+        view.seed_command_history_from_state(&state);
         view.sync_transcript_overlay(&state);
         view.sync_pending_user_input_edit(&state);
         if let Some(panel) = view.command_panel.as_mut() {

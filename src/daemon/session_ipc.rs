@@ -15,8 +15,8 @@ use uuid::Uuid;
 use crate::{
     dashboard::{
         DashboardAction, DashboardActionResult, DashboardActivityHistoryCount,
-        DashboardActivityHistoryPage, DashboardContextCompositionSnapshot, DashboardPlanStep,
-        DashboardPrimitiveOptimizationSnapshot, DashboardRuntimeActivity,
+        DashboardActivityHistoryPage, DashboardContextCompositionSnapshot, DashboardInputHistory,
+        DashboardPlanStep, DashboardPrimitiveOptimizationSnapshot, DashboardRuntimeActivity,
         DashboardRuntimeOptimizationSnapshot, DashboardRuntimeStatusLevel, DashboardSessionTitle,
         DashboardState, DashboardTokenUsageSnapshot,
     },
@@ -75,6 +75,9 @@ pub enum SessionIpcRequest {
     DashboardHistoryPage {
         before: Option<i64>,
         after: Option<i64>,
+        limit: usize,
+    },
+    DashboardInputHistory {
         limit: usize,
     },
     DashboardHistoryCount,
@@ -174,6 +177,9 @@ pub enum SessionIpcResponse {
     },
     DashboardHistoryPage {
         page: DashboardActivityHistoryPage,
+    },
+    DashboardInputHistory {
+        history: DashboardInputHistory,
     },
     DashboardHistoryCount {
         count: DashboardActivityHistoryCount,
