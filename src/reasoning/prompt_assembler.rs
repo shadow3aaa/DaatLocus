@@ -111,7 +111,7 @@ fn render_target_language(language: &str) -> String {
         "en-US" => "English (en-US)".to_string(),
         "zh-CN" => "Simplified Chinese (zh-CN)".to_string(),
         "configured-locale" => "the configured locale".to_string(),
-        language if language.is_empty() => "the configured locale".to_string(),
+        "" => "the configured locale".to_string(),
         language => language.to_string(),
     }
 }

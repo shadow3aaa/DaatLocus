@@ -59,7 +59,7 @@ jobs:
           echo "target=$target" >> "$GITHUB_OUTPUT"
 
       - name: Build release binary
-        run: cargo build -p daat-locus --release --locked
+        run: cargo build -p daat-locus --release --locked --target "${{ steps.host.outputs.target }}"
 
       - name: Package release binary
         shell: bash
