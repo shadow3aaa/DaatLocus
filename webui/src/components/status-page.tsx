@@ -1762,7 +1762,7 @@ function WebSlashPanelShell({
   onClose: () => void;
 }) {
   return (
-    <section aria-label={title} className="flex flex-col gap-2 text-sm">
+    <section aria-label={title} className="flex min-h-0 flex-col gap-2 text-sm">
       <div className="flex min-w-0 items-start gap-2">
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium text-foreground">{title}</p>
@@ -1781,7 +1781,9 @@ function WebSlashPanelShell({
           <XIcon data-icon="inline-start" aria-hidden="true" />
         </Button>
       </div>
-      {children}
+      <div className="-mx-2 min-h-0 max-h-72 overflow-y-auto overflow-x-hidden px-2 [scrollbar-gutter:stable]">
+        <div className="flex min-w-0 flex-col gap-2">{children}</div>
+      </div>
     </section>
   );
 }
@@ -1812,7 +1814,7 @@ function WebSlashSelectionPanel({
       subtitle={meta.subtitle}
       onClose={onClose}
     >
-      <div className="flex max-h-64 flex-col gap-1 overflow-auto">
+      <div className="flex min-w-0 flex-col gap-1">
         {items.length > 0 ? (
           items.map((item, index) => (
             <Button
@@ -1877,7 +1879,7 @@ function WebSlashStatusPanel({
       subtitle="Current session runtime facts."
       onClose={onClose}
     >
-      <div className="flex max-h-72 flex-col gap-3 overflow-auto">
+      <div className="flex min-w-0 flex-col gap-3">
         {!snapshot ? (
           <Alert className="px-2 py-1">
             <InfoIcon className="size-4" aria-hidden="true" />
@@ -2028,7 +2030,7 @@ function WebSlashSleepStatusPanel({
       subtitle="Background optimization state."
       onClose={onClose}
     >
-      <div className="flex max-h-72 flex-col gap-3 overflow-auto">
+      <div className="flex min-w-0 flex-col gap-3">
         <div className="flex flex-col gap-1">
           <p className="text-xs font-medium text-foreground">
             Runtime optimization
@@ -2061,7 +2063,7 @@ function WebSlashTelegramStatusPanel({
       subtitle="Transport access request state."
       onClose={onClose}
     >
-      <div className="flex max-h-72 flex-col gap-2 overflow-auto">
+      <div className="flex min-w-0 flex-col gap-2">
         <WebSlashKeyValueRows rows={[["Pending requests", requests.length]]} />
         {requests.length > 0 ? (
           <div className="flex flex-col gap-1">
@@ -2105,7 +2107,7 @@ function WebSlashDetailPanel({
 }) {
   return (
     <WebSlashPanelShell title={title} onClose={onClose}>
-      <div className="max-h-72 overflow-auto rounded-md bg-muted/35 p-2 font-mono text-xs leading-5 text-foreground/90">
+      <div className="min-w-0 rounded-md bg-muted/35 p-2 font-mono text-xs leading-5 text-foreground/90">
         {renderWebSlashDetailLines(text).map((line, index) => (
           <div
             key={`${index}-${line.text}`}
@@ -2172,7 +2174,7 @@ function WebSlashSkillsListPanel({
           ))}
         </div>
       ) : null}
-      <div className="flex max-h-64 flex-col gap-1 overflow-auto">
+      <div className="flex min-w-0 flex-col gap-1">
         {skills.length > 0 ? (
           skills.map((skill, index) => (
             <Button
@@ -2262,7 +2264,7 @@ function WebSlashSkillsTogglePanel({
       {panel.feedback ? (
         <WebSlashCommandFeedbackView feedback={panel.feedback} />
       ) : null}
-      <div className="flex max-h-64 flex-col gap-1 overflow-auto">
+      <div className="flex min-w-0 flex-col gap-1">
         {skills.length > 0 ? (
           skills.map((skill, index) => (
             <Button
@@ -2335,7 +2337,7 @@ function WebSlashTelegramAccessPanel({
       subtitle={`Select a pending request to ${panel.action}.`}
       onClose={onClose}
     >
-      <div className="flex max-h-64 flex-col gap-1 overflow-auto">
+      <div className="flex min-w-0 flex-col gap-1">
         {requests.length > 0 ? (
           requests.map((request, index) => (
             <Button
@@ -2395,7 +2397,7 @@ function WebSlashKeyValueRows({
   rows: Array<[string, string | number | null | undefined]>;
 }) {
   return (
-    <div className="grid max-h-72 grid-cols-[minmax(7rem,auto)_1fr] gap-x-4 gap-y-1 overflow-auto text-sm">
+    <div className="grid min-w-0 grid-cols-[minmax(7rem,auto)_1fr] gap-x-4 gap-y-1 text-sm">
       {rows.map(([label, value]) => (
         <Fragment key={label}>
           <span className="truncate font-medium text-foreground">{label}</span>
