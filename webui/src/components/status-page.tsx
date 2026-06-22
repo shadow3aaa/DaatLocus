@@ -5445,7 +5445,7 @@ function AgentChatPatchFileBlock({
         </div>
       ) : null}
       {file.lines.length > 0 ? (
-        <div className="min-w-0 max-w-full overflow-x-auto font-mono text-xs leading-5 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin]">
+        <div className="min-w-0 max-w-full overflow-hidden font-mono text-xs leading-5 [overflow-wrap:anywhere]">
           {file.lines.map((line, index) => (
             <AgentChatPatchDiffRow
               key={`patch-line-${index}`}
@@ -5474,7 +5474,7 @@ function AgentChatPatchDiffRow({
 }) {
   if (line.kind === "hunk_break") {
     return (
-      <div className="grid min-w-0 grid-cols-[var(--old-width)_var(--new-width)_1rem_minmax(0,1fr)] gap-1 px-2 py-0.5 text-muted-foreground/70 [--new-width:2.5rem] [--old-width:2.5rem] sm:min-w-max sm:gap-2 sm:px-3">
+      <div className="grid min-w-0 grid-cols-[var(--old-width)_var(--new-width)_1rem_minmax(0,1fr)] gap-1 px-2 py-0.5 text-muted-foreground/70 [--new-width:2.5rem] [--old-width:2.5rem] sm:gap-2 sm:px-3">
         <span>{"".padStart(oldWidth, " ")}</span>
         <span>{"".padStart(newWidth, " ")}</span>
         <span>⋮</span>
@@ -5496,7 +5496,7 @@ function AgentChatPatchDiffRow({
   return (
     <div
       className={cn(
-        "grid min-w-0 grid-cols-[var(--old-width)_var(--new-width)_1rem_minmax(0,1fr)] gap-1 px-2 py-0.5 sm:min-w-max sm:gap-2 sm:px-3",
+        "grid min-w-0 grid-cols-[var(--old-width)_var(--new-width)_1rem_minmax(0,1fr)] gap-1 px-2 py-0.5 sm:gap-2 sm:px-3",
         "[--new-width:2.5rem] [--old-width:2.5rem]",
         agentChatDiffRowToneClassName(line.kind),
       )}
@@ -5515,7 +5515,7 @@ function AgentChatPatchDiffRow({
       >
         {gutter}
       </span>
-      <span className="whitespace-pre-wrap break-words text-foreground/85 sm:whitespace-pre">
+      <span className="min-w-0 whitespace-pre-wrap break-words text-foreground/85 [overflow-wrap:anywhere]">
         <AgentChatHighlightedInline
           tokens={highlightedLine}
           fallback={line.text}
@@ -6418,12 +6418,12 @@ function AgentChatDiffBlockFile({
           <span className="text-destructive">-{file.removed_lines}</span>
         </span>
       </div>
-      <pre className="max-h-72 min-w-0 max-w-full overflow-auto whitespace-pre-wrap px-2 leading-5 [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin] sm:whitespace-pre sm:px-3">
+      <pre className="max-h-72 min-w-0 max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap break-words px-2 leading-5 [overflow-wrap:anywhere] [scrollbar-color:hsl(var(--muted-foreground)/0.35)_transparent] [scrollbar-width:thin] sm:px-3">
         {file.lines.map((line, lineIndex) => (
           <Fragment key={`${file.path}-legacy-diff-${lineIndex}`}>
             <span
               className={cn(
-                "inline-block min-w-full",
+                "inline-block w-full max-w-full whitespace-pre-wrap break-words align-top [overflow-wrap:anywhere]",
                 agentChatDiffRowToneClassName(line.kind),
               )}
             >
