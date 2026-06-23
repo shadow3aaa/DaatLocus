@@ -453,21 +453,31 @@ async fn handle_ipc_connection(
     state: Arc<SessionIpcServerState>,
     stream: &mut interprocess::local_socket::tokio::Stream,
 ) -> Result<()> {
-    let request = read_request(stream).await?;
+    let request = read_request(stream)
+        .await
+        .map_err(|err| miette!("read session IPC request failed: {err:?}"))?;
+    let request_id = request.request_id.clone();
+    let request_id_for_log = request_id.clone();
+    let request_kind = request.body.kind();
     if let Some(response) = validate_ipc_request(
         &request,
         &state.expected_session_id,
         &state.expected_ipc_token,
     ) {
-        write_response(stream, &response).await?;
+        write_response(stream, &response).await.map_err(|err| {
+            miette!(
+                "write session IPC validation response failed request_id={} request_kind={}: {err:?}",
+                request_id,
+                request_kind
+            )
+        })?;
         return Ok(());
     }
 
     if matches!(request.body, SessionIpcRequest::SubscribeDashboard) {
-        return stream_dashboard_snapshots(state.dashboard_rx.clone(), stream).await;
+        return stream_dashboard_snapshots(state.dashboard_rx.clone(), stream, &request_id).await;
     }
 
-    let request_id = request.request_id;
     let response = match request.body {
         SessionIpcRequest::Status => IpcResponseEnvelope::ok(
             request_id,
@@ -626,7 +636,13 @@ async fn handle_ipc_connection(
             IpcResponseEnvelope::ok(request_id, SessionIpcResponse::ShutdownAccepted)
         }
     };
-    write_response(stream, &response).await
+    write_response(stream, &response).await.map_err(|err| {
+        miette!(
+            "write session IPC response failed request_id={} request_kind={}: {err:?}",
+            request_id_for_log,
+            request_kind
+        )
+    })
 }
 
 fn validate_ipc_request(
@@ -1148,6 +1164,7 @@ fn drain_telegram_outbox(handle: &TelegramTransportStateHandle) -> Vec<PendingOu
 async fn stream_dashboard_snapshots(
     mut rx: watch::Receiver<DashboardState>,
     stream: &mut interprocess::local_socket::tokio::Stream,
+    request_id: &str,
 ) -> Result<()> {
     let initial = rx.borrow_and_update().clone();
     write_stream_event(
@@ -1156,7 +1173,13 @@ async fn stream_dashboard_snapshots(
             state: Box::new(initial),
         },
     )
-    .await?;
+    .await
+    .map_err(|err| {
+        miette!(
+            "write session IPC dashboard stream initial snapshot failed request_id={} request_kind=subscribe_dashboard: {err:?}",
+            request_id
+        )
+    })?;
     loop {
         match rx.changed().await {
             Ok(()) => {
@@ -1167,7 +1190,13 @@ async fn stream_dashboard_snapshots(
                         state: Box::new(snapshot),
                     },
                 )
-                .await?;
+                .await
+                .map_err(|err| {
+                    miette!(
+                        "write session IPC dashboard stream snapshot failed request_id={} request_kind=subscribe_dashboard: {err:?}",
+                        request_id
+                    )
+                })?;
             }
             Err(_) => {
                 write_stream_event(
@@ -1176,7 +1205,13 @@ async fn stream_dashboard_snapshots(
                         reason: "dashboard state channel closed".to_string(),
                     },
                 )
-                .await?;
+                .await
+                .map_err(|err| {
+                    miette!(
+                        "write session IPC dashboard stream close event failed request_id={} request_kind=subscribe_dashboard: {err:?}",
+                        request_id
+                    )
+                })?;
                 return Ok(());
             }
         }

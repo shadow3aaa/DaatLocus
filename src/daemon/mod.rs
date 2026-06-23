@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    io::Write,
     net::Ipv4Addr,
     path::{Path as StdPath, PathBuf},
     process::Stdio,
@@ -87,6 +88,8 @@ const SESSION_DIRECTORY_REMOVE_ATTEMPTS: usize = 5;
 const SESSION_DIRECTORY_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const DAEMON_MAIN_LOG: &str = "daat-locus.log";
 const DAEMON_STDERR_LOG: &str = "daemon-stderr.log";
+const SESSION_STDIO_LOG_PREFIX: &str = "session-";
+const SESSION_STDIO_LOG_SUFFIX: &str = "-stdio.log";
 pub const DAEMONIZE_ENV: &str = "DAAT_LOCUS_DAEMONIZE";
 const MAX_COMMAND_ATTACHMENTS: usize = 4;
 const MAX_COMMAND_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
@@ -1560,7 +1563,7 @@ async fn send_handler(
             }
         };
         return match client
-            .request(session_ipc::SessionIpcRequest::SubmitUserInput {
+            .request_without_response_timeout(session_ipc::SessionIpcRequest::SubmitUserInput {
                 origin: session_ipc::UserInputOrigin::CliSend,
                 text: message.to_string(),
                 attachments: Vec::new(),
@@ -1957,6 +1960,122 @@ fn signal_process(pid: u32, signal: Signal) -> bool {
         .unwrap_or(false)
 }
 
+fn session_stdio_log_file_name(session_id: &session::SessionId) -> String {
+    let safe_session_id = session_id
+        .as_str()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("{SESSION_STDIO_LOG_PREFIX}{safe_session_id}{SESSION_STDIO_LOG_SUFFIX}")
+}
+
+async fn session_stdio_log_path(session_id: &session::SessionId) -> PathBuf {
+    daat_locus_paths()
+        .await
+        .logs_file(&session_stdio_log_file_name(session_id))
+}
+
+async fn open_session_stdio_log(
+    session_id: &session::SessionId,
+) -> Result<(PathBuf, std::fs::File, std::fs::File)> {
+    let path = session_stdio_log_path(session_id).await;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            miette!(
+                "create session stdio log dir {} failed: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    {
+        let mut marker = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|err| miette!("open session stdio log {} failed: {err}", path.display()))?;
+        writeln!(
+            marker,
+            "\n--- session `{}` starting at {} ---",
+            session_id,
+            chrono::Utc::now().to_rfc3339()
+        )
+        .map_err(|err| {
+            miette!(
+                "write session stdio log marker {} failed: {err}",
+                path.display()
+            )
+        })?;
+    }
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| miette!("open session stdout log {} failed: {err}", path.display()))?;
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| miette!("open session stderr log {} failed: {err}", path.display()))?;
+    Ok((path, stdout, stderr))
+}
+
+fn spawn_session_exit_watcher(
+    sessions: session::SessionRegistry,
+    session_tokens: SessionTokenStore,
+    session_id: session::SessionId,
+    pid: u32,
+    mut child: std::process::Child,
+    stdio_log_path: PathBuf,
+) {
+    tokio::spawn(async move {
+        let wait_result = tokio::task::spawn_blocking(move || child.wait()).await;
+        match wait_result {
+            Ok(Ok(status)) if status.success() => {
+                tracing::info!(
+                    "session `{session_id}` pid {pid} exited successfully with status {status}; stdio_log={}",
+                    stdio_log_path.display()
+                );
+            }
+            Ok(Ok(status)) => {
+                tracing::warn!(
+                    "session `{session_id}` pid {pid} exited with status {status}; stdio_log={}",
+                    stdio_log_path.display()
+                );
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    "failed to wait for session `{session_id}` pid {pid}: {err}; stdio_log={}",
+                    stdio_log_path.display()
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "session `{session_id}` pid {pid} wait task failed: {err}; stdio_log={}",
+                    stdio_log_path.display()
+                );
+            }
+        }
+
+        if let Some(info) = sessions.get(&session_id)
+            && info.pid == Some(pid)
+            && info.status.is_process_backed()
+        {
+            session_tokens.write().remove(&session_id);
+            if let Err(err) = sessions.mark_dead(&session_id).await {
+                tracing::warn!(
+                    "failed to mark exited session `{session_id}` pid {pid} dead: {err:?}"
+                );
+            }
+        }
+    });
+}
+
 async fn spawn_session_process(
     sessions: session::SessionRegistry,
     session_tokens: SessionTokenStore,
@@ -1967,6 +2086,7 @@ async fn spawn_session_process(
     let ipc_token = session::generate_ipc_token();
     let binary = std::env::current_exe()
         .map_err(|err| miette!("resolve current executable failed: {err}"))?;
+    let (stdio_log_path, stdout_log, stderr_log) = open_session_stdio_log(&session_id).await?;
     let mut command = std::process::Command::new(binary);
     command
         .arg("--session-id")
@@ -1982,13 +2102,17 @@ async fn spawn_session_process(
         .arg("daemon")
         .arg("serve")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(stdout_log)
+        .stderr(stderr_log);
     crate::process_spawn::apply_no_window(&mut command);
     let child = command
         .spawn()
         .map_err(|err| miette!("spawn session process failed: {err}"))?;
     let pid = child.id();
+    tracing::info!(
+        "spawned session `{session_id}` pid {pid}; stdio_log={}",
+        stdio_log_path.display()
+    );
     session_tokens
         .write()
         .insert(session_id.clone(), ipc_token.clone());
@@ -1996,6 +2120,14 @@ async fn spawn_session_process(
     sessions
         .mark_starting(&session_id, pid, ipc_name.clone(), &ipc_token)
         .await?;
+    spawn_session_exit_watcher(
+        sessions.clone(),
+        session_tokens.clone(),
+        session_id.clone(),
+        pid,
+        child,
+        stdio_log_path,
+    );
 
     let client = session_ipc::SessionIpcClient::new(session_id.clone(), ipc_name, ipc_token)
         .with_timeout(Duration::from_secs(2));
@@ -2149,23 +2281,25 @@ fn settings_provider_summary(name: &str, provider: &ProviderConfig) -> SettingsP
             credential: credential_summary(github_token, None),
             auth_file: None,
         },
-        ProviderConfig::OpenaiCodexOauth {
-            auth_file,
-            base_url,
-        } => SettingsProviderSummary {
-            name: name.to_string(),
-            provider_type: "openai-codex-oauth",
-            base_url: Some(
-                base_url
-                    .clone()
-                    .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string()),
-            ),
-            credential: SettingsCredentialSummary {
-                status: SettingsCredentialStatus::OauthFile,
-                source: auth_file.clone(),
-            },
-            auth_file: auth_file.clone(),
-        },
+        ProviderConfig::OpenaiCodexOauth { base_url } => {
+            let auth_file = crate::providers::codex_oauth_auth_file(name)
+                .to_string_lossy()
+                .to_string();
+            SettingsProviderSummary {
+                name: name.to_string(),
+                provider_type: "openai-codex-oauth",
+                base_url: Some(
+                    base_url
+                        .clone()
+                        .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string()),
+                ),
+                credential: SettingsCredentialSummary {
+                    status: SettingsCredentialStatus::OauthFile,
+                    source: Some(auth_file.clone()),
+                },
+                auth_file: Some(auth_file),
+            }
+        }
         ProviderConfig::OpenaiCompatible {
             base_url, api_key, ..
         } => SettingsProviderSummary {
@@ -2849,9 +2983,12 @@ impl DaemonClient {
         mut stop_rx: oneshot::Receiver<()>,
     ) -> Result<()> {
         let request = self.websocket_request()?;
+        let connect_timeout = self.control_timeout;
 
         let (ws, _) = tokio::select! {
-            result = tokio_tungstenite::connect_async(request) => {
+            result = tokio::time::timeout(connect_timeout, tokio_tungstenite::connect_async(request)) => {
+                let result = result
+                    .map_err(|_| miette!("connect dashboard ws timed out after {}ms", connect_timeout.as_millis()))?;
                 result.map_err(|err| miette!("connect dashboard ws failed: {err}"))?
             }
             _ = &mut stop_rx => {
@@ -3318,6 +3455,17 @@ mod tests {
 
         assert_eq!(request.origin, session_ipc::UserInputOrigin::Tui);
         assert_eq!(request.session_id.as_deref(), Some("session-test"));
+    }
+
+    #[test]
+    fn session_stdio_log_file_name_sanitizes_session_id() {
+        let session_id = session::SessionId::from_string("../session:test".to_string())
+            .expect("non-empty session id");
+
+        assert_eq!(
+            session_stdio_log_file_name(&session_id),
+            "session-___session_test-stdio.log"
+        );
     }
 
     #[tokio::test]

@@ -96,6 +96,28 @@ pub enum SessionIpcRequest {
     },
 }
 
+impl SessionIpcRequest {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::StatusSummary => "status_summary",
+            Self::SubmitUserInput { .. } => "submit_user_input",
+            Self::DashboardCommand { .. } => "dashboard_command",
+            Self::DashboardAction { .. } => "dashboard_action",
+            Self::EnqueueTelegramEvent { .. } => "enqueue_telegram_event",
+            Self::DashboardSnapshot => "dashboard_snapshot",
+            Self::DashboardHistoryPage { .. } => "dashboard_history_page",
+            Self::DashboardInputHistory { .. } => "dashboard_input_history",
+            Self::DashboardHistoryCount => "dashboard_history_count",
+            Self::DrainTelegramOutbox => "drain_telegram_outbox",
+            Self::RecordTelegramDelivery { .. } => "record_telegram_delivery",
+            Self::RequeueTelegramOutbound { .. } => "requeue_telegram_outbound",
+            Self::SubscribeDashboard => "subscribe_dashboard",
+            Self::Shutdown { .. } => "shutdown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserInputOrigin {
@@ -307,15 +329,43 @@ impl SessionIpcClient {
             .map_err(|_| miette!("session IPC request timed out"))?
     }
 
+    pub async fn request_without_response_timeout(
+        &self,
+        body: SessionIpcRequest,
+    ) -> Result<SessionIpcResponse> {
+        let envelope = IpcRequestEnvelope::new(&self.session_id, self.ipc_token.clone(), body);
+        let request_id = envelope.request_id.clone();
+        let mut stream = tokio::time::timeout(self.timeout, async {
+            let mut stream = connect_local_socket(&self.ipc_name).await?;
+            write_json_frame(&mut stream, &envelope).await?;
+            Ok::<_, miette::Report>(stream)
+        })
+        .await
+        .map_err(|_| miette!("session IPC request connect/write timed out"))??;
+        let response: IpcResponseEnvelope = read_json_frame(&mut stream).await?;
+        if response.request_id != request_id {
+            return Err(miette!(
+                "session IPC response id mismatch: expected {}, got {}",
+                request_id,
+                response.request_id
+            ));
+        }
+        Ok(response.body)
+    }
+
     pub async fn subscribe_dashboard(&self) -> Result<LocalSocketStream> {
         let envelope = IpcRequestEnvelope::new(
             &self.session_id,
             self.ipc_token.clone(),
             SessionIpcRequest::SubscribeDashboard,
         );
-        let mut stream = connect_local_socket(&self.ipc_name).await?;
-        write_json_frame(&mut stream, &envelope).await?;
-        Ok(stream)
+        tokio::time::timeout(self.timeout, async {
+            let mut stream = connect_local_socket(&self.ipc_name).await?;
+            write_json_frame(&mut stream, &envelope).await?;
+            Ok::<_, miette::Report>(stream)
+        })
+        .await
+        .map_err(|_| miette!("session IPC dashboard subscribe connect/write timed out"))?
     }
 }
 
@@ -476,6 +526,19 @@ mod tests {
         assert_eq!(UserInputOrigin::CliSend.terminal_origin_label(), "cli_send");
     }
 
+    #[test]
+    fn session_ipc_request_kind_matches_wire_kind() {
+        assert_eq!(SessionIpcRequest::Status.kind(), "status");
+        assert_eq!(
+            SessionIpcRequest::DashboardSnapshot.kind(),
+            "dashboard_snapshot"
+        );
+        assert_eq!(
+            SessionIpcRequest::SubscribeDashboard.kind(),
+            "subscribe_dashboard"
+        );
+    }
+
     #[tokio::test]
     async fn ipc_json_frame_round_trips_request_envelope() {
         let (mut writer, mut reader) = duplex(4096);
@@ -583,5 +646,54 @@ mod tests {
             err.to_string().contains("response id mismatch"),
             "unexpected error: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn ipc_client_can_wait_for_long_response_without_response_timeout() {
+        let ipc_name = test_ipc_name();
+        let server = SessionIpcServer::bind(&ipc_name)
+            .await
+            .expect("bind IPC server");
+        let client = SessionIpcClient::new(fixed_session_id(), ipc_name, "ipc-token".to_string())
+            .with_timeout(Duration::from_millis(25));
+
+        let server_future = async {
+            let mut stream = server.accept().await.expect("accept IPC client");
+            let request = read_request(&mut stream).await.expect("read request");
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            write_response(
+                &mut stream,
+                &IpcResponseEnvelope::ok(
+                    &request.request_id,
+                    SessionIpcResponse::Submitted {
+                        event_id: "event-1".to_string(),
+                        reply_message: Some("done".to_string()),
+                        terminal_status: Some("resolved".to_string()),
+                    },
+                ),
+            )
+            .await
+            .expect("write delayed response");
+        };
+        let client_future =
+            client.request_without_response_timeout(SessionIpcRequest::SubmitUserInput {
+                origin: UserInputOrigin::CliSend,
+                text: "hello".to_string(),
+                attachments: Vec::new(),
+                wait_for_reply: true,
+            });
+        let (_, client_result) = tokio::join!(server_future, client_future);
+
+        match client_result.expect("client waits for delayed response") {
+            SessionIpcResponse::Submitted {
+                reply_message,
+                terminal_status,
+                ..
+            } => {
+                assert_eq!(reply_message.as_deref(), Some("done"));
+                assert_eq!(terminal_status.as_deref(), Some("resolved"));
+            }
+            _ => panic!("unexpected response"),
+        }
     }
 }

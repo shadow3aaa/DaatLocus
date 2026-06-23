@@ -17,7 +17,10 @@ use tokio::{
 
 use crate::daat_locus_paths::daat_locus_paths;
 
-use super::{DAEMON_MAIN_LOG, DAEMON_STDERR_LOG, ServerState};
+use super::{
+    DAEMON_MAIN_LOG, DAEMON_STDERR_LOG, SESSION_STDIO_LOG_PREFIX, SESSION_STDIO_LOG_SUFFIX,
+    ServerState,
+};
 
 const DEFAULT_LOG_LINE_LIMIT: usize = 500;
 const MAX_LOG_LINE_LIMIT: usize = 2_000;
@@ -144,7 +147,7 @@ pub(super) async fn read_handler(
 
 async fn log_sources() -> Vec<LogSourceEntry> {
     let paths = daat_locus_paths().await;
-    vec![
+    let mut sources = vec![
         log_source_entry(
             "daemon-main",
             "Daemon main log",
@@ -159,7 +162,40 @@ async fn log_sources() -> Vec<LogSourceEntry> {
             paths.logs_file(DAEMON_STDERR_LOG),
         )
         .await,
-    ]
+    ];
+    sources.extend(session_stdio_log_sources(paths.logs_dir()).await);
+    sources
+}
+
+async fn session_stdio_log_sources(log_dir: PathBuf) -> Vec<LogSourceEntry> {
+    let Ok(mut entries) = tokio::fs::read_dir(log_dir).await else {
+        return Vec::new();
+    };
+    let mut sources = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !file_name.starts_with(SESSION_STDIO_LOG_PREFIX)
+            || !file_name.ends_with(SESSION_STDIO_LOG_SUFFIX)
+        {
+            continue;
+        }
+        let session_label = &file_name
+            [SESSION_STDIO_LOG_PREFIX.len()..file_name.len() - SESSION_STDIO_LOG_SUFFIX.len()];
+        sources.push(
+            log_source_entry(
+                format!("session-stdio-{session_label}"),
+                format!("Session {session_label} stdio"),
+                "Session process stdout/stderr, including panic output.",
+                path,
+            )
+            .await,
+        );
+    }
+    sources.sort_by(|left, right| left.label.cmp(&right.label));
+    sources
 }
 
 async fn log_source_entry(
@@ -348,4 +384,32 @@ fn lines_from_bytes(buffer: &[u8], starts_mid_line: bool) -> Vec<String> {
     };
 
     text.lines().map(|line| line.to_string()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn session_stdio_log_sources_lists_session_stdio_files_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let log_dir = temp.path().to_path_buf();
+        tokio::fs::write(log_dir.join("session-abc-stdio.log"), b"panic\n")
+            .await
+            .expect("write session log");
+        tokio::fs::write(log_dir.join("session-abc-stderr.log"), b"old\n")
+            .await
+            .expect("write old log");
+        tokio::fs::write(log_dir.join("daat-locus.log"), b"main\n")
+            .await
+            .expect("write main log");
+
+        let sources = session_stdio_log_sources(log_dir).await;
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].id, "session-stdio-abc");
+        assert_eq!(sources[0].label, "Session abc stdio");
+        assert!(sources[0].exists);
+        assert!(sources[0].path.ends_with("session-abc-stdio.log"));
+    }
 }
