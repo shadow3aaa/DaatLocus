@@ -25,49 +25,18 @@ pub(crate) async fn daat_locus_loop(
     enqueue_app_notice_work(context);
     sync_driver_frontier_from_sources(context);
     if context.active_runtime_turn {
-        // Detect a stale flag caused by select! cancellation. If the turn has
-        // exceeded request_timeout + 120s but active_runtime_turn is still true,
-        // daat_locus_loop was likely cancelled before resetting it.
-        let stale_threshold = Duration::from_secs(
-            context
-                .config
-                .main_model_config()
-                .request_timeout_secs()
-                .saturating_add(120),
-        );
-        let is_stale = context
-            .runtime_turn_started_at
-            .map(|started| started.elapsed() > stale_threshold)
-            .unwrap_or(false);
-        if is_stale {
-            tracing::warn!(
-                elapsed_secs = context
-                    .runtime_turn_started_at
-                    .map(|t| t.elapsed().as_secs())
-                    .unwrap_or(0),
-                threshold_secs = stale_threshold.as_secs(),
-                "stale active_runtime_turn detected (likely cancelled by tokio::select!); resetting"
-            );
-            reset_cancelled_runtime_turn(context, "stale active_runtime_turn");
-            // fall through to normal processing
-        } else {
-            let phase = context
+        tracing::warn!(
+            elapsed_secs = context
+                .runtime_turn_started_at
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0),
+            phase = context
                 .active_runtime_phase
                 .map(|phase| phase.label())
-                .unwrap_or("running");
-            set_runtime_status_only(
-                Some(tx),
-                format!("processing: runtime turn running / {phase}"),
-            );
-            sync_dashboard_state(
-                context,
-                tx,
-                sleep_status,
-                Some(cycle_started_at.elapsed().as_millis()),
-            );
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            return;
-        }
+                .unwrap_or("running"),
+            "stale active_runtime_turn detected at loop entry; resetting cancelled turn"
+        );
+        reset_cancelled_runtime_turn(context, "stale active_runtime_turn at loop entry");
     }
     let pending_work_count = context.pending_work.pending_count();
     if pending_work_count == 0 {
