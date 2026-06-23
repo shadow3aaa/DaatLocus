@@ -1712,37 +1712,28 @@ async fn prompt_provider(
                     crate::tr!(locale, "config.codex_oauth_device_login"),
                     crate::tr!(locale, "config.codex_oauth_import_local_codex"),
                     crate::tr!(locale, "config.codex_oauth_import_codex_auth_file"),
-                    crate::tr!(locale, "config.codex_oauth_auth_file"),
                 ],
                 0,
             )?;
-            let default_auth_file = codex_oauth_auth_file(&name, None);
-            let auth_file = if auth_method == 0 {
+            let default_auth_file = codex_oauth_auth_file(&name);
+            if auth_method == 0 {
                 let result = run_codex_oauth_browser_flow(locale, |prompt, lines| {
                     ui.status(&prompt, &lines)
                 })
                 .await;
                 let tokens = result?;
                 write_codex_oauth_tokens(&default_auth_file, &tokens).await?;
-                Some(default_auth_file.to_string_lossy().to_string())
             } else if auth_method == 1 {
                 let result =
                     run_codex_oauth_device_flow(locale, |prompt, lines| ui.status(&prompt, &lines))
                         .await;
                 let tokens = result?;
                 write_codex_oauth_tokens(&default_auth_file, &tokens).await?;
-                Some(default_auth_file.to_string_lossy().to_string())
             } else if auth_method == 2 {
                 let source_auth_file = codex_cli_auth_file();
-                Some(
-                    import_codex_cli_auth_file_for_provider(
-                        ui,
-                        &source_auth_file,
-                        &default_auth_file,
-                    )
-                    .await?,
-                )
-            } else if auth_method == 3 {
+                import_codex_cli_auth_file_for_provider(ui, &source_auth_file, &default_auth_file)
+                    .await?;
+            } else {
                 let default_codex_auth_file = codex_cli_auth_file();
                 let default_codex_auth_file_display =
                     default_codex_auth_file.to_string_lossy().to_string();
@@ -1751,22 +1742,9 @@ async fn prompt_provider(
                     Some(&default_codex_auth_file_display),
                 )?;
                 let source_auth_file = expand_user_path(&source);
-                Some(
-                    import_codex_cli_auth_file_for_provider(
-                        ui,
-                        &source_auth_file,
-                        &default_auth_file,
-                    )
-                    .await?,
-                )
-            } else {
-                let default_auth_file_display = default_auth_file.to_string_lossy().to_string();
-                let path = ui.text(
-                    &crate::tr!(locale, "config.codex_oauth_auth_file_path"),
-                    Some(&default_auth_file_display),
-                )?;
-                Some(path)
-            };
+                import_codex_cli_auth_file_for_provider(ui, &source_auth_file, &default_auth_file)
+                    .await?;
+            }
             let use_custom_url =
                 ui.confirm(&crate::tr!(locale, "config.custom_base_url"), false)?;
             let base_url = if use_custom_url {
@@ -1775,10 +1753,7 @@ async fn prompt_provider(
             } else {
                 None
             };
-            ProviderConfig::OpenaiCodexOauth {
-                auth_file,
-                base_url,
-            }
+            ProviderConfig::OpenaiCodexOauth { base_url }
         }
         ProviderKind::GithubCopilot => {
             let auth_method = ui.select(
@@ -2101,14 +2076,11 @@ async fn fetch_model_ids(provider_name: &str, provider: &ProviderConfig) -> Vec<
             let api_key = resolve_env_reference(api_key);
             fetch_openai_models(base, &api_key).await
         }
-        ProviderConfig::OpenaiCodexOauth {
-            auth_file,
-            base_url,
-        } => {
+        ProviderConfig::OpenaiCodexOauth { base_url } => {
             let base = base_url
                 .as_deref()
                 .unwrap_or(codex_oauth_default_base_url());
-            fetch_codex_oauth_models(provider_name, auth_file.as_deref(), base).await
+            fetch_codex_oauth_models(provider_name, base).await
         }
         ProviderConfig::OpenaiCompatible {
             base_url, api_key, ..
@@ -2311,12 +2283,8 @@ fn extract_context_value(key: &str, val: &serde_json::Value) -> Option<usize> {
     None
 }
 
-async fn fetch_codex_oauth_models(
-    provider_name: &str,
-    auth_file: Option<&str>,
-    base_url: &str,
-) -> Vec<DiscoveredModel> {
-    let auth_file = codex_oauth_auth_file(provider_name, auth_file);
+async fn fetch_codex_oauth_models(provider_name: &str, base_url: &str) -> Vec<DiscoveredModel> {
+    let auth_file = codex_oauth_auth_file(provider_name);
     let access = match codex_oauth_access_from_file(&auth_file).await {
         Ok(access) => access,
         Err(err) => {
@@ -3119,21 +3087,11 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
                 let masked = mask_secret(github_token);
                 ("github-copilot", vec![("github_token", masked)])
             }
-            ProviderConfig::OpenaiCodexOauth {
-                auth_file,
-                base_url,
-            } => {
+            ProviderConfig::OpenaiCodexOauth { base_url } => {
                 let url = base_url
                     .as_deref()
                     .unwrap_or(codex_oauth_default_base_url());
-                let auth_file = auth_file.as_deref().unwrap_or("<default>");
-                (
-                    "openai-codex-oauth",
-                    vec![
-                        ("base_url", url.to_string()),
-                        ("auth_file", auth_file.to_string()),
-                    ],
-                )
+                ("openai-codex-oauth", vec![("base_url", url.to_string())])
             }
             ProviderConfig::OpenaiCompatible {
                 base_url, api_key, ..
@@ -3213,12 +3171,12 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
         push_config_subfield(
             &mut lines,
             "request_timeout",
-            format!("{}s", model.request_timeout_secs),
+            format!("{}s", model.request_timeout_secs()),
         );
         push_config_subfield(
             &mut lines,
             "stream_idle_timeout",
-            format!("{}s", model.stream_idle_timeout_secs),
+            format!("{}s", model.stream_idle_timeout_secs()),
         );
         push_config_subfield(
             &mut lines,
@@ -3774,10 +3732,7 @@ mod tests {
 
     #[test]
     fn codex_oauth_reasoning_options_use_responses_effort_scale() {
-        let provider = ProviderConfig::OpenaiCodexOauth {
-            auth_file: None,
-            base_url: None,
-        };
+        let provider = ProviderConfig::OpenaiCodexOauth { base_url: None };
         let options = reasoning_options_for_prompt(&provider, "gpt-5.5", None);
 
         assert_eq!(

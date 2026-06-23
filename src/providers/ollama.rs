@@ -24,6 +24,7 @@ use crate::{
     providers::io::{
         default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
         looks_like_vision_unsupported_error, non_empty_string, parse_retry_after_seconds,
+        read_response_text_with_timeout, send_request_for_streaming_response,
         should_retry_request_without_thinking_budget, summarize_agent_turn_request,
         summarize_prompt_request, truncate_for_error,
     },
@@ -130,6 +131,7 @@ pub struct OllamaClient {
     rpm: Option<usize>,
     request_rate_limiter: Option<RequestRateLimiter>,
     keep_alive: Option<String>,
+    request_timeout: Duration,
     stream_idle_timeout: Duration,
     effective_context_window_tokens: usize,
     auto_compact_threshold_tokens: usize,
@@ -149,7 +151,7 @@ impl OllamaClient {
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
         let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
         let client = reqwest::Client::builder()
-            .timeout(request_timeout)
+            .connect_timeout(Duration::from_secs(15))
             .build()
             .expect("failed to build ollama http client");
         let context_window_tokens = model_config.context_window_tokens();
@@ -192,6 +194,7 @@ impl OllamaClient {
                 model_config.rpm(),
             ),
             keep_alive: keep_alive.map(|s| s.to_string()).filter(|s| !s.is_empty()),
+            request_timeout,
             stream_idle_timeout,
             effective_context_window_tokens,
             auto_compact_threshold_tokens,
@@ -319,9 +322,14 @@ impl OllamaClient {
             if let Some(auth) = self.auth_header() {
                 req = req.header("Authorization", &auth);
             }
-            let response = req.send().await.map_err(|err| {
-                format_request_error("ollama chat request failed", &url, request_context, &err)
-            })?;
+            let response = send_request_for_streaming_response(
+                req,
+                self.stream_idle_timeout,
+                "ollama chat request failed",
+                &url,
+                request_context,
+            )
+            .await?;
 
             let status = response.status();
 
@@ -331,7 +339,14 @@ impl OllamaClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok())
                     .and_then(parse_retry_after_seconds);
-                let body = response.text().await.unwrap_or_default();
+                let body = read_response_text_with_timeout(
+                    response,
+                    self.stream_idle_timeout,
+                    "ollama 429 response body read failed",
+                    &url,
+                    request_context,
+                )
+                .await?;
                 if rate_limit_attempt >= MAX_429_RETRIES {
                     return Err(miette!(
                         "ollama api returned HTTP 429 after {MAX_429_RETRIES} retries: {}",
@@ -354,7 +369,14 @@ impl OllamaClient {
             }
 
             if status.is_server_error() {
-                let body = response.text().await.unwrap_or_default();
+                let body = read_response_text_with_timeout(
+                    response,
+                    self.stream_idle_timeout,
+                    "ollama 5xx response body read failed",
+                    &url,
+                    request_context,
+                )
+                .await?;
                 if transient_attempt >= MAX_5XX_RETRIES {
                     return Err(miette!(
                         "ollama api returned HTTP {status} after {MAX_5XX_RETRIES} retries: {}",
@@ -374,10 +396,14 @@ impl OllamaClient {
                 continue;
             }
 
-            let body = response
-                .text()
-                .await
-                .map_err(|err| miette!("ollama response body read failed: {err}"))?;
+            let body = read_response_text_with_timeout(
+                response,
+                self.stream_idle_timeout,
+                "ollama response body read failed",
+                &url,
+                request_context,
+            )
+            .await?;
 
             if !status.is_success() {
                 return Err(miette!(
@@ -473,14 +499,14 @@ impl OllamaClient {
         if let Some(auth) = self.auth_header() {
             req = req.header("Authorization", &auth);
         }
-        req.send().await.map_err(|err| {
-            format_request_error(
-                "ollama chat stream request failed",
-                &url,
-                request_context,
-                &err,
-            )
-        })
+        send_request_for_streaming_response(
+            req,
+            self.request_timeout,
+            "ollama chat stream request failed",
+            &url,
+            request_context,
+        )
+        .await
     }
 
     async fn call_ollama_stream(
@@ -491,6 +517,7 @@ impl OllamaClient {
         request: &AgentTurnRequest,
     ) -> Result<AgentTurnStreamResult> {
         let request_context = summarize_agent_turn_request(request, Some(budget));
+        let url = self.chat_url();
         let allowed_tool_names: HashSet<String> =
             request.tools.iter().map(|t| t.name.clone()).collect();
 
@@ -515,7 +542,14 @@ impl OllamaClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok())
                     .and_then(parse_retry_after_seconds);
-                let body = response.text().await.unwrap_or_default();
+                let body = read_response_text_with_timeout(
+                    response,
+                    self.request_timeout,
+                    "ollama stream 429 response body read failed",
+                    &url,
+                    &request_context,
+                )
+                .await?;
                 if rate_limit_attempt >= MAX_429_RETRIES {
                     return Err(miette!(
                         "ollama stream: api returned HTTP 429 after {MAX_429_RETRIES} retries: {}",
@@ -538,7 +572,14 @@ impl OllamaClient {
             }
 
             if status.is_server_error() {
-                let body = response.text().await.unwrap_or_default();
+                let body = read_response_text_with_timeout(
+                    response,
+                    self.request_timeout,
+                    "ollama stream 5xx response body read failed",
+                    &url,
+                    &request_context,
+                )
+                .await?;
                 if transient_attempt >= MAX_5XX_RETRIES {
                     return Err(miette!(
                         "ollama stream: api returned HTTP {status} after {MAX_5XX_RETRIES} retries: {}",
@@ -559,7 +600,14 @@ impl OllamaClient {
             }
 
             if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
+                let body = read_response_text_with_timeout(
+                    response,
+                    self.request_timeout,
+                    "ollama stream error response body read failed",
+                    &url,
+                    &request_context,
+                )
+                .await?;
 
                 if looks_like_context_window_error(&body) {
                     return Err(ContextBudgetExceededError::for_request(
@@ -640,6 +688,11 @@ impl OllamaClient {
         let mut last_reasoning_progress_emit_at = Instant::now();
         let mut last_reasoning_progress_char_len = 0usize;
         let mut buffer = String::new();
+        let url = self.chat_url();
+        let stream_request_context = [
+            format!("model={}", self.model),
+            "phase=ollama_stream".to_string(),
+        ];
 
         let bytes_stream = response.bytes_stream();
         futures_util::pin_mut!(bytes_stream);
@@ -652,14 +705,20 @@ impl OllamaClient {
                         "ollama streaming response stalled for over {}s (model={}, url={})",
                         self.stream_idle_timeout.as_secs(),
                         self.model,
-                        self.chat_url()
+                        url
                     )
                 })?;
             let Some(chunk) = next_chunk else {
                 break;
             };
-            let chunk =
-                chunk.map_err(|err| miette!("ollama streaming chunk read failed: {err}"))?;
+            let chunk = chunk.map_err(|err| {
+                format_request_error(
+                    "ollama streaming chunk read failed",
+                    &url,
+                    &stream_request_context,
+                    &err,
+                )
+            })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(line_end) = buffer.find('\n') {

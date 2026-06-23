@@ -17,6 +17,7 @@ use crate::{
 
 const CONFIG_FILE_NAME: &str = "config.toml";
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: i64 = 95;
+const DEFAULT_STREAM_IDLE_TIMEOUT_SECS: u64 = 15 * 60;
 
 pub fn normalize_provider_base_url(base_url: &str) -> String {
     base_url.trim().trim_end_matches('/').to_string()
@@ -56,8 +57,6 @@ pub enum ProviderConfig {
         github_token: String,
     },
     OpenaiCodexOauth {
-        #[serde(default)]
-        auth_file: Option<String>,
         #[serde(default)]
         base_url: Option<String>,
     },
@@ -131,7 +130,7 @@ impl Default for ModelConfig {
             thinking_budget: None,
             rpm: None,
             request_timeout_secs: 300,
-            stream_idle_timeout_secs: 45,
+            stream_idle_timeout_secs: DEFAULT_STREAM_IDLE_TIMEOUT_SECS,
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             auto_compact_token_limit: None,
             effective_context_window_percent: DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
@@ -158,7 +157,8 @@ impl ModelConfig {
     }
 
     pub fn stream_idle_timeout_secs(&self) -> u64 {
-        self.stream_idle_timeout_secs.max(1)
+        self.stream_idle_timeout_secs
+            .max(DEFAULT_STREAM_IDLE_TIMEOUT_SECS)
     }
 
     pub fn context_window_tokens(&self) -> usize {
@@ -528,8 +528,8 @@ pub async fn load_config() -> Result<Config, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, ModelConfig, ProviderConfig, ThinkingBudget, normalize_provider_base_url,
-        resolve_env_reference,
+        Config, DEFAULT_STREAM_IDLE_TIMEOUT_SECS, ModelConfig, ProviderConfig, ThinkingBudget,
+        normalize_provider_base_url, resolve_env_reference,
     };
     use crate::sandbox::StrongFilesystemSandboxMode;
 
@@ -724,6 +724,31 @@ enabled = false
     }
 
     #[test]
+    fn codex_oauth_config_ignores_auth_file_field() {
+        let config: Config = toml::from_str(
+            r#"
+main_model = "default"
+
+[providers.codex-oauth]
+type = "openai-codex-oauth"
+auth_file = 'C:\Users\example\.daat-locus\config\old.json'
+
+[models.default]
+provider = "codex-oauth"
+model_id = "gpt-5.5"
+"#,
+        )
+        .expect("parse config");
+
+        assert!(matches!(
+            config.providers["codex-oauth"],
+            ProviderConfig::OpenaiCodexOauth { .. }
+        ));
+        let serialized = toml::to_string_pretty(&config).expect("serialize config");
+        assert!(!serialized.contains("auth_file"));
+    }
+
+    #[test]
     fn thinking_budget_preserves_configured_string() {
         let config: Config = toml::from_str(
             r#"
@@ -801,6 +826,19 @@ thinking_budget = "xhigh"
         assert_eq!(model.effective_context_window_tokens(), 100_000);
         assert_eq!(model.auto_compact_token_limit(), 100_000);
         assert_eq!(model.reserved_output_tokens(), 0);
+    }
+
+    #[test]
+    fn stream_idle_timeout_has_long_reasoning_floor() {
+        let model = ModelConfig {
+            stream_idle_timeout_secs: 45,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            model.stream_idle_timeout_secs(),
+            DEFAULT_STREAM_IDLE_TIMEOUT_SECS
+        );
     }
 
     #[cfg(unix)]

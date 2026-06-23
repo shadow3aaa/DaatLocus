@@ -10,7 +10,8 @@ use tracing::warn;
 
 use super::io::{
     default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
-    non_empty_string, normalize_sse_buffer, parse_retry_after_seconds, take_next_sse_event,
+    non_empty_string, normalize_sse_buffer, parse_retry_after_seconds,
+    read_response_text_with_timeout, send_request_for_streaming_response, take_next_sse_event,
     truncate_for_error, truncate_for_json_error,
 };
 use super::payload::{flatten_tool_result_as_assistant_text, image_part_data_url};
@@ -34,6 +35,7 @@ pub(crate) struct ResponsesCompatibleClient {
     model: String,
     thinking_budget: Option<String>,
     rpm: Option<usize>,
+    request_timeout: Duration,
     stream_idle_timeout: Duration,
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
@@ -54,7 +56,7 @@ impl ResponsesCompatibleClient {
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
         let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
         let client = reqwest::Client::builder()
-            .timeout(request_timeout)
+            .connect_timeout(Duration::from_secs(15))
             .build()
             .expect("failed to build responses-compatible http client");
         let context_window_tokens = model_config.context_window_tokens();
@@ -76,6 +78,7 @@ impl ResponsesCompatibleClient {
                 .thinking_budget()
                 .map(|budget| budget.as_str().to_string()),
             rpm: model_config.rpm(),
+            request_timeout,
             stream_idle_timeout,
             context_window_tokens,
             effective_context_window_tokens,
@@ -144,21 +147,19 @@ impl ResponsesCompatibleClient {
         let mut transient_attempt = 0usize;
         loop {
             self.wait_for_request_slot(request_context).await;
-            let response = self
+            let request = self
                 .client
                 .post(&url)
                 .bearer_auth(&self.api_key)
-                .json(payload)
-                .send()
-                .await
-                .map_err(|err| {
-                    format_request_error(
-                        "responses-compatible request failed",
-                        &url,
-                        request_context,
-                        &err,
-                    )
-                })?;
+                .json(payload);
+            let response = send_request_for_streaming_response(
+                request,
+                self.request_timeout,
+                "responses-compatible request failed",
+                &url,
+                request_context,
+            )
+            .await?;
 
             if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 let retry_after = response
@@ -166,10 +167,14 @@ impl ResponsesCompatibleClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok())
                     .and_then(parse_retry_after_seconds);
-                let body = response
-                    .text()
-                    .await
-                    .map_err(|err| miette!("responses-compatible body read failed: {err}"))?;
+                let body = read_response_text_with_timeout(
+                    response,
+                    self.request_timeout,
+                    "responses-compatible 429 body read failed",
+                    &url,
+                    request_context,
+                )
+                .await?;
 
                 if rate_limit_attempt >= MAX_429_RETRIES {
                     return Err(miette!(
@@ -196,10 +201,14 @@ impl ResponsesCompatibleClient {
 
             if response.status().is_server_error() {
                 let status = response.status();
-                let body = response
-                    .text()
-                    .await
-                    .map_err(|err| miette!("responses-compatible body read failed: {err}"))?;
+                let body = read_response_text_with_timeout(
+                    response,
+                    self.request_timeout,
+                    "responses-compatible 5xx body read failed",
+                    &url,
+                    request_context,
+                )
+                .await?;
 
                 if transient_attempt >= MAX_5XX_RETRIES {
                     return Err(miette!(
@@ -253,6 +262,10 @@ impl ResponsesCompatibleClient {
         let mut last_reasoning_progress_emit_at = Instant::now();
         let mut last_reasoning_progress_char_len = 0usize;
         let mut stream = response.bytes_stream();
+        let stream_request_context = [
+            format!("model={}", self.model),
+            "phase=response_stream".to_string(),
+        ];
 
         use futures_util::StreamExt;
 
@@ -270,8 +283,14 @@ impl ResponsesCompatibleClient {
             let Some(chunk) = next_chunk else {
                 break;
             };
-            let chunk =
-                chunk.map_err(|err| miette!("responses-compatible stream read failed: {err}"))?;
+            let chunk = chunk.map_err(|err| {
+                format_request_error(
+                    "responses-compatible stream read failed",
+                    &url,
+                    &stream_request_context,
+                    &err,
+                )
+            })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             normalize_sse_buffer(&mut buffer);
 
@@ -444,10 +463,15 @@ impl Llm for ResponsesCompatibleClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .map_err(|err| miette!("responses-compatible body read failed: {err}"))?;
+            let url = self.url();
+            let body = read_response_text_with_timeout(
+                response,
+                self.request_timeout,
+                "responses-compatible body read failed",
+                &url,
+                &request_context,
+            )
+            .await?;
             return Err(miette!(
                 "responses-compatible returned HTTP {}: {}",
                 status,
@@ -496,10 +520,15 @@ impl Llm for ResponsesCompatibleClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .map_err(|err| miette!("responses-compatible body read failed: {err}"))?;
+            let url = self.url();
+            let body = read_response_text_with_timeout(
+                response,
+                self.request_timeout,
+                "responses-compatible body read failed",
+                &url,
+                &request_context,
+            )
+            .await?;
             if looks_like_context_window_error(&body) {
                 return Err(ContextBudgetExceededError::for_request(
                     "agent turn",
@@ -530,10 +559,15 @@ impl Llm for ResponsesCompatibleClient {
                         .parse_responses_stream(Some(context), response, true)
                         .await;
                 }
-                let body = response
-                    .text()
-                    .await
-                    .map_err(|err| miette!("responses-compatible body read failed: {err}"))?;
+                let url = self.url();
+                let body = read_response_text_with_timeout(
+                    response,
+                    self.request_timeout,
+                    "responses-compatible body read failed",
+                    &url,
+                    &request_context,
+                )
+                .await?;
                 return Err(miette!(
                     "responses-compatible returned HTTP {}: {}",
                     status,

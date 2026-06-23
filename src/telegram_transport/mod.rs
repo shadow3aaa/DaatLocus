@@ -21,6 +21,10 @@ use crate::{
     telegram_acl::{AccessDecision, TelegramAclHandle},
 };
 
+const TELEGRAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const TELEGRAM_FILE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const TELEGRAM_LONG_POLL_TIMEOUT_GRACE: Duration = Duration::from_secs(10);
+
 #[async_trait]
 pub trait TelegramInputRouter: Send + Sync {
     async fn route_telegram_event(&self, event: TelegramIncomingEvent) -> Result<()>;
@@ -74,6 +78,7 @@ impl TelegramDeliveryClient {
         let response = self
             .client
             .post(self.endpoint("sendMessage"))
+            .timeout(TELEGRAM_REQUEST_TIMEOUT)
             .json(&serde_json::json!({
                 "chat_id": chat_id,
                 "text": render_markdown_as_telegram_html(text),
@@ -346,6 +351,7 @@ impl TelegramTransport {
         let response = self
             .client
             .post(url)
+            .timeout(self.get_updates_timeout())
             .json(&serde_json::json!({
                 "offset": self.offset,
                 "timeout": self.config.poll_timeout_secs,
@@ -373,10 +379,16 @@ impl TelegramTransport {
         }
     }
 
+    fn get_updates_timeout(&self) -> Duration {
+        Duration::from_secs(self.config.poll_timeout_secs.max(1))
+            .saturating_add(TELEGRAM_LONG_POLL_TIMEOUT_GRACE)
+    }
+
     async fn get_me(&self) -> Result<TelegramBotProfile> {
         let response = self
             .client
             .post(self.endpoint("getMe"))
+            .timeout(TELEGRAM_REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|err| miette!("telegram getMe request failed: {}", err.without_url()))?
@@ -403,6 +415,7 @@ impl TelegramTransport {
         let response = self
             .client
             .post(self.endpoint("setMyCommands"))
+            .timeout(TELEGRAM_REQUEST_TIMEOUT)
             .json(&serde_json::json!({
                 "commands": commands,
             }))
@@ -499,6 +512,7 @@ impl TelegramTransport {
         let response = self
             .client
             .post(self.endpoint("getFile"))
+            .timeout(TELEGRAM_REQUEST_TIMEOUT)
             .json(&serde_json::json!({ "file_id": file_id }))
             .send()
             .await
@@ -528,6 +542,7 @@ impl TelegramTransport {
                 "https://api.telegram.org/file/bot{}/{}",
                 self.config.bot_token, file_path
             ))
+            .timeout(TELEGRAM_FILE_DOWNLOAD_TIMEOUT)
             .send()
             .await
             .map_err(|err| {
@@ -559,6 +574,7 @@ impl TelegramTransport {
         let response = self
             .client
             .post(url)
+            .timeout(TELEGRAM_REQUEST_TIMEOUT)
             .json(&serde_json::json!({
                 "chat_id": chat_id,
                 "text": render_markdown_as_telegram_html(text),
@@ -652,6 +668,7 @@ impl TelegramLiveDraftClient {
         let response = self
             .client
             .post(self.endpoint("sendMessageDraft"))
+            .timeout(TELEGRAM_REQUEST_TIMEOUT)
             .json(&serde_json::json!({
                 "chat_id": chat_id,
                 "draft_id": draft_id,

@@ -36,8 +36,9 @@ use crate::{
 
 use super::{
     default_rate_limit_backoff, format_request_error, looks_like_context_window_error,
-    non_empty_string, shared_request_rate_limiter, summarize_agent_turn_request,
-    summarize_prompt_request, take_next_sse_event, truncate_for_error, truncate_for_json_error,
+    non_empty_string, read_response_text_with_timeout, send_request_for_streaming_response,
+    shared_request_rate_limiter, summarize_agent_turn_request, summarize_prompt_request,
+    take_next_sse_event, truncate_for_error, truncate_for_json_error,
 };
 
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -75,6 +76,7 @@ struct CodexResponsesClient {
     model: String,
     thinking_budget: Option<String>,
     rpm: Option<usize>,
+    request_timeout: Duration,
     stream_idle_timeout: Duration,
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
@@ -167,7 +169,7 @@ impl CodexResponsesClient {
         let base_url = crate::config::normalize_provider_base_url(base_url);
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
         let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
-        let client = codex_http_client_builder(request_timeout)
+        let client = codex_responses_http_client_builder()
             .build()
             .expect("failed to build Codex Responses http client");
         let context_window_tokens = model_config.context_window_tokens();
@@ -194,6 +196,7 @@ impl CodexResponsesClient {
                 .thinking_budget()
                 .map(|budget| budget.as_str().to_string()),
             rpm: model_config.rpm(),
+            request_timeout,
             stream_idle_timeout,
             context_window_tokens,
             effective_context_window_tokens,
@@ -309,14 +312,14 @@ impl CodexResponsesClient {
                     .header(CODEX_THREAD_ID_HEADER, &identity.thread_id)
                     .header(CODEX_WINDOW_ID_HEADER, &identity.window_id);
             }
-            let response = request.json(payload).send().await.map_err(|err| {
-                format_request_error(
-                    "Codex Responses request failed",
-                    &url,
-                    request_context,
-                    &err,
-                )
-            })?;
+            let response = send_request_for_streaming_response(
+                request.json(payload),
+                self.request_timeout,
+                "Codex Responses request failed",
+                &url,
+                request_context,
+            )
+            .await?;
 
             if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 let retry_after = response
@@ -324,10 +327,14 @@ impl CodexResponsesClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok())
                     .and_then(super::parse_retry_after_seconds);
-                let body = response
-                    .text()
-                    .await
-                    .map_err(|err| miette!("Codex Responses body read failed: {err}"))?;
+                let body = read_response_text_with_timeout(
+                    response,
+                    self.request_timeout,
+                    "Codex Responses 429 body read failed",
+                    &url,
+                    request_context,
+                )
+                .await?;
 
                 if rate_limit_attempt >= MAX_429_RETRIES {
                     return Err(miette!(
@@ -354,10 +361,14 @@ impl CodexResponsesClient {
 
             if response.status().is_server_error() {
                 let status = response.status();
-                let body = response
-                    .text()
-                    .await
-                    .map_err(|err| miette!("Codex Responses body read failed: {err}"))?;
+                let body = read_response_text_with_timeout(
+                    response,
+                    self.request_timeout,
+                    "Codex Responses 5xx body read failed",
+                    &url,
+                    request_context,
+                )
+                .await?;
 
                 if transient_attempt >= MAX_5XX_RETRIES {
                     return Err(miette!(
@@ -407,10 +418,15 @@ impl CodexResponsesClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .map_err(|err| miette!("Codex Responses body read failed: {err}"))?;
+            let url = self.url();
+            let body = read_response_text_with_timeout(
+                response,
+                self.request_timeout,
+                "Codex Responses body read failed",
+                &url,
+                &request_context,
+            )
+            .await?;
             if looks_like_context_window_error(&body) {
                 return Err(ContextBudgetExceededError::for_request(
                     "prompt request",
@@ -482,10 +498,15 @@ impl CodexResponsesClient {
                     .parse_responses_stream(Some(context), response, true)
                     .await;
             }
-            let body = response
-                .text()
-                .await
-                .map_err(|err| miette!("Codex Responses body read failed: {err}"))?;
+            let url = self.url();
+            let body = read_response_text_with_timeout(
+                response,
+                self.request_timeout,
+                "Codex Responses body read failed",
+                &url,
+                &request_context,
+            )
+            .await?;
             if looks_like_context_window_error(&body) {
                 return Err(ContextBudgetExceededError::for_request(
                     "agent turn",
@@ -546,6 +567,10 @@ impl CodexResponsesClient {
         let mut last_reasoning_progress_emit_at = Instant::now();
         let mut last_reasoning_progress_char_len = 0usize;
         let mut stream = response.bytes_stream();
+        let stream_request_context = [
+            format!("model={}", self.model),
+            "phase=response_stream".to_string(),
+        ];
 
         while !completed {
             let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
@@ -561,8 +586,14 @@ impl CodexResponsesClient {
             let Some(chunk) = next_chunk else {
                 break;
             };
-            let chunk =
-                chunk.map_err(|err| miette!("Codex Responses stream read failed: {err}"))?;
+            let chunk = chunk.map_err(|err| {
+                format_request_error(
+                    "Codex Responses stream read failed",
+                    &url,
+                    &stream_request_context,
+                    &err,
+                )
+            })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             super::normalize_sse_buffer(&mut buffer);
 
@@ -728,14 +759,21 @@ fn codex_http_client_builder(timeout: Duration) -> reqwest::ClientBuilder {
         .tcp_keepalive(Duration::from_secs(CODEX_HTTP_TCP_KEEPALIVE_SECS))
 }
 
+fn codex_responses_http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .pool_idle_timeout(Duration::from_secs(CODEX_HTTP_POOL_IDLE_TIMEOUT_SECS))
+        .pool_max_idle_per_host(CODEX_HTTP_POOL_MAX_IDLE_PER_HOST)
+        .tcp_keepalive(Duration::from_secs(CODEX_HTTP_TCP_KEEPALIVE_SECS))
+}
+
 impl CodexOAuthClient {
     pub(crate) fn new(
         provider_name: &str,
-        auth_file: Option<&str>,
         base_url: Option<&str>,
         model_config: &ModelConfig,
     ) -> Self {
-        let auth_file = codex_oauth_auth_file(provider_name, auth_file);
+        let auth_file = codex_oauth_auth_file(provider_name);
         let auth_client = codex_http_client_builder(Duration::from_secs(15))
             .build()
             .expect("failed to build OpenAI Codex auth http client");
@@ -1268,16 +1306,8 @@ fn parse_responses_usage(usage: &Value) -> Option<TokenUsage> {
     if usage.is_zero() { None } else { Some(usage) }
 }
 
-pub(crate) fn codex_oauth_auth_file(provider_name: &str, auth_file: Option<&str>) -> PathBuf {
-    let Some(auth_file) = auth_file.map(str::trim).filter(|value| !value.is_empty()) else {
-        return default_codex_oauth_auth_file(provider_name);
-    };
-    let path = PathBuf::from(auth_file);
-    if path.is_absolute() {
-        path
-    } else {
-        PersistenceStore::runtime_sync().config_file(auth_file)
-    }
+pub(crate) fn codex_oauth_auth_file(provider_name: &str) -> PathBuf {
+    default_codex_oauth_auth_file(provider_name)
 }
 
 pub(crate) fn codex_oauth_default_base_url() -> &'static str {

@@ -42,8 +42,6 @@ pub(super) async fn run_agent_turn_with_retry(
             state.context_composition = Some(context_composition.clone());
         });
     }
-    let request_timeout =
-        Duration::from_secs(context.config.main_model_config().request_timeout_secs());
     let model_name = context
         .llm
         .model_name()
@@ -51,40 +49,9 @@ pub(super) async fn run_agent_turn_with_retry(
     let mut attempt = 1usize;
     loop {
         set_runtime_status_only(tx, "Working");
-        let turn_result = tokio::time::timeout(
-            request_timeout,
-            context.llm.run_agent_turn(context, request.clone()),
-        )
-        .await;
+        let turn_result = context.llm.run_agent_turn(context, request.clone()).await;
         match turn_result {
-            Err(_) => {
-                let err = miette!(
-                    "agent turn timed out after {}s (model={}, messages={}, tools={}, estimated_input_tokens={estimated_input_tokens})",
-                    request_timeout.as_secs(),
-                    model_name,
-                    request.messages.len(),
-                    request.tools.len(),
-                );
-                let will_retry = true;
-                write_current_turn_response_error_dump(&err.to_string(), attempt, will_retry).await;
-                let capped_shift = (attempt.saturating_sub(1)).min(6) as u32;
-                let backoff_ms = 300u64.saturating_mul(1u64 << capped_shift).min(30_000);
-                let summary = format!(
-                    "model request timed out; retry #{attempt} after {:.1}s",
-                    backoff_ms as f64 / 1000.0
-                );
-                set_runtime_status(tx, RuntimeStatusLevel::Warn, summary);
-                tracing::warn!(
-                    "run_agent_turn timed out after {}s; retry #{attempt} in {backoff_ms}ms (model={}, messages={}, tools={}, estimated_input_tokens={estimated_input_tokens})",
-                    request_timeout.as_secs(),
-                    model_name,
-                    request.messages.len(),
-                    request.tools.len(),
-                );
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                attempt += 1;
-            }
-            Ok(Ok(response)) => {
+            Ok(response) => {
                 write_current_turn_response_dump(&response, attempt).await;
                 if let Some(info) = context.llm.token_usage_info() {
                     let observed_input =
@@ -100,9 +67,10 @@ pub(super) async fn run_agent_turn_with_retry(
                 clear_runtime_status(tx);
                 return Ok(response);
             }
-            Ok(Err(err)) => {
+            Err(err) => {
                 let will_retry = should_retry_agent_turn_error(&err);
-                write_current_turn_response_error_dump(&err.to_string(), attempt, will_retry).await;
+                let error_detail = plain_report_text(&err);
+                write_current_turn_response_error_dump(&error_detail, attempt, will_retry).await;
                 if !will_retry {
                     clear_runtime_status(tx);
                     return Err(err);
@@ -114,12 +82,35 @@ pub(super) async fn run_agent_turn_with_retry(
                     backoff_ms as f64 / 1000.0
                 );
                 set_runtime_status(tx, RuntimeStatusLevel::Warn, summary);
-                tracing::warn!("run_agent_turn retry #{attempt} after {backoff_ms}ms: {err}");
+                tracing::warn!(
+                    "run_agent_turn retry #{attempt} after {backoff_ms}ms (model={}, messages={}, tools={}, estimated_input_tokens={estimated_input_tokens}): {error_detail}",
+                    model_name,
+                    request.messages.len(),
+                    request.tools.len(),
+                );
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 attempt += 1;
             }
         }
     }
+}
+
+fn plain_report_text(err: &miette::Report) -> String {
+    let mut lines = vec![err.to_string()];
+    let mut causes = Vec::new();
+    let mut current = err.source();
+    while let Some(source) = current {
+        let cause = source.to_string();
+        if !cause.trim().is_empty() {
+            causes.push(cause);
+        }
+        current = source.source();
+    }
+    if !causes.is_empty() {
+        lines.push("causes:".to_string());
+        lines.extend(causes.into_iter().map(|cause| format!("- {cause}")));
+    }
+    lines.join("\n")
 }
 
 fn should_retry_agent_turn_error(err: &miette::Report) -> bool {
@@ -352,5 +343,15 @@ mod tests {
         let err = miette!("model provider request failed: connection reset");
 
         assert!(should_retry_agent_turn_error(&err));
+    }
+
+    #[test]
+    fn retry_error_detail_is_plain_text_not_fancy_diagnostic() {
+        let err = miette!("provider stream failed\nkind=stream_body_read");
+        let detail = plain_report_text(&err);
+
+        assert!(detail.contains("provider stream failed"));
+        assert!(detail.contains("kind=stream_body_read"));
+        assert!(!detail.contains("ERROR"));
     }
 }

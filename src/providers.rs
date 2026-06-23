@@ -63,6 +63,7 @@ pub struct OpenAIClient {
     temperature: f64,
     thinking_budget: Option<String>,
     rpm: Option<usize>,
+    request_timeout: Duration,
     stream_idle_timeout: Duration,
     context_window_tokens: usize,
     effective_context_window_tokens: usize,
@@ -163,7 +164,7 @@ impl OpenAIClient {
         let request_timeout = Duration::from_secs(model_config.request_timeout_secs());
         let stream_idle_timeout = Duration::from_secs(model_config.stream_idle_timeout_secs());
         let client = reqwest::Client::builder()
-            .timeout(request_timeout)
+            .connect_timeout(Duration::from_secs(15))
             .build()
             .expect("failed to build llm http client");
         let context_window_tokens = model_config.context_window_tokens();
@@ -183,6 +184,7 @@ impl OpenAIClient {
                 .thinking_budget()
                 .map(|budget| budget.as_str().to_string()),
             rpm: model_config.rpm(),
+            request_timeout,
             stream_idle_timeout,
             context_window_tokens,
             effective_context_window_tokens,
@@ -316,6 +318,7 @@ impl OpenAIClient {
         url: &str,
         payload: &serde_json::Value,
         request_context: &[String],
+        response_header_timeout: Duration,
     ) -> Result<reqwest::Response> {
         const MAX_429_RETRIES: usize = 4;
         const MAX_5XX_RETRIES: usize = 3;
@@ -324,17 +327,20 @@ impl OpenAIClient {
         let mut transient_attempt = 0usize;
         loop {
             self.wait_for_request_slot(request_context).await;
-            let response = self
+            let request = self
                 .client
                 .post(url)
                 .bearer_auth(&self.api_key)
                 .headers(self.extra_headers.clone())
-                .json(payload)
-                .send()
-                .await
-                .map_err(|err| {
-                    format_request_error("llm request failed", url, request_context, &err)
-                })?;
+                .json(payload);
+            let response = send_request_for_streaming_response(
+                request,
+                response_header_timeout,
+                "llm request failed",
+                url,
+                request_context,
+            )
+            .await?;
 
             if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 let retry_after = response
@@ -342,10 +348,14 @@ impl OpenAIClient {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok())
                     .and_then(parse_retry_after_seconds);
-                let body = response
-                    .text()
-                    .await
-                    .map_err(|err| miette!("llm response body read failed: {err}"))?;
+                let body = read_response_text_with_timeout(
+                    response,
+                    response_header_timeout,
+                    "llm 429 response body read failed",
+                    url,
+                    request_context,
+                )
+                .await?;
 
                 if rate_limit_attempt >= MAX_429_RETRIES {
                     return Err(miette!(
@@ -373,10 +383,14 @@ impl OpenAIClient {
 
             if response.status().is_server_error() {
                 let status = response.status();
-                let body = response
-                    .text()
-                    .await
-                    .map_err(|err| miette!("llm response body read failed: {err}"))?;
+                let body = read_response_text_with_timeout(
+                    response,
+                    response_header_timeout,
+                    "llm 5xx response body read failed",
+                    url,
+                    request_context,
+                )
+                .await?;
 
                 if transient_attempt >= MAX_5XX_RETRIES {
                     return Err(miette!(
@@ -428,13 +442,22 @@ impl OpenAIClient {
                 self.current_adapter()
                     .build_prompt_payload(self, &request, output_schema.clone());
             let response = self
-                .post_json_with_rate_limit_retry(&url, &payload, &request_context)
+                .post_json_with_rate_limit_retry(
+                    &url,
+                    &payload,
+                    &request_context,
+                    self.stream_idle_timeout,
+                )
                 .await?;
             let status = response.status();
-            let body = response
-                .text()
-                .await
-                .map_err(|err| miette!("llm response body read failed: {err}"))?;
+            let body = read_response_text_with_timeout(
+                response,
+                self.stream_idle_timeout,
+                "llm response body read failed",
+                &url,
+                &request_context,
+            )
+            .await?;
 
             if status.is_success() {
                 break body;
@@ -595,7 +618,12 @@ impl OpenAIClient {
                 self.current_adapter()
                     .build_agent_turn_payload(self, request.clone(), true);
             let response = self
-                .post_json_with_rate_limit_retry(&url, &payload, &request_context)
+                .post_json_with_rate_limit_retry(
+                    &url,
+                    &payload,
+                    &request_context,
+                    self.request_timeout,
+                )
                 .await?;
             let status = response.status();
             let content_type = response
@@ -609,10 +637,14 @@ impl OpenAIClient {
                 break (response, content_type);
             }
 
-            let body = response
-                .text()
-                .await
-                .map_err(|err| miette!("llm response body read failed: {err}"))?;
+            let body = read_response_text_with_timeout(
+                response,
+                self.request_timeout,
+                "llm response body read failed",
+                &url,
+                &request_context,
+            )
+            .await?;
             if looks_like_context_window_error(&body) {
                 return Err(ContextBudgetExceededError::for_request(
                     "agent turn",
@@ -698,10 +730,14 @@ impl OpenAIClient {
         };
 
         if !content_type.contains("text/event-stream") {
-            let body = response
-                .text()
-                .await
-                .map_err(|err| miette!("llm response body read failed: {err}"))?;
+            let body = read_response_text_with_timeout(
+                response,
+                self.request_timeout,
+                "llm response body read failed",
+                &url,
+                &request_context,
+            )
+            .await?;
             let response_json: serde_json::Value = serde_json::from_str(&body).map_err(|err| {
                 miette!(
                     "llm response is not valid JSON: {err}; body={}",
@@ -732,6 +768,10 @@ impl OpenAIClient {
         let mut last_reasoning_progress_emit_at = Instant::now();
         let mut last_reasoning_progress_char_len = 0usize;
         let mut stream = response.bytes_stream();
+        let stream_request_context = [
+            format!("model={}", self.model),
+            "phase=chat_completions_stream".to_string(),
+        ];
         let mut stream_done = false;
         while !stream_done {
             let next_chunk = tokio::time::timeout(self.stream_idle_timeout, stream.next())
@@ -747,7 +787,14 @@ impl OpenAIClient {
             let Some(chunk) = next_chunk else {
                 break;
             };
-            let chunk = chunk.map_err(|err| miette!("llm streaming chunk read failed: {err}"))?;
+            let chunk = chunk.map_err(|err| {
+                format_request_error(
+                    "llm streaming chunk read failed",
+                    &url,
+                    &stream_request_context,
+                    &err,
+                )
+            })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             normalize_sse_buffer(&mut buffer);
             while let Some(event) = take_next_sse_event(&mut buffer) {
@@ -1201,12 +1248,8 @@ pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn Llm + Send
             let resolved = resolve_env_reference(github_token);
             Ok(Box::new(CopilotClient::new(&resolved, model_config)))
         }
-        ProviderConfig::OpenaiCodexOauth {
-            auth_file,
-            base_url,
-        } => Ok(Box::new(CodexOAuthClient::new(
+        ProviderConfig::OpenaiCodexOauth { base_url } => Ok(Box::new(CodexOAuthClient::new(
             &model_config.provider,
-            auth_file.as_deref(),
             base_url.as_deref(),
             model_config,
         ))),

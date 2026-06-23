@@ -339,32 +339,159 @@ pub(crate) fn format_request_error(
     request_context: &[String],
     err: &reqwest::Error,
 ) -> miette::Report {
-    let mut lines = vec![format!("{prefix}: {err}"), format!("url={url}")];
+    let causes = request_error_causes(err);
+    let kind = classify_request_error(
+        RequestErrorFlags::from_reqwest(err),
+        &causes,
+        request_context,
+    );
+    let mut lines = vec![
+        request_error_headline(prefix, kind, &err.to_string()),
+        format!("url={url}"),
+    ];
     lines.extend(request_context.iter().cloned());
-    if err.is_timeout() {
-        lines.push("kind=timeout".to_string());
-    } else if err.is_connect() {
-        lines.push("kind=connect".to_string());
-    } else if err.is_request() {
-        lines.push("kind=request".to_string());
-    } else if err.is_body() {
-        lines.push("kind=body".to_string());
-    } else if err.is_decode() {
-        lines.push("kind=decode".to_string());
-    }
-
-    let mut causes = Vec::new();
-    let mut current = err.source();
-    while let Some(source) = current {
-        causes.push(source.to_string());
-        current = source.source();
-    }
+    lines.push(format!("kind={kind}"));
     if !causes.is_empty() {
         lines.push("causes:".to_string());
         lines.extend(causes.into_iter().map(|cause| format!("- {cause}")));
     }
 
     miette!(lines.join("\n"))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RequestErrorFlags {
+    timeout: bool,
+    connect: bool,
+    request: bool,
+    body: bool,
+    decode: bool,
+}
+
+impl RequestErrorFlags {
+    fn from_reqwest(err: &reqwest::Error) -> Self {
+        Self {
+            timeout: err.is_timeout(),
+            connect: err.is_connect(),
+            request: err.is_request(),
+            body: err.is_body(),
+            decode: err.is_decode(),
+        }
+    }
+}
+
+fn request_error_causes(err: &reqwest::Error) -> Vec<String> {
+    let mut causes = Vec::new();
+    let mut current = err.source();
+    while let Some(source) = current {
+        causes.push(source.to_string());
+        current = source.source();
+    }
+    causes
+}
+
+fn classify_request_error(
+    flags: RequestErrorFlags,
+    causes: &[String],
+    request_context: &[String],
+) -> &'static str {
+    if flags.timeout {
+        return "timeout";
+    }
+    if flags.connect {
+        return "connect";
+    }
+    if flags.request {
+        return "request";
+    }
+    if flags.body {
+        return stream_or_body_error_kind(request_context);
+    }
+    if flags.decode && causes_indicate_connection_body_read(causes) {
+        return stream_or_body_error_kind(request_context);
+    }
+    if flags.decode {
+        return "decode";
+    }
+    "unknown"
+}
+
+fn stream_or_body_error_kind(request_context: &[String]) -> &'static str {
+    if request_context
+        .iter()
+        .any(|line| line.contains("phase=") && line.contains("stream"))
+    {
+        "stream_body_read"
+    } else {
+        "body_read"
+    }
+}
+
+fn causes_indicate_connection_body_read(causes: &[String]) -> bool {
+    causes.iter().any(|cause| {
+        let cause = cause.to_ascii_lowercase();
+        cause.contains("error reading a body from connection")
+            || cause.contains("without sending tls close_notify")
+            || cause.contains("unexpected eof")
+    })
+}
+
+fn request_error_headline(prefix: &str, kind: &str, source: &str) -> String {
+    match kind {
+        "stream_body_read" => format!("{prefix}: streaming response body read failed"),
+        "body_read" => format!("{prefix}: response body read failed"),
+        _ => format!("{prefix}: {source}"),
+    }
+}
+
+pub(crate) async fn send_request_for_streaming_response(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+    prefix: &str,
+    url: &str,
+    request_context: &[String],
+) -> miette::Result<reqwest::Response> {
+    match tokio::time::timeout(timeout, request.send()).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(err)) => Err(format_request_error(prefix, url, request_context, &err)),
+        Err(_) => {
+            let mut lines = vec![
+                format!(
+                    "{prefix}: response headers timed out after {}s",
+                    timeout.as_secs()
+                ),
+                format!("url={url}"),
+            ];
+            lines.extend(request_context.iter().cloned());
+            lines.push("kind=response_header_timeout".to_string());
+            Err(miette!(lines.join("\n")))
+        }
+    }
+}
+
+pub(crate) async fn read_response_text_with_timeout(
+    response: reqwest::Response,
+    timeout: Duration,
+    prefix: &str,
+    url: &str,
+    request_context: &[String],
+) -> miette::Result<String> {
+    match tokio::time::timeout(timeout, response.text()).await {
+        Ok(Ok(body)) => Ok(body),
+        Ok(Err(err)) => Err(format_request_error(prefix, url, request_context, &err)),
+        Err(_) => {
+            let mut lines = vec![
+                format!(
+                    "{prefix}: response body timed out after {}s",
+                    timeout.as_secs()
+                ),
+                format!("url={url}"),
+            ];
+            lines.extend(request_context.iter().cloned());
+            lines.push("kind=response_body_timeout".to_string());
+            Err(miette!(lines.join("\n")))
+        }
+    }
 }
 
 pub(crate) fn truncate_for_error(text: &str) -> String {
@@ -426,5 +553,51 @@ mod tests {
         assert!(!should_retry_request_without_reasoning_summary(
             "The assistant summary mentioned reasoning, but the request succeeded."
         ));
+    }
+
+    #[test]
+    fn classifies_decode_wrapped_stream_body_read_errors() {
+        let kind = classify_request_error(
+            RequestErrorFlags {
+                decode: true,
+                ..RequestErrorFlags::default()
+            },
+            &[
+                "error reading a body from connection".to_string(),
+                "peer closed connection without sending TLS close_notify".to_string(),
+            ],
+            &["phase=response_stream".to_string()],
+        );
+
+        assert_eq!(kind, "stream_body_read");
+    }
+
+    #[test]
+    fn classifies_regular_decode_errors_as_decode() {
+        let kind = classify_request_error(
+            RequestErrorFlags {
+                decode: true,
+                ..RequestErrorFlags::default()
+            },
+            &["expected value at line 1 column 1".to_string()],
+            &["phase=response_stream".to_string()],
+        );
+
+        assert_eq!(kind, "decode");
+    }
+
+    #[test]
+    fn stream_body_read_headline_hides_decode_wrapper() {
+        let headline = request_error_headline(
+            "Codex Responses stream read failed",
+            "stream_body_read",
+            "error decoding response body",
+        );
+
+        assert_eq!(
+            headline,
+            "Codex Responses stream read failed: streaming response body read failed"
+        );
+        assert!(!headline.contains("decoding"));
     }
 }
