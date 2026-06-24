@@ -8,7 +8,9 @@
     Language="1033"
     Codepage="65001">
     <SummaryInformation Description="{{description}}" Manufacturer="{{manufacturer}}" />
-    <MajorUpgrade DowngradeErrorMessage="A newer version of {{product_name}} is already installed." />
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="A newer version of {{product_name}} is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Icon Id="ProductIcon" SourceFile="{{icon_path}}" />
@@ -33,6 +35,9 @@
         <Directory Id="INSTALLFOLDER" Name="{{product_name}}">
           <Component Id="MainExecutable" Guid="{{app_component_guid}}">
             <File Id="MainExecutableFile" Source="{{binary_path}}" KeyPath="yes" />
+          </Component>
+          <Component Id="LauncherExecutable" Guid="{{launcher_component_guid}}">
+            <File Id="LauncherExecutableFile" Source="{{launcher_binary_path}}" KeyPath="yes" />
           </Component>
           <Component Id="UserPathEnvironment" Guid="{{path_component_guid}}">
             <Environment
@@ -62,7 +67,7 @@
             Id="DaatLocusStartMenuShortcut"
             Name="{{product_name}}"
             Description="{{description}}"
-            Target="[#MainExecutableFile]"
+            Target="[#LauncherExecutableFile]"
             WorkingDirectory="INSTALLFOLDER"
             Icon="ProductIcon" />
           <RemoveFolder Id="RemoveDaatLocusStartMenuFolder" On="uninstall" />
@@ -79,6 +84,7 @@
 
     <Feature Id="MainFeature" Title="{{product_name}}" Level="1">
       <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="LauncherExecutable" />
       <ComponentRef Id="UserPathEnvironment" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>

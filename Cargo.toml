@@ -44,7 +44,13 @@ bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
 disabled-strategies = ["quick-install", "compile"]
 
 [workspace]
-members = [".", "xtask", "crates/scope-engine", "crates/daat-locus-macros"]
+members = [
+    ".",
+    "xtask",
+    "crates/scope-engine",
+    "crates/daat-locus-macros",
+    "crates/daat-locus-launcher",
+]
 default-members = ["."]
 resolver = "3"
 

@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::daemon::DaemonControlCommand;
 
 pub(crate) const NO_TRAY_ENV: &str = "DAAT_LOCUS_NO_TRAY";
+pub(crate) const ENABLE_TRAY_ENV: &str = "DAAT_LOCUS_ENABLE_TRAY";
 
 #[derive(Clone)]
 pub(crate) struct DaemonTrayHandle {
@@ -40,7 +41,10 @@ pub(crate) struct DaemonTrayStartup {
 }
 
 pub(crate) fn should_attempt_daemon_tray() -> bool {
-    std::env::var_os(NO_TRAY_ENV).is_none() && platform_tray::gui_session_available()
+    if std::env::var_os(NO_TRAY_ENV).is_some() {
+        return false;
+    }
+    std::env::var_os(ENABLE_TRAY_ENV).is_some() || platform_tray::gui_session_available()
 }
 
 pub(crate) fn run_daemon_tray(startup: DaemonTrayStartup, handle: DaemonTrayHandle) -> Result<()> {

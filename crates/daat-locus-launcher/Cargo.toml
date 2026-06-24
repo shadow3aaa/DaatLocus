@@ -1,0 +1,11 @@
+[package]
+name = "daat-locus-launcher"
+version = "0.2.0"
+edition = "2024"
+description = "Internal Windows GUI launcher for Daat Locus installers."
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "daat-locus-launcher"
+path = "src/main.rs"

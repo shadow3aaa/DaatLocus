@@ -12,6 +12,7 @@ use serde::Deserialize;
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const DEFAULT_BINARY_PACKAGE_DIR_NAME: &str = "package";
 const WINDOWS_MSI_TARGET: &str = "x86_64-pc-windows-msvc";
+const WINDOWS_LAUNCHER_PACKAGE_NAME: &str = "daat-locus-launcher";
 const WINDOWS_MSI_UTIL_EXTENSION: &str = "WixToolset.Util.wixext";
 const WINDOWS_BOOTSTRAPPER_EXTENSION: &str = "WixToolset.BootstrapperApplications.wixext";
 const WINDOWS_MSI_ICON_SIZES: &[u32] = &[16, 24, 32, 48, 64, 128, 256];
@@ -115,6 +116,7 @@ struct WindowsMsiPaths {
     work_dir: PathBuf,
     output_dir: PathBuf,
     binary_path: PathBuf,
+    launcher_binary_path: PathBuf,
     icon_path: PathBuf,
     generated_wxs_path: PathBuf,
     generated_bundle_wxs_path: PathBuf,
@@ -132,11 +134,13 @@ struct WindowsMsiTemplateData {
     repository: String,
     binary_name: String,
     binary_path: String,
+    launcher_binary_path: String,
     msi_path: String,
     icon_path: String,
     upgrade_code: String,
     bundle_upgrade_code: String,
     app_component_guid: String,
+    launcher_component_guid: String,
     path_component_guid: String,
     shortcut_component_guid: String,
 }
@@ -218,11 +222,13 @@ fn package_windows_msi(args: PackageWindowsMsiArgs) -> Result<()> {
                 .arg("build")
                 .arg("-p")
                 .arg(&manifest.package.name)
+                .arg("-p")
+                .arg(WINDOWS_LAUNCHER_PACKAGE_NAME)
                 .arg("--release")
                 .arg("--locked")
                 .arg("--target")
                 .arg(WINDOWS_MSI_TARGET),
-            "build Windows release binary",
+            "build Windows release binaries",
         )?;
     }
 
@@ -230,6 +236,13 @@ fn package_windows_msi(args: PackageWindowsMsiArgs) -> Result<()> {
         return Err(format!(
             "release binary missing at {}; run `cargo xtask package windows` without --skip-build to build it",
             paths.binary_path.display()
+        )
+        .into());
+    }
+    if !paths.launcher_binary_path.is_file() {
+        return Err(format!(
+            "launcher binary missing at {}; run `cargo xtask package windows` without --skip-build to build it",
+            paths.launcher_binary_path.display()
         )
         .into());
     }
@@ -374,7 +387,7 @@ fn percent_encode_file_url_path(path: &str) -> String {
 fn windows_msi_paths(
     repo: &Path,
     package: &RootPackage,
-    binary_name: &str,
+    main_binary_name: &str,
 ) -> Result<WindowsMsiPaths> {
     ensure_safe_relative_path("target triple", Path::new(WINDOWS_MSI_TARGET))?;
     let release_dir = repo.join("target").join(WINDOWS_MSI_TARGET).join("release");
@@ -390,7 +403,8 @@ fn windows_msi_paths(
     ));
 
     Ok(WindowsMsiPaths {
-        binary_path: release_dir.join(binary_name),
+        binary_path: release_dir.join(main_binary_name),
+        launcher_binary_path: release_dir.join(binary_name(WINDOWS_LAUNCHER_PACKAGE_NAME)),
         icon_path: work_dir.join(format!("{}.ico", package.name)),
         generated_wxs_path: work_dir.join(format!("{}.wxs", package.name)),
         generated_bundle_wxs_path: work_dir.join(format!("{}-bootstrapper.wxs", package.name)),
@@ -416,11 +430,13 @@ fn windows_msi_template_data(
         repository: package.repository.clone().unwrap_or_default(),
         binary_name: binary_name.to_string(),
         binary_path: wix_path(&paths.binary_path),
+        launcher_binary_path: wix_path(&paths.launcher_binary_path),
         msi_path: wix_path(&paths.msi_path),
         icon_path: wix_path(&paths.icon_path),
         upgrade_code: "ce78b6f8-ed5d-4ea4-823e-25ef51910924".to_string(),
         bundle_upgrade_code: "dc1d21bb-0a31-4c37-a8b4-045875b1e202".to_string(),
         app_component_guid: "1c3dbd45-2997-4aa7-8906-d7bf8e169cba".to_string(),
+        launcher_component_guid: "89344c45-7d12-409b-b44e-eeb10ad70212".to_string(),
         path_component_guid: "7dff73dd-d542-4793-afb5-f93d1e2d921f".to_string(),
         shortcut_component_guid: "3da8345e-d097-4875-a50a-2f5132209088".to_string(),
     })
@@ -476,11 +492,19 @@ fn render_windows_msi_template(
         ("{{repository}}", data.repository.as_str()),
         ("{{binary_name}}", data.binary_name.as_str()),
         ("{{binary_path}}", data.binary_path.as_str()),
+        (
+            "{{launcher_binary_path}}",
+            data.launcher_binary_path.as_str(),
+        ),
         ("{{msi_path}}", data.msi_path.as_str()),
         ("{{icon_path}}", data.icon_path.as_str()),
         ("{{upgrade_code}}", data.upgrade_code.as_str()),
         ("{{bundle_upgrade_code}}", data.bundle_upgrade_code.as_str()),
         ("{{app_component_guid}}", data.app_component_guid.as_str()),
+        (
+            "{{launcher_component_guid}}",
+            data.launcher_component_guid.as_str(),
+        ),
         ("{{path_component_guid}}", data.path_component_guid.as_str()),
         (
             "{{shortcut_component_guid}}",
