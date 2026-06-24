@@ -5223,6 +5223,7 @@ function AgentChatThinkingCollapsibleCell({
             text={contentText}
             limit={AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT}
             tone="muted"
+            preserveSoftBreaks
           />
           {!open && isTruncatable ? (
             <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-background to-transparent pointer-events-none" />
@@ -5872,10 +5873,12 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
   text,
   limit,
   tone = "default",
+  preserveSoftBreaks = false,
 }: {
   text: string;
   limit: number;
   tone?: "default" | "error" | "muted";
+  preserveSoftBreaks?: boolean;
 }) {
   const limitedText = limitMarkdownInput(text, limit);
   const markdownId = useId();
@@ -5944,7 +5947,16 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
             </blockquote>
           ),
           hr: () => <Separator />,
-          p: ({ children }: any) => <p className="break-words">{children}</p>,
+          p: ({ children }: any) => (
+            <p
+              className={cn(
+                "break-words",
+                preserveSoftBreaks && "whitespace-pre-line",
+              )}
+            >
+              {children}
+            </p>
+          ),
           pre: ({ children }: { children?: ReactNode }) => {
             const codeProps = markdownPreCodeProps(children);
             if (codeProps) {
