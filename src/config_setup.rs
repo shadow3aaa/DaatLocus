@@ -502,12 +502,16 @@ pub async fn complete_setup_provider_auth(
 }
 
 fn config_from_setup_request(request: &SetupConfigRequest) -> Result<Config> {
-    let (providers, models, main_model, efficient_model) =
-        if !request.providers.is_empty() || !request.models.is_empty() {
-            config_registries_from_setup_request(request)?
-        } else {
-            legacy_config_registries_from_setup_request(request)?
-        };
+    let SetupConfigRegistryParts {
+        providers,
+        models,
+        main_model,
+        efficient_model,
+    } = if !request.providers.is_empty() || !request.models.is_empty() {
+        config_registries_from_setup_request(request)?
+    } else {
+        legacy_config_registries_from_setup_request(request)?
+    };
 
     Ok(Config {
         providers,
@@ -525,14 +529,16 @@ fn config_from_setup_request(request: &SetupConfigRequest) -> Result<Config> {
     })
 }
 
+struct SetupConfigRegistryParts {
+    providers: HashMap<String, ProviderConfig>,
+    models: HashMap<String, ModelConfig>,
+    main_model: String,
+    efficient_model: String,
+}
+
 fn config_registries_from_setup_request(
     request: &SetupConfigRequest,
-) -> Result<(
-    HashMap<String, ProviderConfig>,
-    HashMap<String, ModelConfig>,
-    String,
-    String,
-)> {
+) -> Result<SetupConfigRegistryParts> {
     let mut providers = HashMap::new();
     for provider in &request.providers {
         let name = required_name(&provider.name, "provider.name")?;
@@ -578,17 +584,17 @@ fn config_registries_from_setup_request(
             .unwrap_or(&main_model),
         "efficient_model",
     )?;
-    Ok((providers, models, main_model, efficient_model))
+    Ok(SetupConfigRegistryParts {
+        providers,
+        models,
+        main_model,
+        efficient_model,
+    })
 }
 
 fn legacy_config_registries_from_setup_request(
     request: &SetupConfigRequest,
-) -> Result<(
-    HashMap<String, ProviderConfig>,
-    HashMap<String, ModelConfig>,
-    String,
-    String,
-)> {
+) -> Result<SetupConfigRegistryParts> {
     let provider_kind = request
         .provider_kind
         .ok_or_else(|| miette!("provider_kind is required"))?;
@@ -629,7 +635,12 @@ fn legacy_config_registries_from_setup_request(
         );
     }
 
-    Ok((providers, models, main_model_name, efficient_model_name))
+    Ok(SetupConfigRegistryParts {
+        providers,
+        models,
+        main_model: main_model_name,
+        efficient_model: efficient_model_name,
+    })
 }
 
 async fn write_setup_persona(request: &SetupConfigRequest) -> Result<()> {
