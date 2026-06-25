@@ -850,19 +850,15 @@ pub(crate) async fn execute_agent_loop_step(
                                 );
                             });
                         }
-                        ToolCallActivityEvent::Plan(event) => {
-                            if !event.steps.is_empty() {
-                                tx.send_modify(|state| {
-                                    apply_activity_event(
-                                        state,
-                                        DashboardActivityEvent::AppendCommittedCells {
-                                            cells: vec![SessionActivityEvent::PlanResult(
-                                                event.into(),
-                                            )],
-                                        },
-                                    );
-                                });
-                            }
+                        ToolCallActivityEvent::Plan(event) if !event.steps.is_empty() => {
+                            tx.send_modify(|state| {
+                                apply_activity_event(
+                                    state,
+                                    DashboardActivityEvent::AppendCommittedCells {
+                                        cells: vec![SessionActivityEvent::PlanResult(event.into())],
+                                    },
+                                );
+                            });
                         }
                         _ => {}
                     }

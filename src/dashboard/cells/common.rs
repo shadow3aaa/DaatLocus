@@ -355,38 +355,6 @@ fn push_paragraph_break(output: &mut String) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{normalize_thinking_markdown_sections, thinking_cell};
-
-    #[test]
-    fn thinking_markdown_splits_embedded_bold_headings() {
-        let content = "Everything needs careful path syntax.**Considering project operations**\n\nI am checking project state.";
-
-        assert_eq!(
-            normalize_thinking_markdown_sections(content),
-            "Everything needs careful path syntax.\n\n**Considering project operations**\n\nI am checking project state."
-        );
-    }
-
-    #[test]
-    fn thinking_cell_normalizes_persisted_content() {
-        let cell = thinking_cell("Intro.**Setting up for git commands**\n\nBody");
-
-        assert_eq!(
-            cell.content,
-            "Intro.\n\n**Setting up for git commands**\n\nBody"
-        );
-    }
-
-    #[test]
-    fn thinking_markdown_does_not_split_inline_bold_phrases() {
-        let content = "I should keep **important phrase**\n\nas normal prose.";
-
-        assert_eq!(normalize_thinking_markdown_sections(content), content);
-    }
-}
-
 impl From<TextActivityDescriptor> for GenericAppActivityData {
     fn from(data: TextActivityDescriptor) -> Self {
         generic_app_cell(
@@ -515,5 +483,37 @@ fn render_exposed_tool_name_token(token: &str) -> String {
         token.to_string()
     } else {
         format!("{}{}{}", &token[..start], rendered, &token[end..])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_thinking_markdown_sections, thinking_cell};
+
+    #[test]
+    fn thinking_markdown_splits_embedded_bold_headings() {
+        let content = "Everything needs careful path syntax.**Considering project operations**\n\nI am checking project state.";
+
+        assert_eq!(
+            normalize_thinking_markdown_sections(content),
+            "Everything needs careful path syntax.\n\n**Considering project operations**\n\nI am checking project state."
+        );
+    }
+
+    #[test]
+    fn thinking_cell_normalizes_persisted_content() {
+        let cell = thinking_cell("Intro.**Setting up for git commands**\n\nBody");
+
+        assert_eq!(
+            cell.content,
+            "Intro.\n\n**Setting up for git commands**\n\nBody"
+        );
+    }
+
+    #[test]
+    fn thinking_markdown_does_not_split_inline_bold_phrases() {
+        let content = "I should keep **important phrase**\n\nas normal prose.";
+
+        assert_eq!(normalize_thinking_markdown_sections(content), content);
     }
 }

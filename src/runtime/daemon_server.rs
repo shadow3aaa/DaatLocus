@@ -708,7 +708,7 @@ async fn hydrate_session_tokens(
 }
 
 fn manager_dashboard_state(telegram_acl: &TelegramAclHandle) -> DashboardState {
-    let state = DashboardState {
+    DashboardState {
         agent_name: dashboard_agent_name(),
         status_output:
             "Manager daemon is running.\nSelect or create a session to view runtime state."
@@ -726,8 +726,7 @@ fn manager_dashboard_state(telegram_acl: &TelegramAclHandle) -> DashboardState {
             "Manager daemon: session runtime state is available through selected sessions."
                 .to_string(),
         ..DashboardState::default()
-    };
-    state
+    }
 }
 
 fn manager_telegram_status_output(telegram_acl: &TelegramAclHandle) -> String {
