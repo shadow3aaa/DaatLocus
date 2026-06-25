@@ -305,7 +305,11 @@ fn apply_perf_scroll_step(
         return false;
     }
 
-    let rows = if (frame_index / 18) % 2 == 0 { 4 } else { -4 };
+    let rows = if (frame_index / 18).is_multiple_of(2) {
+        4
+    } else {
+        -4
+    };
     view.handle_activity_scroll_rows(rows)
 }
 
@@ -539,7 +543,7 @@ fn mock_patch(idx: usize) -> crate::activity_event::PatchActivityDescriptor {
 fn mock_reply(idx: usize) -> ReplyActivityDescriptor {
     ReplyActivityDescriptor {
         disposition: ReplyDisposition::Resolved,
-        subject: if idx % 2 == 0 {
+        subject: if idx.is_multiple_of(2) {
             ReplySubject::Message
         } else {
             ReplySubject::Notice

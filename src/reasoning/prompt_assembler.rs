@@ -16,6 +16,7 @@ use super::{
 
 const WORKSPACE_PATH_PLACEHOLDER: &str = "{{workspace_path}}";
 const PERSONA_SECTION_PLACEHOLDER: &str = "{{persona_section}}";
+const PERSONA_NAME_PLACEHOLDER: &str = "{{name}}";
 const SKILLS_SECTION_PLACEHOLDER: &str = "{{skills_section}}";
 const APP_DOCS_SECTION_PLACEHOLDER: &str = "{{app_docs_section}}";
 const COMPILED_ADDITIONS_SECTION_PLACEHOLDER: &str = "{{compiled_additions_section}}";
@@ -96,14 +97,19 @@ fn render_persona_section(
     configured_locale: &str,
 ) -> String {
     let target_language = render_target_language(language);
+    let identity_summary = render_persona_template(persona.identity_summary.trim(), persona);
     format!(
         "# Persona\n\nname: {}\nlanguage: {}\nconfigured_locale: {}\n\n{}\n\n## Communication Language\n\n- Use {} for all user-visible assistant prose, including intermediate progress messages, status updates, and final replies.\n- If the user explicitly requests another language, follow that requested language until they change it.\n- Preserve code, commands, file paths, identifiers, tool names, schema keys, logs, errors, direct quotes, and source text in their original language.\n- Do not switch to English merely because tool names, system text, retrieved sources, or internal runtime context are English.",
         persona.name.trim(),
         language.trim(),
         configured_locale.trim(),
-        persona.identity_summary.trim(),
+        identity_summary.trim(),
         target_language
     )
+}
+
+fn render_persona_template(template: &str, persona: &PromptPersonaSpec) -> String {
+    template.replace(PERSONA_NAME_PLACEHOLDER, persona.name.trim())
 }
 
 fn render_target_language(language: &str) -> String {
@@ -240,10 +246,12 @@ mod tests {
         let persona = PromptPersonaSpec {
             name: "Daat Locus".to_string(),
             language: "configured-locale".to_string(),
-            identity_summary: "Daat Locus follows the configured locale.".to_string(),
+            identity_summary: "{{name}} follows the configured locale.".to_string(),
         };
         let text = render_persona_section(&persona, "zh-CN", "zh-CN");
 
+        assert!(text.contains("Daat Locus follows the configured locale."));
+        assert!(!text.contains("{{name}}"));
         assert!(text.contains("## Communication Language"));
         assert!(text.contains("Simplified Chinese (zh-CN)"));
         assert!(text.contains("intermediate progress messages"));
@@ -257,6 +265,20 @@ mod tests {
         assert_eq!(
             render_target_language("configured-locale"),
             "the configured locale"
+        );
+    }
+
+    #[test]
+    fn persona_template_only_renders_at_prompt_boundary() {
+        let persona = PromptPersonaSpec {
+            name: "Custom Agent".to_string(),
+            language: "configured-locale".to_string(),
+            identity_summary: "{{name}} answers directly.".to_string(),
+        };
+
+        assert_eq!(
+            render_persona_template(&persona.identity_summary, &persona),
+            "Custom Agent answers directly."
         );
     }
 }

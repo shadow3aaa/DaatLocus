@@ -857,6 +857,7 @@ Use the configured locale by default.
             assert_eq!(loaded.language, locale);
 
             let content = std::fs::read_to_string(&path).expect("written persona file");
+            assert!(content.contains("{{name}}"));
             let written =
                 parse_prompt_persona_markdown(&content).expect("written persona should parse");
             assert_eq!(written.language, locale);
