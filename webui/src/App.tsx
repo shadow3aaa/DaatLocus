@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 
 import { AppSidebar } from "@/components/app-sidebar";
 import { LoginPage } from "@/components/login-page";
@@ -30,7 +30,10 @@ import {
 } from "@/lib/daemon-api";
 
 type AppPage = "agent" | "status" | "settings" | "logs";
+type ThemeMode = "light" | "dark";
+
 const SELECTED_SESSION_STORAGE_KEY = "daat-locus.webui.selected-session-id";
+const THEME_STORAGE_KEY = "daat-locus.webui.theme";
 
 const APP_DOCUMENT_TITLE = "Daat Locus";
 
@@ -64,6 +67,8 @@ export default function App() {
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(
     null,
   );
+
+  const { themeMode, toggleThemeMode } = useThemeMode();
 
   const selectedSession = useMemo(
     () =>
@@ -288,6 +293,8 @@ export default function App() {
             sessionError={sessionError}
             isCreatingSession={isCreatingSession}
             deletingSessionId={deletingSessionId}
+            themeMode={themeMode}
+            onToggleThemeMode={toggleThemeMode}
             onSelectSession={handleSelectSession}
             onCreateSession={handleCreateSession}
             onDeleteSession={handleDeleteSession}
@@ -307,6 +314,7 @@ export default function App() {
 }
 
 function MockAgentApp() {
+  const { themeMode, toggleThemeMode } = useThemeMode();
   useEffect(() => {
     document.title = pageDocumentTitle("agent", MOCK_SESSION, true);
   }, []);
@@ -320,6 +328,8 @@ function MockAgentApp() {
           sessionError={null}
           isCreatingSession={false}
           deletingSessionId={null}
+          themeMode={themeMode}
+          onToggleThemeMode={toggleThemeMode}
           onSelectSession={() => undefined}
           onCreateSession={() => undefined}
           onDeleteSession={async () => undefined}
@@ -499,6 +509,63 @@ function readStoredSelectedSessionId() {
   return (
     window.localStorage.getItem(SELECTED_SESSION_STORAGE_KEY)?.trim() || null
   );
+}
+
+function useThemeMode() {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(readStoredThemeMode);
+
+  useLayoutEffect(() => {
+    applyThemeMode(themeMode);
+  }, [themeMode]);
+
+  function toggleThemeMode() {
+    setThemeMode((current) => (current === "dark" ? "light" : "dark"));
+  }
+
+  return { themeMode, toggleThemeMode };
+}
+
+function readStoredThemeMode(): ThemeMode {
+  if (typeof window === "undefined") {
+    return "light";
+  }
+
+  try {
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (storedTheme === "dark" || storedTheme === "light") {
+      return storedTheme;
+    }
+  } catch {
+    // Ignore localStorage failures, e.g. private mode or disabled storage.
+  }
+
+  if (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-color-scheme: dark)").matches
+  ) {
+    return "dark";
+  }
+
+  return "light";
+}
+
+function applyThemeMode(themeMode: ThemeMode) {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  document.documentElement.classList.toggle("dark", themeMode === "dark");
+  document.documentElement.style.colorScheme = themeMode;
+
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+  } catch {
+    // Ignore localStorage failures, e.g. private mode or disabled storage.
+  }
 }
 
 function projectLabel(projectDir: string) {

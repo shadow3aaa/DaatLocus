@@ -4,10 +4,12 @@ import {
   FolderIcon,
   FolderPlusIcon,
   MessageSquareIcon,
+  MoonIcon,
   MoreHorizontalIcon,
   PlusIcon,
   ScrollTextIcon,
   SettingsIcon,
+  SunIcon,
   Trash2Icon,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -34,11 +36,13 @@ import {
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarSeparator,
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
@@ -46,6 +50,7 @@ import type { SessionInfo } from "@/lib/daemon-api";
 import { cn } from "@/lib/utils";
 
 type AppPage = "agent" | "status" | "settings" | "logs";
+type ThemeMode = "light" | "dark";
 
 type AppSidebarProps = {
   activePage: AppPage;
@@ -54,6 +59,8 @@ type AppSidebarProps = {
   sessionError: string | null;
   isCreatingSession: boolean;
   deletingSessionId: string | null;
+  themeMode: ThemeMode;
+  onToggleThemeMode: () => void;
   onSelectSession: (sessionId: string) => void;
   onCreateSession: (projectDir?: string) => void;
   onDeleteSession: (sessionId: string) => Promise<void>;
@@ -128,6 +135,8 @@ function AppSidebarBody({
   sessionError,
   isCreatingSession,
   deletingSessionId,
+  themeMode,
+  onToggleThemeMode,
   onSelectSession,
   onCreateSession,
   onDeleteSession,
@@ -241,6 +250,30 @@ function AppSidebarBody({
           onRequestDeleteSession={setDeleteCandidate}
         />
       </SidebarContent>
+
+      <SidebarFooter>
+        <SidebarSeparator className="mx-0" />
+        <Button
+          type="button"
+          variant="ghost"
+          aria-label={
+            themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"
+          }
+          aria-pressed={themeMode === "dark"}
+          title={
+            themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"
+          }
+          onClick={onToggleThemeMode}
+          className="w-full justify-start"
+        >
+          {themeMode === "dark" ? (
+            <SunIcon data-icon="inline-start" />
+          ) : (
+            <MoonIcon data-icon="inline-start" />
+          )}
+          {themeMode === "dark" ? "Light mode" : "Dark mode"}
+        </Button>
+      </SidebarFooter>
 
       <DeleteSessionDialog
         session={deleteCandidate}
