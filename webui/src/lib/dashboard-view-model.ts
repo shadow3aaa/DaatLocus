@@ -1,4 +1,4 @@
-import type { AgentAnimationStatus } from "@/components/agent-status-animation";
+import type { AgentExpressionStatus } from "@/components/agent-expression";
 import type {
   DashboardContextCompositionSnapshot,
   DashboardContextCompositionSegment,
@@ -114,7 +114,7 @@ export const RUNTIME_OPTIMIZATION_CHART_CONFIG = {
 };
 
 export type AgentStatusView = {
-  animationStatus: AgentAnimationStatus;
+  expressionStatus: AgentExpressionStatus;
   label: string;
 };
 
@@ -221,19 +221,19 @@ export function deriveAgentStatus({
   snapshot,
 }: AgentStatusInput): AgentStatusView {
   if (isLoading && !snapshot) {
-    return { animationStatus: "waiting", label: "Loading" };
+    return { expressionStatus: "waiting", label: "Loading" };
   }
 
   if (loadError && !snapshot) {
-    return { animationStatus: "waiting", label: "Status unavailable" };
+    return { expressionStatus: "waiting", label: "Status unavailable" };
   }
 
   if (!snapshot) {
-    return { animationStatus: "idle", label: "Idle" };
+    return { expressionStatus: "idle", label: "Idle" };
   }
 
   return {
-    animationStatus: snapshot.runtime_activity?.status ?? "idle",
+    expressionStatus: snapshot.runtime_activity?.status ?? "idle",
     label: snapshot.runtime_activity?.label ?? "Idle",
   };
 }
