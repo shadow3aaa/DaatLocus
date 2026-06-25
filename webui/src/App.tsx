@@ -3,9 +3,11 @@ import { useEffect, useMemo, useState } from "react";
 import { AppSidebar } from "@/components/app-sidebar";
 import { LoginPage } from "@/components/login-page";
 import { LogsPage } from "@/components/logs-page";
+import { SetupPage } from "@/components/setup-page";
 import { SettingsPage } from "@/components/settings-page";
 import { AgentPage, StatusPage } from "@/components/status-page";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import {
   Empty,
   EmptyContent,
@@ -14,13 +16,17 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { Spinner } from "@/components/ui/spinner";
 import { getStoredDaemonToken } from "@/lib/daemon-auth";
 import {
   createSession,
   deleteSession,
+  fetchConfigReadiness,
   fetchSessions,
+  type ConfigReadinessReport,
   type DashboardSnapshot,
   type SessionInfo,
+  type SetupConfigRequest,
 } from "@/lib/daemon-api";
 
 type AppPage = "agent" | "status" | "settings" | "logs";
@@ -29,6 +35,10 @@ const SELECTED_SESSION_STORAGE_KEY = "daat-locus.webui.selected-session-id";
 const APP_DOCUMENT_TITLE = "Daat Locus";
 
 export default function App() {
+  if (shouldRenderMockSetupPage()) {
+    return <MockSetupApp />;
+  }
+
   if (shouldRenderMockAgentPage()) {
     return <MockAgentApp />;
   }
@@ -37,6 +47,13 @@ export default function App() {
     Boolean(getStoredDaemonToken()),
   );
   const [activePage, setActivePage] = useState(getCurrentPage);
+  const [configReadiness, setConfigReadiness] =
+    useState<ConfigReadinessReport | null>(null);
+  const [configReadinessError, setConfigReadinessError] = useState<string | null>(
+    null,
+  );
+  const [hasLoadedConfigReadiness, setHasLoadedConfigReadiness] =
+    useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     readStoredSelectedSessionId,
@@ -59,6 +76,12 @@ export default function App() {
   );
 
   useEffect(() => {
+    const controller = new AbortController();
+    void refreshConfigReadiness(controller.signal);
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
     function updateActivePage() {
       setActivePage(getCurrentPage());
     }
@@ -78,7 +101,7 @@ export default function App() {
   }, [activePage, isAuthenticated, selectedSession]);
 
   useEffect(() => {
-    if (!isAuthenticated) {
+    if (!isAuthenticated || configReadiness?.kind !== "complete") {
       return;
     }
 
@@ -92,7 +115,7 @@ export default function App() {
       controller.abort();
       window.clearInterval(interval);
     };
-  }, [isAuthenticated]);
+  }, [configReadiness?.kind, isAuthenticated]);
 
   useEffect(() => {
     if (selectedSessionId) {
@@ -123,6 +146,23 @@ export default function App() {
       }
       setSessionError(error instanceof Error ? error.message : String(error));
       setHasLoadedSessions(true);
+    }
+  }
+
+  async function refreshConfigReadiness(signal?: AbortSignal) {
+    try {
+      const readiness = await fetchConfigReadiness({ signal });
+      setConfigReadiness(readiness);
+      setConfigReadinessError(null);
+      setHasLoadedConfigReadiness(true);
+    } catch (error) {
+      if (signal?.aborted) {
+        return;
+      }
+      setConfigReadinessError(
+        error instanceof Error ? error.message : String(error),
+      );
+      setHasLoadedConfigReadiness(true);
     }
   }
 
@@ -184,9 +224,62 @@ export default function App() {
     }
   }
 
+  function handleSetupReadinessChanged(nextReadiness: ConfigReadinessReport) {
+    setConfigReadiness(nextReadiness);
+    if (nextReadiness.kind === "complete") {
+      leaveSetupRoute();
+    }
+  }
+
+  function leaveSetupRoute() {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const url = new URL(window.location.href);
+    const wasForcedByQuery = url.searchParams.get("setup") === "1";
+    const wasForcedByHash = url.hash === "#setup";
+
+    if (wasForcedByQuery) {
+      url.searchParams.delete("setup");
+    }
+    if (wasForcedByHash) {
+      url.hash = "";
+    }
+
+    if (wasForcedByQuery || wasForcedByHash) {
+      window.history.replaceState(
+        null,
+        "",
+        `${url.pathname}${url.search}${url.hash}`,
+      );
+      setActivePage(getCurrentPage());
+    }
+  }
+
+  const shouldShowSetup =
+    shouldForceSetupPage() ||
+    (configReadiness !== null && configReadiness.kind !== "complete");
+
   return (
     <main className="min-h-screen bg-background text-foreground">
-      {isAuthenticated ? (
+      {!hasLoadedConfigReadiness ? (
+        <SetupLoadingPage />
+      ) : configReadinessError && !configReadiness ? (
+        <SetupErrorPage
+          message={configReadinessError}
+          onRefresh={() => void refreshConfigReadiness()}
+        />
+      ) : shouldShowSetup ? (
+        isAuthenticated && configReadiness ? (
+          <SetupPage
+            readiness={configReadiness}
+            onReadinessChanged={handleSetupReadinessChanged}
+          />
+        ) : (
+          <LoginPage onAuthenticated={() => setIsAuthenticated(true)} />
+        )
+      ) : isAuthenticated ? (
         <SidebarProvider>
           <AppSidebar
             activePage={activePage}
@@ -239,6 +332,32 @@ function MockAgentApp() {
         </SidebarInset>
       </SidebarProvider>
     </main>
+  );
+}
+
+function MockSetupApp() {
+  const readiness = MOCK_SETUP_READINESS;
+
+  useEffect(() => {
+    document.title = "Daat Locus Setup Mock";
+  }, []);
+
+  async function handleMockSave(request: SetupConfigRequest) {
+    return {
+      ...readiness,
+      kind: "complete" as const,
+      port: request.daemon_port ?? readiness.port,
+      message: "mock setup configuration is complete",
+      recovery_note: null,
+    };
+  }
+
+  return (
+    <SetupPage
+      readiness={readiness}
+      onReadinessChanged={() => undefined}
+      onSaveSetupConfig={handleMockSave}
+    />
   );
 }
 
@@ -299,6 +418,67 @@ function NoSessionPage({
             </Alert>
           </EmptyContent>
         ) : null}
+      </Empty>
+    </section>
+  );
+}
+
+function SetupLoadingPage() {
+  return (
+    <section
+      aria-label="Loading configuration readiness"
+      className="flex min-h-screen w-full items-center justify-center px-6 py-16"
+    >
+      <Empty className="w-full max-w-lg border border-dashed bg-card/60">
+        <EmptyHeader>
+          <EmptyTitle>Checking configuration</EmptyTitle>
+          <EmptyDescription>
+            Loading Manager readiness before opening the agent workspace.
+          </EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <div className="flex items-center justify-center">
+            <Spinner />
+          </div>
+        </EmptyContent>
+      </Empty>
+    </section>
+  );
+}
+
+function SetupErrorPage({
+  message,
+  onRefresh,
+}: {
+  message: string;
+  onRefresh: () => void;
+}) {
+  return (
+    <section
+      aria-label="Configuration readiness error"
+      className="flex min-h-screen w-full items-center justify-center px-6 py-16"
+    >
+      <Empty className="w-full max-w-lg border border-dashed bg-card/60">
+        <EmptyHeader>
+          <EmptyTitle>Unable to read configuration state</EmptyTitle>
+          <EmptyDescription>
+            The WebUI could not determine whether the agent can run.
+          </EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <div className="flex w-full flex-col gap-4">
+            <Alert variant="destructive" className="w-full">
+              <AlertDescription>{message}</AlertDescription>
+            </Alert>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onRefresh}
+            >
+              Retry
+            </Button>
+          </div>
+        </EmptyContent>
       </Empty>
     </section>
   );
@@ -398,8 +578,33 @@ function shouldRenderMockAgentPage() {
   return new URLSearchParams(window.location.search).get("mock") === "agent";
 }
 
+function shouldRenderMockSetupPage() {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return false;
+  }
+
+  return new URLSearchParams(window.location.search).get("mock") === "setup";
+}
+
+function shouldForceSetupPage() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const params = new URLSearchParams(window.location.search);
+  return params.get("setup") === "1" || window.location.hash === "#setup";
+}
+
 const MOCK_NOW_MS = Date.now();
 const MOCK_PROJECT_DIR = "C:\\Users\\13940\\DaatLocus";
+
+const MOCK_SETUP_READINESS: ConfigReadinessReport = {
+  kind: "unconfigured",
+  config_path: "C:\\Users\\13940\\.daat-locus\\config\\config.toml",
+  backup_path: "C:\\Users\\13940\\.daat-locus\\config\\config.toml.bak",
+  port: 53825,
+  message: "configuration has no provider/model setup",
+  recovery_note: null,
+};
 
 const MOCK_SESSION: SessionInfo = {
   session_id: "mock-agent-session",
@@ -585,7 +790,7 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
                 kind: "delete",
                 old_lineno: 121,
                 new_lineno: null,
-                text: "<AgentStatusAnimation />",
+                text: "<AgentExpression />",
               },
               {
                 kind: "add",

@@ -22,7 +22,7 @@ export function clearStoredDaemonToken() {
 
 export async function verifyDaemonToken(token: string): Promise<DaemonAuthResult> {
   try {
-    const response = await fetch("/settings/summary", {
+    const response = await fetch("/status/summary", {
       method: "GET",
       headers: {
         Accept: "application/json",

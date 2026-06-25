@@ -551,6 +551,96 @@ export type SettingsSummary = {
   };
 };
 
+export type ConfigReadinessKind = "unconfigured" | "incomplete" | "complete";
+
+export type ConfigReadinessReport = {
+  kind: ConfigReadinessKind;
+  config_path: string;
+  backup_path: string;
+  port: number;
+  message: string;
+  recovery_note: string | null;
+};
+
+type ConfigReadinessResponse = {
+  readiness: ConfigReadinessReport;
+};
+
+export type SetupProviderKind =
+  | "openai"
+  | "openai_compatible"
+  | "openai_codex_oauth"
+  | "github_copilot"
+  | "ollama"
+  | "ollama_cloud";
+
+export type SetupProviderRequest = {
+  kind: SetupProviderKind;
+  name: string;
+  api_key?: string | null;
+  base_url?: string | null;
+  keep_alive?: string | null;
+  codex_auth_method?: string | null;
+  codex_auth_file?: string | null;
+  github_auth_method?: string | null;
+};
+
+export type SetupDiscoveredModel = {
+  id: string;
+  context_window_tokens?: number | null;
+  max_completion_tokens?: number | null;
+  supports_vision?: boolean | null;
+  thinking_budgets?: string[];
+};
+
+type SetupDiscoverModelsResponse = {
+  models: SetupDiscoveredModel[];
+};
+
+export type SetupProviderAuthStartResponse = {
+  flow_id: string;
+  provider_kind: SetupProviderKind;
+  verification_url: string;
+  user_code: string;
+  expires_at_ms: number;
+  interval_secs: number;
+};
+
+export type SetupProviderAuthResponse = {
+  api_key?: string | null;
+  auth_file?: string | null;
+  message: string;
+};
+
+export type SetupModelRequest = {
+  name: string;
+  provider_name: string;
+  model_id: string;
+  context_window_tokens?: number | null;
+  max_completion_tokens?: number | null;
+  supports_vision?: boolean | null;
+  thinking_budget?: string | null;
+};
+
+export type SetupConfigRequest = {
+  locale?: string;
+  persona_name?: string | null;
+  persona_language?: string | null;
+  providers?: SetupProviderRequest[];
+  models?: SetupModelRequest[];
+  main_model?: string | null;
+  efficient_model?: string | null;
+  provider_kind?: SetupProviderKind;
+  provider_name?: string;
+  main_model_name?: string;
+  main_model_id?: string;
+  efficient_model_name?: string;
+  efficient_model_id?: string;
+  api_key?: string | null;
+  base_url?: string | null;
+  daemon_port?: number | null;
+};
+
 type FetchOptions = {
   signal?: AbortSignal;
   token?: string;
@@ -795,6 +885,208 @@ export async function fetchSettingsSummary({
   });
 
   return parseJsonResponse<SettingsSummary>(response, "Settings summary");
+}
+
+export async function fetchConfigReadiness({
+  signal,
+}: FetchOptions = {}): Promise<ConfigReadinessReport> {
+  const response = await fetch("/config/readiness", {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+    },
+    signal,
+  });
+
+  const result = await parseJsonResponse<ConfigReadinessResponse>(
+    response,
+    "Config readiness",
+  );
+  return result.readiness;
+}
+
+export async function saveSetupConfig(
+  request: SetupConfigRequest,
+  {
+    signal,
+    token = getStoredDaemonToken(),
+  }: FetchOptions = {},
+): Promise<ConfigReadinessReport> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for setup.");
+  }
+
+  const response = await fetch("/config/setup", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+    signal,
+  });
+
+  const result = await parseJsonResponse<ConfigReadinessResponse>(
+    response,
+    "Config setup",
+  );
+  return result.readiness;
+}
+
+export async function probeSetupConfig(
+  request: SetupConfigRequest,
+  {
+    signal,
+    token = getStoredDaemonToken(),
+  }: FetchOptions = {},
+): Promise<ConfigReadinessReport> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for setup probe.");
+  }
+
+  const response = await fetch("/config/probe", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+    signal,
+  });
+
+  const result = await parseJsonResponse<ConfigReadinessResponse>(
+    response,
+    "Config probe",
+  );
+  return result.readiness;
+}
+
+export async function discoverSetupModels(
+  provider: SetupProviderRequest,
+  {
+    signal,
+    token = getStoredDaemonToken(),
+  }: FetchOptions = {},
+): Promise<SetupDiscoveredModel[]> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for model discovery.");
+  }
+
+  const response = await fetch("/config/discover-models", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ provider }),
+    signal,
+  });
+
+  const result = await parseJsonResponse<SetupDiscoverModelsResponse>(
+    response,
+    "Model discovery",
+  );
+  return result.models;
+}
+
+export async function runSetupProviderAuth(
+  provider: SetupProviderRequest,
+  {
+    signal,
+    token = getStoredDaemonToken(),
+  }: FetchOptions = {},
+): Promise<SetupProviderAuthResponse> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for setup auth.");
+  }
+
+  const response = await fetch("/config/provider-auth/run", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ provider }),
+    signal,
+  });
+
+  return parseJsonResponse<SetupProviderAuthResponse>(
+    response,
+    "Provider auth",
+  );
+}
+
+export async function startSetupProviderAuthDevice(
+  provider: SetupProviderRequest,
+  {
+    signal,
+    token = getStoredDaemonToken(),
+  }: FetchOptions = {},
+): Promise<SetupProviderAuthStartResponse> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for setup auth.");
+  }
+
+  const response = await fetch("/config/provider-auth/device/start", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ provider }),
+    signal,
+  });
+
+  return parseJsonResponse<SetupProviderAuthStartResponse>(
+    response,
+    "Provider device auth start",
+  );
+}
+
+export async function completeSetupProviderAuthDevice(
+  provider: SetupProviderRequest,
+  flowId: string,
+  {
+    signal,
+    token = getStoredDaemonToken(),
+  }: FetchOptions = {},
+): Promise<SetupProviderAuthResponse> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for setup auth.");
+  }
+
+  const response = await fetch("/config/provider-auth/device/complete", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ provider, flow_id: flowId }),
+    signal,
+  });
+
+  return parseJsonResponse<SetupProviderAuthResponse>(
+    response,
+    "Provider device auth complete",
+  );
 }
 
 export async function runDashboardCommand(

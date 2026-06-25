@@ -62,6 +62,10 @@ export default defineConfig({
         target: daemonTarget,
         changeOrigin: true,
       },
+      "/config": {
+        target: daemonTarget,
+        changeOrigin: true,
+      },
       "/sessions": {
         target: daemonTarget,
         changeOrigin: true,
