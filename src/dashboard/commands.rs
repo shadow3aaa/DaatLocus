@@ -63,6 +63,14 @@ pub enum DashboardAction {
     },
 }
 
+pub(crate) fn dashboard_action_is_manager_owned(action: &DashboardAction) -> bool {
+    matches!(
+        action,
+        DashboardAction::ApproveTelegramAccess { .. }
+            | DashboardAction::RejectTelegramAccess { .. }
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DashboardActionResult {
     pub success: bool,

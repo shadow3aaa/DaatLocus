@@ -147,6 +147,32 @@ impl TelegramAclHandle {
         chats
     }
 
+    pub fn approve_verified(
+        &self,
+        chat_id: i64,
+        title: impl Into<String>,
+        sender: impl Into<String>,
+        last_message_preview: impl Into<String>,
+        seen_at_ms: i64,
+    ) -> Result<()> {
+        let mut inner = self.inner.lock();
+        inner.state.pending.remove(&chat_id);
+        inner.state.blocked.remove(&chat_id);
+        inner.state.approved.insert(chat_id);
+        inner.state.approved_meta.insert(
+            chat_id,
+            ApprovedChat {
+                chat_id,
+                title: title.into(),
+                sender: sender.into(),
+                last_message_preview: last_message_preview.into(),
+                approved_at_ms: seen_at_ms,
+                last_seen_at_ms: seen_at_ms,
+            },
+        );
+        persist_locked(&inner)
+    }
+
     pub fn approve(&self, chat_id: i64) -> Result<()> {
         let mut inner = self.inner.lock();
         let pending = inner.state.pending.remove(&chat_id);

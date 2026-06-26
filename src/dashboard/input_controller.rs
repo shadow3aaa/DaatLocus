@@ -4,8 +4,7 @@ use super::command_flow::{
     adjusted_popup_scroll, command_blocks_submission, command_feedback_from_action_result,
     command_panel_for_input, dashboard_action_for_input, dashboard_command_body,
     is_clear_command_input, is_dashboard_command_input, matching_commands,
-    selected_command_completion, telegram_access_command_panel,
-    unsupported_dashboard_command_feedback,
+    selected_command_completion, unsupported_dashboard_command_feedback,
 };
 use super::command_input::{
     expand_paste_placeholders, handle_paste_placeholder, should_insert_newline_on_enter,
@@ -110,9 +109,6 @@ pub(super) fn handle_key_event(
                 view.command_panel = Some(CommandPanel::SkillsToggle(
                     SkillsTogglePanel::from_state(state),
                 ));
-            }
-            CommandPanelAction::OpenTelegramAccess(action) => {
-                view.command_panel = Some(telegram_access_command_panel(action, &pending_requests));
             }
             CommandPanelAction::EditPendingUserInput {
                 event_id,

@@ -231,7 +231,9 @@ pub(crate) fn execute_control_command(
         ["sleep", "status"] => fallback_output(&state.sleep_status_output),
         ["skills"] | ["skills", "list"] | ["skills", "show"] => render_skills_list(state),
         ["skills", "show", target] => render_skill_detail(state, target),
-        ["telegram"] => "available actions: status, approve, reject".to_string(),
+        ["telegram"] => {
+            "available actions: status\nTelegram verification uses daemon auth tokens. Run `daat-locus daemon token create telegram` locally, then send `/verify <token>` to the Telegram bot.".to_string()
+        }
         ["telegram", "status"] => fallback_output(&state.inspect_telegram_output),
         ["telegram", "approve"] => render_pending_access_requests("approve", &requests),
         ["telegram", "reject"] => render_pending_access_requests("reject", &requests),
@@ -241,6 +243,26 @@ pub(crate) fn execute_control_command(
         [verb, ..] => format!("unknown command: {verb}"),
         [] => "empty command".to_string(),
     }
+}
+
+pub(crate) fn dashboard_command_is_manager_owned(command: &str) -> bool {
+    let command = command.trim().trim_start_matches('/').trim();
+    if command.is_empty() {
+        return false;
+    }
+    let input = format!("/{command}");
+    let Some(parts) = dashboard_command_parts(&input) else {
+        return false;
+    };
+    matches!(
+        parts.as_slice(),
+        ["telegram"]
+            | ["telegram", "status"]
+            | ["telegram", "approve"]
+            | ["telegram", "reject"]
+            | ["telegram", "approve", _]
+            | ["telegram", "reject", _]
+    )
 }
 
 fn debug_command_panel(state: &DashboardState) -> CommandPanel {
@@ -381,11 +403,11 @@ fn app_status_detail_panel(state: &DashboardState, target: &str) -> CommandPanel
 
 fn telegram_command_panel(
     state: &DashboardState,
-    requests: &[PendingAccessRequest],
+    _requests: &[PendingAccessRequest],
 ) -> CommandPanel {
     CommandPanel::Selection(CommandSelectionPanel {
         title: "Telegram".to_string(),
-        subtitle: Some("Inspect transport state or handle access requests.".to_string()),
+        subtitle: Some("Inspect transport state or bind a chat with a daemon auth token.".to_string()),
         items: vec![
             CommandSelectionItem {
                 name: "Status".to_string(),
@@ -397,16 +419,13 @@ fn telegram_command_panel(
                 disabled: false,
             },
             CommandSelectionItem {
-                name: "Approve access request".to_string(),
-                description: format!("approve one of {} pending requests", requests.len()),
-                action: CommandSelectionAction::OpenTelegramAccess(TelegramAccessAction::Approve),
-                disabled: requests.is_empty(),
-            },
-            CommandSelectionItem {
-                name: "Reject access request".to_string(),
-                description: format!("reject one of {} pending requests", requests.len()),
-                action: CommandSelectionAction::OpenTelegramAccess(TelegramAccessAction::Reject),
-                disabled: requests.is_empty(),
+                name: "Verify".to_string(),
+                description: "bind a Telegram chat with a daemon auth token".to_string(),
+                action: CommandSelectionAction::ShowDetail {
+                    title: "TELEGRAM VERIFY".to_string(),
+                    text: "Run `daat-locus daemon token create telegram` locally, then send `/verify <token>` to the Telegram bot.".to_string(),
+                },
+                disabled: false,
             },
         ],
         selected: 0,

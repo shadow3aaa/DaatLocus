@@ -55,7 +55,8 @@ use crate::{
         DashboardAction, DashboardActionResult, DashboardActivityHistoryPage,
         DashboardCommandAttachment, DashboardCommandRunner, DashboardControlCommand,
         DashboardHistoryLoader, DashboardIncomingAttachment, DashboardInputHistory,
-        DashboardSessionTitle, DashboardState, execute_control_command, execute_dashboard_action,
+        DashboardSessionTitle, DashboardState, dashboard_action_is_manager_owned,
+        dashboard_command_is_manager_owned, execute_control_command, execute_dashboard_action,
     },
     model_catalog::catalog_model_capacity,
     sandbox::StrongFilesystemSandboxMode,
@@ -1168,6 +1169,13 @@ fn status_response(state: &ServerState) -> StatusResponse {
     }
 }
 
+fn overlay_manager_owned_dashboard_state(
+    telegram_acl: &TelegramAclHandle,
+    snapshot: &mut DashboardState,
+) {
+    snapshot.pending_access_requests = telegram_acl.pending_requests();
+}
+
 async fn status_summary_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -1308,7 +1316,8 @@ async fn snapshot_handler(
                 .await
             {
                 Ok(session_ipc::SessionIpcResponse::DashboardSnapshot { state: snapshot }) => {
-                    let snapshot = *snapshot;
+                    let mut snapshot = *snapshot;
+                    overlay_manager_owned_dashboard_state(&state.telegram_acl, &mut snapshot);
                     sync_session_title_from_dashboard_state(&state.sessions, session_id, &snapshot)
                         .await;
                     Json(snapshot).into_response()
@@ -1508,10 +1517,11 @@ async fn stream_handler(
     }
     if let Some(session_id) = query.session_id.as_deref() {
         let sessions = state.sessions.clone();
+        let telegram_acl = state.telegram_acl.clone();
         let session_id = session_id.to_string();
         return match session_client_for_request(&state, &session_id).await {
             Ok(client) => ws.on_upgrade(move |socket| {
-                session_dashboard_ws(socket, client, sessions, session_id)
+                session_dashboard_ws(socket, client, sessions, telegram_acl, session_id)
             }),
             Err(err) => (StatusCode::NOT_FOUND, format!("{err:?}")).into_response(),
         };
@@ -1548,6 +1558,28 @@ async fn command_handler(
         }
     };
     if let Some(session_id) = request.session_id.as_deref() {
+        let trimmed = request.command.trim();
+        if let Some(command) = trimmed.strip_prefix('/')
+            && dashboard_command_is_manager_owned(command)
+        {
+            if !attachments.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(CommandResponse {
+                        output: "dashboard commands cannot include attachments".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+            let snapshot = state.dashboard_rx.borrow().clone();
+            let output = execute_control_command(
+                command.trim(),
+                &state.telegram_acl,
+                &snapshot,
+                &state.dashboard_control_tx,
+            );
+            return Json(CommandResponse { output }).into_response();
+        }
         let client = match session_client_for_request(&state, session_id).await {
             Ok(client) => client,
             Err(err) => {
@@ -1560,7 +1592,6 @@ async fn command_handler(
                     .into_response();
             }
         };
-        let trimmed = request.command.trim();
         if let Some(command) = trimmed.strip_prefix('/') {
             if !attachments.is_empty() {
                 return (
@@ -1651,6 +1682,14 @@ async fn dashboard_action_handler(
     }
     if let Some(response) = config_not_ready_dashboard_action_response().await {
         return response;
+    }
+    if dashboard_action_is_manager_owned(&request.action) {
+        let result = execute_dashboard_action(
+            request.action,
+            &state.telegram_acl,
+            &state.dashboard_control_tx,
+        );
+        return Json(DashboardActionResponse { result }).into_response();
     }
     if let Some(session_id) = request.session_id.as_deref() {
         let client = match session_client_for_request(&state, session_id).await {
@@ -2702,6 +2741,7 @@ async fn session_dashboard_ws(
     mut socket: WebSocket,
     client: session_ipc::SessionIpcClient,
     sessions: session::SessionRegistry,
+    telegram_acl: TelegramAclHandle,
     session_id: String,
 ) {
     let mut stream = match client.subscribe_dashboard().await {
@@ -2723,9 +2763,10 @@ async fn session_dashboard_ws(
     loop {
         match session_ipc::read_stream_event(&mut stream).await {
             Ok(session_ipc::SessionIpcStreamEvent::DashboardSnapshot { state }) => {
-                sync_session_title_from_dashboard_state(&sessions, &session_id, state.as_ref())
-                    .await;
-                if send_dashboard_ws_snapshot(&mut socket, state.as_ref())
+                let mut snapshot = *state;
+                overlay_manager_owned_dashboard_state(&telegram_acl, &mut snapshot);
+                sync_session_title_from_dashboard_state(&sessions, &session_id, &snapshot).await;
+                if send_dashboard_ws_snapshot(&mut socket, &snapshot)
                     .await
                     .is_err()
                 {

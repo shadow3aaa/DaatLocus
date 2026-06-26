@@ -31,6 +31,11 @@ pub trait TelegramInputRouter: Send + Sync {
 }
 
 #[async_trait]
+pub trait TelegramAuthVerifier: Send + Sync {
+    async fn authorize_telegram_verification(&self, token: &str) -> bool;
+}
+
+#[async_trait]
 pub trait TelegramSessionCommandHandler: Send + Sync {
     async fn handle_session_command(
         &self,
@@ -64,7 +69,12 @@ impl TelegramDeliveryClient {
         if self.acl.classify(chat_id) != AccessDecision::Approved {
             return Err(miette!("chat is not approved in telegram acl"));
         }
-        self.send_text(chat_id, &message.text).await
+        if let Some(draft_id) = message.draft_id {
+            self.send_message_draft(chat_id, draft_id, &message.text)
+                .await
+        } else {
+            self.send_text(chat_id, &message.text).await
+        }
     }
 
     async fn send_text(&self, chat_id: i64, text: &str) -> Result<()> {
@@ -106,6 +116,49 @@ impl TelegramDeliveryClient {
         }
     }
 
+    async fn send_message_draft(&self, chat_id: i64, draft_id: i64, text: &str) -> Result<()> {
+        let response = self
+            .client
+            .post(self.endpoint("sendMessageDraft"))
+            .timeout(TELEGRAM_REQUEST_TIMEOUT)
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "draft_id": draft_id,
+                "text": text,
+                "parse_mode": "MarkdownV2",
+            }))
+            .send()
+            .await
+            .map_err(|err| {
+                miette!(
+                    "telegram sendMessageDraft request failed: {}",
+                    err.without_url()
+                )
+            })?
+            .error_for_status()
+            .map_err(|err| {
+                miette!(
+                    "telegram sendMessageDraft http error: {}",
+                    err.without_url()
+                )
+            })?;
+
+        let payload: TelegramApiResponse<bool> = response
+            .json()
+            .await
+            .map_err(|err| miette!("telegram sendMessageDraft json decode failed: {err}"))?;
+        if payload.ok {
+            Ok(())
+        } else {
+            bail!(
+                "telegram sendMessageDraft failed: {}",
+                payload
+                    .description
+                    .unwrap_or_else(|| "unknown api error".to_string())
+            );
+        }
+    }
+
     fn endpoint(&self, method: &str) -> String {
         format!(
             "https://api.telegram.org/bot{}/{}",
@@ -119,6 +172,7 @@ pub struct TelegramTransport {
     config: TelegramConfig,
     acl: TelegramAclHandle,
     handle: TelegramTransportStateHandle,
+    auth_verifier: Arc<dyn TelegramAuthVerifier>,
     input_router: Arc<dyn TelegramInputRouter>,
     session_command_handler: Arc<dyn TelegramSessionCommandHandler>,
     command_state_rx: watch::Receiver<DashboardState>,
@@ -133,6 +187,7 @@ impl TelegramTransport {
         config: TelegramConfig,
         handle: TelegramTransportStateHandle,
         acl: TelegramAclHandle,
+        auth_verifier: Arc<dyn TelegramAuthVerifier>,
         input_router: Arc<dyn TelegramInputRouter>,
         session_command_handler: Arc<dyn TelegramSessionCommandHandler>,
         command_state_rx: watch::Receiver<DashboardState>,
@@ -144,6 +199,7 @@ impl TelegramTransport {
             config,
             acl,
             handle,
+            auth_verifier,
             input_router,
             session_command_handler,
             command_state_rx,
@@ -224,7 +280,13 @@ impl TelegramTransport {
                 continue;
             }
 
-            match self.send_message(chat_id, &message.text).await {
+            let send_result = if let Some(draft_id) = message.draft_id {
+                self.send_message_draft(chat_id, draft_id, &message.text)
+                    .await
+            } else {
+                self.send_message(chat_id, &message.text).await
+            };
+            match send_result {
                 Ok(()) => {}
                 Err(err) => {
                     let reason = truncate_reason(&format!("{err:?}"));
@@ -252,12 +314,11 @@ impl TelegramTransport {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| render_chat_title(&message.chat));
         let chat_title = render_chat_title(&message.chat);
+        let command = extract_telegram_command(&message, self.bot_username.as_deref());
 
         match self.acl.classify(message.chat.id) {
             AccessDecision::Approved => {
-                if let Some(command) =
-                    extract_telegram_command(&message, self.bot_username.as_deref())
-                {
+                if let Some(command) = command {
                     if let Err(err) = self
                         .handle_command_message(message.chat.id, &chat_title, &command)
                         .await
@@ -302,18 +363,94 @@ impl TelegramTransport {
                 self.handle
                     .observe_incoming_message(chat_id, chat_title.clone());
             }
-            AccessDecision::Blocked => (),
-            AccessDecision::Unknown => {
-                if let Err(err) = self.acl.register_pending(
-                    message.chat.id,
-                    chat_title,
-                    sender,
-                    truncate_reason(&text),
-                    chrono::Utc::now().timestamp_millis(),
-                ) {
-                    tracing::error!("register pending telegram chat failed: {err:?}");
+            AccessDecision::Blocked | AccessDecision::Unknown => {
+                if let Err(err) = self
+                    .handle_unverified_message(
+                        message.chat.id,
+                        &chat_title,
+                        &sender,
+                        &text,
+                        command,
+                    )
+                    .await
+                {
+                    tracing::error!("handle unverified telegram message failed: {err:?}");
                 }
             }
+        }
+    }
+
+    async fn handle_unverified_message(
+        &self,
+        chat_id: i64,
+        chat_title: &str,
+        sender: &str,
+        text: &str,
+        command: Option<String>,
+    ) -> Result<()> {
+        let seen_at_ms = chrono::Utc::now().timestamp_millis();
+        let preview = truncate_reason(text);
+        let Some(command) = command else {
+            self.register_pending_unverified(chat_id, chat_title, sender, &preview, seen_at_ms);
+            return self
+                .send_text(chat_id, telegram_verify_instructions())
+                .await;
+        };
+        let Some(token) = parse_verify_command(&command) else {
+            self.register_pending_unverified(chat_id, chat_title, sender, &preview, seen_at_ms);
+            return self
+                .send_text(chat_id, telegram_verify_instructions())
+                .await;
+        };
+        if token.is_empty() {
+            return self
+                .send_text(chat_id, telegram_verify_usage_message())
+                .await;
+        }
+        if !self
+            .auth_verifier
+            .authorize_telegram_verification(token)
+            .await
+        {
+            self.register_pending_unverified(chat_id, chat_title, sender, &preview, seen_at_ms);
+            return self
+                .send_text(chat_id, telegram_verify_failed_message())
+                .await;
+        }
+        self.acl
+            .approve_verified(
+                chat_id,
+                chat_title.to_string(),
+                sender.to_string(),
+                preview,
+                seen_at_ms,
+            )
+            .map_err(|err| miette!("approve verified telegram chat failed: {err:?}"))?;
+        self.handle
+            .register_known_chat(chat_id.to_string(), chat_title.to_string());
+        self.send_text(
+            chat_id,
+            "Telegram verification complete. Send a message to Daat Locus or use /session_list.",
+        )
+        .await
+    }
+
+    fn register_pending_unverified(
+        &self,
+        chat_id: i64,
+        chat_title: &str,
+        sender: &str,
+        preview: &str,
+        seen_at_ms: i64,
+    ) {
+        if let Err(err) = self.acl.register_pending(
+            chat_id,
+            chat_title.to_string(),
+            sender.to_string(),
+            preview.to_string(),
+            seen_at_ms,
+        ) {
+            tracing::error!("register pending telegram chat failed: {err:?}");
         }
     }
 
@@ -602,69 +739,7 @@ impl TelegramTransport {
         }
     }
 
-    async fn send_text(&self, chat_id: i64, text: &str) -> Result<()> {
-        for chunk in split_telegram_message_text(text) {
-            self.send_message(chat_id, &chunk).await?;
-        }
-        Ok(())
-    }
-
-    fn endpoint(&self, method: &str) -> String {
-        format!(
-            "https://api.telegram.org/bot{}/{}",
-            self.config.bot_token, method
-        )
-    }
-}
-
-const TELEGRAM_SESSION_COMMANDS: &[(&str, &str)] = &[
-    (
-        "session_list",
-        "list sessions and the current chat attachment",
-    ),
-    ("session_new", "create and attach a new session"),
-    ("session_attach", "attach this chat to an existing session"),
-    ("session_delete", "delete an existing session"),
-];
-
-fn telegram_bot_commands() -> Vec<serde_json::Value> {
-    let mut commands = remote_dashboard_commands()
-        .into_iter()
-        .map(|command| {
-            serde_json::json!({
-                "command": command.command,
-                "description": command.description,
-            })
-        })
-        .collect::<Vec<_>>();
-    commands.extend(
-        TELEGRAM_SESSION_COMMANDS
-            .iter()
-            .map(|(command, description)| {
-                serde_json::json!({
-                    "command": command,
-                    "description": description,
-                })
-            }),
-    );
-    commands
-}
-
-#[derive(Clone)]
-pub struct TelegramLiveDraftClient {
-    client: Client,
-    config: TelegramConfig,
-}
-
-impl TelegramLiveDraftClient {
-    pub fn new(config: TelegramConfig) -> Self {
-        Self {
-            client: Client::new(),
-            config,
-        }
-    }
-
-    pub async fn send_message_draft(&self, chat_id: i64, draft_id: i64, text: &str) -> Result<()> {
+    async fn send_message_draft(&self, chat_id: i64, draft_id: i64, text: &str) -> Result<()> {
         let response = self
             .client
             .post(self.endpoint("sendMessageDraft"))
@@ -707,12 +782,53 @@ impl TelegramLiveDraftClient {
         }
     }
 
+    async fn send_text(&self, chat_id: i64, text: &str) -> Result<()> {
+        for chunk in split_telegram_message_text(text) {
+            self.send_message(chat_id, &chunk).await?;
+        }
+        Ok(())
+    }
+
     fn endpoint(&self, method: &str) -> String {
         format!(
             "https://api.telegram.org/bot{}/{}",
             self.config.bot_token, method
         )
     }
+}
+
+const TELEGRAM_SESSION_COMMANDS: &[(&str, &str)] = &[
+    (
+        "session_list",
+        "list sessions and the current chat attachment",
+    ),
+    ("session_new", "create and attach a new session"),
+    ("session_attach", "attach this chat to an existing session"),
+    ("session_delete", "delete an existing session"),
+];
+
+fn telegram_bot_commands() -> Vec<serde_json::Value> {
+    let mut commands = vec![serde_json::json!({
+        "command": "verify",
+        "description": "verify this chat with a daemon auth token",
+    })];
+    commands.extend(remote_dashboard_commands().into_iter().map(|command| {
+        serde_json::json!({
+            "command": command.command,
+            "description": command.description,
+        })
+    }));
+    commands.extend(
+        TELEGRAM_SESSION_COMMANDS
+            .iter()
+            .map(|(command, description)| {
+                serde_json::json!({
+                    "command": command,
+                    "description": description,
+                })
+            }),
+    );
+    commands
 }
 
 #[derive(Deserialize)]
@@ -1104,6 +1220,30 @@ fn normalize_telegram_command(
     })
 }
 
+fn parse_verify_command(command: &str) -> Option<&str> {
+    let mut parts = command.split_whitespace();
+    if parts.next()? != "verify" {
+        return None;
+    }
+    let token = parts.next().unwrap_or_default();
+    if parts.next().is_some() {
+        return Some("");
+    }
+    Some(token)
+}
+
+fn telegram_verify_instructions() -> &'static str {
+    "This Telegram chat is not verified yet.\nRun `daat-locus daemon token create telegram` locally, then send `/verify <token>` here."
+}
+
+fn telegram_verify_usage_message() -> &'static str {
+    "Usage: /verify <token>\nRun `daat-locus daemon token create telegram` locally to create a daemon auth token."
+}
+
+fn telegram_verify_failed_message() -> &'static str {
+    "Telegram verification failed. Create a daemon auth token locally with `daat-locus daemon token create telegram`, then send `/verify <token>` here."
+}
+
 fn should_persist_update_offset_before_handling(
     update: &TelegramUpdate,
     bot_username: Option<&str>,
@@ -1276,12 +1416,21 @@ mod tests {
     }
 
     #[test]
+    fn verify_command_accepts_exactly_one_token() {
+        assert_eq!(parse_verify_command("verify abc123"), Some("abc123"));
+        assert_eq!(parse_verify_command("verify"), Some(""));
+        assert_eq!(parse_verify_command("verify abc123 extra"), Some(""));
+        assert_eq!(parse_verify_command("status"), None);
+    }
+
+    #[test]
     fn bot_commands_include_telegram_session_controls() {
         let commands = telegram_bot_commands()
             .into_iter()
             .filter_map(|command| command.get("command")?.as_str().map(ToString::to_string))
             .collect::<Vec<_>>();
 
+        assert!(commands.contains(&"verify".to_string()));
         assert!(commands.contains(&"session_list".to_string()));
         assert!(commands.contains(&"session_new".to_string()));
         assert!(commands.contains(&"session_attach".to_string()));

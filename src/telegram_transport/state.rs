@@ -76,6 +76,8 @@ pub struct PendingOutboundMessage {
     pub local_message_id: String,
     pub chat_id: String,
     pub text: String,
+    #[serde(default)]
+    pub draft_id: Option<i64>,
     pub related_event_id: Option<String>,
     pub settle_status_on_delivery: Option<EventStatus>,
     #[serde(default)]
@@ -182,6 +184,7 @@ impl TelegramTransportStateHandle {
                 local_message_id: Uuid::new_v4().to_string(),
                 chat_id: chat_id.clone(),
                 text: chunk,
+                draft_id: None,
                 related_event_id: if is_last {
                     related_event_id.clone()
                 } else {
@@ -199,6 +202,38 @@ impl TelegramTransportStateHandle {
                 },
             });
         }
+        persist_telegram_state_result(&self.inner, &state)?;
+        self.inner.outbound_notify.notify_one();
+        Ok(())
+    }
+
+    pub fn enqueue_outgoing_draft(
+        &self,
+        chat_id: String,
+        draft_id: i64,
+        text: String,
+    ) -> Result<()> {
+        let mut state = self.inner.state.lock();
+        state.ensure_chat(chat_id.clone(), chat_id.clone());
+        if let Some(existing) = state
+            .outbox
+            .iter_mut()
+            .find(|message| message.chat_id == chat_id && message.draft_id == Some(draft_id))
+        {
+            existing.text = text;
+            persist_telegram_state_result(&self.inner, &state)?;
+            self.inner.outbound_notify.notify_one();
+            return Ok(());
+        }
+        state.outbox.push_back(PendingOutboundMessage {
+            local_message_id: Uuid::new_v4().to_string(),
+            chat_id,
+            text,
+            draft_id: Some(draft_id),
+            related_event_id: None,
+            settle_status_on_delivery: None,
+            settle_note_on_delivery: None,
+        });
         persist_telegram_state_result(&self.inner, &state)?;
         self.inner.outbound_notify.notify_one();
         Ok(())
@@ -491,6 +526,7 @@ mod tests {
             local_message_id: "local-1".to_string(),
             chat_id: "chat-1".to_string(),
             text: "reply text".to_string(),
+            draft_id: None,
             related_event_id: Some("event-1".to_string()),
             settle_status_on_delivery: Some(EventStatus::Resolved),
             settle_note_on_delivery: Some("delivered".to_string()),
@@ -625,6 +661,60 @@ mod tests {
                 assert!(message.settle_note_on_delivery.is_none());
             }
         }
+    }
+
+    #[test]
+    fn enqueue_outgoing_draft_marks_outbox_message_as_draft_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transport = TelegramTransportState {
+            inner: Arc::new(TelegramInner {
+                state: Mutex::new(TelegramState::default()),
+                update_offset: Mutex::new(None),
+                outbound_notify: Notify::new(),
+                persistence_path: dir.path().join("telegram_state"),
+                update_offset_path: dir.path().join("telegram_update_offset"),
+            }),
+        };
+        let handle = transport.handle();
+
+        handle
+            .enqueue_outgoing_draft("1".to_string(), 42, "Working...".to_string())
+            .expect("enqueue draft");
+
+        let outbound = handle.take_next_outbound().expect("draft outbound");
+        assert_eq!(outbound.chat_id, "1");
+        assert_eq!(outbound.text, "Working...");
+        assert_eq!(outbound.draft_id, Some(42));
+        assert!(outbound.related_event_id.is_none());
+        assert!(outbound.settle_status_on_delivery.is_none());
+        assert!(outbound.settle_note_on_delivery.is_none());
+    }
+
+    #[test]
+    fn enqueue_outgoing_draft_coalesces_pending_draft_updates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let transport = TelegramTransportState {
+            inner: Arc::new(TelegramInner {
+                state: Mutex::new(TelegramState::default()),
+                update_offset: Mutex::new(None),
+                outbound_notify: Notify::new(),
+                persistence_path: dir.path().join("telegram_state"),
+                update_offset_path: dir.path().join("telegram_update_offset"),
+            }),
+        };
+        let handle = transport.handle();
+
+        handle
+            .enqueue_outgoing_draft("1".to_string(), 42, "Working".to_string())
+            .expect("enqueue draft");
+        handle
+            .enqueue_outgoing_draft("1".to_string(), 42, "Still working".to_string())
+            .expect("replace draft");
+
+        let outbound = handle.take_next_outbound().expect("draft outbound");
+        assert_eq!(outbound.text, "Still working");
+        assert_eq!(outbound.draft_id, Some(42));
+        assert!(handle.take_next_outbound().is_none());
     }
 
     #[test]

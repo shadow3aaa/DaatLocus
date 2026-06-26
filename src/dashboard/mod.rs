@@ -33,7 +33,7 @@ pub use cells::{
     render_activity_from_messages, terminal_activity_event_from_terminal_data,
     thinking_activity_cell, user_activity_cell_from_event,
 };
-pub(crate) use command_flow::execute_control_command;
+pub(crate) use command_flow::{dashboard_command_is_manager_owned, execute_control_command};
 pub use commands::{
     DashboardAction, DashboardActionResult, DashboardCommandAttachment, DashboardCommandRunner,
     DashboardControlCommand, DashboardPendingUserInputMoveDirection,
@@ -91,7 +91,7 @@ use command_render::{
 };
 #[cfg(test)]
 use command_text::{render_pending_access_requests, render_skills_list};
-pub(crate) use commands::execute_dashboard_action;
+pub(crate) use commands::{dashboard_action_is_manager_owned, execute_dashboard_action};
 use frame_profiler::{TuiFrameProfiler, TuiFrameTiming};
 use serde::{Deserialize, Serialize};
 use terminal_hyperlinks::{
@@ -812,8 +812,8 @@ fn render_tui_dashboard_frame<B: Backend>(
 mod tests {
     use super::command_flow::{
         command_blocks_submission, command_live_feedback, command_panel_for_input,
-        dashboard_action_for_input, dashboard_command_body, is_clear_command_input,
-        matching_commands, telegram_access_picker_for_input,
+        dashboard_action_for_input, dashboard_command_body, dashboard_command_is_manager_owned,
+        is_clear_command_input, matching_commands, telegram_access_picker_for_input,
     };
     use super::selection::{SelectableId, SelectableRegion};
     use super::*;
@@ -1366,6 +1366,27 @@ mod tests {
             invocation.action,
             DashboardAction::ApproveTelegramAccess { chat_id: 42 }
         );
+    }
+
+    #[test]
+    fn telegram_commands_and_actions_are_manager_owned() {
+        assert!(dashboard_command_is_manager_owned("/telegram"));
+        assert!(dashboard_command_is_manager_owned("telegram status"));
+        assert!(dashboard_command_is_manager_owned("/telegram approve"));
+        assert!(dashboard_command_is_manager_owned("/telegram approve 42"));
+        assert!(dashboard_command_is_manager_owned("/telegram reject 42"));
+        assert!(!dashboard_command_is_manager_owned("/status"));
+        assert!(!dashboard_command_is_manager_owned("/skills reload"));
+
+        assert!(dashboard_action_is_manager_owned(
+            &DashboardAction::ApproveTelegramAccess { chat_id: 42 }
+        ));
+        assert!(dashboard_action_is_manager_owned(
+            &DashboardAction::RejectTelegramAccess { chat_id: 42 }
+        ));
+        assert!(!dashboard_action_is_manager_owned(
+            &DashboardAction::InterruptRuntime
+        ));
     }
 
     #[test]

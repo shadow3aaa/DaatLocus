@@ -28,7 +28,8 @@ use crate::{
         DashboardAction, DashboardActivityHistoryStore, DashboardControlCommand,
         DashboardPendingUserInputMoveDirection, DashboardRuntimeActivity,
         DashboardRuntimeActivityStatus, DashboardRuntimeStatusLevel, DashboardState, ReducedMotion,
-        activity_events_from_history_items, dashboard_agent_name, execute_control_command,
+        activity_events_from_history_items, dashboard_action_is_manager_owned,
+        dashboard_agent_name, dashboard_command_is_manager_owned, execute_control_command,
         execute_dashboard_action, sync_dashboard_runtime_status_live_cell,
     },
     events::{
@@ -518,13 +519,18 @@ async fn handle_ipc_connection(
             response
         }
         SessionIpcRequest::DashboardCommand { command } => {
-            let snapshot = state.dashboard_rx.borrow().clone();
-            let output = execute_control_command(
-                command.trim(),
-                &state.telegram_acl,
-                &snapshot,
-                &state.dashboard_control_tx,
-            );
+            let command = command.trim();
+            let output = if dashboard_command_is_manager_owned(command) {
+                "telegram commands are handled by the manager daemon".to_string()
+            } else {
+                let snapshot = state.dashboard_rx.borrow().clone();
+                execute_control_command(
+                    command,
+                    &state.telegram_acl,
+                    &snapshot,
+                    &state.dashboard_control_tx,
+                )
+            };
             IpcResponseEnvelope::ok(
                 request_id,
                 SessionIpcResponse::DashboardCommandResult { output },
@@ -683,6 +689,14 @@ fn execute_session_dashboard_action(
     action: DashboardAction,
     state: &SessionIpcServerState,
 ) -> crate::dashboard::DashboardActionResult {
+    if dashboard_action_is_manager_owned(&action) {
+        return crate::dashboard::DashboardActionResult {
+            success: false,
+            message: "telegram actions are handled by the manager daemon".to_string(),
+            detail: None,
+        };
+    }
+
     match action {
         DashboardAction::InterruptRuntime => match state.runtime_interrupt_tx.send(()) {
             Ok(()) => crate::dashboard::DashboardActionResult {

@@ -1,5 +1,11 @@
+use std::time::Duration;
+
 use super::*;
-use crate::live_progress::{LiveProgressEvent, TelegramLiveStatus};
+use crate::{
+    live_progress::{LiveProgressEvent, TelegramLiveStatus},
+    telegram_transport::state::TelegramTransportStateHandle,
+};
+use tokio::{sync::mpsc, task::JoinHandle, time::MissedTickBehavior};
 
 const TELEGRAM_MESSAGE_LIMIT: usize = 4096;
 const MAX_LIVE_DRAFT_STATUSES: usize = 5;
@@ -39,7 +45,7 @@ pub(super) fn maybe_start_telegram_live_draft_session(
     let (draft_id, previous_sent_text) = context
         .get_or_create_telegram_live_draft(event_id.clone(), stable_live_draft_id(event.event_id));
     let live_drafts = context.telegram_live_drafts.clone();
-    let client = TelegramLiveDraftClient::new(context.config.telegram.clone());
+    let telegram = context.telegram.clone();
     let (tx, mut rx) = mpsc::unbounded_channel::<LiveProgressEvent>();
     context.install_live_progress(Some(tx));
     let join = tokio::spawn(async move {
@@ -50,11 +56,9 @@ pub(super) fn maybe_start_telegram_live_draft_session(
         let mut dirty = false;
         let initial_draft_text = state.render_markdown_v2();
         if should_send_initial_live_draft(&last_sent) {
-            if let Err(err) = client
-                .send_message_draft(chat_id, draft_id, &initial_draft_text)
-                .await
+            if let Err(err) = enqueue_live_draft(&telegram, chat_id, draft_id, &initial_draft_text)
             {
-                tracing::warn!("telegram initial live draft send failed: {err:?}");
+                tracing::warn!("telegram initial live draft enqueue failed: {err:?}");
             } else {
                 record_live_draft_sent(&live_drafts, &event_id, &initial_draft_text);
                 last_sent = initial_draft_text;
@@ -74,11 +78,8 @@ pub(super) fn maybe_start_telegram_live_draft_session(
                     if dirty {
                         let draft_text = state.render_markdown_v2();
                         if draft_text != last_sent {
-                            if let Err(err) = client
-                                .send_message_draft(chat_id, draft_id, &draft_text)
-                                .await
-                            {
-                                tracing::warn!("telegram live draft update failed: {err:?}");
+                            if let Err(err) = enqueue_live_draft(&telegram, chat_id, draft_id, &draft_text) {
+                                tracing::warn!("telegram live draft enqueue failed: {err:?}");
                             } else {
                                 record_live_draft_sent(&live_drafts, &event_id, &draft_text);
                                 last_sent = draft_text;
@@ -92,17 +93,24 @@ pub(super) fn maybe_start_telegram_live_draft_session(
         if dirty {
             let draft_text = state.render_markdown_v2();
             if draft_text != last_sent
-                && let Err(err) = client
-                    .send_message_draft(chat_id, draft_id, &draft_text)
-                    .await
+                && let Err(err) = enqueue_live_draft(&telegram, chat_id, draft_id, &draft_text)
             {
-                tracing::warn!("telegram final live draft flush failed: {err:?}");
+                tracing::warn!("telegram final live draft enqueue failed: {err:?}");
             } else if draft_text != last_sent {
                 record_live_draft_sent(&live_drafts, &event_id, &draft_text);
             }
         }
     });
     Some(TelegramLiveDraftSession { join })
+}
+
+fn enqueue_live_draft(
+    telegram: &TelegramTransportStateHandle,
+    chat_id: i64,
+    draft_id: i64,
+    text: &str,
+) -> Result<()> {
+    telegram.enqueue_outgoing_draft(chat_id.to_string(), draft_id, text.to_string())
 }
 
 fn stable_live_draft_id(event_id: uuid::Uuid) -> i64 {
@@ -467,21 +475,6 @@ mod tests {
             crate::activity_event::glyph::EXEC,
             "Command Ran",
         )));
-        assert_eq!(state.render_markdown_v2(), "∷ Plan Updated\n• Command Ran");
-    }
-
-    #[test]
-    fn live_draft_keeps_recent_statuses() {
-        let mut state = TelegramLiveDraftState::working();
-        state.apply(LiveProgressEvent::TelegramStatus(status(
-            crate::activity_event::glyph::PLAN,
-            "Plan Updated",
-        )));
-        state.apply(LiveProgressEvent::TelegramStatus(status(
-            crate::activity_event::glyph::EXEC,
-            "Command Ran",
-        )));
-
         assert_eq!(state.render_markdown_v2(), "∷ Plan Updated\n• Command Ran");
     }
 

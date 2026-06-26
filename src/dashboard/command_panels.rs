@@ -41,7 +41,6 @@ pub(super) enum CommandSelectionAction {
     },
     OpenSkillsList,
     OpenSkillsToggle,
-    OpenTelegramAccess(TelegramAccessAction),
     RunAction {
         title: String,
         action: DashboardAction,
@@ -134,7 +133,6 @@ pub(super) enum CommandPanelAction {
     Replace(CommandPanel),
     OpenSkillsList,
     OpenSkillsToggle,
-    OpenTelegramAccess(TelegramAccessAction),
     EditPendingUserInput {
         event_id: String,
         incoming_text: String,
@@ -596,9 +594,6 @@ fn handle_selection_panel_key(
                     keep_panel: *keep_panel,
                 },
                 CommandSelectionAction::OpenSkillsToggle => CommandPanelAction::OpenSkillsToggle,
-                CommandSelectionAction::OpenTelegramAccess(action) => {
-                    CommandPanelAction::OpenTelegramAccess(*action)
-                }
             }
         }
         _ => CommandPanelAction::None,

@@ -19,8 +19,8 @@ use crate::{
     runtime::bootstrap::{bootstrap_telegram_transport_state_from_acl, emit_startup_progress},
     telegram_acl::TelegramAclHandle,
     telegram_transport::{
-        TelegramDeliveryClient, TelegramInputRouter, TelegramSessionCommandHandler,
-        TelegramTransport,
+        TelegramAuthVerifier, TelegramDeliveryClient, TelegramInputRouter,
+        TelegramSessionCommandHandler, TelegramTransport,
         state::{PendingOutboundMessage, TelegramTransportState},
     },
 };
@@ -31,6 +31,17 @@ struct ManagerTelegramInputRouter {
     sessions: session::SessionRegistry,
     session_tokens: SessionTokenStore,
     telegram_defaults: session::TelegramSessionDefaults,
+}
+
+struct ManagerTelegramAuthVerifier {
+    auth_registry: crate::daemon::DaemonTokenRegistryHandle,
+}
+
+#[async_trait::async_trait]
+impl TelegramAuthVerifier for ManagerTelegramAuthVerifier {
+    async fn authorize_telegram_verification(&self, token: &str) -> bool {
+        self.auth_registry.authorize_token(token).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -301,7 +312,7 @@ async fn run_daemon_serve_inner(
 
     let daemon_server = start_server(DaemonServerStartParams {
         port: config.daemon.port,
-        auth_registry: daemon_token_registry,
+        auth_registry: daemon_token_registry.clone(),
         lifecycle: daemon_lifecycle.clone(),
         dashboard_rx: dashboard_tx.subscribe(),
         telegram_acl: telegram_acl.clone(),
@@ -338,11 +349,15 @@ async fn run_daemon_serve_inner(
             session_tokens: telegram_session_tokens,
             telegram_defaults,
         });
+        let telegram_auth_verifier = Arc::new(ManagerTelegramAuthVerifier {
+            auth_registry: daemon_token_registry.clone(),
+        });
         Some(tokio::spawn(
             TelegramTransport::new(
                 config.telegram.clone(),
                 telegram_handle,
                 telegram_acl.clone(),
+                telegram_auth_verifier,
                 telegram_router.clone(),
                 telegram_router,
                 dashboard_tx.subscribe(),
@@ -620,6 +635,10 @@ async fn deliver_session_telegram_message(
         }
         Err(err) => {
             let reason = format!("{err:?}");
+            if message.draft_id.is_some() {
+                tracing::warn!("telegram draft delivery failed; dropping draft update: {reason}");
+                return Ok(());
+            }
             if let Some(event_id) = message.related_event_id.as_deref() {
                 let _ = record_telegram_delivery(
                     client,
