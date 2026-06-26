@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/empty";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Spinner } from "@/components/ui/spinner";
-import { getStoredDaemonToken } from "@/lib/daemon-auth";
+import { getStoredDaemonToken, storeDaemonToken } from "@/lib/daemon-auth";
 import {
   createSession,
   deleteSession,
@@ -36,6 +36,38 @@ const SELECTED_SESSION_STORAGE_KEY = "daat-locus.webui.selected-session-id";
 const THEME_STORAGE_KEY = "daat-locus.webui.theme";
 
 const APP_DOCUMENT_TITLE = "Daat Locus";
+
+consumeDaemonTokenFromHash();
+
+function consumeDaemonTokenFromHash() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const hash = window.location.hash;
+  const hashValue = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (!hashValue.includes("=")) {
+    return;
+  }
+
+  const params = new URLSearchParams(
+    hashValue.startsWith("?") ? hashValue.slice(1) : hashValue,
+  );
+  const token = params.get("daemon_token")?.trim();
+  if (!token) {
+    return;
+  }
+
+  storeDaemonToken(token);
+  params.delete("daemon_token");
+
+  const nextHash = params.toString();
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${window.location.pathname}${window.location.search}${nextHash ? `#${nextHash}` : ""}`,
+  );
+}
 
 export default function App() {
   if (shouldRenderMockSetupPage()) {

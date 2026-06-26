@@ -6,13 +6,15 @@ use std::{
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 const CONFIG_FILE_NAME: &str = "config.toml";
 const DEFAULT_DAEMON_PORT: u16 = 53825;
 const ENABLE_TRAY_ENV: &str = "DAAT_LOCUS_ENABLE_TRAY";
 const NO_TRAY_ENV: &str = "DAAT_LOCUS_NO_TRAY";
 const LAUNCHER_LOG_FILE_NAME: &str = "launcher.log";
+const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const DAEMON_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(200);
 #[cfg(windows)]
 const MAIN_BINARY_NAME: &str = "daat-locus.exe";
 #[cfg(not(windows))]
@@ -26,7 +28,8 @@ fn main() {
 fn run() -> io::Result<()> {
     let home = daat_locus_home();
     let config_path = home.join("config").join(CONFIG_FILE_NAME);
-    if !config_path.is_file() {
+    let config_exists = config_path.is_file();
+    if !config_exists && !should_start_without_config() {
         log_launcher(
             &home,
             &format!(
@@ -36,8 +39,20 @@ fn run() -> io::Result<()> {
         );
         return Ok(());
     }
-    let port = configured_daemon_port(&config_path).unwrap_or(DEFAULT_DAEMON_PORT);
+    let port = if config_exists {
+        configured_daemon_port(&config_path).unwrap_or(DEFAULT_DAEMON_PORT)
+    } else {
+        log_launcher(
+            &home,
+            &format!(
+                "config file missing at {}; using default daemon port {DEFAULT_DAEMON_PORT}",
+                config_path.display()
+            ),
+        );
+        DEFAULT_DAEMON_PORT
+    };
     if daemon_port_is_active(port) {
+        open_webui_if_requested(port, &home);
         return Ok(());
     }
     let main_binary = installed_main_binary()?;
@@ -46,7 +61,16 @@ fn run() -> io::Result<()> {
         log_launcher(&home, &message);
         return Err(io::Error::new(io::ErrorKind::NotFound, message));
     }
-    spawn_daemon(&main_binary, &home)
+    spawn_daemon(&main_binary, &home)?;
+    if wait_for_daemon_port(port) {
+        open_webui_if_requested(port, &home);
+    } else {
+        log_launcher(
+            &home,
+            &format!("daemon did not become ready on port {port} before launcher timeout"),
+        );
+    }
+    Ok(())
 }
 fn installed_main_binary() -> io::Result<PathBuf> {
     let launcher = env::current_exe()?;
@@ -129,6 +153,73 @@ fn daemon_port_from_config(content: &str) -> Option<u16> {
 fn daemon_port_is_active(port: u16) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
+}
+fn wait_for_daemon_port(port: u16) -> bool {
+    let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
+    while Instant::now() < deadline {
+        if daemon_port_is_active(port) {
+            return true;
+        }
+        std::thread::sleep(DAEMON_STARTUP_POLL_INTERVAL);
+    }
+    false
+}
+fn open_webui_if_requested(port: u16, home: &Path) {
+    if !should_open_webui_after_launch() {
+        return;
+    }
+    let url = webui_url(port, home);
+    if let Err(err) = open_url(&url) {
+        log_launcher(home, &format!("failed to open WebUI {url}: {err}"));
+    }
+}
+fn webui_url(port: u16, home: &Path) -> String {
+    let setup_url = format!("http://localhost:{port}/?setup=1");
+    let Some(token) = local_daemon_token(home) else {
+        return setup_url;
+    };
+    format!(
+        "{setup_url}#daemon_token={}",
+        percent_encode_url_component(&token)
+    )
+}
+fn local_daemon_token(home: &Path) -> Option<String> {
+    let token = fs::read_to_string(home.join("runtime").join("daemon.token")).ok()?;
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+fn percent_encode_url_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+fn should_start_without_config() -> bool {
+    cfg!(target_os = "macos")
+}
+fn should_open_webui_after_launch() -> bool {
+    cfg!(target_os = "macos")
+}
+#[cfg(target_os = "macos")]
+fn open_url(url: &str) -> io::Result<()> {
+    Command::new("open").arg(url).spawn().map(|_| ())
+}
+#[cfg(target_os = "windows")]
+fn open_url(url: &str) -> io::Result<()> {
+    Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn()
+        .map(|_| ())
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_url(url: &str) -> io::Result<()> {
+    Command::new("xdg-open").arg(url).spawn().map(|_| ())
 }
 fn daat_locus_home() -> PathBuf {
     if let Ok(value) = env::var("DAAT_LOCUS_HOME")

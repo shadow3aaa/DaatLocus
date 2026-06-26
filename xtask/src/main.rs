@@ -12,11 +12,29 @@ use serde::Deserialize;
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const DEFAULT_BINARY_PACKAGE_DIR_NAME: &str = "package";
 const WINDOWS_MSI_TARGET: &str = "x86_64-pc-windows-msvc";
-const WINDOWS_LAUNCHER_PACKAGE_NAME: &str = "daat-locus-launcher";
+const LAUNCHER_PACKAGE_NAME: &str = "daat-locus-launcher";
 const WINDOWS_MSI_UTIL_EXTENSION: &str = "WixToolset.Util.wixext";
 const WINDOWS_BOOTSTRAPPER_EXTENSION: &str = "WixToolset.BootstrapperApplications.wixext";
 const WINDOWS_MSI_ICON_SIZES: &[u32] = &[16, 24, 32, 48, 64, 128, 256];
 const WINDOWS_BOOTSTRAPPER_LOGO_SIZE: u32 = 128;
+const MACOS_APP_BUNDLE_NAME: &str = "Daat Locus.app";
+const MACOS_BUNDLE_IDENTIFIER: &str = "io.daat-locus.app";
+const MACOS_ICON_FILE_STEM: &str = "AppIcon";
+const MACOS_PKG_IDENTIFIER: &str = "io.daat-locus.pkg";
+const MACOS_CLI_WRAPPER_NAME: &str = "daat-locus";
+const MACOS_INSTALLED_CLI_TARGET: &str = "/Applications/Daat Locus.app/Contents/MacOS/daat-locus";
+const MACOS_ICONSET: &[(u32, &str)] = &[
+    (16, "icon_16x16.png"),
+    (32, "icon_16x16@2x.png"),
+    (32, "icon_32x32.png"),
+    (64, "icon_32x32@2x.png"),
+    (128, "icon_128x128.png"),
+    (256, "icon_128x128@2x.png"),
+    (256, "icon_256x256.png"),
+    (512, "icon_256x256@2x.png"),
+    (512, "icon_512x512.png"),
+    (1024, "icon_512x512@2x.png"),
+];
 
 fn main() -> ExitCode {
     match run() {
@@ -33,6 +51,7 @@ fn run() -> Result<()> {
     match cli.command {
         Some(XtaskCommand::Package(args)) => match args.command {
             PackageSubcommand::Binary(args) => package_release_binary(args)?,
+            PackageSubcommand::Macos(args) => package_macos_installer(args)?,
             PackageSubcommand::Windows(args) => package_windows_msi(args)?,
         },
         None => {
@@ -68,8 +87,24 @@ enum PackageSubcommand {
     /// Package an already-built release binary for cargo-binstall.
     Binary(PackageReleaseArgs),
 
+    /// Build the macOS app bundle and installer package.
+    #[command(name = "macos")]
+    Macos(PackageMacosInstallerArgs),
+
     /// Build the Windows x64 MSI and bootstrapper installers.
     Windows(PackageWindowsMsiArgs),
+}
+
+#[derive(Debug, Args)]
+struct PackageMacosInstallerArgs {
+    #[arg(long, value_name = "TARGET")]
+    target: Option<String>,
+
+    #[arg(long, hide = true)]
+    skip_build: bool,
+
+    #[arg(long, hide = true)]
+    keep_work_dir: bool,
 }
 
 #[derive(Debug, Args)]
@@ -113,6 +148,25 @@ struct RootPackage {
     repository: Option<String>,
 }
 
+struct MacosInstallerPaths {
+    work_dir: PathBuf,
+    output_dir: PathBuf,
+    app_dir: PathBuf,
+    macos_dir: PathBuf,
+    resources_dir: PathBuf,
+    pkg_root_dir: PathBuf,
+    pkg_app_dir: PathBuf,
+    pkg_cli_dir: PathBuf,
+    binary_path: PathBuf,
+    launcher_binary_path: PathBuf,
+    info_plist_path: PathBuf,
+    iconset_dir: PathBuf,
+    icon_path: PathBuf,
+    component_pkg_path: PathBuf,
+    distribution_path: PathBuf,
+    pkg_path: PathBuf,
+}
+
 struct WindowsMsiPaths {
     work_dir: PathBuf,
     output_dir: PathBuf,
@@ -125,6 +179,14 @@ struct WindowsMsiPaths {
     generated_bundle_wxs_path: PathBuf,
     msi_path: PathBuf,
     bootstrapper_path: PathBuf,
+}
+
+struct MacosInfoPlistData {
+    product_name: String,
+    executable_name: String,
+    icon_file: String,
+    bundle_identifier: String,
+    version: String,
 }
 
 struct WindowsMsiTemplateData {
@@ -211,6 +273,128 @@ fn package_release_binary(args: PackageReleaseArgs) -> Result<()> {
     print_packaged_artifact(&format!("release binary for {target}"), &archive_path);
     Ok(())
 }
+fn package_macos_installer(args: PackageMacosInstallerArgs) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return Err("macOS installer packaging requires macOS".into());
+    }
+
+    let target = match args.target {
+        Some(target) => target,
+        None => rustc_host_target()?,
+    };
+    ensure_safe_relative_path("target triple", Path::new(&target))?;
+    let manifest = read_root_manifest()?;
+    let repo = repo_root();
+    let main_binary_name = binary_name(&manifest.package.name);
+    let launcher_binary_name = binary_name(LAUNCHER_PACKAGE_NAME);
+    let paths = macos_installer_paths(
+        &repo,
+        &manifest.package,
+        &target,
+        &main_binary_name,
+        &launcher_binary_name,
+    )?;
+
+    if !args.skip_build {
+        run_command(
+            Command::new("cargo")
+                .arg("build")
+                .arg("-p")
+                .arg(&manifest.package.name)
+                .arg("-p")
+                .arg(LAUNCHER_PACKAGE_NAME)
+                .arg("--release")
+                .arg("--locked")
+                .arg("--target")
+                .arg(&target),
+            "build macOS release binaries",
+        )?;
+    }
+
+    if !paths.binary_path.is_file() {
+        return Err(format!(
+            "release binary missing at {}; run `cargo xtask package macos` without --skip-build to build it",
+            paths.binary_path.display()
+        )
+        .into());
+    }
+    if !paths.launcher_binary_path.is_file() {
+        return Err(format!(
+            "launcher binary missing at {}; run `cargo xtask package macos` without --skip-build to build it",
+            paths.launcher_binary_path.display()
+        )
+        .into());
+    }
+
+    if paths.work_dir.exists() && !args.keep_work_dir {
+        fs::remove_dir_all(&paths.work_dir)?;
+    }
+    if paths.app_dir.exists() {
+        fs::remove_dir_all(&paths.app_dir)?;
+    }
+    if paths.pkg_root_dir.exists() {
+        fs::remove_dir_all(&paths.pkg_root_dir)?;
+    }
+    if paths.component_pkg_path.exists() {
+        fs::remove_file(&paths.component_pkg_path)?;
+    }
+    if paths.pkg_path.exists() {
+        fs::remove_file(&paths.pkg_path)?;
+    }
+    fs::create_dir_all(&paths.output_dir)?;
+    fs::create_dir_all(&paths.macos_dir)?;
+    fs::create_dir_all(&paths.resources_dir)?;
+
+    fs::copy(&paths.binary_path, paths.macos_dir.join(&main_binary_name))?;
+    fs::copy(
+        &paths.launcher_binary_path,
+        paths.macos_dir.join(&launcher_binary_name),
+    )?;
+    render_macos_info_plist(
+        &repo.join("packaging").join("macos").join("Info.plist"),
+        &paths.info_plist_path,
+        &MacosInfoPlistData {
+            product_name: product_name(&manifest.package.name),
+            executable_name: launcher_binary_name,
+            icon_file: MACOS_ICON_FILE_STEM.to_string(),
+            bundle_identifier: MACOS_BUNDLE_IDENTIFIER.to_string(),
+            version: manifest.package.version.clone(),
+        },
+    )?;
+    render_macos_icns(
+        &repo.join("assets").join("logo.svg"),
+        &paths.iconset_dir,
+        &paths.icon_path,
+    )?;
+
+    fs::create_dir_all(
+        paths
+            .pkg_app_dir
+            .parent()
+            .ok_or("macOS package app path has no parent")?,
+    )?;
+    fs::create_dir_all(&paths.pkg_cli_dir)?;
+    copy_dir_recursive(&paths.app_dir, &paths.pkg_app_dir)?;
+    write_macos_cli_wrapper(&paths.pkg_cli_dir.join(MACOS_CLI_WRAPPER_NAME))?;
+    create_macos_pkg(
+        &paths,
+        &product_name(&manifest.package.name),
+        &manifest.package.version,
+    )?;
+
+    if !paths.pkg_path.is_file() {
+        return Err(format!(
+            "productbuild did not create expected PKG at {}",
+            paths.pkg_path.display()
+        )
+        .into());
+    }
+
+    print_packaged_artifact("macOS app bundle", &paths.app_dir);
+    print_packaged_artifact("macOS installer", &paths.pkg_path);
+    Ok(())
+}
+
 fn package_windows_msi(args: PackageWindowsMsiArgs) -> Result<()> {
     if !cfg!(windows) {
         return Err("Windows installer packaging requires Windows".into());
@@ -228,7 +412,7 @@ fn package_windows_msi(args: PackageWindowsMsiArgs) -> Result<()> {
                 .arg("-p")
                 .arg(&manifest.package.name)
                 .arg("-p")
-                .arg(WINDOWS_LAUNCHER_PACKAGE_NAME)
+                .arg(LAUNCHER_PACKAGE_NAME)
                 .arg("--release")
                 .arg("--locked")
                 .arg("--target")
@@ -396,6 +580,194 @@ fn percent_encode_file_url_path(path: &str) -> String {
     encoded
 }
 
+fn macos_installer_paths(
+    repo: &Path,
+    package: &RootPackage,
+    target: &str,
+    main_binary_name: &str,
+    launcher_binary_name: &str,
+) -> Result<MacosInstallerPaths> {
+    let release_dir = repo.join("target").join(target).join("release");
+    let output_dir = release_dir.join("macos");
+    let work_dir = release_dir.join("macos-work");
+    let app_dir = output_dir.join(MACOS_APP_BUNDLE_NAME);
+    let contents_dir = app_dir.join("Contents");
+    let macos_dir = contents_dir.join("MacOS");
+    let resources_dir = contents_dir.join("Resources");
+    let pkg_root_dir = work_dir.join("pkg-root");
+    let pkg_app_dir = pkg_root_dir
+        .join("Applications")
+        .join(MACOS_APP_BUNDLE_NAME);
+    let pkg_cli_dir = pkg_root_dir.join("usr").join("local").join("bin");
+    let iconset_dir = work_dir.join(format!("{MACOS_ICON_FILE_STEM}.iconset"));
+    let component_pkg_path = work_dir.join(format!("{}-component.pkg", package.name));
+    let distribution_path = work_dir.join(format!("{}-distribution.xml", package.name));
+    let pkg_path = output_dir.join(format!(
+        "{}-{}-{}.pkg",
+        package.name, package.version, target
+    ));
+
+    Ok(MacosInstallerPaths {
+        binary_path: release_dir.join(main_binary_name),
+        launcher_binary_path: release_dir.join(launcher_binary_name),
+        info_plist_path: contents_dir.join("Info.plist"),
+        icon_path: resources_dir.join(format!("{MACOS_ICON_FILE_STEM}.icns")),
+        work_dir,
+        output_dir,
+        app_dir,
+        macos_dir,
+        resources_dir,
+        pkg_root_dir,
+        pkg_app_dir,
+        pkg_cli_dir,
+        iconset_dir,
+        component_pkg_path,
+        distribution_path,
+        pkg_path,
+    })
+}
+
+fn render_macos_info_plist(
+    template_path: &Path,
+    output_path: &Path,
+    data: &MacosInfoPlistData,
+) -> Result<()> {
+    let mut text = fs::read_to_string(template_path)?;
+    let replacements = [
+        ("{{product_name}}", data.product_name.as_str()),
+        ("{{executable_name}}", data.executable_name.as_str()),
+        ("{{icon_file}}", data.icon_file.as_str()),
+        ("{{bundle_identifier}}", data.bundle_identifier.as_str()),
+        ("{{version}}", data.version.as_str()),
+    ];
+    for (placeholder, value) in replacements {
+        text = text.replace(placeholder, &escape_xml(value));
+    }
+    fs::write(output_path, text)?;
+    Ok(())
+}
+
+fn render_macos_icns(svg_path: &Path, iconset_dir: &Path, icns_path: &Path) -> Result<()> {
+    if iconset_dir.exists() {
+        fs::remove_dir_all(iconset_dir)?;
+    }
+    fs::create_dir_all(iconset_dir)?;
+    for &(size, name) in MACOS_ICONSET {
+        render_svg_to_png(svg_path, &iconset_dir.join(name), size, size)?;
+    }
+    run_command(
+        Command::new("iconutil")
+            .arg("-c")
+            .arg("icns")
+            .arg(iconset_dir)
+            .arg("-o")
+            .arg(icns_path),
+        "build macOS icns",
+    )?;
+    Ok(())
+}
+
+fn write_macos_cli_wrapper(path: &Path) -> Result<()> {
+    fs::write(path, macos_cli_wrapper_text(MACOS_INSTALLED_CLI_TARGET))?;
+    run_command(
+        Command::new("chmod").arg("755").arg(path),
+        "mark macOS CLI wrapper executable",
+    )?;
+    Ok(())
+}
+
+fn macos_cli_wrapper_text(target: &str) -> String {
+    format!("#!/bin/sh\nexec {} \"$@\"\n", shell_single_quote(target))
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    let mut entries = fs::read_dir(source)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect::<Vec<_>>();
+    entries.sort();
+    for entry in entries {
+        let destination_entry = destination.join(
+            entry
+                .file_name()
+                .ok_or("directory entry has no file name")?,
+        );
+        if entry.is_dir() {
+            copy_dir_recursive(&entry, &destination_entry)?;
+        } else {
+            fs::copy(&entry, &destination_entry)?;
+        }
+    }
+    Ok(())
+}
+
+fn create_macos_pkg(paths: &MacosInstallerPaths, product_name: &str, version: &str) -> Result<()> {
+    run_command(
+        Command::new("pkgbuild")
+            .arg("--root")
+            .arg(&paths.pkg_root_dir)
+            .arg("--identifier")
+            .arg(MACOS_PKG_IDENTIFIER)
+            .arg("--version")
+            .arg(version)
+            .arg("--install-location")
+            .arg("/")
+            .arg("--ownership")
+            .arg("recommended")
+            .arg(&paths.component_pkg_path),
+        "build macOS component package",
+    )?;
+    write_macos_distribution(
+        &paths.distribution_path,
+        product_name,
+        version,
+        paths
+            .component_pkg_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("macOS component package path has no file name")?,
+    )?;
+    run_command(
+        Command::new("productbuild")
+            .arg("--distribution")
+            .arg(&paths.distribution_path)
+            .arg("--package-path")
+            .arg(&paths.work_dir)
+            .arg(&paths.pkg_path),
+        "build macOS installer package",
+    )?;
+    Ok(())
+}
+
+fn write_macos_distribution(
+    path: &Path,
+    product_name: &str,
+    version: &str,
+    component_pkg_name: &str,
+) -> Result<()> {
+    fs::write(
+        path,
+        macos_distribution_xml(product_name, version, component_pkg_name),
+    )?;
+    Ok(())
+}
+
+fn macos_distribution_xml(product_name: &str, version: &str, component_pkg_name: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<installer-gui-script minSpecVersion=\"1\">\n  <title>{}</title>\n  <options customize=\"never\" require-scripts=\"false\"/>\n  <domains enable_anywhere=\"false\" enable_currentUserHome=\"false\" enable_localSystem=\"true\"/>\n  <choices-outline>\n    <line choice=\"default\"/>\n  </choices-outline>\n  <choice id=\"default\" title=\"{}\">\n    <pkg-ref id=\"{}\"/>\n  </choice>\n  <pkg-ref id=\"{}\" version=\"{}\" auth=\"Root\">{}</pkg-ref>\n</installer-gui-script>\n",
+        escape_xml(product_name),
+        escape_xml(product_name),
+        MACOS_PKG_IDENTIFIER,
+        MACOS_PKG_IDENTIFIER,
+        escape_xml(version),
+        escape_xml(component_pkg_name),
+    )
+}
+
 fn windows_msi_paths(
     repo: &Path,
     package: &RootPackage,
@@ -416,7 +788,7 @@ fn windows_msi_paths(
 
     Ok(WindowsMsiPaths {
         binary_path: release_dir.join(main_binary_name),
-        launcher_binary_path: release_dir.join(binary_name(WINDOWS_LAUNCHER_PACKAGE_NAME)),
+        launcher_binary_path: release_dir.join(binary_name(LAUNCHER_PACKAGE_NAME)),
         icon_path: work_dir.join(format!("{}.ico", package.name)),
         bootstrapper_logo_path: work_dir.join(format!("{}-bootstrapper-logo.png", package.name)),
         license_rtf_path: work_dir.join(format!("{}-license.rtf", package.name)),
@@ -756,7 +1128,7 @@ fn ensure_safe_relative_path(label: &str, path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::escape_rtf;
+    use super::{escape_rtf, macos_cli_wrapper_text, macos_distribution_xml, shell_single_quote};
 
     const BOOTSTRAPPER_TEMPLATE: &str =
         include_str!("../../packaging/windows/daat-locus-bootstrapper.wxs");
@@ -786,5 +1158,34 @@ mod tests {
     fn rtf_escaping_preserves_rtf_syntax() {
         assert_eq!(escape_rtf(r"a\b{c}"), r"a\\b\{c\}");
         assert_eq!(escape_rtf("x\ty"), r"x\tab y");
+    }
+
+    #[test]
+    fn shell_single_quote_handles_spaces_and_quotes() {
+        assert_eq!(
+            shell_single_quote("/Applications/Daat Locus.app/Contents/MacOS/daat-locus"),
+            "'/Applications/Daat Locus.app/Contents/MacOS/daat-locus'"
+        );
+        assert_eq!(shell_single_quote("/tmp/it's-here"), "'/tmp/it'\\''s-here'");
+    }
+
+    #[test]
+    fn macos_cli_wrapper_execs_installed_app_binary() {
+        assert_eq!(
+            macos_cli_wrapper_text("/Applications/Daat Locus.app/Contents/MacOS/daat-locus"),
+            "#!/bin/sh\nexec '/Applications/Daat Locus.app/Contents/MacOS/daat-locus' \"$@\"\n"
+        );
+    }
+
+    #[test]
+    fn macos_distribution_uses_product_title() {
+        let distribution =
+            macos_distribution_xml("Daat Locus", "0.2.0", "daat-locus-component.pkg");
+
+        assert!(distribution.contains("<title>Daat Locus</title>"));
+        assert!(distribution.contains("<choice id=\"default\" title=\"Daat Locus\">"));
+        assert!(distribution.contains(
+            "<pkg-ref id=\"io.daat-locus.pkg\" version=\"0.2.0\" auth=\"Root\">daat-locus-component.pkg</pkg-ref>"
+        ));
     }
 }

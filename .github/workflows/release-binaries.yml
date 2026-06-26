@@ -65,6 +65,11 @@ jobs:
         shell: bash
         run: cargo xtask package binary --target "${{ steps.host.outputs.target }}"
 
+      - name: Package macOS installer
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: cargo xtask package macos --target "${{ steps.host.outputs.target }}"
+
       - name: Set up .NET SDK
         if: matrix.os == 'windows-latest'
         uses: actions/setup-dotnet@v4
@@ -99,6 +104,15 @@ jobs:
           name: daat-locus-${{ steps.host.outputs.target }}-windows-setup
           if-no-files-found: error
           path: target/x86_64-pc-windows-msvc/release/msi/*-setup.exe
+
+
+      - name: Upload macOS installer artifact
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: daat-locus-${{ steps.host.outputs.target }}-macos-installer
+          if-no-files-found: error
+          path: target/${{ steps.host.outputs.target }}/release/macos/*.pkg
 
   publish:
     name: Upload release assets
@@ -149,3 +163,4 @@ jobs:
           files: |
             target/release-artifacts/*.tar.zst
             target/release-artifacts/*-setup.exe
+            target/release-artifacts/*.pkg

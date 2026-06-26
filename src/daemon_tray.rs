@@ -57,7 +57,7 @@ mod platform_tray {
         platform::run_return::EventLoopExtRunReturn,
     };
     use tray_icon::{
-        Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+        Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent,
         menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     };
 
@@ -125,12 +125,7 @@ mod platform_tray {
                         *control_flow = ControlFlow::Exit;
                     }
                 }
-                Event::UserEvent(TrayEvent::TrayIcon(TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                }))
-                | Event::UserEvent(TrayEvent::TrayIcon(TrayIconEvent::DoubleClick {
+                Event::UserEvent(TrayEvent::TrayIcon(TrayIconEvent::DoubleClick {
                     button: MouseButton::Left,
                     ..
                 })) => {
@@ -158,7 +153,7 @@ mod platform_tray {
         TrayIconBuilder::new()
             .with_tooltip(format!("DaatLocus Daemon on :{port}"))
             .with_menu(Box::new(menu))
-            .with_menu_on_left_click(false)
+            .with_menu_on_left_click(true)
             .with_icon(daemon_icon()?)
             .with_icon_as_template(true)
             .build()
