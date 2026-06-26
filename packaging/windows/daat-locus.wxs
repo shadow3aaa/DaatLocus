@@ -36,9 +36,6 @@
           <Component Id="MainExecutable" Guid="{{app_component_guid}}">
             <File Id="MainExecutableFile" Source="{{binary_path}}" KeyPath="yes" />
           </Component>
-          <Component Id="LauncherExecutable" Guid="{{launcher_component_guid}}">
-            <File Id="LauncherExecutableFile" Source="{{launcher_binary_path}}" KeyPath="yes" />
-          </Component>
           <Component Id="UserPathEnvironment" Guid="{{path_component_guid}}">
             <Environment
               Id="AddInstallFolderToUserPath"
@@ -55,6 +52,11 @@
               Value="1"
               KeyPath="yes" />
           </Component>
+          <Directory Id="LauncherFolder" Name="Launcher">
+            <Component Id="LauncherExecutable" Guid="{{launcher_component_guid}}">
+              <File Id="LauncherExecutableFile" Source="{{launcher_binary_path}}" KeyPath="yes" />
+            </Component>
+          </Directory>
         </Directory>
       </Directory>
     </StandardDirectory>

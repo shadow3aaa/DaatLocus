@@ -1130,8 +1130,16 @@ fn ensure_safe_relative_path(label: &str, path: &Path) -> Result<()> {
 mod tests {
     use super::{escape_rtf, macos_cli_wrapper_text, macos_distribution_xml, shell_single_quote};
 
+    const WINDOWS_MSI_TEMPLATE: &str = include_str!("../../packaging/windows/daat-locus.wxs");
     const BOOTSTRAPPER_TEMPLATE: &str =
         include_str!("../../packaging/windows/daat-locus-bootstrapper.wxs");
+
+    #[test]
+    fn windows_msi_keeps_launcher_out_of_user_path() {
+        assert!(WINDOWS_MSI_TEMPLATE.contains("Value=\"[INSTALLFOLDER]\""));
+        assert!(WINDOWS_MSI_TEMPLATE.contains("Id=\"LauncherFolder\" Name=\"Launcher\""));
+        assert!(WINDOWS_MSI_TEMPLATE.contains("Target=\"[#LauncherExecutableFile]\""));
+    }
 
     #[test]
     fn bootstrapper_uses_real_standard_ba_theme() {

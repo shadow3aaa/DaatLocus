@@ -74,13 +74,29 @@ fn run() -> io::Result<()> {
 }
 fn installed_main_binary() -> io::Result<PathBuf> {
     let launcher = env::current_exe()?;
-    let install_dir = launcher.parent().ok_or_else(|| {
+    installed_main_binary_for_launcher(&launcher)
+}
+
+fn installed_main_binary_for_launcher(launcher: &Path) -> io::Result<PathBuf> {
+    let launcher_dir = launcher.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "launcher executable has no parent directory",
         )
     })?;
-    Ok(install_dir.join(MAIN_BINARY_NAME))
+    let same_dir_binary = launcher_dir.join(MAIN_BINARY_NAME);
+    if same_dir_binary.is_file() {
+        return Ok(same_dir_binary);
+    }
+    let parent_dir_binary = launcher_dir
+        .parent()
+        .map(|parent| parent.join(MAIN_BINARY_NAME));
+    if let Some(parent_dir_binary) = parent_dir_binary.as_ref()
+        && parent_dir_binary.is_file()
+    {
+        return Ok(parent_dir_binary.clone());
+    }
+    Ok(parent_dir_binary.unwrap_or(same_dir_binary))
 }
 fn spawn_daemon(main_binary: &Path, home: &Path) -> io::Result<()> {
     let stderr = launcher_log_file(home)
@@ -95,7 +111,6 @@ fn spawn_daemon(main_binary: &Path, home: &Path) -> io::Result<()> {
 }
 fn configure_daemon_command(command: &mut Command, with_tray: bool) {
     command
-        .arg("daemon")
         .arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null());
@@ -201,7 +216,7 @@ fn percent_encode_url_component(value: &str) -> String {
     encoded
 }
 fn should_start_without_config() -> bool {
-    cfg!(target_os = "macos")
+    true
 }
 fn should_open_webui_after_launch() -> bool {
     cfg!(target_os = "macos")
@@ -253,9 +268,14 @@ fn unix_timestamp_millis() -> u128 {
 }
 #[cfg(test)]
 mod tests {
-    use super::{ENABLE_TRAY_ENV, configure_daemon_command, daemon_port_from_config};
+    use super::{
+        ENABLE_TRAY_ENV, MAIN_BINARY_NAME, configure_daemon_command, daemon_port_from_config,
+        installed_main_binary_for_launcher,
+    };
     use std::ffi::OsStr;
+    use std::path::PathBuf;
     use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn daemon_port_parser_reads_daemon_section() {
@@ -284,7 +304,7 @@ mod tests {
                 .get_args()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
-            vec!["daemon".to_string(), "serve".to_string()]
+            vec!["serve".to_string()]
         );
         assert_eq!(
             command
@@ -294,5 +314,48 @@ mod tests {
                 .map(|value| value.to_string_lossy().into_owned()),
             Some("1".to_string())
         );
+    }
+
+    #[test]
+    fn installed_main_binary_supports_root_launcher_layout() {
+        let dir = test_temp_dir("root-launcher-layout");
+        let launcher = dir.join("daat-locus-launcher.exe");
+        let main = dir.join(MAIN_BINARY_NAME);
+        std::fs::write(&main, "").expect("main binary marker");
+
+        assert_eq!(
+            installed_main_binary_for_launcher(&launcher).expect("main binary"),
+            main
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn installed_main_binary_supports_launcher_subdir_layout() {
+        let dir = test_temp_dir("launcher-subdir-layout");
+        let launcher_dir = dir.join("Launcher");
+        std::fs::create_dir(&launcher_dir).expect("launcher dir");
+        let launcher = launcher_dir.join("daat-locus-launcher.exe");
+        let main = dir.join(MAIN_BINARY_NAME);
+        std::fs::write(&main, "").expect("main binary marker");
+
+        assert_eq!(
+            installed_main_binary_for_launcher(&launcher).expect("main binary"),
+            main
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn test_temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "daat-locus-launcher-test-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
     }
 }

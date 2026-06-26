@@ -255,7 +255,7 @@ enum DaatLocusCommand {
         #[command(subcommand)]
         target: ResetTarget,
     },
-    /// Manage configuration; opens an interactive menu without a subcommand.
+    /// Manage configuration.
     Config {
         #[command(subcommand)]
         target: Option<ConfigTarget>,
