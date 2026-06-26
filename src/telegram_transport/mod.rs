@@ -175,11 +175,27 @@ pub struct TelegramTransport {
     auth_verifier: Arc<dyn TelegramAuthVerifier>,
     input_router: Arc<dyn TelegramInputRouter>,
     session_command_handler: Arc<dyn TelegramSessionCommandHandler>,
-    command_state_rx: watch::Receiver<DashboardState>,
-    command_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
+    dashboard_commands: TelegramDashboardCommandBridge,
     offset: Option<i64>,
     bot_username: Option<String>,
     commands_registered: bool,
+}
+
+pub struct TelegramDashboardCommandBridge {
+    state_rx: watch::Receiver<DashboardState>,
+    control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
+}
+
+impl TelegramDashboardCommandBridge {
+    pub fn new(
+        state_rx: watch::Receiver<DashboardState>,
+        control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
+    ) -> Self {
+        Self {
+            state_rx,
+            control_tx,
+        }
+    }
 }
 
 impl TelegramTransport {
@@ -190,8 +206,7 @@ impl TelegramTransport {
         auth_verifier: Arc<dyn TelegramAuthVerifier>,
         input_router: Arc<dyn TelegramInputRouter>,
         session_command_handler: Arc<dyn TelegramSessionCommandHandler>,
-        command_state_rx: watch::Receiver<DashboardState>,
-        command_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
+        dashboard_commands: TelegramDashboardCommandBridge,
     ) -> Self {
         let offset = handle.next_update_offset();
         Self {
@@ -202,8 +217,7 @@ impl TelegramTransport {
             auth_verifier,
             input_router,
             session_command_handler,
-            command_state_rx,
-            command_control_tx,
+            dashboard_commands,
             offset,
             bot_username: None,
             commands_registered: false,
@@ -477,8 +491,13 @@ impl TelegramTransport {
             }
         }
         let response = {
-            let state = self.command_state_rx.borrow();
-            execute_control_command(command, &self.acl, &state, &self.command_control_tx)
+            let state = self.dashboard_commands.state_rx.borrow();
+            execute_control_command(
+                command,
+                &self.acl,
+                &state,
+                &self.dashboard_commands.control_tx,
+            )
         };
         self.send_text(chat_id, &response).await
     }

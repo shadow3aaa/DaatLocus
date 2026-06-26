@@ -19,8 +19,8 @@ use crate::{
     runtime::bootstrap::{bootstrap_telegram_transport_state_from_acl, emit_startup_progress},
     telegram_acl::TelegramAclHandle,
     telegram_transport::{
-        TelegramAuthVerifier, TelegramDeliveryClient, TelegramInputRouter,
-        TelegramSessionCommandHandler, TelegramTransport,
+        TelegramAuthVerifier, TelegramDashboardCommandBridge, TelegramDeliveryClient,
+        TelegramInputRouter, TelegramSessionCommandHandler, TelegramTransport,
         state::{PendingOutboundMessage, TelegramTransportState},
     },
 };
@@ -360,8 +360,10 @@ async fn run_daemon_serve_inner(
                 telegram_auth_verifier,
                 telegram_router.clone(),
                 telegram_router,
-                dashboard_tx.subscribe(),
-                dashboard_control_tx.clone(),
+                TelegramDashboardCommandBridge::new(
+                    dashboard_tx.subscribe(),
+                    dashboard_control_tx.clone(),
+                ),
             )
             .run(),
         ))
