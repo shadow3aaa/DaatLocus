@@ -210,9 +210,12 @@ hash-anchored edits, and propagation review.
 - Open the target project with `coding__open_project` before using SCOPE-backed
   project operations.
 - Use `coding__search_code` to find source lines. Its results are path-scoped
-  `line#hash` hits; do not invent anchors.
+  `line#hash|source line` hits. The `line#hash` anchor is valid input for
+  follow-up `coding__read_code` and `coding__edit_code`; do not invent anchors.
 - Use `coding__read_code` with a path plus returned line anchor to get
-  hash-anchored source lines before editing.
+  `line#hash|source line` output before editing. `search_code` and `read_code`
+  use the same line-anchor format, so anchors copied from either output are
+  valid and consistent for subsequent edits.
 - Use `coding__edit_code` for SCOPE-owned source files. It applies structured
   path plus line-hash anchored edits and returns propagation results.
 - Use global `read_file` and `edit_file` for ordinary files, config, generated
