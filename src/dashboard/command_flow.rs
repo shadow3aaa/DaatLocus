@@ -3,18 +3,15 @@ use std::path::PathBuf;
 use super::command_panels::{
     CommandFeedback, CommandFeedbackLevel, CommandPanel, CommandSelectionAction,
     CommandSelectionItem, CommandSelectionPanel, CommandSuggestion, DashboardActionInvocation,
-    DashboardCommandContext, SkillsListPanel, TelegramAccessAction, TelegramAccessPicker,
-    detail_panel,
+    DashboardCommandContext, SkillsListPanel, detail_panel,
 };
 use super::command_registry::{
     app_status_command_accepts, clear_command_accepts, dashboard_command_is_known,
     dashboard_commands, debug_command_accepts, quit_command_accepts, restart_command_accepts,
     skills_command_accepts, sleep_command_accepts, status_command_accepts,
-    telegram_command_accepts,
 };
 use super::command_text::{
-    fallback_output, format_pending_request_choices, render_app_status_text,
-    render_available_app_statuses, render_pending_access_requests, render_skill_detail,
+    fallback_output, render_app_status_text, render_available_app_statuses, render_skill_detail,
     render_skills_list, resolve_skill_target, skill_status_description, truncate_command_text,
 };
 use super::{DashboardAction, DashboardActionResult, DashboardControlCommand, DashboardState};
@@ -23,7 +20,6 @@ use crate::{
     reasoning::turn_compile::{
         load_prompt_persona_spec_sync, prompt_persona_path_sync, render_prompt_persona_markdown,
     },
-    telegram_acl::{PendingAccessRequest, TelegramAclHandle},
 };
 
 pub(super) fn command_feedback_from_action_result(
@@ -62,22 +58,6 @@ pub(super) fn command_panel_for_input(
         }
         ["sleep"] => Some(sleep_command_panel(context.state)),
         ["sleep", "status"] => Some(sleep_status_panel(context.state)),
-        ["telegram"] => Some(telegram_command_panel(context.state, context.requests)),
-        ["telegram", "status"] => Some(telegram_status_panel(context.state)),
-        ["telegram", "approve"] => Some(
-            telegram_access_picker_for_input(input, context.requests)
-                .map(CommandPanel::TelegramAccess)
-                .unwrap_or_else(|| {
-                    telegram_access_command_panel(TelegramAccessAction::Approve, context.requests)
-                }),
-        ),
-        ["telegram", "reject"] => Some(
-            telegram_access_picker_for_input(input, context.requests)
-                .map(CommandPanel::TelegramAccess)
-                .unwrap_or_else(|| {
-                    telegram_access_command_panel(TelegramAccessAction::Reject, context.requests)
-                }),
-        ),
         [verb] if app_status_command_accepts(verb) => {
             Some(app_status_selection_panel(context.state))
         }
@@ -139,47 +119,13 @@ pub(super) fn dashboard_action_for_input(
                 quiet_success: false,
             }
         }
-        ["telegram", "approve", chat_id] | ["telegram", "reject", chat_id] => {
-            let chat_id = chat_id.parse::<i64>().map_err(|_| CommandFeedback {
-                title: "TELEGRAM".to_string(),
-                message: format!("invalid chat_id: {chat_id}"),
-                detail: None,
-                level: CommandFeedbackLevel::Error,
-            })?;
-            let action = if parts[1] == "approve" {
-                DashboardAction::ApproveTelegramAccess { chat_id }
-            } else {
-                DashboardAction::RejectTelegramAccess { chat_id }
-            };
-            DashboardActionInvocation {
-                title: "TELEGRAM".to_string(),
-                action,
-                quiet_success: false,
-            }
-        }
         _ => return Ok(None),
     };
     Ok(Some(invocation))
 }
 
-pub(super) fn telegram_access_command_panel(
-    action: TelegramAccessAction,
-    requests: &[PendingAccessRequest],
-) -> CommandPanel {
-    if requests.is_empty() {
-        return detail_panel(action.title(), "No pending Telegram access requests.");
-    }
-    CommandPanel::TelegramAccess(TelegramAccessPicker {
-        action,
-        requests: requests.to_vec(),
-        selected: 0,
-        scroll: 0,
-    })
-}
-
 pub(crate) fn execute_control_command(
     command: &str,
-    telegram_acl: &TelegramAclHandle,
     state: &DashboardState,
     control_tx: &tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
 ) -> String {
@@ -188,11 +134,7 @@ pub(crate) fn execute_control_command(
         return "empty command".to_string();
     }
     let input = format!("/{command}");
-    let requests = telegram_acl.pending_requests();
-    let context = DashboardCommandContext {
-        requests: &requests,
-        state,
-    };
+    let context = DashboardCommandContext { state };
     let Some(parts) = dashboard_command_parts(&input) else {
         return "empty command".to_string();
     };
@@ -203,8 +145,7 @@ pub(crate) fn execute_control_command(
 
     match dashboard_action_for_input(&input, &context) {
         Ok(Some(invocation)) => {
-            let result =
-                super::execute_dashboard_action(invocation.action, telegram_acl, control_tx);
+            let result = super::execute_dashboard_action(invocation.action, control_tx);
             return result.message;
         }
         Ok(None) => {}
@@ -231,12 +172,6 @@ pub(crate) fn execute_control_command(
         ["sleep", "status"] => fallback_output(&state.sleep_status_output),
         ["skills"] | ["skills", "list"] | ["skills", "show"] => render_skills_list(state),
         ["skills", "show", target] => render_skill_detail(state, target),
-        ["telegram"] => {
-            "available actions: status\nTelegram verification uses daemon auth tokens. Run `daat-locus token create telegram` locally, then send `/verify <token>` to the Telegram bot.".to_string()
-        }
-        ["telegram", "status"] => fallback_output(&state.inspect_telegram_output),
-        ["telegram", "approve"] => render_pending_access_requests("approve", &requests),
-        ["telegram", "reject"] => render_pending_access_requests("reject", &requests),
         [verb, ..] if dashboard_command_is_known(verb) => {
             format!("unsupported command shape: /{}", parts.join(" "))
         }
@@ -245,24 +180,8 @@ pub(crate) fn execute_control_command(
     }
 }
 
-pub(crate) fn dashboard_command_is_manager_owned(command: &str) -> bool {
-    let command = command.trim().trim_start_matches('/').trim();
-    if command.is_empty() {
-        return false;
-    }
-    let input = format!("/{command}");
-    let Some(parts) = dashboard_command_parts(&input) else {
-        return false;
-    };
-    matches!(
-        parts.as_slice(),
-        ["telegram"]
-            | ["telegram", "status"]
-            | ["telegram", "approve"]
-            | ["telegram", "reject"]
-            | ["telegram", "approve", _]
-            | ["telegram", "reject", _]
-    )
+pub(crate) fn dashboard_command_is_manager_owned(_command: &str) -> bool {
+    false
 }
 
 fn debug_command_panel(state: &DashboardState) -> CommandPanel {
@@ -401,45 +320,6 @@ fn app_status_detail_panel(state: &DashboardState, target: &str) -> CommandPanel
     detail_panel(format!("APP STATUS {}", target.to_uppercase()), output)
 }
 
-fn telegram_command_panel(
-    state: &DashboardState,
-    _requests: &[PendingAccessRequest],
-) -> CommandPanel {
-    CommandPanel::Selection(CommandSelectionPanel {
-        title: "Telegram".to_string(),
-        subtitle: Some("Inspect transport state or bind a chat with a daemon auth token.".to_string()),
-        items: vec![
-            CommandSelectionItem {
-                name: "Status".to_string(),
-                description: "show Telegram transport details".to_string(),
-                action: CommandSelectionAction::ShowDetail {
-                    title: "TELEGRAM STATUS".to_string(),
-                    text: fallback_output(&state.inspect_telegram_output),
-                },
-                disabled: false,
-            },
-            CommandSelectionItem {
-                name: "Verify".to_string(),
-                description: "bind a Telegram chat with a daemon auth token".to_string(),
-                action: CommandSelectionAction::ShowDetail {
-                    title: "TELEGRAM VERIFY".to_string(),
-                    text: "Run `daat-locus token create telegram` locally, then send `/verify <token>` to the Telegram bot.".to_string(),
-                },
-                disabled: false,
-            },
-        ],
-        selected: 0,
-        scroll: 0,
-    })
-}
-
-fn telegram_status_panel(state: &DashboardState) -> CommandPanel {
-    detail_panel(
-        "TELEGRAM STATUS",
-        fallback_output(&state.inspect_telegram_output),
-    )
-}
-
 fn skills_command_panel(state: &DashboardState) -> CommandPanel {
     let auto_count = state
         .skills
@@ -485,30 +365,6 @@ fn skill_detail_panel(state: &DashboardState, target: &str) -> Option<CommandPan
         ]
         .join("\n"),
     ))
-}
-
-pub(super) fn telegram_access_picker_for_input(
-    input: &str,
-    requests: &[PendingAccessRequest],
-) -> Option<TelegramAccessPicker> {
-    if requests.is_empty() {
-        return None;
-    }
-
-    let command = dashboard_command_body(input)?;
-    let parts = command.split_whitespace().collect::<Vec<_>>();
-    let action = match parts.as_slice() {
-        ["telegram", "approve"] => TelegramAccessAction::Approve,
-        ["telegram", "reject"] => TelegramAccessAction::Reject,
-        _ => return None,
-    };
-
-    Some(TelegramAccessPicker {
-        action,
-        requests: requests.to_vec(),
-        selected: 0,
-        scroll: 0,
-    })
 }
 
 pub(super) fn is_clear_command_input(input: &str) -> bool {
@@ -614,44 +470,6 @@ pub(super) fn command_live_feedback(
             }
             _ => {}
         }
-    } else if telegram_command_accepts(verb) {
-        match parts.as_slice() {
-            ["telegram", "status"] => {}
-            ["telegram", "approve" | "reject"] => {
-                let subcommand = parts[1];
-                if context.requests.is_empty() {
-                    return Some(CommandFeedback {
-                        title: "TELEGRAM".to_string(),
-                        message: format!("No pending Telegram requests to {subcommand}."),
-                        detail: Some("Use /telegram to inspect Telegram state.".to_string()),
-                        level: CommandFeedbackLevel::Info,
-                    });
-                }
-                return Some(CommandFeedback {
-                    title: "TELEGRAM".to_string(),
-                    message: format!("Press Enter to choose a request to {subcommand}."),
-                    detail: Some(format_pending_request_choices(context.requests)),
-                    level: CommandFeedbackLevel::Info,
-                });
-            }
-            ["telegram", "approve" | "reject", chat_id] if chat_id.parse::<i64>().is_err() => {
-                return Some(CommandFeedback {
-                    title: "TELEGRAM".to_string(),
-                    message: format!("Invalid chat_id '{chat_id}'."),
-                    detail: None,
-                    level: CommandFeedbackLevel::Error,
-                });
-            }
-            ["telegram", "approve" | "reject", _] => {}
-            ["telegram", subcommand, ..] => {
-                return Some(unknown_command_part_feedback(
-                    "TELEGRAM",
-                    format!("Unknown Telegram action '{subcommand}'."),
-                    "Use /telegram to choose an action.",
-                ));
-            }
-            _ => {}
-        }
     } else if app_status_command_accepts(verb) {
         let apps = context
             .state
@@ -753,18 +571,6 @@ fn command_extra_argument_feedback(parts: &[&str]) -> Option<CommandFeedback> {
             detail: Some(format!("usage: /skills {} <skill>", parts[1])),
             level: CommandFeedbackLevel::Error,
         }),
-        ["telegram", "status", ..] if parts.len() > 2 => Some(CommandFeedback {
-            title: "TELEGRAM".to_string(),
-            message: "telegram status does not take extra arguments.".to_string(),
-            detail: Some("usage: /telegram status".to_string()),
-            level: CommandFeedbackLevel::Error,
-        }),
-        ["telegram", "approve" | "reject", ..] if parts.len() > 3 => Some(CommandFeedback {
-            title: "TELEGRAM".to_string(),
-            message: format!("telegram {} accepts at most one chat_id.", parts[1]),
-            detail: Some(format!("usage: /telegram {} [chat_id]", parts[1])),
-            level: CommandFeedbackLevel::Error,
-        }),
         [verb, ..] if app_status_command_accepts(verb) && parts.len() > 2 => {
             Some(CommandFeedback {
                 title: "APP STATUS".to_string(),
@@ -784,17 +590,7 @@ pub(super) fn command_blocks_submission(
     let feedback = command_live_feedback(input, context)?;
     match feedback.level {
         CommandFeedbackLevel::Warning | CommandFeedbackLevel::Error => Some(feedback),
-        CommandFeedbackLevel::Info => {
-            let parts = dashboard_command_parts(input)?;
-            if matches!(
-                parts.as_slice(),
-                ["telegram", "approve"] | ["telegram", "reject"]
-            ) {
-                Some(feedback)
-            } else {
-                None
-            }
-        }
+        CommandFeedbackLevel::Info => None,
     }
 }
 
@@ -966,10 +762,6 @@ pub(super) fn dashboard_parts_open_panel(parts: &[&str]) -> bool {
             | ["debug", "preturn_context"]
             | ["sleep"]
             | ["sleep", "status"]
-            | ["telegram"]
-            | ["telegram", "status"]
-            | ["telegram", "approve"]
-            | ["telegram", "reject"]
             | ["skills"]
             | ["skills", "list"]
             | ["skills", "show"]
@@ -987,7 +779,5 @@ pub(super) fn dashboard_parts_run_action(parts: &[&str]) -> bool {
             | ["skills", "reload"]
             | ["skills", "enable", _]
             | ["skills", "disable", _]
-            | ["telegram", "approve", _]
-            | ["telegram", "reject", _]
     )
 }

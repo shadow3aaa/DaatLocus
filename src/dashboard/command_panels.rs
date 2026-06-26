@@ -6,12 +6,7 @@ use super::{
     DashboardAction, DashboardPendingUserInput, DashboardPendingUserInputMoveDirection,
     DashboardState, command_text::skill_status_description,
 };
-use crate::{
-    openskills::{OpenSkillDashboardError, OpenSkillDashboardSummary},
-    telegram_acl::PendingAccessRequest,
-};
-
-pub(super) const TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS: usize = 8;
+use crate::openskills::{OpenSkillDashboardError, OpenSkillDashboardSummary};
 
 pub(super) struct CommandDetailPanel {
     pub(super) title: String,
@@ -95,7 +90,6 @@ pub(super) enum CommandPanel {
     Selection(CommandSelectionPanel),
     SkillsList(SkillsListPanel),
     SkillsToggle(SkillsTogglePanel),
-    TelegramAccess(TelegramAccessPicker),
     PendingUserInputQueue(PendingUserInputQueuePanel),
 }
 
@@ -112,19 +106,6 @@ pub(super) enum CommandFeedbackLevel {
     Info,
     Warning,
     Error,
-}
-
-pub(super) struct TelegramAccessPicker {
-    pub(super) action: TelegramAccessAction,
-    pub(super) requests: Vec<PendingAccessRequest>,
-    pub(super) selected: usize,
-    pub(super) scroll: usize,
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum TelegramAccessAction {
-    Approve,
-    Reject,
 }
 
 pub(super) enum CommandPanelAction {
@@ -151,7 +132,6 @@ pub(super) struct DashboardActionInvocation {
 }
 
 pub(super) struct DashboardCommandContext<'a> {
-    pub(super) requests: &'a [PendingAccessRequest],
     pub(super) state: &'a DashboardState,
 }
 
@@ -162,31 +142,13 @@ pub(super) struct CommandSuggestion {
     pub(super) description: String,
 }
 
-impl TelegramAccessAction {
-    pub(super) fn verb(self) -> &'static str {
-        match self {
-            TelegramAccessAction::Approve => "approve",
-            TelegramAccessAction::Reject => "reject",
-        }
-    }
-
-    pub(super) fn title(self) -> &'static str {
-        match self {
-            TelegramAccessAction::Approve => "TELEGRAM APPROVE",
-            TelegramAccessAction::Reject => "TELEGRAM REJECT",
-        }
-    }
-}
-
 impl CommandPanel {
     pub(super) fn sync_state(&mut self, state: &DashboardState) {
         match self {
             CommandPanel::SkillsList(panel) => panel.sync_state(state),
             CommandPanel::SkillsToggle(panel) => panel.sync_state(state),
             CommandPanel::PendingUserInputQueue(panel) => panel.sync_state(state),
-            CommandPanel::Detail(_)
-            | CommandPanel::Selection(_)
-            | CommandPanel::TelegramAccess(_) => {}
+            CommandPanel::Detail(_) | CommandPanel::Selection(_) => {}
         }
     }
 
@@ -200,14 +162,6 @@ impl CommandPanel {
             CommandPanel::SkillsToggle(_) => {
                 "Space/Enter toggle auto-use   type search   Backspace edit   Esc close"
             }
-            CommandPanel::TelegramAccess(picker) => match picker.action {
-                TelegramAccessAction::Approve => {
-                    "Enter approve selected   ↑/↓ move   PgUp/PgDn page   Esc cancel"
-                }
-                TelegramAccessAction::Reject => {
-                    "Enter reject selected   ↑/↓ move   PgUp/PgDn page   Esc cancel"
-                }
-            },
             CommandPanel::PendingUserInputQueue(_) => {
                 "Enter edit   d discard   Shift+↑/↓ reorder   c clear   Esc close"
             }
@@ -495,7 +449,6 @@ pub(super) fn handle_command_panel_key(
         CommandPanel::Selection(selection) => handle_selection_panel_key(selection, key),
         CommandPanel::SkillsList(skills) => handle_skills_list_panel_key(skills, key),
         CommandPanel::SkillsToggle(skills) => handle_skills_toggle_panel_key(skills, key),
-        CommandPanel::TelegramAccess(picker) => handle_telegram_access_panel_key(picker, key),
         CommandPanel::PendingUserInputQueue(queue) => {
             handle_pending_user_input_queue_panel_key(queue, key)
         }
@@ -838,88 +791,6 @@ fn handle_skills_toggle_panel_key(
             CommandPanelAction::None
         }
         _ => CommandPanelAction::None,
-    }
-}
-
-fn handle_telegram_access_panel_key(
-    picker: &mut TelegramAccessPicker,
-    key: KeyEvent,
-) -> CommandPanelAction {
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => CommandPanelAction::Close,
-        KeyCode::Up | KeyCode::Char('k') => {
-            picker.selected = picker
-                .selected
-                .saturating_sub(1)
-                .min(picker.requests.len().saturating_sub(1));
-            picker.scroll =
-                adjusted_picker_scroll(picker.scroll, picker.selected, picker.requests.len());
-            CommandPanelAction::None
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            picker.selected = (picker.selected + 1).min(picker.requests.len().saturating_sub(1));
-            picker.scroll =
-                adjusted_picker_scroll(picker.scroll, picker.selected, picker.requests.len());
-            CommandPanelAction::None
-        }
-        KeyCode::PageUp => {
-            picker.selected = picker.selected.saturating_sub(8);
-            picker.scroll =
-                adjusted_picker_scroll(picker.scroll, picker.selected, picker.requests.len());
-            CommandPanelAction::None
-        }
-        KeyCode::PageDown => {
-            picker.selected = (picker.selected + 8).min(picker.requests.len().saturating_sub(1));
-            picker.scroll =
-                adjusted_picker_scroll(picker.scroll, picker.selected, picker.requests.len());
-            CommandPanelAction::None
-        }
-        KeyCode::Home => {
-            picker.selected = 0;
-            picker.scroll = 0;
-            CommandPanelAction::None
-        }
-        KeyCode::End => {
-            picker.selected = picker.requests.len().saturating_sub(1);
-            picker.scroll =
-                adjusted_picker_scroll(picker.scroll, picker.selected, picker.requests.len());
-            CommandPanelAction::None
-        }
-        KeyCode::Enter => {
-            let Some(request) = picker.requests.get(picker.selected) else {
-                return CommandPanelAction::None;
-            };
-            let action = match picker.action {
-                TelegramAccessAction::Approve => DashboardAction::ApproveTelegramAccess {
-                    chat_id: request.chat_id,
-                },
-                TelegramAccessAction::Reject => DashboardAction::RejectTelegramAccess {
-                    chat_id: request.chat_id,
-                },
-            };
-            CommandPanelAction::RunAction {
-                title: picker.action.title().to_string(),
-                action,
-                keep_panel: false,
-            }
-        }
-        _ => CommandPanelAction::None,
-    }
-}
-
-fn adjusted_picker_scroll(current_scroll: usize, selected_index: usize, total: usize) -> usize {
-    if total <= TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS {
-        return 0;
-    }
-    let max_scroll = total.saturating_sub(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS);
-    if selected_index < current_scroll {
-        selected_index
-    } else if selected_index >= current_scroll + TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS {
-        (selected_index + 1)
-            .saturating_sub(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS)
-            .min(max_scroll)
-    } else {
-        current_scroll.min(max_scroll)
     }
 }
 

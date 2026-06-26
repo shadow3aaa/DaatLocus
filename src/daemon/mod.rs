@@ -1572,12 +1572,8 @@ async fn command_handler(
                     .into_response();
             }
             let snapshot = state.dashboard_rx.borrow().clone();
-            let output = execute_control_command(
-                command.trim(),
-                &state.telegram_acl,
-                &snapshot,
-                &state.dashboard_control_tx,
-            );
+            let output =
+                execute_control_command(command.trim(), &snapshot, &state.dashboard_control_tx);
             return Json(CommandResponse { output }).into_response();
         }
         let client = match session_client_for_request(&state, session_id).await {
@@ -1660,12 +1656,7 @@ async fn command_handler(
             .into_response();
     };
     let snapshot = state.dashboard_rx.borrow().clone();
-    let output = execute_control_command(
-        command.trim(),
-        &state.telegram_acl,
-        &snapshot,
-        &state.dashboard_control_tx,
-    );
+    let output = execute_control_command(command.trim(), &snapshot, &state.dashboard_control_tx);
     Json(CommandResponse { output }).into_response()
 }
 
@@ -1684,11 +1675,7 @@ async fn dashboard_action_handler(
         return response;
     }
     if dashboard_action_is_manager_owned(&request.action) {
-        let result = execute_dashboard_action(
-            request.action,
-            &state.telegram_acl,
-            &state.dashboard_control_tx,
-        );
+        let result = execute_dashboard_action(request.action, &state.dashboard_control_tx);
         return Json(DashboardActionResponse { result }).into_response();
     }
     if let Some(session_id) = request.session_id.as_deref() {
@@ -1734,11 +1721,7 @@ async fn dashboard_action_handler(
         return Json(DashboardActionResponse { result }).into_response();
     }
 
-    let result = execute_dashboard_action(
-        request.action,
-        &state.telegram_acl,
-        &state.dashboard_control_tx,
-    );
+    let result = execute_dashboard_action(request.action, &state.dashboard_control_tx);
     Json(DashboardActionResponse { result }).into_response()
 }
 

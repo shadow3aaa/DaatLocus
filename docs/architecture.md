@@ -419,9 +419,8 @@ DashboardState + TuiViewState
 coalesced draw requests, and animation scheduling through `FrameRequester`.
 
 Slash commands are top-level product entry points. Commands such as `/skills`,
-`/telegram`, `/debug`, `/app-status`, and `/status` should open panels or one
-obvious action. Large typed CLI trees stay in internal, remote-control, or test
-surfaces.
+`/debug`, `/app-status`, and `/status` should open panels or one obvious action.
+Large typed CLI trees stay in internal, remote-control, or test surfaces.
 
 WebUI session rendering reads structured `DashboardState`, `WebActivityItem`,
 and `ActivityCell` data directly while mirroring the TUI session activity

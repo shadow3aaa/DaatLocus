@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::DashboardState;
-use crate::telegram_acl::TelegramAclHandle;
 
 #[derive(Clone, Debug)]
 pub enum DashboardControlCommand {
@@ -36,12 +35,6 @@ pub enum DashboardAction {
         path: PathBuf,
         enabled: bool,
     },
-    ApproveTelegramAccess {
-        chat_id: i64,
-    },
-    RejectTelegramAccess {
-        chat_id: i64,
-    },
     DismissPendingUserInput {
         event_id: Uuid,
     },
@@ -63,12 +56,8 @@ pub enum DashboardAction {
     },
 }
 
-pub(crate) fn dashboard_action_is_manager_owned(action: &DashboardAction) -> bool {
-    matches!(
-        action,
-        DashboardAction::ApproveTelegramAccess { .. }
-            | DashboardAction::RejectTelegramAccess { .. }
-    )
+pub(crate) fn dashboard_action_is_manager_owned(_action: &DashboardAction) -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,7 +111,6 @@ pub trait DashboardCommandRunner: Send + Sync {
 
 pub(crate) fn execute_dashboard_action(
     action: DashboardAction,
-    telegram_acl: &TelegramAclHandle,
     control_tx: &tokio::sync::mpsc::UnboundedSender<DashboardControlCommand>,
 ) -> DashboardActionResult {
     match action {
@@ -171,16 +159,6 @@ pub(crate) fn execute_dashboard_action(
                 }
             }
         }
-        DashboardAction::ApproveTelegramAccess { chat_id } => match telegram_acl.approve(chat_id) {
-            Ok(()) => DashboardActionResult::ok(format!("approved {chat_id}")),
-            Err(err) => {
-                DashboardActionResult::error(format!("approve failed for {chat_id}: {err}"))
-            }
-        },
-        DashboardAction::RejectTelegramAccess { chat_id } => match telegram_acl.reject(chat_id) {
-            Ok(()) => DashboardActionResult::ok(format!("rejected {chat_id}")),
-            Err(err) => DashboardActionResult::error(format!("reject failed for {chat_id}: {err}")),
-        },
         DashboardAction::DismissPendingUserInput { .. }
         | DashboardAction::ClearPendingUserInputs
         | DashboardAction::UpdatePendingUserInput { .. }

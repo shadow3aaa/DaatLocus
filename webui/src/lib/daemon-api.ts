@@ -671,8 +671,6 @@ export type DashboardAction =
   | { kind: "restart_daemon" }
   | { kind: "reload_skills" }
   | { kind: "set_skill_auto_use"; path: string; enabled: boolean }
-  | { kind: "approve_telegram_access"; chat_id: number }
-  | { kind: "reject_telegram_access"; chat_id: number }
   | { kind: "dismiss_pending_user_input"; event_id: string }
   | { kind: "clear_pending_user_inputs" }
   | {

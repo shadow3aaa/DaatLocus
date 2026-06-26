@@ -379,7 +379,7 @@ type WebSlashCommandFeedback = {
 type WebSlashPanel =
   | {
       kind: "selection";
-      panel: "debug" | "sleep" | "telegram" | "skills" | "app-status";
+      panel: "debug" | "sleep" | "skills" | "app-status";
     }
   | {
       kind: "detail";
@@ -393,9 +393,6 @@ type WebSlashPanel =
       kind: "sleep-status";
     }
   | {
-      kind: "telegram-status";
-    }
-  | {
       kind: "skills-list";
       search: string;
     }
@@ -403,10 +400,6 @@ type WebSlashPanel =
       kind: "skills-toggle";
       search: string;
       feedback?: WebSlashCommandFeedback | null;
-    }
-  | {
-      kind: "telegram-access";
-      action: "approve" | "reject";
     };
 
 type WebSlashSelectionItem = {
@@ -455,10 +448,6 @@ const WEB_SLASH_COMMANDS: WebSlashCommandDefinition[] = [
   {
     name: "skills",
     description: "list and manage OpenSkills automatic use",
-  },
-  {
-    name: "telegram",
-    description: "telegram status and access controls",
   },
 ];
 
@@ -1802,8 +1791,6 @@ function WebSlashPanelView({
       return <WebSlashStatusPanel snapshot={snapshot} onClose={onClose} />;
     case "sleep-status":
       return <WebSlashSleepStatusPanel snapshot={snapshot} onClose={onClose} />;
-    case "telegram-status":
-      return <WebSlashTelegramStatusPanel snapshot={snapshot} onClose={onClose} />;
     case "detail":
       return (
         <WebSlashDetailPanel
@@ -1829,16 +1816,6 @@ function WebSlashPanelView({
           isSending={isSending}
           onClose={onClose}
           onSetPanel={onSetPanel}
-          onRunDashboardAction={onRunDashboardAction}
-        />
-      );
-    case "telegram-access":
-      return (
-        <WebSlashTelegramAccessPanel
-          panel={panel}
-          snapshot={snapshot}
-          isSending={isSending}
-          onClose={onClose}
           onRunDashboardAction={onRunDashboardAction}
         />
       );
@@ -2143,53 +2120,6 @@ function WebSlashSleepStatusPanel({
   );
 }
 
-function WebSlashTelegramStatusPanel({
-  snapshot,
-  onClose,
-}: {
-  snapshot: DashboardSnapshot | null;
-  onClose: () => void;
-}) {
-  const requests = snapshot?.pending_access_requests ?? [];
-
-  return (
-    <WebSlashPanelShell
-      title="TELEGRAM STATUS"
-      subtitle="Transport access request state."
-      onClose={onClose}
-    >
-      <div className="flex min-w-0 flex-col gap-2">
-        <WebSlashKeyValueRows rows={[["Pending requests", requests.length]]} />
-        {requests.length > 0 ? (
-          <div className="flex flex-col gap-1">
-            {requests.map((request) => (
-              <div
-                key={request.chat_id}
-                className="flex min-w-0 gap-2 px-2 py-1 text-sm"
-              >
-                <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                  {request.chat_id}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium text-foreground">
-                    {request.title || request.sender}
-                  </span>
-                  <span className="block truncate text-xs text-muted-foreground">
-                    {request.sender}  {request.last_message_preview}
-                  </span>
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="px-2 py-3 text-sm text-muted-foreground">
-            No pending Telegram access requests.
-          </p>
-        )}
-      </div>
-    </WebSlashPanelShell>
-  );
-}
 
 function WebSlashDetailPanel({
   title,
@@ -2411,80 +2341,6 @@ function WebSlashSkillsTogglePanel({
   );
 }
 
-function WebSlashTelegramAccessPanel({
-  panel,
-  snapshot,
-  isSending,
-  onClose,
-  onRunDashboardAction,
-}: {
-  panel: Extract<WebSlashPanel, { kind: "telegram-access" }>;
-  snapshot: DashboardSnapshot | null;
-  isSending: boolean;
-  onClose: () => void;
-  onRunDashboardAction: (action: DashboardAction) => void;
-}) {
-  const requests = snapshot?.pending_access_requests ?? [];
-
-  return (
-    <WebSlashPanelShell
-      title={panel.action === "approve" ? "TELEGRAM APPROVE" : "TELEGRAM REJECT"}
-      subtitle={`Select a pending request to ${panel.action}.`}
-      onClose={onClose}
-    >
-      <div className="flex min-w-0 flex-col gap-1">
-        {requests.length > 0 ? (
-          requests.map((request, index) => (
-            <Button
-              key={`${panel.action}-${request.chat_id}`}
-              type="button"
-              variant="ghost"
-              disabled={isSending}
-              onClick={() =>
-                onRunDashboardAction({
-                  kind:
-                    panel.action === "approve"
-                      ? "approve_telegram_access"
-                      : "reject_telegram_access",
-                  chat_id: request.chat_id,
-                })
-              }
-              className={cn(
-                "group h-auto w-full min-w-0 justify-start gap-2 px-2 py-1.5 text-left text-sm disabled:cursor-not-allowed disabled:opacity-60",
-                index === 0 && "bg-muted text-foreground",
-              )}
-            >
-              <span
-                aria-hidden="true"
-                className={cn(
-                  "w-3 shrink-0 text-primary opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
-                  index === 0 && "opacity-100",
-                )}
-              >
-                ›
-              </span>
-              <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                {request.chat_id}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate font-medium text-foreground">
-                  {request.title || request.sender}
-                </span>
-                <span className="block truncate text-xs text-muted-foreground">
-                  {request.sender}  {request.last_message_preview}
-                </span>
-              </span>
-            </Button>
-          ))
-        ) : (
-          <p className="px-2 py-3 text-sm text-muted-foreground">
-            No pending Telegram access requests.
-          </p>
-        )}
-      </div>
-    </WebSlashPanelShell>
-  );
-}
 
 function WebSlashKeyValueRows({
   rows,
@@ -2813,30 +2669,6 @@ function webSlashCommandFeedback(
     }
   }
 
-  if (verb === "telegram") {
-    const action = parsed.parts[1];
-    if (action && !["status", "approve", "reject"].includes(action)) {
-      return {
-        title: "TELEGRAM",
-        message: `Unknown Telegram action '${action}'.`,
-        detail: "Use /telegram to choose an action.",
-        level: "error",
-        blocksSubmit: true,
-      };
-    }
-    if (
-      ["approve", "reject"].includes(action) &&
-      parsed.parts.length === 3 &&
-      !/^-?\d+$/.test(parsed.parts[2])
-    ) {
-      return {
-        title: "TELEGRAM",
-        message: `Invalid chat_id '${parsed.parts[2]}'.`,
-        level: "error",
-        blocksSubmit: true,
-      };
-    }
-  }
 
   return null;
 }
@@ -2870,15 +2702,6 @@ function webSlashExtraArgumentFeedback(
       title: "SLEEP",
       message: `sleep ${parts[1]} does not take extra arguments.`,
       detail: `usage: /sleep ${parts[1]}`,
-      level: "error",
-      blocksSubmit: true,
-    };
-  }
-  if (parts[0] === "telegram" && parts[1] === "status" && parts.length > 2) {
-    return {
-      title: "TELEGRAM",
-      message: "/telegram status does not take extra arguments.",
-      detail: "usage: /telegram status",
       level: "error",
       blocksSubmit: true,
     };
@@ -2922,19 +2745,6 @@ function webSlashExtraArgumentFeedback(
       blocksSubmit: true,
     };
   }
-  if (
-    parts[0] === "telegram" &&
-    (parts[1] === "approve" || parts[1] === "reject") &&
-    parts.length > 3
-  ) {
-    return {
-      title: "TELEGRAM",
-      message: `telegram ${parts[1]} accepts at most one chat_id.`,
-      detail: `usage: /telegram ${parts[1]} [chat_id]`,
-      level: "error",
-      blocksSubmit: true,
-    };
-  }
   if (webSlashCommandAccepts("app-status", parts[0]) && parts.length > 2) {
     return {
       title: "APP STATUS",
@@ -2962,7 +2772,7 @@ function webSlashPanelForInput(
     if (verb === "status") {
       return { kind: "status" };
     }
-    if (["debug", "sleep", "telegram", "skills"].includes(verb)) {
+    if (["debug", "sleep", "skills"].includes(verb)) {
       return { kind: "selection", panel: verb as Extract<WebSlashPanel, { kind: "selection" }>["panel"] };
     }
     if (webSlashCommandAccepts("app-status", verb)) {
@@ -3000,14 +2810,6 @@ function webSlashPanelForInput(
   }
   if (verb === "sleep" && parts[1] === "status") {
     return { kind: "sleep-status" };
-  }
-  if (verb === "telegram") {
-    if (parts[1] === "status") {
-      return { kind: "telegram-status" };
-    }
-    if (parts[1] === "approve" || parts[1] === "reject") {
-      return { kind: "telegram-access", action: parts[1] };
-    }
   }
   if (webSlashCommandAccepts("app-status", verb) && parts.length === 2) {
     const target = parts[1].toLowerCase();
@@ -3077,23 +2879,6 @@ function webSlashActionForInput(
       enabled: parts[1] === "enable",
     };
   }
-  if (
-    parts[0] === "telegram" &&
-    (parts[1] === "approve" || parts[1] === "reject") &&
-    parts.length === 3
-  ) {
-    const chatId = Number(parts[2]);
-    if (!Number.isSafeInteger(chatId)) {
-      return null;
-    }
-    return {
-      kind:
-        parts[1] === "approve"
-          ? "approve_telegram_access"
-          : "reject_telegram_access",
-      chat_id: chatId,
-    };
-  }
   return null;
 }
 
@@ -3158,12 +2943,6 @@ function webSlashSelectionMeta(
     return {
       title: "Sleep",
       subtitle: "Inspect sleep state or start a background sleep run.",
-    };
-  }
-  if (panel === "telegram") {
-    return {
-      title: "Telegram",
-      subtitle: "Inspect transport state or handle access requests.",
     };
   }
   return {
@@ -3257,28 +3036,6 @@ function webSlashSelectionItems(
       },
     ];
   }
-  if (panel === "telegram") {
-    const pending = snapshot?.pending_access_requests.length ?? 0;
-    return [
-      {
-        id: "telegram-status",
-        name: "Status",
-        description: "show Telegram transport details",
-      },
-      {
-        id: "telegram-approve",
-        name: "Approve access request",
-        description: `approve one of ${pending} pending requests`,
-        disabled: pending === 0,
-      },
-      {
-        id: "telegram-reject",
-        name: "Reject access request",
-        description: `reject one of ${pending} pending requests`,
-        disabled: pending === 0,
-      },
-    ];
-  }
   if (panel === "skills") {
     const skills = snapshot?.skills ?? [];
     return [
@@ -3333,12 +3090,6 @@ function webSlashRunSelectionItem(
     onSetPanel({ kind: "sleep-status" });
   } else if (itemId === "sleep-run") {
     onRunDashboardAction({ kind: "run_sleep" });
-  } else if (itemId === "telegram-status") {
-    onSetPanel({ kind: "telegram-status" });
-  } else if (itemId === "telegram-approve") {
-    onSetPanel({ kind: "telegram-access", action: "approve" });
-  } else if (itemId === "telegram-reject") {
-    onSetPanel({ kind: "telegram-access", action: "reject" });
   } else if (itemId === "skills-list") {
     onSetPanel({ kind: "skills-list", search: "" });
   } else if (itemId === "skills-toggle") {

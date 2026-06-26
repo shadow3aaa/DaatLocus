@@ -8,15 +8,12 @@ import {
 } from "react";
 
 import {
-  CheckIcon,
   ChevronRight,
   GripVerticalIcon,
   TriangleAlertIcon,
-  XIcon,
 } from "lucide-react";
 import { Bar, BarChart, XAxis, YAxis } from "recharts";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,9 +31,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import {
-  runDashboardCommand,
   fetchStatusSummary,
-  type DashboardPendingAccessRequest,
   type SessionInfo,
   type SessionStatusDashboard,
   type StatusSessionSummary,
@@ -64,7 +59,6 @@ const STATUS_CARD_ORDER_STORAGE_KEY = "daat-locus.status.card-order";
 const STATUS_SUMMARY_REFRESH_MS = 5000;
 const DEFAULT_STATUS_CARD_ORDER = [
   "sessions",
-  "telegram-approval",
   "runtime-optimization",
   "context-composition",
   "daily-token-usage",
@@ -81,7 +75,6 @@ type StatusCardDropIntent = {
 
 type StatusCardContentProps = {
   summary: StatusSummary | null;
-  onRefresh: () => void;
   dragHandle: ReactNode;
 };
 
@@ -120,10 +113,6 @@ const STATUS_CARD_DEFINITIONS: Record<StatusCardId, StatusCardDefinition> = {
     label: "Sessions",
     render: (props) => <SessionsCard {...props} />,
   },
-  "telegram-approval": {
-    label: "Telegram Approval",
-    render: (props) => <TelegramApprovalCard {...props} />,
-  },
   "runtime-optimization": {
     label: "Runtime Optimization",
     render: (props) => <RuntimeOptimizationCard {...props} />,
@@ -143,7 +132,7 @@ const STATUS_CARD_DEFINITIONS: Record<StatusCardId, StatusCardDefinition> = {
 };
 
 export function StatusPage() {
-  const { summary, loadError, reload } = useStatusSummary();
+  const { summary, loadError } = useStatusSummary();
   const [cardOrder, setCardOrder] = useState<StatusCardId[]>(
     readStoredStatusCardOrder,
   );
@@ -289,7 +278,6 @@ export function StatusPage() {
                 >
                   {definition.render({
                     summary,
-                    onRefresh: reload,
                     dragHandle: (
                       <StatusCardDragHandle
                         cardId={cardId}
@@ -470,107 +458,6 @@ function SessionStatusLine({ entry }: { entry: StatusSessionSummary }) {
   );
 }
 
-function TelegramApprovalCard({
-  summary,
-  onRefresh,
-  dragHandle,
-}: {
-  summary: StatusSummary | null;
-  onRefresh: () => void;
-  dragHandle: ReactNode;
-}) {
-  const requests = summary?.pending_access_requests ?? [];
-  const [busyChatId, setBusyChatId] = useState<number | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-
-  async function handleRequestAction(
-    request: DashboardPendingAccessRequest,
-    action: "approve" | "reject",
-  ) {
-    setBusyChatId(request.chat_id);
-    setActionError(null);
-
-    try {
-      await runDashboardCommand(`/telegram ${action} ${request.chat_id}`, {});
-      onRefresh();
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusyChatId(null);
-    }
-  }
-
-  return (
-    <Card className="w-full">
-      <CardHeader>
-        <CardTitle>Telegram Approval</CardTitle>
-        <CardAction>{dragHandle}</CardAction>
-      </CardHeader>
-      <CardContent>
-        {requests.length > 0 ? (
-          <div className="flex flex-col gap-3">
-            {requests.map((request) => {
-              const isBusy = busyChatId === request.chat_id;
-              const label = telegramApprovalDisplayName(request);
-
-              return (
-                <div
-                  key={request.chat_id}
-                  className="flex items-center gap-3 rounded-xl border bg-muted/20 p-3"
-                >
-                  <Avatar className="size-10 border border-border bg-background">
-                    <AvatarFallback className="text-sm font-medium">
-                      {telegramApprovalInitials(label)}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate font-medium">{label}</div>
-                    <div className="truncate font-mono text-xs text-muted-foreground">
-                      {request.chat_id}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <Button
-                      type="button"
-                      variant="default"
-                      size="icon-sm"
-                      aria-label={`Approve ${label}`}
-                      disabled={busyChatId !== null}
-                      onClick={() => handleRequestAction(request, "approve")}
-                    >
-                      <CheckIcon data-icon="inline-start" aria-hidden="true" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="icon-sm"
-                      aria-label={`Reject ${label}`}
-                      disabled={busyChatId !== null}
-                      onClick={() => handleRequestAction(request, "reject")}
-                    >
-                      <XIcon data-icon="inline-start" aria-hidden="true" />
-                    </Button>
-                  </div>
-                  {isBusy ? <span className="sr-only">Processing</span> : null}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <DashboardEmptyState
-            title="No pending Telegram approvals"
-            description="Incoming access requests will appear here when Telegram control needs review."
-          />
-        )}
-        {actionError ? (
-          <Alert variant="destructive" className="mt-3 px-2 py-1">
-            <AlertDescription className="text-xs">{actionError}</AlertDescription>
-          </Alert>
-        ) : null}
-      </CardContent>
-    </Card>
-  );
-}
 
 function DailyTokenUsageCard({
   summary,
@@ -1389,13 +1276,4 @@ function ContextPrefixTooltip({
       </div>
     </div>
   );
-}
-
-function telegramApprovalDisplayName(request: DashboardPendingAccessRequest) {
-  return request.sender || request.title || "Unknown";
-}
-
-function telegramApprovalInitials(value: string) {
-  const characters = Array.from(value.trim());
-  return characters.slice(0, 2).join("").toUpperCase() || "TG";
 }

@@ -307,7 +307,7 @@ DashboardState + TuiViewState
 
 `FrameRequester` 是 draw scheduler。TUI 使用 full-frame rendering、coalesced draw requests，并通过 `FrameRequester` 安排 animation frames。
 
-Slash commands 是顶层产品入口。`/skills`、`/telegram`、`/debug`、`/app-status`、`/status` 这类命令应打开 panel 或执行一个明确动作。大型 typed CLI tree 留给 internal、remote-control 或 test surfaces。
+Slash commands 是顶层产品入口。`/skills`、`/debug`、`/app-status`、`/status` 这类命令应打开 panel 或执行一个明确动作。大型 typed CLI tree 留给 internal、remote-control 或 test surfaces。
 
 WebUI session rendering 直接读取 structured `DashboardState`、`WebActivityItem` 和 `ActivityCell` 数据，并镜像 TUI session activity hierarchy。
 

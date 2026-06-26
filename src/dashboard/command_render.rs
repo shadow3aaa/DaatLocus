@@ -21,7 +21,6 @@ use super::command_input::{
 use super::command_panels::{
     CommandDetailPanel, CommandFeedback, CommandFeedbackLevel, CommandPanel, CommandSelectionPanel,
     DashboardCommandContext, PendingUserInputQueuePanel, SkillsListPanel, SkillsTogglePanel,
-    TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS, TelegramAccessPicker,
 };
 use super::command_registry::dashboard_command_is_known;
 use super::command_text::{truncate_command_text, truncate_display_width};
@@ -56,14 +55,6 @@ impl CommandPanel {
                     .saturating_add(feedback_rows)
                     .clamp(6, 16)
             }
-            CommandPanel::TelegramAccess(picker) => 4u16
-                .saturating_add(
-                    picker
-                        .requests
-                        .len()
-                        .min(TELEGRAM_ACCESS_PICKER_VISIBLE_ROWS) as u16,
-                )
-                .clamp(6, 15),
             CommandPanel::PendingUserInputQueue(panel) => {
                 let feedback_rows = command_feedback_row_count(panel.feedback.as_ref());
                 4u16.saturating_add(panel.inputs.len().min(8) as u16)
@@ -159,7 +150,6 @@ pub(super) fn render_command_panel(f: &mut Frame, area: Rect, panel: &CommandPan
         CommandPanel::Selection(selection) => render_selection_panel(f, inner, selection),
         CommandPanel::SkillsList(skills) => render_skills_list_panel(f, inner, skills),
         CommandPanel::SkillsToggle(skills) => render_skills_toggle_panel(f, inner, skills),
-        CommandPanel::TelegramAccess(picker) => render_telegram_access_panel(f, inner, picker),
         CommandPanel::PendingUserInputQueue(panel) => {
             render_pending_user_input_queue_panel(f, inner, panel)
         }
@@ -271,19 +261,6 @@ fn command_panel_copy_lines(panel: &CommandPanel) -> (Vec<String>, u16) {
                         ))
                     }),
             );
-            (lines, 0)
-        }
-        CommandPanel::TelegramAccess(picker) => {
-            let mut lines = vec![
-                picker.action.title().to_string(),
-                format!("Select a pending request to {}.", picker.action.verb()),
-            ];
-            lines.extend(picker.requests.iter().skip(picker.scroll).map(|request| {
-                format!(
-                    "{}  {}  {}  {}",
-                    request.chat_id, request.title, request.sender, request.last_message_preview
-                )
-            }));
             (lines, 0)
         }
         CommandPanel::PendingUserInputQueue(panel) => {
@@ -1172,58 +1149,6 @@ fn render_skills_toggle_panel(f: &mut Frame, area: Rect, panel: &SkillsTogglePan
     f.render_widget(Paragraph::new(Text::from(lines)), rest);
 }
 
-fn render_telegram_access_panel(f: &mut Frame, area: Rect, picker: &TelegramAccessPicker) {
-    let rest = render_panel_title(
-        f,
-        area,
-        picker.action.title(),
-        Some(&format!(
-            "Select a pending request to {}.",
-            picker.action.verb()
-        )),
-    );
-    if rest.height == 0 {
-        return;
-    }
-    let lines = picker
-        .requests
-        .iter()
-        .skip(picker.scroll)
-        .take(rest.height as usize)
-        .enumerate()
-        .map(|(visible_idx, request)| {
-            let idx = picker.scroll + visible_idx;
-            let selected = idx == picker.selected;
-            let marker = if selected { "›" } else { " " };
-            let style = if selected {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            Line::from(vec![
-                Span::styled(marker, Style::default().fg(Color::Cyan)),
-                Span::raw(" "),
-                Span::styled(
-                    format!(
-                        "{}  {}  {}  {}",
-                        request.chat_id,
-                        request.title,
-                        request.sender,
-                        truncate_command_text(&request.last_message_preview, 100)
-                    ),
-                    style,
-                ),
-            ])
-        })
-        .collect::<Vec<_>>();
-    f.render_widget(
-        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
-        rest,
-    );
-}
-
 fn command_hint(input: &str, context: &DashboardCommandContext<'_>) -> String {
     let matches = matching_commands(input, context);
     if !is_dashboard_command_input(input) {
@@ -1376,10 +1301,7 @@ mod tests {
         let backend = TestBackend::new(10, 4);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let state = crate::dashboard::DashboardState::default();
-        let context = DashboardCommandContext {
-            requests: &[],
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
         let mut last_cursor_pos = None;
         let selection = SelectionRegistry::default();
         let mut selectable_regions = Vec::new();
@@ -1431,10 +1353,7 @@ mod tests {
         let backend = TestBackend::new(10, 4);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let state = crate::dashboard::DashboardState::default();
-        let context = DashboardCommandContext {
-            requests: &[],
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
         let mut last_cursor_pos = None;
         let selection = SelectionRegistry::default();
         let mut selectable_regions = Vec::new();
@@ -1476,10 +1395,7 @@ mod tests {
         let backend = TestBackend::new(30, 4);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let state = crate::dashboard::DashboardState::default();
-        let context = DashboardCommandContext {
-            requests: &[],
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
         let mut last_cursor_pos = None;
         let selection = SelectionRegistry::default();
         let mut selectable_regions = Vec::new();
@@ -1521,10 +1437,7 @@ mod tests {
         let backend = TestBackend::new(20, 3);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let state = crate::dashboard::DashboardState::default();
-        let context = DashboardCommandContext {
-            requests: &[],
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
         let mut last_cursor_pos = None;
         let selection = SelectionRegistry::default();
         let mut selectable_regions = Vec::new();
@@ -1571,10 +1484,7 @@ mod tests {
         let backend = TestBackend::new(10, 4);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let state = crate::dashboard::DashboardState::default();
-        let context = DashboardCommandContext {
-            requests: &[],
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
         let mut last_cursor_pos = None;
         let selection = SelectionRegistry::default();
         let mut selectable_regions = Vec::new();
@@ -1622,10 +1532,7 @@ mod tests {
         let backend = TestBackend::new(20, 4);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let state = crate::dashboard::DashboardState::default();
-        let context = DashboardCommandContext {
-            requests: &[],
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
         let mut last_cursor_pos = None;
         let selection = SelectionRegistry::default();
         let mut selectable_regions = Vec::new();
@@ -1672,10 +1579,7 @@ mod tests {
         let backend = TestBackend::new(10, 2);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
         let state = crate::dashboard::DashboardState::default();
-        let context = DashboardCommandContext {
-            requests: &[],
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
         let mut last_cursor_pos = None;
         let selection = SelectionRegistry::default();
         let mut selectable_regions = Vec::new();
@@ -1724,10 +1628,7 @@ mod tests {
     #[test]
     fn command_input_selection_highlight_survives_redraw() {
         let state = crate::dashboard::DashboardState::default();
-        let context = DashboardCommandContext {
-            requests: &[],
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
         let input = "hello";
         let mut registry = SelectionRegistry::default();
         let mut last_cursor_pos = None;

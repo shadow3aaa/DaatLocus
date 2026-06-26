@@ -124,7 +124,6 @@ pub(crate) async fn run_session_serve(
         events: events.clone(),
         pending_work: pending_work.clone(),
         telegram: telegram_handle.clone(),
-        telegram_acl: telegram_acl.clone(),
         dashboard_control_tx: dashboard_control_tx.clone(),
         runtime_interrupt_tx: runtime_interrupt_tx.clone(),
         daemon_control_tx: daemon_control_tx.clone(),
@@ -421,7 +420,6 @@ struct SessionIpcServerState {
     events: EventStore,
     pending_work: PendingWorkQueue,
     telegram: TelegramTransportStateHandle,
-    telegram_acl: TelegramAclHandle,
     dashboard_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     runtime_interrupt_tx: mpsc::UnboundedSender<()>,
     daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
@@ -524,12 +522,7 @@ async fn handle_ipc_connection(
                 "telegram commands are handled by the manager daemon".to_string()
             } else {
                 let snapshot = state.dashboard_rx.borrow().clone();
-                execute_control_command(
-                    command,
-                    &state.telegram_acl,
-                    &snapshot,
-                    &state.dashboard_control_tx,
-                )
+                execute_control_command(command, &snapshot, &state.dashboard_control_tx)
             };
             IpcResponseEnvelope::ok(
                 request_id,
@@ -772,7 +765,7 @@ fn execute_session_dashboard_action(
             }
             result
         }
-        other => execute_dashboard_action(other, &state.telegram_acl, &state.dashboard_control_tx),
+        other => execute_dashboard_action(other, &state.dashboard_control_tx),
     }
 }
 

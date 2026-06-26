@@ -90,7 +90,7 @@ use command_render::{
     command_popup_row_count, pending_user_input_preview_row_count, render_command_bar,
 };
 #[cfg(test)]
-use command_text::{render_pending_access_requests, render_skills_list};
+use command_text::render_skills_list;
 pub(crate) use commands::{dashboard_action_is_manager_owned, execute_dashboard_action};
 use frame_profiler::{TuiFrameProfiler, TuiFrameTiming};
 use serde::{Deserialize, Serialize};
@@ -599,15 +599,11 @@ fn render_tui_dashboard_frame<B: Backend>(
 ) -> Result<TuiFrameRender, B::Error> {
     let frame_start = Instant::now();
     let prep_start = Instant::now();
-    let pending_requests = state.pending_access_requests.clone();
     let overlay_open = view.transcript_overlay.is_some();
     let panel_open =
         view.command_panel.is_some() || view.editing_pending_user_input.is_some() || overlay_open;
     let live_command_feedback = if !panel_open {
-        let command_context = DashboardCommandContext {
-            requests: &pending_requests,
-            state,
-        };
+        let command_context = DashboardCommandContext { state };
         command_live_feedback(view.command_input.as_str(), &command_context)
     } else {
         None
@@ -623,10 +619,7 @@ fn render_tui_dashboard_frame<B: Backend>(
     };
     let feedback_rows = command_feedback_row_count(active_command_feedback);
     let popup_rows = if !panel_open {
-        let command_context = DashboardCommandContext {
-            requests: &pending_requests,
-            state,
-        };
+        let command_context = DashboardCommandContext { state };
         command_popup_row_count(view.command_input.as_str(), &command_context)
     } else {
         0
@@ -751,10 +744,7 @@ fn render_tui_dashboard_frame<B: Backend>(
             CommandBarRenderState {
                 input: view.command_input.as_str(),
                 cursor_pos: view.command_input.cursor_pos,
-                context: &DashboardCommandContext {
-                    requests: &pending_requests,
-                    state,
-                },
+                context: &DashboardCommandContext { state },
                 footer_context: &state.footer_context,
                 pending_paste_count: view.pending_pastes.len(),
                 pending_image_attachment_count: view.pending_image_attachments.len(),
@@ -813,7 +803,7 @@ mod tests {
     use super::command_flow::{
         command_blocks_submission, command_live_feedback, command_panel_for_input,
         dashboard_action_for_input, dashboard_command_body, dashboard_command_is_manager_owned,
-        is_clear_command_input, matching_commands, telegram_access_picker_for_input,
+        is_clear_command_input, matching_commands,
     };
     use super::selection::{SelectableId, SelectableRegion};
     use super::*;
@@ -824,20 +814,8 @@ mod tests {
     };
     use ratatui::{Terminal, backend::TestBackend};
 
-    fn pending_request(chat_id: i64) -> PendingAccessRequest {
-        PendingAccessRequest {
-            chat_id,
-            title: format!("chat-{chat_id}"),
-            sender: format!("sender-{chat_id}"),
-            last_message_preview: format!("message-{chat_id}"),
-            first_seen_at_ms: chat_id,
-            last_seen_at_ms: chat_id,
-        }
-    }
-
     fn test_command_context<'a>() -> DashboardCommandContext<'a> {
         DashboardCommandContext {
-            requests: &[],
             state: Box::leak(Box::new(DashboardState::default())),
         }
     }
@@ -1127,10 +1105,7 @@ mod tests {
             }],
             ..DashboardState::default()
         };
-        let context = DashboardCommandContext {
-            requests: &[],
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
 
         assert!(matching_commands("status", &context).is_empty());
         let slash_matches = matching_commands("/sta", &context);
@@ -1160,7 +1135,6 @@ mod tests {
 
     #[test]
     fn completions_stay_at_top_level_entries() {
-        let requests = vec![pending_request(42)];
         let state = DashboardState {
             app_status_outputs: vec![("browser".to_string(), "state".to_string())],
             skills: vec![OpenSkillDashboardSummary {
@@ -1174,10 +1148,7 @@ mod tests {
             }],
             ..DashboardState::default()
         };
-        let context = DashboardCommandContext {
-            requests: &requests,
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
 
         let app_match = matching_commands("/app", &context)
             .into_iter()
@@ -1186,7 +1157,6 @@ mod tests {
         assert_eq!(app_match.completion, "/app-status");
 
         assert!(matching_commands("/app-status ", &context).is_empty());
-        assert!(matching_commands("/telegram approve ", &context).is_empty());
         assert!(matching_commands("/skills disable ", &context).is_empty());
         assert_eq!(
             matching_commands("$wri", &context)
@@ -1211,10 +1181,7 @@ mod tests {
             }],
             ..DashboardState::default()
         };
-        let context = DashboardCommandContext {
-            requests: &[],
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
 
         assert!(command_blocks_submission("/skills", &context).is_none());
         let text = render_skills_list(&state);
@@ -1260,7 +1227,6 @@ mod tests {
 
     #[test]
     fn root_commands_open_interactive_bottom_panels() {
-        let requests = vec![pending_request(42)];
         let state = DashboardState {
             app_status_outputs: vec![("browser".to_string(), "ready".to_string())],
             skills: vec![OpenSkillDashboardSummary {
@@ -1274,10 +1240,7 @@ mod tests {
             }],
             ..DashboardState::default()
         };
-        let context = DashboardCommandContext {
-            requests: &requests,
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
 
         match command_panel_for_input("/debug", &context).expect("debug panel") {
             CommandPanel::Selection(panel) => {
@@ -1310,12 +1273,6 @@ mod tests {
             }
             _ => panic!("skills list should open a skill list panel"),
         }
-        match command_panel_for_input("/telegram approve", &context).expect("telegram panel") {
-            CommandPanel::TelegramAccess(panel) => {
-                assert_eq!(panel.requests.len(), 1);
-            }
-            _ => panic!("telegram approve should open an access picker"),
-        }
     }
 
     #[test]
@@ -1330,7 +1287,6 @@ mod tests {
 
     #[test]
     fn hidden_action_commands_parse_to_dashboard_actions() {
-        let requests = vec![pending_request(42)];
         let state = DashboardState {
             skills: vec![OpenSkillDashboardSummary {
                 name: "writer".to_string(),
@@ -1343,10 +1299,7 @@ mod tests {
             }],
             ..DashboardState::default()
         };
-        let context = DashboardCommandContext {
-            requests: &requests,
-            state: &state,
-        };
+        let context = DashboardCommandContext { state: &state };
 
         let invocation = dashboard_action_for_input("/skills disable writer", &context)
             .expect("valid action")
@@ -1358,34 +1311,18 @@ mod tests {
                 enabled: false,
             }
         );
-
-        let invocation = dashboard_action_for_input("/telegram approve 42", &context)
-            .expect("valid action")
-            .expect("telegram action");
-        assert_eq!(
-            invocation.action,
-            DashboardAction::ApproveTelegramAccess { chat_id: 42 }
-        );
     }
 
     #[test]
-    fn telegram_commands_and_actions_are_manager_owned() {
-        assert!(dashboard_command_is_manager_owned("/telegram"));
-        assert!(dashboard_command_is_manager_owned("telegram status"));
-        assert!(dashboard_command_is_manager_owned("/telegram approve"));
-        assert!(dashboard_command_is_manager_owned("/telegram approve 42"));
-        assert!(dashboard_command_is_manager_owned("/telegram reject 42"));
+    fn dashboard_commands_are_not_manager_owned() {
         assert!(!dashboard_command_is_manager_owned("/status"));
         assert!(!dashboard_command_is_manager_owned("/skills reload"));
 
-        assert!(dashboard_action_is_manager_owned(
-            &DashboardAction::ApproveTelegramAccess { chat_id: 42 }
-        ));
-        assert!(dashboard_action_is_manager_owned(
-            &DashboardAction::RejectTelegramAccess { chat_id: 42 }
-        ));
         assert!(!dashboard_action_is_manager_owned(
             &DashboardAction::InterruptRuntime
+        ));
+        assert!(!dashboard_action_is_manager_owned(
+            &DashboardAction::RestartDaemon
         ));
     }
 
@@ -1523,39 +1460,6 @@ mod tests {
         assert!(!commands.contains(&"snapshot"));
         assert!(!commands.contains(&"system_prompt"));
         assert!(!commands.contains(&"quit"));
-    }
-
-    #[test]
-    fn telegram_access_without_chat_id_lists_pending_requests() {
-        let requests = vec![pending_request(42)];
-        let state = DashboardState::default();
-        let context = DashboardCommandContext {
-            requests: &requests,
-            state: &state,
-        };
-
-        let output = render_pending_access_requests("approve", context.requests);
-
-        assert!(output.contains("pending requests"));
-        assert!(output.contains("/telegram approve <chat_id>"));
-        assert!(output.contains("42"));
-    }
-
-    #[test]
-    fn local_telegram_access_picker_matches_no_arg_commands() {
-        let requests = vec![pending_request(42), pending_request(7)];
-
-        let approve = telegram_access_picker_for_input("/telegram approve", &requests)
-            .expect("approve command should open picker");
-        assert_eq!(approve.action.verb(), "approve");
-        assert_eq!(approve.requests.len(), 2);
-
-        let reject = telegram_access_picker_for_input("/telegram reject ", &requests)
-            .expect("reject command should open picker");
-        assert_eq!(reject.action.verb(), "reject");
-
-        assert!(telegram_access_picker_for_input("/telegram approve 42", &requests).is_none());
-        assert!(telegram_access_picker_for_input("/status", &requests).is_none());
     }
 
     #[test]

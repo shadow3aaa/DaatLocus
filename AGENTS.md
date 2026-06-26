@@ -113,7 +113,6 @@ Examples:
 
 ```text
 /skills     -> action menu -> skill list or enable/disable toggle view
-/telegram   -> action menu -> status detail or pending request picker
 /debug      -> action menu -> readonly detail views
 /app-status -> app picker -> app detail view
 /status     -> readonly detail view

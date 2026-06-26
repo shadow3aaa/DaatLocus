@@ -51,8 +51,6 @@ pub(super) fn handle_key_event(
     view: &mut TuiViewState,
     state: &DashboardState,
 ) -> TuiInputOutcome {
-    let pending_requests = state.pending_access_requests.clone();
-
     if is_ctrl_c(key)
         && let Some(text) = view.selected_text()
     {
@@ -160,10 +158,7 @@ pub(super) fn handle_key_event(
         }
     }
 
-    let command_context = DashboardCommandContext {
-        requests: &pending_requests,
-        state,
-    };
+    let command_context = DashboardCommandContext { state };
 
     match key.code {
         KeyCode::Char(c) => {

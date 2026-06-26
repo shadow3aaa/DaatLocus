@@ -20,7 +20,6 @@ use crate::{
         TerminalActivityAction, TerminalActivityDescriptor,
     },
     openskills::OpenSkillDashboardSummary,
-    telegram_acl::PendingAccessRequest,
 };
 
 #[derive(Clone, Debug)]
@@ -322,10 +321,9 @@ fn mock_dashboard_state(scenario: TuiPerfScenario) -> (DashboardState, TuiViewSt
             TuiPerfScenario::Mixed => 140,
         }),
         skills: mock_skills(),
-        pending_access_requests: mock_pending_requests(),
         status_output: "runtime: active\nsessions: 4\ntransport: local".to_string(),
         sleep_status_output: "sleep: idle\nlast run: 12m ago".to_string(),
-        inspect_telegram_output: "telegram: polling\npending access: 2".to_string(),
+        inspect_telegram_output: "telegram: polling\nverification: token-based".to_string(),
         app_status_outputs: vec![
             (
                 "coding".to_string(),
@@ -364,7 +362,7 @@ fn mock_dashboard_state(scenario: TuiPerfScenario) -> (DashboardState, TuiViewSt
             view.max_scroll = u16::MAX;
         }
         TuiPerfScenario::LiveActivity => {
-            view.command_input.set_text("/telegram approve".to_string());
+            view.command_input.set_text("/status".to_string());
         }
         TuiPerfScenario::CommandPanels => {
             view.command_panel = Some(CommandPanel::SkillsList(SkillsListPanel::from_state(
@@ -585,27 +583,6 @@ fn mock_skills() -> Vec<OpenSkillDashboardSummary> {
             allow_implicit_invocation: false,
             user_disabled: false,
             auto_use_enabled: false,
-        },
-    ]
-}
-
-fn mock_pending_requests() -> Vec<PendingAccessRequest> {
-    vec![
-        PendingAccessRequest {
-            chat_id: 42,
-            title: "Build Channel".to_string(),
-            sender: "shadow3".to_string(),
-            last_message_preview: "/status".to_string(),
-            first_seen_at_ms: 1_700_000_000_000,
-            last_seen_at_ms: 1_700_000_010_000,
-        },
-        PendingAccessRequest {
-            chat_id: 7,
-            title: "Ops".to_string(),
-            sender: "tester".to_string(),
-            last_message_preview: "/skills".to_string(),
-            first_seen_at_ms: 1_700_000_020_000,
-            last_seen_at_ms: 1_700_000_030_000,
         },
     ]
 }

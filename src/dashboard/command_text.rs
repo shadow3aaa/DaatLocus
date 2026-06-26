@@ -1,7 +1,7 @@
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::DashboardState;
-use crate::{openskills::OpenSkillDashboardSummary, telegram_acl::PendingAccessRequest};
+use crate::openskills::OpenSkillDashboardSummary;
 
 pub(super) fn render_skills_list(state: &DashboardState) -> String {
     if state.skills.is_empty() {
@@ -176,26 +176,6 @@ pub(super) fn truncate_display_width(text: &str, max_width: usize) -> String {
     out
 }
 
-pub(super) fn render_pending_access_requests(
-    action: &str,
-    requests: &[PendingAccessRequest],
-) -> String {
-    if requests.is_empty() {
-        return "no pending requests".to_string();
-    }
-
-    let mut lines = vec![format!(
-        "pending requests - send '/telegram {action} <chat_id>' to proceed:"
-    )];
-    lines.extend(requests.iter().map(|request| {
-        format!(
-            "  {} | {} | {} | {}",
-            request.chat_id, request.title, request.sender, request.last_message_preview
-        )
-    }));
-    lines.join("\n")
-}
-
 pub(super) fn render_available_app_statuses(state: &DashboardState) -> String {
     let apps = state
         .app_status_outputs
@@ -228,13 +208,4 @@ pub(super) fn fallback_output(output: &str) -> String {
     } else {
         output.to_string()
     }
-}
-
-pub(super) fn format_pending_request_choices(requests: &[PendingAccessRequest]) -> String {
-    requests
-        .iter()
-        .take(4)
-        .map(|request| format!("{} {}", request.chat_id, request.sender))
-        .collect::<Vec<_>>()
-        .join(" | ")
 }

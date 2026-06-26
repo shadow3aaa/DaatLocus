@@ -492,12 +492,7 @@ impl TelegramTransport {
         }
         let response = {
             let state = self.dashboard_commands.state_rx.borrow();
-            execute_control_command(
-                command,
-                &self.acl,
-                &state,
-                &self.dashboard_commands.control_tx,
-            )
+            execute_control_command(command, &state, &self.dashboard_commands.control_tx)
         };
         self.send_text(chat_id, &response).await
     }
