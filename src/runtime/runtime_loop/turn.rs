@@ -928,10 +928,15 @@ pub(crate) async fn execute_agent_loop_step(
                         );
                     });
                 }
+                let model_content = super::coding_source_elision::elide_coding_tool_model_content(
+                    runtime_step.agent_messages(),
+                    call,
+                    &result.model_content(),
+                );
                 runtime_step.push_agent_message(AgentMessage::tool(
                     call.id.clone(),
                     call.name.clone(),
-                    result.model_content(),
+                    model_content,
                 ));
                 let activity_event = result.activity_event.clone();
                 runtime_step.push_history_message(HistoryMessage::tool(

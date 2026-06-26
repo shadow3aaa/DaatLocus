@@ -824,12 +824,16 @@ impl App for CodingApp {
             },
             AppToolSpec {
                 name: "search_code".to_string(),
-                description: "Search source content and return path-scoped line-hash hits.".to_string(),
+                description:
+                    "Search source content and return path-scoped line-hash hits; repeated visible source lines may be elided with ~."
+                        .to_string(),
                 input_schema: model_schema_for::<CodingSearchCodeArgsSchema>(),
             },
             AppToolSpec {
                 name: "read_code".to_string(),
-                description: "Read code by path plus line-hash anchor in around or full mode.".to_string(),
+                description:
+                    "Read code by path plus line-hash anchor in around or full mode; repeated visible source lines may be elided with ~."
+                        .to_string(),
                 input_schema: model_schema_for::<CodingReadCodeArgs>(),
             },
             AppToolSpec {

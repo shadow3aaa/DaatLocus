@@ -1523,6 +1523,37 @@ The Coding tool protocol uses one source-location vocabulary:
 Do not introduce a second model-facing target identity or session-local target
 registry for search/read flows.
 
+Coding source records have two model-visible forms:
+
+```text
+line#hash|source line
+line#hash~
+start_line#hash...end_line#hash~
+```
+
+For `search_code`, prefix the same record with the path:
+
+```text
+path|line#hash|source line
+path|line#hash~
+path|start_line#hash...end_line#hash~
+```
+
+The `~` forms mean the exact same `path + line#hash` source line, or every line
+in the contiguous `start...end` span, was already shown earlier in the currently
+visible model context. These omitted anchors remain valid for follow-up reads
+and edits, but the model must re-read the range if it needs source text that is
+not visible nearby. Do not use `~` for stale, unavailable, hidden, or
+permission-denied content. A real empty source line is still rendered as
+`line#hash|`, not `line#hash~`.
+
+When assembling tool results, elide repeated code greedily and only when the
+runtime can prove the earlier full source record is still visible in the current
+assembled prompt. The visibility key is `path + line#hash`; do not match on raw
+source text alone. `search_code` hits and `read_code` lines both add full source
+records to the same visible-line set. Collapse adjacent omitted records only
+when they are in the same path and their line numbers are consecutive.
+
 `search_code` is the model-visible search primitive. It replaces separate
 model-visible `grep` and `glob` tools while staying aligned with `rg`
 semantics. Inputs should cover the useful `rg` shape: `query`, `path`, `mode`,
@@ -1545,7 +1576,9 @@ Search output is an array of hits:
 Rules:
 
 - Return one match object per matched line.
-- `hit` must be exactly one `line#hash|source line`.
+- `hit` must be exactly one coding source record: normally
+  `line#hash|source line`, or `line#hash~` when that exact `path + line#hash`
+  line was already shown earlier in the visible context.
 - Return the actual matched line. If a match is inside a function, method, type,
   or other AST symbol, the search hit is still the matched line, not the
   enclosing declaration line.
@@ -1584,9 +1617,11 @@ Rules:
 - Do not add manual `enclosing`, `selector`, `context_before`,
   `context_after`, path/range, or other compatibility fields to `read_code`.
 - `read_code` output should be minimal: `{ "content": "..." }`.
-- `content` lines use the existing `line#hash|source line` format. Do not
-  repeat `path`, `mode`, resolved range, enclosing symbol metadata, or other
-  values the caller already supplied or that are implementation detail.
+- `content` lines use coding source records: normally `line#hash|source line`,
+  or `line#hash~` / `start_line#hash...end_line#hash~` when those exact
+  `path + line#hash` lines were already shown earlier in the visible context.
+  Do not repeat `path`, `mode`, resolved range, enclosing symbol metadata, or
+  other values the caller already supplied or that are implementation detail.
 - Line hashes stay short. They are stale-edit guards, not long-term identities.
 
 `edit_code` uses the same structured edit schema as `edit_file`, but with SCOPE

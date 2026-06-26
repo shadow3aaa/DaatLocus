@@ -69,6 +69,7 @@ use crate::runtime::bootstrap::{
     build_eval_context_with_compiled, load_compiled_prompts_only, summarize_sleep_summary,
 };
 mod claimed_input;
+mod coding_source_elision;
 mod dashboard_control;
 mod live_draft;
 mod model_driver;
