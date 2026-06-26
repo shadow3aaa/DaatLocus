@@ -156,10 +156,6 @@
     animation: agent-chat-runtime-shimmer 2000ms ease-in-out infinite both;
   }
 
-  .agent-chat-runtime-marker-flash {
-    animation: agent-chat-runtime-marker-flash 720ms steps(2, end) infinite;
-  }
-
   @keyframes agent-chat-runtime-shimmer {
     0%,
     100% {
@@ -181,20 +177,8 @@
     }
   }
 
-  @keyframes agent-chat-runtime-marker-flash {
-    0%,
-    100% {
-      opacity: 0.45;
-    }
-
-    50% {
-      opacity: 1;
-    }
-  }
-
   @media (prefers-reduced-motion: reduce) {
-    .agent-chat-runtime-shimmer-letter,
-    .agent-chat-runtime-marker-flash {
+    .agent-chat-runtime-shimmer-letter {
       animation: none;
       opacity: 1;
       text-shadow: none;

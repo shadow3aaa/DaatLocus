@@ -1,8 +1,10 @@
 import {
+  createContext,
   Fragment,
   isValidElement,
   memo,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -17,6 +19,7 @@ import {
   type RefObject,
   type UIEvent,
 } from "react";
+import { createPortal } from "react-dom";
 
 import {
   ArrowDownIcon,
@@ -35,6 +38,10 @@ import {
   Trash2Icon,
   XIcon,
 } from "lucide-react";
+import {
+  AgentExpression,
+  type AgentExpressionStatus,
+} from "@/components/agent-expression";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -512,7 +519,6 @@ type AgentChatSessionActivityRender =
     }
   | {
       kind: "reply";
-      icon: AgentChatActivityMarkerKind;
       title: string;
       messageLines: string[];
       disposition: string;
@@ -547,7 +553,100 @@ type AgentChatExploredCall = {
 type AgentChatSessionActivityViewProps = {
   bubbleId: string;
   render: AgentChatSessionActivityRender;
+  isLatestReply?: boolean;
+  isActiveRuntimeStatus?: boolean;
 };
+
+type AgentChatExpressionSlotKind = "reply" | "runtime";
+
+type AgentChatExpressionRect = {
+  top: number;
+  left: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+};
+
+type AgentChatExpressionSlotMeta = {
+  status: AgentExpressionStatus;
+  className?: string;
+};
+
+type AgentChatExpressionSlotRegistration = AgentChatExpressionSlotMeta & {
+  element: HTMLElement;
+};
+
+type AgentChatExpressionSlotSnapshot = AgentChatExpressionSlotMeta & {
+  rect: AgentChatExpressionRect;
+};
+
+type AgentChatExpressionTransition = AgentChatExpressionSlotMeta & {
+  id: number;
+  toKey: string;
+  fromRect: AgentChatExpressionRect;
+  toRect: AgentChatExpressionRect;
+};
+
+type AgentChatExpressionTransitionContextValue = {
+  hiddenSlotKey: string | null;
+  registerSlot: (
+    slotKey: string,
+    element: HTMLElement | null,
+    meta: AgentChatExpressionSlotMeta,
+  ) => void;
+};
+
+const AGENT_CHAT_EXPRESSION_TRANSITION_MS = 520;
+const AgentChatExpressionTransitionContext =
+  createContext<AgentChatExpressionTransitionContextValue | null>(null);
+
+function agentChatExpressionSlotKey(
+  kind: AgentChatExpressionSlotKind,
+  id: string,
+) {
+  return `${kind}:${id}`;
+}
+
+function agentChatExpressionRectFromElement(
+  element: HTMLElement,
+): AgentChatExpressionRect {
+  const rect = element.getBoundingClientRect();
+  return {
+    top: rect.top,
+    left: rect.left,
+    right: rect.right,
+    bottom: rect.bottom,
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
+function agentChatExpressionRectIsVisible(rect: AgentChatExpressionRect) {
+  return (
+    rect.width > 0 &&
+    rect.height > 0 &&
+    rect.bottom > 0 &&
+    rect.right > 0 &&
+    rect.top < window.innerHeight &&
+    rect.left < window.innerWidth
+  );
+}
+
+function useAgentChatPrefersReducedMotion() {
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handleChange = () => setPrefersReducedMotion(mediaQuery.matches);
+
+    handleChange();
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, []);
+
+  return prefersReducedMotion;
+}
 
 function AgentChatComposer({
   sessionId,
@@ -3455,6 +3554,63 @@ function AgentChatBubbles({
     () => mergeAgentChatBubbles(historyBubbles, snapshotBubbles),
     [historyBubbles, snapshotBubbles],
   );
+
+  const activeRuntimeStatusBubbleId = useMemo(() => {
+    const activeRuntimeStatusBubble = bubbles.find(
+      (bubble) =>
+        (bubble.live || bubble.status === "running") &&
+        agentChatBubbleHasSessionActivityEvent(bubble, "RuntimeStatus"),
+    );
+    return activeRuntimeStatusBubble?.id ?? null;
+  }, [bubbles]);
+  const latestReplyBubbleId = useMemo(() => {
+    if (activeRuntimeStatusBubbleId) {
+      return null;
+    }
+
+    for (let index = bubbles.length - 1; index >= 0; index -= 1) {
+      const bubble = bubbles[index];
+      if (bubble && agentChatBubbleHasSessionActivityEvent(bubble, "Reply")) {
+        return bubble.id;
+      }
+    }
+
+    return null;
+  }, [activeRuntimeStatusBubbleId, bubbles]);
+  const activeAgentExpressionSlotKey = activeRuntimeStatusBubbleId
+    ? agentChatExpressionSlotKey("runtime", activeRuntimeStatusBubbleId)
+    : latestReplyBubbleId
+      ? agentChatExpressionSlotKey("reply", latestReplyBubbleId)
+      : null;
+  const prefersReducedMotion = useAgentChatPrefersReducedMotion();
+  const expressionSlotsRef = useRef(
+    new Map<string, AgentChatExpressionSlotRegistration>(),
+  );
+  const expressionSlotSnapshotsRef = useRef(
+    new Map<string, AgentChatExpressionSlotSnapshot>(),
+  );
+  const previousActiveExpressionSlotKeyRef = useRef<string | null>(null);
+  const expressionTransitionIdRef = useRef(0);
+  const expressionTransitionFrameRef = useRef<number | null>(null);
+  const expressionTransitionTimeoutRef = useRef<number | null>(null);
+  const [expressionTransition, setExpressionTransition] =
+    useState<AgentChatExpressionTransition | null>(null);
+  const [expressionTransitionActive, setExpressionTransitionActive] =
+    useState(false);
+  const registerAgentExpressionSlot = useCallback(
+    (
+      slotKey: string,
+      element: HTMLElement | null,
+      meta: AgentChatExpressionSlotMeta,
+    ) => {
+      if (element) {
+        expressionSlotsRef.current.set(slotKey, { ...meta, element });
+      } else {
+        expressionSlotsRef.current.delete(slotKey);
+      }
+    },
+    [],
+  );
   const displayItems = useMemo(
     () =>
       foldCompletedAgentChatActivity(bubbles, {
@@ -4039,11 +4195,120 @@ function AgentChatBubbles({
     updateScrollButtonVisibility(panel);
     updateQuickNavActiveItem(panel);
   }, [openFoldedActivityGroups, panelRef, updateQuickNavActiveItem]);
+  useLayoutEffect(() => {
+    const previousKey = previousActiveExpressionSlotKeyRef.current;
+    const nextKey = activeAgentExpressionSlotKey;
+    const previousSnapshot = previousKey
+      ? expressionSlotSnapshotsRef.current.get(previousKey)
+      : undefined;
+    const nextRegistration = nextKey
+      ? expressionSlotsRef.current.get(nextKey)
+      : undefined;
+
+    if (prefersReducedMotion || !nextKey) {
+      if (expressionTransitionFrameRef.current !== null) {
+        window.cancelAnimationFrame(expressionTransitionFrameRef.current);
+        expressionTransitionFrameRef.current = null;
+      }
+      if (expressionTransitionTimeoutRef.current !== null) {
+        window.clearTimeout(expressionTransitionTimeoutRef.current);
+        expressionTransitionTimeoutRef.current = null;
+      }
+      setExpressionTransition(null);
+      setExpressionTransitionActive(false);
+    } else if (
+      previousKey &&
+      previousKey !== nextKey &&
+      previousSnapshot &&
+      nextRegistration
+    ) {
+      const nextRect = agentChatExpressionRectFromElement(
+        nextRegistration.element,
+      );
+      if (
+        agentChatExpressionRectIsVisible(previousSnapshot.rect) &&
+        agentChatExpressionRectIsVisible(nextRect)
+      ) {
+        if (expressionTransitionFrameRef.current !== null) {
+          window.cancelAnimationFrame(expressionTransitionFrameRef.current);
+        }
+        if (expressionTransitionTimeoutRef.current !== null) {
+          window.clearTimeout(expressionTransitionTimeoutRef.current);
+        }
+
+        const nextTransition: AgentChatExpressionTransition = {
+          id: expressionTransitionIdRef.current + 1,
+          toKey: nextKey,
+          fromRect: previousSnapshot.rect,
+          toRect: nextRect,
+          status: nextRegistration.status,
+          className: nextRegistration.className,
+        };
+        expressionTransitionIdRef.current = nextTransition.id;
+        setExpressionTransition(nextTransition);
+        setExpressionTransitionActive(false);
+        expressionTransitionFrameRef.current = window.requestAnimationFrame(
+          () => {
+            expressionTransitionFrameRef.current = window.requestAnimationFrame(
+              () => {
+                expressionTransitionFrameRef.current = null;
+                setExpressionTransitionActive(true);
+              },
+            );
+          },
+        );
+        expressionTransitionTimeoutRef.current = window.setTimeout(() => {
+          setExpressionTransition((current) =>
+            current?.id === nextTransition.id ? null : current,
+          );
+          setExpressionTransitionActive(false);
+          expressionTransitionTimeoutRef.current = null;
+        }, AGENT_CHAT_EXPRESSION_TRANSITION_MS + 120);
+      } else {
+        setExpressionTransition(null);
+        setExpressionTransitionActive(false);
+      }
+    }
+
+    const nextSnapshots = new Map<string, AgentChatExpressionSlotSnapshot>();
+    expressionSlotsRef.current.forEach((registration, slotKey) => {
+      nextSnapshots.set(slotKey, {
+        status: registration.status,
+        className: registration.className,
+        rect: agentChatExpressionRectFromElement(registration.element),
+      });
+    });
+    expressionSlotSnapshotsRef.current = nextSnapshots;
+    previousActiveExpressionSlotKeyRef.current = nextKey;
+  });
+
+  useEffect(() => {
+    return () => {
+      if (expressionTransitionFrameRef.current !== null) {
+        window.cancelAnimationFrame(expressionTransitionFrameRef.current);
+      }
+      if (expressionTransitionTimeoutRef.current !== null) {
+        window.clearTimeout(expressionTransitionTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const agentExpressionTransitionContextValue =
+    useMemo<AgentChatExpressionTransitionContextValue>(
+      () => ({
+        hiddenSlotKey: expressionTransition?.toKey ?? null,
+        registerSlot: registerAgentExpressionSlot,
+      }),
+      [expressionTransition?.toKey, registerAgentExpressionSlot],
+    );
 
 
   return (
-    <>
-      <div
+    <AgentChatExpressionTransitionContext.Provider
+      value={agentExpressionTransitionContextValue}
+    >
+      <>
+        <div
         ref={panelRef}
         aria-label="Agent activity"
         onScroll={handleScroll}
@@ -4085,11 +4350,17 @@ function AgentChatBubbles({
                   className="min-w-0 max-w-full"
                 >
                   {item.kind === "bubble" ? (
-                    <AgentChatBubbleItem bubble={item.bubble} />
+                    <AgentChatBubbleItem
+                      bubble={item.bubble}
+                      activeRuntimeStatusBubbleId={activeRuntimeStatusBubbleId}
+                      isLatestReply={item.bubble.id === latestReplyBubbleId}
+                    />
                   ) : (
                     <AgentChatFoldedActivityGroup
                       id={item.id}
                       bubbles={item.bubbles}
+                      activeRuntimeStatusBubbleId={activeRuntimeStatusBubbleId}
+                      latestReplyBubbleId={latestReplyBubbleId}
                       open={Boolean(openFoldedActivityGroups[item.id])}
                       onOpenChange={(nextOpen) =>
                         handleFoldedActivityGroupOpenChange(item.id, nextOpen)
@@ -4149,7 +4420,17 @@ function AgentChatBubbles({
       >
         <ArrowDownIcon data-icon="inline-start" aria-hidden="true" />
       </Button>
+      {typeof document !== "undefined" && expressionTransition
+        ? createPortal(
+            <AgentChatExpressionTransitionOverlay
+              active={expressionTransitionActive}
+              transition={expressionTransition}
+            />,
+            document.body,
+          )
+        : null}
     </>
+  </AgentChatExpressionTransitionContext.Provider>
   );
 }
 
@@ -4265,12 +4546,16 @@ function AgentChatQuickNavigation({
 function AgentChatFoldedActivityGroup({
   id,
   bubbles,
+  activeRuntimeStatusBubbleId,
+  latestReplyBubbleId,
   open,
   onOpenChange,
   isFocused = true,
 }: {
   id: string;
   bubbles: AgentChatBubble[];
+  activeRuntimeStatusBubbleId?: string | null;
+  latestReplyBubbleId?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   isFocused?: boolean;
@@ -4311,7 +4596,9 @@ function AgentChatFoldedActivityGroup({
               <AgentChatBubbleItem
                 key={`${id}-${bubble.id}`}
                 bubble={bubble}
+                activeRuntimeStatusBubbleId={activeRuntimeStatusBubbleId}
                 isFocused={isFocused}
+                isLatestReply={bubble.id === latestReplyBubbleId}
                 compact
               />
             ))}
@@ -4324,11 +4611,15 @@ function AgentChatFoldedActivityGroup({
 
 function AgentChatBubbleItem({
   bubble,
+  activeRuntimeStatusBubbleId,
   isFocused = true,
+  isLatestReply = false,
   compact = false,
 }: {
   bubble: AgentChatBubble;
+  activeRuntimeStatusBubbleId?: string | null;
   isFocused?: boolean;
+  isLatestReply?: boolean;
   compact?: boolean;
 }) {
   if (bubble.uiHint === "final-message-separator") {
@@ -4374,6 +4665,8 @@ function AgentChatBubbleItem({
           <AgentChatSessionActivityView
             bubbleId={bubble.id}
             render={SessionActivityRender}
+            isActiveRuntimeStatus={bubble.id === activeRuntimeStatusBubbleId}
+            isLatestReply={isLatestReply}
           />
         ) : (
           <div className="flex min-w-0 max-w-full flex-col gap-2 text-foreground/90">
@@ -4541,6 +4834,8 @@ function AgentChatActivityHeader({
 function AgentChatSessionActivityView({
   bubbleId,
   render,
+  isActiveRuntimeStatus = false,
+  isLatestReply = false,
 }: AgentChatSessionActivityViewProps) {
   if (render.kind === "text") {
     if (render.icon === "user") {
@@ -4582,7 +4877,11 @@ function AgentChatSessionActivityView({
   if (render.kind === "runtimeStatus") {
     return (
       <AgentChatRuntimeStatusCell
-        icon={render.icon}
+        agentExpressionSlotKey={
+          isActiveRuntimeStatus
+            ? agentChatExpressionSlotKey("runtime", bubbleId)
+            : null
+        }
         title={render.title}
         detail={render.detail}
         startedAtMs={render.startedAtMs}
@@ -4674,11 +4973,11 @@ function AgentChatSessionActivityView({
   return (
     <AgentChatReplyActivityLine
       id={bubbleId}
-      icon={render.icon}
       title={render.title}
       messageLines={render.messageLines}
       disposition={render.disposition}
       subject={render.subject}
+      isLatestReply={isLatestReply}
     />
   );
 }
@@ -4710,6 +5009,107 @@ function AgentChatActivityMarker({
     >
       {marker}
     </span>
+  );
+}
+function AgentChatExpressionSlot({
+  slotKey,
+  status,
+  className,
+}: {
+  slotKey: string;
+  status: AgentExpressionStatus;
+  className?: string;
+}) {
+  const transitionContext = useContext(AgentChatExpressionTransitionContext);
+  const hidden = transitionContext?.hiddenSlotKey === slotKey;
+  const registerSlot = transitionContext?.registerSlot;
+  const setSlotElement = useCallback(
+    (element: HTMLSpanElement | null) => {
+      registerSlot?.(slotKey, element, { status, className });
+    },
+    [className, registerSlot, slotKey, status],
+  );
+
+  return (
+    <span
+      ref={setSlotElement}
+      aria-hidden={hidden ? "true" : undefined}
+      className={cn(
+        "inline-flex h-6 w-4 shrink-0 items-start justify-start",
+        hidden && "opacity-0",
+      )}
+    >
+      <AgentExpression status={status} className={className} />
+    </span>
+  );
+}
+
+function AgentChatExpressionTransitionOverlay({
+  active,
+  transition,
+}: {
+  active: boolean;
+  transition: AgentChatExpressionTransition;
+}) {
+  const translateX = transition.toRect.left - transition.fromRect.left;
+  const translateY = transition.toRect.top - transition.fromRect.top;
+  const scaleX = transition.fromRect.width
+    ? transition.toRect.width / transition.fromRect.width
+    : 1;
+  const scaleY = transition.fromRect.height
+    ? transition.toRect.height / transition.fromRect.height
+    : 1;
+
+  return (
+    <div
+      aria-hidden="true"
+      className="pointer-events-none fixed z-[90] will-change-transform"
+      style={{
+        left: transition.fromRect.left,
+        top: transition.fromRect.top,
+        width: transition.fromRect.width,
+        height: transition.fromRect.height,
+        transform: active
+          ? `translate3d(${translateX}px, ${translateY}px, 0) scale(${scaleX}, ${scaleY})`
+          : "translate3d(0, 0, 0) scale(1)",
+        transformOrigin: "top left",
+        transition: `transform ${AGENT_CHAT_EXPRESSION_TRANSITION_MS}ms cubic-bezier(0.2, 0.9, 0.2, 1)`,
+      }}
+    >
+      <AgentExpression
+        status={transition.status}
+        className={cn(transition.className, "h-full w-full p-0")}
+      />
+    </div>
+  );
+}
+function AgentChatReplyMarker({
+  disposition,
+  slotKey,
+}: {
+  disposition: string;
+  slotKey: string;
+}) {
+  const status =
+    disposition === "failed"
+      ? "error"
+      : disposition === "dismissed"
+        ? "waiting"
+        : "idle";
+
+  return (
+    <AgentChatExpressionSlot
+      slotKey={slotKey}
+      status={status}
+      className={cn(
+        "w-4 shrink-0 p-0",
+        disposition === "failed"
+          ? "text-destructive"
+          : disposition === "dismissed"
+            ? "text-muted-foreground"
+            : "text-primary",
+      )}
+    />
   );
 }
 
@@ -4809,13 +5209,13 @@ function AgentChatDetailRows({
 }
 
 function AgentChatRuntimeStatusCell({
-  icon,
+  agentExpressionSlotKey,
   title,
   detail,
   startedAtMs,
   reducedMotion,
 }: {
-  icon: AgentChatActivityMarkerKind;
+  agentExpressionSlotKey?: string | null;
   title: string;
   detail?: string | null;
   startedAtMs?: number | null;
@@ -4844,12 +5244,18 @@ function AgentChatRuntimeStatusCell({
         "text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere]",
       )}
     >
-      <AgentChatActivityMarker
-        icon={icon}
-        className={cn(
-          shouldAnimate && "agent-chat-runtime-marker-flash text-primary",
-        )}
-      />
+      {agentExpressionSlotKey ? (
+        <AgentChatExpressionSlot
+          slotKey={agentExpressionSlotKey}
+          status={shouldAnimate ? "running" : "waiting"}
+          className={cn(
+            "w-4 shrink-0 p-0",
+            shouldAnimate ? "text-primary" : "text-muted-foreground",
+          )}
+        />
+      ) : (
+        <AgentChatActivityMarker icon="activity" />
+      )}
       <p className="min-w-0 break-words">
         <span className="font-semibold text-foreground">
           {shouldAnimate ? (
@@ -4913,6 +5319,7 @@ function AgentChatRuntimeShimmerText({
 function AgentChatActivityTextCell({
   id,
   icon,
+  marker,
   title,
   bodyLines,
   fullBody,
@@ -4922,6 +5329,7 @@ function AgentChatActivityTextCell({
 }: {
   id: string;
   icon: AgentChatActivityMarkerKind;
+  marker?: ReactNode;
   title: string;
   bodyLines: string[];
   fullBody?: string | null;
@@ -4943,10 +5351,12 @@ function AgentChatActivityTextCell({
       )}
     >
       <div className={AGENT_CHAT_ACTIVITY_ROW_CLASS}>
-        <AgentChatActivityMarker
-          icon={icon}
-          tone={tone === "error" ? "error" : "default"}
-        />
+        {marker ?? (
+          <AgentChatActivityMarker
+            icon={icon}
+            tone={tone === "error" ? "error" : "default"}
+          />
+        )}
         <p
           className={cn(
             "min-w-0 break-words font-semibold text-foreground",
@@ -5463,19 +5873,26 @@ function AgentChatMessageActivityLine({
 
 function AgentChatReplyActivityLine({
   id,
-  icon,
   title,
   messageLines,
   disposition,
   subject,
+  isLatestReply = false,
 }: {
   id: string;
-  icon: AgentChatActivityMarkerKind;
   title: string;
   messageLines: string[];
   disposition: string;
   subject: string;
+  isLatestReply?: boolean;
 }) {
+  const replyMarker = isLatestReply ? (
+    <AgentChatReplyMarker
+      disposition={disposition}
+      slotKey={agentChatExpressionSlotKey("reply", id)}
+    />
+  ) : null;
+
   if (disposition === "resolved" && subject === "message") {
     const agentMessage = agentChatAgentMessageFromLines(messageLines);
     if (!agentMessage) {
@@ -5485,6 +5902,7 @@ function AgentChatReplyActivityLine({
       <AgentChatActivityTextCell
         id={id}
         icon="activity"
+        marker={replyMarker}
         title={agentMessage.title}
         bodyLines={agentMessage.bodyLines}
         fullBody={agentMessage.fullBody}
@@ -5501,13 +5919,15 @@ function AgentChatReplyActivityLine({
       )}
     >
       <div className={cn(AGENT_CHAT_ACTIVITY_ROW_CLASS, "leading-6")}>
-        <AgentChatActivityMarker
-          icon={icon}
-          tone={disposition === "failed" ? "error" : "default"}
-          className={
-            disposition === "dismissed" ? "text-muted-foreground" : undefined
-          }
-        />
+        {replyMarker ?? (
+          <AgentChatActivityMarker
+            icon="activity"
+            tone={disposition === "failed" ? "error" : "default"}
+            className={
+              disposition === "dismissed" ? "text-muted-foreground" : undefined
+            }
+          />
+        )}
         <p
           className={cn(
             "min-w-0 break-words font-semibold text-foreground",
@@ -7148,7 +7568,6 @@ function agentChatSessionActivityRenderForBubble(
     const disposition = normalizeAgentChatReplyDisposition(reply.disposition);
     return {
       kind: "reply",
-      icon: "activity",
       title: agentChatReplyTitle(
         disposition,
         stringValue(reply.subject, "message"),
