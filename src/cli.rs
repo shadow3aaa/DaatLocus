@@ -135,6 +135,12 @@ mod tests {
         assert!(help.contains("Open a coding session tied to a project directory"));
         assert!(help.contains("ls"));
         assert!(help.contains("List sessions known to the daemon"));
+        assert!(help.contains("status"));
+        assert!(help.contains("Show daemon status"));
+        assert!(help.contains("token"));
+        assert!(help.contains("Manage daemon access tokens"));
+        assert!(help.contains("serve"));
+        assert!(!help.contains("config-schema"));
         assert!(help.contains("WebUI"));
         assert!(help.contains("http://localhost:"));
         assert!(help.contains("\x1b[38;5;87m"));
@@ -142,6 +148,24 @@ mod tests {
         assert!(help.contains("\x1b[96mrun"));
         assert!(!help.contains("long-running local agent runtime"));
         assert!(!help.contains('╭'));
+    }
+
+    #[test]
+    fn config_help_only_exposes_menu_and_show() {
+        let mut command = Cli::command();
+        let config_help = command
+            .find_subcommand_mut("config")
+            .expect("config subcommand")
+            .render_help()
+            .ansi()
+            .to_string();
+
+        assert!(config_help.contains("show"));
+        assert!(!config_help.contains("add-provider"));
+        assert!(!config_help.contains("add-model"));
+        assert!(!config_help.contains("set-main-model"));
+        assert!(!config_help.contains("set-efficient-model"));
+        assert!(!config_help.contains("set-telegram"));
     }
 
     #[test]
@@ -213,11 +237,19 @@ enum DaatLocusCommand {
         /// Prompt text. Multiple words are joined with spaces; stdin is used when omitted.
         prompt: Vec<String>,
     },
-    /// Manage the background daemon process.
-    Daemon {
+    /// Show daemon status.
+    Status,
+    /// Manage daemon access tokens.
+    Token {
         #[command(subcommand)]
-        target: DaemonTarget,
+        target: DaemonTokenTarget,
     },
+    /// Stop the background daemon.
+    Stop,
+    /// Restart the background daemon.
+    Restart,
+    /// Start the daemon in the foreground.
+    Serve,
     /// Clear local state or cache data.
     Reset {
         #[command(subcommand)]
@@ -236,7 +268,7 @@ enum DaatLocusCommand {
         target: DevTarget,
     },
     /// Print the JSON Schema for config.toml.
-    #[command(name = "config-schema")]
+    #[command(name = "config-schema", hide = true)]
     ConfigSchema,
     /// Internal workspace app worker process.
     #[command(name = "workspace-app-worker", hide = true)]
@@ -291,21 +323,6 @@ struct TuiPerfCliArgs {
 enum ConfigTarget {
     /// Show the current config summary with secrets masked.
     Show,
-    /// Add a provider interactively.
-    #[command(name = "add-provider")]
-    AddProvider,
-    /// Add a model interactively.
-    #[command(name = "add-model")]
-    AddModel,
-    /// Change the main model.
-    #[command(name = "set-main-model")]
-    SetMainModel,
-    /// Change the efficient model.
-    #[command(name = "set-efficient-model")]
-    SetEfficientModel,
-    /// Configure Telegram transport.
-    #[command(name = "set-telegram")]
-    SetTelegram,
 }
 
 #[derive(Debug, Subcommand)]
@@ -319,23 +336,6 @@ enum ResetTarget {
     Memory,
     /// Clear state, memory, and compile data.
     All,
-}
-
-#[derive(Debug, Subcommand)]
-enum DaemonTarget {
-    /// Show daemon status.
-    Status,
-    /// Manage daemon access tokens.
-    Token {
-        #[command(subcommand)]
-        target: DaemonTokenTarget,
-    },
-    /// Stop the background daemon.
-    Stop,
-    /// Restart the background daemon.
-    Restart,
-    /// Start the daemon in the foreground.
-    Serve,
 }
 
 #[derive(Debug, Subcommand)]
@@ -422,27 +422,19 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
             )?;
             return Ok(());
         }
-        Some(DaatLocusCommand::Daemon {
-            target: DaemonTarget::Status,
-        }) => {
+        Some(DaatLocusCommand::Status) => {
             run_daemon_status_command().await?;
             return Ok(());
         }
-        Some(DaatLocusCommand::Daemon {
-            target: DaemonTarget::Token { target },
-        }) => {
+        Some(DaatLocusCommand::Token { target }) => {
             run_daemon_token_command(target).await?;
             return Ok(());
         }
-        Some(DaatLocusCommand::Daemon {
-            target: DaemonTarget::Stop,
-        }) => {
+        Some(DaatLocusCommand::Stop) => {
             run_daemon_stop_command().await?;
             return Ok(());
         }
-        Some(DaatLocusCommand::Daemon {
-            target: DaemonTarget::Restart,
-        }) => {
+        Some(DaatLocusCommand::Restart) => {
             run_daemon_restart_command().await?;
             return Ok(());
         }
@@ -482,10 +474,7 @@ pub(crate) async fn async_main(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(DaatLocusCommand::Daemon {
-        target: DaemonTarget::Serve,
-    }) = cli.command.as_ref()
-    {
+    if matches!(cli.command, Some(DaatLocusCommand::Serve)) {
         if let Some(session_id) = cli.session_id.clone() {
             let config = config_setup::load_complete_config().await?;
             let ipc_name = cli
@@ -1375,11 +1364,6 @@ async fn run_config_command(target: Option<&ConfigTarget>) -> Result<()> {
     match target {
         None => config_wizard::run_config_menu().await,
         Some(ConfigTarget::Show) => config_wizard::show_config().await,
-        Some(ConfigTarget::AddProvider) => config_wizard::run_add_provider().await,
-        Some(ConfigTarget::AddModel) => config_wizard::run_add_model().await,
-        Some(ConfigTarget::SetMainModel) => config_wizard::run_set_main_model().await,
-        Some(ConfigTarget::SetEfficientModel) => config_wizard::run_set_efficient_model().await,
-        Some(ConfigTarget::SetTelegram) => config_wizard::run_set_telegram().await,
     }
 }
 

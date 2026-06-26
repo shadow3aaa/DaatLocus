@@ -2326,7 +2326,6 @@ async fn spawn_session_process(
         command.arg("--session-project-dir").arg(project_dir);
     }
     command
-        .arg("daemon")
         .arg("serve")
         .stdin(Stdio::null())
         .stdout(stdout_log)
@@ -3551,7 +3550,6 @@ fn configure_detached_daemon_command(
     startup_mode: DetachedDaemonStartupMode,
 ) {
     command
-        .arg("daemon")
         .arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null());
@@ -3781,10 +3779,7 @@ mod tests {
 
         configure_detached_daemon_command(&mut command, DetachedDaemonStartupMode::WithTray);
 
-        assert_eq!(
-            command_args(&command),
-            vec!["daemon".to_string(), "serve".to_string()]
-        );
+        assert_eq!(command_args(&command), vec!["serve".to_string()]);
         assert_eq!(
             command_env(&command, crate::daemon_tray::ENABLE_TRAY_ENV),
             Some(Some("1".to_string()))
@@ -3798,10 +3793,7 @@ mod tests {
 
         configure_detached_daemon_command(&mut command, DetachedDaemonStartupMode::Headless);
 
-        assert_eq!(
-            command_args(&command),
-            vec!["daemon".to_string(), "serve".to_string()]
-        );
+        assert_eq!(command_args(&command), vec!["serve".to_string()]);
         assert_eq!(
             command_env(&command, DAEMONIZE_ENV),
             Some(Some("1".to_string()))

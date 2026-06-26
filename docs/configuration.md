@@ -15,11 +15,6 @@ specific config change.
 ```bash
 cargo run -- config
 cargo run -- config show
-cargo run -- config add-provider
-cargo run -- config add-model
-cargo run -- config set-main-model
-cargo run -- config set-telegram
-cargo run -- config-schema
 ```
 
 `config show` masks secrets. Provider credentials may also reference environment
@@ -88,11 +83,11 @@ The Daat Locus daemon binds to `0.0.0.0:<daemon.port>` instead of a loopback
 address, so machines on the same LAN can open the embedded WebUI at
 `http://<this-machine-lan-ip>:<daemon.port>/`. Dashboard APIs, command APIs,
 and the WebSocket stream require a daemon token; create one with
-`daat-locus daemon token create <name>` and paste it into the WebUI login page.
+`daat-locus token create <name>` and paste it into the WebUI login page.
 
 ## Provider Notes
 
-Supported provider types are configured through `config add-provider`:
+Supported provider types can be configured through the interactive `config` menu:
 
 - `openai`: OpenAI API key provider.
 - `openai-compatible`: OpenAI-compatible HTTP API provider.

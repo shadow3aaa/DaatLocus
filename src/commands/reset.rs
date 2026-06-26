@@ -15,7 +15,7 @@ async fn get_daat_locus_home() -> PathBuf {
 async fn reject_if_daemon_running(reset_name: &str) -> Result<()> {
     if connect_daemon_status().await.is_ok() {
         return Err(miette!(
-            "{reset_name} refused while DaatLocus daemon is running; run `daat-locus daemon stop` first"
+            "{reset_name} refused while DaatLocus daemon is running; run `daat-locus stop` first"
         ));
     }
     Ok(())

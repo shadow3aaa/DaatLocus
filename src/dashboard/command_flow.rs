@@ -232,7 +232,7 @@ pub(crate) fn execute_control_command(
         ["skills"] | ["skills", "list"] | ["skills", "show"] => render_skills_list(state),
         ["skills", "show", target] => render_skill_detail(state, target),
         ["telegram"] => {
-            "available actions: status\nTelegram verification uses daemon auth tokens. Run `daat-locus daemon token create telegram` locally, then send `/verify <token>` to the Telegram bot.".to_string()
+            "available actions: status\nTelegram verification uses daemon auth tokens. Run `daat-locus token create telegram` locally, then send `/verify <token>` to the Telegram bot.".to_string()
         }
         ["telegram", "status"] => fallback_output(&state.inspect_telegram_output),
         ["telegram", "approve"] => render_pending_access_requests("approve", &requests),
@@ -423,7 +423,7 @@ fn telegram_command_panel(
                 description: "bind a Telegram chat with a daemon auth token".to_string(),
                 action: CommandSelectionAction::ShowDetail {
                     title: "TELEGRAM VERIFY".to_string(),
-                    text: "Run `daat-locus daemon token create telegram` locally, then send `/verify <token>` to the Telegram bot.".to_string(),
+                    text: "Run `daat-locus token create telegram` locally, then send `/verify <token>` to the Telegram bot.".to_string(),
                 },
                 disabled: false,
             },

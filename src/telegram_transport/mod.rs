@@ -1252,15 +1252,15 @@ fn parse_verify_command(command: &str) -> Option<&str> {
 }
 
 fn telegram_verify_instructions() -> &'static str {
-    "This Telegram chat is not verified yet.\nRun `daat-locus daemon token create telegram` locally, then send `/verify <token>` here."
+    "This Telegram chat is not verified yet.\nRun `daat-locus token create telegram` locally, then send `/verify <token>` here."
 }
 
 fn telegram_verify_usage_message() -> &'static str {
-    "Usage: /verify <token>\nRun `daat-locus daemon token create telegram` locally to create a daemon auth token."
+    "Usage: /verify <token>\nRun `daat-locus token create telegram` locally to create a daemon auth token."
 }
 
 fn telegram_verify_failed_message() -> &'static str {
-    "Telegram verification failed. Create a daemon auth token locally with `daat-locus daemon token create telegram`, then send `/verify <token>` here."
+    "Telegram verification failed. Create a daemon auth token locally with `daat-locus token create telegram`, then send `/verify <token>` here."
 }
 
 fn should_persist_update_offset_before_handling(
