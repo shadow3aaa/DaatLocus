@@ -409,11 +409,12 @@ fn prepare_structured_edits(
         if validate_parse
             && !ext.is_empty()
             && !new_content.is_empty()
-            && !analyzer.can_parse(ext, &new_content)
+            && let Some(diagnostic) = analyzer.parse_error_diagnostic(ext, &new_content)
         {
             return Err(format!(
-                "edit rejected: tree-sitter cannot parse the result for {}",
-                full_path.display()
+                "edit rejected: tree-sitter cannot parse the result for {}\n{}",
+                full_path.display(),
+                diagnostic.message()
             ));
         }
 
@@ -654,6 +655,37 @@ mod e2e_tests {
             err.contains("hash mismatch"),
             "expected hash mismatch, got: {err}"
         );
+
+        let unchanged = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+        assert_eq!(unchanged, rust_code);
+    }
+
+    #[test]
+    fn parse_rejection_reports_tree_sitter_error_location() {
+        let dir = setup_temp_rust_project();
+        let rust_code = "pub fn hello() {\n    println!(\"hello\");\n}\n";
+        let (_, hashes) = write_rust_file(dir.path(), "lib.rs", rust_code);
+
+        let edits = vec![api::StructuredEdit {
+            path: "src/lib.rs".to_string(),
+            op: api::EditOp::Replace,
+            start: hashes[0].clone(),
+            end: Some(hashes[2].clone()),
+            content: Some(api::EditContent::Lines(vec![
+                "pub fn hello() {".to_string(),
+                "    println!(\"hello\");".to_string(),
+            ])),
+        }];
+        let lsp: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
+        let err = edit_code_apply(&edits, dir.path(), &lsp).unwrap_err();
+
+        assert!(err.contains("tree-sitter cannot parse the result"));
+        assert!(err.contains("src\\lib.rs") || err.contains("src/lib.rs"));
+        assert!(err.contains("first parse error:"));
+        assert!(err.contains("L"));
+        assert!(err.contains("C"));
+        assert!(err.contains("println!"));
+        assert!(err.contains('^'));
 
         let unchanged = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
         assert_eq!(unchanged, rust_code);

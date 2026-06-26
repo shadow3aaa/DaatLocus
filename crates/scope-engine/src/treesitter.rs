@@ -46,6 +46,47 @@ impl SymbolMatch {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseErrorDiagnostic {
+    pub kind: ParseErrorKind,
+    pub node_kind: String,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+    pub snippet: String,
+}
+
+impl ParseErrorDiagnostic {
+    pub fn message(&self) -> String {
+        format!(
+            "first parse error: {} node `{}` at L{}:C{}-L{}:C{}\n{}",
+            self.kind.as_str(),
+            self.node_kind,
+            self.start_line,
+            self.start_column,
+            self.end_line,
+            self.end_column,
+            self.snippet
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseErrorKind {
+    Error,
+    Missing,
+}
+
+impl ParseErrorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "ERROR",
+            Self::Missing => "MISSING",
+        }
+    }
+}
+
 pub struct TreeSitterAnalyzer {
     registry: LanguageRegistry,
 }
@@ -213,14 +254,51 @@ impl TreeSitterAnalyzer {
     /// Returns true if parsing succeeds (i.e. the file is syntactically valid
     /// for the given language), false otherwise.
     pub fn can_parse(&self, ext: &str, content: &str) -> bool {
+        self.parse_error_diagnostic(ext, content).is_none()
+    }
+
+    /// Return the first tree-sitter parse diagnostic for this source, if any.
+    ///
+    /// Tree-sitter does not expose compiler-style syntax diagnostics. It
+    /// recovers by placing ERROR and MISSING nodes in the parse tree. This
+    /// helper reports the first such node with source coordinates and a compact
+    /// snippet so edit rejection messages can point at the likely problem.
+    pub fn parse_error_diagnostic(&self, ext: &str, content: &str) -> Option<ParseErrorDiagnostic> {
         let adapter = match self.registry.get(ext) {
-            Some(a) => a,
-            None => return false,
+            Some(adapter) => adapter,
+            None => {
+                return Some(ParseErrorDiagnostic {
+                    kind: ParseErrorKind::Error,
+                    node_kind: format!("unsupported extension `{ext}`"),
+                    start_line: 1,
+                    start_column: 1,
+                    end_line: 1,
+                    end_column: 1,
+                    snippet: parse_error_snippet(content, 1, 1),
+                });
+            }
         };
         let mut parser = adapter.parser();
-        parser
-            .parse(content, None)
-            .is_some_and(|tree| !node_has_parse_error(tree.root_node()))
+        let tree = parser.parse(content, None)?;
+        first_parse_error_node(tree.root_node()).map(|node| {
+            let start = node.start_position();
+            let end = node.end_position();
+            let start_line = start.row + 1;
+            let start_column = start.column + 1;
+            ParseErrorDiagnostic {
+                kind: if node.is_missing() {
+                    ParseErrorKind::Missing
+                } else {
+                    ParseErrorKind::Error
+                },
+                node_kind: node.kind().to_string(),
+                start_line,
+                start_column,
+                end_line: end.row + 1,
+                end_column: end.column + 1,
+                snippet: parse_error_snippet(content, start_line, start_column),
+            }
+        })
     }
 
     /// Return the SCOPE language adapter that owns semantic source operations
@@ -334,13 +412,47 @@ fn kind_prefix(kind: &str) -> &'static str {
     }
 }
 
-fn node_has_parse_error(node: tree_sitter::Node<'_>) -> bool {
-    if node.has_error() || node.is_error() || node.is_missing() {
-        return true;
+fn first_parse_error_node<'tree>(
+    node: tree_sitter::Node<'tree>,
+) -> Option<tree_sitter::Node<'tree>> {
+    if node.is_error() || node.is_missing() {
+        return Some(node);
     }
 
     let mut cursor = node.walk();
-    node.children(&mut cursor).any(node_has_parse_error)
+    for child in node.children(&mut cursor) {
+        if (child.has_error() || child.is_error() || child.is_missing())
+            && let Some(found) = first_parse_error_node(child)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn parse_error_snippet(content: &str, line: usize, column: usize) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    let start_line = line.saturating_sub(2).max(1);
+    let end_line = line
+        .saturating_add(2)
+        .max(start_line)
+        .min(lines.len().max(line));
+    let width = end_line.to_string().len().max(1);
+    let mut snippet = String::new();
+
+    for current_line in start_line..=end_line {
+        let text = lines
+            .get(current_line.saturating_sub(1))
+            .copied()
+            .unwrap_or("");
+        snippet.push_str(&format!("{current_line:>width$} | {text}\n"));
+        if current_line == line {
+            let caret_padding = " ".repeat(column.saturating_sub(1));
+            snippet.push_str(&format!("{:>width$} | {caret_padding}^\n", ""));
+        }
+    }
+
+    snippet.trim_end().to_string()
 }
 
 const RUST_USE_IMPORT_QUERY: &str = "(use_declaration) @import";
@@ -503,6 +615,22 @@ fn run() {
         let analyzer = TreeSitterAnalyzer::new();
         let invalid = "fn main( {\n";
         assert!(!analyzer.can_parse("rs", invalid));
+    }
+
+    #[test]
+    fn parse_error_diagnostic_reports_location_and_snippet() {
+        let analyzer = TreeSitterAnalyzer::new();
+        let invalid = "fn main( {\n";
+
+        let diagnostic = analyzer
+            .parse_error_diagnostic("rs", invalid)
+            .expect("invalid rust should produce a parse diagnostic");
+        let message = diagnostic.message();
+
+        assert!(message.contains("first parse error:"));
+        assert!(message.contains("L1:C"));
+        assert!(message.contains("fn main( {"));
+        assert!(message.contains('^'));
     }
 
     #[test]
