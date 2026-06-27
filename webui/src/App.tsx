@@ -1335,6 +1335,8 @@ const MOCK_SETTINGS_SETUP_CONFIG: SetupConfigResponse = {
     main_model: "gpt-5.5",
     efficient_model: "gpt-5.5-mini",
     daemon_port: 53825,
+    telegram_enabled: true,
+    telegram_bot_token: "$TELEGRAM_BOT_TOKEN",
   },
   readiness: {
     ...MOCK_SETUP_READINESS,

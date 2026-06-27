@@ -14,7 +14,16 @@ import {
   type ModelAccessEditorValue,
 } from "@/components/setup-page";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import {
   fetchSetupConfig,
   saveSetupConfig,
@@ -26,6 +35,11 @@ import {
 type LoadState = "idle" | "loading" | "error";
 type SaveState = "idle" | "pending" | "saving" | "saved" | "error";
 const SETTINGS_AUTOSAVE_DELAY_MS = 800;
+
+type TelegramSettingsValue = {
+  enabled: boolean;
+  botToken: string;
+};
 
 type SettingsPageProps = {
   mockSetupConfig?: SetupConfigResponse;
@@ -58,6 +72,12 @@ export function SettingsPage({
       ? setupConfigRequestToModelAccessEditorValue(mockSetupConfig.config)
       : createDefaultModelAccessEditorValue(),
   );
+  const [telegramSettings, setTelegramSettings] =
+    useState<TelegramSettingsValue>(() =>
+      mockSetupConfig
+        ? setupConfigRequestToTelegramSettingsValue(mockSetupConfig.config)
+        : createDefaultTelegramSettingsValue(),
+    );
   const [loadState, setLoadState] = useState<LoadState>(
     () => (mockSetupConfig ? "idle" : "loading"),
   );
@@ -139,6 +159,7 @@ export function SettingsPage({
     isLoading,
     modelAccess,
     onSaveSetupConfig,
+    telegramSettings,
   ]);
 
   function hydrateSettings(
@@ -147,8 +168,11 @@ export function SettingsPage({
   ) {
     setBaseConfig(config);
     setReadiness(nextReadiness);
-    setAgentPersonalization(setupConfigRequestToAgentPersonalizationEditorValue(config));
+    setAgentPersonalization(
+      setupConfigRequestToAgentPersonalizationEditorValue(config),
+    );
     setModelAccess(setupConfigRequestToModelAccessEditorValue(config));
+    setTelegramSettings(setupConfigRequestToTelegramSettingsValue(config));
     setLoadState("idle");
     setLoadError(null);
     setSaveState("idle");
@@ -188,6 +212,7 @@ export function SettingsPage({
       ...(baseConfig ?? {}),
       ...agentPersonalizationEditorValueToSetupRequest(agentPersonalization),
       ...modelAccessEditorValueToSetupRequest(modelAccess),
+      ...telegramSettingsValueToSetupRequest(telegramSettings),
     };
     delete request.daemon_port;
     return request;
@@ -253,6 +278,14 @@ export function SettingsPage({
               modelDescription="Shape available model capacity into a dependable runtime catalog."
               selectionDescription="Set the operating balance between depth, speed, and everyday work."
             />
+
+            <TelegramSettingsEditor
+              value={telegramSettings}
+              onChange={(nextValue) => {
+                setTelegramSettings(nextValue);
+                markDirty();
+              }}
+            />
           </>
         )}
       </div>
@@ -260,10 +293,93 @@ export function SettingsPage({
     </section>
   );
 }
+function createDefaultTelegramSettingsValue(): TelegramSettingsValue {
+  return {
+    enabled: false,
+    botToken: "",
+  };
+}
+
+function setupConfigRequestToTelegramSettingsValue(
+  request: SetupConfigRequest,
+): TelegramSettingsValue {
+  return {
+    enabled: request.telegram_enabled ?? false,
+    botToken: request.telegram_bot_token ?? "",
+  };
+}
+
+function telegramSettingsValueToSetupRequest(
+  value: TelegramSettingsValue,
+): Pick<SetupConfigRequest, "telegram_enabled" | "telegram_bot_token"> {
+  return {
+    telegram_enabled: value.enabled,
+    telegram_bot_token: value.botToken,
+  };
+}
+
+function TelegramSettingsEditor({
+  value,
+  onChange,
+}: {
+  value: TelegramSettingsValue;
+  onChange: (value: TelegramSettingsValue) => void;
+}) {
+  return (
+    <section className="flex flex-col gap-6">
+      <div className="flex flex-col gap-2">
+        <h2 className="text-3xl font-medium tracking-normal">Telegram</h2>
+        <p className="max-w-2xl text-base text-muted-foreground">
+          Enable Telegram transport and provide the bot token used for incoming
+          messages and event replies.
+        </p>
+      </div>
+
+      <FieldGroup className="max-w-2xl">
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel htmlFor="telegram-settings-enabled">
+              Enable Telegram
+            </FieldLabel>
+            <FieldDescription>
+              The transport starts only when this switch is on and the token is
+              a real Bot API token.
+            </FieldDescription>
+          </FieldContent>
+          <Switch
+            id="telegram-settings-enabled"
+            checked={value.enabled}
+            onCheckedChange={(enabled) => onChange({ ...value, enabled })}
+            aria-label="Enable Telegram transport"
+          />
+        </Field>
+
+        <Field>
+          <FieldLabel htmlFor="telegram-settings-bot-token">Bot token</FieldLabel>
+          <Input
+            id="telegram-settings-bot-token"
+            type="password"
+            value={value.botToken}
+            onChange={(event) =>
+              onChange({ ...value, botToken: event.target.value })
+            }
+            placeholder="123456789:AA..."
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <FieldDescription>
+            Paste the token from <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">BotFather</a>.
+          </FieldDescription>
+        </Field>
+      </FieldGroup>
+    </section>
+  );
+}
+
 function SettingsSkeleton() {
   return (
     <div className="flex flex-col gap-10">
-      {Array.from({ length: 4 }, (_, sectionIndex) => (
+      {Array.from({ length: 5 }, (_, sectionIndex) => (
         <section key={sectionIndex} className="flex flex-col gap-5">
           <div className="flex flex-col gap-2">
             <Skeleton className="h-8 w-40" />

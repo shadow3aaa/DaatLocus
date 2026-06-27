@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use crate::{
     config::{
-        Config, DaemonConfig, ModelConfig, ProviderConfig, ThinkingBudget, load_config,
-        normalize_provider_base_url, write_config,
+        Config, DaemonConfig, ModelConfig, ProviderConfig, TelegramConfig, ThinkingBudget,
+        load_config, normalize_provider_base_url, write_config,
     },
     daat_locus_paths::daat_locus_paths,
     i18n::Locale,
@@ -109,6 +109,10 @@ pub struct SetupConfigRequest {
     pub base_url: Option<String>,
     #[serde(default)]
     pub daemon_port: Option<u16>,
+    #[serde(default)]
+    pub telegram_enabled: Option<bool>,
+    #[serde(default)]
+    pub telegram_bot_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -548,6 +552,8 @@ fn setup_config_from_config(config: &Config) -> SetupConfigRequest {
         main_model: Some(config.main_model.clone()),
         efficient_model: Some(config.efficient_model.clone()),
         daemon_port: Some(config.daemon.port),
+        telegram_enabled: Some(config.telegram.enabled),
+        telegram_bot_token: Some(config.telegram.bot_token.clone()),
         ..SetupConfigRequest::default()
     }
 }
@@ -677,6 +683,15 @@ fn config_from_setup_request_with_base(
         .filter(|port| *port > 0)
         .unwrap_or(base.daemon.port);
 
+    let telegram = TelegramConfig {
+        enabled: request.telegram_enabled.unwrap_or(base.telegram.enabled),
+        bot_token: request
+            .telegram_bot_token
+            .clone()
+            .unwrap_or_else(|| base.telegram.bot_token.clone()),
+        poll_timeout_secs: base.telegram.poll_timeout_secs,
+    };
+
     Ok(Config {
         providers,
         models,
@@ -684,6 +699,7 @@ fn config_from_setup_request_with_base(
         main_model,
         efficient_model,
         daemon: DaemonConfig { port: daemon_port },
+        telegram,
         ..base
     })
 }
@@ -1988,5 +2004,34 @@ model_id = "gpt-4.1-mini"
         let model = setup_discovered_model(&provider, discovered);
 
         assert_eq!(model.thinking_budgets, vec!["true", "false"]);
+    }
+
+    #[test]
+    fn setup_config_round_trips_telegram_settings() {
+        let mut base_config = Config::default();
+        base_config.telegram = TelegramConfig {
+            enabled: false,
+            bot_token: "$TELEGRAM_BOT_TOKEN".to_string(),
+            poll_timeout_secs: 45,
+        };
+
+        let request = setup_config_from_config(&base_config);
+
+        assert_eq!(request.telegram_enabled, Some(false));
+        assert_eq!(
+            request.telegram_bot_token.as_deref(),
+            Some("$TELEGRAM_BOT_TOKEN")
+        );
+
+        let mut next_request = request.clone();
+        next_request.telegram_enabled = Some(true);
+        next_request.telegram_bot_token = Some("123456789:bot-token".to_string());
+
+        let next_config =
+            config_from_setup_request_with_base(&next_request, base_config.clone()).unwrap();
+
+        assert!(next_config.telegram.enabled);
+        assert_eq!(next_config.telegram.bot_token, "123456789:bot-token");
+        assert_eq!(next_config.telegram.poll_timeout_secs, 45);
     }
 }

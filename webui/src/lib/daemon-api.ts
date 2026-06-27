@@ -647,6 +647,8 @@ export type SetupConfigRequest = {
   api_key?: string | null;
   base_url?: string | null;
   daemon_port?: number | null;
+  telegram_enabled?: boolean | null;
+  telegram_bot_token?: string | null;
 };
 export type SetupConfigResponse = {
   config: SetupConfigRequest;
