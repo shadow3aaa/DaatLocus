@@ -199,6 +199,8 @@ pub struct DashboardContextCompositionPrefixUnit {
 pub struct DashboardContextCompositionSnapshot {
     pub captured_at_ms: Option<i64>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_context_window: Option<usize>,
     pub total_estimated_tokens: usize,
     pub total_bytes: usize,
     pub message_count: usize,

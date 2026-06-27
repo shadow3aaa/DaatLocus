@@ -75,7 +75,7 @@ pub struct ManagerBootConfig {
     pub port: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SetupConfigRequest {
     #[serde(default)]
     pub locale: Option<Locale>,
@@ -142,6 +142,20 @@ pub struct SetupModelRequest {
     pub supports_vision: Option<bool>,
     #[serde(default)]
     pub thinking_budget: Option<String>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub rpm: Option<u32>,
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub stream_idle_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub auto_compact_token_limit: Option<usize>,
+    #[serde(default)]
+    pub effective_context_window_percent: Option<i64>,
+    #[serde(default)]
+    pub tool_output_max_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -368,7 +382,8 @@ pub async fn load_complete_config() -> Result<Config> {
 
 pub async fn write_setup_config(request: SetupConfigRequest) -> Result<ConfigReadinessReport> {
     prepare_setup_provider_credentials(&request.providers).await?;
-    let config = config_from_setup_request(&request)?;
+    let base_config = load_config().await.unwrap_or_else(|_| Config::default());
+    let config = config_from_setup_request_with_base(&request, base_config)?;
     config
         .validate()
         .map_err(|err| miette!("setup config is internally invalid: {err}"))?;
@@ -379,6 +394,13 @@ pub async fn write_setup_config(request: SetupConfigRequest) -> Result<ConfigRea
         .await
         .map_err(|err| miette!("failed to write setup persona: {err}"))?;
     Ok(ensure_config_readiness().await)
+}
+
+pub async fn read_setup_config() -> Result<SetupConfigRequest> {
+    let config = load_config()
+        .await
+        .map_err(|err| miette!("failed to load setup config: {err}"))?;
+    Ok(setup_config_from_config(&config))
 }
 
 pub async fn preview_setup_config(request: SetupConfigRequest) -> Result<ConfigReadinessReport> {
@@ -501,7 +523,145 @@ pub async fn complete_setup_provider_auth(
     }
 }
 
+fn setup_config_from_config(config: &Config) -> SetupConfigRequest {
+    let persona = load_prompt_persona_spec_sync();
+    let mut providers = config
+        .providers
+        .iter()
+        .map(|(name, provider)| setup_provider_from_config(name, provider))
+        .collect::<Vec<_>>();
+    providers.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut models = config
+        .models
+        .iter()
+        .map(|(name, model)| setup_model_from_config(name, model))
+        .collect::<Vec<_>>();
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+
+    SetupConfigRequest {
+        locale: Some(config.locale),
+        persona_name: Some(persona.name),
+        persona_language: Some(persona.language),
+        providers,
+        models,
+        main_model: Some(config.main_model.clone()),
+        efficient_model: Some(config.efficient_model.clone()),
+        daemon_port: Some(config.daemon.port),
+        ..SetupConfigRequest::default()
+    }
+}
+
+fn setup_provider_from_config(name: &str, provider: &ProviderConfig) -> SetupProviderRequest {
+    match provider {
+        ProviderConfig::Openai { api_key, base_url } => SetupProviderRequest {
+            kind: SetupProviderKind::Openai,
+            name: name.to_string(),
+            api_key: Some(api_key.clone()),
+            base_url: base_url.clone(),
+            keep_alive: None,
+            codex_auth_method: None,
+            codex_auth_file: None,
+            github_auth_method: None,
+        },
+        ProviderConfig::GithubCopilot { github_token } => SetupProviderRequest {
+            kind: SetupProviderKind::GithubCopilot,
+            name: name.to_string(),
+            api_key: Some(github_token.clone()),
+            base_url: None,
+            keep_alive: None,
+            codex_auth_method: None,
+            codex_auth_file: None,
+            github_auth_method: Some(if looks_like_env_reference(github_token) {
+                SetupGithubAuthMethod::EnvToken
+            } else {
+                SetupGithubAuthMethod::ManualToken
+            }),
+        },
+        ProviderConfig::OpenaiCodexOauth { base_url } => SetupProviderRequest {
+            kind: SetupProviderKind::OpenaiCodexOauth,
+            name: name.to_string(),
+            api_key: None,
+            base_url: base_url.clone(),
+            keep_alive: None,
+            codex_auth_method: Some(SetupCodexAuthMethod::ExistingAuthFile),
+            codex_auth_file: Some(codex_oauth_auth_file(name).to_string_lossy().to_string()),
+            github_auth_method: None,
+        },
+        ProviderConfig::OpenaiCompatible {
+            base_url, api_key, ..
+        } => SetupProviderRequest {
+            kind: SetupProviderKind::OpenaiCompatible,
+            name: name.to_string(),
+            api_key: Some(api_key.clone()),
+            base_url: Some(base_url.clone()),
+            keep_alive: None,
+            codex_auth_method: None,
+            codex_auth_file: None,
+            github_auth_method: None,
+        },
+        ProviderConfig::Ollama {
+            host,
+            api_key,
+            keep_alive,
+        } => {
+            let normalized_host = host.as_deref().map(normalize_provider_base_url);
+            let is_cloud = normalized_host.as_deref() == Some("https://ollama.com")
+                && api_key
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty());
+            SetupProviderRequest {
+                kind: if is_cloud {
+                    SetupProviderKind::OllamaCloud
+                } else {
+                    SetupProviderKind::Ollama
+                },
+                name: name.to_string(),
+                api_key: api_key.clone(),
+                base_url: host.clone(),
+                keep_alive: keep_alive.clone(),
+                codex_auth_method: None,
+                codex_auth_file: None,
+                github_auth_method: None,
+            }
+        }
+    }
+}
+
+fn setup_model_from_config(name: &str, model: &ModelConfig) -> SetupModelRequest {
+    SetupModelRequest {
+        name: name.to_string(),
+        provider_name: model.provider.clone(),
+        model_id: model.model_id.clone(),
+        context_window_tokens: Some(model.context_window_tokens),
+        max_completion_tokens: Some(model.max_completion_tokens),
+        supports_vision: model.supports_vision,
+        thinking_budget: model
+            .thinking_budget()
+            .map(|budget| budget.as_str().to_string()),
+        temperature: Some(model.temperature),
+        rpm: model.rpm,
+        request_timeout_secs: Some(model.request_timeout_secs),
+        stream_idle_timeout_secs: Some(model.stream_idle_timeout_secs),
+        auto_compact_token_limit: model.auto_compact_token_limit,
+        effective_context_window_percent: Some(model.effective_context_window_percent),
+        tool_output_max_tokens: Some(model.tool_output_max_tokens),
+    }
+}
+
+fn looks_like_env_reference(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with('$') || trimmed.starts_with("env:")
+}
+
 fn config_from_setup_request(request: &SetupConfigRequest) -> Result<Config> {
+    config_from_setup_request_with_base(request, Config::default())
+}
+
+fn config_from_setup_request_with_base(
+    request: &SetupConfigRequest,
+    base: Config,
+) -> Result<Config> {
     let SetupConfigRegistryParts {
         providers,
         models,
@@ -512,20 +672,19 @@ fn config_from_setup_request(request: &SetupConfigRequest) -> Result<Config> {
     } else {
         legacy_config_registries_from_setup_request(request)?
     };
+    let daemon_port = request
+        .daemon_port
+        .filter(|port| *port > 0)
+        .unwrap_or(base.daemon.port);
 
     Ok(Config {
         providers,
         models,
-        locale: request.locale.unwrap_or_default(),
+        locale: request.locale.unwrap_or(base.locale),
         main_model,
         efficient_model,
-        daemon: DaemonConfig {
-            port: request
-                .daemon_port
-                .filter(|port| *port > 0)
-                .unwrap_or_else(|| DaemonConfig::default().port),
-        },
-        ..Config::default()
+        daemon: DaemonConfig { port: daemon_port },
+        ..base
     })
 }
 
@@ -1249,11 +1408,27 @@ fn model_from_setup_model(
         model.max_completion_tokens.filter(|value| *value > 0),
         model.supports_vision,
     );
+    let default = ModelConfig::default();
     Ok(ModelConfig {
         provider: provider_name.to_string(),
         model_id,
+        temperature: model.temperature.unwrap_or(default.temperature),
+        rpm: model.rpm,
+        request_timeout_secs: model
+            .request_timeout_secs
+            .unwrap_or(default.request_timeout_secs),
+        stream_idle_timeout_secs: model
+            .stream_idle_timeout_secs
+            .unwrap_or(default.stream_idle_timeout_secs),
         context_window_tokens: capacity.context_window_tokens,
+        auto_compact_token_limit: model.auto_compact_token_limit,
+        effective_context_window_percent: model
+            .effective_context_window_percent
+            .unwrap_or(default.effective_context_window_percent),
         max_completion_tokens: capacity.max_completion_tokens,
+        tool_output_max_tokens: model
+            .tool_output_max_tokens
+            .unwrap_or(default.tool_output_max_tokens),
         supports_vision: Some(capacity.supports_vision),
         thinking_budget: model
             .thinking_budget
@@ -1261,7 +1436,6 @@ fn model_from_setup_model(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ThinkingBudget::new),
-        ..ModelConfig::default()
     })
 }
 

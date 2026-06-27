@@ -1,68 +1,173 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { RefreshCwIcon, TriangleAlertIcon } from "lucide-react";
+import { useEffect, useState } from "react";
+import { TriangleAlertIcon } from "lucide-react";
 
+import {
+  AgentPersonalizationEditor,
+  ModelAccessEditor,
+  agentPersonalizationEditorValueToSetupRequest,
+  createDefaultAgentPersonalizationEditorValue,
+  createDefaultModelAccessEditorValue,
+  modelAccessEditorValueToSetupRequest,
+  setupConfigRequestToAgentPersonalizationEditorValue,
+  setupConfigRequestToModelAccessEditorValue,
+  type AgentPersonalizationEditorValue,
+  type ModelAccessEditorValue,
+} from "@/components/setup-page";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyTitle,
-} from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Spinner } from "@/components/ui/spinner";
 import {
-  fetchSettingsSummary,
-  type SettingsCredentialStatus,
-  type SettingsCredentialSummary,
-  type SettingsModelSummary,
-  type SettingsProviderSummary,
-  type SettingsSummary,
+  fetchSetupConfig,
+  saveSetupConfig,
+  type ConfigReadinessReport,
+  type SetupConfigRequest,
+  type SetupConfigResponse,
 } from "@/lib/daemon-api";
-import { cn } from "@/lib/utils";
-
-const NUMBER_FORMATTER = new Intl.NumberFormat("en-US");
 
 type LoadState = "idle" | "loading" | "error";
-type Tone = "good" | "warn" | "neutral";
+type SaveState = "idle" | "pending" | "saving" | "saved" | "error";
+const SETTINGS_AUTOSAVE_DELAY_MS = 800;
 
-type SettingLine = {
-  label: string;
-  value: ReactNode;
-  meta?: ReactNode;
-  action?: ReactNode;
-  mono?: boolean;
-  breakAll?: boolean;
+type SettingsPageProps = {
+  mockSetupConfig?: SetupConfigResponse;
+  onSaveSetupConfig?: (
+    request: SetupConfigRequest,
+    options?: { signal?: AbortSignal },
+  ) => Promise<ConfigReadinessReport>;
 };
 
-export function SettingsPage() {
-  const [summary, setSummary] = useState<SettingsSummary | null>(null);
-  const [loadState, setLoadState] = useState<LoadState>("loading");
+export function SettingsPage({
+  mockSetupConfig,
+  onSaveSetupConfig = saveSetupConfig,
+}: SettingsPageProps = {}) {
+  const [baseConfig, setBaseConfig] = useState<SetupConfigRequest | null>(
+    () => mockSetupConfig?.config ?? null,
+  );
+  const [readiness, setReadiness] = useState<ConfigReadinessReport | null>(
+    () => mockSetupConfig?.readiness ?? null,
+  );
+  const [agentPersonalization, setAgentPersonalization] =
+    useState<AgentPersonalizationEditorValue>(() =>
+      mockSetupConfig
+        ? setupConfigRequestToAgentPersonalizationEditorValue(
+            mockSetupConfig.config,
+          )
+        : createDefaultAgentPersonalizationEditorValue(),
+    );
+  const [modelAccess, setModelAccess] = useState<ModelAccessEditorValue>(() =>
+    mockSetupConfig
+      ? setupConfigRequestToModelAccessEditorValue(mockSetupConfig.config)
+      : createDefaultModelAccessEditorValue(),
+  );
+  const [loadState, setLoadState] = useState<LoadState>(
+    () => (mockSetupConfig ? "idle" : "loading"),
+  );
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [isDirty, setIsDirty] = useState(false);
+
+  const isLoading = loadState === "loading";
+  const showSettingsAlerts = Boolean(
+    loadError ||
+      readiness?.recovery_note ||
+      (saveState === "error" && saveError),
+  );
 
   useEffect(() => {
+    if (mockSetupConfig) {
+      hydrateSettings(mockSetupConfig.config, mockSetupConfig.readiness);
+      return;
+    }
+
     const controller = new AbortController();
-    void loadSummary(controller.signal);
+    void loadSettings(controller.signal);
 
     return () => controller.abort();
-  }, []);
+  }, [mockSetupConfig]);
 
-  async function loadSummary(signal?: AbortSignal) {
+  useEffect(() => {
+    if (!isDirty || isLoading) {
+      return;
+    }
+
+    const validationError = validateSettingsDraft(modelAccess);
+    if (validationError) {
+      setSaveState("error");
+      setSaveError(validationError);
+      return;
+    }
+
+    let cancelled = false;
+    const controller = new AbortController();
+    setSaveState("pending");
+    setSaveError(null);
+
+    const timeoutId = window.setTimeout(() => {
+      const request = buildSettingsRequest();
+      setSaveState("saving");
+      setSaveError(null);
+
+      void onSaveSetupConfig(request, { signal: controller.signal })
+        .then((nextReadiness) => {
+          if (cancelled) {
+            return;
+          }
+          setBaseConfig(request);
+          setReadiness(nextReadiness);
+          setSaveState("saved");
+          setSaveError(null);
+          setIsDirty(false);
+        })
+        .catch((error) => {
+          if (cancelled || controller.signal.aborted) {
+            return;
+          }
+          setSaveState("error");
+          setSaveError(error instanceof Error ? error.message : String(error));
+        });
+    }, SETTINGS_AUTOSAVE_DELAY_MS);
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    agentPersonalization,
+    baseConfig,
+    isDirty,
+    isLoading,
+    modelAccess,
+    onSaveSetupConfig,
+  ]);
+
+  function hydrateSettings(
+    config: SetupConfigRequest,
+    nextReadiness: ConfigReadinessReport,
+  ) {
+    setBaseConfig(config);
+    setReadiness(nextReadiness);
+    setAgentPersonalization(setupConfigRequestToAgentPersonalizationEditorValue(config));
+    setModelAccess(setupConfigRequestToModelAccessEditorValue(config));
+    setLoadState("idle");
+    setLoadError(null);
+    setSaveState("idle");
+    setSaveError(null);
+    setIsDirty(false);
+  }
+
+  async function loadSettings(signal?: AbortSignal) {
+    if (mockSetupConfig) {
+      hydrateSettings(mockSetupConfig.config, mockSetupConfig.readiness);
+      return;
+    }
+
     setLoadState("loading");
     setLoadError(null);
 
     try {
-      const nextSummary = await fetchSettingsSummary({ signal });
-      setSummary(nextSummary);
-      setLoadState("idle");
+      const nextSetupConfig = await fetchSetupConfig({ signal });
+      hydrateSettings(nextSetupConfig.config, nextSetupConfig.readiness);
     } catch (error) {
       if (signal?.aborted) {
         return;
@@ -72,418 +177,126 @@ export function SettingsPage() {
     }
   }
 
-  const isLoading = loadState === "loading";
+  function markDirty() {
+    setIsDirty(true);
+    setSaveState("pending");
+    setSaveError(null);
+  }
+
+  function buildSettingsRequest(): SetupConfigRequest {
+    const request: SetupConfigRequest = {
+      ...(baseConfig ?? {}),
+      ...agentPersonalizationEditorValueToSetupRequest(agentPersonalization),
+      ...modelAccessEditorValueToSetupRequest(modelAccess),
+    };
+    delete request.daemon_port;
+    return request;
+  }
+
 
   return (
     <section
       id="settings"
       aria-label="Settings"
-      className="min-h-screen w-full px-6 pb-10 pt-20 md:pb-12 md:pt-8"
+      className="min-h-screen w-full px-6"
     >
-      <div className="flex w-full flex-col gap-4">
-        {loadError ? (
-          <Alert variant="destructive">
-            <TriangleAlertIcon aria-hidden="true" />
-            <AlertTitle>Unable to load settings</AlertTitle>
-            <AlertDescription>{loadError}</AlertDescription>
-          </Alert>
+      <div aria-hidden="true" className="h-20 md:h-8" />
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-12">
+
+        {showSettingsAlerts ? (
+          <div className="flex flex-col gap-4">
+            {loadError ? (
+              <Alert variant="destructive">
+                <TriangleAlertIcon aria-hidden="true" />
+                <AlertTitle>Unable to load settings</AlertTitle>
+                <AlertDescription>{loadError}</AlertDescription>
+              </Alert>
+            ) : null}
+
+            {readiness?.recovery_note ? (
+              <Alert>
+                <TriangleAlertIcon aria-hidden="true" />
+                <AlertTitle>Configuration file restored</AlertTitle>
+                <AlertDescription>{readiness.recovery_note}</AlertDescription>
+              </Alert>
+            ) : null}
+
+            {saveState === "error" && saveError ? (
+              <Alert variant="destructive">
+                <TriangleAlertIcon aria-hidden="true" />
+                <AlertTitle>Unable to save settings</AlertTitle>
+                <AlertDescription>{saveError}</AlertDescription>
+              </Alert>
+            ) : null}
+          </div>
         ) : null}
 
-        {summary ? (
-          <div className="grid w-full grid-cols-1 items-start gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            <CoreCard
-              summary={summary}
-              isLoading={isLoading}
-              onRefresh={() => void loadSummary()}
-            />
-            <ProvidersCard providers={summary.providers} />
-            <ModelsCard models={summary.models} />
-          </div>
-        ) : (
+        {isLoading && !baseConfig ? (
           <SettingsSkeleton />
+        ) : (
+          <>
+            <AgentPersonalizationEditor
+              value={agentPersonalization}
+              onChange={(nextValue) => {
+                setAgentPersonalization(nextValue);
+                markDirty();
+              }}
+            />
+
+            <ModelAccessEditor
+              value={modelAccess}
+              onChange={(nextValue) => {
+                setModelAccess(nextValue);
+                markDirty();
+              }}
+              providerDescription="Tune the secure access layer behind the agent's model capability."
+              modelDescription="Shape available model capacity into a dependable runtime catalog."
+              selectionDescription="Set the operating balance between depth, speed, and everyday work."
+            />
+          </>
         )}
       </div>
+      <div aria-hidden="true" className="h-20 md:h-8" />
     </section>
   );
 }
-
-function CoreCard({
-  summary,
-  isLoading,
-  onRefresh,
-}: {
-  summary: SettingsSummary;
-  isLoading: boolean;
-  onRefresh: () => void;
-}) {
-  const portChanged = summary.daemon.configured_port !== summary.daemon.serving_port;
-
-  return (
-    <Card className="w-full">
-      <CardHeader>
-        <CardTitle>Settings</CardTitle>
-        <CardAction>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Refresh settings"
-            onClick={onRefresh}
-            disabled={isLoading}
-          >
-            {isLoading ? (
-              <Spinner data-icon="inline-start" />
-            ) : (
-              <RefreshCwIcon data-icon="inline-start" aria-hidden="true" />
-            )}
-          </Button>
-        </CardAction>
-      </CardHeader>
-      <CardContent>
-        <SettingList
-          lines={[
-            {
-              label: "Main",
-              value: summary.main_model,
-              action: <BadgeLine labels={modelRoles(summary, summary.main_model)} />,
-            },
-            {
-              label: "Locale",
-              value: summary.locale,
-              meta: summary.locale_label,
-            },
-            {
-              label: "Daemon",
-              value: `${summary.daemon.bind_host}:${summary.daemon.serving_port}`,
-              meta: portChanged ? `config :${summary.daemon.configured_port}` : undefined,
-            },
-            {
-              label: "Sandbox",
-              value: summary.sandbox.strong_filesystem,
-              action: (
-                <StatusBadge
-                  tone={summary.sandbox.enabled ? "good" : "neutral"}
-                  label={summary.sandbox.enabled ? "on" : "off"}
-                />
-              ),
-            },
-            {
-              label: "Judge",
-              value: summary.judge.effective_model,
-              action: (
-                <StatusBadge
-                  tone={summary.judge.enabled ? "good" : "neutral"}
-                  label={summary.judge.enabled ? "on" : "off"}
-                />
-              ),
-            },
-            {
-              label: "Telegram",
-              value: `${summary.telegram.poll_timeout_secs}s poll`,
-              action: (
-                <div className="flex shrink-0 items-center gap-1.5">
-                  <StatusBadge
-                    tone={summary.telegram.enabled ? "good" : "neutral"}
-                    label={summary.telegram.enabled ? "on" : "off"}
-                  />
-                  <CredentialBadge credential={summary.telegram.credential} />
-                </div>
-              ),
-            },
-            {
-              label: "Config",
-              value: summary.config_path,
-              meta: formatDateTime(summary.loaded_at_ms),
-              mono: true,
-              breakAll: true,
-            },
-          ]}
-        />
-      </CardContent>
-    </Card>
-  );
-}
-
-function ProvidersCard({ providers }: { providers: SettingsProviderSummary[] }) {
-  return (
-    <Card className="w-full">
-      <CardHeader>
-        <CardTitle>Providers</CardTitle>
-        <CardAction>
-          <Badge variant="outline" className="rounded-full">
-            {providers.length}
-          </Badge>
-        </CardAction>
-      </CardHeader>
-      <CardContent>
-        {providers.length ? (
-          <div className="divide-y divide-border/60">
-            {providers.map((provider) => (
-              <ProviderLine key={provider.name} provider={provider} />
-            ))}
-          </div>
-        ) : (
-          <EmptyState>No providers</EmptyState>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function ProviderLine({ provider }: { provider: SettingsProviderSummary }) {
-  const endpoint = provider.base_url ?? provider.auth_file;
-
-  return (
-    <SettingLineRow
-      line={{
-        label: provider.provider_type,
-        value: provider.name,
-        meta: endpoint,
-        action: <CredentialBadge credential={provider.credential} />,
-        breakAll: Boolean(endpoint),
-        mono: Boolean(endpoint),
-      }}
-    />
-  );
-}
-
-function ModelsCard({ models }: { models: SettingsModelSummary[] }) {
-  return (
-    <Card className="w-full sm:col-span-2 xl:col-span-1">
-      <CardHeader>
-        <CardTitle>Models</CardTitle>
-        <CardAction>
-          <Badge variant="outline" className="rounded-full">
-            {models.length}
-          </Badge>
-        </CardAction>
-      </CardHeader>
-      <CardContent>
-        {models.length ? (
-          <div className="divide-y divide-border/60">
-            {models.map((model) => (
-              <ModelLine key={model.name} model={model} />
-            ))}
-          </div>
-        ) : (
-          <EmptyState>No models</EmptyState>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function ModelLine({ model }: { model: SettingsModelSummary }) {
-  return (
-    <SettingLineRow
-      line={{
-        label: model.provider,
-        value: model.name,
-        meta: (
-          <>
-            <span className="font-mono">{model.model_id}</span>
-            <span aria-hidden="true"> · </span>
-            <span>{modelFootprint(model)}</span>
-          </>
-        ),
-        action: <BadgeLine labels={modelRolesFromFlags(model)} />,
-      }}
-    />
-  );
-}
-
-function SettingList({ lines }: { lines: SettingLine[] }) {
-  return (
-    <div className="divide-y divide-border/60">
-      {lines.map((line) => (
-        <SettingLineRow key={`${line.label}-${String(line.value)}`} line={line} />
-      ))}
-    </div>
-  );
-}
-
-function SettingLineRow({ line }: { line: SettingLine }) {
-  return (
-    <div className="flex min-w-0 items-start justify-between gap-3 py-3 first:pt-0 last:pb-0">
-      <div className="flex min-w-0 flex-col gap-1">
-        <div className="text-xs uppercase tracking-wide text-muted-foreground">
-          {line.label}
-        </div>
-        <div
-          className={cn(
-            "truncate text-sm font-medium",
-            line.mono && "font-mono text-xs",
-            line.breakAll && "whitespace-normal break-all",
-          )}
-        >
-          {line.value}
-        </div>
-        {line.meta ? (
-          <div
-            className={cn(
-              "truncate text-xs text-muted-foreground",
-              line.mono && "font-mono",
-              line.breakAll && "whitespace-normal break-all",
-            )}
-          >
-            {line.meta}
-          </div>
-        ) : null}
-      </div>
-      {line.action ? <div className="shrink-0">{line.action}</div> : null}
-    </div>
-  );
-}
-
-function BadgeLine({ labels }: { labels: string[] }) {
-  if (!labels.length) {
-    return null;
-  }
-
-  return (
-    <div className="flex flex-wrap justify-end gap-1.5">
-      {labels.map((label) => (
-        <Badge key={label} variant="outline" className="rounded-full">
-          {label}
-        </Badge>
-      ))}
-    </div>
-  );
-}
-
-function StatusBadge({ tone, label }: { tone: Tone; label: string }) {
-  return (
-    <Badge variant={toneBadgeVariant(tone)} className="rounded-full">
-      {label}
-    </Badge>
-  );
-}
-
-function CredentialBadge({
-  credential,
-}: {
-  credential: SettingsCredentialSummary;
-}) {
-  return (
-    <StatusBadge
-      tone={credentialTone(credential.status)}
-      label={credentialStatusLabel(credential.status)}
-    />
-  );
-}
-
-function EmptyState({ children }: { children: ReactNode }) {
-  return (
-    <Empty className="border-0 py-6">
-      <EmptyHeader>
-        <EmptyTitle>{children}</EmptyTitle>
-        <EmptyDescription>Nothing is configured for this section.</EmptyDescription>
-      </EmptyHeader>
-    </Empty>
-  );
-}
-
 function SettingsSkeleton() {
   return (
-    <div className="grid w-full grid-cols-1 items-start gap-4 sm:grid-cols-2 xl:grid-cols-3">
-      {Array.from({ length: 3 }, (_, index) => (
-        <Card key={index} className="w-full">
-          <CardHeader>
-            <Skeleton className="h-5 w-24" />
-          </CardHeader>
-          <CardContent className="grid gap-4">
-            {Array.from({ length: 6 }, (_, rowIndex) => (
-              <div key={rowIndex} className="flex flex-col gap-2">
-                <Skeleton className="h-3 w-16" />
-                <Skeleton className="h-4 w-3/4" />
+    <div className="flex flex-col gap-10">
+      {Array.from({ length: 4 }, (_, sectionIndex) => (
+        <section key={sectionIndex} className="flex flex-col gap-5">
+          <div className="flex flex-col gap-2">
+            <Skeleton className="h-8 w-40" />
+            <Skeleton className="h-4 w-full max-w-2xl" />
+          </div>
+          <div className="divide-y border-y">
+            {Array.from({ length: 3 }, (_, rowIndex) => (
+              <div key={rowIndex} className="flex flex-col gap-2 py-4">
+                <Skeleton className="h-5 w-56" />
+                <Skeleton className="h-4 w-full max-w-xl" />
               </div>
             ))}
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       ))}
     </div>
   );
 }
 
-function modelRoles(summary: SettingsSummary, modelName: string) {
-  return [
-    summary.main_model === modelName ? "main" : null,
-    summary.judge_model === modelName ? "judge" : null,
-  ].filter((role): role is string => Boolean(role));
-}
-
-function modelRolesFromFlags(model: SettingsModelSummary) {
-  return [
-    model.is_main ? "main" : null,
-    model.is_judge ? "judge" : null,
-  ].filter((role): role is string => Boolean(role));
-}
-
-function modelFootprint(model: SettingsModelSummary) {
-  const context = `${formatNumber(model.context_window_tokens)} ctx`;
-  const reserve = `${formatNumber(model.reserved_output_tokens)} reserve`;
-  const output = `${formatNumber(model.max_completion_tokens)} out`;
-  const timeout = `${model.request_timeout_secs}s`;
-
-  return `${context} · ${reserve} · ${output} · ${timeout}`;
-}
-
-function credentialTone(status: SettingsCredentialStatus): Tone {
-  switch (status) {
-    case "configured":
-    case "env_configured":
-    case "oauth_file":
-      return "good";
-    case "env_missing":
-    case "missing":
-    case "placeholder":
-      return "warn";
-    default:
-      return "neutral";
+function validateSettingsDraft(modelAccess: ModelAccessEditorValue) {
+  if (modelAccess.providers.length === 0) {
+    return "Add at least one provider.";
   }
-}
-
-function credentialStatusLabel(status: SettingsCredentialStatus) {
-  switch (status) {
-    case "configured":
-      return "set";
-    case "env_configured":
-      return "env";
-    case "env_missing":
-      return "missing env";
-    case "missing":
-      return "missing";
-    case "placeholder":
-      return "placeholder";
-    case "oauth_file":
-      return "oauth";
-    default:
-      return status;
+  if (modelAccess.models.length === 0) {
+    return "Add at least one model.";
   }
-}
-
-function toneBadgeVariant(
-  tone: Tone,
-): "default" | "secondary" | "destructive" | "outline" | "ghost" {
-  switch (tone) {
-    case "good":
-      return "secondary";
-    case "warn":
-      return "destructive";
-    default:
-      return "outline";
+  if (!modelAccess.models.some((model) => model.name === modelAccess.mainModel)) {
+    return "Select a valid main model.";
   }
-}
-
-function formatDateTime(value: number) {
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
-
-function formatNumber(value: number) {
-  return NUMBER_FORMATTER.format(value);
+  if (
+    !modelAccess.models.some((model) => model.name === modelAccess.efficientModel)
+  ) {
+    return "Select a valid efficient model.";
+  }
+  return null;
 }

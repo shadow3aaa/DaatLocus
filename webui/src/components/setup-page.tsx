@@ -77,7 +77,7 @@ type CodexAuthMethod =
 type GithubAuthMethod = "device_login" | "manual_token" | "env_token";
 type SupportsVisionValue = "auto" | "true" | "false";
 
-type SetupProviderDraft = {
+export type SetupProviderDraft = {
   id: string;
   name: string;
   kind: SetupProviderKind;
@@ -89,7 +89,7 @@ type SetupProviderDraft = {
   githubAuthMethod: GithubAuthMethod;
 };
 
-type SetupModelDraft = {
+export type SetupModelDraft = {
   id: string;
   name: string;
   providerName: string;
@@ -98,6 +98,7 @@ type SetupModelDraft = {
   maxCompletionTokens: string;
   supportsVision: SupportsVisionValue;
   thinkingBudget: string;
+  source?: SetupModelRequest;
 };
 
 type ProviderDialogState = {
@@ -108,6 +109,36 @@ type ProviderDialogState = {
 type ModelDialogState = {
   mode: ModelDialogMode;
   model: SetupModelDraft | null;
+};
+
+export type ModelAccessEditorValue = {
+  providers: SetupProviderDraft[];
+  models: SetupModelDraft[];
+  mainModel: string;
+  efficientModel: string;
+};
+export type AgentPersonalizationEditorValue = {
+  personaName: string;
+  personaLanguage: string;
+};
+
+
+type ModelAccessEditorProps = {
+  value: ModelAccessEditorValue;
+  onChange: (value: ModelAccessEditorValue) => void;
+  submitSlot?: ReactNode;
+  providerDescription?: string;
+  modelDescription?: string;
+  selectionDescription?: string;
+};
+
+type AgentPersonalizationEditorProps = {
+  value: AgentPersonalizationEditorValue;
+  onChange: (value: AgentPersonalizationEditorValue) => void;
+  title?: string;
+  description?: string | null;
+  showHeader?: boolean;
+  className?: string;
 };
 
 type SetupPageProps = {
@@ -248,23 +279,14 @@ export function SetupPage({
   const [personalizationPreview, setPersonalizationPreview] = useState("Hello");
   const [personalizationPreviewVisible, setPersonalizationPreviewVisible] =
     useState(true);
-  const [providers, setProviders] = useState<SetupProviderDraft[]>(() =>
-    initialSetupProviders(),
+  const [modelAccess, setModelAccess] = useState<ModelAccessEditorValue>(() =>
+    createDefaultModelAccessEditorValue(),
   );
-  const [models, setModels] = useState<SetupModelDraft[]>(() =>
-    initialSetupModels(),
-  );
-  const [mainModel, setMainModel] = useState("");
-  const [efficientModel, setEfficientModel] = useState("");
-  const [providerDialog, setProviderDialog] =
-    useState<ProviderDialogState | null>(null);
-  const [modelDialog, setModelDialog] = useState<ModelDialogState | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const isSaving = saveState === "saving";
-  const agentDisplayName = agentName.trim() || "DaatLocus";
-  const modelNames = models.map((model) => model.name);
+  const { providers, models, mainModel, efficientModel } = modelAccess;
   const mainModelMissing = !models.some((model) => model.name === mainModel);
   const efficientModelMissing = !models.some(
     (model) => model.name === efficientModel,
@@ -311,12 +333,11 @@ export function SetupPage({
     }
 
     const request: SetupConfigRequest = {
-      persona_name: agentDisplayName,
-      persona_language: personaLanguage,
-      providers: providers.map(providerToRequest),
-      models: models.map(modelToRequest),
-      main_model: mainModel,
-      efficient_model: efficientModel,
+      ...agentPersonalizationEditorValueToSetupRequest({
+        personaName: agentName,
+        personaLanguage,
+      }),
+      ...modelAccessEditorValueToSetupRequest(modelAccess),
       daemon_port: readiness.port,
     };
 
@@ -335,82 +356,6 @@ export function SetupPage({
     }
   }
 
-  function openAddProviderDialog() {
-    setProviderDialog({
-      mode: "add",
-      provider: createDefaultProvider(providers),
-    });
-  }
-
-  function openEditProviderDialog(provider: SetupProviderDraft) {
-    setProviderDialog({ mode: "edit", provider });
-  }
-
-  function saveProvider(provider: SetupProviderDraft) {
-    setSaveState("idle");
-    setSaveError(null);
-    const previous = providerDialog?.provider ?? null;
-    setProviders((current) => {
-      if (providerDialog?.mode === "edit") {
-        return current.map((item) => (item.id === provider.id ? provider : item));
-      }
-      return [...current, provider];
-    });
-    if (previous && previous.name !== provider.name) {
-      setModels((current) =>
-        current.map((model) =>
-          model.providerName === previous.name
-            ? { ...model, providerName: provider.name }
-            : model,
-        ),
-      );
-    }
-    setProviderDialog(null);
-  }
-
-  function deleteProvider(provider: SetupProviderDraft) {
-    const nextProviders = providers.filter((item) => item.id !== provider.id);
-    const nextModels = models.filter(
-      (model) => model.providerName !== provider.name,
-    );
-    setProviders(nextProviders);
-    setModels(nextModels);
-    setMainModel((current) => safeSelectedModel(current, nextModels));
-    setEfficientModel((current) => safeSelectedModel(current, nextModels));
-  }
-
-  function openAddModelDialog() {
-    setModelDialog({
-      mode: "add",
-      model: createDefaultModel(providers),
-    });
-  }
-
-  function openEditModelDialog(model: SetupModelDraft) {
-    setModelDialog({ mode: "edit", model });
-  }
-
-  function saveModel(model: SetupModelDraft) {
-    setSaveState("idle");
-    setSaveError(null);
-    setModels((current) => {
-      const next =
-        modelDialog?.mode === "edit"
-          ? current.map((item) => (item.id === model.id ? model : item))
-          : [...current, model];
-      setMainModel((selected) => safeSelectedModel(selected, next));
-      setEfficientModel((selected) => safeSelectedModel(selected, next));
-      return next;
-    });
-    setModelDialog(null);
-  }
-
-  function deleteModel(model: SetupModelDraft) {
-    const nextModels = models.filter((item) => item.id !== model.id);
-    setModels(nextModels);
-    setMainModel((current) => safeSelectedModel(current, nextModels));
-    setEfficientModel((current) => safeSelectedModel(current, nextModels));
-  }
 
   if (step === "intro") {
     return (
@@ -458,42 +403,15 @@ export function SetupPage({
           <div className="grid flex-1 grid-cols-1 gap-16 lg:grid-cols-12">
             <div className="flex flex-col gap-24 lg:col-span-6">
               <h1 className="text-7xl font-medium tracking-normal">Personalize</h1>
-              <FieldGroup className="max-w-xl">
-                <Field>
-                  <FieldLabel htmlFor="setup-locale">
-                    Language for {agentDisplayName}
-                  </FieldLabel>
-                  <Select
-                    value={personaLanguage}
-                    onValueChange={setPersonaLanguage}
-                  >
-                    <SelectTrigger id="setup-locale" className="w-full">
-                      <SelectValue placeholder="Select language" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        {PERSONA_LANGUAGES.map((language) => (
-                          <SelectItem key={language.value} value={language.value}>
-                            {language.label}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="setup-agent-name">
-                    {agentDisplayName} name
-                  </FieldLabel>
-                  <Input
-                    id="setup-agent-name"
-                    value={agentName}
-                    onChange={(event) => setAgentName(event.target.value)}
-                    placeholder="DaatLocus"
-                    spellCheck={false}
-                  />
-                </Field>
-              </FieldGroup>
+              <AgentPersonalizationEditor
+                value={{ personaName: agentName, personaLanguage }}
+                onChange={(nextValue) => {
+                  setAgentName(nextValue.personaName);
+                  setPersonaLanguage(nextValue.personaLanguage);
+                }}
+                showHeader={false}
+                className="max-w-xl"
+              />
             </div>
 
             <div className="flex items-start justify-center pt-6 lg:col-span-4 lg:col-start-8 lg:justify-center lg:pt-36">
@@ -567,113 +485,314 @@ export function SetupPage({
             ) : null}
           </div>
 
-          <RegistrySection
-            title="Providers"
-            description="Add model providers."
-            actionLabel="Add provider"
-            onAdd={openAddProviderDialog}
-          >
-            <ProviderList
-              providers={providers}
-              onEdit={openEditProviderDialog}
-              onDelete={deleteProvider}
-            />
-          </RegistrySection>
-
-          <RegistrySection
-            title="Models"
-            description="Add models provided by configured providers."
-            actionLabel="Add model"
-            onAdd={openAddModelDialog}
-            addDisabled={providers.length === 0}
-          >
-            <ModelList
-              models={models}
-              providers={providers}
-              onEdit={openEditModelDialog}
-              onDelete={deleteModel}
-            />
-          </RegistrySection>
-
-          <section className="flex flex-col gap-6">
-            <div className="flex flex-col gap-2">
-              <h2 className="text-3xl font-medium tracking-normal">Select Models</h2>
-              <p className="max-w-2xl text-base text-muted-foreground">
-                The main model handles primary interactions; the efficient model handles simple tasks.
-              </p>
-            </div>
-            <FieldGroup className="max-w-2xl">
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <Field data-invalid={mainModelMissing}>
-                  <FieldLabel htmlFor="setup-main-model">Main model</FieldLabel>
-                  <Select value={mainModel} onValueChange={setMainModel}>
-                    <SelectTrigger id="setup-main-model" className="w-full">
-                      <SelectValue placeholder="Select main model" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        {modelNames.map((name) => (
-                          <SelectItem key={name} value={name}>
-                            {name}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                  <FieldError>
-                    {mainModelMissing ? "Select a model." : null}
-                  </FieldError>
-                </Field>
-                <Field data-invalid={efficientModelMissing}>
-                  <FieldLabel htmlFor="setup-efficient-model">
-                    Efficient model
-                  </FieldLabel>
-                  <Select
-                    value={efficientModel}
-                    onValueChange={setEfficientModel}
+          <ModelAccessEditor
+            value={modelAccess}
+            onChange={(nextValue) => {
+              setModelAccess(nextValue);
+              setSaveState("idle");
+              setSaveError(null);
+            }}
+            submitSlot={
+              canCompleteSetup ? (
+                <div className="flex justify-start pt-4">
+                  <Button
+                    type="submit"
+                    size="icon"
+                    className="size-14 rounded-full"
+                    disabled={isSaving}
+                    aria-label={isSaving ? "Completing setup" : "Complete setup"}
                   >
-                    <SelectTrigger
-                      id="setup-efficient-model"
-                      className="w-full"
-                    >
-                      <SelectValue placeholder="Select efficient model" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        {modelNames.map((name) => (
-                          <SelectItem key={name} value={name}>
-                            {name}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                  <FieldError>
-                    {efficientModelMissing ? "Select a model." : null}
-                  </FieldError>
-                </Field>
-              </div>
-            </FieldGroup>
-            {canCompleteSetup ? (
-              <div className="flex justify-start pt-4">
-                <Button
-                  type="submit"
-                  size="icon"
-                  className="size-14 rounded-full"
-                  disabled={isSaving}
-                  aria-label={isSaving ? "Completing setup" : "Complete setup"}
-                >
-                  {isSaving ? (
-                    <Spinner data-icon="inline-start" />
-                  ) : (
-                    <CheckIcon data-icon="inline-start" aria-hidden="true" />
-                  )}
-                </Button>
-              </div>
-            ) : null}
-          </section>
+                    {isSaving ? (
+                      <Spinner data-icon="inline-start" />
+                    ) : (
+                      <CheckIcon data-icon="inline-start" aria-hidden="true" />
+                    )}
+                  </Button>
+                </div>
+              ) : null
+            }
+          />
         </div>
       </form>
+
+    </section>
+  );
+}
+
+export function AgentPersonalizationEditor({
+  value,
+  onChange,
+  title,
+  description = "Shape the agent's identity and voice across every interaction.",
+  showHeader = true,
+  className,
+}: AgentPersonalizationEditorProps) {
+  const agentDisplayName = displayAgentName(value.personaName);
+  const sectionTitle = title ?? `Customize ${agentDisplayName}`;
+
+  return (
+    <section className={cn("flex flex-col gap-6", className)}>
+      {showHeader ? (
+        <div className="flex flex-col gap-2">
+          <h2 className="text-3xl font-medium tracking-normal">
+            {sectionTitle}
+          </h2>
+          {description ? (
+            <p className="max-w-3xl text-base text-muted-foreground">
+              {description}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+      <FieldGroup className="max-w-xl">
+        <Field>
+          <FieldLabel htmlFor="agent-personalization-language">
+            Language for {agentDisplayName}
+          </FieldLabel>
+          <Select
+            value={normalizePersonaLanguage(value.personaLanguage)}
+            onValueChange={(personaLanguage) =>
+              onChange({ ...value, personaLanguage })
+            }
+          >
+            <SelectTrigger
+              id="agent-personalization-language"
+              className="w-full"
+            >
+              <SelectValue placeholder="Select language" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {PERSONA_LANGUAGES.map((language) => (
+                  <SelectItem key={language.value} value={language.value}>
+                    {language.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor="agent-personalization-name">
+            {agentDisplayName} name
+          </FieldLabel>
+          <Input
+            id="agent-personalization-name"
+            value={value.personaName}
+            onChange={(event) =>
+              onChange({ ...value, personaName: event.target.value })
+            }
+            placeholder="DaatLocus"
+            spellCheck={false}
+          />
+        </Field>
+      </FieldGroup>
+    </section>
+  );
+}
+
+export function ModelAccessEditor({
+  value,
+  onChange,
+  submitSlot = null,
+  providerDescription = "Connect the capability sources the agent can draw from.",
+  modelDescription = "Shape the model catalog into dependable reasoning capacity.",
+  selectionDescription =
+    "Set the operating balance between deep focus and lightweight work.",
+}: ModelAccessEditorProps) {
+  const [providerDialog, setProviderDialog] =
+    useState<ProviderDialogState | null>(null);
+  const [modelDialog, setModelDialog] = useState<ModelDialogState | null>(null);
+  const { providers, models, mainModel, efficientModel } = value;
+  const modelNames = models.map((model) => model.name);
+  const mainModelMissing = !models.some((model) => model.name === mainModel);
+  const efficientModelMissing = !models.some(
+    (model) => model.name === efficientModel,
+  );
+
+  function updateValue(nextValue: ModelAccessEditorValue) {
+    onChange(nextValue);
+  }
+
+  function openAddProviderDialog() {
+    setProviderDialog({
+      mode: "add",
+      provider: createDefaultProvider(providers),
+    });
+  }
+
+  function openEditProviderDialog(provider: SetupProviderDraft) {
+    setProviderDialog({ mode: "edit", provider });
+  }
+
+  function saveProvider(provider: SetupProviderDraft) {
+    const previous = providerDialog?.provider ?? null;
+    const nextProviders =
+      providerDialog?.mode === "edit"
+        ? providers.map((item) => (item.id === provider.id ? provider : item))
+        : [...providers, provider];
+    const nextModels =
+      previous && previous.name !== provider.name
+        ? models.map((model) =>
+            model.providerName === previous.name
+              ? { ...model, providerName: provider.name }
+              : model,
+          )
+        : models;
+
+    updateValue({
+      ...value,
+      providers: nextProviders,
+      models: nextModels,
+    });
+    setProviderDialog(null);
+  }
+
+  function deleteProvider(provider: SetupProviderDraft) {
+    const nextProviders = providers.filter((item) => item.id !== provider.id);
+    const nextModels = models.filter(
+      (model) => model.providerName !== provider.name,
+    );
+    updateValue({
+      ...value,
+      providers: nextProviders,
+      models: nextModels,
+      mainModel: safeSelectedModel(mainModel, nextModels),
+      efficientModel: safeSelectedModel(efficientModel, nextModels),
+    });
+  }
+
+  function openAddModelDialog() {
+    setModelDialog({
+      mode: "add",
+      model: createDefaultModel(providers),
+    });
+  }
+
+  function openEditModelDialog(model: SetupModelDraft) {
+    setModelDialog({ mode: "edit", model });
+  }
+
+  function saveModel(model: SetupModelDraft) {
+    const nextModels =
+      modelDialog?.mode === "edit"
+        ? models.map((item) => (item.id === model.id ? model : item))
+        : [...models, model];
+    updateValue({
+      ...value,
+      models: nextModels,
+      mainModel: safeSelectedModel(mainModel, nextModels),
+      efficientModel: safeSelectedModel(efficientModel, nextModels),
+    });
+    setModelDialog(null);
+  }
+
+  function deleteModel(model: SetupModelDraft) {
+    const nextModels = models.filter((item) => item.id !== model.id);
+    updateValue({
+      ...value,
+      models: nextModels,
+      mainModel: safeSelectedModel(mainModel, nextModels),
+      efficientModel: safeSelectedModel(efficientModel, nextModels),
+    });
+  }
+
+  return (
+    <>
+      <RegistrySection
+        title="Providers"
+        description={providerDescription}
+        actionLabel="Add provider"
+        onAdd={openAddProviderDialog}
+      >
+        <ProviderList
+          providers={providers}
+          onEdit={openEditProviderDialog}
+          onDelete={deleteProvider}
+        />
+      </RegistrySection>
+
+      <RegistrySection
+        title="Models"
+        description={modelDescription}
+        actionLabel="Add model"
+        onAdd={openAddModelDialog}
+        addDisabled={providers.length === 0}
+      >
+        <ModelList
+          models={models}
+          providers={providers}
+          onEdit={openEditModelDialog}
+          onDelete={deleteModel}
+        />
+      </RegistrySection>
+
+      <section className="flex flex-col gap-6">
+        <div className="flex flex-col gap-2">
+          <h2 className="text-3xl font-medium tracking-normal">Select Models</h2>
+          <p className="max-w-2xl text-base text-muted-foreground">
+            {selectionDescription}
+          </p>
+        </div>
+        <FieldGroup className="max-w-2xl">
+          <div className="flex flex-col gap-4">
+            <Field data-invalid={mainModelMissing}>
+              <FieldLabel htmlFor="model-access-main-model">Main model</FieldLabel>
+              <Select
+                value={mainModel}
+                onValueChange={(selected) =>
+                  updateValue({ ...value, mainModel: selected })
+                }
+              >
+                <SelectTrigger id="model-access-main-model" className="w-full">
+                  <SelectValue placeholder="Select main model" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {modelNames.map((name) => (
+                      <SelectItem key={name} value={name}>
+                        {name}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <FieldError>{mainModelMissing ? "Select a model." : null}</FieldError>
+            </Field>
+            <Field data-invalid={efficientModelMissing}>
+              <FieldLabel htmlFor="model-access-efficient-model">
+                Efficient model
+              </FieldLabel>
+              <Select
+                value={efficientModel}
+                onValueChange={(selected) =>
+                  updateValue({ ...value, efficientModel: selected })
+                }
+              >
+                <SelectTrigger
+                  id="model-access-efficient-model"
+                  className="w-full"
+                >
+                  <SelectValue placeholder="Select efficient model" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {modelNames.map((name) => (
+                      <SelectItem key={name} value={name}>
+                        {name}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <FieldError>
+                {efficientModelMissing ? "Select a model." : null}
+              </FieldError>
+            </Field>
+          </div>
+        </FieldGroup>
+        {submitSlot}
+      </section>
 
       <ProviderDialog
         dialog={providerDialog}
@@ -696,7 +815,7 @@ export function SetupPage({
         }}
         onSubmit={saveModel}
       />
-    </section>
+    </>
   );
 }
 
@@ -1895,12 +2014,140 @@ function ModelDialog({
   );
 }
 
-function initialSetupProviders(): SetupProviderDraft[] {
-  return [];
+function displayAgentName(personaName: string | null | undefined) {
+  return personaName?.trim() || "DaatLocus";
 }
 
-function initialSetupModels(): SetupModelDraft[] {
-  return [];
+function normalizePersonaLanguage(personaLanguage: string | null | undefined) {
+  return personaLanguage?.trim() || "zh-CN";
+}
+
+export function createDefaultAgentPersonalizationEditorValue(): AgentPersonalizationEditorValue {
+  return {
+    personaName: "DaatLocus",
+    personaLanguage: "zh-CN",
+  };
+}
+
+export function setupConfigRequestToAgentPersonalizationEditorValue(
+  request: SetupConfigRequest,
+): AgentPersonalizationEditorValue {
+  return {
+    personaName: displayAgentName(request.persona_name),
+    personaLanguage: normalizePersonaLanguage(request.persona_language),
+  };
+}
+
+export function agentPersonalizationEditorValueToSetupRequest(
+  value: AgentPersonalizationEditorValue,
+): Pick<SetupConfigRequest, "persona_name" | "persona_language"> {
+  return {
+    persona_name: displayAgentName(value.personaName),
+    persona_language: normalizePersonaLanguage(value.personaLanguage),
+  };
+}
+
+export function createDefaultModelAccessEditorValue(): ModelAccessEditorValue {
+  return {
+    providers: [],
+    models: [],
+    mainModel: "",
+    efficientModel: "",
+  };
+}
+
+export function modelAccessEditorValueToSetupRequest(
+  value: ModelAccessEditorValue,
+): Pick<
+  SetupConfigRequest,
+  "providers" | "models" | "main_model" | "efficient_model"
+> {
+  return {
+    providers: value.providers.map(providerToRequest),
+    models: value.models.map(modelToRequest),
+    main_model: value.mainModel || null,
+    efficient_model: value.efficientModel || value.mainModel || null,
+  };
+}
+
+export function setupConfigRequestToModelAccessEditorValue(
+  request: SetupConfigRequest,
+): ModelAccessEditorValue {
+  return {
+    providers: (request.providers ?? []).map(providerRequestToDraft),
+    models: (request.models ?? []).map(modelRequestToDraft),
+    mainModel: request.main_model ?? "",
+    efficientModel: request.efficient_model ?? request.main_model ?? "",
+  };
+}
+
+function providerRequestToDraft(provider: SetupProviderRequest): SetupProviderDraft {
+  const githubAuthMethod = normalizeGithubAuthMethod(provider);
+  return {
+    id: createLocalId("provider"),
+    name: provider.name,
+    kind: provider.kind,
+    apiKey:
+      provider.api_key ?? defaultProviderApiKey(provider.kind, githubAuthMethod),
+    baseUrl: provider.base_url ?? "",
+    keepAlive: provider.keep_alive ?? "",
+    codexAuthMethod: normalizeCodexAuthMethod(provider.codex_auth_method),
+    codexAuthFile: provider.codex_auth_file ?? "",
+    githubAuthMethod,
+  };
+}
+
+function modelRequestToDraft(model: SetupModelRequest): SetupModelDraft {
+  return {
+    id: createLocalId("model"),
+    name: model.name,
+    providerName: model.provider_name,
+    modelId: model.model_id,
+    contextWindowTokens: String(
+      model.context_window_tokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS,
+    ),
+    maxCompletionTokens: String(
+      model.max_completion_tokens ?? DEFAULT_MAX_COMPLETION_TOKENS,
+    ),
+    supportsVision:
+      model.supports_vision == null
+        ? "auto"
+        : model.supports_vision
+          ? "true"
+          : "false",
+    thinkingBudget: model.thinking_budget ?? "",
+    source: model,
+  };
+}
+
+function normalizeCodexAuthMethod(
+  value: string | null | undefined,
+): CodexAuthMethod {
+  switch (value) {
+    case "browser_login":
+    case "device_login":
+    case "import_local_codex":
+    case "import_auth_file":
+    case "existing_auth_file":
+      return value;
+    default:
+      return "existing_auth_file";
+  }
+}
+
+function normalizeGithubAuthMethod(
+  provider: SetupProviderRequest,
+): GithubAuthMethod {
+  switch (provider.github_auth_method) {
+    case "device_login":
+    case "manual_token":
+    case "env_token":
+      return provider.github_auth_method;
+    default:
+      return provider.api_key?.trim().startsWith("$")
+        ? "env_token"
+        : "manual_token";
+  }
 }
 
 function createDefaultProvider(
@@ -1987,6 +2234,7 @@ function providerToRequest(provider: SetupProviderDraft): SetupProviderRequest {
 
 function modelToRequest(model: SetupModelDraft): SetupModelRequest {
   return {
+    ...model.source,
     name: model.name,
     provider_name: model.providerName,
     model_id: model.modelId,

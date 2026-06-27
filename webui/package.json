@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "dev:mock": "vite --open /?mock=setup",
+    "dev:mock:settings": "vite --open /?mock=settings",
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
     "test": "bun test",

@@ -39,6 +39,7 @@ pub(super) async fn run_agent_turn_with_retry(
         context.latest_context_composition.as_ref(),
         context,
         &request,
+        limits.context_window_tokens,
     );
     context.latest_context_composition = Some(context_composition.clone());
     if let Some(tx) = tx {
@@ -144,6 +145,7 @@ fn build_context_composition_snapshot(
     previous: Option<&DashboardContextCompositionSnapshot>,
     context: &Context,
     request: &AgentTurnRequest,
+    model_context_window: usize,
 ) -> DashboardContextCompositionSnapshot {
     let mut segments = request
         .messages
@@ -208,6 +210,7 @@ fn build_context_composition_snapshot(
             .llm
             .model_name()
             .or_else(|| Some(context.config.main_model_config().model_id.clone())),
+        model_context_window: Some(model_context_window),
         total_estimated_tokens,
         total_bytes,
         message_count: request.messages.len(),

@@ -4252,6 +4252,40 @@ function AgentChatBubbles({
             expressionTransitionFrameRef.current = window.requestAnimationFrame(
               () => {
                 expressionTransitionFrameRef.current = null;
+                const latestRegistration =
+                  expressionSlotsRef.current.get(nextKey) ?? nextRegistration;
+                const latestPreviousRegistration = previousKey
+                  ? expressionSlotsRef.current.get(previousKey)
+                  : undefined;
+                const latestFromRect = latestPreviousRegistration
+                  ? agentChatExpressionRectFromElement(
+                      latestPreviousRegistration.element,
+                    )
+                  : previousSnapshot.rect;
+                const latestToRect = agentChatExpressionRectFromElement(
+                  latestRegistration.element,
+                );
+
+                if (
+                  !agentChatExpressionRectIsVisible(latestFromRect) ||
+                  !agentChatExpressionRectIsVisible(latestToRect)
+                ) {
+                  setExpressionTransition(null);
+                  setExpressionTransitionActive(false);
+                  return;
+                }
+
+                setExpressionTransition((current) =>
+                  current?.id === nextTransition.id
+                    ? {
+                        ...current,
+                        className: latestRegistration.className,
+                        fromRect: latestFromRect,
+                        status: latestRegistration.status,
+                        toRect: latestToRect,
+                      }
+                    : current,
+                );
                 setExpressionTransitionActive(true);
               },
             );

@@ -130,6 +130,7 @@ export type DashboardContextCompositionPrefixUnit = {
 export type DashboardContextCompositionSnapshot = {
   captured_at_ms: number | null;
   model: string | null;
+  model_context_window?: number | null;
   total_estimated_tokens: number;
   total_bytes: number;
   message_count: number;
@@ -620,6 +621,13 @@ export type SetupModelRequest = {
   max_completion_tokens?: number | null;
   supports_vision?: boolean | null;
   thinking_budget?: string | null;
+  temperature?: number | null;
+  rpm?: number | null;
+  request_timeout_secs?: number | null;
+  stream_idle_timeout_secs?: number | null;
+  auto_compact_token_limit?: number | null;
+  effective_context_window_percent?: number | null;
+  tool_output_max_tokens?: number | null;
 };
 
 export type SetupConfigRequest = {
@@ -640,6 +648,11 @@ export type SetupConfigRequest = {
   base_url?: string | null;
   daemon_port?: number | null;
 };
+export type SetupConfigResponse = {
+  config: SetupConfigRequest;
+  readiness: ConfigReadinessReport;
+};
+
 
 type FetchOptions = {
   signal?: AbortSignal;
@@ -903,6 +916,28 @@ export async function fetchConfigReadiness({
   return result.readiness;
 }
 
+
+export async function fetchSetupConfig({
+  signal,
+  token = getStoredDaemonToken(),
+}: FetchOptions = {}): Promise<SetupConfigResponse> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for setup config.");
+  }
+
+  const response = await fetch("/config/setup", {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  return parseJsonResponse<SetupConfigResponse>(response, "Setup config");
+}
 export async function saveSetupConfig(
   request: SetupConfigRequest,
   {

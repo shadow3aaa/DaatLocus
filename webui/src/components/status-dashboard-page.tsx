@@ -612,20 +612,51 @@ function contextCompositionCells(
     return [];
   }
 
-  return composition.segments.flatMap((segment, segmentIndex) => {
-    const unitCount = Math.ceil(
-      Math.max(0, segment.tokens) / CONTEXT_COMPOSITION_UNIT_TOKENS,
-    );
-    const label = segment.label || segment.name || segment.source || "Unknown";
+  return contextCompositionDisplaySegments(composition.segments).flatMap(
+    (segment, segmentIndex) => {
+      const unitCount = Math.ceil(
+        Math.max(0, segment.tokens) / CONTEXT_COMPOSITION_UNIT_TOKENS,
+      );
+      const label = segment.label || segment.name || segment.source || "Unknown";
 
-    return Array.from({ length: unitCount }, (_, unitIndex) => ({
-      key: `${segment.hash}-${segmentIndex}-${unitIndex}`,
-      label,
-      segment,
-      unitIndex,
-      unitCount,
-    }));
-  });
+      return Array.from({ length: unitCount }, (_, unitIndex) => ({
+        key: `${segment.hash}-${segmentIndex}-${unitIndex}`,
+        label,
+        segment,
+        unitIndex,
+        unitCount,
+      }));
+    },
+  );
+}
+
+function contextCompositionDisplaySegments(
+  segments: DashboardContextCompositionSegment[],
+) {
+  return segments
+    .map((segment, index) => ({ segment, index }))
+    .sort((left, right) => {
+      const priorityDelta =
+        contextCompositionDisplayPriority(left.segment) -
+        contextCompositionDisplayPriority(right.segment);
+
+      return priorityDelta || left.index - right.index;
+    })
+    .map(({ segment }) => segment);
+}
+
+function contextCompositionDisplayPriority(
+  segment: DashboardContextCompositionSegment,
+) {
+  if (segment.name === "tools_schema" || segment.source === "request_tools") {
+    return 0;
+  }
+
+  if (segment.name === "system_messages" || segment.source === "system") {
+    return 1;
+  }
+
+  return 2;
 }
 
 function contextCompositionCellCapacity(
@@ -633,6 +664,7 @@ function contextCompositionCellCapacity(
   composition: DashboardContextCompositionSnapshot | null,
 ) {
   const contextWindow =
+    composition?.model_context_window ??
     dashboard?.token_usage.main?.model_context_window ??
     dashboard?.token_usage.judge?.model_context_window ??
     null;

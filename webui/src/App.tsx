@@ -28,6 +28,7 @@ import {
   type DashboardSnapshot,
   type SessionInfo,
   type SetupConfigRequest,
+  type SetupConfigResponse,
   type StatusSummary,
 } from "@/lib/daemon-api";
 
@@ -82,6 +83,10 @@ export default function App() {
 
   if (shouldRenderMockStatusPage()) {
     return <MockStatusApp />;
+  }
+
+  if (shouldRenderMockSettingsPage()) {
+    return <MockSettingsApp />;
   }
 
   const [isAuthenticated, setIsAuthenticated] = useState(() =>
@@ -413,6 +418,49 @@ function MockStatusApp() {
   );
 }
 
+function MockSettingsApp() {
+  const { themeMode, toggleThemeMode } = useThemeMode();
+  useEffect(() => {
+    document.title = pageDocumentTitle("settings", null, true);
+  }, []);
+
+  async function handleMockSave(request: SetupConfigRequest) {
+    return {
+      ...MOCK_SETTINGS_SETUP_CONFIG.readiness,
+      kind: "complete" as const,
+      port: request.daemon_port ?? MOCK_SETTINGS_SETUP_CONFIG.readiness.port,
+      message: "mock settings configuration is complete",
+      recovery_note: null,
+    };
+  }
+
+  return (
+    <main className="min-h-screen bg-background text-foreground">
+      <SidebarProvider>
+        <AppSidebar
+          activePage="settings"
+          sessions={MOCK_SIDEBAR_SESSIONS}
+          selectedSessionId={MOCK_SESSION.session_id}
+          sessionError={null}
+          isCreatingSession={false}
+          deletingSessionId={null}
+          themeMode={themeMode}
+          onToggleThemeMode={toggleThemeMode}
+          onSelectSession={() => undefined}
+          onCreateSession={() => undefined}
+          onDeleteSession={async () => undefined}
+        />
+        <SidebarInset className="min-h-screen">
+          <SettingsPage
+            mockSetupConfig={MOCK_SETTINGS_SETUP_CONFIG}
+            onSaveSetupConfig={handleMockSave}
+          />
+        </SidebarInset>
+      </SidebarProvider>
+    </main>
+  );
+}
+
 function MockSetupApp() {
   const readiness = MOCK_SETUP_READINESS;
 
@@ -719,6 +767,14 @@ function shouldRenderMockStatusPage() {
   }
 
   return new URLSearchParams(window.location.search).get("mock") === "status";
+}
+
+function shouldRenderMockSettingsPage() {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return false;
+  }
+
+  return new URLSearchParams(window.location.search).get("mock") === "settings";
 }
 
 function shouldRenderMockSetupPage() {
@@ -1183,6 +1239,110 @@ const MOCK_STATUS_SUMMARY: StatusSummary = {
   ],
 };
 
+const MOCK_SETTINGS_SETUP_CONFIG: SetupConfigResponse = {
+  config: {
+    locale: "en-US",
+    persona_name: "DaatLocus",
+    persona_language: "zh-CN",
+    providers: [
+      {
+        name: "openai-main",
+        kind: "openai_compatible",
+        api_key: "$OPENAI_API_KEY",
+        base_url: "https://api.openai.example/v1",
+      },
+      {
+        name: "codex-oauth",
+        kind: "openai_codex_oauth",
+        base_url: null,
+        codex_auth_method: "existing_auth_file",
+        codex_auth_file: "C:\\Users\\13940\\.codex\\auth.json",
+      },
+      {
+        name: "local-ollama",
+        kind: "ollama",
+        api_key: null,
+        base_url: "http://127.0.0.1:11434",
+        keep_alive: "5m",
+      },
+    ],
+    models: [
+      {
+        name: "gpt-5.5",
+        provider_name: "openai-main",
+        model_id: "gpt-5.5",
+        temperature: 0.2,
+        thinking_budget: "medium",
+        rpm: 120,
+        request_timeout_secs: 180,
+        stream_idle_timeout_secs: 45,
+        context_window_tokens: 200_000,
+        effective_context_window_percent: 80,
+        auto_compact_token_limit: 144_000,
+        max_completion_tokens: 32_768,
+        tool_output_max_tokens: 40_000,
+        supports_vision: true,
+      },
+      {
+        name: "gpt-5.5-mini",
+        provider_name: "openai-main",
+        model_id: "gpt-5.5-mini",
+        temperature: 0,
+        thinking_budget: "low",
+        rpm: 240,
+        request_timeout_secs: 120,
+        stream_idle_timeout_secs: 30,
+        context_window_tokens: 128_000,
+        effective_context_window_percent: 75,
+        auto_compact_token_limit: 86_000,
+        max_completion_tokens: 16_384,
+        tool_output_max_tokens: 24_000,
+        supports_vision: false,
+      },
+      {
+        name: "codex-reasoner",
+        provider_name: "codex-oauth",
+        model_id: "codex-reasoner-2026-06",
+        temperature: 0.1,
+        thinking_budget: "high",
+        rpm: null,
+        request_timeout_secs: 240,
+        stream_idle_timeout_secs: 60,
+        context_window_tokens: 256_000,
+        effective_context_window_percent: 70,
+        auto_compact_token_limit: 160_000,
+        max_completion_tokens: 65_536,
+        tool_output_max_tokens: 60_000,
+        supports_vision: true,
+      },
+      {
+        name: "local-qwen",
+        provider_name: "local-ollama",
+        model_id: "qwen3:32b",
+        temperature: 0.4,
+        thinking_budget: null,
+        rpm: null,
+        request_timeout_secs: 90,
+        stream_idle_timeout_secs: 20,
+        context_window_tokens: 32_768,
+        effective_context_window_percent: 85,
+        auto_compact_token_limit: 25_000,
+        max_completion_tokens: 8192,
+        tool_output_max_tokens: 12_000,
+        supports_vision: false,
+      },
+    ],
+    main_model: "gpt-5.5",
+    efficient_model: "gpt-5.5-mini",
+    daemon_port: 53825,
+  },
+  readiness: {
+    ...MOCK_SETUP_READINESS,
+    kind: "complete",
+    message: "configuration is complete",
+  },
+};
+
 type MockStatusSessionSummaryConfig = {
   session: SessionInfo;
   dashboardTitle: string;
@@ -1281,6 +1441,7 @@ function mockContextCompositionSnapshot({
   return {
     captured_at_ms: MOCK_NOW_MS,
     model,
+    model_context_window: 200_000,
     total_estimated_tokens: totalEstimatedTokens,
     total_bytes: totalBytes,
     message_count: messageCount,

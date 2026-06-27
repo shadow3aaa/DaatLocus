@@ -86,7 +86,7 @@ function SidebarProvider({
             ...style,
           } as React.CSSProperties
         }
-        className={cn("flex min-h-svh w-full max-w-full overflow-x-hidden bg-background", className)}
+        className={cn("flex h-svh w-full max-w-full overflow-hidden bg-background", className)}
         {...props}
       >
         {children}
@@ -174,7 +174,10 @@ function SidebarInset({ className, ...props }: React.ComponentProps<"main">) {
   return (
     <main
       data-slot="sidebar-inset"
-      className={cn("relative flex min-w-0 flex-1 flex-col bg-background", className)}
+      className={cn(
+        "relative flex h-svh min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto bg-background",
+        className,
+      )}
       {...props}
     />
   );

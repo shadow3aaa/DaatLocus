@@ -302,6 +302,12 @@ pub struct ConfigReadinessResponse {
     pub readiness: ConfigReadinessReport,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConfigSetupResponse {
+    pub config: SetupConfigRequest,
+    pub readiness: ConfigReadinessReport,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SettingsSummaryResponse {
     pub loaded_at_ms: i64,
@@ -645,7 +651,10 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         )
         .route("/settings/summary", get(settings_summary_handler))
         .route("/config/readiness", get(config_readiness_handler))
-        .route("/config/setup", post(config_setup_handler))
+        .route(
+            "/config/setup",
+            get(config_setup_read_handler).post(config_setup_handler),
+        )
         .route("/config/probe", post(config_probe_handler))
         .route(
             "/config/discover-models",
@@ -1014,6 +1023,27 @@ async fn config_readiness_handler() -> impl IntoResponse {
         readiness: config_setup::ensure_config_readiness().await,
     })
     .into_response()
+}
+
+async fn config_setup_read_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match config_setup::read_setup_config().await {
+        Ok(config) => Json(ConfigSetupResponse {
+            config,
+            readiness: config_setup::ensure_config_readiness().await,
+        })
+        .into_response(),
+        Err(err) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": format!("{err:?}") })),
+        )
+            .into_response(),
+    }
 }
 
 async fn config_setup_handler(
