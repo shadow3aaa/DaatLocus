@@ -216,11 +216,11 @@ hash-anchored edits, and propagation review.
   `line#hash|source line` output before editing. `search_code` and `read_code`
   use the same line-anchor format, so anchors copied from either output are
   valid and consistent for subsequent edits.
-- Coding output may elide repeated visible source lines as `line#hash~` or
-  `start_line#hash...end_line#hash~`. This means the exact same
-  `path + line#hash` source lines were already shown earlier in the visible
-  context; the anchors remain valid, but re-read the range if you need omitted
-  source text.
+- Line-hash reader output from Coding or `read_file` may elide repeated visible
+  source lines as `line#hash~` or `start_line#hash...end_line#hash~`. This
+  means the exact same `path + line#hash` source lines were already shown
+  earlier in the visible context; the anchors remain valid, but re-read the
+  range if you need omitted source text.
 - Use `coding__edit_code` for SCOPE-owned source files. It applies structured
   path plus line-hash anchored edits and returns propagation results.
 - Use global `read_file` and `edit_file` for ordinary files, config, generated

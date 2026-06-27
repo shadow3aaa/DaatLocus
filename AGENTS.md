@@ -1414,7 +1414,10 @@ Rules:
 - `read_file` accepts a path plus optional `start_line` and `line_count`.
 - Paths may be workspace-relative or absolute paths allowed by the sandbox.
 - `read_file` output lines use the same `line#hash|source line` format used by
-  Coding reads.
+  Coding reads. Repeated visible `read_file` or Coding source lines may be
+  elided as `line#hash~` or `start_line#hash...end_line#hash~`; these anchors
+  remain valid and mean the full source line was already visible in current
+  context.
 - Line hashes are stale-edit guards. They are not long-term identities and
   should stay short.
 - `read_file` is the fallback for imports, top-level code, search misses,
@@ -1523,7 +1526,7 @@ The Coding tool protocol uses one source-location vocabulary:
 Do not introduce a second model-facing target identity or session-local target
 registry for search/read flows.
 
-Coding source records have two model-visible forms:
+Line-hash source records rendered by Coding and `read_file` have these model-visible forms:
 
 ```text
 line#hash|source line
@@ -1550,9 +1553,10 @@ permission-denied content. A real empty source line is still rendered as
 When assembling tool results, elide repeated code greedily and only when the
 runtime can prove the earlier full source record is still visible in the current
 assembled prompt. The visibility key is `path + line#hash`; do not match on raw
-source text alone. `search_code` hits and `read_code` lines both add full source
-records to the same visible-line set. Collapse adjacent omitted records only
-when they are in the same path and their line numbers are consecutive.
+source text alone. `search_code` hits, `read_code` lines, and `read_file` lines
+all add full source records to the same visible-line set. Collapse adjacent
+omitted records only when they are in the same path and their line numbers are
+consecutive.
 
 `search_code` is the model-visible search primitive. It replaces separate
 model-visible `grep` and `glob` tools while staying aligned with `rg`

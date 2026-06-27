@@ -928,7 +928,7 @@ pub(crate) async fn execute_agent_loop_step(
                         );
                     });
                 }
-                let model_content = super::coding_source_elision::elide_coding_tool_model_content(
+                let model_content = super::coding_source_elision::elide_tool_model_content(
                     runtime_step.agent_messages(),
                     call,
                     &result.model_content(),
