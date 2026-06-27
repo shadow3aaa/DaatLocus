@@ -10,7 +10,9 @@ const CACHE_DIR_NAME: &str = "cache";
 const ARTIFACTS_DIR_NAME: &str = "artifacts";
 const JOURNALS_DIR_NAME: &str = "journals";
 const LOGS_DIR_NAME: &str = "logs";
+const RAW_DIR_NAME: &str = "raw";
 const RUNTIME_DIR_NAME: &str = "runtime";
+const SESSIONS_DIR_NAME: &str = "sessions";
 
 #[derive(Clone, Debug)]
 pub struct DaatLocusPaths {
@@ -74,8 +76,16 @@ impl DaatLocusPaths {
         self.root.join(LOGS_DIR_NAME)
     }
 
+    pub fn raw_dir(&self) -> PathBuf {
+        self.logs_dir().join(RAW_DIR_NAME)
+    }
+
     pub fn runtime_dir(&self) -> PathBuf {
         self.root.join(RUNTIME_DIR_NAME)
+    }
+
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.root.join(SESSIONS_DIR_NAME)
     }
 
     pub fn browser_runtime_dir(&self) -> PathBuf {
@@ -159,10 +169,14 @@ impl DaatLocusPaths {
         self.logs_dir().join(file_name)
     }
 
+    pub fn raw_file(&self, file_name: &str) -> PathBuf {
+        self.raw_dir().join(file_name)
+    }
+
     pub fn for_session(session_id: &str) -> Self {
         Self {
             root: resolve_daat_locus_home_root()
-                .join("sessions")
+                .join(SESSIONS_DIR_NAME)
                 .join(session_id),
         }
     }
@@ -184,6 +198,7 @@ fn ensure_layout_sync(paths: &DaatLocusPaths) {
     let _ = std::fs::create_dir_all(paths.journal_dir());
     let _ = std::fs::create_dir_all(paths.logs_dir());
     let _ = std::fs::create_dir_all(paths.runtime_dir());
+    let _ = std::fs::create_dir_all(paths.sessions_dir());
 }
 
 fn migrate_legacy_path_sync(from: PathBuf, to: PathBuf) {

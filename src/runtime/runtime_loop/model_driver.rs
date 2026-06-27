@@ -27,7 +27,14 @@ pub(super) async fn run_agent_turn_with_retry(
     };
     let budget = estimate_agent_turn_request(&request.messages, &request.tools, limits)
         .with_calibrated_input_tokens(&context.token_estimate_baseline);
-    write_current_turn_messages_dump(&request, &budget, context.llm.model_name().as_deref()).await;
+    let session_id = context.session_id.clone();
+    write_current_turn_messages_dump(
+        session_id.as_deref(),
+        &request,
+        &budget,
+        context.llm.model_name().as_deref(),
+    )
+    .await;
     let context_composition = build_context_composition_snapshot(
         context.latest_context_composition.as_ref(),
         context,
@@ -52,7 +59,7 @@ pub(super) async fn run_agent_turn_with_retry(
         let turn_result = context.llm.run_agent_turn(context, request.clone()).await;
         match turn_result {
             Ok(response) => {
-                write_current_turn_response_dump(&response, attempt).await;
+                write_current_turn_response_dump(session_id.as_deref(), &response, attempt).await;
                 if let Some(info) = context.llm.token_usage_info() {
                     let observed_input =
                         usize::try_from(info.last_token_usage.input_tokens.max(0)).unwrap_or(0);
@@ -70,7 +77,13 @@ pub(super) async fn run_agent_turn_with_retry(
             Err(err) => {
                 let will_retry = should_retry_agent_turn_error(&err);
                 let error_detail = plain_report_text(&err);
-                write_current_turn_response_error_dump(&error_detail, attempt, will_retry).await;
+                write_current_turn_response_error_dump(
+                    session_id.as_deref(),
+                    &error_detail,
+                    attempt,
+                    will_retry,
+                )
+                .await;
                 if !will_retry {
                     clear_runtime_status(tx);
                     return Err(err);

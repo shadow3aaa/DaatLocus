@@ -351,7 +351,7 @@ enum DaemonTokenTarget {
 }
 
 pub(crate) async fn async_main(cli: Cli) -> Result<()> {
-    let _log_guard = init_logging().await;
+    let _log_guard = init_logging(cli.session_id.as_deref()).await;
 
     match cli.command.as_ref() {
         Some(DaatLocusCommand::WorkspaceAppWorker {

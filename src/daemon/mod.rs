@@ -92,10 +92,8 @@ const SESSION_PROCESS_TERM_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_PROCESS_KILL_TIMEOUT: Duration = Duration::from_secs(5);
 const SESSION_DIRECTORY_REMOVE_ATTEMPTS: usize = 5;
 const SESSION_DIRECTORY_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(100);
-const DAEMON_MAIN_LOG: &str = "daat-locus.log";
-const DAEMON_STDERR_LOG: &str = "daemon-stderr.log";
-const SESSION_STDIO_LOG_PREFIX: &str = "session-";
-const SESSION_STDIO_LOG_SUFFIX: &str = "-stdio.log";
+const DAEMON_MAIN_LOG: &str = crate::logging::DAEMON_LOG_FILE_NAME;
+const SESSION_LOG: &str = crate::logging::SESSION_LOG_FILE_NAME;
 pub const DAEMONIZE_ENV: &str = "DAAT_LOCUS_DAEMONIZE";
 const MAX_COMMAND_ATTACHMENTS: usize = 4;
 const MAX_COMMAND_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
@@ -2170,69 +2168,50 @@ fn signal_process(pid: u32, signal: Signal) -> bool {
         .unwrap_or(false)
 }
 
-fn session_stdio_log_file_name(session_id: &session::SessionId) -> String {
-    let safe_session_id = session_id
-        .as_str()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("{SESSION_STDIO_LOG_PREFIX}{safe_session_id}{SESSION_STDIO_LOG_SUFFIX}")
-}
-
-async fn session_stdio_log_path(session_id: &session::SessionId) -> PathBuf {
-    daat_locus_paths()
-        .await
-        .logs_file(&session_stdio_log_file_name(session_id))
-}
-
-async fn open_session_stdio_log(
-    session_id: &session::SessionId,
+fn open_stdio_log_pair(
+    path: PathBuf,
+    marker: &str,
 ) -> Result<(PathBuf, std::fs::File, std::fs::File)> {
-    let path = session_stdio_log_path(session_id).await;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            miette!(
-                "create session stdio log dir {} failed: {err}",
-                parent.display()
-            )
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|err| miette!("create log dir {} failed: {err}", parent.display()))?;
     }
     {
-        let mut marker = std::fs::OpenOptions::new()
+        let mut marker_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-            .map_err(|err| miette!("open session stdio log {} failed: {err}", path.display()))?;
+            .map_err(|err| miette!("open log {} failed: {err}", path.display()))?;
         writeln!(
-            marker,
-            "\n--- session `{}` starting at {} ---",
-            session_id,
+            marker_file,
+            "\n--- {marker} at {} ---",
             chrono::Utc::now().to_rfc3339()
         )
-        .map_err(|err| {
-            miette!(
-                "write session stdio log marker {} failed: {err}",
-                path.display()
-            )
-        })?;
+        .map_err(|err| miette!("write log marker {} failed: {err}", path.display()))?;
     }
     let stdout = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .map_err(|err| miette!("open session stdout log {} failed: {err}", path.display()))?;
+        .map_err(|err| miette!("open stdout log {} failed: {err}", path.display()))?;
     let stderr = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .map_err(|err| miette!("open session stderr log {} failed: {err}", path.display()))?;
+        .map_err(|err| miette!("open stderr log {} failed: {err}", path.display()))?;
     Ok((path, stdout, stderr))
+}
+
+async fn session_log_path(session_id: &session::SessionId) -> PathBuf {
+    session::session_state_paths(session_id).logs_file(SESSION_LOG)
+}
+
+async fn open_session_log(
+    session_id: &session::SessionId,
+) -> Result<(PathBuf, std::fs::File, std::fs::File)> {
+    let path = session_log_path(session_id).await;
+    let marker = format!("session `{}` starting", session_id);
+    open_stdio_log_pair(path, &marker)
 }
 
 fn spawn_session_exit_watcher(
@@ -2241,33 +2220,33 @@ fn spawn_session_exit_watcher(
     session_id: session::SessionId,
     pid: u32,
     mut child: std::process::Child,
-    stdio_log_path: PathBuf,
+    log_path: PathBuf,
 ) {
     tokio::spawn(async move {
         let wait_result = tokio::task::spawn_blocking(move || child.wait()).await;
         match wait_result {
             Ok(Ok(status)) if status.success() => {
                 tracing::info!(
-                    "session `{session_id}` pid {pid} exited successfully with status {status}; stdio_log={}",
-                    stdio_log_path.display()
+                    "session `{session_id}` pid {pid} exited successfully with status {status}; log={}",
+                    log_path.display()
                 );
             }
             Ok(Ok(status)) => {
                 tracing::warn!(
-                    "session `{session_id}` pid {pid} exited with status {status}; stdio_log={}",
-                    stdio_log_path.display()
+                    "session `{session_id}` pid {pid} exited with status {status}; log={}",
+                    log_path.display()
                 );
             }
             Ok(Err(err)) => {
                 tracing::warn!(
-                    "failed to wait for session `{session_id}` pid {pid}: {err}; stdio_log={}",
-                    stdio_log_path.display()
+                    "failed to wait for session `{session_id}` pid {pid}: {err}; log={}",
+                    log_path.display()
                 );
             }
             Err(err) => {
                 tracing::warn!(
-                    "session `{session_id}` pid {pid} wait task failed: {err}; stdio_log={}",
-                    stdio_log_path.display()
+                    "session `{session_id}` pid {pid} wait task failed: {err}; log={}",
+                    log_path.display()
                 );
             }
         }
@@ -2296,7 +2275,7 @@ async fn spawn_session_process(
     let ipc_token = session::generate_ipc_token();
     let binary = std::env::current_exe()
         .map_err(|err| miette!("resolve current executable failed: {err}"))?;
-    let (stdio_log_path, stdout_log, stderr_log) = open_session_stdio_log(&session_id).await?;
+    let (session_log_path, stdout_log, stderr_log) = open_session_log(&session_id).await?;
     let mut command = std::process::Command::new(binary);
     command
         .arg("--session-id")
@@ -2319,8 +2298,8 @@ async fn spawn_session_process(
         .map_err(|err| miette!("spawn session process failed: {err}"))?;
     let pid = child.id();
     tracing::info!(
-        "spawned session `{session_id}` pid {pid}; stdio_log={}",
-        stdio_log_path.display()
+        "spawned session `{session_id}` pid {pid}; log={}",
+        session_log_path.display()
     );
     session_tokens
         .write()
@@ -2335,7 +2314,7 @@ async fn spawn_session_process(
         session_id.clone(),
         pid,
         child,
-        stdio_log_path,
+        session_log_path,
     );
 
     let client = session_ipc::SessionIpcClient::new(session_id.clone(), ipc_name, ipc_token)
@@ -3492,23 +3471,19 @@ pub async fn spawn_detached_daemon_process() -> Result<()> {
         crate::daemon_tray::should_attempt_daemon_tray(),
     );
 
-    // Redirect stderr to the log file to simplify daemon startup failure diagnosis.
-    // stdout is still discarded because emit_startup_progress println! output is
-    // already recorded through tracing.
-    let log_path = daemon_stderr_log_path().await;
-    let stderr_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&log_path)
-        .map_err(|err| miette!("open daemon stderr log {}: {err}", log_path.display()))?;
+    let (log_path, stdout_log, stderr_log) =
+        open_stdio_log_pair(daemon_main_log_path().await, "daemon process starting")?;
 
     let mut command = std::process::Command::new(current_exe);
     configure_detached_daemon_command(&mut command, startup_mode);
-    command.stderr(stderr_file);
+    command.stdout(stdout_log).stderr(stderr_log);
     command
         .spawn()
         .map_err(|err| miette!("spawn daemon process failed: {err}"))?;
+    tracing::info!(
+        "spawned detached daemon process; log={}",
+        log_path.display()
+    );
     Ok(())
 }
 
@@ -3532,10 +3507,7 @@ fn configure_detached_daemon_command(
     command: &mut std::process::Command,
     startup_mode: DetachedDaemonStartupMode,
 ) {
-    command
-        .arg("serve")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null());
+    command.arg("serve").stdin(Stdio::null());
 
     match startup_mode {
         DetachedDaemonStartupMode::WithTray => {
@@ -3573,30 +3545,15 @@ fn apply_detached_daemon_creation_flags(
 ) {
 }
 
-async fn daemon_stderr_log_path() -> PathBuf {
-    daat_locus_paths().await.logs_file(DAEMON_STDERR_LOG)
-}
-
 async fn daemon_main_log_path() -> PathBuf {
     daat_locus_paths().await.logs_file(DAEMON_MAIN_LOG)
 }
 
 async fn daemon_startup_log_tail_suffix() -> String {
-    let mut sections = Vec::new();
-    if let Some(section) = log_tail_section(daemon_main_log_path().await, "recent daemon log").await
-    {
-        sections.push(section);
-    }
-    if let Some(section) =
-        log_tail_section(daemon_stderr_log_path().await, "recent daemon stderr").await
-    {
-        sections.push(section);
-    }
-    if sections.is_empty() {
-        String::new()
-    } else {
-        format!("\n\n{}", sections.join("\n\n"))
-    }
+    log_tail_section(daemon_main_log_path().await, "recent daemon log")
+        .await
+        .map(|section| format!("\n\n{section}"))
+        .unwrap_or_default()
 }
 
 async fn log_tail_section(path: PathBuf, title: &str) -> Option<String> {
@@ -3822,14 +3779,18 @@ mod tests {
     }
 
     #[test]
-    fn session_stdio_log_file_name_sanitizes_session_id() {
-        let session_id = session::SessionId::from_string("../session:test".to_string())
-            .expect("non-empty session id");
+    fn open_stdio_log_pair_writes_start_marker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("session.log");
 
-        assert_eq!(
-            session_stdio_log_file_name(&session_id),
-            "session-___session_test-stdio.log"
-        );
+        let (returned_path, stdout_log, stderr_log) =
+            open_stdio_log_pair(path.clone(), "session `abc` starting").expect("open log pair");
+        drop(stdout_log);
+        drop(stderr_log);
+
+        assert_eq!(returned_path, path);
+        let contents = std::fs::read_to_string(&returned_path).expect("read log");
+        assert!(contents.contains("--- session `abc` starting at "));
     }
 
     #[tokio::test]
