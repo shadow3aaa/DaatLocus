@@ -1174,39 +1174,6 @@ function TokenUsageTooltip({
           />
         </div>
       </div>
-      {datum.models.length ? (
-        <div className="grid gap-2 border-t pt-2">
-          {datum.models.map((model) => (
-            <div key={model.key} className="grid gap-1">
-              <div className="truncate font-medium text-foreground">
-                {model.label}
-              </div>
-              <div className="grid gap-1 text-muted-foreground">
-                <TokenUsageTooltipRow
-                  label="Total"
-                  value={model.usage.total_tokens}
-                />
-                <TokenUsageTooltipRow
-                  label="Input"
-                  value={model.usage.input_tokens}
-                />
-                <TokenUsageTooltipRow
-                  label="Cached"
-                  value={model.usage.cached_input_tokens}
-                />
-                <TokenUsageTooltipRow
-                  label="Output"
-                  value={model.usage.output_tokens}
-                />
-                <TokenUsageTooltipRow
-                  label="Reasoning"
-                  value={model.usage.reasoning_output_tokens}
-                />
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : null}
     </div>
   );
 }
