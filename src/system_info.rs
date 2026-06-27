@@ -25,7 +25,6 @@ impl SystemSampler {
     }
 
     fn refresh(&mut self) {
-        self.sysinfo.refresh_cpu_all();
         self.sysinfo.refresh_memory();
         self.networks.refresh(true);
         self.last_refresh = time::Instant::now();
@@ -34,7 +33,6 @@ impl SystemSampler {
     fn sample(&mut self) -> SystemInfo {
         let elapsed = self.last_refresh.elapsed();
         let elapsed_secs = elapsed.as_secs_f64().max(0.001); // Avoid division by zero
-        let cpu_usage = self.sysinfo.global_cpu_usage();
         let used_memory = self.sysinfo.used_memory() / 1024 / 1024; // Convert to MB
         let total_memory = self.sysinfo.total_memory() / 1024 / 1024; // Convert to MB
         let memory_usage = used_memory as f32 / total_memory as f32 * 100.0; // Percentage
@@ -54,7 +52,6 @@ impl SystemSampler {
         self.refresh();
 
         SystemInfo {
-            cpu_usage,
             used_memory,
             total_memory,
             memory_usage,
@@ -65,8 +62,6 @@ impl SystemSampler {
 }
 
 pub struct SystemInfo {
-    /// Percentage of CPU usage
-    cpu_usage: f32,
     /// Mb of Memory usage
     used_memory: u64,
     /// Mb of total Memory
@@ -87,7 +82,6 @@ impl SystemInfo {
 
 impl Display for SystemInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "CPU Usage: {:.2}%", self.cpu_usage)?;
         writeln!(
             f,
             "Memory Usage: {:.2}% ({} MB / {} MB)",
