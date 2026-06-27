@@ -24,9 +24,11 @@ import {
   fetchConfigReadiness,
   fetchSessions,
   type ConfigReadinessReport,
+  type DashboardContextCompositionSnapshot,
   type DashboardSnapshot,
   type SessionInfo,
   type SetupConfigRequest,
+  type StatusSummary,
 } from "@/lib/daemon-api";
 
 type AppPage = "agent" | "status" | "settings" | "logs";
@@ -76,6 +78,10 @@ export default function App() {
 
   if (shouldRenderMockAgentPage()) {
     return <MockAgentApp />;
+  }
+
+  if (shouldRenderMockStatusPage()) {
+    return <MockStatusApp />;
   }
 
   const [isAuthenticated, setIsAuthenticated] = useState(() =>
@@ -371,6 +377,36 @@ function MockAgentApp() {
             sessionId={MOCK_SESSION.session_id}
             mockSnapshot={MOCK_DASHBOARD_SNAPSHOT}
           />
+        </SidebarInset>
+      </SidebarProvider>
+    </main>
+  );
+}
+
+function MockStatusApp() {
+  const { themeMode, toggleThemeMode } = useThemeMode();
+  useEffect(() => {
+    document.title = pageDocumentTitle("status", null, true);
+  }, []);
+
+  return (
+    <main className="min-h-screen bg-background text-foreground">
+      <SidebarProvider>
+        <AppSidebar
+          activePage="status"
+          sessions={MOCK_SIDEBAR_SESSIONS}
+          selectedSessionId={MOCK_SESSION.session_id}
+          sessionError={null}
+          isCreatingSession={false}
+          deletingSessionId={null}
+          themeMode={themeMode}
+          onToggleThemeMode={toggleThemeMode}
+          onSelectSession={() => undefined}
+          onCreateSession={() => undefined}
+          onDeleteSession={async () => undefined}
+        />
+        <SidebarInset className="min-h-screen">
+          <StatusPage mockSummary={MOCK_STATUS_SUMMARY} />
         </SidebarInset>
       </SidebarProvider>
     </main>
@@ -675,6 +711,14 @@ function shouldRenderMockAgentPage() {
   }
 
   return new URLSearchParams(window.location.search).get("mock") === "agent";
+}
+
+function shouldRenderMockStatusPage() {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return false;
+  }
+
+  return new URLSearchParams(window.location.search).get("mock") === "status";
 }
 
 function shouldRenderMockSetupPage() {
@@ -990,3 +1034,353 @@ const MOCK_DASHBOARD_SNAPSHOT: DashboardSnapshot = {
   footer_context: "gpt-5.5 · Coding · 42k/128k used",
   footer_estimated_input_tokens: 42_000,
 };
+
+const MOCK_STATUS_SUMMARY: StatusSummary = {
+  loaded_at_ms: MOCK_NOW_MS,
+  daemon: {
+    pid: 53825,
+    started_at_ms: MOCK_NOW_MS - 6 * 60 * 60 * 1000,
+    version: "mock-webui",
+    bind_host: "127.0.0.1",
+    port: 53825,
+    state: "ready",
+    connected_clients: 2,
+  },
+  pending_access_requests: [],
+  sessions: [
+    mockStatusSessionSummary({
+      session: {
+        ...MOCK_SESSION,
+        title: "Mock token usage history",
+        last_seen_at_ms: MOCK_NOW_MS,
+      },
+      dashboardTitle: "Status page mock session",
+      runtimeStatus: "Ready",
+      runtimeDetail: "Mock status data",
+      mainModel: "gpt-5.5",
+      judgeModel: "gpt-5.5-mini",
+      mainTokenUsage: mockTokenUsageInfo([
+        mockDailyTokenUsage(6, 11_600_000, 8_900_000, 84_000, 35_000),
+        mockDailyTokenUsage(5, 17_300_000, 13_100_000, 96_000, 42_000),
+        mockDailyTokenUsage(4, 13_800_000, 9_200_000, 78_000, 28_000),
+        mockDailyTokenUsage(3, 24_500_000, 18_600_000, 132_000, 64_000),
+        mockDailyTokenUsage(2, 18_200_000, 13_900_000, 101_000, 49_000),
+        mockDailyTokenUsage(1, 32_400_000, 25_700_000, 165_000, 83_000),
+        mockDailyTokenUsage(0, 41_600_000, 38_900_000, 204_800, 129_600),
+      ]),
+      judgeTokenUsage: mockTokenUsageInfo([
+        mockDailyTokenUsage(6, 1_200_000, 430_000, 21_000, 0),
+        mockDailyTokenUsage(5, 1_680_000, 510_000, 24_000, 0),
+        mockDailyTokenUsage(4, 940_000, 280_000, 18_000, 0),
+        mockDailyTokenUsage(3, 2_180_000, 790_000, 31_000, 0),
+        mockDailyTokenUsage(2, 1_540_000, 620_000, 22_000, 0),
+        mockDailyTokenUsage(1, 2_760_000, 1_080_000, 35_000, 0),
+        mockDailyTokenUsage(0, 2_920_000, 1_420_000, 38_000, 0),
+      ]),
+      contextComposition: mockContextCompositionSnapshot({
+        model: "gpt-5.5",
+        messageCount: 42,
+        toolCount: 18,
+        stablePrefixTokens: 26_000,
+        changedPrefixTokens: 8_000,
+        newSuffixTokens: 18_000,
+        segments: [
+          mockContextSegment("system_messages", "System messages", "system", 8_400, "prefix"),
+          mockContextSegment("afterclaim_context", "Afterclaim context", "user", 4_800, "history"),
+          mockContextSegment("preturn_context", "Preturn context", "user", 9_600, "history"),
+          mockContextSegment("conversation_history", "Conversation history", "user", 12_300, "history"),
+          mockContextSegment("assistant_messages", "Assistant messages", "assistant", 7_400, "history"),
+          mockContextSegment("tool_messages", "Tool outputs", "tool", 5_700, "history"),
+          mockContextSegment("tools_schema", "Tools schema", "request_tools", 13_100, "tools"),
+        ],
+      }),
+    }),
+    mockStatusSessionSummary({
+      session: {
+        session_id: "mock-status-session-compact",
+        scope: { kind: "project", project_dir: MOCK_PROJECT_DIR },
+        project_dir: MOCK_PROJECT_DIR,
+        title: "Mock compact coding pass",
+        started_at_ms: MOCK_NOW_MS - 6 * 24 * 60 * 60 * 1000,
+        last_seen_at_ms: MOCK_NOW_MS - 40 * 60 * 1000,
+      },
+      dashboardTitle: "Mock compact coding pass",
+      runtimeStatus: "Working",
+      runtimeDetail: "Context preview",
+      mainModel: "gpt-5.5",
+      judgeModel: "gpt-5.5-mini",
+      mainTokenUsage: mockTokenUsageInfo([
+        mockDailyTokenUsage(2, 9_400_000, 6_200_000, 58_000, 21_000),
+        mockDailyTokenUsage(1, 15_800_000, 10_900_000, 74_000, 32_000),
+        mockDailyTokenUsage(0, 19_600_000, 14_400_000, 92_000, 41_000),
+      ]),
+      judgeTokenUsage: mockTokenUsageInfo([
+        mockDailyTokenUsage(2, 640_000, 180_000, 14_000, 0),
+        mockDailyTokenUsage(1, 920_000, 260_000, 18_000, 0),
+        mockDailyTokenUsage(0, 1_180_000, 340_000, 22_000, 0),
+      ]),
+      contextComposition: mockContextCompositionSnapshot({
+        model: "gpt-5.5",
+        messageCount: 24,
+        toolCount: 11,
+        stablePrefixTokens: 18_000,
+        changedPrefixTokens: 3_000,
+        newSuffixTokens: 9_000,
+        segments: [
+          mockContextSegment("system_messages", "System messages", "system", 8_000, "prefix"),
+          mockContextSegment("preturn_context", "Preturn context", "user", 5_400, "history"),
+          mockContextSegment("conversation_history", "Conversation history", "user", 7_200, "history"),
+          mockContextSegment("tool_messages", "Tool outputs", "tool", 2_900, "history"),
+          mockContextSegment("tools_schema", "Tools schema", "request_tools", 6_500, "tools"),
+        ],
+      }),
+    }),
+    mockStatusSessionSummary({
+      session: {
+        session_id: "mock-status-session-large-context",
+        scope: { kind: "project", project_dir: MOCK_PROJECT_DIR },
+        project_dir: MOCK_PROJECT_DIR,
+        title: "Mock long context review",
+        started_at_ms: MOCK_NOW_MS - 11 * 24 * 60 * 60 * 1000,
+        last_seen_at_ms: MOCK_NOW_MS - 2 * 60 * 60 * 1000,
+      },
+      dashboardTitle: "Mock long context review",
+      runtimeStatus: "Ready",
+      runtimeDetail: "Large request assembled",
+      mainModel: "gpt-5.5",
+      judgeModel: "gpt-5.5-mini",
+      mainTokenUsage: mockTokenUsageInfo([
+        mockDailyTokenUsage(3, 22_100_000, 16_000_000, 104_000, 52_000),
+        mockDailyTokenUsage(2, 28_800_000, 20_200_000, 136_000, 68_000),
+        mockDailyTokenUsage(1, 34_500_000, 27_900_000, 156_000, 71_000),
+        mockDailyTokenUsage(0, 49_200_000, 39_600_000, 214_000, 118_000),
+      ]),
+      judgeTokenUsage: mockTokenUsageInfo([
+        mockDailyTokenUsage(3, 1_100_000, 310_000, 22_000, 0),
+        mockDailyTokenUsage(2, 1_480_000, 390_000, 29_000, 0),
+        mockDailyTokenUsage(1, 2_140_000, 720_000, 34_000, 0),
+        mockDailyTokenUsage(0, 2_680_000, 1_100_000, 39_000, 0),
+      ]),
+      contextComposition: mockContextCompositionSnapshot({
+        model: "gpt-5.5",
+        messageCount: 76,
+        toolCount: 25,
+        stablePrefixTokens: 41_000,
+        changedPrefixTokens: 14_000,
+        newSuffixTokens: 36_000,
+        segments: [
+          mockContextSegment("system_messages", "System messages", "system", 9_200, "prefix"),
+          mockContextSegment("afterclaim_context", "Afterclaim context", "user", 7_600, "history"),
+          mockContextSegment("preturn_context", "Preturn context", "user", 16_800, "history"),
+          mockContextSegment("summarized_history", "Summarized history", "user", 18_400, "history"),
+          mockContextSegment("conversation_history", "Conversation history", "user", 22_900, "history"),
+          mockContextSegment("assistant_messages", "Assistant messages", "assistant", 11_700, "history"),
+          mockContextSegment("tool_messages", "Tool outputs", "tool", 13_300, "history"),
+          mockContextSegment("tools_schema", "Tools schema", "request_tools", 19_500, "tools"),
+        ],
+      }),
+    }),
+  ],
+};
+
+type MockStatusSessionSummaryConfig = {
+  session: SessionInfo;
+  dashboardTitle: string;
+  runtimeStatus: string;
+  runtimeDetail: string;
+  mainModel: string;
+  judgeModel: string;
+  mainTokenUsage: ReturnType<typeof mockTokenUsageInfo>;
+  judgeTokenUsage: ReturnType<typeof mockTokenUsageInfo>;
+  contextComposition: DashboardContextCompositionSnapshot;
+};
+
+type MockContextCompositionConfig = {
+  model: string;
+  messageCount: number;
+  toolCount: number;
+  stablePrefixTokens: number;
+  changedPrefixTokens: number;
+  newSuffixTokens: number;
+  segments: DashboardContextCompositionSnapshot["segments"];
+};
+
+function mockStatusSessionSummary({
+  session,
+  dashboardTitle,
+  runtimeStatus,
+  runtimeDetail,
+  mainModel,
+  judgeModel,
+  mainTokenUsage,
+  judgeTokenUsage,
+  contextComposition,
+}: MockStatusSessionSummaryConfig): StatusSummary["sessions"][number] {
+  return {
+    session,
+    runtime_status: {
+      ready: true,
+      pending_work_count: 0,
+      active_runtime_turn: runtimeStatus === "Working",
+    },
+    dashboard: {
+      agent_name: "Daat Locus",
+      session_title: {
+        title: dashboardTitle,
+        generated: false,
+        updated_at_ms: MOCK_NOW_MS,
+      },
+      last_cycle_elapsed_ms: 1180,
+      runtime_status: runtimeStatus,
+      runtime_status_level: "info",
+      runtime_activity: {
+        status: runtimeStatus === "Working" ? "running" : "idle",
+        label: runtimeStatus,
+        detail: runtimeDetail,
+        active_runtime_turn: runtimeStatus === "Working",
+        active_runtime_phase: runtimeStatus === "Working" ? "mock" : null,
+      },
+      current_plan_step: null,
+      token_usage: {
+        main_model: mainModel,
+        judge_model: judgeModel,
+        efficient_model: judgeModel,
+        main: mainTokenUsage,
+        judge: judgeTokenUsage,
+      },
+      primitive_optimization: MOCK_DASHBOARD_SNAPSHOT.primitive_optimization!,
+      runtime_optimization: MOCK_DASHBOARD_SNAPSHOT.runtime_optimization!,
+      context_composition: contextComposition,
+    },
+    error: null,
+  };
+}
+
+function mockContextCompositionSnapshot({
+  model,
+  messageCount,
+  toolCount,
+  stablePrefixTokens,
+  changedPrefixTokens,
+  newSuffixTokens,
+  segments,
+}: MockContextCompositionConfig): DashboardContextCompositionSnapshot {
+  const totalEstimatedTokens = segments.reduce(
+    (total, segment) => total + segment.tokens,
+    0,
+  );
+  const totalBytes = segments.reduce((total, segment) => total + segment.bytes, 0);
+  const segmentsWithPercent = segments.map((segment) => ({
+    ...segment,
+    percent:
+      totalEstimatedTokens > 0
+        ? (segment.tokens / totalEstimatedTokens) * 100
+        : 0,
+  }));
+
+  return {
+    captured_at_ms: MOCK_NOW_MS,
+    model,
+    total_estimated_tokens: totalEstimatedTokens,
+    total_bytes: totalBytes,
+    message_count: messageCount,
+    tool_count: toolCount,
+    tools_schema_tokens: segments
+      .filter((segment) => segment.name === "tools_schema")
+      .reduce((total, segment) => total + segment.tokens, 0),
+    stable_prefix_tokens: stablePrefixTokens,
+    new_suffix_tokens: newSuffixTokens,
+    changed_prefix_tokens: changedPrefixTokens,
+    previous_common_prefix_tokens: stablePrefixTokens,
+    previous_request_hash: "mock-previous-context",
+    current_request_hash: "mock-current-context",
+    segments: segmentsWithPercent,
+    prefix_units: segments.map((segment) => ({
+      hash: segment.hash,
+      tokens: segment.tokens,
+    })),
+  };
+}
+
+function mockContextSegment(
+  name: string,
+  label: string,
+  source: string,
+  tokens: number,
+  cacheRole: string,
+): DashboardContextCompositionSnapshot["segments"][number] {
+  return {
+    name,
+    label,
+    source,
+    tokens,
+    bytes: tokens * 4,
+    percent: 0,
+    hash: `${name}-${tokens}-${cacheRole}`,
+    cache_role: cacheRole,
+  };
+}
+
+function mockDailyTokenUsage(
+  daysAgo: number,
+  inputTokens: number,
+  cachedInputTokens: number,
+  outputTokens: number,
+  reasoningOutputTokens: number,
+) {
+  return {
+    date: mockDateDaysAgo(daysAgo),
+    usage: mockTokenUsage(
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+      reasoningOutputTokens,
+    ),
+  };
+}
+
+function mockTokenUsageInfo(dailyTokenUsage: ReturnType<typeof mockDailyTokenUsage>[]) {
+  const totalTokenUsage = dailyTokenUsage.reduce(
+    (total, day) => addMockTokenUsage(total, day.usage),
+    mockTokenUsage(0, 0, 0, 0),
+  );
+
+  return {
+    total_token_usage: totalTokenUsage,
+    last_token_usage: dailyTokenUsage.at(-1)?.usage ?? mockTokenUsage(0, 0, 0, 0),
+    model_context_window: 200_000,
+    daily_token_usage: dailyTokenUsage,
+  };
+}
+
+function addMockTokenUsage(
+  left: ReturnType<typeof mockTokenUsage>,
+  right: ReturnType<typeof mockTokenUsage>,
+) {
+  return mockTokenUsage(
+    left.input_tokens + right.input_tokens,
+    left.cached_input_tokens + right.cached_input_tokens,
+    left.output_tokens + right.output_tokens,
+    left.reasoning_output_tokens + right.reasoning_output_tokens,
+  );
+}
+
+function mockTokenUsage(
+  inputTokens: number,
+  cachedInputTokens: number,
+  outputTokens: number,
+  reasoningOutputTokens: number,
+) {
+  return {
+    input_tokens: inputTokens,
+    cached_input_tokens: cachedInputTokens,
+    output_tokens: outputTokens,
+    reasoning_output_tokens: reasoningOutputTokens,
+    total_tokens: inputTokens + outputTokens + reasoningOutputTokens,
+  };
+}
+
+function mockDateDaysAgo(daysAgo: number) {
+  const dayMs = 24 * 60 * 60 * 1000;
+  return new Date(MOCK_NOW_MS - daysAgo * dayMs).toISOString().slice(0, 10);
+}

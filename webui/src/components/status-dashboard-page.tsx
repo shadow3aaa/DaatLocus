@@ -6,15 +6,13 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-
 import {
-  ChevronRight,
+  ChevronDownIcon,
   GripVerticalIcon,
   TriangleAlertIcon,
 } from "lucide-react";
 import { Bar, BarChart, XAxis, YAxis } from "recharts";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -25,6 +23,14 @@ import {
 } from "@/components/ui/card";
 import { ChartContainer, ChartTooltip } from "@/components/ui/chart";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Empty,
   EmptyDescription,
   EmptyHeader,
@@ -32,38 +38,32 @@ import {
 } from "@/components/ui/empty";
 import {
   fetchStatusSummary,
+  type DashboardContextCompositionSegment,
+  type DashboardContextCompositionSnapshot,
   type SessionInfo,
   type SessionStatusDashboard,
-  type StatusSessionSummary,
   type StatusSummary,
 } from "@/lib/daemon-api";
 import {
-  CONTEXT_COMPOSITION_CHART_CONFIG,
-  RUNTIME_OPTIMIZATION_CHART_CONFIG,
   TOKEN_USAGE_CHART_CONFIG,
-  PRIMITIVE_OPTIMIZATION_CHART_CONFIG,
-  contextCompositionCardData,
   dailyTokenUsageChartDataFromSources,
   formatCompactNumber,
-  formatPercent,
   formatPercentAxisTick,
-  runtimeOptimizationProgressData,
-  primitiveOptimizationProgressData,
-  type ContextCompositionPrefixSummaryDatum,
-  type DailyTokenUsageSource,
   type DailyTokenUsageChartDatum,
+  type DailyTokenUsageSource,
 } from "@/lib/dashboard-view-model";
 import { cn } from "@/lib/utils";
 
 const STATUS_CARD_ORDER_STORAGE_KEY = "daat-locus.status.card-order";
 const STATUS_SUMMARY_REFRESH_MS = 5000;
+const CONTEXT_COMPOSITION_UNIT_TOKENS = 1000;
 const DEFAULT_STATUS_CARD_ORDER = [
-  "sessions",
-  "runtime-optimization",
   "context-composition",
   "daily-token-usage",
-  "primitive-optimization",
 ] as const;
+
+const CONTEXT_COMPOSITION_GRID_LABEL =
+  "Context composition heatmap. Each cell represents one thousand tokens.";
 
 type StatusCardId = (typeof DEFAULT_STATUS_CARD_ORDER)[number];
 type StatusCardPlacement = "before" | "after";
@@ -87,52 +87,40 @@ type TokenUsageTooltipPayloadItem = {
   payload?: DailyTokenUsageChartDatum;
 };
 
-type ContextPrefixTooltipPayloadItem = {
-  payload?: ContextCompositionPrefixSummaryDatum;
-};
-
-type OptimizationChartConfig = Record<string, { color: string }>;
-
-type OptimizationProgressDatum = {
-  key: string;
-  label: string;
-  value: number;
-  colorKey: string;
-  detail: string;
-};
-
 type SessionDashboardEntry = {
   session: SessionInfo;
   dashboard: SessionStatusDashboard;
 };
 
-type SessionStatusTone = "attention" | "active" | "ready" | "available";
+type ContextCompositionCell = {
+  key: string;
+  label: string;
+  segment: DashboardContextCompositionSegment;
+  unitIndex: number;
+  unitCount: number;
+};
+
+type ContextCompositionCapacitySource = Pick<
+  SessionStatusDashboard,
+  "token_usage"
+>;
 
 const STATUS_CARD_DEFINITIONS: Record<StatusCardId, StatusCardDefinition> = {
-  sessions: {
-    label: "Sessions",
-    render: (props) => <SessionsCard {...props} />,
-  },
-  "runtime-optimization": {
-    label: "Runtime Optimization",
-    render: (props) => <RuntimeOptimizationCard {...props} />,
-  },
   "context-composition": {
-    label: "Model Context Composition",
-    render: (props) => <ModelContextCompositionCard {...props} />,
+    label: "Context Composition",
+    render: (props) => <ContextCompositionCard {...props} />,
   },
   "daily-token-usage": {
     label: "Token Usage",
     render: (props) => <DailyTokenUsageCard {...props} />,
   },
-  "primitive-optimization": {
-    label: "Primitive Optimization",
-    render: (props) => <PrimitiveOptimizationCard {...props} />,
-  },
+};
+type StatusPageProps = {
+  mockSummary?: StatusSummary;
 };
 
-export function StatusPage() {
-  const { summary, loadError } = useStatusSummary();
+export function StatusPage({ mockSummary }: StatusPageProps = {}) {
+  const { summary, loadError } = useStatusSummary(mockSummary);
   const [cardOrder, setCardOrder] = useState<StatusCardId[]>(
     readStoredStatusCardOrder,
   );
@@ -143,6 +131,10 @@ export function StatusPage() {
   const cardColumns = useMemo(() => statusCardColumns(cardOrder), [cardOrder]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
     try {
       window.localStorage.setItem(
         STATUS_CARD_ORDER_STORAGE_KEY,
@@ -248,15 +240,9 @@ export function StatusPage() {
           <AlertDescription>{loadError.message}</AlertDescription>
         </Alert>
       ) : null}
-      <div className="grid w-full grid-cols-1 items-start gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="grid w-full grid-cols-1 items-start gap-4 lg:grid-cols-2">
         {cardColumns.map((column, columnIndex) => (
-          <div
-            key={columnIndex}
-            className={cn(
-              "flex min-w-0 flex-col gap-4",
-              columnIndex === 2 && "sm:col-span-2 xl:col-span-1",
-            )}
-          >
+          <div key={columnIndex} className="flex min-w-0 flex-col gap-4">
             {column.map((cardId) => {
               const definition = STATUS_CARD_DEFINITIONS[cardId];
               return (
@@ -298,8 +284,10 @@ export function StatusPage() {
   );
 }
 
-function useStatusSummary() {
-  const [summary, setSummary] = useState<StatusSummary | null>(null);
+function useStatusSummary(mockSummary?: StatusSummary) {
+  const [summary, setSummary] = useState<StatusSummary | null>(
+    () => mockSummary ?? null,
+  );
   const [loadError, setLoadError] = useState<Error | null>(null);
 
   async function load(signal?: AbortSignal) {
@@ -316,6 +304,12 @@ function useStatusSummary() {
   }
 
   useEffect(() => {
+    if (mockSummary) {
+      setSummary(mockSummary);
+      setLoadError(null);
+      return;
+    }
+
     const controller = new AbortController();
     void load(controller.signal);
     const interval = window.setInterval(() => {
@@ -326,16 +320,14 @@ function useStatusSummary() {
       controller.abort();
       window.clearInterval(interval);
     };
-  }, []);
+  }, [mockSummary]);
 
   return {
     summary,
     loadError,
-    reload: () => {
-      void load();
-    },
   };
 }
+
 
 function StatusCardDragHandle({
   cardId,
@@ -374,50 +366,130 @@ function StatusCardDragHandle({
   );
 }
 
-function SessionsCard({
+function ContextCompositionCard({
   summary,
   dragHandle,
-}: {
-  summary: StatusSummary | null;
-  dragHandle: ReactNode;
-}) {
-  const sessions = summary?.sessions ?? [];
-  const runningSessions = sessions.filter((entry) => entry.runtime_status?.ready);
+}: StatusCardContentProps) {
+  const entries = useMemo(() => sessionDashboardEntries(summary), [summary]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedSessionId((current) => {
+      if (current && entries.some((entry) => entry.session.session_id === current)) {
+        return current;
+      }
+
+      return entries[0]?.session.session_id ?? null;
+    });
+  }, [entries]);
+
+  const selectedEntry =
+    entries.find((entry) => entry.session.session_id === selectedSessionId) ??
+    entries[0] ??
+    null;
+  const composition = selectedEntry?.dashboard.context_composition ?? null;
+  const selectedSessionLabel = selectedEntry
+    ? sessionDisplayName(selectedEntry.session, selectedEntry.dashboard)
+    : "No session";
+  const cells = useMemo(() => contextCompositionCells(composition), [composition]);
+  const cellCapacity = contextCompositionCellCapacity(
+    selectedEntry?.dashboard ?? null,
+    composition,
+  );
+  const emptyCellCount = Math.max(0, cellCapacity - cells.length);
+  const hasComposition = Boolean(composition && cellCapacity > 0);
 
   return (
     <Card className="w-full">
       <CardHeader>
-        <CardTitle>Sessions</CardTitle>
+        <CardTitle>Context Composition</CardTitle>
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        <div className="grid grid-cols-3 gap-2">
-          <ContextCompositionMetric
-            label="Daemon"
-            value={summary?.daemon.state ?? "loading"}
-            detail={summary ? `:${summary.daemon.port}` : "manager"}
-          />
-          <ContextCompositionMetric
-            label="Sessions"
-            value={formatCompactNumber(sessions.length)}
-            detail={`${formatCompactNumber(runningSessions.length)} ready`}
-          />
-          <ContextCompositionMetric
-            label="Clients"
-            value={formatCompactNumber(summary?.daemon.connected_clients ?? 0)}
-            detail="web/tui"
-          />
-        </div>
-        {sessions.length > 0 ? (
-          <div className="flex flex-col gap-2">
-            {sessions.map((entry) => (
-              <SessionStatusLine key={entry.session.session_id} entry={entry} />
-            ))}
+      <CardContent className="flex flex-col gap-4">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="w-fit max-w-full"
+              disabled={entries.length === 0}
+            >
+              <span className="max-w-64 truncate">{selectedSessionLabel}</span>
+              <ChevronDownIcon data-icon="inline-end" aria-hidden="true" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="start"
+            className="w-72 max-w-[calc(100vw-2rem)]"
+          >
+            <DropdownMenuLabel>Session</DropdownMenuLabel>
+            <DropdownMenuRadioGroup
+              value={selectedEntry?.session.session_id ?? ""}
+              onValueChange={setSelectedSessionId}
+            >
+              {entries.map((entry) => {
+                const context = entry.dashboard.context_composition;
+                return (
+                  <DropdownMenuRadioItem
+                    key={entry.session.session_id}
+                    value={entry.session.session_id}
+                  >
+                    <span className="flex min-w-0 flex-col">
+                      <span className="truncate">
+                        {sessionDisplayName(entry.session, entry.dashboard)}
+                      </span>
+                      <span className="truncate text-xs text-muted-foreground">
+                        {context
+                          ? `${formatContextTokenCount(
+                              context.total_estimated_tokens,
+                            )} context`
+                          : "No context snapshot"}
+                      </span>
+                    </span>
+                  </DropdownMenuRadioItem>
+                );
+              })}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {hasComposition ? (
+          <div className="overflow-x-auto px-1 pb-1 pt-0.5">
+            <div
+              className="grid min-w-max grid-cols-[repeat(32,minmax(0,0.75rem))] gap-1"
+              role="img"
+              aria-label={`${CONTEXT_COMPOSITION_GRID_LABEL} Showing ${cells.length} used units out of ${cellCapacity} total units for ${selectedSessionLabel}.`}
+            >
+              {cells.map((cell) => (
+                <span
+                  key={cell.key}
+                  aria-hidden="true"
+                  title={`${cell.label} · unit ${cell.unitIndex + 1}/${cell.unitCount} · ${formatContextTokenCount(cell.segment.tokens)}`}
+                  className={cn(
+                    "size-3 rounded-[3px] ring-1 ring-background/70 transition-transform hover:scale-125",
+                    contextCompositionShadeClass(cell.segment),
+                  )}
+                />
+              ))}
+              {Array.from({ length: emptyCellCount }, (_, unitIndex) => (
+                <span
+                  key={`empty-${unitIndex}`}
+                  aria-hidden="true"
+                  title={`Unused context · unit ${cells.length + unitIndex + 1}/${cellCapacity}`}
+                  className="size-3 rounded-[3px] bg-background ring-1 ring-border/80"
+                />
+              ))}
+            </div>
           </div>
         ) : (
           <DashboardEmptyState
-            title="No sessions registered"
-            description="Sessions will appear here after the manager starts or reconnects them."
+            compact
+            title={entries.length ? "No context snapshot" : "No sessions found"}
+            description={
+              entries.length
+                ? "This session has not assembled a model request context yet."
+                : "Context composition appears after a session publishes status data."
+            }
           />
         )}
       </CardContent>
@@ -425,47 +497,8 @@ function SessionsCard({
   );
 }
 
-function SessionStatusLine({ entry }: { entry: StatusSessionSummary }) {
-  const runtime = entry.runtime_status;
-  const status: SessionStatusTone = entry.error
-    ? "attention"
-    : runtime?.active_runtime_turn
-      ? "active"
-      : runtime?.ready
-        ? "ready"
-        : "available";
-  const detail = entry.error
-    ? entry.error
-    : runtime
-      ? `${runtime.pending_work_count} pending`
-      : sessionScopeLabel(entry.session);
 
-  return (
-    <div className="flex min-w-0 items-center gap-3 rounded-lg border bg-muted/20 px-3 py-2">
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-medium">
-          {sessionDisplayName(entry.session, entry.dashboard)}
-        </div>
-        <div className="truncate text-xs text-muted-foreground">{detail}</div>
-      </div>
-      <Badge
-        variant={sessionStatusBadgeVariant(status)}
-        className="font-mono tabular-nums"
-      >
-        {status}
-      </Badge>
-    </div>
-  );
-}
-
-
-function DailyTokenUsageCard({
-  summary,
-  dragHandle,
-}: {
-  summary: StatusSummary | null;
-  dragHandle: ReactNode;
-}) {
+function DailyTokenUsageCard({ summary, dragHandle }: StatusCardContentProps) {
   const chartData = useMemo(
     () => dailyTokenUsageChartDataFromSources(tokenUsageSources(summary)),
     [summary],
@@ -538,334 +571,6 @@ function DailyTokenUsageCard({
   );
 }
 
-function ModelContextCompositionCard({
-  summary,
-  dragHandle,
-}: {
-  summary: StatusSummary | null;
-  dragHandle: ReactNode;
-}) {
-  const entries = useMemo(
-    () =>
-      sessionDashboardEntries(summary).filter(
-        (entry) => entry.dashboard.context_composition,
-      ),
-    [summary],
-  );
-
-  return (
-    <Card className="w-full overflow-visible">
-      <CardHeader>
-        <CardTitle>Model Context Composition</CardTitle>
-        <CardAction>{dragHandle}</CardAction>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        {entries.length > 0 ? (
-          <>
-            {entries.map((entry) => (
-              <SessionContextComposition
-                key={entry.session.session_id}
-                entry={entry}
-              />
-            ))}
-          </>
-        ) : (
-          <DashboardEmptyState
-            title="Waiting for context captures"
-            description="Context composition appears after a session sends a model request."
-          />
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function SessionContextComposition({
-  entry,
-}: {
-  entry: SessionDashboardEntry;
-}) {
-  const composition = entry.dashboard.context_composition;
-  const compositionData = useMemo(
-    () => contextCompositionCardData(entry.dashboard),
-    [entry.dashboard],
-  );
-
-  if (!composition) {
-    return null;
-  }
-
-  return (
-    <div className="flex flex-col gap-3 rounded-lg border bg-muted/20 p-3">
-      <div className="flex min-w-0 items-center justify-between gap-3">
-        <div className="truncate text-sm font-medium">
-          {sessionDisplayName(entry.session, entry.dashboard)}
-        </div>
-        <div className="shrink-0 font-mono text-xs text-muted-foreground">
-          {composition.model ?? "unknown"}
-        </div>
-      </div>
-      <div className="grid grid-cols-3 gap-2">
-        <ContextCompositionMetric
-          label="Total"
-          value={formatCompactNumber(composition.total_estimated_tokens)}
-          detail="est. tokens"
-        />
-        <ContextCompositionMetric
-          label="New suffix"
-          value={formatPercent(compositionData.newSuffixRatio)}
-          detail={formatCompactNumber(composition.new_suffix_tokens)}
-        />
-        <ContextCompositionMetric
-          label="Stable"
-          value={formatPercent(compositionData.stablePrefixRatio)}
-          detail={formatCompactNumber(composition.stable_prefix_tokens)}
-        />
-      </div>
-      <ChartContainer
-        config={CONTEXT_COMPOSITION_CHART_CONFIG}
-        className="h-10 w-full overflow-visible [&_.recharts-wrapper]:overflow-visible"
-      >
-        <BarChart
-          accessibilityLayer
-          data={compositionData.prefixSummaryData}
-          layout="vertical"
-          margin={{ top: 8, right: 0, left: 0, bottom: 8 }}
-          stackOffset="expand"
-        >
-          <XAxis type="number" hide domain={[0, 1]} />
-          <YAxis type="category" dataKey="label" hide />
-          <ChartTooltip
-            cursor={{ fill: "transparent" }}
-            wrapperStyle={{ zIndex: 50 }}
-            content={<ContextPrefixTooltip />}
-          />
-          <Bar
-            dataKey="stable"
-            stackId="prefix"
-            fill="var(--color-stable)"
-            isAnimationActive={false}
-            radius={[4, 0, 0, 4]}
-          />
-          <Bar
-            dataKey="changed"
-            stackId="prefix"
-            fill="var(--color-changed)"
-            isAnimationActive={false}
-            radius={[0, 0, 0, 0]}
-          />
-          <Bar
-            dataKey="new"
-            stackId="prefix"
-            fill="var(--color-new)"
-            isAnimationActive={false}
-            radius={[0, 4, 4, 0]}
-          />
-          <Bar
-            dataKey="unknown"
-            stackId="prefix"
-            fill="var(--color-unknown)"
-            isAnimationActive={false}
-            radius={[0, 4, 4, 0]}
-          />
-        </BarChart>
-      </ChartContainer>
-      <div className="grid gap-2 text-xs text-muted-foreground">
-        <ContextCompositionDetailRow
-          label="Messages / tools"
-          value={`${composition.message_count} / ${composition.tool_count}`}
-        />
-        <ContextCompositionDetailRow
-          label="Tool schema"
-          value={`${formatCompactNumber(composition.tools_schema_tokens)} tokens`}
-        />
-      </div>
-    </div>
-  );
-}
-
-function ContextCompositionMetric({
-  label,
-  value,
-  detail,
-}: {
-  label: string;
-  value: string;
-  detail: string;
-}) {
-  return (
-    <div className="rounded-xl border bg-muted/20 p-2">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 font-mono text-lg font-medium tabular-nums text-foreground">
-        {value}
-      </div>
-      <div className="truncate text-xs text-muted-foreground">{detail}</div>
-    </div>
-  );
-}
-
-function ContextCompositionDetailRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className="min-w-0 flex-1">{label}</span>
-      <span className="truncate font-mono font-medium tabular-nums text-foreground">
-        {value}
-      </span>
-    </div>
-  );
-}
-
-function PrimitiveOptimizationCard({
-  summary,
-  dragHandle,
-}: {
-  summary: StatusSummary | null;
-  dragHandle: ReactNode;
-}) {
-  const rows = useMemo(
-    () =>
-      sessionDashboardEntries(summary).map((entry) => {
-        const progressData = primitiveOptimizationProgressData(entry.dashboard);
-        const total = progressData.reduce((sum, item) => sum + item.value, 0);
-        return { entry, progressData, total };
-      }),
-    [summary],
-  );
-  const visibleRows = rows.filter((row) => row.total > 0);
-
-  if (visibleRows.length === 0) {
-    return (
-      <Card className="w-full">
-        <CardHeader>
-          <CardTitle>Primitive Optimization</CardTitle>
-          <CardAction>{dragHandle}</CardAction>
-        </CardHeader>
-        <CardContent>
-          <DashboardEmptyState
-            title="No primitive optimization data"
-            description="Optimization progress appears after primitive evidence is processed."
-          />
-        </CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <Card className="w-full">
-      <CardHeader>
-        <CardTitle>Primitive Optimization</CardTitle>
-        <CardAction>{dragHandle}</CardAction>
-      </CardHeader>
-      <CardContent>
-        <div className="flex flex-col gap-4">
-          {visibleRows.map((row) => (
-            <OptimizationSessionRow
-              key={row.entry.session.session_id}
-              label={sessionDisplayName(row.entry.session, row.entry.dashboard)}
-              data={row.progressData}
-              total={row.total}
-              config={PRIMITIVE_OPTIMIZATION_CHART_CONFIG}
-            />
-          ))}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function RuntimeOptimizationCard({
-  summary,
-  dragHandle,
-}: {
-  summary: StatusSummary | null;
-  dragHandle: ReactNode;
-}) {
-  const rows = useMemo(
-    () =>
-      sessionDashboardEntries(summary).map((entry) => {
-        const progressData = runtimeOptimizationProgressData(entry.dashboard);
-        const total = progressData.reduce((sum, item) => sum + item.value, 0);
-        return { entry, progressData, total };
-      }),
-    [summary],
-  );
-  const visibleRows = rows.filter((row) => row.total > 0);
-
-  if (visibleRows.length === 0) {
-    return (
-      <Card className="w-full">
-        <CardHeader>
-          <CardTitle>Runtime Optimization</CardTitle>
-          <CardAction>{dragHandle}</CardAction>
-        </CardHeader>
-        <CardContent>
-          <DashboardEmptyState
-            title="No runtime optimization data"
-            description="Runtime optimization progress appears after error cases are processed."
-          />
-        </CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <Card className="w-full">
-      <CardHeader>
-        <CardTitle>Runtime Optimization</CardTitle>
-        <CardAction>{dragHandle}</CardAction>
-      </CardHeader>
-      <CardContent>
-        <div className="flex flex-col gap-4">
-          {visibleRows.map((row) => (
-            <OptimizationSessionRow
-              key={row.entry.session.session_id}
-              label={sessionDisplayName(row.entry.session, row.entry.dashboard)}
-              data={row.progressData}
-              total={row.total}
-              config={RUNTIME_OPTIMIZATION_CHART_CONFIG}
-            />
-          ))}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function OptimizationSessionRow({
-  label,
-  data,
-  total,
-  config,
-}: {
-  label: string;
-  data: OptimizationProgressDatum[];
-  total: number;
-  config: OptimizationChartConfig;
-}) {
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex min-w-0 items-center justify-between gap-3 text-xs text-muted-foreground">
-        <span className="truncate font-medium text-foreground">{label}</span>
-        <span className="shrink-0 font-mono tabular-nums">
-          {formatCompactNumber(total)} total
-        </span>
-      </div>
-      <OptimizationProgressBar data={data} total={total} config={config} />
-      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        <span>Queued</span>
-        <ChevronRight className="size-3" />
-        <span>Applied</span>
-      </div>
-    </div>
-  );
-}
-
 function DashboardEmptyState({
   title,
   description,
@@ -888,12 +593,86 @@ function DashboardEmptyState({
 function sessionDashboardEntries(
   summary: StatusSummary | null,
 ): SessionDashboardEntry[] {
-  return (summary?.sessions ?? [])
-    .filter((entry) => entry.dashboard)
-    .map((entry) => ({
-      session: entry.session,
-      dashboard: entry.dashboard as SessionStatusDashboard,
+  return (summary?.sessions ?? []).flatMap((entry) =>
+    entry.dashboard
+      ? [
+          {
+            session: entry.session,
+            dashboard: entry.dashboard,
+          },
+        ]
+      : [],
+  );
+}
+
+function contextCompositionCells(
+  composition: DashboardContextCompositionSnapshot | null,
+): ContextCompositionCell[] {
+  if (!composition) {
+    return [];
+  }
+
+  return composition.segments.flatMap((segment, segmentIndex) => {
+    const unitCount = Math.ceil(
+      Math.max(0, segment.tokens) / CONTEXT_COMPOSITION_UNIT_TOKENS,
+    );
+    const label = segment.label || segment.name || segment.source || "Unknown";
+
+    return Array.from({ length: unitCount }, (_, unitIndex) => ({
+      key: `${segment.hash}-${segmentIndex}-${unitIndex}`,
+      label,
+      segment,
+      unitIndex,
+      unitCount,
     }));
+  });
+}
+
+function contextCompositionCellCapacity(
+  dashboard: ContextCompositionCapacitySource | null,
+  composition: DashboardContextCompositionSnapshot | null,
+) {
+  const contextWindow =
+    dashboard?.token_usage.main?.model_context_window ??
+    dashboard?.token_usage.judge?.model_context_window ??
+    null;
+  const totalTokens =
+    contextWindow && contextWindow > 0
+      ? contextWindow
+      : composition?.total_estimated_tokens ?? 0;
+
+  return Math.ceil(Math.max(0, totalTokens) / CONTEXT_COMPOSITION_UNIT_TOKENS);
+}
+
+
+function contextCompositionShadeClass(segment: DashboardContextCompositionSegment) {
+  const sourceKey = `${segment.name} ${segment.source} ${segment.cache_role}`.toLowerCase();
+
+  if (sourceKey.includes("system")) {
+    return "bg-foreground/80";
+  }
+
+  if (sourceKey.includes("tools")) {
+    return "bg-foreground/65";
+  }
+
+  if (
+    sourceKey.includes("afterclaim") ||
+    sourceKey.includes("preturn") ||
+    sourceKey.includes("claimed")
+  ) {
+    return "bg-foreground/50";
+  }
+
+  if (sourceKey.includes("conversation") || sourceKey.includes("summary")) {
+    return "bg-foreground/35";
+  }
+
+  if (sourceKey.includes("assistant") || sourceKey.includes("tool")) {
+    return "bg-foreground/25";
+  }
+
+  return "bg-foreground/15";
 }
 
 function tokenUsageSources(
@@ -930,43 +709,16 @@ function sessionDisplayName(
   );
 }
 
-function sessionStatusBadgeVariant(
-  status: SessionStatusTone,
-): "default" | "secondary" | "destructive" | "outline" | "ghost" {
-  switch (status) {
-    case "attention":
-      return "destructive";
-    case "active":
-      return "default";
-    case "ready":
-      return "secondary";
-    case "available":
-      return "outline";
-  }
-}
-
-function sessionScopeLabel(session: SessionInfo) {
-  if (session.scope.kind === "project") {
-    return session.scope.project_dir;
-  }
-  return "general";
-}
 
 function statusCardColumns(order: StatusCardId[]) {
   const normalizedOrder = normalizeStatusCardOrder(order);
-  const firstColumnLength = Math.ceil(normalizedOrder.length / 3);
-  const secondColumnLength = Math.ceil(
-    (normalizedOrder.length - firstColumnLength) / 2,
-  );
+  const columnCount = Math.min(Math.max(normalizedOrder.length, 1), 2);
+  const columnLength = Math.ceil(normalizedOrder.length / columnCount);
 
-  return [
-    normalizedOrder.slice(0, firstColumnLength),
-    normalizedOrder.slice(
-      firstColumnLength,
-      firstColumnLength + secondColumnLength,
-    ),
-    normalizedOrder.slice(firstColumnLength + secondColumnLength),
-  ];
+  return Array.from({ length: columnCount }, (_, columnIndex) => {
+    const startIndex = columnIndex * columnLength;
+    return normalizedOrder.slice(startIndex, startIndex + columnLength);
+  }).filter((column) => column.length > 0);
 }
 
 function moveStatusCardByDelta(
@@ -1076,69 +828,10 @@ function statusCardIdFromValue(value: unknown): StatusCardId | null {
     : null;
 }
 
-function OptimizationProgressBar({
-  data,
-  total,
-  config,
-}: {
-  data: OptimizationProgressDatum[];
-  total: number;
-  config: OptimizationChartConfig;
-}) {
-  const visibleItems = data.filter((item) => item.value > 0);
-
-  if (total <= 0 || visibleItems.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="flex flex-col gap-2">
-      <div
-        className="flex h-10 w-full overflow-hidden rounded-md border bg-muted/30"
-        role="img"
-        aria-label={visibleItems
-          .map(
-            (item) =>
-              `${item.label} ${formatCompactNumber(item.value)}: ${item.detail}`,
-          )
-          .join("; ")}
-      >
-        {visibleItems.map((item) => {
-          const color = config[item.colorKey]?.color ?? "var(--muted)";
-          const width = `${(item.value / total) * 100}%`;
-
-          return (
-            <div
-              key={item.key}
-              aria-hidden="true"
-              className="min-w-[2px]"
-              style={{ width, backgroundColor: color }}
-            />
-          );
-        })}
-      </div>
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-muted-foreground">
-        {visibleItems.map((item) => {
-          const color = config[item.colorKey]?.color ?? "var(--muted)";
-
-          return (
-            <div key={item.key} className="flex min-w-0 items-center gap-1.5">
-              <span
-                aria-hidden="true"
-                className="h-2 w-2 flex-none rounded-full"
-                style={{ backgroundColor: color }}
-              />
-              <span className="min-w-0 flex-1 truncate">{item.label}</span>
-              <span className="font-mono tabular-nums text-foreground">
-                {formatCompactNumber(item.value)}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
+function formatContextTokenCount(tokens: number) {
+  return `${formatCompactNumber(Math.max(0, tokens))} tokens`;
 }
+
 
 function TokenUsageTooltip({
   active,
@@ -1199,48 +892,6 @@ function TokenUsageTooltipRow({
       <span className="font-mono font-medium tabular-nums text-foreground">
         {formatCompactNumber(value)}
       </span>
-    </div>
-  );
-}
-
-function ContextPrefixTooltip({
-  active,
-  payload,
-}: {
-  active?: boolean;
-  payload?: ContextPrefixTooltipPayloadItem[];
-}) {
-  if (!active) {
-    return null;
-  }
-
-  const datum = payload?.[0]?.payload;
-  if (!datum) {
-    return null;
-  }
-
-  return (
-    <div className="grid min-w-64 gap-1.5 rounded-lg border bg-background px-3 py-2.5 text-xs shadow-xl">
-      <div className="font-medium text-foreground">
-        Cache-affecting prefix comparison
-      </div>
-      <div className="grid gap-1 text-muted-foreground">
-        {datum.bars.map((bar) => (
-          <div key={bar.key} className="flex min-w-0 items-center gap-2">
-            <span
-              className="size-2 shrink-0 rounded-[2px]"
-              style={{ backgroundColor: `var(--color-${bar.colorKey})` }}
-            />
-            <span className="min-w-0 flex-1 truncate">{bar.label}</span>
-            <span className="font-mono font-medium tabular-nums text-foreground">
-              {formatCompactNumber(bar.tokens)}
-            </span>
-            <span className="font-mono tabular-nums">
-              {formatPercent(bar.ratio)}
-            </span>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
