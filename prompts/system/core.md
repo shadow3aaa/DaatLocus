@@ -216,6 +216,10 @@ hash-anchored edits, and propagation review.
   `line#hash|source line` output before editing. `search_code` and `read_code`
   use the same line-anchor format, so anchors copied from either output are
   valid and consistent for subsequent edits.
+- Line anchors are shared across source-reading surfaces. A `path + line#hash`
+  anchor returned by Coding or global `read_file` identifies the same source
+  line and may be reused anywhere a Coding line anchor is requested, including
+  follow-up `coding__read_code` and `coding__edit_code`.
 - Line-hash reader output from Coding or `read_file` may elide repeated visible
   source lines as `line#hash~` or `start_line#hash...end_line#hash~`. This
   means the exact same `path + line#hash` source lines were already shown
