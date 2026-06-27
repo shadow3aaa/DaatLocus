@@ -2008,11 +2008,13 @@ model_id = "gpt-4.1-mini"
 
     #[test]
     fn setup_config_round_trips_telegram_settings() {
-        let mut base_config = Config::default();
-        base_config.telegram = TelegramConfig {
-            enabled: false,
-            bot_token: "$TELEGRAM_BOT_TOKEN".to_string(),
-            poll_timeout_secs: 45,
+        let base_config = Config {
+            telegram: TelegramConfig {
+                enabled: false,
+                bot_token: "$TELEGRAM_BOT_TOKEN".to_string(),
+                poll_timeout_secs: 45,
+            },
+            ..Config::default()
         };
 
         let request = setup_config_from_config(&base_config);
