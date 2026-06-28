@@ -101,12 +101,17 @@ type SessionDashboardEntry = {
   dashboard: SessionStatusDashboard;
 };
 
+type ContextCompositionRun = {
+  key: string;
+  label: string;
+  segment: DashboardContextCompositionSegment;
+  tokens: number;
+};
+
 type ContextCompositionCell = {
   key: string;
   label: string;
   segment: DashboardContextCompositionSegment;
-  unitIndex: number;
-  unitCount: number;
 };
 const STATUS_CARD_DEFINITIONS: Record<StatusCardId, StatusCardDefinition> = {
   "context-composition": {
@@ -489,26 +494,18 @@ function ContextCompositionCard({
                 <span
                   key={cell.key}
                   aria-hidden="true"
-                  title={t("status.contextUnitTitle", {
-                    label: cell.label,
-                    unit: cell.unitIndex + 1,
-                    total: cell.unitCount,
-                    tokens: formatContextTokenCount(cell.segment.tokens, t),
-                  })}
+                  title={cell.label}
                   className={cn(
                     "size-3 rounded-[3px] ring-1 ring-background/70 transition-transform hover:scale-125",
                     contextCompositionShadeClass(cell.segment),
                   )}
                 />
               ))}
+
               {Array.from({ length: emptyCellCount }, (_, unitIndex) => (
                 <span
                   key={`empty-${unitIndex}`}
                   aria-hidden="true"
-                  title={t("status.gridPaddingTitle", {
-                    unit: cells.length + unitIndex + 1,
-                    total: cellCapacity,
-                  })}
                   className="size-3 rounded-[3px] bg-background ring-1 ring-border/80"
                 />
               ))}
@@ -645,22 +642,111 @@ function contextCompositionCells(
     return [];
   }
 
-  return contextCompositionDisplaySegments(composition.segments).flatMap(
-    (segment, segmentIndex) => {
-      const unitCount = Math.ceil(
-        Math.max(0, segment.tokens) / CONTEXT_COMPOSITION_UNIT_TOKENS,
-      );
-      const label = segment.label || segment.name || segment.source || "Unknown";
+  const runs = contextCompositionDisplayRuns(composition.segments);
+  const totalTokens = runs.reduce((total, run) => total + run.tokens, 0);
+  const cellCount = Math.ceil(totalTokens / CONTEXT_COMPOSITION_UNIT_TOKENS);
+  const cells: ContextCompositionCell[] = [];
+  let runIndex = 0;
+  let runStart = 0;
+  let runEnd = runs[0]?.tokens ?? 0;
 
-      return Array.from({ length: unitCount }, (_, unitIndex) => ({
-        key: `${segment.hash}-${segmentIndex}-${unitIndex}`,
-        label,
-        segment,
-        unitIndex,
-        unitCount,
-      }));
-    },
-  );
+  for (let cellIndex = 0; cellIndex < cellCount; cellIndex += 1) {
+    const cellStart = cellIndex * CONTEXT_COMPOSITION_UNIT_TOKENS;
+    const cellEnd = Math.min(
+      totalTokens,
+      cellStart + CONTEXT_COMPOSITION_UNIT_TOKENS,
+    );
+
+    while (runIndex < runs.length && runEnd <= cellStart) {
+      runStart = runEnd;
+      runIndex += 1;
+      runEnd += runs[runIndex]?.tokens ?? 0;
+    }
+
+    const run = contextCompositionDominantRunForCell(
+      runs,
+      runIndex,
+      runStart,
+      runEnd,
+      cellStart,
+      cellEnd,
+    );
+    if (!run) {
+      continue;
+    }
+
+    cells.push({
+      key: `${cellIndex}-${run.key}`,
+      label: run.label,
+      segment: run.segment,
+    });
+  }
+
+  return cells;
+}
+
+function contextCompositionDominantRunForCell(
+  runs: ContextCompositionRun[],
+  initialRunIndex: number,
+  initialRunStart: number,
+  initialRunEnd: number,
+  cellStart: number,
+  cellEnd: number,
+) {
+  let bestRun: ContextCompositionRun | null = null;
+  let bestOverlap = 0;
+  let runIndex = initialRunIndex;
+  let runStart = initialRunStart;
+  let runEnd = initialRunEnd;
+
+  while (runIndex < runs.length && runStart < cellEnd) {
+    const overlap = Math.max(
+      0,
+      Math.min(runEnd, cellEnd) - Math.max(runStart, cellStart),
+    );
+
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      bestRun = runs[runIndex];
+    }
+
+    runStart = runEnd;
+    runIndex += 1;
+    runEnd += runs[runIndex]?.tokens ?? 0;
+  }
+
+  return bestRun;
+}
+
+function contextCompositionDisplayRuns(
+  segments: DashboardContextCompositionSegment[],
+): ContextCompositionRun[] {
+  const runs: ContextCompositionRun[] = [];
+
+  for (const segment of contextCompositionDisplaySegments(segments)) {
+    const tokens = Math.max(0, segment.tokens);
+    if (tokens === 0) {
+      continue;
+    }
+
+    const key = contextCompositionSegmentTypeKey(segment);
+    const label = contextCompositionSegmentLabel(segment);
+    const previousRun = runs[runs.length - 1];
+
+    if (previousRun?.key === key) {
+      previousRun.tokens += tokens;
+      continue;
+    }
+
+    runs.push({
+      key,
+      label,
+      segment,
+      tokens,
+    });
+  }
+
+  return runs;
 }
 
 function contextCompositionDisplaySegments(
@@ -676,6 +762,16 @@ function contextCompositionDisplaySegments(
       return priorityDelta || left.index - right.index;
     })
     .map(({ segment }) => segment);
+}
+
+function contextCompositionSegmentTypeKey(
+  segment: DashboardContextCompositionSegment,
+) {
+  return segment.name || segment.label || segment.source || "unknown";
+}
+
+function contextCompositionSegmentLabel(segment: DashboardContextCompositionSegment) {
+  return segment.label || segment.name || segment.source || "Unknown";
 }
 
 function contextCompositionDisplayPriority(

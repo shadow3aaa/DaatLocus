@@ -283,9 +283,6 @@ const resources = {
         contextDisplayAria:
           "{{gridLabel}} Showing {{occupied}} occupied units on a {{displayScale}} rectangular display for {{session}}.",
         tokenCount: "{{count}} tokens",
-        contextUnitTitle:
-          "{{label}} · unit {{unit}}/{{total}} · {{tokens}}",
-        gridPaddingTitle: "Grid padding · unit {{unit}}/{{total}}",
         total: "Total",
         cached: "Cached",
         uncached: "Uncached",
@@ -511,8 +508,6 @@ const resources = {
         contextDisplayAria:
           "{{gridLabel}} 正在为 {{session}} 显示 {{occupied}} 个占用单元，矩形显示范围为 {{displayScale}}。",
         tokenCount: "{{count}} tokens",
-        contextUnitTitle: "{{label}} · 单元 {{unit}}/{{total}} · {{tokens}}",
-        gridPaddingTitle: "网格填充 · 单元 {{unit}}/{{total}}",
         total: "总计",
         cached: "缓存",
         uncached: "未缓存",
