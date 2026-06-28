@@ -84,6 +84,8 @@ pub struct SetupConfigRequest {
     #[serde(default)]
     pub persona_language: Option<String>,
     #[serde(default)]
+    pub persona_identity_summary: Option<String>,
+    #[serde(default)]
     pub providers: Vec<SetupProviderRequest>,
     #[serde(default)]
     pub models: Vec<SetupModelRequest>,
@@ -547,6 +549,7 @@ fn setup_config_from_config(config: &Config) -> SetupConfigRequest {
         locale: Some(config.locale),
         persona_name: Some(persona.name),
         persona_language: Some(persona.language),
+        persona_identity_summary: Some(persona.identity_summary),
         providers,
         models,
         main_model: Some(config.main_model.clone()),
@@ -832,10 +835,24 @@ async fn write_setup_persona(request: &SetupConfigRequest) -> Result<()> {
         .filter(|language| !language.is_empty())
         .unwrap_or(default.language.as_str())
         .to_string();
+    let identity_summary = request
+        .persona_identity_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or_else(|| {
+            let current_summary = current.identity_summary.trim();
+            if current_summary.is_empty() {
+                default.identity_summary.trim()
+            } else {
+                current_summary
+            }
+        })
+        .to_string();
     let persona = PromptPersonaSpec {
         name,
         language,
-        identity_summary: current.identity_summary,
+        identity_summary,
     };
     let content = render_prompt_persona_markdown(&persona);
     write_bytes_atomic(
@@ -2035,5 +2052,29 @@ model_id = "gpt-4.1-mini"
         assert!(next_config.telegram.enabled);
         assert_eq!(next_config.telegram.bot_token, "123456789:bot-token");
         assert_eq!(next_config.telegram.poll_timeout_secs, 45);
+    }
+
+    #[tokio::test]
+    async fn write_setup_persona_updates_identity_summary() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home_override = crate::DaatLocusHomeOverride::set(temp.path().to_path_buf()).await;
+        let request = SetupConfigRequest {
+            persona_name: Some("CustomAgent".to_string()),
+            persona_language: Some("en-US".to_string()),
+            persona_identity_summary: Some(
+                "{{name}} answers with extra context.\nKeep a calm tone.".to_string(),
+            ),
+            ..SetupConfigRequest::default()
+        };
+
+        write_setup_persona(&request).await.unwrap();
+
+        let persona = load_prompt_persona_spec_sync();
+        assert_eq!(persona.name, "CustomAgent");
+        assert_eq!(persona.language, "en-US");
+        assert_eq!(
+            persona.identity_summary,
+            "{{name}} answers with extra context.\nKeep a calm tone."
+        );
     }
 }

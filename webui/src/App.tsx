@@ -1244,6 +1244,7 @@ const MOCK_SETTINGS_SETUP_CONFIG: SetupConfigResponse = {
     locale: "en-US",
     persona_name: "DaatLocus",
     persona_language: "zh-CN",
+    persona_identity_summary: "{{name}} is concise, operational, and explicit about runtime state.",
     providers: [
       {
         name: "openai-main",

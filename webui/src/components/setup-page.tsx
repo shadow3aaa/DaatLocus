@@ -35,6 +35,7 @@ import {
   FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -120,6 +121,7 @@ export type ModelAccessEditorValue = {
 export type AgentPersonalizationEditorValue = {
   personaName: string;
   personaLanguage: string;
+  identitySummary: string;
 };
 
 
@@ -276,8 +278,11 @@ export function SetupPage({
   onSaveSetupConfig = saveSetupConfig,
 }: SetupPageProps) {
   const [step, setStep] = useState<SetupStep>("intro");
-  const [personaLanguage, setPersonaLanguage] = useState("zh-CN");
-  const [agentName, setAgentName] = useState("DaatLocus");
+  const [agentPersonalization, setAgentPersonalization] =
+    useState<AgentPersonalizationEditorValue>(() =>
+      createDefaultAgentPersonalizationEditorValue(),
+    );
+  const personaLanguage = agentPersonalization.personaLanguage;
   const [personalizationPreview, setPersonalizationPreview] = useState("Hello");
   const [personalizationPreviewVisible, setPersonalizationPreviewVisible] =
     useState(true);
@@ -335,10 +340,7 @@ export function SetupPage({
     }
 
     const request: SetupConfigRequest = {
-      ...agentPersonalizationEditorValueToSetupRequest({
-        personaName: agentName,
-        personaLanguage,
-      }),
+      ...agentPersonalizationEditorValueToSetupRequest(agentPersonalization),
       ...modelAccessEditorValueToSetupRequest(modelAccess),
       daemon_port: readiness.port,
     };
@@ -406,10 +408,9 @@ export function SetupPage({
             <div className="flex flex-col gap-24 lg:col-span-6">
               <h1 className="text-7xl font-medium tracking-normal">Personalize</h1>
               <AgentPersonalizationEditor
-                value={{ personaName: agentName, personaLanguage }}
+                value={agentPersonalization}
                 onChange={(nextValue) => {
-                  setAgentName(nextValue.personaName);
-                  setPersonaLanguage(nextValue.personaLanguage);
+                  setAgentPersonalization(nextValue);
                 }}
                 showHeader={false}
                 className="max-w-xl"
@@ -588,6 +589,24 @@ export function AgentPersonalizationEditor({
             placeholder="DaatLocus"
             spellCheck={false}
           />
+        </Field>
+        <Field>
+          <FieldLabel htmlFor="agent-personalization-identity-summary">
+            Persona content
+          </FieldLabel>
+          <Textarea
+            id="agent-personalization-identity-summary"
+            value={value.identitySummary}
+            onChange={(event) =>
+              onChange({ ...value, identitySummary: event.target.value })
+            }
+            placeholder={DEFAULT_PERSONA_IDENTITY_SUMMARY}
+            className="min-h-28"
+            spellCheck={false}
+          />
+          <FieldDescription>
+            Supports {"{{name}}"}; this content is written into the persona prompt.
+          </FieldDescription>
         </Field>
       </FieldGroup>
     </section>
@@ -2026,10 +2045,14 @@ function normalizePersonaLanguage(personaLanguage: string | null | undefined) {
   return personaLanguage?.trim() || "zh-CN";
 }
 
+const DEFAULT_PERSONA_IDENTITY_SUMMARY =
+  "{{name}} is a neutral, concise, results-oriented agent persona. It follows the configured locale for user-facing replies, communicates clearly, and prioritizes accurate, actionable responses.";
+
 export function createDefaultAgentPersonalizationEditorValue(): AgentPersonalizationEditorValue {
   return {
     personaName: "DaatLocus",
     personaLanguage: "zh-CN",
+    identitySummary: DEFAULT_PERSONA_IDENTITY_SUMMARY,
   };
 }
 
@@ -2039,15 +2062,23 @@ export function setupConfigRequestToAgentPersonalizationEditorValue(
   return {
     personaName: displayAgentName(request.persona_name),
     personaLanguage: normalizePersonaLanguage(request.persona_language),
+    identitySummary:
+      request.persona_identity_summary?.trim() ||
+      DEFAULT_PERSONA_IDENTITY_SUMMARY,
   };
 }
 
 export function agentPersonalizationEditorValueToSetupRequest(
   value: AgentPersonalizationEditorValue,
-): Pick<SetupConfigRequest, "persona_name" | "persona_language"> {
+): Pick<
+  SetupConfigRequest,
+  "persona_name" | "persona_language" | "persona_identity_summary"
+> {
   return {
     persona_name: displayAgentName(value.personaName),
     persona_language: normalizePersonaLanguage(value.personaLanguage),
+    persona_identity_summary:
+      value.identitySummary.trim() || DEFAULT_PERSONA_IDENTITY_SUMMARY,
   };
 }
 

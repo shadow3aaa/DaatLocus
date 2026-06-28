@@ -634,6 +634,7 @@ export type SetupConfigRequest = {
   locale?: string;
   persona_name?: string | null;
   persona_language?: string | null;
+  persona_identity_summary?: string | null;
   providers?: SetupProviderRequest[];
   models?: SetupModelRequest[];
   main_model?: string | null;
