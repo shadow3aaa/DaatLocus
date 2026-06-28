@@ -19,8 +19,8 @@ use crate::{
     runtime::bootstrap::{bootstrap_telegram_transport_state_from_acl, emit_startup_progress},
     telegram_acl::TelegramAclHandle,
     telegram_transport::{
-        TelegramAuthVerifier, TelegramDashboardCommandBridge, TelegramDeliveryClient,
-        TelegramInputRouter, TelegramSessionCommandHandler, TelegramTransport,
+        TelegramAuthVerifier, TelegramDeliveryClient, TelegramInputRouter,
+        TelegramSessionCommandHandler, TelegramTransport,
         state::{PendingOutboundMessage, TelegramTransportState},
     },
 };
@@ -170,6 +170,35 @@ impl TelegramSessionCommandHandler for ManagerTelegramInputRouter {
             }
             _ => Ok(None),
         }
+    }
+
+    async fn handle_dashboard_command(&self, chat_id: &str, command: &str) -> Result<String> {
+        let Some(session_id) = self.telegram_defaults.get(chat_id) else {
+            return Ok(
+                "no attached session. Use /session_list to inspect sessions or /session_new [title] to create one."
+                    .to_string(),
+            );
+        };
+        if self.sessions.get(&session_id).is_none() {
+            return Ok(format!(
+                "attached session `{}` no longer exists. Use /session_list or /session_attach <session_id_or_unique_prefix>.",
+                session_id.as_str()
+            ));
+        }
+        let client =
+            session_client_for_id(&self.sessions, &self.session_tokens, session_id.as_str())
+                .await?;
+        let response = client
+            .request(session_ipc::SessionIpcRequest::DashboardCommand {
+                command: command.trim().to_string(),
+            })
+            .await;
+        Ok(match response {
+            Ok(session_ipc::SessionIpcResponse::DashboardCommandResult { output }) => output,
+            Ok(session_ipc::SessionIpcResponse::Error { message, .. }) => message,
+            Ok(_) => "unexpected session IPC dashboard command response".to_string(),
+            Err(err) => format!("session dashboard command failed: {err:?}"),
+        })
     }
 }
 
@@ -360,10 +389,6 @@ async fn run_daemon_serve_inner(
                 telegram_auth_verifier,
                 telegram_router.clone(),
                 telegram_router,
-                TelegramDashboardCommandBridge::new(
-                    dashboard_tx.subscribe(),
-                    dashboard_control_tx.clone(),
-                ),
             )
             .run(),
         ))

@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use miette::{Result, bail, miette};
 use reqwest::{Client, header::CONTENT_TYPE};
 use serde::Deserialize;
-use tokio::sync::{mpsc, watch};
 
 use crate::telegram_transport::state::{
     PendingOutboundMessage, TelegramTransportStateHandle, split_telegram_message_text,
@@ -14,9 +13,7 @@ use crate::telegram_transport::state::{
 use crate::{
     config::TelegramConfig,
     daat_locus_paths::daat_locus_paths_sync,
-    dashboard::{
-        DashboardControlCommand, DashboardState, execute_control_command, remote_dashboard_commands,
-    },
+    dashboard::remote_dashboard_commands,
     events::{TelegramIncomingAttachment, TelegramIncomingAttachmentKind, TelegramIncomingEvent},
     telegram_acl::{AccessDecision, TelegramAclHandle},
 };
@@ -43,6 +40,8 @@ pub trait TelegramSessionCommandHandler: Send + Sync {
         chat_title: &str,
         command: &str,
     ) -> Result<Option<String>>;
+
+    async fn handle_dashboard_command(&self, chat_id: &str, command: &str) -> Result<String>;
 }
 
 #[derive(Clone)]
@@ -175,27 +174,9 @@ pub struct TelegramTransport {
     auth_verifier: Arc<dyn TelegramAuthVerifier>,
     input_router: Arc<dyn TelegramInputRouter>,
     session_command_handler: Arc<dyn TelegramSessionCommandHandler>,
-    dashboard_commands: TelegramDashboardCommandBridge,
     offset: Option<i64>,
     bot_username: Option<String>,
     commands_registered: bool,
-}
-
-pub struct TelegramDashboardCommandBridge {
-    state_rx: watch::Receiver<DashboardState>,
-    control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
-}
-
-impl TelegramDashboardCommandBridge {
-    pub fn new(
-        state_rx: watch::Receiver<DashboardState>,
-        control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
-    ) -> Self {
-        Self {
-            state_rx,
-            control_tx,
-        }
-    }
 }
 
 impl TelegramTransport {
@@ -206,7 +187,6 @@ impl TelegramTransport {
         auth_verifier: Arc<dyn TelegramAuthVerifier>,
         input_router: Arc<dyn TelegramInputRouter>,
         session_command_handler: Arc<dyn TelegramSessionCommandHandler>,
-        dashboard_commands: TelegramDashboardCommandBridge,
     ) -> Self {
         let offset = handle.next_update_offset();
         Self {
@@ -217,7 +197,6 @@ impl TelegramTransport {
             auth_verifier,
             input_router,
             session_command_handler,
-            dashboard_commands,
             offset,
             bot_username: None,
             commands_registered: false,
@@ -490,9 +469,13 @@ impl TelegramTransport {
                     .await;
             }
         }
-        let response = {
-            let state = self.dashboard_commands.state_rx.borrow();
-            execute_control_command(command, &state, &self.dashboard_commands.control_tx)
+        let response = match self
+            .session_command_handler
+            .handle_dashboard_command(&chat_id_string, command)
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => format!("dashboard command failed: {err:?}"),
         };
         self.send_text(chat_id, &response).await
     }
