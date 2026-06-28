@@ -1006,9 +1006,9 @@ fn file_uri_to_path_string(uri: &str) -> String {
         return uri.to_string();
     };
     let decoded = percent_decode_file_path(rest);
-    if decoded.starts_with('/') {
-        if decoded.len() >= 3 && has_windows_drive_prefix(&decoded[1..]) {
-            return decoded[1..].to_string();
+    if let Some(stripped) = decoded.strip_prefix('/') {
+        if has_windows_drive_prefix(stripped) {
+            return stripped.to_string();
         }
         return decoded;
     }
