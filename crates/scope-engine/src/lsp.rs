@@ -686,6 +686,11 @@ impl LspClient {
             }
         };
 
+        if let Some(err) = resp.get("error") {
+            eprintln!("[scope-engine/lsp] textDocument/references error: {err}");
+            return vec![];
+        }
+
         let locations = match resp.get("result") {
             Some(serde_json::Value::Array(arr)) => arr.clone(),
             Some(serde_json::Value::Null) | None => {
@@ -708,10 +713,10 @@ impl LspClient {
                         return vec![];
                     }
                 };
-                eprintln!(
-                    "[scope-engine/lsp] retry response: {}",
-                    serde_json::to_string(&retry_resp).unwrap_or_default()
-                );
+                if let Some(err) = retry_resp.get("error") {
+                    eprintln!("[scope-engine/lsp] retry textDocument/references error: {err}");
+                    return vec![];
+                }
                 match retry_resp.get("result") {
                     Some(serde_json::Value::Array(arr)) => arr.clone(),
                     _ => return vec![],
@@ -903,13 +908,142 @@ fn path_to_file_uri(path: &Path) -> String {
     } else {
         std::env::current_dir().unwrap_or_default().join(path)
     };
-    let s = abs.to_string_lossy();
-    format!("file://{s}")
+    file_uri_from_absolute_path_string(&abs.to_string_lossy())
+}
+
+fn file_uri_from_absolute_path_string(path: &str) -> String {
+    let mut normalized = path.replace('\\', "/");
+
+    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        return unc_path_to_file_uri(rest);
+    }
+    if let Some(rest) = normalized.strip_prefix("//?/") {
+        normalized = rest.to_string();
+    } else if let Some(rest) = normalized.strip_prefix("//./") {
+        normalized = rest.to_string();
+    }
+
+    if let Some(rest) = normalized.strip_prefix("//") {
+        return unc_path_to_file_uri(rest);
+    }
+
+    if has_windows_drive_prefix(&normalized) {
+        return format!("file:///{}", percent_encode_file_path(&normalized));
+    }
+
+    if normalized.starts_with('/') {
+        return format!("file://{}", percent_encode_file_path(&normalized));
+    }
+
+    format!("file:///{}", percent_encode_file_path(&normalized))
+}
+
+fn unc_path_to_file_uri(path: &str) -> String {
+    let (host, rest) = path.split_once('/').unwrap_or((path, ""));
+    if rest.is_empty() {
+        format!("file://{}", percent_encode_file_path(host))
+    } else {
+        format!(
+            "file://{}/{}",
+            percent_encode_file_path(host),
+            percent_encode_file_path(rest)
+        )
+    }
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+fn percent_encode_file_path(path: &str) -> String {
+    let mut encoded = String::new();
+    for &byte in path.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn percent_decode_file_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+        {
+            decoded.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn uri_to_path(uri: &str) -> PathBuf {
-    let stripped = uri.strip_prefix("file://").unwrap_or(uri);
-    PathBuf::from(stripped)
+    PathBuf::from(file_uri_to_path_string(uri))
+}
+
+fn file_uri_to_path_string(uri: &str) -> String {
+    let Some(rest) = uri.strip_prefix("file://") else {
+        return uri.to_string();
+    };
+    let decoded = percent_decode_file_path(rest);
+    if decoded.starts_with('/') {
+        if decoded.len() >= 3 && has_windows_drive_prefix(&decoded[1..]) {
+            return decoded[1..].to_string();
+        }
+        return decoded;
+    }
+    format!("//{decoded}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_uri_from_absolute_path_string, file_uri_to_path_string};
+
+    #[test]
+    fn windows_verbatim_paths_become_valid_file_uris() {
+        let uri =
+            file_uri_from_absolute_path_string(r"\\?\C:\Users\Name With Space\src\main#test.rs");
+
+        assert_eq!(
+            uri,
+            "file:///C:/Users/Name%20With%20Space/src/main%23test.rs"
+        );
+    }
+
+    #[test]
+    fn unix_paths_become_valid_file_uris() {
+        let uri = file_uri_from_absolute_path_string("/tmp/name with space/main#test.rs");
+
+        assert_eq!(uri, "file:///tmp/name%20with%20space/main%23test.rs");
+    }
+
+    #[test]
+    fn file_uris_decode_windows_drive_paths() {
+        let path =
+            file_uri_to_path_string("file:///C:/Users/Name%20With%20Space/src/main%23test.rs");
+
+        assert_eq!(path, "C:/Users/Name With Space/src/main#test.rs");
+    }
 }
 
 // ── Analyzer trait impl ──────────────────────────────────────
