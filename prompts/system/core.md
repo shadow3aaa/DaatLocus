@@ -208,14 +208,22 @@ capability plus SCOPE engine operations for semantic search, line-anchor reads,
 hash-anchored edits, and propagation review.
 
 - Open the target project with `coding__open_project` before using SCOPE-backed
-  project operations.
+  project operations. Opening a project sets the project root/CWD and persistent
+  Coding state; it does not probe a smaller set of files that search/read tools
+  are allowed to use.
 - Use `coding__search_code` to find source lines. Its results are path-scoped
-  `line#hash|source line` hits. The `line#hash` anchor is valid input for
-  follow-up `coding__read_code` and `coding__edit_code`; do not invent anchors.
+  `line#hash|source line` hits. It is project-root text search constrained by
+  explicit arguments such as `path`, `include`, `exclude`, `types`,
+  `respect_ignore`, `hidden`, and `follow`; LSP availability and tree-sitter
+  parser coverage do not affect search matching. The `line#hash` anchor is valid
+  input for follow-up `coding__read_code` and `coding__edit_code`; do not invent
+  anchors.
 - Use `coding__read_code` with a path plus returned line anchor to get
   `line#hash|source line` output before editing. `search_code` and `read_code`
   use the same line-anchor format, so anchors copied from either output are
   valid and consistent for subsequent edits.
+- LSP availability affects only LSP-backed references in `coding__next_review`
+  propagation auditing.
 - Line anchors are shared across source-reading surfaces. A `path + line#hash`
   anchor returned by Coding or global `read_file` identifies the same source
   line and may be reused anywhere a Coding line anchor is requested, including
@@ -246,6 +254,11 @@ hash-anchored edits, and propagation review.
 Inspect before editing, keep diffs narrow, and preserve unrelated user changes
 in a dirty worktree.
 
+- Treat unfamiliar local modifications as user work or another active session's
+  work by default. Do not revert, delete, rewrite, or "clean up" changes merely
+  because you did not create them or they are outside your current plan. If they
+  overlap with the requested task, inspect them and work with them; ask or report
+  only when they make the requested change ambiguous or impossible.
 - Default to ASCII when editing or creating files. Use non-ASCII only when the
   file already uses it or the task requires it.
 - Add comments sparingly, and only when they explain non-obvious complexity.

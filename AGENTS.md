@@ -1509,6 +1509,11 @@ It is an `App` because:
 - symbol lookups and propagation analysis require an open project context
 - the model needs to see propagation status to decide whether to continue editing
 
+Opening a project establishes the Coding project root/CWD, persistent state, and
+optional LSP connection state. It does not discover or freeze a smaller set of
+files that `search_code` or `read_code` may use. Those tools operate under the
+project root and their explicit path/filter arguments.
+
 **State rendering design:**
 
 Coding must render its key state into `AppStateRender` so that:
@@ -1539,6 +1544,9 @@ Operational constraints:
   lsp_status, propagation_pending_count, and up to N recent propagation events.
 - LSP process lifecycle (start, crash recovery, shutdown) belongs to Coding
   internals, not to tool return values.
+- Missing LSP affects only LSP-backed references in `coding__next_review`
+  propagation auditing. It must not be presented or interpreted as affecting
+  other Coding tool behavior.
 
 ### Coding Search / Read / Edit Protocol
 
@@ -1702,6 +1710,12 @@ SCOPE — Semantic Code Operation & Propagation Engine (`scope-engine`) provides
 semantic code reading, searching, hash-anchored editing, and propagation review.
 Do not document unimplemented refactoring features as expected model-facing
 capabilities.
+
+`search_code` is project-root text search plus explicit filters. It is not
+affected by LSP availability, tree-sitter parser coverage, or any guessed
+"opened" file set. A type filter such as `types: ["typescript"]` is only a file
+extension filter; it should include all registered extensions for that language
+name, such as `.ts` and `.tsx`.
 
 | Capability | SCOPE Status | Boundary |
 |---|---|---|

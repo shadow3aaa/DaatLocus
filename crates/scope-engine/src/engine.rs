@@ -472,11 +472,15 @@ fn build_optional_type_exts(types: &[String]) -> Result<Option<HashSet<String>>,
         .join(", ");
     let mut exts = HashSet::new();
     for requested_type in requested {
-        if let Some((_, language_exts)) = languages
+        let matching_language_exts = languages
             .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(&requested_type))
-        {
-            exts.extend(language_exts.iter().map(|ext| ext.to_ascii_lowercase()));
+            .filter(|(name, _)| name.eq_ignore_ascii_case(&requested_type))
+            .flat_map(|(_, language_exts)| language_exts.iter())
+            .map(|ext| ext.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+
+        if !matching_language_exts.is_empty() {
+            exts.extend(matching_language_exts);
             continue;
         }
         if registry.get(&requested_type).is_some() {
@@ -1035,6 +1039,33 @@ mod tests {
                 .map(|hit| hit.path.as_str())
                 .collect::<Vec<_>>(),
             vec![".hidden.rs", "ignored.rs"]
+        );
+    }
+
+    #[test]
+    fn search_code_type_filter_includes_all_same_named_language_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("component.ts"), "const needle = true;\n").unwrap();
+        std::fs::write(dir.path().join("component.tsx"), "const needle = true;\n").unwrap();
+        std::fs::write(dir.path().join("component.js"), "const needle = true;\n").unwrap();
+
+        let output = search_code(
+            dir.path(),
+            &SearchCodeInput {
+                query: "needle".to_string(),
+                types: vec!["typescript".to_string()],
+                ..SearchCodeInput::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            output
+                .matches
+                .iter()
+                .map(|hit| hit.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["component.ts", "component.tsx"]
         );
     }
 
