@@ -902,7 +902,7 @@ pub(crate) async fn execute_agent_loop_step(
                             Some(crate::dashboard::SessionActivityEvent::Error(
                                 TextActivityDescriptor {
                                     title: format!("{display_tool_name} failed"),
-                                    body_lines: compact_body_lines(&error_text, 6),
+                                    body_lines: compact_preserved_body_lines(&error_text, 12),
                                 }
                                 .into(),
                             )),

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::{
-    activity_event::{TextActivityDescriptor, ToolCallActivityEvent, compact_body_lines},
+    activity_event::{TextActivityDescriptor, ToolCallActivityEvent, compact_preserved_body_lines},
     app::{AppId, AppToolExecutionContext},
     context::{
         ActivePrimitiveRunSession, AppNoticeKey, Context, PendingPrimitiveRunFlush,

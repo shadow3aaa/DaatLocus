@@ -358,6 +358,34 @@ pub fn compact_body_lines(text: &str, max_lines: usize) -> Vec<String> {
         .collect()
 }
 
+pub fn compact_preserved_body_lines(text: &str, max_lines: usize) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+
+        if lines.len() >= max_lines {
+            break;
+        }
+    }
+
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -373,6 +401,25 @@ mod tests {
                 text: "inspect code".to_string(),
             }],
         }
+    }
+
+    #[test]
+    fn compact_preserved_body_lines_keeps_diagnostic_layout() {
+        let lines = compact_preserved_body_lines(
+            "error header\n  1 | import type { TFunction }\n    | ^\n\nnext cause\n",
+            8,
+        );
+
+        assert_eq!(
+            lines,
+            vec![
+                "error header".to_string(),
+                "  1 | import type { TFunction }".to_string(),
+                "    | ^".to_string(),
+                String::new(),
+                "next cause".to_string(),
+            ]
+        );
     }
 
     #[test]

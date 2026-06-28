@@ -469,6 +469,7 @@ type AgentChatSessionActivityRender =
       imageAttachments?: AgentChatImageAttachmentData[];
       bodyLimit?: number;
       tone?: "default" | "error" | "muted";
+      preserveSoftBreaks?: boolean;
     }
   | {
       kind: "browser";
@@ -4901,6 +4902,7 @@ function AgentChatSessionActivityView({
         imageAttachments={render.imageAttachments}
         bodyLimit={render.bodyLimit}
         tone={render.tone}
+        preserveSoftBreaks={render.preserveSoftBreaks}
       />
     );
   }
@@ -5366,6 +5368,7 @@ function AgentChatActivityTextCell({
   imageAttachments = [],
   bodyLimit,
   tone = "default",
+  preserveSoftBreaks = false,
 }: {
   id: string;
   icon: AgentChatActivityMarkerKind;
@@ -5376,6 +5379,7 @@ function AgentChatActivityTextCell({
   imageAttachments?: AgentChatImageAttachmentData[];
   bodyLimit?: number;
   tone?: "default" | "error" | "muted";
+  preserveSoftBreaks?: boolean;
 }) {
   const renderedText = fullBody
     ? fullBody.split("\n").slice(1).join("\n")
@@ -5419,6 +5423,7 @@ function AgentChatActivityTextCell({
             text={renderedText}
             limit={bodyLimit ?? AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT}
             tone={tone === "error" ? "error" : "default"}
+            preserveSoftBreaks={preserveSoftBreaks}
           />
         </div>
       ) : null}
@@ -6251,7 +6256,7 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
             <p
               className={cn(
                 "break-words",
-                preserveSoftBreaks && "whitespace-pre-line",
+                preserveSoftBreaks && "whitespace-pre-wrap",
               )}
             >
               {children}
@@ -7650,6 +7655,7 @@ function agentChatSessionActivityRenderForBubble(
       bodyLines: stringArrayValue(error.body_lines),
       bodyLimit: AGENT_CHAT_ERROR_LINE_LIMIT,
       tone: "error",
+      preserveSoftBreaks: true,
     };
   }
 

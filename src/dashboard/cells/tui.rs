@@ -2554,13 +2554,16 @@ fn render_error_lines(
     lines.extend(prefixed_body_lines(
         body_lines
             .iter()
-            .take(limit)
-            .map(|line| {
-                Line::from(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(Color::LightRed),
-                ))
+            .flat_map(|line| {
+                let expanded = line.lines().map(ToString::to_string).collect::<Vec<_>>();
+                if expanded.is_empty() {
+                    vec![String::new()]
+                } else {
+                    expanded
+                }
             })
+            .take(limit)
+            .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::LightRed))))
             .collect(),
         max_width,
     ));
@@ -3688,6 +3691,26 @@ That's it.";
             rendered.first().map(String::as_str),
             Some("■ Command failed")
         );
+    }
+
+    #[test]
+    fn error_activity_cell_preserves_multiline_diagnostic_layout() {
+        let rendered = render_error_cell_lines(
+            &ErrorActivityData {
+                title: "coding::edit_code failed".to_string(),
+                body_lines: vec![
+                    "scope-engine edit_code failed\n  1 | import type { TFunction }\n    | ^"
+                        .to_string(),
+                ],
+            },
+            80,
+        )
+        .into_iter()
+        .map(|line| line_text(&line))
+        .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("1 | import type")));
+        assert!(rendered.iter().any(|line| line.contains("| ^")));
     }
 
     #[test]
