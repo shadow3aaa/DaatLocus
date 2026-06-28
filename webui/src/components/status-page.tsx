@@ -78,6 +78,7 @@ import {
   InputGroupTextarea,
 } from "@/components/ui/input-group";
 import { Separator } from "@/components/ui/separator";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import ReactMarkdown from "react-markdown";
@@ -1545,124 +1546,126 @@ function PendingUserInputQueue({
         aria-busy={queueBusy || undefined}
         className="mb-2 border-b border-border/60 pb-2"
       >
-        <div role="list" className="max-h-40 overflow-auto">
-          {inputs.map((input, index) => {
-            const position = index + 1;
-            const dismissBusy =
-              busyActionId === pendingUserInputDismissActionId(input);
-            const preemptBusy =
-              busyActionId === pendingUserInputPreemptActionId(input);
-            const moveBusy = Boolean(
-              busyActionId?.startsWith(`${input.event_id}:move-to:`),
-            );
-            const preview = pendingUserInputPreview(input);
-            const canReorder = inputs.length > 1;
-            const dragOver =
-              dragOverEventId === input.event_id &&
-              draggingEventId !== input.event_id;
+        <ScrollArea className="max-h-40" viewportClassName="max-h-40">
+          <div role="list">
+            {inputs.map((input, index) => {
+              const position = index + 1;
+              const dismissBusy =
+                busyActionId === pendingUserInputDismissActionId(input);
+              const preemptBusy =
+                busyActionId === pendingUserInputPreemptActionId(input);
+              const moveBusy = Boolean(
+                busyActionId?.startsWith(`${input.event_id}:move-to:`),
+              );
+              const preview = pendingUserInputPreview(input);
+              const canReorder = inputs.length > 1;
+              const dragOver =
+                dragOverEventId === input.event_id &&
+                draggingEventId !== input.event_id;
 
-            return (
-              <div
-                key={input.event_id}
-                role="listitem"
-                onDragOver={(event) => handleDragOver(event, input)}
-                onDrop={(event) => handleDrop(event, input)}
-                onDragEnd={resetDragState}
-                className={cn(
-                  "grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)_auto_auto] items-start gap-x-2 px-2 py-1 text-sm leading-5 text-foreground/90",
-                  dragOver && "rounded-md bg-accent/60",
-                )}
-              >
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  draggable={canReorder && !queueBusy}
-                  aria-label={`Drag pending input ${position}`}
-                  title={canReorder ? "Drag to reorder" : "Only one queued input"}
-                  disabled={queueBusy || !canReorder}
-                  onDragStart={(event) => handleDragStart(event, input)}
+              return (
+                <div
+                  key={input.event_id}
+                  role="listitem"
+                  onDragOver={(event) => handleDragOver(event, input)}
+                  onDrop={(event) => handleDrop(event, input)}
                   onDragEnd={resetDragState}
-                  className="rounded-full text-muted-foreground hover:text-foreground disabled:opacity-60 enabled:cursor-grab enabled:active:cursor-grabbing"
-                >
-                  {moveBusy ? (
-                    <Spinner data-icon="inline-start" />
-                  ) : (
-                    <GripVerticalIcon data-icon="inline-start" aria-hidden="true" />
+                  className={cn(
+                    "grid min-w-0 grid-cols-[1.5rem_minmax(0,1fr)_auto_auto] items-start gap-x-2 px-2 py-1 text-sm leading-5 text-foreground/90",
+                    dragOver && "rounded-md bg-accent/60",
                   )}
-                </Button>
-                <p className="min-w-0 truncate" title={preview}>
-                  {preview}
-                </p>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={`Run pending input ${position} now`}
-                  title="Run this queued input now"
-                  disabled={queueBusy}
-                  onClick={() => onPreempt(input)}
-                  className="rounded-full text-muted-foreground hover:text-foreground"
                 >
-                  {preemptBusy ? (
-                    <Spinner data-icon="inline-start" />
-                  ) : (
-                    <CornerDownLeftIcon data-icon="inline-start" aria-hidden="true" />
-                  )}
-                </Button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label={`More actions for pending input ${position}`}
-                      title="More actions"
-                      disabled={queueBusy}
-                      className="rounded-full text-muted-foreground hover:text-foreground"
-                    >
-                      {dismissBusy ? (
-                        <Spinner data-icon="inline-start" />
-                      ) : (
-                        <MoreHorizontalIcon
-                          data-icon="inline-start"
-                          aria-hidden="true"
-                        />
-                      )}
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-44">
-                    <DropdownMenuGroup>
-                      <DropdownMenuItem
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    draggable={canReorder && !queueBusy}
+                    aria-label={`Drag pending input ${position}`}
+                    title={canReorder ? "Drag to reorder" : "Only one queued input"}
+                    disabled={queueBusy || !canReorder}
+                    onDragStart={(event) => handleDragStart(event, input)}
+                    onDragEnd={resetDragState}
+                    className="rounded-full text-muted-foreground hover:text-foreground disabled:opacity-60 enabled:cursor-grab enabled:active:cursor-grabbing"
+                  >
+                    {moveBusy ? (
+                      <Spinner data-icon="inline-start" />
+                    ) : (
+                      <GripVerticalIcon data-icon="inline-start" aria-hidden="true" />
+                    )}
+                  </Button>
+                  <p className="min-w-0 truncate" title={preview}>
+                    {preview}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={`Run pending input ${position} now`}
+                    title="Run this queued input now"
+                    disabled={queueBusy}
+                    onClick={() => onPreempt(input)}
+                    className="rounded-full text-muted-foreground hover:text-foreground"
+                  >
+                    {preemptBusy ? (
+                      <Spinner data-icon="inline-start" />
+                    ) : (
+                      <CornerDownLeftIcon data-icon="inline-start" aria-hidden="true" />
+                    )}
+                  </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`More actions for pending input ${position}`}
+                        title="More actions"
                         disabled={queueBusy}
-                        onSelect={() => openEditDialog(input)}
+                        className="rounded-full text-muted-foreground hover:text-foreground"
                       >
-                        <PencilIcon />
-                        <span>Edit message</span>
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        disabled={queueBusy}
-                        variant="destructive"
-                        onSelect={() => onDismiss(input)}
-                      >
-                        <Trash2Icon />
-                        <span>Dismiss message</span>
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        disabled={queueBusy}
-                        variant="destructive"
-                        onSelect={onClear}
-                      >
-                        <Trash2Icon />
-                        <span>Clear queue</span>
-                      </DropdownMenuItem>
-                    </DropdownMenuGroup>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            );
-          })}
-        </div>
+                        {dismissBusy ? (
+                          <Spinner data-icon="inline-start" />
+                        ) : (
+                          <MoreHorizontalIcon
+                            data-icon="inline-start"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-44">
+                      <DropdownMenuGroup>
+                        <DropdownMenuItem
+                          disabled={queueBusy}
+                          onSelect={() => openEditDialog(input)}
+                        >
+                          <PencilIcon />
+                          <span>Edit message</span>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          disabled={queueBusy}
+                          variant="destructive"
+                          onSelect={() => onDismiss(input)}
+                        >
+                          <Trash2Icon />
+                          <span>Dismiss message</span>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          disabled={queueBusy}
+                          variant="destructive"
+                          onSelect={onClear}
+                        >
+                          <Trash2Icon />
+                          <span>Clear queue</span>
+                        </DropdownMenuItem>
+                      </DropdownMenuGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              );
+            })}
+          </div>
+        </ScrollArea>
       </section>
 
       <Dialog
@@ -1952,9 +1955,12 @@ function WebSlashPanelShell({
           <XIcon data-icon="inline-start" aria-hidden="true" />
         </Button>
       </div>
-      <div className="-mx-2 min-h-0 max-h-72 overflow-y-auto overflow-x-hidden px-2 [scrollbar-gutter:stable]">
+      <ScrollArea
+        className="-mx-2 min-h-0 max-h-72"
+        viewportClassName="max-h-72 px-2"
+      >
         <div className="flex min-w-0 flex-col gap-2">{children}</div>
-      </div>
+      </ScrollArea>
     </section>
   );
 }
