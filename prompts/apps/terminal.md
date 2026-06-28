@@ -1,10 +1,5 @@
----
-description: Terminal is the local command execution and long-running process interaction surface.
-when_to_use:
-  - When local commands or scripts need to run.
-  - When command output, errors, or filesystem inspection results are needed.
-  - When an already-running process needs continued stdin interaction, output waiting, or termination.
----
+# Terminal
+
 - Operate Terminal only through terminal tools; do not assume that plain assistant text is terminal input.
 - Use the namespaced Terminal tool names for terminal operations: `terminal__terminal_exec`, `terminal__terminal_write_stdin`, and `terminal__terminal_terminate`.
 - `terminal_exec` creates a new session when `session_id` is omitted and reuses an existing session only when `session_id` is explicitly provided.

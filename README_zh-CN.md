@@ -75,6 +75,7 @@ daat-locus config              # 打开交互式配置菜单
 - [English README](README.md)
 - [架构说明](docs/architecture_zh-CN.md)
 - [配置](docs/configuration_zh-CN.md)
+- [Semantic Code Operation & Propagation Engine](crates/scope-engine/README.md)
 - [贡献指南](CONTRIBUTING_zh-CN.md)
 - [内置 SOP primitives](workflows/README.md)
 

@@ -1086,6 +1086,22 @@ Commit history is a long-term engineering interface, not a temporary chat log. W
 - Do not commit local research directories, generated caches, runtime logs, or unconfirmed experiments.
 - Before rewriting already-pushed history, create a local backup branch. Push rewritten `main` with `--force-with-lease`.
 
+## Static Checks And Autofix
+
+Static checks should not turn the model into a manual formatter.
+
+- When a configured tool can mechanically fix the reported issue, use that tool
+  rather than editing the mechanical change by hand. Examples include
+  `cargo fmt`, formatter commands, and safe project-specific autofix commands.
+- For lint tools with autofix modes, prefer the autofix path only when the tool
+  is already part of the project workflow and the resulting diff can be
+  inspected.
+- Manual edits are for semantic fixes, unsafe autofix output, unavailable
+  autofix support, or cases where the tool reports a real design problem rather
+  than a mechanical rewrite.
+- After any automatic fix, inspect the diff and run the relevant verification
+  again.
+
 ## Runtime Model
 
 A runtime turn usually contains these layers:
@@ -1141,23 +1157,27 @@ coding__open_project
 coding__get_state
 ```
 
-Every `App` must expose three separate layers:
+Every `App` must expose two separate layers:
 
 - `state`: current structured domain facts, returned by the app's generated
   `appid__get_state` tool and rendered in TUI/WebUI app-status surfaces
-- `usage`: what the app is for and when it is worth using
-- `how_to_use`: how to operate the app's tools correctly
+- `docs`: stable system-prompt documentation for operating the app's tools and
+  understanding the app's capability boundary
 
 Do not mix these layers.
 
 - `state` is not an operating manual.
-- `usage` is not a full tutorial.
-- `how_to_use` is not world state.
+- `docs` are system prompt material only. They must not be returned
+  by `appid__get_state`, app-status surfaces, preturn state, or any other
+  runtime state channel.
+- App docs are not a routing or focus metadata layer. Do not add app prompt
+  frontmatter such as `description` or `when_to_use`; if the model needs stable
+  capability guidance, write it in the app docs markdown itself.
 - Project or workspace instructions such as `AGENTS.md` are instruction context,
   not app state.
 
-In code, keep this separation visible through `App::render_state`, `usage()`,
-`how_to_use()`, and the generated `appid__get_state` surface. Do not put
+In code, keep this separation visible through `App::render_state`, `docs()`,
+and the generated `appid__get_state` surface. Do not put
 self-optimizable task execution procedures into an app's supplemental
 instruction layer. Reusable methods across tasks should be modeled as `Workflow`
 SOP primitives, not as app-local explanatory text.
@@ -1480,7 +1500,8 @@ Operational constraints:
 
 ### Coding
 
-`Coding` is the interface for semantic code operations powered by scope-engine.
+`Coding` is the interface for semantic code operations powered by SCOPE —
+Semantic Code Operation & Propagation Engine (`scope-engine`).
 
 It is an `App` because:
 
@@ -1677,9 +1698,10 @@ work should simply call the correct namespaced tool directly.
 
 ### SCOPE Current Boundary and Static File Tool Boundary
 
-SCOPE (scope-engine) provides semantic code reading, searching, hash-anchored
-editing, and propagation review. Do not document unimplemented refactoring
-features as expected model-facing capabilities.
+SCOPE — Semantic Code Operation & Propagation Engine (`scope-engine`) provides
+semantic code reading, searching, hash-anchored editing, and propagation review.
+Do not document unimplemented refactoring features as expected model-facing
+capabilities.
 
 | Capability | SCOPE Status | Boundary |
 |---|---|---|
@@ -1725,15 +1747,15 @@ Minimal directory structure:
   runtime/
     app.lua
   prompt/
-    usage.md
-    how_to_use.md
+    docs.md
 ```
 
 Rules:
 
 - `runtime/app.lua` is the only Lua entry point.
-- `prompt/usage.md` is the capability-domain description.
-- `prompt/how_to_use.md` is the operation manual for the app's tools.
+- `prompt/docs.md` is the app's only prompt document. It is plain markdown
+  without required frontmatter. It may include stable capability boundaries and
+  operation documentation for the app's tools.
 - Third-party app packages do not carry self-optimizable workflow assets.
 
 ### `app.toml`
@@ -1744,7 +1766,7 @@ Rules:
 
 - It does not carry `id`.
 - It does not carry permissions.
-- It does not carry usage, how-to-use, or workflow metadata.
+- It does not carry prompt docs or workflow metadata.
 - By default, the entry point is `runtime/app.lua`.
 
 Minimal example:
@@ -2111,7 +2133,7 @@ Do not mix capability manuals into state when a stable instruction layer is bett
 Examples:
 
 - event completion rules belong in system/tool contract or a small event contract block
-- app usage and `how_to_use` are capability docs, not app state
+- app docs are capability docs, not app state
 - project instructions such as `AGENTS.md` belong to project instruction
   context, not Coding app state
 - workflow primitive routing catalog rules belong in workflow contract / AfterClaim routing context
@@ -2152,7 +2174,7 @@ When refactoring old snapshot parts, use this mapping:
 - old `sensory` -> `PreTurn.Environment`
 - old `plan` -> `PreTurn.TaskState`
 - old app surface dump -> explicit `appid__get_state` tool result or dashboard app-status output
-- old app usage / how-to-use -> `CapabilityDocs.App`
+- old app usage / how-to-use / docs -> `AppDocs`
 - old claimed events -> `AfterClaim.ClaimedInput`
 - old event queue summary -> `AfterClaim.EventQueueContext`
 - old delivery reminder -> `EventContract`

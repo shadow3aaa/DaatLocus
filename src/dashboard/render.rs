@@ -229,18 +229,6 @@ pub fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String
         .state_renders()
         .into_iter()
         .map(|(app_id, state)| {
-            let usage = context.apps.usage(&app_id).unwrap_or(crate::app::AppUsage {
-                description: "No usage available.".to_string(),
-                when_to_use: Vec::new(),
-                body_markdown: None,
-            });
-            let how_to_use = context
-                .apps
-                .how_to_use(&app_id)
-                .unwrap_or(crate::app::AppHowToUse {
-                    lines: Vec::new(),
-                    body_markdown: None,
-                });
             let mut lines = Vec::new();
             let key = app_id.to_string().to_ascii_lowercase();
             lines.push(format!("App Status: {}", state.title));
@@ -249,18 +237,6 @@ pub fn render_app_status_outputs_for_dashboard(context: &Context) -> Vec<(String
             lines.push(format!("app_id={key}"));
             lines.push(format!("title={}", state.title));
             lines.extend(state.lines.iter().cloned());
-            lines.push(String::new());
-            lines.push("[usage]".to_string());
-            lines.push(crate::reasoning::prompts::build_app_usage_prompt(
-                app_id.clone(),
-                &usage,
-            ));
-            lines.push(String::new());
-            lines.push("[how_to_use]".to_string());
-            lines.push(crate::reasoning::prompts::build_app_how_to_use_prompt(
-                app_id.clone(),
-                &how_to_use,
-            ));
             (key, lines.join("\n"))
         })
         .collect()

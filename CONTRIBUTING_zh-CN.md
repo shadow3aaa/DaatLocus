@@ -91,7 +91,7 @@ App 是有状态能力域，不是 focus gate。
 
 修改 App 时：
 
-- 保持 `state`、`usage` 和 `how_to_use` 分离；
+- 保持 `state` 和 `docs` 分离；
 - 通过 App namespace 暴露 model-facing tools；
 - 保持生成的 `appid__get_state` surface 准确且便宜；
 - 保持 app notice 显式且可 resolution；

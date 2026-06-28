@@ -1,4 +1,4 @@
-use crate::app::{AppHowToUse, AppId, AppUsage};
+use crate::app::{AppDocs, AppId};
 
 use super::prompt_text::{PromptTextBuilder, render_bullet_list};
 
@@ -19,9 +19,7 @@ pub(crate) fn prompt_bullet_lines(markdown: &str) -> Vec<String> {
 
 #[derive(Clone, Copy)]
 pub(crate) struct AppPrompt {
-    pub description: &'static str,
-    pub when_to_use: &'static [&'static str],
-    pub how_to_use: &'static str,
+    pub docs: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -32,49 +30,23 @@ pub(crate) struct PromptPersona {
 }
 
 impl AppPrompt {
-    pub(crate) fn usage(self) -> AppUsage {
-        AppUsage {
-            description: self.description.to_string(),
-            when_to_use: self
-                .when_to_use
-                .iter()
-                .map(|item| (*item).to_string())
-                .collect(),
-            body_markdown: None,
-        }
-    }
-
-    pub(crate) fn app_how_to_use(self) -> AppHowToUse {
-        AppHowToUse {
+    pub(crate) fn app_docs(self) -> AppDocs {
+        AppDocs {
             lines: Vec::new(),
-            body_markdown: Some(self.how_to_use.to_string()),
+            body_markdown: Some(self.docs.to_string()),
         }
     }
 }
 
-pub fn build_app_usage_prompt(_app_id: AppId, usage: &AppUsage) -> String {
-    if let Some(body) = usage.body_markdown.as_deref()
-        && !body.trim().is_empty()
-    {
-        return body.trim().to_string();
-    }
-    let mut builder = PromptTextBuilder::new();
-    builder.push_labeled_section("description", usage.description.clone());
-    if !usage.when_to_use.is_empty() {
-        builder.push_labeled_section("when_to_use", render_bullet_list(usage.when_to_use.clone()));
-    }
-    builder.build()
-}
-
-pub fn build_app_how_to_use_prompt(app_id: AppId, how_to_use: &AppHowToUse) -> String {
-    if let Some(body) = how_to_use.body_markdown.as_deref()
+pub fn build_app_docs_prompt(app_id: AppId, docs: &AppDocs) -> String {
+    if let Some(body) = docs.body_markdown.as_deref()
         && !body.trim().is_empty()
     {
         return body.trim().to_string();
     }
     let mut builder = PromptTextBuilder::new();
     let _ = app_id;
-    builder.push_paragraph(render_bullet_list(how_to_use.lines.clone()));
+    builder.push_paragraph(render_bullet_list(docs.lines.clone()));
     builder.build()
 }
 
@@ -111,9 +83,7 @@ mod tests {
     #[test]
     fn generated_app_prompt_structs_are_nonempty() {
         for prompt in [APP_BROWSER, APP_CODING, APP_TERMINAL] {
-            assert!(!prompt.description.is_empty());
-            assert!(!prompt.when_to_use.is_empty());
-            assert!(!prompt.how_to_use.is_empty());
+            assert!(!prompt.docs.is_empty());
         }
     }
 

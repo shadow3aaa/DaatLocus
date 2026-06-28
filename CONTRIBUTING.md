@@ -115,7 +115,7 @@ An App is a stateful capability domain, not a focus gate.
 
 When changing an App:
 
-- keep `state`, `usage`, and `how_to_use` separate
+- keep `state` and `docs` separate
 - expose model-facing tools through the App namespace
 - keep the generated `appid__get_state` surface accurate and cheap
 - keep app notices explicit and resolvable

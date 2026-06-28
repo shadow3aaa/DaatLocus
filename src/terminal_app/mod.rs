@@ -19,8 +19,8 @@ use crate::{
         compact_body_lines,
     },
     app::{
-        App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
-        AppToolSpec, AppUsage,
+        App, AppDocs, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
+        AppToolSpec,
     },
     core::{TerminalExecArgs, TerminalTerminateArgs, TerminalWaitMode, TerminalWriteStdinArgs},
     dashboard::{
@@ -661,12 +661,8 @@ impl App for TerminalApp {
         }
     }
 
-    fn usage(&self) -> AppUsage {
-        APP_TERMINAL.usage()
-    }
-
-    fn how_to_use(&self) -> AppHowToUse {
-        APP_TERMINAL.app_how_to_use()
+    fn docs(&self) -> AppDocs {
+        APP_TERMINAL.app_docs()
     }
 
     fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {

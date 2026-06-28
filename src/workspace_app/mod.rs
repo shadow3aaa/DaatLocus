@@ -22,8 +22,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     app::{
-        App, AppDynamicToolResult, AppDynamicToolSpec, AppHowToUse, AppId, AppInstallDisposition,
-        AppManager, AppStateRender, AppUsage,
+        App, AppDocs, AppDynamicToolResult, AppDynamicToolSpec, AppId, AppInstallDisposition,
+        AppManager, AppStateRender,
     },
     daat_locus_paths::daat_locus_paths_sync,
     persistence::PersistenceStore,
@@ -106,8 +106,7 @@ impl Drop for WorkspaceAppWatcherHandle {
 #[derive(Debug)]
 pub struct WorkspaceApp {
     id: AppId,
-    usage_markdown: String,
-    how_to_use_markdown: String,
+    docs_markdown: String,
     handle_state: Mutex<WorkspaceAppHandleState>,
 }
 
@@ -982,10 +981,8 @@ impl WorkspaceApp {
             ));
         }
 
-        let usage_markdown = fs::read_to_string(app_dir.join("prompt").join("usage.md"))
-            .map_err(|err| miette!("failed to read prompt/usage.md for app `{id}`: {err}"))?;
-        let how_to_use_markdown = fs::read_to_string(app_dir.join("prompt").join("how_to_use.md"))
-            .map_err(|err| miette!("failed to read prompt/how_to_use.md for app `{id}`: {err}"))?;
+        let docs_markdown = fs::read_to_string(app_dir.join("prompt").join("docs.md"))
+            .map_err(|err| miette!("failed to read prompt/docs.md for app `{id}`: {err}"))?;
         let state_dir = state_root.join(id.as_str());
         let mut worker = WorkspaceAppWorkerClient::start(
             id.clone(),
@@ -1015,8 +1012,7 @@ impl WorkspaceApp {
 
         Ok(Self {
             id,
-            usage_markdown,
-            how_to_use_markdown,
+            docs_markdown,
             handle_state: Mutex::new(WorkspaceAppHandleState {
                 worker,
                 render,
@@ -1100,18 +1096,10 @@ impl App for WorkspaceApp {
         render
     }
 
-    fn usage(&self) -> AppUsage {
-        AppUsage {
-            description: markdown_summary_line(&self.usage_markdown),
-            when_to_use: Vec::new(),
-            body_markdown: Some(self.usage_markdown.clone()),
-        }
-    }
-
-    fn how_to_use(&self) -> AppHowToUse {
-        AppHowToUse {
+    fn docs(&self) -> AppDocs {
+        AppDocs {
             lines: Vec::new(),
-            body_markdown: Some(self.how_to_use_markdown.clone()),
+            body_markdown: Some(self.docs_markdown.clone()),
         }
     }
 
@@ -1221,16 +1209,6 @@ fn load_runtime_state(path: &Path) -> Result<WorkspaceAppRuntimeState> {
     })
 }
 
-fn markdown_summary_line(content: &str) -> String {
-    content
-        .lines()
-        .map(str::trim)
-        .map(|line| line.trim_start_matches('#').trim())
-        .find(|line| !line.is_empty())
-        .unwrap_or("Third-party app")
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1245,15 +1223,10 @@ mod tests {
             .expect("write app.toml");
         fs::write(app_dir.join("runtime").join("app.lua"), lua_source).expect("write app.lua");
         fs::write(
-            app_dir.join("prompt").join("usage.md"),
-            "# Notes\n\nUse this app when you need note-oriented workflows.\n",
+            app_dir.join("prompt").join("docs.md"),
+            "# Notes\n\nRead the current state, then use the app-specific tools.\n",
         )
-        .expect("write usage.md");
-        fs::write(
-            app_dir.join("prompt").join("how_to_use.md"),
-            "Read the current state, then use the app-specific tools.\n",
-        )
-        .expect("write how_to_use.md");
+        .expect("write docs.md");
     }
 
     #[tokio::test]
@@ -1326,7 +1299,6 @@ return app
 
         let app = &mut bootstrap.apps[0];
         assert_eq!(app.id().to_string(), "notes");
-        assert_eq!(app.usage().description, "Notes");
         assert_eq!(app.render_state().title, "Notes App");
         assert!(
             app.render_state()

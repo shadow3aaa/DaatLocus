@@ -22,13 +22,13 @@ use crate::{
         PatchFileOperation, ToolCallActivityEvent, compact_body_lines,
     },
     app::{
-        App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
-        AppToolSpec, AppUsage,
+        App, AppDocs, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
+        AppToolSpec,
     },
     context_budget::truncate_text_to_token_budget,
     dashboard::SessionActivityEvent,
     reasoning::{episode::EpisodeActionRecord, prompts::APP_CODING, runtime::AgentToolCall},
-    runtime::scope_client::ScopeClient,
+    runtime::scope_engine::ScopeEngineHandle,
     schema_utils::{model_schema_for, structured_edit_args_schema},
 };
 
@@ -52,7 +52,7 @@ pub struct CodingReadCodeArgs {
     pub mode: CodingReadCodeMode,
 }
 
-type CodingSearchCodeArgs = scope_engine::api::SearchCodeRequest;
+type CodingSearchCodeArgs = scope_engine::api::SearchCodeInput;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct CodingEditCodeArgs {
@@ -391,7 +391,7 @@ fn format_install_command(value: Option<&Value>) -> Option<String> {
 }
 
 pub struct CodingApp {
-    scope: ScopeClient,
+    scope: ScopeEngineHandle,
     project_root: Option<PathBuf>,
     config_hint_summary: Option<CodingConfigHintSummary>,
     root_instructions: Vec<ProjectInstructionDocument>,
@@ -403,7 +403,7 @@ pub struct CodingApp {
 impl CodingApp {
     pub fn new() -> Self {
         Self {
-            scope: ScopeClient::new(),
+            scope: ScopeEngineHandle::new(),
             project_root: None,
             config_hint_summary: None,
             root_instructions: Vec::new(),
@@ -523,8 +523,8 @@ impl CodingApp {
 
         let root_instructions = load_instruction_documents_in_dir(&project_root)?;
         let root_instruction_fingerprint = project_instruction_fingerprint(&root_instructions);
-        let response = self.scope.open_project(project_root.clone())?;
-        let config_hints = ScopeClient::get_config_hints();
+        let output = self.scope.open_project(project_root.clone())?;
+        let config_hints = ScopeEngineHandle::get_config_hints();
         let config_hint_summary = CodingConfigHintSummary::from_hints(&config_hints);
 
         self.project_root = Some(project_root.clone());
@@ -564,7 +564,7 @@ impl CodingApp {
             json!({
                 "status": "opened",
                 "project_root": project_root,
-                "scope_response": response,
+                "scope_output": output,
                 "config_hints": config_hints,
                 "root_project_instruction_fingerprint": root_instruction_fingerprint,
             }),
@@ -757,9 +757,9 @@ impl CodingApp {
             })?;
         let mut blocked = Vec::new();
         for edit in args.edits {
-            let response = self.scope.is_responsible_source(Path::new(&edit.path))?;
-            if response.is_responsible {
-                blocked.push(format!("{} ({})", response.path, response.reason));
+            let output = self.scope.is_responsible_source(Path::new(&edit.path))?;
+            if output.is_responsible {
+                blocked.push(format!("{} ({})", output.path, output.reason));
             }
         }
         if blocked.is_empty() {
@@ -799,20 +799,8 @@ impl App for CodingApp {
         }
     }
 
-    fn usage(&self) -> AppUsage {
-        APP_CODING.usage()
-    }
-
-    fn how_to_use(&self) -> AppHowToUse {
-        static SCOPE_USAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let scope_usage_md = SCOPE_USAGE.get_or_init(|| ScopeClient::usage().usage_markdown);
-        AppHowToUse {
-            lines: Vec::new(),
-            body_markdown: Some(format!(
-                "{}\n\n---\n\n{}",
-                APP_CODING.how_to_use, scope_usage_md
-            )),
-        }
+    fn docs(&self) -> AppDocs {
+        APP_CODING.app_docs()
     }
 
     fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
@@ -972,7 +960,7 @@ impl App for CodingApp {
                 self.require_project()?;
                 let args: CodingReadCodeArgs = parse_coding_tool_args(call)?;
                 let summary_target = read_args_summary(&args);
-                let request = scope_engine::api::ReadCodeRequest {
+                let input = scope_engine::api::ReadCodeInput {
                     path: args.path.clone(),
                     anchor: args.anchor.clone(),
                     mode: match args.mode {
@@ -980,7 +968,7 @@ impl App for CodingApp {
                         CodingReadCodeMode::Full => scope_engine::api::ReadCodeMode::Full,
                     },
                 };
-                let result = self.scope.read_code(request)?;
+                let result = self.scope.read_code(input)?;
                 self.last_action = Some(format!("read {summary_target}"));
                 let model_content =
                     truncate_text_to_token_budget(&result.content, context.tool_output_max_tokens);
@@ -1055,28 +1043,28 @@ impl App for CodingApp {
             "next_review" => {
                 self.require_project()?;
                 let args: CodingNextReviewArgs = parse_coding_tool_args(call)?;
-                let response = self.scope.ack_next_events(args.limit);
-                self.last_action = Some(if response.returned == 1 {
+                let output = self.scope.ack_next_events(args.limit);
+                self.last_action = Some(if output.returned == 1 {
                     "acknowledged next review".to_string()
                 } else {
-                    format!("acknowledged {} reviews", response.returned)
+                    format!("acknowledged {} reviews", output.returned)
                 });
-                let review_present = response.returned > 0;
-                let review_title = coding_review_title(&response);
-                let review_summary = coding_review_summary(&response);
-                let model_content = coding_review_model_content(&response).map(|content| {
+                let review_present = output.returned > 0;
+                let review_title = coding_review_title(&output);
+                let review_summary = coding_review_summary(&output);
+                let model_content = coding_review_model_content(&output).map(|content| {
                     truncate_text_to_token_budget(&content, context.tool_output_max_tokens)
                 });
                 Ok(AppToolExecutionResult::from_activity_event(
                     if review_present {
                         format!(
                             "acknowledged {} coding impact review target(s); remaining={}",
-                            response.returned, response.remaining
+                            output.returned, output.remaining
                         )
                     } else {
                         "no coding review event pending".to_string()
                     },
-                    serde_json::to_value(&response).unwrap(),
+                    serde_json::to_value(&output).unwrap(),
                     model_content,
                     Some(SessionActivityEvent::CodingReview(
                         CodingReviewActivityDescriptor {
@@ -1128,10 +1116,10 @@ fn coding_target_summary(selector: &str) -> String {
     summarize_coding_inline_text(selector)
 }
 
-fn coding_review_title(response: &scope_engine::api::NextReviewResponse) -> String {
-    match response.returned {
+fn coding_review_title(output: &scope_engine::api::ReviewBatch) -> String {
+    match output.returned {
         0 => "No review pending".to_string(),
-        1 => match response.review.as_ref() {
+        1 => match output.review.as_ref() {
             Some(review) => format!(
                 "Reviewing impact of {}",
                 coding_target_summary(review_modified_symbol(review))
@@ -1142,28 +1130,28 @@ fn coding_review_title(response: &scope_engine::api::NextReviewResponse) -> Stri
     }
 }
 
-fn coding_review_summary(response: &scope_engine::api::NextReviewResponse) -> String {
-    if response.returned == 0 {
+fn coding_review_summary(output: &scope_engine::api::ReviewBatch) -> String {
+    if output.returned == 0 {
         return "no pending propagation review".to_string();
     }
 
     format!(
         "{} acquired; {} remaining",
-        coding_count_label(response.returned, "impact target", "impact targets"),
-        response.remaining
+        coding_count_label(output.returned, "impact target", "impact targets"),
+        output.remaining
     )
 }
 
-fn coding_review_model_content(response: &scope_engine::api::NextReviewResponse) -> Option<String> {
-    if response.returned == 0 {
+fn coding_review_model_content(output: &scope_engine::api::ReviewBatch) -> Option<String> {
+    if output.returned == 0 {
         return None;
     }
 
     let mut lines = vec![
-        format!("returned={}", response.returned),
-        format!("remaining={}", response.remaining),
+        format!("returned={}", output.returned),
+        format!("remaining={}", output.remaining),
     ];
-    for (index, review) in response.reviews.iter().enumerate() {
+    for (index, review) in output.reviews.iter().enumerate() {
         lines.push(format!(
             "{}. {}",
             index + 1,

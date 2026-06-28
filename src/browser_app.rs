@@ -15,8 +15,8 @@ use viewpoint_core::{AriaSnapshot, Browser, BrowserContext, DocumentLoadState, P
 use crate::{
     activity_event::{BrowserActivityAction, BrowserActivityDescriptor, ToolCallActivityEvent},
     app::{
-        App, AppHowToUse, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
-        AppToolSpec, AppUsage,
+        App, AppDocs, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
+        AppToolSpec,
     },
     context_budget::truncate_text_to_token_budget,
     core::{
@@ -1003,12 +1003,8 @@ impl App for BrowserApp {
         }
     }
 
-    fn usage(&self) -> AppUsage {
-        APP_BROWSER.usage()
-    }
-
-    fn how_to_use(&self) -> AppHowToUse {
-        APP_BROWSER.app_how_to_use()
+    fn docs(&self) -> AppDocs {
+        APP_BROWSER.app_docs()
     }
 
     fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {

@@ -1,4 +1,4 @@
-//! SCOPE engine in-process client.
+//! In-process SCOPE engine handle.
 //!
 //! Provides direct access to scope-engine functionality (tree-sitter parsing,
 //! symbol lookup, code editing, propagation analysis) without spawning a
@@ -21,7 +21,7 @@ pub struct ScopeEditCodeResult {
     pub applied_summary: api::AppliedStructuredEditSummary,
 }
 
-/// In-process SCOPE engine client.
+/// In-process SCOPE engine handle.
 ///
 /// Wraps the scope-engine library to provide:
 /// - Path plus line-hash code search and reading
@@ -29,15 +29,15 @@ pub struct ScopeEditCodeResult {
 /// - Propagation review events
 /// - Tree-sitter symbol lookup
 /// - Config hints for language servers
-pub struct ScopeClient {
+pub struct ScopeEngineHandle {
     project_root: Option<PathBuf>,
     propagation_state: Mutex<PropagationState>,
     lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>>,
     tree_sitter: TreeSitterAnalyzer,
 }
 
-impl ScopeClient {
-    /// Create a new scope client (no project opened yet).
+impl ScopeEngineHandle {
+    /// Create a new scope engine handle (no project opened yet).
     #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
@@ -53,10 +53,10 @@ impl ScopeClient {
     pub fn open_project(
         &mut self,
         project_root: impl Into<PathBuf>,
-    ) -> Result<api::OpenProjectResponse> {
+    ) -> Result<api::OpenProjectOutput> {
         let project_root = project_root.into();
         let previous_project_root = self.project_root.clone();
-        let response = engine::open_project(
+        let output = engine::open_project(
             &project_root,
             previous_project_root.as_deref(),
             &self.lsp_analyzer,
@@ -70,7 +70,7 @@ impl ScopeClient {
             *state = PropagationState::new();
         }
         self.project_root = Some(project_root);
-        Ok(response)
+        Ok(output)
     }
 
     /// The project root path, if a project has been opened.
@@ -109,17 +109,17 @@ impl ScopeClient {
 
     /// Read code using a path plus line-hash anchor.
     #[allow(dead_code)]
-    pub fn read_code(&self, request: api::ReadCodeRequest) -> Result<api::ReadCodeResponse> {
+    pub fn read_code(&self, input: api::ReadCodeInput) -> Result<api::ReadCodeOutput> {
         let root = self.require_project_root()?;
-        engine::read_code(root, &request)
+        engine::read_code(root, &input)
             .map_err(|err| miette!("scope-engine read_code failed: {err}"))
     }
 
     /// Search code and return matched line-hash hits.
     #[allow(dead_code)]
-    pub fn search_code(&self, request: api::SearchCodeRequest) -> Result<api::SearchCodeResponse> {
+    pub fn search_code(&self, input: api::SearchCodeInput) -> Result<api::SearchCodeOutput> {
         let root = self.require_project_root()?;
-        engine::search_code(root, &request)
+        engine::search_code(root, &input)
             .map_err(|err| miette!("scope-engine search_code failed: {err}"))
     }
 
@@ -127,9 +127,9 @@ impl ScopeClient {
     #[allow(dead_code)]
     pub fn edit_code(&self, edits: &[api::StructuredEdit]) -> Result<ScopeEditCodeResult> {
         let root = self.require_project_root()?;
-        let response = engine::edit_code(
+        let output = engine::edit_code(
             root,
-            &api::EditCodeRequest {
+            &api::EditCodeInput {
                 edits: edits.to_vec(),
             },
             &self.propagation_state,
@@ -137,18 +137,18 @@ impl ScopeClient {
         )
         .map_err(|err| miette!("scope-engine edit_code failed: {err}"))?;
         Ok(ScopeEditCodeResult {
-            propagation_results: response.propagation_results,
-            applied_summary: response.applied_summary,
+            propagation_results: output.propagation_results,
+            applied_summary: output.applied_summary,
         })
     }
 
     /// Return whether SCOPE owns semantic source operations for a path.
     #[allow(dead_code)]
-    pub fn is_responsible_source(&self, path: &Path) -> Result<api::IsResponsibleSourceResponse> {
+    pub fn is_responsible_source(&self, path: &Path) -> Result<api::SourceResponsibility> {
         let root = self.require_project_root()?;
         engine::is_responsible_source(
             root,
-            &api::IsResponsibleSourceRequest {
+            &api::SourceResponsibilityInput {
                 path: path.to_string_lossy().into_owned(),
             },
         )
@@ -167,7 +167,7 @@ impl ScopeClient {
 
     /// Acknowledge and return accumulated propagation review events.
     #[allow(dead_code)]
-    pub fn ack_next_events(&self, limit: Option<usize>) -> api::NextReviewResponse {
+    pub fn ack_next_events(&self, limit: Option<usize>) -> api::ReviewBatch {
         engine::ack_next_events(&self.propagation_state, limit)
             .unwrap_or_else(|err| panic!("scope-engine ack_next_events failed: {err}"))
     }
@@ -182,12 +182,6 @@ impl ScopeClient {
     #[allow(dead_code)]
     pub fn get_config_hints() -> serde_json::Value {
         engine::config_hints()
-    }
-
-    /// Return SCOPE-owned usage documentation and model-facing protocol schema.
-    #[allow(dead_code)]
-    pub fn usage() -> api::ScopeUsageResponse {
-        scope_engine::usage::usage_response()
     }
 
     /// Get the list of supported tree-sitter languages.
@@ -207,7 +201,7 @@ impl ScopeClient {
     }
 }
 
-impl Default for ScopeClient {
+impl Default for ScopeEngineHandle {
     fn default() -> Self {
         Self::new()
     }
@@ -244,49 +238,49 @@ mod tests {
         )
         .unwrap();
 
-        let mut client = ScopeClient::new();
+        let mut handle = ScopeEngineHandle::new();
         assert!(
-            client
+            handle
                 .next_review_event(vec![open_result("src/main.rs::fn main")])
                 .is_some()
         );
-        assert_eq!(client.pending_review_count(), 0);
+        assert_eq!(handle.pending_review_count(), 0);
         assert!(
-            client
+            handle
                 .next_review_event(vec![open_result("src/main.rs::fn main")])
                 .is_some()
         );
-        assert_eq!(client.pending_review_count(), 0);
+        assert_eq!(handle.pending_review_count(), 0);
 
-        client
+        handle
             .propagation_state
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .accumulate(vec![open_result("src/main.rs::fn main")]);
-        assert_eq!(client.pending_review_count(), 1);
+        assert_eq!(handle.pending_review_count(), 1);
 
-        client.open_project(temp_dir.path()).expect("open project");
-        assert_eq!(client.pending_review_count(), 0);
+        handle.open_project(temp_dir.path()).expect("open project");
+        assert_eq!(handle.pending_review_count(), 0);
 
-        client
+        handle
             .propagation_state
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .accumulate(vec![open_result("src/lib.rs::fn lib")]);
-        assert_eq!(client.pending_review_count(), 1);
+        assert_eq!(handle.pending_review_count(), 1);
 
-        let response = client
+        let output = handle
             .open_project(temp_dir.path())
             .expect("reopen same project");
-        assert_eq!(response.status, "already_open");
-        assert_eq!(client.pending_review_count(), 1);
+        assert_eq!(output.status, "already_open");
+        assert_eq!(handle.pending_review_count(), 1);
 
-        client
+        handle
             .open_project(other_temp_dir.path())
             .expect("open other project");
-        assert_eq!(client.pending_review_count(), 0);
+        assert_eq!(handle.pending_review_count(), 0);
         assert!(
-            client
+            handle
                 .next_review_event(vec![open_result("src/main.rs::fn main")])
                 .is_some()
         );
@@ -294,8 +288,8 @@ mod tests {
 
     #[test]
     fn ack_next_events_returns_batch_and_remaining_count() {
-        let client = ScopeClient::new();
-        client
+        let handle = ScopeEngineHandle::new();
+        handle
             .propagation_state
             .lock()
             .unwrap_or_else(|err| err.into_inner())
@@ -305,12 +299,12 @@ mod tests {
                 open_result("src/c.rs::fn third"),
             ]);
 
-        let response = client.ack_next_events(Some(2));
+        let output = handle.ack_next_events(Some(2));
 
-        assert_eq!(response.returned, 2);
-        assert_eq!(response.reviews.len(), 2);
-        assert_eq!(response.remaining, 1);
-        match response.review.unwrap() {
+        assert_eq!(output.returned, 2);
+        assert_eq!(output.reviews.len(), 2);
+        assert_eq!(output.remaining, 1);
+        match output.review.unwrap() {
             api::ReviewEvent::InvestigateImpact {
                 modified_symbol, ..
             } => assert_eq!(modified_symbol, "src/c.rs::fn third"),

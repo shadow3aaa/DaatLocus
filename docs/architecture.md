@@ -136,9 +136,8 @@ Browser, Terminal, or Coding.
 
 ### Capability Docs Are Separate
 
-Keep app usage docs, app how-to-use docs, project instructions, event completion
-rules, and workflow routing as separate instruction layers with their own
-responsibilities.
+Keep app docs, project instructions, event completion rules, and workflow
+routing as separate instruction layers with their own responsibilities.
 
 ## Core Runtime Objects
 
@@ -194,7 +193,7 @@ Builtin primitives live in repository `workflows/*.md` and are compiled by
 ## App Model
 
 An `App` is a stateful capability domain with its own tools, state, lifecycle,
-usage guidance, and operation guidance.
+and prompt docs.
 
 The current built-in Apps are:
 
@@ -202,8 +201,9 @@ The current built-in Apps are:
   element refs, navigation, and page interaction.
 - **Terminal**: persistent command sessions, unread output, stdin continuation,
   process lifecycle, and working directories.
-- **Coding**: project-aware source operations backed by scope-engine, including
-  semantic search, hash-anchored reads and edits, and propagation review.
+- **Coding**: project-aware source operations backed by SCOPE — Semantic Code
+  Operation & Propagation Engine (`scope-engine`), including semantic search,
+  hash-anchored reads and edits, and propagation review.
 
 ### App Tool Exposure
 
@@ -225,17 +225,20 @@ The App still owns its state and lifecycle internally. Tool ownership is visible
 in the tool name, and operations use explicit identifiers and visible runtime
 selection inputs.
 
-### State, Usage, And How-To-Use
+### State And Docs
 
-Every App exposes three separate layers:
+Every App exposes two separate layers:
 
 - `state`: current structured facts, returned by `appid__get_state` and rendered
   in app-status surfaces;
-- `usage`: when the capability domain is worth using;
-- `how_to_use`: how to operate the App's tools safely.
+- `docs`: stable system-prompt documentation for operating the App's tools and
+  understanding its capability boundary.
 
-Keep these layers separate: state reports current facts, usage describes
-applicability, and how-to-use text explains safe operation.
+Keep these layers separate: state reports current facts, while docs explain
+capability boundaries and safe operation. Only `state` belongs in runtime state
+surfaces; `docs` are system prompt material. App docs are plain markdown, not a
+frontmatter metadata layer; do not add app-level `description` or `when_to_use`
+fields.
 
 ### Static File Tools Are Runtime Tools
 
@@ -263,8 +266,7 @@ Third-party workspace Apps are source-first assets under:
 ~/daat-locus-workspace/apps/<app_id_snake_case>/
   app.toml
   runtime/app.lua
-  prompt/usage.md
-  prompt/how_to_use.md
+  prompt/docs.md
 ```
 
 The host loads one Lua 5.4 module from `runtime/app.lua` through `mlua`. The
@@ -272,7 +274,7 @@ current Lua surface uses one module instance with hooks such as `config(ctx)`,
 `init(ctx, state)`, `render_state(ctx, state)`, `list_tools(ctx, state)`,
 `call_tool(ctx, state, name, args)`, and `poll_notices(ctx, state)`.
 
-Workspace app prompts describe the App capability. Reusable task SOPs live in
+Workspace app prompt docs describe the App capability. Reusable task SOPs live in
 workflow primitive specs.
 
 ## Tool And Action Boundaries

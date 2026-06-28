@@ -125,14 +125,7 @@ pub struct AppStateRender {
 }
 
 #[derive(Debug, Clone)]
-pub struct AppUsage {
-    pub description: String,
-    pub when_to_use: Vec<String>,
-    pub body_markdown: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AppHowToUse {
+pub struct AppDocs {
     pub lines: Vec<String>,
     pub body_markdown: Option<String>,
 }
@@ -229,9 +222,7 @@ pub trait App: Send + Sync {
 
     fn render_state(&self) -> AppStateRender;
 
-    fn usage(&self) -> AppUsage;
-
-    fn how_to_use(&self) -> AppHowToUse;
+    fn docs(&self) -> AppDocs;
 
     fn dynamic_tools(&self) -> Result<Vec<AppDynamicToolSpec>> {
         Ok(Vec::new())
@@ -360,12 +351,8 @@ impl AppManager {
         self.apps.get(id).map(|app| app.render_state())
     }
 
-    pub fn usage(&self, id: &AppId) -> Option<AppUsage> {
-        self.apps.get(id).map(|app| app.usage())
-    }
-
-    pub fn how_to_use(&self, id: &AppId) -> Option<AppHowToUse> {
-        self.apps.get(id).map(|app| app.how_to_use())
+    pub fn docs(&self, id: &AppId) -> Option<AppDocs> {
+        self.apps.get(id).map(|app| app.docs())
     }
 
     pub fn app_ids(&self) -> Vec<AppId> {

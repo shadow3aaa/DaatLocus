@@ -154,9 +154,9 @@ pub fn open_project(
     project_root: &Path,
     current_project_root: Option<&Path>,
     lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
-) -> Result<OpenProjectResponse, String> {
+) -> Result<OpenProjectOutput, String> {
     if current_project_root == Some(project_root) {
-        return Ok(OpenProjectResponse {
+        return Ok(OpenProjectOutput {
             status: "already_open".to_string(),
             project_root: project_root.to_string_lossy().into_owned(),
             detected_lsp_language: None,
@@ -170,7 +170,7 @@ pub fn open_project(
             .lock()
             .map_err(|_| "lock poisoned".to_string())?;
         *lsp_guard = None;
-        return Ok(OpenProjectResponse {
+        return Ok(OpenProjectOutput {
             status: "opened".to_string(),
             project_root: project_root.to_string_lossy().into_owned(),
             detected_lsp_language: detected_lsp_language.map(str::to_string),
@@ -196,7 +196,7 @@ pub fn open_project(
         }
     }
 
-    Ok(OpenProjectResponse {
+    Ok(OpenProjectOutput {
         status: "opened".to_string(),
         project_root: project_root.to_string_lossy().into_owned(),
         detected_lsp_language: detected_lsp_language.map(str::to_string),
@@ -206,8 +206,8 @@ pub fn open_project(
 
 pub fn search_code(
     project_root: &Path,
-    params: &SearchCodeRequest,
-) -> Result<SearchCodeResponse, String> {
+    params: &SearchCodeInput,
+) -> Result<SearchCodeOutput, String> {
     if params.query.is_empty() {
         return Err("query is required".to_string());
     }
@@ -215,13 +215,13 @@ pub fn search_code(
     let limit = normalize_search_limit(params.limit);
     let target = project_relative_arg(project_root, params.path.as_deref())?;
     let matches = search_project_matches(project_root, params, target.as_deref(), limit)?;
-    Ok(SearchCodeResponse { matches })
+    Ok(SearchCodeOutput { matches })
 }
 
 pub fn is_responsible_source(
     project_root: &Path,
-    params: &IsResponsibleSourceRequest,
-) -> Result<IsResponsibleSourceResponse, String> {
+    params: &SourceResponsibilityInput,
+) -> Result<SourceResponsibility, String> {
     let relative = project_relative_arg(project_root, Some(&params.path))?
         .ok_or_else(|| "path is required".to_string())?;
     let path = project_root.join(&relative);
@@ -245,7 +245,7 @@ pub fn is_responsible_source(
         (None, _) => "path has no file extension for SCOPE source ownership".to_string(),
     };
 
-    Ok(IsResponsibleSourceResponse {
+    Ok(SourceResponsibility {
         is_responsible,
         path: relative,
         extension,
@@ -262,12 +262,12 @@ fn normalize_search_limit(limit: Option<usize>) -> usize {
 
 fn search_project_matches(
     project_root: &Path,
-    params: &SearchCodeRequest,
+    params: &SearchCodeInput,
     target: Option<&str>,
     limit: usize,
 ) -> Result<Vec<SearchHit>, String> {
     let regex = build_search_regex(params)?;
-    let filters = SearchFileFilters::from_request(params)?;
+    let filters = SearchFileFilters::from_input(params)?;
     let mut matches = Vec::new();
 
     for entry in project_files(project_root, target, &filters)? {
@@ -298,7 +298,7 @@ fn search_project_matches(
     Ok(matches)
 }
 
-fn build_search_regex(params: &SearchCodeRequest) -> Result<Regex, String> {
+fn build_search_regex(params: &SearchCodeInput) -> Result<Regex, String> {
     let mut pattern = match params.mode {
         SearchMode::Literal => regex::escape(&params.query),
         SearchMode::Regex => params.query.clone(),
@@ -337,7 +337,7 @@ struct SearchFileFilters {
 }
 
 impl SearchFileFilters {
-    fn from_request(params: &SearchCodeRequest) -> Result<Self, String> {
+    fn from_input(params: &SearchCodeInput) -> Result<Self, String> {
         Ok(Self {
             include: build_optional_glob_set(&params.include)?,
             exclude: build_optional_glob_set(&params.exclude)?,
@@ -548,10 +548,7 @@ fn read_line_range(content: &str, start_line: usize, end_line: usize) -> String 
     snippet
 }
 
-pub fn read_code(
-    project_root: &Path,
-    params: &ReadCodeRequest,
-) -> Result<ReadCodeResponse, String> {
+pub fn read_code(project_root: &Path, params: &ReadCodeInput) -> Result<ReadCodeOutput, String> {
     let relative = project_relative_arg(project_root, Some(&params.path))?
         .ok_or_else(|| "path is required".to_string())?;
     let full_path = project_root.join(&relative);
@@ -565,7 +562,7 @@ pub fn read_code(
     let raw_content = read_line_range(&file_content, start_line, end_line);
     let prefixed_content = prefix_lines_with_hash(&raw_content, start_line);
 
-    Ok(ReadCodeResponse {
+    Ok(ReadCodeOutput {
         content: prefixed_content,
     })
 }
@@ -647,10 +644,10 @@ fn prefix_lines_with_hash(content: &str, start_line: usize) -> String {
 
 pub fn edit_code(
     project_root: &Path,
-    params: &EditCodeRequest,
+    params: &EditCodeInput,
     propagation_state: &Mutex<PropagationState>,
     lsp_analyzer: &Mutex<Option<Box<dyn Analyzer + Send>>>,
-) -> Result<PropagationResponse, String> {
+) -> Result<EditCodeOutput, String> {
     match patch::edit_code_apply(&params.edits, project_root, lsp_analyzer) {
         Ok((results, applied_summary)) => {
             if !results.is_empty()
@@ -658,7 +655,7 @@ pub fn edit_code(
             {
                 state.accumulate(results.clone());
             }
-            Ok(PropagationResponse {
+            Ok(EditCodeOutput {
                 propagation_results: results,
                 applied_summary,
             })
@@ -735,7 +732,7 @@ pub fn config_hints() -> serde_json::Value {
 pub fn ack_next_events(
     propagation_state: &Mutex<PropagationState>,
     limit: Option<usize>,
-) -> Result<NextReviewResponse, String> {
+) -> Result<ReviewBatch, String> {
     let limit = limit
         .unwrap_or(DEFAULT_REVIEW_LIMIT)
         .clamp(1, MAX_REVIEW_LIMIT);
@@ -746,7 +743,7 @@ pub fn ack_next_events(
     let review = reviews.first().cloned();
     let returned = reviews.len();
     let remaining = state.pending_count();
-    Ok(NextReviewResponse {
+    Ok(ReviewBatch {
         review,
         reviews,
         returned,
@@ -770,9 +767,9 @@ mod tests {
         .unwrap();
         let lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
 
-        let response = open_project(dir.path(), None, &lsp_analyzer).unwrap();
+        let output = open_project(dir.path(), None, &lsp_analyzer).unwrap();
 
-        assert_eq!(response.detected_lsp_language.as_deref(), Some("rust"));
+        assert_eq!(output.detected_lsp_language.as_deref(), Some("rust"));
     }
 
     #[test]
@@ -780,10 +777,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>> = Mutex::new(None);
 
-        let response = open_project(dir.path(), Some(dir.path()), &lsp_analyzer).unwrap();
+        let output = open_project(dir.path(), Some(dir.path()), &lsp_analyzer).unwrap();
 
-        assert_eq!(response.status, "already_open");
-        assert_eq!(response.detected_lsp_language, None);
+        assert_eq!(output.status, "already_open");
+        assert_eq!(output.detected_lsp_language, None);
     }
 
     #[test]
@@ -807,18 +804,18 @@ mod tests {
         )
         .unwrap();
 
-        let response = search_code(
+        let output = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "needle".to_string(),
                 path: Some("src".to_string()),
                 include: vec!["*.rs".to_string()],
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
 
-        let hits = response
+        let hits = output
             .matches
             .iter()
             .map(|item| (item.path.clone(), item.hit.clone()))
@@ -847,27 +844,27 @@ mod tests {
         )
         .unwrap();
 
-        let response = search_code(
+        let output = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "matching_commands(".to_string(),
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
-        assert_eq!(response.matches.len(), 1);
-        assert_eq!(response.matches[0].path, "lib.rs");
-        assert!(response.matches[0].hit.contains("matching_commands"));
+        assert_eq!(output.matches.len(), 1);
+        assert_eq!(output.matches[0].path, "lib.rs");
+        assert!(output.matches[0].hit.contains("matching_commands"));
 
-        let response = search_code(
+        let output = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "needle".to_string(),
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
-        assert_eq!(response.matches.len(), 1);
+        assert_eq!(output.matches.len(), 1);
     }
 
     #[test]
@@ -875,26 +872,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("lib.rs"), "let needle = true;\n").unwrap();
 
-        let literal_response = search_code(
+        let literal_output = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: r"needle\s+=\s+true".to_string(),
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
-        assert!(literal_response.matches.is_empty());
+        assert!(literal_output.matches.is_empty());
 
-        let regex_response = search_code(
+        let regex_output = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: r"needle\s+=\s+true".to_string(),
                 mode: SearchMode::Regex,
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
-        assert_eq!(regex_response.matches.len(), 1);
+        assert_eq!(regex_output.matches.len(), 1);
     }
 
     #[test]
@@ -907,9 +904,9 @@ mod tests {
 
         let smart_lower = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "needle".to_string(),
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
@@ -917,9 +914,9 @@ mod tests {
 
         let smart_upper = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "Needle".to_string(),
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
@@ -934,11 +931,11 @@ mod tests {
 
         let word = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "needle".to_string(),
                 word: true,
                 case_mode: SearchCase::Sensitive,
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
@@ -950,11 +947,11 @@ mod tests {
 
         let line = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "needle".to_string(),
                 line: true,
                 case_mode: SearchCase::Sensitive,
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
@@ -985,13 +982,13 @@ mod tests {
 
         let filtered = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "needle".to_string(),
                 path: Some("src".to_string()),
                 include: vec!["*.rs".to_string()],
                 exclude: vec!["src/generated/**".to_string()],
                 types: vec!["rust".to_string()],
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
@@ -1006,12 +1003,12 @@ mod tests {
 
         let default_visibility = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "needle".to_string(),
                 path: None,
                 include: vec!["*.rs".to_string()],
                 exclude: vec!["src/**".to_string()],
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
@@ -1019,14 +1016,14 @@ mod tests {
 
         let unrestricted_visibility = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "needle".to_string(),
                 path: None,
                 include: vec!["*.rs".to_string()],
                 exclude: vec!["src/**".to_string()],
                 hidden: true,
                 respect_ignore: false,
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
@@ -1041,17 +1038,17 @@ mod tests {
     }
 
     #[test]
-    fn search_code_request_accepts_legacy_single_include_glob() {
+    fn search_code_input_accepts_legacy_single_include_glob() {
         let value = serde_json::json!({
             "query": "needle",
             "include": "*.rs"
         });
 
-        let request: SearchCodeRequest = serde_json::from_value(value).unwrap();
-        assert_eq!(request.include, vec!["*.rs".to_string()]);
-        assert_eq!(request.mode, SearchMode::Literal);
-        assert_eq!(request.case_mode, SearchCase::Smart);
-        assert!(request.respect_ignore);
+        let input: SearchCodeInput = serde_json::from_value(value).unwrap();
+        assert_eq!(input.include, vec!["*.rs".to_string()]);
+        assert_eq!(input.mode, SearchMode::Literal);
+        assert_eq!(input.case_mode, SearchCase::Smart);
+        assert!(input.respect_ignore);
     }
 
     #[test]
@@ -1063,16 +1060,16 @@ mod tests {
         )
         .unwrap();
 
-        let response = search_code(
+        let output = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "needle".to_string(),
                 limit: Some(2),
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
-        assert_eq!(response.matches.len(), 2);
+        assert_eq!(output.matches.len(), 2);
     }
 
     #[test]
@@ -1084,16 +1081,16 @@ mod tests {
         )
         .unwrap();
 
-        let response = search_code(
+        let output = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "needle".to_string(),
                 limit: Some(0),
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
-        assert_eq!(response.matches.len(), 1);
+        assert_eq!(output.matches.len(), 1);
     }
 
     #[test]
@@ -1102,19 +1099,19 @@ mod tests {
         let source = "use std::fmt;\n\npub fn second() {\n    println!(\"second\");\n}\n";
         std::fs::write(dir.path().join("lib.rs"), source).unwrap();
 
-        let response = search_code(
+        let output = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "std::fmt".to_string(),
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
 
-        assert_eq!(response.matches.len(), 1);
-        assert_eq!(response.matches[0].path, "lib.rs");
+        assert_eq!(output.matches.len(), 1);
+        assert_eq!(output.matches[0].path, "lib.rs");
         assert_eq!(
-            response.matches[0].hit,
+            output.matches[0].hit,
             format_line_with_hash(1, "use std::fmt;")
         );
     }
@@ -1127,9 +1124,9 @@ mod tests {
 
         let search = search_code(
             dir.path(),
-            &SearchCodeRequest {
+            &SearchCodeInput {
                 query: "second".to_string(),
-                ..SearchCodeRequest::default()
+                ..SearchCodeInput::default()
             },
         )
         .unwrap();
@@ -1141,7 +1138,7 @@ mod tests {
             .to_string();
         let result = read_code(
             dir.path(),
-            &ReadCodeRequest {
+            &ReadCodeInput {
                 path: "lib.rs".to_string(),
                 anchor,
                 mode: ReadCodeMode::Full,
@@ -1178,7 +1175,7 @@ mod tests {
 
         let result = read_code(
             dir.path(),
-            &ReadCodeRequest {
+            &ReadCodeInput {
                 path: "lib.rs".to_string(),
                 anchor,
                 mode: ReadCodeMode::Around,
@@ -1200,7 +1197,7 @@ mod tests {
 
         let err = read_code(
             dir.path(),
-            &ReadCodeRequest {
+            &ReadCodeInput {
                 path: "lib.rs".to_string(),
                 anchor: "1#00".to_string(),
                 mode: ReadCodeMode::Around,
@@ -1259,30 +1256,12 @@ mod tests {
     }
 
     #[test]
-    fn scope_usage_is_available() {
-        let result = serde_json::to_value(crate::usage::usage_response()).unwrap();
-        assert!(
-            result["usage_markdown"]
-                .as_str()
-                .unwrap()
-                .contains("matched source lines with line-hash anchors")
-        );
-        assert!(
-            result["protocol_items"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|item| item["item"] == "read_code")
-        );
-    }
-
-    #[test]
     fn is_responsible_source_reports_scope_owned_source() {
         let dir = tempfile::tempdir().unwrap();
 
         let result = is_responsible_source(
             dir.path(),
-            &IsResponsibleSourceRequest {
+            &SourceResponsibilityInput {
                 path: "src/lib.rs".to_string(),
             },
         )
@@ -1299,7 +1278,7 @@ mod tests {
 
         let result = is_responsible_source(
             dir.path(),
-            &IsResponsibleSourceRequest {
+            &SourceResponsibilityInput {
                 path: "README.md".to_string(),
             },
         )

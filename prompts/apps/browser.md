@@ -1,10 +1,5 @@
----
-description: Browser is the web viewing and interaction surface for tasks that require active browsing and exploration.
-when_to_use:
-  - When active web browsing is needed instead of judging only from injected event facts.
-  - When current visible page content must be read, candidate links must be opened, or investigation must continue across pages.
-  - When a web session needs continued interaction such as submitting search, filling controls, going back or forward, or reloading.
----
+# Browser
+
 - Operate Browser only through browser tools; do not assume raw HTML access or human-style mechanical navigation.
 - Use `browser__browser_open_page` to open pages.
 - If the page may still be loading, call `browser__browser_wait`; to understand current page content or obtain interactable element refs, call `browser__browser_snapshot` for a compact semantic snapshot.

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     activity_event::{TextActivityDescriptor, ToolCallActivityEvent, glyph},
-    app::{AppHowToUse, AppId, AppStateRender, AppToolExecutionContext, AppUsage},
+    app::{AppId, AppStateRender, AppToolExecutionContext},
     context::Context,
     context_budget::truncate_text_to_token_budget_with_notice,
     dashboard::SessionActivityEvent,
@@ -259,8 +259,6 @@ enum AppStateDetail {
 struct AppGetStateArgs {
     /// State detail to return. Use full when exact visible facts are needed.
     detail: Option<AppStateDetail>,
-    /// Include the app usage and operation manual alongside current state.
-    include_manual: Option<bool>,
 }
 
 struct AppGetStateRuntimeTool {
@@ -281,52 +279,18 @@ impl AppGetStateRuntimeTool {
     }
 }
 
-fn app_state_payload(
-    app_id: &AppId,
-    state: &AppStateRender,
-    detail: AppStateDetail,
-    usage: Option<&AppUsage>,
-    how_to_use: Option<&AppHowToUse>,
-) -> Value {
-    let mut payload = json!({
+fn app_state_payload(app_id: &AppId, state: &AppStateRender, detail: AppStateDetail) -> Value {
+    json!({
         "app": app_id.to_string(),
         "detail": match detail {
             AppStateDetail::Summary => "summary",
             AppStateDetail::Full => "full",
         },
         "state": state,
-    });
-
-    if let Value::Object(map) = &mut payload {
-        if let Some(usage) = usage {
-            map.insert(
-                "usage".to_string(),
-                json!({
-                    "description": &usage.description,
-                    "when_to_use": &usage.when_to_use,
-                    "body_markdown": &usage.body_markdown,
-                }),
-            );
-        }
-        if let Some(how_to_use) = how_to_use {
-            map.insert(
-                "how_to_use".to_string(),
-                json!({
-                    "lines": &how_to_use.lines,
-                    "body_markdown": &how_to_use.body_markdown,
-                }),
-            );
-        }
-    }
-    payload
+    })
 }
 
-fn render_app_get_state_model_content(
-    app_id: &AppId,
-    state: &AppStateRender,
-    usage: Option<&AppUsage>,
-    how_to_use: Option<&AppHowToUse>,
-) -> String {
+fn render_app_get_state_model_content(app_id: &AppId, state: &AppStateRender) -> String {
     let mut out = String::new();
     out.push_str(&format!("app={app_id}\n"));
     out.push_str(&format!("state_title={}\n", state.title));
@@ -337,40 +301,6 @@ fn render_app_get_state_model_content(
         for line in &state.lines {
             out.push_str("- ");
             out.push_str(line);
-            out.push('\n');
-        }
-    }
-
-    if let Some(usage) = usage {
-        out.push_str("usage:\n");
-        out.push_str("- description: ");
-        out.push_str(&usage.description);
-        out.push('\n');
-        for item in &usage.when_to_use {
-            out.push_str("- when_to_use: ");
-            out.push_str(item);
-            out.push('\n');
-        }
-        if let Some(body) = usage.body_markdown.as_deref()
-            && !body.trim().is_empty()
-        {
-            out.push_str("- notes:\n");
-            out.push_str(body.trim());
-            out.push('\n');
-        }
-    }
-
-    if let Some(how_to_use) = how_to_use {
-        out.push_str("how_to_use:\n");
-        for line in &how_to_use.lines {
-            out.push_str("- ");
-            out.push_str(line);
-            out.push('\n');
-        }
-        if let Some(body) = how_to_use.body_markdown.as_deref()
-            && !body.trim().is_empty()
-        {
-            out.push_str(body.trim());
             out.push('\n');
         }
     }
@@ -389,7 +319,7 @@ impl RuntimeTool for AppGetStateRuntimeTool {
     }
 
     fn description(&self) -> &str {
-        "Read the current state for this app capability domain. Set include_manual=true when you also need its usage and operation notes."
+        "Read the current state for this app capability domain."
     }
 
     fn input_spec(&self) -> AgentToolInputSpec {
@@ -401,28 +331,24 @@ impl RuntimeTool for AppGetStateRuntimeTool {
         Ok(EpisodeActionRecord {
             kind: self.exposed_name.clone(),
             summary: format!(
-                "detail={} include_manual={}",
+                "detail={}",
                 match args.detail.unwrap_or_default() {
                     AppStateDetail::Summary => "summary",
                     AppStateDetail::Full => "full",
-                },
-                args.include_manual.unwrap_or(false)
+                }
             ),
         })
     }
 
     fn call_activity_event(&self, call: &AgentToolCall) -> miette::Result<ToolCallActivityEvent> {
         let args: AppGetStateArgs = parse_tool_args(call)?;
-        let mut lines = vec![format!(
+        let lines = vec![format!(
             "detail={}",
             match args.detail.unwrap_or_default() {
                 AppStateDetail::Summary => "summary",
                 AppStateDetail::Full => "full",
             }
         )];
-        if args.include_manual.unwrap_or(false) {
-            lines.push("include_manual=true".to_string());
-        }
         Ok(ToolCallActivityEvent::app(
             AppId::render_exposed_tool_name(&self.exposed_name),
             lines,
@@ -439,26 +365,9 @@ impl RuntimeTool for AppGetStateRuntimeTool {
             .apps
             .state_render_for(&self.owner_app_id)
             .ok_or_else(|| miette!("app missing for state read: {}", self.owner_app_id))?;
-        let include_manual = args.include_manual.unwrap_or(false);
-        let usage = include_manual
-            .then(|| context.apps.usage(&self.owner_app_id))
-            .flatten();
-        let how_to_use = include_manual
-            .then(|| context.apps.how_to_use(&self.owner_app_id))
-            .flatten();
-        let payload = app_state_payload(
-            &self.owner_app_id,
-            &state,
-            args.detail.unwrap_or_default(),
-            usage.as_ref(),
-            how_to_use.as_ref(),
-        );
-        let model_content = render_app_get_state_model_content(
-            &self.owner_app_id,
-            &state,
-            usage.as_ref(),
-            how_to_use.as_ref(),
-        );
+        let payload =
+            app_state_payload(&self.owner_app_id, &state, args.detail.unwrap_or_default());
+        let model_content = render_app_get_state_model_content(&self.owner_app_id, &state);
         Ok(ToolExecutionResult::from_activity_event(
             format!("read {} state", self.owner_app_id),
             payload,
@@ -1600,7 +1509,7 @@ mod tests {
         let call = AgentToolCall {
             id: "call_state".to_string(),
             name: "terminal__get_state".to_string(),
-            arguments: json!({ "include_manual": true }),
+            arguments: json!({}),
         };
 
         let result = execute_agent_tool_call(&mut isolated.context, &call)
@@ -1609,7 +1518,8 @@ mod tests {
 
         assert!(result.model_content().contains("app=terminal"));
         assert_eq!(result.payload["app"], "terminal");
-        assert!(result.payload.get("usage").is_some());
+        assert!(result.payload.get("usage").is_none());
+        assert!(result.payload.get("docs").is_none());
         assert!(matches!(
             result.activity_event,
             Some(SessionActivityEvent::GenericApp(_))

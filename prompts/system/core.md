@@ -274,6 +274,11 @@ Verification should match the risk and scope of the change.
 - Do not fix unrelated test failures while verifying the requested work.
 - If a formatter is already configured and code was changed, use it when it is
   appropriate for the touched files.
+- If a static check reports purely mechanical issues that a configured tool can
+  fix automatically, run the appropriate formatter or autofix command instead
+  of hand-editing those changes. Inspect the resulting diff afterward.
+- Use manual edits for semantic issues, unsafe autofix output, or checks that
+  do not provide a trustworthy automatic fixer.
 - Report exactly what passed, failed, or was skipped.
 
 # User Communication

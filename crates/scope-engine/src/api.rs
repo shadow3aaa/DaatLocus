@@ -3,14 +3,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 // ── Domain types ────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OpenProjectRequest {
-    pub project_root: String,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OpenProjectResponse {
+pub struct OpenProjectOutput {
     pub status: String,
     pub project_root: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -21,7 +15,7 @@ pub struct OpenProjectResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReadCodeRequest {
+pub struct ReadCodeInput {
     pub path: String,
     pub anchor: String,
     pub mode: ReadCodeMode,
@@ -35,13 +29,13 @@ pub enum ReadCodeMode {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ReadCodeResponse {
+pub struct ReadCodeOutput {
     /// File content with per-line hash prefix: `line#hash|original_text\n`
     pub content: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SearchCodeResponse {
+pub struct SearchCodeOutput {
     pub matches: Vec<SearchHit>,
 }
 
@@ -69,7 +63,7 @@ pub enum SearchCase {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct SearchCodeRequest {
+pub struct SearchCodeInput {
     pub query: String,
     #[serde(default)]
     pub mode: SearchMode,
@@ -97,7 +91,7 @@ pub struct SearchCodeRequest {
     pub limit: Option<usize>,
 }
 
-impl Default for SearchCodeRequest {
+impl Default for SearchCodeInput {
     fn default() -> Self {
         Self {
             query: String::new(),
@@ -143,7 +137,7 @@ where
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct EditCodeRequest {
+pub struct EditCodeInput {
     pub edits: Vec<StructuredEdit>,
 }
 
@@ -179,7 +173,7 @@ pub struct StructuredEdit {
     /// Relative file path from project root.
     pub path: String,
     pub op: EditOp,
-    /// `line#hash` anchor from read_code response.
+    /// `line#hash` anchor from read_code output.
     pub start: String,
     /// `line#hash` end anchor (required for replace, ignored otherwise).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -191,12 +185,12 @@ pub struct StructuredEdit {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct IsResponsibleSourceRequest {
+pub struct SourceResponsibilityInput {
     pub path: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct IsResponsibleSourceResponse {
+pub struct SourceResponsibility {
     pub is_responsible: bool,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -204,19 +198,6 @@ pub struct IsResponsibleSourceResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     pub reason: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ScopeUsageResponse {
-    pub usage_markdown: String,
-    pub protocol_items: Vec<ScopeProtocolItemSchema>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ScopeProtocolItemSchema {
-    pub item: String,
-    pub syntax: String,
-    pub notes: String,
 }
 
 // ── Propagation types ────────────────────────────────────────
@@ -229,7 +210,7 @@ pub enum PropagationSource {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct PropagationResponse {
+pub struct EditCodeOutput {
     pub propagation_results: Vec<PropagationResult>,
     pub applied_summary: AppliedStructuredEditSummary,
 }
@@ -272,16 +253,11 @@ pub struct AppliedStructuredEditSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct NextReviewResponse {
+pub struct ReviewBatch {
     pub review: Option<ReviewEvent>,
     pub reviews: Vec<ReviewEvent>,
     pub returned: usize,
     pub remaining: usize,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct NextReviewRequest {
-    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -7,7 +7,7 @@ use super::{
         AfterClaimWorkflowPrimitiveRoutingPart, PreTurnContextPart, PreTurnPlanPart,
         PreTurnProjectInstructionsPart, PreTurnSensoryPart, PreTurnWorkflowStatePart,
     },
-    prompts::{SYSTEM_CORE, build_app_how_to_use_prompt, build_app_usage_prompt},
+    prompts::{SYSTEM_CORE, build_app_docs_prompt},
     turn_compile::{
         PromptPersonaSpec, load_or_create_prompt_persona_spec_sync, load_prompt_persona_spec_sync,
         resolve_prompt_persona_language,
@@ -125,16 +125,10 @@ fn render_target_language(language: &str) -> String {
 fn render_app_docs_section(ctx: &Context) -> String {
     let mut sections = Vec::new();
     for app_id in ctx.apps.app_ids() {
-        if let Some(usage) = ctx.apps.usage(&app_id) {
+        if let Some(docs) = ctx.apps.docs(&app_id) {
             sections.push(format!(
-                "## {app_id} Usage\n\n{}",
-                build_app_usage_prompt(app_id.clone(), &usage)
-            ));
-        }
-        if let Some(how_to_use) = ctx.apps.how_to_use(&app_id) {
-            sections.push(format!(
-                "## {app_id} Operation\n\n{}",
-                build_app_how_to_use_prompt(app_id.clone(), &how_to_use)
+                "## {app_id}\n\n{}",
+                build_app_docs_prompt(app_id.clone(), &docs)
             ));
         }
     }
