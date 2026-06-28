@@ -1582,7 +1582,7 @@ consecutive.
 `search_code` is the model-visible search primitive. It replaces separate
 model-visible `grep` and `glob` tools while staying aligned with `rg`
 semantics. Inputs should cover the useful `rg` shape: `query`, `path`, `mode`,
-`case`, `word`, `line`, `include`, `exclude`, `types`, `type_not`, `hidden`,
+`case`, `word`, `whole_line`, `include`, `exclude`, `types`, `type_not`, `hidden`,
 `respect_ignore`, `follow`, and `limit`.
 
 Search output is an array of hits:

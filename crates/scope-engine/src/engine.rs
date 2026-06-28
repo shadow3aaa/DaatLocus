@@ -303,7 +303,7 @@ fn build_search_regex(params: &SearchCodeInput) -> Result<Regex, String> {
         SearchMode::Literal => regex::escape(&params.query),
         SearchMode::Regex => params.query.clone(),
     };
-    if params.line {
+    if params.whole_line {
         pattern = format!("^(?:{pattern})$");
     } else if params.word {
         pattern = format!(r"\b(?:{pattern})\b");
@@ -895,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn search_code_honors_case_word_and_line_modes() {
+    fn search_code_honors_case_word_and_whole_line_modes() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("lower.rs"), "let needle = true;\n").unwrap();
         std::fs::write(dir.path().join("upper.rs"), "let Needle = true;\n").unwrap();
@@ -945,18 +945,19 @@ mod tests {
             word.matches
         );
 
-        let line = search_code(
+        let whole_line = search_code(
             dir.path(),
             &SearchCodeInput {
                 query: "needle".to_string(),
-                line: true,
+                whole_line: true,
                 case_mode: SearchCase::Sensitive,
                 ..SearchCodeInput::default()
             },
         )
         .unwrap();
         assert_eq!(
-            line.matches
+            whole_line
+                .matches
                 .iter()
                 .map(|hit| (hit.path.clone(), hit.hit.clone()))
                 .collect::<Vec<_>>(),

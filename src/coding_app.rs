@@ -89,7 +89,7 @@ pub struct CodingSearchCodeArgsSchema {
     #[serde(rename = "case")]
     pub case_mode: CodingSearchCaseSchema,
     pub word: bool,
-    pub line: bool,
+    pub whole_line: bool,
     pub hidden: bool,
     pub respect_ignore: bool,
     pub follow: bool,
@@ -1326,6 +1326,10 @@ fn diff_line_text(text: &str) -> String {
 }
 
 fn format_search_hits_for_model(matches: &[scope_engine::api::SearchHit]) -> String {
+    if matches.is_empty() {
+        return "found 0 matches".to_string();
+    }
+
     matches
         .iter()
         .map(|hit| format!("{}|{}", hit.path, hit.hit))
@@ -1522,6 +1526,11 @@ mod tests {
                 .model_content()
                 .contains("lsp_setup_hint language=lang5")
         );
+    }
+
+    #[test]
+    fn search_hits_model_output_names_empty_results() {
+        assert_eq!(format_search_hits_for_model(&[]), "found 0 matches");
     }
 
     #[test]

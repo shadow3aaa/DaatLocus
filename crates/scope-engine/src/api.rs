@@ -81,7 +81,7 @@ pub struct SearchCodeInput {
     #[serde(default)]
     pub word: bool,
     #[serde(default)]
-    pub line: bool,
+    pub whole_line: bool,
     #[serde(default)]
     pub hidden: bool,
     #[serde(default = "default_respect_ignore")]
@@ -103,7 +103,7 @@ impl Default for SearchCodeInput {
             type_not: Vec::new(),
             case_mode: SearchCase::default(),
             word: false,
-            line: false,
+            whole_line: false,
             hidden: false,
             respect_ignore: true,
             follow: false,
