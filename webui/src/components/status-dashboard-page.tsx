@@ -56,14 +56,23 @@ import { cn } from "@/lib/utils";
 
 const STATUS_CARD_ORDER_STORAGE_KEY = "daat-locus.status.card-order";
 const STATUS_SUMMARY_REFRESH_MS = 5000;
-const CONTEXT_COMPOSITION_UNIT_TOKENS = 1000;
+const CONTEXT_COMPOSITION_GRID_COLUMNS = 30;
+const CONTEXT_COMPOSITION_REFERENCE_ROW_COUNT = 10;
+const CONTEXT_COMPOSITION_REFERENCE_TOKENS = 1_500_000;
+const CONTEXT_COMPOSITION_REFERENCE_CELL_COUNT =
+  CONTEXT_COMPOSITION_GRID_COLUMNS * CONTEXT_COMPOSITION_REFERENCE_ROW_COUNT;
+const CONTEXT_COMPOSITION_UNIT_TOKENS = Math.ceil(
+  CONTEXT_COMPOSITION_REFERENCE_TOKENS / CONTEXT_COMPOSITION_REFERENCE_CELL_COUNT,
+);
 const DEFAULT_STATUS_CARD_ORDER = [
   "context-composition",
   "daily-token-usage",
 ] as const;
 
-const CONTEXT_COMPOSITION_GRID_LABEL =
-  "Context composition heatmap. Each cell represents one thousand tokens.";
+const CONTEXT_COMPOSITION_GRID_LABEL = [
+  `Context composition heatmap. The base layout is ${CONTEXT_COMPOSITION_GRID_COLUMNS} by ${CONTEXT_COMPOSITION_REFERENCE_ROW_COUNT}.`,
+  `Each cell represents up to ${CONTEXT_COMPOSITION_UNIT_TOKENS.toLocaleString("en-US")} estimated tokens.`,
+].join(" ");
 
 type StatusCardId = (typeof DEFAULT_STATUS_CARD_ORDER)[number];
 type StatusCardPlacement = "before" | "after";
@@ -99,12 +108,6 @@ type ContextCompositionCell = {
   unitIndex: number;
   unitCount: number;
 };
-
-type ContextCompositionCapacitySource = Pick<
-  SessionStatusDashboard,
-  "token_usage"
->;
-
 const STATUS_CARD_DEFINITIONS: Record<StatusCardId, StatusCardDefinition> = {
   "context-composition": {
     label: "Context Composition",
@@ -392,12 +395,12 @@ function ContextCompositionCard({
     ? sessionDisplayName(selectedEntry.session, selectedEntry.dashboard)
     : "No session";
   const cells = useMemo(() => contextCompositionCells(composition), [composition]);
-  const cellCapacity = contextCompositionCellCapacity(
-    selectedEntry?.dashboard ?? null,
-    composition,
-  );
+  const cellCapacity = contextCompositionCellCapacity(cells.length);
   const emptyCellCount = Math.max(0, cellCapacity - cells.length);
   const hasComposition = Boolean(composition && cellCapacity > 0);
+  const displayScaleLabel = formatContextTokenCount(
+    cellCapacity * CONTEXT_COMPOSITION_UNIT_TOKENS,
+  );
 
   return (
     <Card className="w-full">
@@ -456,9 +459,12 @@ function ContextCompositionCard({
         {hasComposition ? (
           <div className="overflow-x-auto px-1 pb-1 pt-0.5">
             <div
-              className="grid min-w-max grid-cols-[repeat(32,minmax(0,0.75rem))] gap-1"
+              className="grid min-w-max gap-1"
+              style={{
+                gridTemplateColumns: `repeat(${CONTEXT_COMPOSITION_GRID_COLUMNS}, minmax(0, 0.75rem))`,
+              }}
               role="img"
-              aria-label={`${CONTEXT_COMPOSITION_GRID_LABEL} Showing ${cells.length} used units out of ${cellCapacity} total units for ${selectedSessionLabel}.`}
+              aria-label={`${CONTEXT_COMPOSITION_GRID_LABEL} Showing ${cells.length} occupied units on a ${displayScaleLabel} rectangular display for ${selectedSessionLabel}.`}
             >
               {cells.map((cell) => (
                 <span
@@ -475,7 +481,7 @@ function ContextCompositionCard({
                 <span
                   key={`empty-${unitIndex}`}
                   aria-hidden="true"
-                  title={`Unused context · unit ${cells.length + unitIndex + 1}/${cellCapacity}`}
+                  title={`Grid padding · unit ${cells.length + unitIndex + 1}/${cellCapacity}`}
                   className="size-3 rounded-[3px] bg-background ring-1 ring-border/80"
                 />
               ))}
@@ -496,8 +502,6 @@ function ContextCompositionCard({
     </Card>
   );
 }
-
-
 function DailyTokenUsageCard({ summary, dragHandle }: StatusCardContentProps) {
   const chartData = useMemo(
     () => dailyTokenUsageChartDataFromSources(tokenUsageSources(summary)),
@@ -659,24 +663,16 @@ function contextCompositionDisplayPriority(
   return 2;
 }
 
-function contextCompositionCellCapacity(
-  dashboard: ContextCompositionCapacitySource | null,
-  composition: DashboardContextCompositionSnapshot | null,
-) {
-  const contextWindow =
-    composition?.model_context_window ??
-    dashboard?.token_usage.main?.model_context_window ??
-    dashboard?.token_usage.judge?.model_context_window ??
-    null;
-  const totalTokens =
-    contextWindow && contextWindow > 0
-      ? contextWindow
-      : composition?.total_estimated_tokens ?? 0;
+function contextCompositionCellCapacity(occupiedCellCount: number) {
+  const occupiedRows = Math.ceil(
+    Math.max(0, occupiedCellCount) / CONTEXT_COMPOSITION_GRID_COLUMNS,
+  );
 
-  return Math.ceil(Math.max(0, totalTokens) / CONTEXT_COMPOSITION_UNIT_TOKENS);
+  return (
+    Math.max(CONTEXT_COMPOSITION_REFERENCE_ROW_COUNT, occupiedRows) *
+    CONTEXT_COMPOSITION_GRID_COLUMNS
+  );
 }
-
-
 function contextCompositionShadeClass(segment: DashboardContextCompositionSegment) {
   const sourceKey = `${segment.name} ${segment.source} ${segment.cache_role}`.toLowerCase();
 
