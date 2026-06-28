@@ -1,4 +1,6 @@
+import type { TFunction } from "i18next";
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AppSidebar } from "@/components/app-sidebar";
 import { LoginPage } from "@/components/login-page";
@@ -23,6 +25,7 @@ import {
   deleteSession,
   fetchConfigReadiness,
   fetchSessions,
+  fetchSetupConfig,
   type ConfigReadinessReport,
   type DashboardContextCompositionSnapshot,
   type DashboardSnapshot,
@@ -31,6 +34,7 @@ import {
   type SetupConfigResponse,
   type StatusSummary,
 } from "@/lib/daemon-api";
+import { setWebUiLanguage } from "@/lib/i18n";
 
 type AppPage = "agent" | "status" | "settings" | "logs";
 type ThemeMode = "light" | "dark";
@@ -89,6 +93,8 @@ export default function App() {
     return <MockSettingsApp />;
   }
 
+  const { t } = useTranslation();
+
   const [isAuthenticated, setIsAuthenticated] = useState(() =>
     Boolean(getStoredDaemonToken()),
   );
@@ -130,6 +136,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+
+    const controller = new AbortController();
+    void syncConfiguredWebUiLanguage(controller.signal);
+    return () => controller.abort();
+  }, [isAuthenticated]);
+
+  useEffect(() => {
     function updateActivePage() {
       setActivePage(getCurrentPage());
     }
@@ -145,8 +161,9 @@ export default function App() {
       activePage,
       selectedSession,
       isAuthenticated,
+      t,
     );
-  }, [activePage, isAuthenticated, selectedSession]);
+  }, [activePage, isAuthenticated, selectedSession, t]);
 
   useEffect(() => {
     if (!isAuthenticated || configReadiness?.kind !== "complete") {
@@ -211,6 +228,17 @@ export default function App() {
         error instanceof Error ? error.message : String(error),
       );
       setHasLoadedConfigReadiness(true);
+    }
+  }
+
+  async function syncConfiguredWebUiLanguage(signal?: AbortSignal) {
+    try {
+      const setupConfig = await fetchSetupConfig({ signal });
+      if (!signal?.aborted) {
+        void setWebUiLanguage(setupConfig.config.locale);
+      }
+    } catch {
+      // Language sync should not block the main app shell.
     }
   }
 
@@ -357,10 +385,11 @@ export default function App() {
 }
 
 function MockAgentApp() {
+  const { t } = useTranslation();
   const { themeMode, toggleThemeMode } = useThemeMode();
   useEffect(() => {
-    document.title = pageDocumentTitle("agent", MOCK_SESSION, true);
-  }, []);
+    document.title = pageDocumentTitle("agent", MOCK_SESSION, true, t);
+  }, [t]);
   return (
     <main className="min-h-screen bg-background text-foreground">
       <SidebarProvider>
@@ -389,10 +418,11 @@ function MockAgentApp() {
 }
 
 function MockStatusApp() {
+  const { t } = useTranslation();
   const { themeMode, toggleThemeMode } = useThemeMode();
   useEffect(() => {
-    document.title = pageDocumentTitle("status", null, true);
-  }, []);
+    document.title = pageDocumentTitle("status", null, true, t);
+  }, [t]);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -419,10 +449,11 @@ function MockStatusApp() {
 }
 
 function MockSettingsApp() {
+  const { t } = useTranslation();
   const { themeMode, toggleThemeMode } = useThemeMode();
   useEffect(() => {
-    document.title = pageDocumentTitle("settings", null, true);
-  }, []);
+    document.title = pageDocumentTitle("settings", null, true, t);
+  }, [t]);
 
   async function handleMockSave(request: SetupConfigRequest) {
     return {
@@ -519,22 +550,26 @@ function NoSessionPage({
   hasLoadedSessions: boolean;
   sessionError: string | null;
 }) {
+  const { t } = useTranslation();
+
   return (
     <section
-      aria-label="Session required"
+      aria-label={t("app.sessionRequiredAria")}
       className="flex min-h-screen w-full items-center justify-center px-6 py-16"
     >
       <Empty className="w-full max-w-lg border border-dashed bg-card/60">
         <EmptyHeader>
           <EmptyTitle>
-            {hasLoadedSessions ? "No session selected" : "Loading sessions"}
+            {hasLoadedSessions
+              ? t("app.noSessionTitle")
+              : t("app.loadingSessionsTitle")}
           </EmptyTitle>
           <EmptyDescription>
             {sessionError
-              ? "Session list could not be loaded."
+              ? t("app.sessionListLoadFailed")
               : hasLoadedSessions
-                ? "Create or select a session from the sidebar."
-                : "Fetching available sessions."}
+                ? t("app.createOrSelectSession")
+                : t("app.fetchingSessions")}
           </EmptyDescription>
         </EmptyHeader>
         {sessionError ? (
@@ -550,16 +585,18 @@ function NoSessionPage({
 }
 
 function SetupLoadingPage() {
+  const { t } = useTranslation();
+
   return (
     <section
-      aria-label="Loading configuration readiness"
+      aria-label={t("app.setupLoadingAria")}
       className="flex min-h-screen w-full items-center justify-center px-6 py-16"
     >
       <Empty className="w-full max-w-lg border border-dashed bg-card/60">
         <EmptyHeader>
-          <EmptyTitle>Checking configuration</EmptyTitle>
+          <EmptyTitle>{t("app.setupLoadingTitle")}</EmptyTitle>
           <EmptyDescription>
-            Loading Manager readiness before opening the agent workspace.
+            {t("app.setupLoadingDescription")}
           </EmptyDescription>
         </EmptyHeader>
         <EmptyContent>
@@ -579,17 +616,17 @@ function SetupErrorPage({
   message: string;
   onRefresh: () => void;
 }) {
+  const { t } = useTranslation();
+
   return (
     <section
-      aria-label="Configuration readiness error"
+      aria-label={t("app.setupErrorAria")}
       className="flex min-h-screen w-full items-center justify-center px-6 py-16"
     >
       <Empty className="w-full max-w-lg border border-dashed bg-card/60">
         <EmptyHeader>
-          <EmptyTitle>Unable to read configuration state</EmptyTitle>
-          <EmptyDescription>
-            The WebUI could not determine whether the agent can run.
-          </EmptyDescription>
+          <EmptyTitle>{t("app.setupErrorTitle")}</EmptyTitle>
+          <EmptyDescription>{t("app.setupErrorDescription")}</EmptyDescription>
         </EmptyHeader>
         <EmptyContent>
           <div className="flex w-full flex-col gap-4">
@@ -601,7 +638,7 @@ function SetupErrorPage({
               variant="outline"
               onClick={onRefresh}
             >
-              Retry
+              {t("common.retry")}
             </Button>
           </div>
         </EmptyContent>
@@ -697,17 +734,17 @@ function sessionDocumentTitle(session: SessionInfo) {
   );
 }
 
-function pageLabel(page: AppPage) {
+function pageLabel(page: AppPage, t: TFunction) {
   switch (page) {
     case "status":
-      return "Status";
+      return t("navigation.status");
     case "settings":
-      return "Settings";
+      return t("navigation.settings");
     case "logs":
-      return "Logs";
+      return t("navigation.logs");
     case "agent":
     default:
-      return "Agent";
+      return t("navigation.agent");
   }
 }
 
@@ -715,9 +752,10 @@ function pageDocumentTitle(
   activePage: AppPage,
   selectedSession: SessionInfo | null,
   isAuthenticated: boolean,
+  t: TFunction,
 ) {
   if (!isAuthenticated) {
-    return `Sign in · ${APP_DOCUMENT_TITLE}`;
+    return `${t("document.signIn")} · ${APP_DOCUMENT_TITLE}`;
   }
 
   const selectedSessionTitle = selectedSession
@@ -727,10 +765,10 @@ function pageDocumentTitle(
   if (activePage === "agent") {
     return selectedSessionTitle
       ? `${selectedSessionTitle} · ${APP_DOCUMENT_TITLE}`
-      : `Agent · ${APP_DOCUMENT_TITLE}`;
+      : `${t("navigation.agent")} · ${APP_DOCUMENT_TITLE}`;
   }
 
-  const activePageLabel = pageLabel(activePage);
+  const activePageLabel = pageLabel(activePage, t);
   return selectedSessionTitle
     ? `${activePageLabel} · ${selectedSessionTitle} · ${APP_DOCUMENT_TITLE}`
     : `${activePageLabel} · ${APP_DOCUMENT_TITLE}`;

@@ -128,9 +128,7 @@ export type DailyTokenUsageChartDatum = {
   date: string;
   label: string;
   cached: number;
-  cachedRatio: number;
   uncached: number;
-  uncachedRatio: number;
   total: number;
   models: DailyTokenUsageModelBreakdown[];
 };
@@ -275,10 +273,6 @@ export function dailyTokenUsageChartDataFromSources(
   }
 
   const dates = recentTokenUsageDates(usageByDate);
-  const maxTotal = Math.max(
-    1,
-    ...dates.map((date) => usageByDate.get(date)?.total ?? 0),
-  );
 
   return dates.map((date, index) => {
     const accumulator =
@@ -289,9 +283,7 @@ export function dailyTokenUsageChartDataFromSources(
       label:
         index === 0 || index === dates.length - 1 ? formatDateLabel(date) : "",
       cached: accumulator.cached,
-      cachedRatio: accumulator.cached / maxTotal,
       uncached: accumulator.uncached,
-      uncachedRatio: accumulator.uncached / maxTotal,
       total: accumulator.total,
       models: Array.from(accumulator.models.entries())
         .map(([key, usage]) => ({
@@ -593,9 +585,6 @@ export function formatDateLabel(date: string) {
   }).format(parsedDate);
 }
 
-export function formatPercentAxisTick(value: number) {
-  return `${Math.round(value * 100)}%`;
-}
 
 export function formatPercent(value: number) {
   return new Intl.NumberFormat("en", {

@@ -1,4 +1,5 @@
 import { type FormEvent, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -30,6 +31,7 @@ export function LoginPage({
 }: {
   onAuthenticated: () => void;
 }) {
+  const { t } = useTranslation();
   const [token, setToken] = useState(() => getStoredDaemonToken());
   const [loginState, setLoginState] = useState<LoginState>("idle");
   const [message, setMessage] = useState("");
@@ -40,19 +42,19 @@ export function LoginPage({
 
     if (!trimmedToken) {
       setLoginState("error");
-      setMessage("Enter the daemon token.");
+      setMessage(t("login.enterToken"));
       return;
     }
 
     setLoginState("checking");
-    setMessage("Verifying token…");
+    setMessage(t("login.verifyingToken"));
 
     const result = await verifyDaemonToken(trimmedToken);
     if (result.ok) {
       storeDaemonToken(trimmedToken);
       setToken(trimmedToken);
       setLoginState("authenticated");
-      setMessage("Token verified. Future pages will reuse this token.");
+      setMessage(t("login.verifiedToken"));
       onAuthenticated();
       return;
     }
@@ -80,7 +82,7 @@ export function LoginPage({
           <form onSubmit={handleSubmit}>
             <FieldGroup>
               <Field data-invalid={isError} data-disabled={isChecking}>
-                <FieldLabel htmlFor="daemon-token">Daemon token</FieldLabel>
+                <FieldLabel htmlFor="daemon-token">{t("login.daemonToken")}</FieldLabel>
                 <Input
                   id="daemon-token"
                   aria-invalid={isError}
@@ -92,7 +94,7 @@ export function LoginPage({
                       setLoginState("idle");
                     }
                   }}
-                  placeholder="Token"
+                  placeholder={t("login.tokenPlaceholder")}
                   type="password"
                   autoComplete="current-password"
                   spellCheck={false}
@@ -103,7 +105,7 @@ export function LoginPage({
               </Field>
               <Button type="submit" disabled={isChecking}>
                 {isChecking ? <Spinner data-icon="inline-start" /> : null}
-                {isChecking ? "Verifying" : "Login"}
+                {isChecking ? t("login.verifying") : t("login.submit")}
               </Button>
             </FieldGroup>
           </form>

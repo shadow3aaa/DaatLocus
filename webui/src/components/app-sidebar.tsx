@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import {
   ActivityIcon,
   ChevronDownIcon,
@@ -12,6 +13,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -66,7 +68,7 @@ type AppSidebarProps = {
 };
 
 type NavigationItem = {
-  label: string;
+  labelKey: string;
   href: string;
   page: AppPage;
   icon: typeof MessageSquareIcon;
@@ -88,25 +90,25 @@ const GENERAL_VISIBLE_SESSION_COUNT = 8;
 
 const navigationItems: NavigationItem[] = [
   {
-    label: "Agent",
+    labelKey: "navigation.agent",
     href: "#agent",
     page: "agent",
     icon: MessageSquareIcon,
   },
   {
-    label: "Status",
+    labelKey: "navigation.status",
     href: "#status",
     page: "status",
     icon: ActivityIcon,
   },
   {
-    label: "Settings",
+    labelKey: "navigation.settings",
     href: "#settings",
     page: "settings",
     icon: SettingsIcon,
   },
   {
-    label: "Logs",
+    labelKey: "navigation.logs",
     href: "#logs",
     page: "logs",
     icon: ScrollTextIcon,
@@ -114,10 +116,12 @@ const navigationItems: NavigationItem[] = [
 ];
 
 export function AppSidebar(props: AppSidebarProps) {
+  const { t } = useTranslation();
+
   return (
     <>
       <SidebarTrigger
-        aria-label="Open sidebar"
+        aria-label={t("sidebar.open")}
         className="fixed top-4 left-4 rounded-full border-border/60 bg-background/80 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/60 md:hidden"
       />
       <Sidebar>
@@ -141,6 +145,7 @@ function AppSidebarBody({
   onDeleteSession,
 }: AppSidebarProps) {
   const { setOpenMobile } = useSidebar();
+  const { t } = useTranslation();
   const sessionTree = buildSessionTree(sessions);
   const [projectsOpen, setProjectsOpen] = useState(true);
   const [conversationsOpen, setConversationsOpen] = useState(true);
@@ -185,7 +190,7 @@ function AppSidebarBody({
         ) : null}
 
         <SidebarSessionSection
-          label="Projects"
+          label={t("sidebar.projects")}
           open={projectsOpen}
           onOpenChange={setProjectsOpen}
           actions={
@@ -221,7 +226,7 @@ function AppSidebarBody({
               ))}
             </div>
           ) : (
-            <SidebarEmptyText>No projects</SidebarEmptyText>
+            <SidebarEmptyText>{t("sidebar.noProjects")}</SidebarEmptyText>
           )}
         </SidebarSessionSection>
 
@@ -249,6 +254,7 @@ function AppSidebarBody({
         <div className="flex flex-col gap-1">
           {navigationItems.map((item) => {
             const Icon = item.icon;
+            const label = t(item.labelKey);
 
             return (
               <Button
@@ -260,7 +266,7 @@ function AppSidebarBody({
                 className="w-full justify-start"
               >
                 <Icon data-icon="inline-start" />
-                {item.label}
+                {label}
               </Button>
             );
           })}
@@ -268,11 +274,15 @@ function AppSidebarBody({
             type="button"
             variant="ghost"
             aria-label={
-              themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"
+              themeMode === "dark"
+                ? t("theme.switchToLight")
+                : t("theme.switchToDark")
             }
             aria-pressed={themeMode === "dark"}
             title={
-              themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"
+              themeMode === "dark"
+                ? t("theme.switchToLight")
+                : t("theme.switchToDark")
             }
             onClick={onToggleThemeMode}
             className="w-full justify-start"
@@ -282,7 +292,7 @@ function AppSidebarBody({
             ) : (
               <MoonIcon data-icon="inline-start" />
             )}
-            {themeMode === "dark" ? "Light mode" : "Dark mode"}
+            {themeMode === "dark" ? t("theme.lightMode") : t("theme.darkMode")}
           </Button>
         </div>
       </SidebarFooter>
@@ -349,6 +359,8 @@ function NewCodingSessionMenu({
   disabled: boolean;
   onCreateSession: (projectDir: string) => void;
 }) {
+  const { t } = useTranslation();
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -356,15 +368,15 @@ function NewCodingSessionMenu({
           type="button"
           variant="ghost"
           size="icon-sm"
-          aria-label="New coding session"
-          title="New coding session"
+          aria-label={t("sidebar.newCodingSession")}
+          title={t("sidebar.newCodingSession")}
           disabled={disabled || projectGroups.length === 0}
         >
           <FolderPlusIcon />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-60">
-        <DropdownMenuLabel>New project session</DropdownMenuLabel>
+        <DropdownMenuLabel>{t("sidebar.newProjectSession")}</DropdownMenuLabel>
         <DropdownMenuGroup>
           {projectGroups.map((group) => (
             <DropdownMenuItem
@@ -380,7 +392,6 @@ function NewCodingSessionMenu({
     </DropdownMenu>
   );
 }
-
 
 function ProjectSessionGroup({
   group,
@@ -399,11 +410,15 @@ function ProjectSessionGroup({
   onSelectSession: (sessionId: string) => void;
   onRequestDeleteSession: (session: SessionInfo) => void;
 }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const visibleSessions = expanded
     ? group.sessions
     : group.sessions.slice(0, PROJECT_VISIBLE_SESSION_COUNT);
   const hiddenSessionCount = group.sessions.length - visibleSessions.length;
+  const newSessionLabel = t("sidebar.newSessionInProject", {
+    project: group.label,
+  });
 
   return (
     <div className="min-w-0">
@@ -419,8 +434,8 @@ function ProjectSessionGroup({
           type="button"
           variant="ghost"
           size="icon-xs"
-          aria-label={`New session in ${group.label}`}
-          title={`New session in ${group.label}`}
+          aria-label={newSessionLabel}
+          title={newSessionLabel}
           disabled={isCreatingSession}
           onClick={onCreateSession}
         >
@@ -443,7 +458,7 @@ function ProjectSessionGroup({
           className="h-8 px-8 text-left text-sm text-sidebar-foreground/45 hover:text-sidebar-foreground"
           onClick={() => setExpanded(true)}
         >
-          Show more
+          {t("sidebar.showMore")}
         </button>
       ) : expanded && group.sessions.length > PROJECT_VISIBLE_SESSION_COUNT ? (
         <button
@@ -451,7 +466,7 @@ function ProjectSessionGroup({
           className="h-8 px-8 text-left text-sm text-sidebar-foreground/45 hover:text-sidebar-foreground"
           onClick={() => setExpanded(false)}
         >
-          Show less
+          {t("sidebar.showLess")}
         </button>
       ) : null}
     </div>
@@ -479,6 +494,7 @@ function ConversationSessionGroup({
   onSelectSession: (sessionId: string) => void;
   onRequestDeleteSession: (session: SessionInfo) => void;
 }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const visibleSessions = expanded
     ? sessions
@@ -487,7 +503,7 @@ function ConversationSessionGroup({
 
   return (
     <SidebarSessionSection
-      label="Conversations"
+      label={t("sidebar.conversations")}
       open={open}
       onOpenChange={onOpenChange}
       actions={
@@ -495,8 +511,8 @@ function ConversationSessionGroup({
           type="button"
           variant="ghost"
           size="icon-sm"
-          aria-label="New conversation"
-          title="New conversation"
+          aria-label={t("sidebar.newConversation")}
+          title={t("sidebar.newConversation")}
           disabled={isCreatingSession}
           onClick={onCreateSession}
         >
@@ -513,7 +529,7 @@ function ConversationSessionGroup({
             onRequestDeleteSession={onRequestDeleteSession}
           />
         ) : (
-          <SidebarEmptyText>No chats</SidebarEmptyText>
+          <SidebarEmptyText>{t("sidebar.noChats")}</SidebarEmptyText>
         )}
 
         {hiddenSessionCount > 0 ? (
@@ -522,7 +538,7 @@ function ConversationSessionGroup({
             className="h-8 px-2 text-left text-sm text-sidebar-foreground/45 hover:text-sidebar-foreground"
             onClick={() => setExpanded(true)}
           >
-            Show more
+            {t("sidebar.showMore")}
           </button>
         ) : expanded && sessions.length > GENERAL_VISIBLE_SESSION_COUNT ? (
           <button
@@ -530,7 +546,7 @@ function ConversationSessionGroup({
             className="h-8 px-2 text-left text-sm text-sidebar-foreground/45 hover:text-sidebar-foreground"
             onClick={() => setExpanded(false)}
           >
-            Show less
+            {t("sidebar.showLess")}
           </button>
         ) : null}
     </SidebarSessionSection>
@@ -581,7 +597,8 @@ function SessionRow({
   onSelectSession: (sessionId: string) => void;
   onRequestDeleteSession: (session: SessionInfo) => void;
 }) {
-  const title = sessionTitle(session);
+  const { t } = useTranslation();
+  const title = sessionTitle(session, t("common.untitledSession"));
   const isDeleting = deletingSessionId === session.session_id;
 
   return (
@@ -596,15 +613,15 @@ function SessionRow({
         >
           <span className="min-w-0 flex-1 truncate">{title}</span>
           <span className="shrink-0 text-xs font-normal text-sidebar-foreground/45">
-            {relativeSessionTime(session)}
+            {relativeSessionTime(session, t)}
           </span>
         </SidebarMenuButton>
         <Button
           type="button"
           variant="ghost"
           size="icon-xs"
-          aria-label={`Delete ${title}`}
-          title="Delete session"
+          aria-label={t("sidebar.deleteSessionAria", { title })}
+          title={t("sidebar.deleteSessionTitle")}
           disabled={deletingSessionId !== null}
           onClick={() => onRequestDeleteSession(session)}
           className={cn(
@@ -638,23 +655,25 @@ function DeleteSessionDialog({
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
 }) {
+  const { t } = useTranslation();
+  const title = session
+    ? sessionTitle(session, t("common.untitledSession"))
+    : t("common.thisSession");
+  const id = session ? shortSessionId(session.session_id) : t("common.unknown");
+
   return (
     <Dialog open={session !== null} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete session?</DialogTitle>
+          <DialogTitle>{t("sidebar.deleteDialogTitle")}</DialogTitle>
           <DialogDescription>
-            This permanently deletes{" "}
-            <span className="font-medium text-foreground">
-              {session ? sessionTitle(session) : "this session"}
-            </span>{" "}
-            ({session ? shortSessionId(session.session_id) : "unknown"}).
+            {t("sidebar.deleteDialogDescription", { title, id })}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <DialogClose asChild>
             <Button type="button" variant="outline" disabled={deleting}>
-              Cancel
+              {t("common.cancel")}
             </Button>
           </DialogClose>
           <Button
@@ -663,7 +682,7 @@ function DeleteSessionDialog({
             disabled={deleting}
             onClick={onConfirm}
           >
-            {deleting ? "Deleting" : "Delete"}
+            {deleting ? t("common.deleting") : t("common.delete")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -671,11 +690,11 @@ function DeleteSessionDialog({
   );
 }
 
-function sessionTitle(session: SessionInfo) {
-  return session.title?.trim() || "Untitled session";
+function sessionTitle(session: SessionInfo, fallback = "Untitled session") {
+  return session.title?.trim() || fallback;
 }
 
-function relativeSessionTime(session: SessionInfo) {
+function relativeSessionTime(session: SessionInfo, t: TFunction) {
   const timestamp = session.last_seen_at_ms ?? session.started_at_ms;
   const elapsedMs = Math.max(0, Date.now() - timestamp);
   const minuteMs = 60_000;
@@ -685,21 +704,31 @@ function relativeSessionTime(session: SessionInfo) {
   const yearMs = 365 * dayMs;
 
   if (elapsedMs < minuteMs) {
-    return "now";
+    return t("sidebar.relativeTime.now");
   }
   if (elapsedMs < hourMs) {
-    return `${Math.floor(elapsedMs / minuteMs)} min`;
+    return t("sidebar.relativeTime.minute", {
+      count: Math.floor(elapsedMs / minuteMs),
+    });
   }
   if (elapsedMs < dayMs) {
-    return `${Math.floor(elapsedMs / hourMs)} hr`;
+    return t("sidebar.relativeTime.hour", {
+      count: Math.floor(elapsedMs / hourMs),
+    });
   }
   if (elapsedMs < monthMs) {
-    return `${Math.floor(elapsedMs / dayMs)} d`;
+    return t("sidebar.relativeTime.day", {
+      count: Math.floor(elapsedMs / dayMs),
+    });
   }
   if (elapsedMs < yearMs) {
-    return `${Math.floor(elapsedMs / monthMs)} mo`;
+    return t("sidebar.relativeTime.month", {
+      count: Math.floor(elapsedMs / monthMs),
+    });
   }
-  return `${Math.floor(elapsedMs / yearMs)} yr`;
+  return t("sidebar.relativeTime.year", {
+    count: Math.floor(elapsedMs / yearMs),
+  });
 }
 
 function buildSessionTree(sessions: SessionInfo[]): SessionTree {

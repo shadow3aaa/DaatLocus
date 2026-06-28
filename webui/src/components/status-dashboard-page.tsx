@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import {
   useEffect,
   useMemo,
@@ -6,6 +7,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
+import { useTranslation } from "react-i18next";
 import {
   ChevronDownIcon,
   GripVerticalIcon,
@@ -48,7 +50,6 @@ import {
   TOKEN_USAGE_CHART_CONFIG,
   dailyTokenUsageChartDataFromSources,
   formatCompactNumber,
-  formatPercentAxisTick,
   type DailyTokenUsageChartDatum,
   type DailyTokenUsageSource,
 } from "@/lib/dashboard-view-model";
@@ -64,15 +65,13 @@ const CONTEXT_COMPOSITION_REFERENCE_CELL_COUNT =
 const CONTEXT_COMPOSITION_UNIT_TOKENS = Math.ceil(
   CONTEXT_COMPOSITION_REFERENCE_TOKENS / CONTEXT_COMPOSITION_REFERENCE_CELL_COUNT,
 );
+const TOKEN_USAGE_AXIS_TARGET_INTERVALS = 4;
+const TOKEN_USAGE_AXIS_MIN_STEP = 1_000;
 const DEFAULT_STATUS_CARD_ORDER = [
   "context-composition",
   "daily-token-usage",
 ] as const;
 
-const CONTEXT_COMPOSITION_GRID_LABEL = [
-  `Context composition heatmap. The base layout is ${CONTEXT_COMPOSITION_GRID_COLUMNS} by ${CONTEXT_COMPOSITION_REFERENCE_ROW_COUNT}.`,
-  `Each cell represents up to ${CONTEXT_COMPOSITION_UNIT_TOKENS.toLocaleString("en-US")} estimated tokens.`,
-].join(" ");
 
 type StatusCardId = (typeof DEFAULT_STATUS_CARD_ORDER)[number];
 type StatusCardPlacement = "before" | "after";
@@ -85,10 +84,11 @@ type StatusCardDropIntent = {
 type StatusCardContentProps = {
   summary: StatusSummary | null;
   dragHandle: ReactNode;
+  t: TFunction;
 };
 
 type StatusCardDefinition = {
-  label: string;
+  labelKey: string;
   render: (props: StatusCardContentProps) => ReactNode;
 };
 
@@ -110,11 +110,11 @@ type ContextCompositionCell = {
 };
 const STATUS_CARD_DEFINITIONS: Record<StatusCardId, StatusCardDefinition> = {
   "context-composition": {
-    label: "Context Composition",
+    labelKey: "status.cards.contextComposition",
     render: (props) => <ContextCompositionCard {...props} />,
   },
   "daily-token-usage": {
-    label: "Token Usage",
+    labelKey: "status.cards.tokenUsage",
     render: (props) => <DailyTokenUsageCard {...props} />,
   },
 };
@@ -123,6 +123,7 @@ type StatusPageProps = {
 };
 
 export function StatusPage({ mockSummary }: StatusPageProps = {}) {
+  const { t } = useTranslation();
   const { summary, loadError } = useStatusSummary(mockSummary);
   const [cardOrder, setCardOrder] = useState<StatusCardId[]>(
     readStoredStatusCardOrder,
@@ -233,13 +234,13 @@ export function StatusPage({ mockSummary }: StatusPageProps = {}) {
   return (
     <section
       id="status"
-      aria-label="Status"
+      aria-label={t("status.pageAria")}
       className="min-h-screen w-full px-6 pb-10 pt-20 md:pb-12 md:pt-8"
     >
       {loadError ? (
         <Alert variant="destructive" className="mb-4">
           <TriangleAlertIcon aria-hidden="true" />
-          <AlertTitle>Unable to load status</AlertTitle>
+          <AlertTitle>{t("status.unableToLoad")}</AlertTitle>
           <AlertDescription>{loadError.message}</AlertDescription>
         </Alert>
       ) : null}
@@ -248,6 +249,7 @@ export function StatusPage({ mockSummary }: StatusPageProps = {}) {
           <div key={columnIndex} className="flex min-w-0 flex-col gap-4">
             {column.map((cardId) => {
               const definition = STATUS_CARD_DEFINITIONS[cardId];
+              const label = t(definition.labelKey);
               return (
                 <div
                   key={cardId}
@@ -267,10 +269,11 @@ export function StatusPage({ mockSummary }: StatusPageProps = {}) {
                 >
                   {definition.render({
                     summary,
+                    t,
                     dragHandle: (
                       <StatusCardDragHandle
                         cardId={cardId}
-                        label={definition.label}
+                        label={label}
                         onDragStart={handleDragStart}
                         onDragEnd={handleDragEnd}
                         onKeyboardMove={handleKeyboardMove}
@@ -351,14 +354,16 @@ function StatusCardDragHandle({
     cardId: StatusCardId,
   ) => void;
 }) {
+  const { t } = useTranslation();
+
   return (
     <Button
       type="button"
       variant="ghost"
       size="icon-sm"
       draggable
-      aria-label={`Reorder ${label} card`}
-      title={`Drag to reorder ${label}`}
+      aria-label={t("status.reorderCard", { label })}
+      title={t("status.dragToReorder", { label })}
       onDragStart={(event) => onDragStart(event, cardId)}
       onDragEnd={onDragEnd}
       onKeyDown={(event) => onKeyboardMove(event, cardId)}
@@ -372,6 +377,7 @@ function StatusCardDragHandle({
 function ContextCompositionCard({
   summary,
   dragHandle,
+  t,
 }: StatusCardContentProps) {
   const entries = useMemo(() => sessionDashboardEntries(summary), [summary]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -392,20 +398,27 @@ function ContextCompositionCard({
     null;
   const composition = selectedEntry?.dashboard.context_composition ?? null;
   const selectedSessionLabel = selectedEntry
-    ? sessionDisplayName(selectedEntry.session, selectedEntry.dashboard)
-    : "No session";
+    ? sessionDisplayName(selectedEntry.session, selectedEntry.dashboard, t)
+    : t("status.noSession");
   const cells = useMemo(() => contextCompositionCells(composition), [composition]);
   const cellCapacity = contextCompositionCellCapacity(cells.length);
   const emptyCellCount = Math.max(0, cellCapacity - cells.length);
   const hasComposition = Boolean(composition && cellCapacity > 0);
   const displayScaleLabel = formatContextTokenCount(
     cellCapacity * CONTEXT_COMPOSITION_UNIT_TOKENS,
+    t,
   );
+  const gridLabel = `${t("status.contextHeatmapLabel", {
+    columns: CONTEXT_COMPOSITION_GRID_COLUMNS,
+    rows: CONTEXT_COMPOSITION_REFERENCE_ROW_COUNT,
+  })} ${t("status.contextCellLabel", {
+    tokens: CONTEXT_COMPOSITION_UNIT_TOKENS.toLocaleString("en-US"),
+  })}`;
 
   return (
     <Card className="w-full">
       <CardHeader>
-        <CardTitle>Context Composition</CardTitle>
+        <CardTitle>{t("status.cards.contextComposition")}</CardTitle>
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
@@ -426,7 +439,7 @@ function ContextCompositionCard({
             align="start"
             className="w-72 max-w-[calc(100vw-2rem)]"
           >
-            <DropdownMenuLabel>Session</DropdownMenuLabel>
+            <DropdownMenuLabel>{t("status.session")}</DropdownMenuLabel>
             <DropdownMenuRadioGroup
               value={selectedEntry?.session.session_id ?? ""}
               onValueChange={setSelectedSessionId}
@@ -440,14 +453,15 @@ function ContextCompositionCard({
                   >
                     <span className="flex min-w-0 flex-col">
                       <span className="truncate">
-                        {sessionDisplayName(entry.session, entry.dashboard)}
+                        {sessionDisplayName(entry.session, entry.dashboard, t)}
                       </span>
                       <span className="truncate text-xs text-muted-foreground">
                         {context
                           ? `${formatContextTokenCount(
                               context.total_estimated_tokens,
-                            )} context`
-                          : "No context snapshot"}
+                              t,
+                            )} ${t("status.context")}`
+                          : t("status.noContextSnapshot")}
                       </span>
                     </span>
                   </DropdownMenuRadioItem>
@@ -464,13 +478,23 @@ function ContextCompositionCard({
                 gridTemplateColumns: `repeat(${CONTEXT_COMPOSITION_GRID_COLUMNS}, minmax(0, 0.75rem))`,
               }}
               role="img"
-              aria-label={`${CONTEXT_COMPOSITION_GRID_LABEL} Showing ${cells.length} occupied units on a ${displayScaleLabel} rectangular display for ${selectedSessionLabel}.`}
+              aria-label={t("status.contextDisplayAria", {
+                gridLabel,
+                occupied: cells.length,
+                displayScale: displayScaleLabel,
+                session: selectedSessionLabel,
+              })}
             >
               {cells.map((cell) => (
                 <span
                   key={cell.key}
                   aria-hidden="true"
-                  title={`${cell.label} · unit ${cell.unitIndex + 1}/${cell.unitCount} · ${formatContextTokenCount(cell.segment.tokens)}`}
+                  title={t("status.contextUnitTitle", {
+                    label: cell.label,
+                    unit: cell.unitIndex + 1,
+                    total: cell.unitCount,
+                    tokens: formatContextTokenCount(cell.segment.tokens, t),
+                  })}
                   className={cn(
                     "size-3 rounded-[3px] ring-1 ring-background/70 transition-transform hover:scale-125",
                     contextCompositionShadeClass(cell.segment),
@@ -481,7 +505,10 @@ function ContextCompositionCard({
                 <span
                   key={`empty-${unitIndex}`}
                   aria-hidden="true"
-                  title={`Grid padding · unit ${cells.length + unitIndex + 1}/${cellCapacity}`}
+                  title={t("status.gridPaddingTitle", {
+                    unit: cells.length + unitIndex + 1,
+                    total: cellCapacity,
+                  })}
                   className="size-3 rounded-[3px] bg-background ring-1 ring-border/80"
                 />
               ))}
@@ -490,11 +517,11 @@ function ContextCompositionCard({
         ) : (
           <DashboardEmptyState
             compact
-            title={entries.length ? "No context snapshot" : "No sessions found"}
+            title={entries.length ? t("status.noContextSnapshot") : t("status.noSessionsFound")}
             description={
               entries.length
-                ? "This session has not assembled a model request context yet."
-                : "Context composition appears after a session publishes status data."
+                ? t("status.contextNoSnapshotDescription")
+                : t("status.contextNoSessionsDescription")
             }
           />
         )}
@@ -502,17 +529,18 @@ function ContextCompositionCard({
     </Card>
   );
 }
-function DailyTokenUsageCard({ summary, dragHandle }: StatusCardContentProps) {
+function DailyTokenUsageCard({ summary, dragHandle, t }: StatusCardContentProps) {
   const chartData = useMemo(
     () => dailyTokenUsageChartDataFromSources(tokenUsageSources(summary)),
     [summary],
   );
   const hasUsage = chartData.some((day) => day.total > 0);
+  const tokenAxisScale = tokenUsageAxisScale(chartData);
 
   return (
     <Card className="w-full overflow-visible">
       <CardHeader>
-        <CardTitle>Token Usage</CardTitle>
+        <CardTitle>{t("status.cards.tokenUsage")}</CardTitle>
         <CardAction>{dragHandle}</CardAction>
       </CardHeader>
       <CardContent>
@@ -523,7 +551,7 @@ function DailyTokenUsageCard({ summary, dragHandle }: StatusCardContentProps) {
           <BarChart
             accessibilityLayer
             data={chartData}
-            margin={{ top: 18, right: 16, left: -8, bottom: 0 }}
+            margin={{ top: 18, right: 16, left: 8, bottom: 0 }}
             barCategoryGap="34%"
           >
             <XAxis
@@ -534,28 +562,29 @@ function DailyTokenUsageCard({ summary, dragHandle }: StatusCardContentProps) {
               interval={0}
             />
             <YAxis
-              width={44}
+              width={56}
               tickLine={false}
               axisLine={false}
-              domain={[0, 1]}
-              ticks={[0, 1]}
-              tickFormatter={formatPercentAxisTick}
+              allowDecimals={false}
+              domain={[0, tokenAxisScale.max]}
+              ticks={tokenAxisScale.ticks}
+              tickFormatter={formatTokenAxisTick}
             />
             <ChartTooltip
               allowEscapeViewBox={{ y: true }}
               cursor={{ fill: "var(--muted)" }}
               wrapperStyle={{ zIndex: 50 }}
-              content={<TokenUsageTooltip />}
+              content={<TokenUsageTooltip t={t} />}
             />
             <Bar
-              dataKey="cachedRatio"
+              dataKey="cached"
               stackId="tokens"
               fill="var(--color-cached)"
               isAnimationActive={false}
               radius={[0, 0, 0, 0]}
             />
             <Bar
-              dataKey="uncachedRatio"
+              dataKey="uncached"
               stackId="tokens"
               fill="var(--color-uncached)"
               isAnimationActive={false}
@@ -565,8 +594,8 @@ function DailyTokenUsageCard({ summary, dragHandle }: StatusCardContentProps) {
         </ChartContainer>
         {hasUsage ? null : (
           <DashboardEmptyState
-            title="No token usage recorded"
-            description="Usage bars appear after sessions make model requests."
+            title={t("status.noTokenUsage")}
+            description={t("status.tokenUsageDescription")}
             compact
           />
         )}
@@ -729,10 +758,12 @@ function tokenUsageModelLabel(role: string, model: string | null | undefined) {
 function sessionDisplayName(
   session: SessionInfo,
   dashboard?: SessionStatusDashboard | null,
+  t?: TFunction,
 ) {
   return (
     session.title?.trim() ||
     dashboard?.session_title?.title.trim() ||
+    t?.("common.untitledSession") ||
     "Untitled session"
   );
 }
@@ -856,17 +887,62 @@ function statusCardIdFromValue(value: unknown): StatusCardId | null {
     : null;
 }
 
-function formatContextTokenCount(tokens: number) {
-  return `${formatCompactNumber(Math.max(0, tokens))} tokens`;
+function formatContextTokenCount(tokens: number, t?: TFunction) {
+  const value = formatCompactNumber(Math.max(0, tokens));
+  return t ? t("status.tokenCount", { count: value }) : `${value} tokens`;
+}
+
+function tokenUsageAxisScale(chartData: DailyTokenUsageChartDatum[]) {
+  const maxTotal = Math.max(0, ...chartData.map((day) => day.total));
+  const step = tokenUsageAxisStep(maxTotal);
+  const max = step * Math.max(1, Math.ceil(maxTotal / step));
+  const intervalCount = Math.max(1, Math.round(max / step));
+
+  return {
+    max,
+    ticks: Array.from(
+      { length: intervalCount + 1 },
+      (_, index) => index * step,
+    ),
+  };
+}
+
+function tokenUsageAxisStep(maxTotal: number) {
+  const safeTotal = Number.isFinite(maxTotal) && maxTotal > 0
+    ? maxTotal
+    : TOKEN_USAGE_AXIS_MIN_STEP;
+  const rawStep = Math.max(
+    TOKEN_USAGE_AXIS_MIN_STEP,
+    safeTotal / TOKEN_USAGE_AXIS_TARGET_INTERVALS,
+  );
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const normalizedStep = rawStep / magnitude;
+
+  if (normalizedStep <= 1) {
+    return magnitude;
+  }
+  if (normalizedStep <= 2) {
+    return 2 * magnitude;
+  }
+  if (normalizedStep <= 5) {
+    return 5 * magnitude;
+  }
+  return 10 * magnitude;
+}
+
+function formatTokenAxisTick(value: number) {
+  return formatCompactNumber(Math.max(0, value));
 }
 
 
 function TokenUsageTooltip({
   active,
   payload,
+  t,
 }: {
   active?: boolean;
   payload?: TokenUsageTooltipPayloadItem[];
+  t: TFunction;
 }) {
   if (!active) {
     return null;
@@ -882,14 +958,14 @@ function TokenUsageTooltip({
       <div>
         <div className="font-medium text-foreground">{datum.date}</div>
         <div className="mt-1 grid gap-1 text-muted-foreground">
-          <TokenUsageTooltipRow label="Total" value={datum.total} />
+          <TokenUsageTooltipRow label={t("status.total")} value={datum.total} />
           <TokenUsageTooltipRow
-            label="Cached"
+            label={t("status.cached")}
             value={datum.cached}
             color="var(--color-cached)"
           />
           <TokenUsageTooltipRow
-            label="Uncached"
+            label={t("status.uncached")}
             value={datum.uncached}
             color="var(--color-uncached)"
           />

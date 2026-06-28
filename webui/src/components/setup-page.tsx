@@ -5,6 +5,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 import {
   ArrowRightIcon,
   CheckIcon,
@@ -59,6 +60,14 @@ import {
   type SetupProviderKind,
   type SetupProviderRequest,
 } from "@/lib/daemon-api";
+
+import {
+  getCurrentWebUiLanguage,
+  normalizeWebUiLocale,
+  setWebUiLanguage,
+  webUiLocaleOptions,
+  type WebUiLocale,
+} from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 type SaveState = "idle" | "saving" | "error";
@@ -277,6 +286,10 @@ export function SetupPage({
   onReadinessChanged,
   onSaveSetupConfig = saveSetupConfig,
 }: SetupPageProps) {
+  const { t } = useTranslation();
+  const [webUiLocale, setWebUiLocale] = useState<WebUiLocale>(
+    getCurrentWebUiLanguage,
+  );
   const [step, setStep] = useState<SetupStep>("intro");
   const [agentPersonalization, setAgentPersonalization] =
     useState<AgentPersonalizationEditorValue>(() =>
@@ -321,21 +334,27 @@ export function SetupPage({
     return () => window.clearTimeout(timeoutId);
   }, [nextPersonalizationPreview, personalizationPreview]);
 
+  function handleWebUiLocaleChange(locale: string) {
+    const nextLocale = normalizeWebUiLocale(locale);
+    setWebUiLocale(nextLocale);
+    void setWebUiLanguage(nextLocale);
+  }
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (providers.length === 0) {
       setSaveState("error");
-      setSaveError("Add at least one provider.");
+      setSaveError(t("setup.validation.providerRequired"));
       return;
     }
     if (models.length === 0) {
       setSaveState("error");
-      setSaveError("Add at least one model.");
+      setSaveError(t("setup.validation.modelRequired"));
       return;
     }
     if (mainModelMissing || efficientModelMissing) {
       setSaveState("error");
-      setSaveError("Select valid main and efficient models.");
+      setSaveError(t("setup.validation.mainAndEfficientModelsRequired"));
       return;
     }
 
@@ -343,6 +362,7 @@ export function SetupPage({
       ...agentPersonalizationEditorValueToSetupRequest(agentPersonalization),
       ...modelAccessEditorValueToSetupRequest(modelAccess),
       daemon_port: readiness.port,
+      locale: webUiLocale,
     };
 
     setSaveState("saving");
@@ -365,18 +385,51 @@ export function SetupPage({
     return (
       <section
         id="setup"
-        aria-label="Configuration setup"
+        aria-label={t("setup.intro.pageAria")}
         className="flex min-h-screen w-full bg-background px-6 py-10"
       >
         <div className="flex w-full flex-col justify-between px-[8vw] py-[8vh]">
           <div className="flex flex-col gap-24">
-            <h1 className="text-7xl font-medium tracking-normal">Hello</h1>
+            <div className="flex flex-col gap-10">
+              <h1 className="text-7xl font-medium tracking-normal">
+                {t("setup.intro.greeting")}
+              </h1>
+              <FieldGroup className="max-w-xs">
+                <Field>
+                  <FieldLabel htmlFor="setup-webui-language">
+                    {t("setup.intro.languageLabel")}
+                  </FieldLabel>
+                  <Select
+                    value={webUiLocale}
+                    onValueChange={handleWebUiLocaleChange}
+                  >
+                    <SelectTrigger id="setup-webui-language" className="w-full">
+                      <SelectValue
+                        placeholder={t("setup.intro.languagePlaceholder")}
+                      />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {webUiLocaleOptions.map((language) => (
+                          <SelectItem key={language.value} value={language.value}>
+                            {language.label}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <FieldDescription>
+                    {t("setup.intro.languageDescription")}
+                  </FieldDescription>
+                </Field>
+              </FieldGroup>
+            </div>
             <div className="flex max-w-2xl flex-col gap-3">
               <p className="text-3xl leading-relaxed text-foreground">
-                It looks like Daat Locus is not configured yet
+                {t("setup.intro.notConfigured")}
               </p>
               <p className="text-3xl leading-relaxed text-foreground">
-                This wizard will guide you through initial setup
+                {t("setup.intro.wizardGuide")}
               </p>
             </div>
           </div>
@@ -385,7 +438,7 @@ export function SetupPage({
               type="button"
               size="icon"
               className="size-12 rounded-full"
-              aria-label="Next"
+              aria-label={t("setup.intro.next")}
               onClick={() => setStep("personalization")}
             >
               <ArrowRightIcon data-icon="inline-end" aria-hidden="true" />
@@ -400,13 +453,15 @@ export function SetupPage({
     return (
       <section
         id="setup"
-        aria-label="Personalization setup"
+        aria-label={t("setup.personalization.pageAria")}
         className="flex min-h-screen w-full bg-background px-6 py-10"
       >
         <div className="flex w-full flex-col justify-between px-[8vw] py-[8vh]">
           <div className="grid flex-1 grid-cols-1 gap-16 lg:grid-cols-12">
             <div className="flex flex-col gap-24 lg:col-span-6">
-              <h1 className="text-7xl font-medium tracking-normal">Personalize</h1>
+              <h1 className="text-7xl font-medium tracking-normal">
+                {t("setup.personalization.title")}
+              </h1>
               <AgentPersonalizationEditor
                 value={agentPersonalization}
                 onChange={(nextValue) => {
@@ -439,7 +494,7 @@ export function SetupPage({
               type="button"
               size="icon"
               className="size-14 rounded-full"
-              aria-label="Next"
+              aria-label={t("setup.personalization.next")}
               onClick={() => setStep("configuration")}
             >
               <ArrowRightIcon data-icon="inline-end" aria-hidden="true" />
@@ -453,7 +508,7 @@ export function SetupPage({
   return (
     <section
       id="setup"
-      aria-label="Provider and model setup"
+      aria-label={t("setup.configuration.pageAria")}
       className="flex min-h-screen w-full bg-background px-6 py-10"
     >
       <form
@@ -462,10 +517,12 @@ export function SetupPage({
       >
         <div className="flex flex-col gap-14">
           <div className="flex flex-col gap-16">
-            <h1 className="text-7xl font-medium tracking-normal">Model Access</h1>
+            <h1 className="text-7xl font-medium tracking-normal">
+              {t("setup.configuration.title")}
+            </h1>
             <div className="flex max-w-3xl flex-col gap-3">
               <p className="text-3xl leading-relaxed text-foreground">
-                Configure providers and models
+                {t("setup.configuration.description")}
               </p>
             </div>
           </div>
@@ -474,7 +531,7 @@ export function SetupPage({
             {readiness.recovery_note ? (
               <Alert>
                 <TriangleAlertIcon aria-hidden="true" />
-                <AlertTitle>Configuration file restored</AlertTitle>
+                <AlertTitle>{t("setup.configuration.configRestored")}</AlertTitle>
                 <AlertDescription>{readiness.recovery_note}</AlertDescription>
               </Alert>
             ) : null}
@@ -482,7 +539,7 @@ export function SetupPage({
             {saveState === "error" && saveError ? (
               <Alert variant="destructive">
                 <TriangleAlertIcon aria-hidden="true" />
-                <AlertTitle>Unable to save configuration</AlertTitle>
+                <AlertTitle>{t("setup.configuration.unableToSave")}</AlertTitle>
                 <AlertDescription>{saveError}</AlertDescription>
               </Alert>
             ) : null}
@@ -503,7 +560,11 @@ export function SetupPage({
                     size="icon"
                     className="size-14 rounded-full"
                     disabled={isSaving}
-                    aria-label={isSaving ? "Completing setup" : "Complete setup"}
+                    aria-label={
+                      isSaving
+                        ? t("setup.configuration.completingSetup")
+                        : t("setup.configuration.completeSetup")
+                    }
                   >
                     {isSaving ? (
                       <Spinner data-icon="inline-start" />
@@ -526,14 +587,19 @@ export function AgentPersonalizationEditor({
   value,
   onChange,
   title,
-  description = "Shape the agent's identity and voice across every interaction.",
+  description,
   showHeader = true,
   className,
   fieldGroupClassName,
 }: AgentPersonalizationEditorProps) {
+  const { t } = useTranslation();
   const agentDisplayName = displayAgentName(value.personaName);
-  const sectionTitle = title ?? `Customize ${agentDisplayName}`;
-
+  const sectionTitle =
+    title ?? t("setup.personalization.customize", { agent: agentDisplayName });
+  const sectionDescription =
+    description === undefined
+      ? t("setup.personalization.defaultDescription")
+      : description;
   return (
     <section className={cn("flex flex-col gap-6", className)}>
       {showHeader ? (
@@ -541,9 +607,9 @@ export function AgentPersonalizationEditor({
           <h2 className="text-3xl font-medium tracking-normal">
             {sectionTitle}
           </h2>
-          {description ? (
+          {sectionDescription ? (
             <p className="max-w-3xl text-base text-muted-foreground">
-              {description}
+              {sectionDescription}
             </p>
           ) : null}
         </div>
@@ -551,7 +617,9 @@ export function AgentPersonalizationEditor({
       <FieldGroup className={cn("max-w-xl", fieldGroupClassName)}>
         <Field>
           <FieldLabel htmlFor="agent-personalization-language">
-            Language for {agentDisplayName}
+            {t("setup.personalization.languageForAgent", {
+              agent: agentDisplayName,
+            })}
           </FieldLabel>
           <Select
             value={normalizePersonaLanguage(value.personaLanguage)}
@@ -563,7 +631,7 @@ export function AgentPersonalizationEditor({
               id="agent-personalization-language"
               className="w-full"
             >
-              <SelectValue placeholder="Select language" />
+              <SelectValue placeholder={t("setup.personalization.languagePlaceholder")} />
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
@@ -578,7 +646,7 @@ export function AgentPersonalizationEditor({
         </Field>
         <Field>
           <FieldLabel htmlFor="agent-personalization-name">
-            {agentDisplayName} name
+            {t("setup.personalization.agentName", { agent: agentDisplayName })}
           </FieldLabel>
           <Input
             id="agent-personalization-name"
@@ -592,7 +660,7 @@ export function AgentPersonalizationEditor({
         </Field>
         <Field>
           <FieldLabel htmlFor="agent-personalization-identity-summary">
-            Persona content
+            {t("setup.personalization.personaContent")}
           </FieldLabel>
           <Textarea
             id="agent-personalization-identity-summary"
@@ -605,7 +673,9 @@ export function AgentPersonalizationEditor({
             spellCheck={false}
           />
           <FieldDescription>
-            Supports {"{{name}}"}; this content is written into the persona prompt.
+            {t("setup.personalization.personaContentDescription", {
+              token: "{{name}}",
+            })}
           </FieldDescription>
         </Field>
       </FieldGroup>
@@ -617,12 +687,18 @@ export function ModelAccessEditor({
   value,
   onChange,
   submitSlot = null,
-  providerDescription = "Connect the capability sources the agent can draw from.",
-  modelDescription = "Shape the model catalog into dependable reasoning capacity.",
-  selectionDescription =
-    "Set the operating balance between deep focus and lightweight work.",
+  providerDescription,
+  modelDescription,
+  selectionDescription,
   fieldGroupClassName,
 }: ModelAccessEditorProps) {
+  const { t } = useTranslation();
+  const providerSectionDescription =
+    providerDescription ?? t("setup.modelAccess.providerDescription");
+  const modelSectionDescription =
+    modelDescription ?? t("setup.modelAccess.modelDescription");
+  const selectionSectionDescription =
+    selectionDescription ?? t("setup.modelAccess.selectionDescription");
   const [providerDialog, setProviderDialog] =
     useState<ProviderDialogState | null>(null);
   const [modelDialog, setModelDialog] = useState<ModelDialogState | null>(null);
@@ -723,9 +799,9 @@ export function ModelAccessEditor({
   return (
     <>
       <RegistrySection
-        title="Providers"
-        description={providerDescription}
-        actionLabel="Add provider"
+        title={t("setup.modelAccess.providers")}
+        description={providerSectionDescription}
+        actionLabel={t("setup.modelAccess.addProvider")}
         onAdd={openAddProviderDialog}
       >
         <ProviderList
@@ -736,9 +812,9 @@ export function ModelAccessEditor({
       </RegistrySection>
 
       <RegistrySection
-        title="Models"
-        description={modelDescription}
-        actionLabel="Add model"
+        title={t("setup.modelAccess.models")}
+        description={modelSectionDescription}
+        actionLabel={t("setup.modelAccess.addModel")}
         onAdd={openAddModelDialog}
         addDisabled={providers.length === 0}
       >
@@ -752,15 +828,19 @@ export function ModelAccessEditor({
 
       <section className="flex flex-col gap-6">
         <div className="flex flex-col gap-2">
-          <h2 className="text-3xl font-medium tracking-normal">Select Models</h2>
+          <h2 className="text-3xl font-medium tracking-normal">
+            {t("setup.modelAccess.selectModels")}
+          </h2>
           <p className="max-w-2xl text-base text-muted-foreground">
-            {selectionDescription}
+            {selectionSectionDescription}
           </p>
         </div>
         <FieldGroup className={cn("max-w-2xl", fieldGroupClassName)}>
           <div className="flex flex-col gap-4">
             <Field data-invalid={mainModelMissing}>
-              <FieldLabel htmlFor="model-access-main-model">Main model</FieldLabel>
+              <FieldLabel htmlFor="model-access-main-model">
+                {t("setup.modelAccess.mainModel")}
+              </FieldLabel>
               <Select
                 value={mainModel}
                 onValueChange={(selected) =>
@@ -768,35 +848,7 @@ export function ModelAccessEditor({
                 }
               >
                 <SelectTrigger id="model-access-main-model" className="w-full">
-                  <SelectValue placeholder="Select main model" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    {modelNames.map((name) => (
-                      <SelectItem key={name} value={name}>
-                        {name}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              <FieldError>{mainModelMissing ? "Select a model." : null}</FieldError>
-            </Field>
-            <Field data-invalid={efficientModelMissing}>
-              <FieldLabel htmlFor="model-access-efficient-model">
-                Efficient model
-              </FieldLabel>
-              <Select
-                value={efficientModel}
-                onValueChange={(selected) =>
-                  updateValue({ ...value, efficientModel: selected })
-                }
-              >
-                <SelectTrigger
-                  id="model-access-efficient-model"
-                  className="w-full"
-                >
-                  <SelectValue placeholder="Select efficient model" />
+                  <SelectValue placeholder={t("setup.modelAccess.selectMainModel")} />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
@@ -809,7 +861,41 @@ export function ModelAccessEditor({
                 </SelectContent>
               </Select>
               <FieldError>
-                {efficientModelMissing ? "Select a model." : null}
+                {mainModelMissing ? t("setup.modelAccess.selectModelError") : null}
+              </FieldError>
+            </Field>
+            <Field data-invalid={efficientModelMissing}>
+              <FieldLabel htmlFor="model-access-efficient-model">
+                {t("setup.modelAccess.efficientModel")}
+              </FieldLabel>
+              <Select
+                value={efficientModel}
+                onValueChange={(selected) =>
+                  updateValue({ ...value, efficientModel: selected })
+                }
+              >
+                <SelectTrigger
+                  id="model-access-efficient-model"
+                  className="w-full"
+                >
+                  <SelectValue
+                    placeholder={t("setup.modelAccess.selectEfficientModel")}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {modelNames.map((name) => (
+                      <SelectItem key={name} value={name}>
+                        {name}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <FieldError>
+                {efficientModelMissing
+                  ? t("setup.modelAccess.selectModelError")
+                  : null}
               </FieldError>
             </Field>
           </div>
@@ -894,10 +980,12 @@ function ProviderList({
   onEdit: (provider: SetupProviderDraft) => void;
   providers: SetupProviderDraft[];
 }) {
+  const { t } = useTranslation();
+
   if (providers.length === 0) {
     return (
       <div className="border-y py-8 text-sm text-muted-foreground">
-        No providers yet. Use the plus button to add one.
+        {t("setup.modelAccess.noProviders")}
       </div>
     );
   }
@@ -932,7 +1020,9 @@ function ProviderList({
               type="button"
               variant="ghost"
               size="icon"
-              aria-label={`Edit ${provider.name}`}
+              aria-label={t("setup.modelAccess.editProviderAria", {
+                name: provider.name,
+              })}
               onClick={() => onEdit(provider)}
             >
               <PencilIcon data-icon="inline-start" aria-hidden="true" />
@@ -941,7 +1031,9 @@ function ProviderList({
               type="button"
               variant="ghost"
               size="icon"
-              aria-label={`Delete ${provider.name}`}
+              aria-label={t("setup.modelAccess.deleteProviderAria", {
+                name: provider.name,
+              })}
               onClick={() => onDelete(provider)}
             >
               <Trash2Icon data-icon="inline-start" aria-hidden="true" />
@@ -964,10 +1056,12 @@ function ModelList({
   onEdit: (model: SetupModelDraft) => void;
   providers: SetupProviderDraft[];
 }) {
+  const { t } = useTranslation();
+
   if (models.length === 0) {
     return (
       <div className="border-y py-8 text-sm text-muted-foreground">
-        No models yet. Add a provider, then use the plus button to add a model.
+        {t("setup.modelAccess.noModels")}
       </div>
     );
   }
@@ -994,9 +1088,16 @@ function ModelList({
                 </Badge>
               </div>
               <p className="mt-1 truncate text-sm text-muted-foreground">
-                context {model.contextWindowTokens || "auto"} · output{" "}
-                {model.maxCompletionTokens || "auto"} · vision{" "}
-                {supportsVisionLabel(model.supportsVision)}
+                {t("setup.modelAccess.modelSummary", {
+                  context: model.contextWindowTokens || t("setup.modelAccess.auto"),
+                  output: model.maxCompletionTokens || t("setup.modelAccess.auto"),
+                  vision:
+                    model.supportsVision === "auto"
+                      ? t("setup.modelAccess.visionAuto")
+                      : model.supportsVision === "true"
+                        ? t("setup.modelAccess.visionYes")
+                        : t("setup.modelAccess.visionNo"),
+                })}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -1004,7 +1105,9 @@ function ModelList({
                 type="button"
                 variant="ghost"
                 size="icon"
-                aria-label={`Edit ${model.name}`}
+                aria-label={t("setup.modelAccess.editModelAria", {
+                  name: model.name,
+                })}
                 onClick={() => onEdit(model)}
               >
                 <PencilIcon data-icon="inline-start" aria-hidden="true" />
@@ -1013,7 +1116,9 @@ function ModelList({
                 type="button"
                 variant="ghost"
                 size="icon"
-                aria-label={`Delete ${model.name}`}
+                aria-label={t("setup.modelAccess.deleteModelAria", {
+                  name: model.name,
+                })}
                 onClick={() => onDelete(model)}
               >
                 <Trash2Icon data-icon="inline-start" aria-hidden="true" />
@@ -2478,12 +2583,6 @@ function providerAuthSaveBlockMessage(provider: SetupProviderDraft) {
   }
 }
 
-function supportsVisionLabel(value: SupportsVisionValue) {
-  if (value === "auto") {
-    return "auto";
-  }
-  return value === "true" ? "yes" : "no";
-}
 
 function defaultModelName(modelId: string) {
   const name = modelId.split(/[/:]/).filter(Boolean).at(-1) ?? modelId;

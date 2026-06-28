@@ -1,3 +1,5 @@
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
 import {
   useEffect,
   useMemo,
@@ -77,6 +79,8 @@ type LogEntry = {
 type LoadState = "idle" | "loading" | "error";
 
 export function LogsPage() {
+
+  const { t } = useTranslation();
   const [sources, setSources] = useState<LogSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [sourceLoadState, setSourceLoadState] = useState<LoadState>("idle");
@@ -95,8 +99,8 @@ export function LogsPage() {
     sources.find((source) => source.id === selectedSourceId) ?? null;
 
   const entries = useMemo(
-    () => lines.map((line) => parseLogEntry(line)),
-    [lines],
+    () => lines.map((line) => parseLogEntry(line, t("logs.blank"))),
+    [lines, t],
   );
 
   const filteredEntries = useMemo(() => {
@@ -276,12 +280,13 @@ export function LogsPage() {
     filteredCount: filteredEntries.length,
     levelFilter,
     query,
+    t,
   });
 
   return (
     <section
       id="logs"
-      aria-label="Logs"
+      aria-label={t("logs.pageAria")}
       className="h-screen overflow-hidden bg-background pt-20"
     >
       <div className="fixed top-4 left-16 z-50 flex items-start gap-2 md:top-6 md:left-[calc(18rem+1.5rem)]">
@@ -295,7 +300,9 @@ export function LogsPage() {
             >
               <span className="truncate">
                 {selectedSource?.label ??
-                  (sourceLoadState === "loading" ? "Loading logs" : "Logs")}
+                  (sourceLoadState === "loading"
+                    ? t("logs.loadingLogs")
+                    : t("logs.title"))}
               </span>
               <ChevronDownIcon data-icon="inline-end" />
             </Button>
@@ -304,7 +311,7 @@ export function LogsPage() {
             {sourceLoadState === "error" ? (
               <>
                 <DropdownMenuLabel className="text-destructive">
-                  {sourceError ?? "Unable to load log sources."}
+                  {sourceError ?? t("logs.sourceLoadFailed")}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
               </>
@@ -331,7 +338,7 @@ export function LogsPage() {
                     variant={source.exists ? "secondary" : "outline"}
                     className="font-mono"
                   >
-                    {source.exists ? "live" : "missing"}
+                    {source.exists ? t("logs.live") : t("logs.missing")}
                   </Badge>
                 </DropdownMenuRadioItem>
               ))}
@@ -379,8 +386,8 @@ export function LogsPage() {
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search logs"
-            aria-label="Search logs"
+            placeholder={t("logs.search")}
+            aria-label={t("logs.search")}
           />
         </InputGroup>
       </div>
@@ -395,7 +402,9 @@ export function LogsPage() {
                 : "100%",
           }}
         >
-          {emptyMessage ? <EmptyLogState message={emptyMessage} /> : null}
+          {emptyMessage ? (
+            <EmptyLogState title={t("logs.title")} message={emptyMessage} />
+          ) : null}
 
           {visibleItems.map((virtualItem) => {
             const entry = filteredEntries[virtualItem.index];
@@ -447,12 +456,12 @@ function LogEntryRow({ entry, query }: { entry: LogEntry; query: string }) {
   );
 }
 
-function EmptyLogState({ message }: { message: string }) {
+function EmptyLogState({ message, title }: { message: string; title: string }) {
   return (
     <div className="absolute inset-0 flex items-center justify-center px-4">
       <Empty className="max-w-md border border-dashed bg-card/60">
         <EmptyHeader>
-          <EmptyTitle>Logs</EmptyTitle>
+          <EmptyTitle>{title}</EmptyTitle>
           <EmptyDescription>{message}</EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -470,6 +479,7 @@ function emptyStateMessage({
   filteredCount,
   levelFilter,
   query,
+  t,
 }: {
   sourceLoadState: LoadState;
   sourceError: string | null;
@@ -480,34 +490,35 @@ function emptyStateMessage({
   filteredCount: number;
   levelFilter: LogLevelFilter;
   query: string;
+  t: TFunction;
 }) {
   if (sourceLoadState === "error" && !selectedSource) {
-    return sourceError ?? "Unable to load log sources.";
+    return sourceError ?? t("logs.sourceLoadFailed");
   }
   if (!selectedSource) {
     return sourceLoadState === "loading"
-      ? "Loading log sources…"
-      : "No log source selected.";
+      ? t("logs.loadingSources")
+      : t("logs.noSourceSelected");
   }
   if (readLoadState === "error" && entriesCount === 0) {
-    return readError ?? "Unable to read this log.";
+    return readError ?? t("logs.readFailed");
   }
   if (readLoadState === "loading" && entriesCount === 0) {
-    return "Loading log entries…";
+    return t("logs.loadingEntries");
   }
   if (entriesCount === 0) {
-    return "No log entries.";
+    return t("logs.noEntries");
   }
   if (!query.trim() && filteredCount === 0) {
-    return `No ${displayLevel(levelFilter)} or higher log entries.`;
+    return t("logs.noLevelEntries", { level: displayLevel(levelFilter) });
   }
   if (query.trim() && filteredCount === 0) {
-    return "No matching log entries.";
+    return t("logs.noMatchingEntries");
   }
   return null;
 }
 
-function parseLogEntry(line: LogLine): LogEntry {
+function parseLogEntry(line: LogLine, blankMessage: string): LogEntry {
   const raw = line.text.trimEnd();
   const fallback: LogEntry = {
     id: line.id,
@@ -515,7 +526,7 @@ function parseLogEntry(line: LogLine): LogEntry {
     timestamp: null,
     level: inferLevel(raw),
     target: null,
-    message: raw || "(blank)",
+    message: raw || blankMessage,
   };
 
   if (!raw) {
