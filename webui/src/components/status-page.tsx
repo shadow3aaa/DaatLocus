@@ -4429,6 +4429,7 @@ function AgentChatBubbles({
       <AgentChatQuickNavigation
         items={visibleQuickNavItems}
         activeItemId={activeQuickNavItemId}
+        resetKey={sessionId}
         hasMoreBefore={hasMoreNavBefore && !navReachedMax}
         isLoadingHistory={isLoadingNavHistory}
         historyError={navHistoryError}
@@ -4478,6 +4479,7 @@ function AgentChatBubbles({
 function AgentChatQuickNavigation({
   items,
   activeItemId,
+  resetKey,
   hasMoreBefore,
   isLoadingHistory,
   historyError,
@@ -4486,6 +4488,7 @@ function AgentChatQuickNavigation({
 }: {
   items: AgentChatQuickNavItem[];
   activeItemId: string | null;
+  resetKey: string;
   hasMoreBefore: boolean;
   isLoadingHistory: boolean;
   historyError: string | null;
@@ -4493,10 +4496,25 @@ function AgentChatQuickNavigation({
   onSelect: (id: string) => void;
 }) {
   const navListRef = useRef<HTMLDivElement>(null);
+  const initializedScrollResetKeyRef = useRef<string | null>(null);
   const collapsedItems = useMemo(
     () => agentChatQuickNavCollapsedItems(items, activeItemId),
     [activeItemId, items],
   );
+
+  useLayoutEffect(() => {
+    const list = navListRef.current;
+    if (
+      !list ||
+      items.length === 0 ||
+      initializedScrollResetKeyRef.current === resetKey
+    ) {
+      return;
+    }
+
+    list.scrollTop = list.scrollHeight;
+    initializedScrollResetKeyRef.current = resetKey;
+  }, [items.length, resetKey]);
 
   const handleNavScroll = useCallback(() => {
     const list = navListRef.current;
