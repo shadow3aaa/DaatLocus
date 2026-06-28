@@ -266,6 +266,7 @@ export function SettingsPage({
                 setAgentPersonalization(nextValue);
                 markDirty();
               }}
+              fieldGroupClassName="max-w-none"
             />
 
             <ModelAccessEditor
@@ -274,6 +275,7 @@ export function SettingsPage({
                 setModelAccess(nextValue);
                 markDirty();
               }}
+              fieldGroupClassName="max-w-none"
               providerDescription="Tune the secure access layer behind the agent's model capability."
               modelDescription="Shape available model capacity into a dependable runtime catalog."
               selectionDescription="Set the operating balance between depth, speed, and everyday work."
@@ -335,7 +337,7 @@ function TelegramSettingsEditor({
         </p>
       </div>
 
-      <FieldGroup className="max-w-2xl">
+      <FieldGroup>
         <Field orientation="horizontal">
           <FieldContent>
             <FieldLabel htmlFor="telegram-settings-enabled">

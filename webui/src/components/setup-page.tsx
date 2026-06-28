@@ -130,6 +130,7 @@ type ModelAccessEditorProps = {
   providerDescription?: string;
   modelDescription?: string;
   selectionDescription?: string;
+  fieldGroupClassName?: string;
 };
 
 type AgentPersonalizationEditorProps = {
@@ -139,6 +140,7 @@ type AgentPersonalizationEditorProps = {
   description?: string | null;
   showHeader?: boolean;
   className?: string;
+  fieldGroupClassName?: string;
 };
 
 type SetupPageProps = {
@@ -526,6 +528,7 @@ export function AgentPersonalizationEditor({
   description = "Shape the agent's identity and voice across every interaction.",
   showHeader = true,
   className,
+  fieldGroupClassName,
 }: AgentPersonalizationEditorProps) {
   const agentDisplayName = displayAgentName(value.personaName);
   const sectionTitle = title ?? `Customize ${agentDisplayName}`;
@@ -544,7 +547,7 @@ export function AgentPersonalizationEditor({
           ) : null}
         </div>
       ) : null}
-      <FieldGroup className="max-w-xl">
+      <FieldGroup className={cn("max-w-xl", fieldGroupClassName)}>
         <Field>
           <FieldLabel htmlFor="agent-personalization-language">
             Language for {agentDisplayName}
@@ -599,6 +602,7 @@ export function ModelAccessEditor({
   modelDescription = "Shape the model catalog into dependable reasoning capacity.",
   selectionDescription =
     "Set the operating balance between deep focus and lightweight work.",
+  fieldGroupClassName,
 }: ModelAccessEditorProps) {
   const [providerDialog, setProviderDialog] =
     useState<ProviderDialogState | null>(null);
@@ -734,7 +738,7 @@ export function ModelAccessEditor({
             {selectionDescription}
           </p>
         </div>
-        <FieldGroup className="max-w-2xl">
+        <FieldGroup className={cn("max-w-2xl", fieldGroupClassName)}>
           <div className="flex flex-col gap-4">
             <Field data-invalid={mainModelMissing}>
               <FieldLabel htmlFor="model-access-main-model">Main model</FieldLabel>
