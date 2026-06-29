@@ -4148,21 +4148,6 @@ function AgentChatBubbles({
   }, [bubbles.length, panelRef, scrollToChatBottom, updateQuickNavActiveItem]);
 
   useEffect(() => {
-    const panel = panelRef.current;
-    if (
-      !panel ||
-      !hasMoreBefore ||
-      isLoadingHistory ||
-      restoreAfterPrependRef.current
-    ) {
-      return;
-    }
-
-    if (panel.scrollTop <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX) {
-      void loadOlderHistory();
-    }
-  }, [hasMoreBefore, isLoadingHistory, loadOlderHistory, panelRef]);
-  useEffect(() => {
     const foldedIds = new Set(
       displayItems
         .filter((item) => item.kind === "foldedActivityGroup")
@@ -4497,6 +4482,10 @@ function AgentChatQuickNavigation({
 }) {
   const navListRef = useRef<HTMLDivElement>(null);
   const initializedScrollResetKeyRef = useRef<string | null>(null);
+  const restoreAfterPrependRef = useRef<{
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
   const collapsedItems = useMemo(
     () => agentChatQuickNavCollapsedItems(items, activeItemId),
     [activeItemId, items],
@@ -4504,16 +4493,29 @@ function AgentChatQuickNavigation({
 
   useLayoutEffect(() => {
     const list = navListRef.current;
-    if (
-      !list ||
-      items.length === 0 ||
-      initializedScrollResetKeyRef.current === resetKey
-    ) {
+    if (!list) {
+      restoreAfterPrependRef.current = null;
       return;
     }
 
-    list.scrollTop = list.scrollHeight;
-    initializedScrollResetKeyRef.current = resetKey;
+    if (initializedScrollResetKeyRef.current !== resetKey) {
+      restoreAfterPrependRef.current = null;
+      if (items.length === 0) {
+        return;
+      }
+
+      list.scrollTop = list.scrollHeight;
+      initializedScrollResetKeyRef.current = resetKey;
+      return;
+    }
+
+    const restore = restoreAfterPrependRef.current;
+    if (!restore) {
+      return;
+    }
+
+    list.scrollTop = list.scrollHeight - restore.scrollHeight + restore.scrollTop;
+    restoreAfterPrependRef.current = null;
   }, [items.length, resetKey]);
 
   const handleNavScroll = useCallback(() => {
@@ -4522,14 +4524,23 @@ function AgentChatQuickNavigation({
       return;
     }
 
-    if (list.scrollTop <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX) {
+    if (
+      list.scrollTop <= AGENT_CHAT_STICKY_BOTTOM_THRESHOLD_PX &&
+      !restoreAfterPrependRef.current
+    ) {
+      restoreAfterPrependRef.current = {
+        scrollHeight: list.scrollHeight,
+        scrollTop: list.scrollTop,
+      };
       onNearTop();
     }
   }, [hasMoreBefore, isLoadingHistory, onNearTop]);
 
   useEffect(() => {
-    handleNavScroll();
-  }, [handleNavScroll, items.length]);
+    if (!isLoadingHistory) {
+      restoreAfterPrependRef.current = null;
+    }
+  }, [isLoadingHistory]);
 
   if (items.length === 0 && !hasMoreBefore && !isLoadingHistory && !historyError) {
     return null;
