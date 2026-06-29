@@ -3,18 +3,19 @@ use super::*;
 
 const USER_INTERRUPT_APP_NOTICE_SUPPRESSION: Duration = Duration::from_secs(30);
 
+pub(crate) enum RuntimeLoopCycle {
+    Idle,
+    ProcessedWork,
+}
+
 pub(crate) async fn daat_locus_loop(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
     sleep_result_tx: &tokio::sync::mpsc::UnboundedSender<SleepTaskResult>,
     sleep_running: &mut bool,
     sleep_status: &mut SleepStatusSnapshot,
-    workspace_app_invalidation_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
-        WorkspaceAppInvalidation,
-    >,
-) {
+) -> RuntimeLoopCycle {
     let cycle_started_at = std::time::Instant::now();
-    drain_workspace_app_invalidations(&mut context.workspace_apps, workspace_app_invalidation_rx);
     sync_workspace_apps_from_invalidation(context).await;
     if let Err(err) = context.apps.refresh_all_notices().await {
         tracing::error!("failed to refresh app notices: {err:?}");
@@ -58,8 +59,7 @@ pub(crate) async fn daat_locus_loop(
             sleep_status,
             Some(cycle_started_at.elapsed().as_millis()),
         );
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        return;
+        return RuntimeLoopCycle::Idle;
     }
     context.idle_since = None;
     let mut status = format!("processing: {pending_work_count} pending work item(s)");
@@ -116,6 +116,7 @@ pub(crate) async fn daat_locus_loop(
     {
         tracing::warn!("session title refresh failed: {err:?}");
     }
+    RuntimeLoopCycle::ProcessedWork
 }
 
 fn sync_driver_frontier_from_sources(context: &Context) {

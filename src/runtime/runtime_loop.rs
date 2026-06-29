@@ -59,7 +59,6 @@ use crate::{
         SleepStatusSnapshot, persist_sleep_status_snapshot, refresh_sleep_status_queues,
     },
     workflow::{PrimitiveRunRecord, append_primitive_run_records},
-    workspace_app::{WorkspaceAppInvalidation, WorkspaceAppRegistry},
 };
 use chrono::Utc;
 use miette::{Result, miette};
@@ -81,7 +80,7 @@ mod workspace_apps;
 
 pub(crate) use dashboard_control::handle_dashboard_control_command;
 pub(crate) use scheduler::{
-    daat_locus_loop, interrupt_active_runtime_turn, reset_cancelled_runtime_turn,
+    RuntimeLoopCycle, daat_locus_loop, interrupt_active_runtime_turn, reset_cancelled_runtime_turn,
 };
 pub(crate) use sleep_driver::{SleepTaskResult, handle_sleep_task_result};
 pub(crate) use turn::execute_agent_loop_step;
@@ -90,7 +89,7 @@ pub(crate) use workflow_evidence::{AgentLoopStepExecution, AgentLoopStepOutput};
 use claimed_input::*;
 use live_draft::{TelegramLiveDraftSession, maybe_start_telegram_live_draft_session};
 use workflow_evidence::{record_runtime_history_messages, record_workflow_run_evidence};
-use workspace_apps::{drain_workspace_app_invalidations, sync_workspace_apps_from_invalidation};
+use workspace_apps::sync_workspace_apps_from_invalidation;
 
 const RUNTIME_EVENT_CLAIM_BATCH_SIZE: usize = 1;
 const RUNTIME_OVERFLOW_FUSE_THRESHOLD: usize = 3;

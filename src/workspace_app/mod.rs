@@ -316,6 +316,10 @@ impl WorkspaceAppRegistry {
         }
     }
 
+    pub fn has_loaded_apps(&self) -> bool {
+        self.records.values().any(|record| record.app_id.is_some())
+    }
+
     pub async fn sync_dirty_apps(
         &mut self,
         apps: &mut AppManager,

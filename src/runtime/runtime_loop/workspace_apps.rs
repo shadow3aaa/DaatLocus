@@ -1,14 +1,5 @@
 use super::*;
 
-pub(super) fn drain_workspace_app_invalidations(
-    workspace_apps: &mut WorkspaceAppRegistry,
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<WorkspaceAppInvalidation>,
-) {
-    while let Ok(invalidation) = rx.try_recv() {
-        workspace_apps.record_invalidation(invalidation);
-    }
-}
-
 pub(super) async fn sync_workspace_apps_from_invalidation(context: &mut Context) {
     let report = match context
         .workspace_apps

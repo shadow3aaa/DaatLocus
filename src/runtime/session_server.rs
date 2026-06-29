@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use miette::{Result, miette};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -16,13 +21,14 @@ use crate::{
         },
     },
     dashboard::render::{
-        current_plan_step_for_dashboard, pending_user_inputs_from_sources,
-        primitive_optimization_snapshot_for_dashboard, render_activity_for_dashboard,
-        render_app_status_outputs_for_dashboard, render_dashboard_footer_context,
-        render_sleep_status_output_for_dashboard, render_status_command_output_for_dashboard,
-        render_system_prompt_output_for_dashboard, render_telegram_status_for_dashboard,
-        runtime_activity_for_dashboard, runtime_optimization_snapshot_for_dashboard,
-        status_command_snapshot_for_dashboard, token_usage_snapshot_for_dashboard,
+        AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, current_plan_step_for_dashboard,
+        pending_user_inputs_from_sources, primitive_optimization_snapshot_for_dashboard,
+        render_activity_for_dashboard, render_app_status_outputs_for_dashboard,
+        render_dashboard_footer_context, render_sleep_status_output_for_dashboard,
+        render_status_command_output_for_dashboard, render_system_prompt_output_for_dashboard,
+        render_telegram_status_for_dashboard, runtime_activity_for_dashboard,
+        runtime_optimization_snapshot_for_dashboard, status_command_snapshot_for_dashboard,
+        token_usage_snapshot_for_dashboard,
     },
     dashboard::{
         DashboardAction, DashboardActivityHistoryStore, DashboardControlCommand,
@@ -49,7 +55,7 @@ use crate::{
         wrap_llm_with_persistent_token_usage,
     },
     runtime::runtime_loop::{
-        SleepTaskResult, daat_locus_loop, handle_dashboard_control_command,
+        RuntimeLoopCycle, SleepTaskResult, daat_locus_loop, handle_dashboard_control_command,
         handle_sleep_task_result, reset_cancelled_runtime_turn,
     },
     runtime_context::build_preturn_context_text,
@@ -70,6 +76,9 @@ pub(crate) struct SessionServeArgs {
     pub ipc_token: String,
     pub project_dir: Option<PathBuf>,
 }
+
+// Workspace app notices are pull-based, so poll them only when a workspace app is loaded.
+const WORKSPACE_APP_NOTICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) async fn run_session_serve(
     config: crate::config::Config,
@@ -103,6 +112,7 @@ pub(crate) async fn run_session_serve(
     let (dashboard_control_tx, mut dashboard_control_rx) =
         mpsc::unbounded_channel::<DashboardControlCommand>();
     let (runtime_interrupt_tx, mut runtime_interrupt_rx) = mpsc::unbounded_channel::<()>();
+    let (runtime_wake_tx, mut runtime_wake_rx) = mpsc::unbounded_channel::<()>();
     let (sleep_result_tx, mut sleep_result_rx) = mpsc::unbounded_channel::<SleepTaskResult>();
     let (workspace_app_invalidation_tx, mut workspace_app_invalidation_rx) =
         mpsc::unbounded_channel::<WorkspaceAppInvalidation>();
@@ -126,6 +136,7 @@ pub(crate) async fn run_session_serve(
         telegram: telegram_handle.clone(),
         dashboard_control_tx: dashboard_control_tx.clone(),
         runtime_interrupt_tx: runtime_interrupt_tx.clone(),
+        runtime_wake_tx: runtime_wake_tx.clone(),
         daemon_control_tx: daemon_control_tx.clone(),
     }));
 
@@ -323,7 +334,11 @@ pub(crate) async fn run_session_serve(
     let mut shutdown_completion_tx = None;
     let mut ctrl_c_disabled = false;
     let mut restart_requested = false;
+    let mut runtime_idle = false;
     loop {
+        if drain_workspace_app_invalidations(&mut context, &mut workspace_app_invalidation_rx) {
+            runtime_idle = false;
+        }
         if (SessionBoundaryRuntimeControlDrain {
             context: &mut context,
             tx: &tx,
@@ -342,15 +357,57 @@ pub(crate) async fn run_session_serve(
             break;
         }
 
+        let runtime_idle_sleep_delay = next_runtime_idle_sleep_delay(&context, sleep_running);
+        let runtime_idle_sleep_enabled = runtime_idle_sleep_delay.is_some();
+        let workspace_app_notice_poll_enabled = context.workspace_apps.has_loaded_apps();
+        let runtime_idle_sleep = async move {
+            match runtime_idle_sleep_delay {
+                Some(delay) => tokio::time::sleep(delay).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let workspace_app_notice_poll = tokio::time::sleep(WORKSPACE_APP_NOTICE_POLL_INTERVAL);
+        tokio::pin!(runtime_idle_sleep);
+        tokio::pin!(workspace_app_notice_poll);
+
         tokio::select! {
-            _ = daat_locus_loop(
+            cycle = daat_locus_loop(
                 &mut context,
                 &tx,
                 &sleep_result_tx,
                 &mut sleep_running,
                 &mut sleep_status,
-                &mut workspace_app_invalidation_rx,
-            ) => {}
+            ), if !runtime_idle => {
+                runtime_idle = matches!(cycle, RuntimeLoopCycle::Idle);
+            }
+            Some(()) = runtime_wake_rx.recv(), if runtime_idle => {
+                runtime_idle = false;
+            }
+            _ = &mut runtime_idle_sleep, if runtime_idle && runtime_idle_sleep_enabled => {
+                runtime_idle = false;
+            }
+            _ = &mut workspace_app_notice_poll, if runtime_idle && workspace_app_notice_poll_enabled => {
+                runtime_idle = false;
+            }
+            Some(invalidation) = workspace_app_invalidation_rx.recv(), if runtime_idle => {
+                context.workspace_apps.record_invalidation(invalidation);
+                runtime_idle = false;
+            }
+            Some(result) = sleep_result_rx.recv(), if runtime_idle => {
+                sleep_running = false;
+                handle_sleep_task_result(&mut context, &tx, &mut sleep_status, result).await;
+            }
+            Some(command) = dashboard_control_rx.recv(), if runtime_idle => {
+                handle_dashboard_control_command(
+                    &mut context,
+                    &tx,
+                    &sleep_result_tx,
+                    &mut sleep_running,
+                    &mut sleep_status,
+                    command,
+                )
+                .await;
+            }
             Some(command) = daemon_control_rx.recv() => {
                 reset_cancelled_runtime_turn(&mut context, "session daemon control interrupt");
                 apply_session_daemon_control_command(
@@ -361,6 +418,7 @@ pub(crate) async fn run_session_serve(
                 break;
             }
             Some(()) = runtime_interrupt_rx.recv() => {
+                runtime_idle = false;
                 handle_dashboard_control_command(
                     &mut context,
                     &tx,
@@ -422,6 +480,7 @@ struct SessionIpcServerState {
     telegram: TelegramTransportStateHandle,
     dashboard_control_tx: mpsc::UnboundedSender<DashboardControlCommand>,
     runtime_interrupt_tx: mpsc::UnboundedSender<()>,
+    runtime_wake_tx: mpsc::UnboundedSender<()>,
     daemon_control_tx: mpsc::UnboundedSender<DaemonControlCommand>,
 }
 
@@ -504,8 +563,7 @@ async fn handle_ipc_connection(
             wait_for_reply,
         } => {
             let response = submit_user_input(
-                &state.events,
-                &state.pending_work,
+                &state,
                 origin,
                 text,
                 attachments,
@@ -537,7 +595,14 @@ async fn handle_ipc_connection(
             )
         }
         SessionIpcRequest::EnqueueTelegramEvent { event } => {
-            enqueue_telegram_event(&state.events, &state.pending_work, event, request_id).await
+            enqueue_telegram_event(
+                &state.events,
+                &state.pending_work,
+                &state.runtime_wake_tx,
+                event,
+                request_id,
+            )
+            .await
         }
         SessionIpcRequest::DashboardSnapshot => IpcResponseEnvelope::ok(
             request_id,
@@ -1017,10 +1082,50 @@ fn validate_pending_terminal_event(events: &EventStore, event_id: uuid::Uuid) ->
     }
     Ok(())
 }
+fn drain_workspace_app_invalidations(
+    context: &mut Context,
+    workspace_app_invalidation_rx: &mut mpsc::UnboundedReceiver<WorkspaceAppInvalidation>,
+) -> bool {
+    let mut drained = false;
+    while let Ok(invalidation) = workspace_app_invalidation_rx.try_recv() {
+        context.workspace_apps.record_invalidation(invalidation);
+        drained = true;
+    }
+    drained
+}
+
+fn next_runtime_idle_sleep_delay(context: &Context, sleep_running: bool) -> Option<Duration> {
+    next_runtime_idle_sleep_delay_from_instants(
+        context.idle_since,
+        context.last_idle_sleep_at,
+        sleep_running,
+    )
+}
+
+fn next_runtime_idle_sleep_delay_from_instants(
+    idle_since: Option<Instant>,
+    last_idle_sleep_at: Option<Instant>,
+    sleep_running: bool,
+) -> Option<Duration> {
+    if sleep_running {
+        return None;
+    }
+
+    let idle_due = idle_since? + AUTO_SLEEP_IDLE_THRESHOLD;
+    let next_due = last_idle_sleep_at
+        .map(|last| std::cmp::max(idle_due, last + AUTO_SLEEP_MIN_INTERVAL))
+        .unwrap_or(idle_due);
+    Some(next_due.saturating_duration_since(Instant::now()))
+}
+
+fn wake_runtime_loop(runtime_wake_tx: &mpsc::UnboundedSender<()>) {
+    if let Err(err) = runtime_wake_tx.send(()) {
+        tracing::debug!("runtime loop wake skipped because receiver is closed: {err}");
+    }
+}
 
 async fn submit_user_input(
-    events: &EventStore,
-    pending_work: &PendingWorkQueue,
+    state: &SessionIpcServerState,
     origin: crate::daemon::session_ipc::UserInputOrigin,
     text: String,
     attachments: Vec<InputAttachment>,
@@ -1031,7 +1136,13 @@ async fn submit_user_input(
     if text.is_empty() {
         return IpcResponseEnvelope::error(request_id, "empty_input", "empty input", false);
     }
-    let event_id = match register_terminal_event(events, pending_work, origin, text, attachments) {
+    let event_id = match register_terminal_event(
+        &state.events,
+        &state.pending_work,
+        origin,
+        text,
+        attachments,
+    ) {
         Ok(event_id) => event_id,
         Err(err) => {
             return IpcResponseEnvelope::error(
@@ -1042,6 +1153,7 @@ async fn submit_user_input(
             );
         }
     };
+    wake_runtime_loop(&state.runtime_wake_tx);
     if !wait_for_reply {
         return IpcResponseEnvelope::ok(
             request_id,
@@ -1052,7 +1164,7 @@ async fn submit_user_input(
             },
         );
     }
-    match wait_for_send_reply(events.clone(), event_id).await {
+    match wait_for_send_reply(state.events.clone(), event_id).await {
         Ok((status, reply_message, note)) => IpcResponseEnvelope::ok(
             request_id,
             SessionIpcResponse::Submitted {
@@ -1073,19 +1185,23 @@ async fn submit_user_input(
 async fn enqueue_telegram_event(
     events: &EventStore,
     pending_work: &PendingWorkQueue,
+    runtime_wake_tx: &mpsc::UnboundedSender<()>,
     event: TelegramIncomingEvent,
     request_id: String,
 ) -> IpcResponseEnvelope {
     match events.register_telegram_incoming(event) {
         Ok(event_id) => match pending_work.enqueue(PendingWork::Event { event_id }) {
-            Ok(_) => IpcResponseEnvelope::ok(
-                request_id,
-                SessionIpcResponse::Submitted {
-                    event_id: event_id.to_string(),
-                    reply_message: None,
-                    terminal_status: None,
-                },
-            ),
+            Ok(_) => {
+                wake_runtime_loop(runtime_wake_tx);
+                IpcResponseEnvelope::ok(
+                    request_id,
+                    SessionIpcResponse::Submitted {
+                        event_id: event_id.to_string(),
+                        reply_message: None,
+                        terminal_status: None,
+                    },
+                )
+            }
             Err(err) => {
                 IpcResponseEnvelope::error(request_id, "enqueue_failed", format!("{err:?}"), true)
             }
@@ -1342,6 +1458,41 @@ mod tests {
             }
             _ => panic!("expected IPC error response"),
         }
+    }
+
+    #[test]
+    fn idle_sleep_delay_requires_idle_and_no_running_sleep() {
+        assert!(next_runtime_idle_sleep_delay_from_instants(None, None, false).is_none());
+
+        let idle_since = Some(Instant::now() - AUTO_SLEEP_IDLE_THRESHOLD);
+        assert!(next_runtime_idle_sleep_delay_from_instants(idle_since, None, true).is_none());
+    }
+
+    #[test]
+    fn idle_sleep_delay_tracks_idle_and_min_interval_deadlines() {
+        let fresh_idle_since = Some(Instant::now());
+        let fresh_delay =
+            next_runtime_idle_sleep_delay_from_instants(fresh_idle_since, None, false)
+                .expect("idle sleep should be scheduled");
+        assert!(fresh_delay <= AUTO_SLEEP_IDLE_THRESHOLD);
+        assert!(fresh_delay > AUTO_SLEEP_IDLE_THRESHOLD - Duration::from_secs(1));
+
+        let overdue_idle_since =
+            Some(Instant::now() - AUTO_SLEEP_IDLE_THRESHOLD - Duration::from_secs(1));
+        let overdue_delay =
+            next_runtime_idle_sleep_delay_from_instants(overdue_idle_since, None, false)
+                .expect("overdue idle sleep should be ready");
+        assert!(overdue_delay <= Duration::from_millis(10));
+
+        let last_idle_sleep_at = Some(Instant::now());
+        let throttled_delay = next_runtime_idle_sleep_delay_from_instants(
+            overdue_idle_since,
+            last_idle_sleep_at,
+            false,
+        )
+        .expect("idle sleep should be throttled by min interval");
+        assert!(throttled_delay <= AUTO_SLEEP_MIN_INTERVAL);
+        assert!(throttled_delay > AUTO_SLEEP_MIN_INTERVAL - Duration::from_secs(1));
     }
 
     #[test]
