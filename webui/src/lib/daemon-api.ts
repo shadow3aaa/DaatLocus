@@ -1,4 +1,4 @@
-import { getStoredDaemonToken } from "@/lib/daemon-auth";
+import { getStoredDaemonToken, notifyDaemonAuthFailed } from "@/lib/daemon-auth";
 
 export type DaemonLifecycleState =
   | "initializing"
@@ -1418,6 +1418,10 @@ async function parseJsonResponse<T>(
     const details = await response.text().catch(() => "");
     const statusText = response.statusText ? ` ${response.statusText}` : "";
     const detailText = details ? `: ${details}` : "";
+
+    if (response.status === 401) {
+      notifyDaemonAuthFailed();
+    }
 
     throw new DaemonApiError(
       `${label} returned ${response.status}${statusText}${detailText}`,

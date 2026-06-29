@@ -1,4 +1,5 @@
 const DAEMON_TOKEN_STORAGE_KEY = "daat-locus.daemonToken";
+export const DAEMON_AUTH_FAILED_EVENT = "daat-locus.daemon-auth-failed";
 
 type DaemonAuthResult =
   | { ok: true }
@@ -18,6 +19,10 @@ export function storeDaemonToken(token: string) {
 
 export function clearStoredDaemonToken() {
   window.localStorage.removeItem(DAEMON_TOKEN_STORAGE_KEY);
+}
+
+export function notifyDaemonAuthFailed() {
+  window.dispatchEvent(new Event(DAEMON_AUTH_FAILED_EVENT));
 }
 
 export async function verifyDaemonToken(token: string): Promise<DaemonAuthResult> {

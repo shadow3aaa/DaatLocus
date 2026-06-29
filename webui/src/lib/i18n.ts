@@ -97,6 +97,10 @@ const resources = {
         setupLoadingTitle: "Checking configuration",
         setupLoadingDescription:
           "Loading Manager readiness before opening the agent workspace.",
+        authLoadingAria: "Verifying daemon token",
+        authLoadingTitle: "Checking authentication",
+        authLoadingDescription:
+          "Verifying the saved daemon token before opening the WebUI.",
         setupErrorAria: "Configuration readiness error",
         setupErrorTitle: "Unable to read configuration state",
         setupErrorDescription:
@@ -340,6 +344,9 @@ const resources = {
         setupLoadingAria: "正在加载配置就绪状态",
         setupLoadingTitle: "正在检查配置",
         setupLoadingDescription: "打开代理工作区前正在加载 Manager 就绪状态。",
+        authLoadingAria: "正在验证 daemon token",
+        authLoadingTitle: "正在检查认证",
+        authLoadingDescription: "打开 WebUI 前正在验证已保存的 daemon token。",
         setupErrorAria: "配置就绪状态错误",
         setupErrorTitle: "无法读取配置状态",
         setupErrorDescription: "WebUI 无法确定代理是否可以运行。",

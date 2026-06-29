@@ -19,6 +19,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import {
+  clearStoredDaemonToken,
   getStoredDaemonToken,
   storeDaemonToken,
   verifyDaemonToken,
@@ -59,6 +60,7 @@ export function LoginPage({
       return;
     }
 
+    clearStoredDaemonToken();
     setLoginState("error");
     setMessage(result.message);
   }

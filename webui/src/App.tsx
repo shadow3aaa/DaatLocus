@@ -19,7 +19,13 @@ import {
 } from "@/components/ui/empty";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { Spinner } from "@/components/ui/spinner";
-import { getStoredDaemonToken, storeDaemonToken } from "@/lib/daemon-auth";
+import {
+  clearStoredDaemonToken,
+  DAEMON_AUTH_FAILED_EVENT,
+  getStoredDaemonToken,
+  storeDaemonToken,
+  verifyDaemonToken,
+} from "@/lib/daemon-auth";
 import {
   createSession,
   deleteSession,
@@ -99,7 +105,10 @@ export default function App() {
   const { t } = useTranslation();
 
   const [isAuthenticated, setIsAuthenticated] = useState(() =>
-    Boolean(getStoredDaemonToken()),
+    Boolean(getStoredDaemonToken().trim()),
+  );
+  const [isCheckingStoredToken, setIsCheckingStoredToken] = useState(() =>
+    Boolean(getStoredDaemonToken().trim()),
   );
   const [activePage, setActivePage] = useState(getCurrentPage);
   const [configReadiness, setConfigReadiness] =
@@ -121,6 +130,54 @@ export default function App() {
   );
 
   const { themeMode, toggleThemeMode } = useThemeMode();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function verifyStoredToken() {
+      const token = getStoredDaemonToken().trim();
+      if (!token) {
+        setIsAuthenticated(false);
+        setIsCheckingStoredToken(false);
+        return;
+      }
+
+      const result = await verifyDaemonToken(token);
+      if (cancelled) {
+        return;
+      }
+      if (result.ok) {
+        setIsAuthenticated(true);
+      } else {
+        clearStoredDaemonToken();
+        setIsAuthenticated(false);
+      }
+      setIsCheckingStoredToken(false);
+    }
+
+    void verifyStoredToken();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    function handleDaemonAuthFailed() {
+      clearStoredDaemonToken();
+      setIsAuthenticated(false);
+      setIsCheckingStoredToken(false);
+    }
+
+    window.addEventListener(DAEMON_AUTH_FAILED_EVENT, handleDaemonAuthFailed);
+
+    return () => {
+      window.removeEventListener(
+        DAEMON_AUTH_FAILED_EVENT,
+        handleDaemonAuthFailed,
+      );
+    };
+  }, []);
 
   const selectedSession = useMemo(
     () =>
@@ -342,7 +399,13 @@ export default function App() {
 
   return (
     <main className="min-h-screen bg-background text-foreground">
-      {!hasLoadedConfigReadiness ? (
+      {isCheckingStoredToken ? (
+        <SetupLoadingPage
+          ariaLabel={t("app.authLoadingAria")}
+          title={t("app.authLoadingTitle")}
+          description={t("app.authLoadingDescription")}
+        />
+      ) : !hasLoadedConfigReadiness ? (
         <SetupLoadingPage />
       ) : configReadinessError && !configReadiness ? (
         <SetupErrorPage
@@ -618,20 +681,29 @@ function NoSessionPage({
   );
 }
 
-function SetupLoadingPage() {
+function SetupLoadingPage({
+  ariaLabel,
+  title,
+  description,
+}: {
+  ariaLabel?: string;
+  title?: string;
+  description?: string;
+} = {}) {
   const { t } = useTranslation();
+  const resolvedAriaLabel = ariaLabel ?? t("app.setupLoadingAria");
+  const resolvedTitle = title ?? t("app.setupLoadingTitle");
+  const resolvedDescription = description ?? t("app.setupLoadingDescription");
 
   return (
     <section
-      aria-label={t("app.setupLoadingAria")}
+      aria-label={resolvedAriaLabel}
       className="flex min-h-screen w-full items-center justify-center px-6 py-16"
     >
       <Empty className="w-full max-w-lg border border-dashed bg-card/60">
         <EmptyHeader>
-          <EmptyTitle>{t("app.setupLoadingTitle")}</EmptyTitle>
-          <EmptyDescription>
-            {t("app.setupLoadingDescription")}
-          </EmptyDescription>
+          <EmptyTitle>{resolvedTitle}</EmptyTitle>
+          <EmptyDescription>{resolvedDescription}</EmptyDescription>
         </EmptyHeader>
         <EmptyContent>
           <div className="flex items-center justify-center">
