@@ -4542,6 +4542,28 @@ function AgentChatQuickNavigation({
     }
   }, [isLoadingHistory]);
 
+  useEffect(() => {
+    const list = navListRef.current;
+    if (
+      !list ||
+      list.clientHeight <= 0 ||
+      isLoadingHistory ||
+      !hasMoreBefore ||
+      historyError ||
+      restoreAfterPrependRef.current
+    ) {
+      return;
+    }
+
+    if (list.scrollHeight <= list.clientHeight) {
+      restoreAfterPrependRef.current = {
+        scrollHeight: list.scrollHeight,
+        scrollTop: list.scrollTop,
+      };
+      onNearTop();
+    }
+  }, [hasMoreBefore, historyError, isLoadingHistory, items.length, onNearTop]);
+
   if (items.length === 0 && !hasMoreBefore && !isLoadingHistory && !historyError) {
     return null;
   }
