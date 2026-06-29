@@ -122,7 +122,7 @@ export function AppSidebar(props: AppSidebarProps) {
     <>
       <SidebarTrigger
         aria-label={t("sidebar.open")}
-        className="fixed top-4 left-4 rounded-full border-border/60 bg-background/80 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/60 md:hidden"
+        className="fixed top-4 left-4 z-50 rounded-full border-border/60 bg-background/80 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/60 md:hidden"
       />
       <Sidebar>
         <AppSidebarBody {...props} />

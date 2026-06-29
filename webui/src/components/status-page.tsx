@@ -25,6 +25,7 @@ import {
   ArrowDownIcon,
   AlertTriangleIcon,
   CheckIcon,
+  ChevronLeftIcon,
   ChevronRightIcon,
   CopyIcon,
   CommandIcon,
@@ -4564,71 +4565,117 @@ function AgentChatQuickNavigation({
     }
   }, [hasMoreBefore, historyError, isLoadingHistory, items.length, onNearTop]);
 
+  const [isQuickNavOpen, setIsQuickNavOpen] = useState(false);
+
+  useEffect(() => {
+    setIsQuickNavOpen(false);
+  }, [resetKey]);
+  const hasQuickNavContent =
+    items.length > 0 || hasMoreBefore || isLoadingHistory || Boolean(historyError);
+  const handleSelect = useCallback(
+    (id: string) => {
+      onSelect(id);
+      setIsQuickNavOpen(false);
+    },
+    [onSelect],
+  );
+
   if (items.length === 0 && !hasMoreBefore && !isLoadingHistory && !historyError) {
     return null;
   }
 
+  const quickNavToggleLabel = isQuickNavOpen
+    ? "Collapse quick navigation"
+    : "Open quick navigation";
+
   return (
     <nav
       aria-label="User message quick navigation"
-      className="group fixed top-1/2 right-4 z-50 flex h-[min(26rem,calc(100vh-1rem))] -translate-y-1/2 items-center justify-end"
+      className="group pointer-events-none fixed top-1/2 right-0 z-50 h-[min(26rem,calc(100vh-1rem))] w-[min(17rem,calc(100vw-1rem))] -translate-y-1/2 md:pointer-events-auto md:right-4 md:flex md:w-auto md:items-center md:justify-end"
     >
-      {items.length > 0 || hasMoreBefore || isLoadingHistory ? (
+      <button
+        type="button"
+        aria-label={quickNavToggleLabel}
+        aria-expanded={isQuickNavOpen}
+        title={quickNavToggleLabel}
+        onClick={() => setIsQuickNavOpen((open) => !open)}
+        className={cn(
+          "pointer-events-auto absolute top-1/2 z-10 flex h-14 w-9 -translate-y-1/2 items-center justify-center rounded-l-xl border border-r-0 border-border/70 bg-background/95 text-muted-foreground shadow-lg shadow-background/25 backdrop-blur-xl transition-all duration-200 hover:bg-muted/70 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none md:hidden",
+          isQuickNavOpen ? "left-0 -translate-x-full" : "right-0",
+        )}
+      >
+        {isQuickNavOpen ? (
+          <ChevronRightIcon aria-hidden="true" />
+        ) : (
+          <ChevronLeftIcon aria-hidden="true" />
+        )}
+      </button>
+      <div
+        className={cn(
+          "pointer-events-auto absolute inset-y-0 right-0 flex h-full w-full overflow-hidden rounded-l-2xl border border-border/70 bg-background/95 shadow-xl shadow-background/25 backdrop-blur-xl transition-transform duration-200 ease-out md:static md:contents md:translate-x-0 md:transition-none",
+          isQuickNavOpen ? "translate-x-0" : "translate-x-full",
+        )}
+      >
+        {hasQuickNavContent ? (
+          <div
+            aria-hidden="true"
+            className="hidden h-full max-h-[calc(100vh-1rem)] w-10 flex-col items-end justify-center gap-2.5 rounded-full px-2 py-2.5 transition-opacity duration-150 md:flex md:group-hover:opacity-0 md:group-focus-within:opacity-0"
+          >
+            {collapsedItems.length > 0 ? (
+              collapsedItems.map((item) => (
+                <span
+                  key={item.id}
+                  className={cn(
+                    "h-[3px] w-6 rounded-full bg-muted-foreground/45 transition-colors",
+                    item.id === activeItemId && "bg-foreground",
+                  )}
+                />
+              ))
+            ) : (
+              <span className="h-[3px] w-6 rounded-full bg-muted-foreground/45" />
+            )}
+          </div>
+        ) : null}
         <div
-          aria-hidden="true"
-          className="flex h-full max-h-[calc(100vh-1rem)] w-10 flex-col items-end justify-center gap-2.5 rounded-full px-2 py-2.5 transition-opacity duration-150 group-hover:opacity-0 group-focus-within:opacity-0"
+          onFocusCapture={() => setIsQuickNavOpen(true)}
+          className="min-w-0 flex-1 md:pointer-events-none md:absolute md:top-1/2 md:right-0 md:w-[min(17rem,calc(100vw-1rem))] md:-translate-y-1/2 md:overflow-hidden md:rounded-lg md:border md:border-border/70 md:bg-background md:opacity-0 md:shadow-lg md:shadow-background/20 md:transition-opacity md:duration-150 md:group-hover:pointer-events-auto md:group-hover:opacity-100 md:group-focus-within:pointer-events-auto md:group-focus-within:opacity-100"
         >
-          {collapsedItems.length > 0 ? (
-            collapsedItems.map((item) => (
-              <span
-                key={item.id}
-                className={cn(
-                  "h-[3px] w-6 rounded-full bg-muted-foreground/45 transition-colors",
-                  item.id === activeItemId && "bg-foreground",
-                )}
-              />
-            ))
-          ) : (
-            <span className="h-[3px] w-6 rounded-full bg-muted-foreground/45" />
-          )}
-        </div>
-      ) : null}
-      <div className="pointer-events-none absolute top-1/2 right-0 w-[min(17rem,calc(100vw-1rem))] -translate-y-1/2 overflow-hidden rounded-lg border border-border/70 bg-background opacity-0 shadow-lg shadow-background/20 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
-        <div
-          ref={navListRef}
-          onScroll={handleNavScroll}
-          className="flex max-h-[min(26rem,calc(100vh-1rem))] flex-col gap-1 overflow-y-auto p-1.5"
-        >
-          {isLoadingHistory ? (
-            <div className="flex min-h-9 items-center gap-2 rounded-md px-2.5 py-1.5 text-sm leading-5 text-muted-foreground">
-              <Spinner data-icon="inline-start" />
-              Loading older…
-            </div>
-          ) : null}
-          {historyError ? (
-            <div className="rounded-md px-2.5 py-1.5 text-sm text-destructive">
-              {historyError}
-            </div>
-          ) : null}
-          {items.map((item) => {
-            const active = item.id === activeItemId;
+          <div
+            ref={navListRef}
+            onScroll={handleNavScroll}
+            className="flex h-full min-w-0 flex-col gap-1 overflow-y-auto p-1.5 md:h-auto md:max-h-[min(26rem,calc(100vh-1rem))]"
+          >
+            {isLoadingHistory ? (
+              <div className="flex min-h-9 items-center gap-2 rounded-md px-2.5 py-1.5 text-sm leading-5 text-muted-foreground">
+                <Spinner data-icon="inline-start" />
+                Loading older…
+              </div>
+            ) : null}
+            {historyError ? (
+              <div className="rounded-md px-2.5 py-1.5 text-sm text-destructive">
+                {historyError}
+              </div>
+            ) : null}
+            {items.map((item) => {
+              const active = item.id === activeItemId;
 
-            return (
-              <button
-                key={item.id}
-                type="button"
-                aria-current={active ? "location" : undefined}
-                title={item.label}
-                onClick={() => onSelect(item.id)}
-                className={cn(
-                  "min-h-8 w-full rounded-md px-2.5 py-1.5 text-left text-sm leading-5 text-foreground/90 transition-colors hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
-                  active && "bg-muted text-foreground",
-                )}
-              >
-                <span className="block truncate">{item.label}</span>
-              </button>
-            );
-          })}
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  aria-current={active ? "location" : undefined}
+                  title={item.label}
+                  onClick={() => handleSelect(item.id)}
+                  className={cn(
+                    "min-h-8 w-full rounded-md px-2.5 py-1.5 text-left text-sm leading-5 text-foreground/90 transition-colors hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
+                    active && "bg-muted text-foreground",
+                  )}
+                >
+                  <span className="block truncate">{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
     </nav>
