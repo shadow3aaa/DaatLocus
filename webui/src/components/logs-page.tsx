@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ChevronDownIcon, SearchIcon } from "lucide-react";
+import { FileTextIcon, ListFilterIcon, SearchIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -78,7 +78,16 @@ type LogEntry = {
 
 type LoadState = "idle" | "loading" | "error";
 
-export function LogsPage() {
+export type LogsPageMockData = {
+  sources: LogSource[];
+  linesBySource: Record<string, string[]>;
+};
+
+type LogsPageProps = {
+  mockData?: LogsPageMockData;
+};
+
+export function LogsPage({ mockData }: LogsPageProps = {}) {
 
   const { t } = useTranslation();
   const [sources, setSources] = useState<LogSource[]>([]);
@@ -90,6 +99,8 @@ export function LogsPage() {
   const [lines, setLines] = useState<LogLine[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
   const [query, setQuery] = useState("");
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [levelFilter, setLevelFilter] = useState<LogLevelFilter>(
     readStoredLevelFilter,
   );
@@ -97,6 +108,7 @@ export function LogsPage() {
 
   const selectedSource =
     sources.find((source) => source.id === selectedSourceId) ?? null;
+  const isSearchVisible = isSearchOpen || query.trim().length > 0;
 
   const entries = useMemo(
     () => lines.map((line) => parseLogEntry(line, t("logs.blank"))),
@@ -131,6 +143,39 @@ export function LogsPage() {
   });
 
   useEffect(() => {
+    if (!isSearchVisible) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [isSearchVisible]);
+
+  useEffect(() => {
+    if (mockData) {
+      setSourceLoadState("idle");
+      setSourceError(null);
+      setSources(mockData.sources);
+      setSelectedSourceId((current) => {
+        if (
+          current &&
+          mockData.sources.some((source) => source.id === current)
+        ) {
+          return current;
+        }
+        return (
+          mockData.sources.find((source) => source.id === "daemon-main")?.id ??
+          mockData.sources.find((source) => source.exists)?.id ??
+          mockData.sources[0]?.id ??
+          null
+        );
+      });
+      return;
+    }
+
     const controller = new AbortController();
 
     async function loadSources() {
@@ -164,7 +209,7 @@ export function LogsPage() {
     void loadSources();
 
     return () => controller.abort();
-  }, []);
+  }, [mockData]);
 
   useEffect(() => {
     setLines([]);
@@ -178,10 +223,10 @@ export function LogsPage() {
     void loadInitialLog(selectedSourceId, controller.signal);
 
     return () => controller.abort();
-  }, [selectedSourceId]);
+  }, [mockData, selectedSourceId]);
 
   useEffect(() => {
-    if (!selectedSourceId || cursor === null) {
+    if (!selectedSourceId || cursor === null || mockData) {
       return;
     }
 
@@ -190,7 +235,7 @@ export function LogsPage() {
     }, FOLLOW_POLL_MS);
 
     return () => window.clearInterval(intervalId);
-  }, [cursor, readLoadState, selectedSourceId]);
+  }, [cursor, mockData, readLoadState, selectedSourceId]);
 
   useEffect(() => {
     if (query.trim() || filteredEntries.length === 0) {
@@ -215,11 +260,17 @@ export function LogsPage() {
     setReadError(null);
 
     try {
-      const response = await readLogSource({
-        source: sourceId,
-        limit: LOG_READ_LIMIT,
-        signal,
-      });
+      const response = mockData
+        ? readMockLogSource({
+            mockData,
+            source: sourceId,
+            limit: LOG_READ_LIMIT,
+          })
+        : await readLogSource({
+            source: sourceId,
+            limit: LOG_READ_LIMIT,
+            signal,
+          });
       applyLogRead(response, { append: false });
       setReadLoadState("idle");
     } catch (error) {
@@ -241,11 +292,18 @@ export function LogsPage() {
     setReadError(null);
 
     try {
-      const response = await readLogSource({
-        source: selectedSourceId,
-        cursor: nextCursor,
-        limit: LOG_READ_LIMIT,
-      });
+      const response = mockData
+        ? readMockLogSource({
+            mockData,
+            source: selectedSourceId,
+            cursor: nextCursor,
+            limit: LOG_READ_LIMIT,
+          })
+        : await readLogSource({
+            source: selectedSourceId,
+            cursor: nextCursor,
+            limit: LOG_READ_LIMIT,
+          });
       applyLogRead(response, {
         append: onlyNew && cursor !== null && !response.reset,
       });
@@ -289,22 +347,19 @@ export function LogsPage() {
       aria-label={t("logs.pageAria")}
       className="h-screen overflow-hidden bg-background pt-20"
     >
-      <div className="fixed top-4 left-16 z-50 flex items-start gap-2 md:top-6 md:left-[calc(18rem+1.5rem)]">
+      <div className="fixed top-4 right-4 z-50 flex max-w-[calc(100vw-5rem)] items-center justify-end gap-2 md:top-6 md:right-6">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
               type="button"
               variant="outline"
+              size="icon"
               disabled={sourceLoadState === "loading" && sources.length === 0}
-              className="max-w-[36vw] rounded-full border-border/60 bg-background/70 px-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
+              aria-label={selectedSource?.label ?? t("logs.title")}
+              title={selectedSource?.label ?? t("logs.title")}
+              className="size-10 rounded-full border-border/60 bg-background/70 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
             >
-              <span className="truncate">
-                {selectedSource?.label ??
-                  (sourceLoadState === "loading"
-                    ? t("logs.loadingLogs")
-                    : t("logs.title"))}
-              </span>
-              <ChevronDownIcon data-icon="inline-end" />
+              <FileTextIcon data-icon="inline-start" aria-hidden="true" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent className="w-72 max-w-[calc(100vw-2rem)]">
@@ -351,10 +406,12 @@ export function LogsPage() {
             <Button
               type="button"
               variant="outline"
-              className="rounded-full border-border/60 bg-background/70 px-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
+              size="icon"
+              aria-label={displayLevel(levelFilter)}
+              title={displayLevel(levelFilter)}
+              className="size-10 rounded-full border-border/60 bg-background/70 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
             >
-              <span>{displayLevel(levelFilter)}</span>
-              <ChevronDownIcon data-icon="inline-end" />
+              <ListFilterIcon data-icon="inline-start" aria-hidden="true" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent className="w-40">
@@ -375,21 +432,46 @@ export function LogsPage() {
             </DropdownMenuRadioGroup>
           </DropdownMenuContent>
         </DropdownMenu>
-      </div>
 
-      <div className="fixed top-4 right-4 z-50 md:top-6 md:right-6">
-        <InputGroup className="h-10 w-[min(44vw,20rem)] rounded-full border-border/60 bg-background/70 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55">
-          <InputGroupAddon align="inline-start">
-            <SearchIcon aria-hidden="true" />
-          </InputGroupAddon>
-          <InputGroupInput
-            type="search"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={t("logs.search")}
-            aria-label={t("logs.search")}
-          />
-        </InputGroup>
+        {isSearchVisible ? (
+          <InputGroup className="h-10 w-44 min-w-0 overflow-hidden rounded-full border-border/60 bg-background/70 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55 sm:w-56 lg:w-72">
+            <InputGroupAddon align="inline-start">
+              <SearchIcon aria-hidden="true" />
+            </InputGroupAddon>
+            <InputGroupInput
+              ref={searchInputRef}
+              id="logs-search-input"
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onBlur={() => {
+                if (!query.trim()) {
+                  setIsSearchOpen(false);
+                }
+              }}
+              placeholder={t("logs.search")}
+              aria-label={t("logs.search")}
+            />
+          </InputGroup>
+        ) : null}
+
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          aria-label={t("logs.search")}
+          aria-controls="logs-search-input"
+          aria-expanded={isSearchVisible}
+          onClick={() => {
+            setIsSearchOpen(true);
+            window.requestAnimationFrame(() => {
+              searchInputRef.current?.focus();
+            });
+          }}
+          className="size-10 rounded-full border-border/60 bg-background/70 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/55"
+        >
+          <SearchIcon data-icon="inline-start" aria-hidden="true" />
+        </Button>
       </div>
 
       <div ref={viewportRef} className="h-full overflow-auto px-3 pb-6 md:px-6">
@@ -704,6 +786,48 @@ function highlightText(text: string, query: string): ReactNode {
   }
 
   return parts;
+}
+
+function readMockLogSource({
+  mockData,
+  source,
+  cursor,
+  limit,
+}: {
+  mockData: LogsPageMockData;
+  source: string;
+  cursor?: number;
+  limit: number;
+}): LogReadResponse {
+  const selectedSource = mockData.sources.find((entry) => entry.id === source);
+  if (!selectedSource) {
+    throw new Error(`Unknown mock log source: ${source}`);
+  }
+
+  const allLines = mockData.linesBySource[source] ?? [];
+  const normalizedCursor =
+    cursor === undefined ? null : Math.max(0, Math.trunc(cursor));
+  const reset = normalizedCursor !== null && normalizedCursor > allLines.length;
+  const startIndex =
+    normalizedCursor === null || reset
+      ? Math.max(allLines.length - limit, 0)
+      : normalizedCursor;
+  const lines = allLines.slice(startIndex, startIndex + limit);
+  const nextCursor = startIndex + lines.length;
+
+  return {
+    source: selectedSource,
+    lines,
+    next_cursor: nextCursor,
+    file_size_bytes: mockLogFileSizeBytes(allLines),
+    truncated_start: startIndex > 0,
+    has_more: nextCursor < allLines.length,
+    reset,
+  };
+}
+
+function mockLogFileSizeBytes(lines: string[]) {
+  return lines.reduce((total, line) => total + line.length + 1, 0);
 }
 
 function toLogLines(rawLines: string[], responseCursor: number): LogLine[] {

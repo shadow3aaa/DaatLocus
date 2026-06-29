@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 
 import { AppSidebar } from "@/components/app-sidebar";
 import { LoginPage } from "@/components/login-page";
-import { LogsPage } from "@/components/logs-page";
+import { LogsPage, type LogsPageMockData } from "@/components/logs-page";
 import { SetupPage } from "@/components/setup-page";
 import { SettingsPage } from "@/components/settings-page";
 import { AgentPage, StatusPage } from "@/components/status-page";
@@ -87,6 +87,9 @@ export default function App() {
 
   if (shouldRenderMockStatusPage()) {
     return <MockStatusApp />;
+  }
+  if (shouldRenderMockLogsPage()) {
+    return <MockLogsApp />;
   }
 
   if (shouldRenderMockSettingsPage()) {
@@ -442,6 +445,37 @@ function MockStatusApp() {
         />
         <SidebarInset className="min-h-screen">
           <StatusPage mockSummary={MOCK_STATUS_SUMMARY} />
+        </SidebarInset>
+      </SidebarProvider>
+    </main>
+  );
+}
+
+function MockLogsApp() {
+  const { t } = useTranslation();
+  const { themeMode, toggleThemeMode } = useThemeMode();
+  useEffect(() => {
+    document.title = pageDocumentTitle("logs", null, true, t);
+  }, [t]);
+
+  return (
+    <main className="min-h-screen bg-background text-foreground">
+      <SidebarProvider>
+        <AppSidebar
+          activePage="logs"
+          sessions={MOCK_SIDEBAR_SESSIONS}
+          selectedSessionId={MOCK_SESSION.session_id}
+          sessionError={null}
+          isCreatingSession={false}
+          deletingSessionId={null}
+          themeMode={themeMode}
+          onToggleThemeMode={toggleThemeMode}
+          onSelectSession={() => undefined}
+          onCreateSession={() => undefined}
+          onDeleteSession={async () => undefined}
+        />
+        <SidebarInset className="min-h-screen">
+          <LogsPage mockData={MOCK_LOGS_DATA} />
         </SidebarInset>
       </SidebarProvider>
     </main>
@@ -807,6 +841,14 @@ function shouldRenderMockStatusPage() {
   return new URLSearchParams(window.location.search).get("mock") === "status";
 }
 
+function shouldRenderMockLogsPage() {
+  if (!import.meta.env.DEV || typeof window === "undefined") {
+    return false;
+  }
+
+  return new URLSearchParams(window.location.search).get("mock") === "logs";
+}
+
 function shouldRenderMockSettingsPage() {
   if (!import.meta.env.DEV || typeof window === "undefined") {
     return false;
@@ -887,6 +929,76 @@ const MOCK_SIDEBAR_SESSIONS: SessionInfo[] = [
     last_seen_at_ms: MOCK_NOW_MS - 63 * 24 * 60 * 60 * 1000,
   },
 ];
+
+const MOCK_LOGS_DATA: LogsPageMockData = {
+  sources: [
+    {
+      id: "daemon-main",
+      label: "Daemon log",
+      description: "Daemon tracing plus stdout/stderr output.",
+      path: "C:\\Users\\13940\\.daat-locus\\logs\\daat-locus.log",
+      exists: true,
+      size_bytes: 486_912,
+      modified_at_ms: MOCK_NOW_MS - 2 * 60 * 1000,
+    },
+    {
+      id: "session-log-mock-agent-session",
+      label: "Session mock-agent-session log",
+      description: "Session process tracing plus stdout/stderr output.",
+      path: "C:\\Users\\13940\\.daat-locus\\sessions\\mock-agent-session\\logs\\session.log",
+      exists: true,
+      size_bytes: 321_408,
+      modified_at_ms: MOCK_NOW_MS - 45 * 1000,
+    },
+    {
+      id: "session-log-render-slot",
+      label: "Session render-slot log",
+      description: "Older session log with warning-heavy output.",
+      path: "C:\\Users\\13940\\.daat-locus\\sessions\\render-slot\\logs\\session.log",
+      exists: true,
+      size_bytes: 174_336,
+      modified_at_ms: MOCK_NOW_MS - 19 * 60 * 1000,
+    },
+  ],
+  linesBySource: {
+    "daemon-main": [
+      `${mockIsoLogTimestamp(48)} INFO daat_locus.daemon: daemon booted bind=127.0.0.1 port=53825`,
+      `${mockIsoLogTimestamp(46)} DEBUG daat_locus.config_setup: readiness classified kind=complete providers=3 models=4`,
+      `${mockIsoLogTimestamp(42)} INFO daat_locus.manager: embedded WebUI served path=/ status=200 duration_ms=3`,
+      `${mockIsoLogTimestamp(39)} TRACE daat_locus.daemon.sessions: refreshed session registry entries=5`,
+      `${mockIsoLogTimestamp(35)} WARN daat_locus.telegram_transport: retrying Telegram outbox delivery chat_id=139400001 reason=rate_limit`,
+      `${mockIsoLogTimestamp(31)} INFO daat_locus.daemon.logs: listed log sources count=3`,
+      `${mockIsoLogTimestamp(26)} ERROR daat_locus.daemon.dashboard: dashboard stream dropped session=mock-agent-session reason=client_closed`,
+      `${mockIsoLogTimestamp(22)} DEBUG daat_locus.daemon.http: GET /status/summary status=200 latency_ms=12`,
+      `${mockIsoLogTimestamp(17)} WARN daat_locus.runtime_context: compacted context exceeded soft target by 4200 tokens`,
+      `${mockIsoLogTimestamp(11)} INFO daat_locus.daemon.logs: mock search target=context-heatmap source=daemon-main`,
+      `${mockIsoLogTimestamp(5)} ERROR daat_locus.terminal_app: terminal session exited command="bun run typecheck" exit=1`,
+      `${mockIsoLogTimestamp(1)} INFO daat_locus.daemon.logs: served mock log page data source=daemon-main`,
+    ],
+    "session-log-mock-agent-session": [
+      `${mockLocalLogTimestamp(57)} - INFO - session - session worker started session_id=mock-agent-session`,
+      `${mockLocalLogTimestamp(54)} - DEBUG - workflow - activated primitive inspect-repository-status-modify-local-project-run-required-checks-report-result`,
+      `${mockLocalLogTimestamp(49)} - INFO - coding - opened project C:\\Users\\13940\\DaatLocus`,
+      `${mockLocalLogTimestamp(43)} - WARNING - terminal - command still running session=terminal-session-64 command=git push`,
+      `${mockLocalLogTimestamp(38)} - INFO - terminal - git push completed remote=origin branch=main`,
+      `${mockLocalLogTimestamp(31)} - ERROR - coding - propagation review found stale anchor path=webui/src/App.tsx`,
+      `${mockLocalLogTimestamp(24)} - DEBUG - runtime - plan updated completed=2 pending=3`,
+      `${mockLocalLogTimestamp(16)} - INFO - webui - rendering LogsPage with mockData sources=3`,
+      `${mockLocalLogTimestamp(8)} - WARNING - logs - default level filter hides debug entries until TRACE is selected`,
+      `${mockLocalLogTimestamp(2)} - INFO - logs - mock search target=session-mock source=session-log-mock-agent-session`,
+    ],
+    "session-log-render-slot": [
+      `${mockIsoLogTimestamp(96)} INFO daat_locus.session: restored dormant session title="Make render slot behavior stable"`,
+      `${mockIsoLogTimestamp(89)} WARN daat_locus.browser_app: stale element ref discarded page_id=mock-page`,
+      `${mockIsoLogTimestamp(82)} WARN daat_locus.coding_app: TypeScript language server unavailable; text search still available`,
+      `${mockIsoLogTimestamp(75)} ERROR daat_locus.webui: failed to decode dashboard activity event kind=LegacyCell`,
+      `${mockIsoLogTimestamp(68)} INFO daat_locus.webui: recovered by rendering unknown activity fallback`,
+      `${mockIsoLogTimestamp(61)} DEBUG daat_locus.status: token usage sample generated tokens=204800 cached=129600`,
+      `${mockIsoLogTimestamp(54)} WARN daat_locus.logs: mock long warning message demonstrates wrapping behavior across the wide log message column without horizontal scrolling`,
+      `${mockIsoLogTimestamp(47)} ERROR daat_locus.logs: mock search target=render-slot source=session-log-render-slot`,
+    ],
+  },
+};
 
 const MOCK_ACTIVITY_STARTED_AT = 1_786_800_000_000;
 
@@ -1585,4 +1697,15 @@ function mockTokenUsage(
 function mockDateDaysAgo(daysAgo: number) {
   const dayMs = 24 * 60 * 60 * 1000;
   return new Date(MOCK_NOW_MS - daysAgo * dayMs).toISOString().slice(0, 10);
+}
+
+function mockIsoLogTimestamp(minutesAgo: number) {
+  return new Date(MOCK_NOW_MS - minutesAgo * 60 * 1000).toISOString();
+}
+
+function mockLocalLogTimestamp(minutesAgo: number) {
+  return new Date(MOCK_NOW_MS - minutesAgo * 60 * 1000)
+    .toISOString()
+    .replace("T", " ")
+    .slice(0, 23);
 }
