@@ -262,7 +262,7 @@ pub fn estimate_agent_turn_request(
                 .sum(),
         },
         BudgetSection {
-            name: "assistant_tool_call_protocol",
+            name: "tool_inputs",
             tokens: messages
                 .iter()
                 .filter_map(|message| match message {

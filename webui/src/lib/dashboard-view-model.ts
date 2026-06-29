@@ -634,13 +634,12 @@ function contextCompositionSegmentChartData(
 
 function shortContextCompositionLabel(label: string) {
   return label
-    .replace(/^Assistant tool-call protocol$/, "Tool-call protocol")
+    .replace(/^Tool inputs$/, "Tool inputs")
     .replace(/^System messages$/, "System")
     .replace(/^Conversation history$/, "History")
     .replace(/^Summarized history$/, "Summary")
     .replace(/^Afterclaim context$/, "Afterclaim")
     .replace(/^Preturn context$/, "Preturn")
-    .replace(/^Memory recall$/, "Memory")
     .replace(/^Assistant messages$/, "Assistant")
     .replace(/^Tool outputs$/, "Tool outputs")
     .replace(/^Tools schema$/, "Tools");

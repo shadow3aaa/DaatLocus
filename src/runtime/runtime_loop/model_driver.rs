@@ -278,9 +278,7 @@ fn context_composition_message_name(message: &AgentMessage) -> String {
     match message {
         AgentMessage::System { .. } => "system_messages".to_string(),
         AgentMessage::Assistant { .. } => "assistant_messages".to_string(),
-        AgentMessage::AssistantToolCallProtocol { .. } => {
-            "assistant_tool_call_protocol".to_string()
-        }
+        AgentMessage::AssistantToolCallProtocol { .. } => "tool_inputs".to_string(),
         AgentMessage::Tool { .. } => "tool_messages".to_string(),
         AgentMessage::User { content } => {
             let text = content.as_text();
@@ -306,13 +304,11 @@ fn context_composition_label_for_name(name: &str) -> &str {
         "system_messages" => "System messages",
         "afterclaim_context" => "Afterclaim context",
         "preturn_context" => "Preturn context",
-        "memory_recall" => "Memory recall",
-        "app_state" => "App state",
         "claimed_input" => "Claimed input",
         "summarized_history" => "Summarized history",
         "conversation_history" => "Conversation history",
         "assistant_messages" => "Assistant messages",
-        "assistant_tool_call_protocol" => "Assistant tool-call protocol",
+        "tool_inputs" => "Tool inputs",
         "tool_messages" => "Tool outputs",
         "tools_schema" => "Tools schema",
         _ => name,
