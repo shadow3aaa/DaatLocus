@@ -1,7 +1,9 @@
 import type { TFunction } from "i18next";
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type DragEvent,
   type KeyboardEvent,
@@ -57,14 +59,17 @@ import { cn } from "@/lib/utils";
 
 const STATUS_CARD_ORDER_STORAGE_KEY = "daat-locus.status.card-order";
 const STATUS_SUMMARY_REFRESH_MS = 5000;
-const CONTEXT_COMPOSITION_GRID_COLUMNS = 30;
+const CONTEXT_COMPOSITION_REFERENCE_COLUMN_COUNT = 30;
 const CONTEXT_COMPOSITION_REFERENCE_ROW_COUNT = 10;
 const CONTEXT_COMPOSITION_REFERENCE_TOKENS = 1_500_000;
 const CONTEXT_COMPOSITION_REFERENCE_CELL_COUNT =
-  CONTEXT_COMPOSITION_GRID_COLUMNS * CONTEXT_COMPOSITION_REFERENCE_ROW_COUNT;
+  CONTEXT_COMPOSITION_REFERENCE_COLUMN_COUNT *
+  CONTEXT_COMPOSITION_REFERENCE_ROW_COUNT;
 const CONTEXT_COMPOSITION_UNIT_TOKENS = Math.ceil(
   CONTEXT_COMPOSITION_REFERENCE_TOKENS / CONTEXT_COMPOSITION_REFERENCE_CELL_COUNT,
 );
+const CONTEXT_COMPOSITION_CELL_SIZE_PX = 12;
+const CONTEXT_COMPOSITION_CELL_GAP_PX = 4;
 const TOKEN_USAGE_AXIS_TARGET_INTERVALS = 4;
 const TOKEN_USAGE_AXIS_MIN_STEP = 1_000;
 const DEFAULT_STATUS_CARD_ORDER = [
@@ -406,16 +411,49 @@ function ContextCompositionCard({
     ? sessionDisplayName(selectedEntry.session, selectedEntry.dashboard, t)
     : t("status.noSession");
   const cells = useMemo(() => contextCompositionCells(composition), [composition]);
-  const cellCapacity = contextCompositionCellCapacity(cells.length);
+  const gridFrameRef = useRef<HTMLDivElement>(null);
+  const [gridColumnCount, setGridColumnCount] = useState(
+    CONTEXT_COMPOSITION_REFERENCE_COLUMN_COUNT,
+  );
+
+  useLayoutEffect(() => {
+    const node = gridFrameRef.current;
+    if (!node) {
+      return;
+    }
+
+    const updateColumnCount = () => {
+      const nextColumnCount = contextCompositionColumnCount(node.clientWidth);
+      setGridColumnCount((current) =>
+        current === nextColumnCount ? current : nextColumnCount,
+      );
+    };
+
+    updateColumnCount();
+
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const resizeObserver = new ResizeObserver(updateColumnCount);
+    resizeObserver.observe(node);
+    return () => resizeObserver.disconnect();
+  }, [cells.length]);
+
+  const cellCapacity = contextCompositionCellCapacity(
+    cells.length,
+    gridColumnCount,
+  );
   const emptyCellCount = Math.max(0, cellCapacity - cells.length);
+  const gridRowCount = Math.ceil(cellCapacity / gridColumnCount);
   const hasComposition = Boolean(composition && cellCapacity > 0);
   const displayScaleLabel = formatContextTokenCount(
     cellCapacity * CONTEXT_COMPOSITION_UNIT_TOKENS,
     t,
   );
   const gridLabel = `${t("status.contextHeatmapLabel", {
-    columns: CONTEXT_COMPOSITION_GRID_COLUMNS,
-    rows: CONTEXT_COMPOSITION_REFERENCE_ROW_COUNT,
+    columns: gridColumnCount,
+    rows: gridRowCount,
   })} ${t("status.contextCellLabel", {
     tokens: CONTEXT_COMPOSITION_UNIT_TOKENS.toLocaleString("en-US"),
   })}`;
@@ -476,11 +514,11 @@ function ContextCompositionCard({
           </DropdownMenuContent>
         </DropdownMenu>
         {hasComposition ? (
-          <div className="overflow-x-auto px-1 pb-1 pt-0.5">
+          <div ref={gridFrameRef} className="overflow-hidden px-1 pb-1 pt-0.5">
             <div
-              className="grid min-w-max gap-1"
+              className="grid max-w-full gap-1"
               style={{
-                gridTemplateColumns: `repeat(${CONTEXT_COMPOSITION_GRID_COLUMNS}, minmax(0, 0.75rem))`,
+                gridTemplateColumns: `repeat(${gridColumnCount}, minmax(0, 0.75rem))`,
               }}
               role="img"
               aria-label={t("status.contextDisplayAria", {
@@ -788,15 +826,33 @@ function contextCompositionDisplayPriority(
   return 2;
 }
 
-function contextCompositionCellCapacity(occupiedCellCount: number) {
+function contextCompositionColumnCount(containerWidth: number) {
+  if (containerWidth <= 0) {
+    return CONTEXT_COMPOSITION_REFERENCE_COLUMN_COUNT;
+  }
+
+  return Math.max(
+    1,
+    Math.floor(
+      (containerWidth + CONTEXT_COMPOSITION_CELL_GAP_PX) /
+        (CONTEXT_COMPOSITION_CELL_SIZE_PX + CONTEXT_COMPOSITION_CELL_GAP_PX),
+    ),
+  );
+}
+
+function contextCompositionCellCapacity(
+  occupiedCellCount: number,
+  columnCount: number,
+) {
+  const safeColumnCount = Math.max(1, Math.floor(columnCount));
+  const minimumRows = Math.ceil(
+    CONTEXT_COMPOSITION_REFERENCE_CELL_COUNT / safeColumnCount,
+  );
   const occupiedRows = Math.ceil(
-    Math.max(0, occupiedCellCount) / CONTEXT_COMPOSITION_GRID_COLUMNS,
+    Math.max(0, occupiedCellCount) / safeColumnCount,
   );
 
-  return (
-    Math.max(CONTEXT_COMPOSITION_REFERENCE_ROW_COUNT, occupiedRows) *
-    CONTEXT_COMPOSITION_GRID_COLUMNS
-  );
+  return Math.max(minimumRows, occupiedRows) * safeColumnCount;
 }
 function contextCompositionShadeClass(segment: DashboardContextCompositionSegment) {
   const sourceKey = `${segment.name} ${segment.source} ${segment.cache_role}`.toLowerCase();

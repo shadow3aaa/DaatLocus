@@ -277,7 +277,7 @@ const resources = {
         contextNoSessionsDescription:
           "Context composition appears after a session publishes status data.",
         contextHeatmapLabel:
-          "Context composition heatmap. The base layout is {{columns}} by {{rows}}.",
+          "Context composition heatmap. The current adaptive layout is {{columns}} by {{rows}}.",
         contextCellLabel:
           "Each cell represents up to {{tokens}} estimated tokens.",
         contextDisplayAria:
@@ -503,7 +503,7 @@ const resources = {
         contextNoSnapshotDescription: "此会话尚未组装模型请求上下文。",
         contextNoSessionsDescription: "会话发布状态数据后会显示上下文组成。",
         contextHeatmapLabel:
-          "上下文组成热力图。基础布局为 {{columns}} × {{rows}}。",
+          "上下文组成热力图。当前自适应布局为 {{columns}} × {{rows}}。",
         contextCellLabel: "每个单元最多代表 {{tokens}} 个预估 token。",
         contextDisplayAria:
           "{{gridLabel}} 正在为 {{session}} 显示 {{occupied}} 个占用单元，矩形显示范围为 {{displayScale}}。",
