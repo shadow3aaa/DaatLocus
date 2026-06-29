@@ -1195,7 +1195,7 @@ mod tests {
             "type_not",
             "case",
             "word",
-            "line",
+            "whole_line",
             "hidden",
             "respect_ignore",
             "follow",
