@@ -6462,10 +6462,6 @@ function AgentChatImageAttachment({
           className="max-h-[22rem] w-full object-contain"
         />
       </a>
-      <figcaption className="flex items-center justify-between gap-3 border-t border-border/50 px-3 py-1.5 text-xs text-muted-foreground">
-        <span className="min-w-0 truncate">{label}</span>
-        {mimeType ? <span className="shrink-0">{mimeType}</span> : null}
-      </figcaption>
     </figure>
   );
 }
