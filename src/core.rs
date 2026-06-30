@@ -21,7 +21,7 @@ const MAX_DAILY_TOKEN_USAGE_DAYS: usize = 30;
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TerminalExecArgs {
     pub command: String,
-    /// Explicit session to reuse; omitted means create a new session.
+    /// Existing session id to reuse; null or empty creates a new session. Never invent a session id.
     pub session_id: Option<String>,
     pub workdir: Option<String>,
     pub yield_time_ms: Option<u64>,

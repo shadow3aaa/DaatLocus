@@ -174,13 +174,21 @@ impl TerminalApp {
             max_chars,
         } = request;
 
-        let target_session_id = session_id.unwrap_or_else(|| self.create_session());
+        let target_session_id = match session_id {
+            Some(id) if !id.trim().is_empty() => id,
+            _ => self.create_session(),
+        };
         if let Some(reason) = Self::forbidden_input_reason(&command) {
             bail!(reason);
         }
         let output_buffer_capacity = self.output_buffer_capacity;
         let effective_workdir = workdir;
-        let session = self.session_mut(&target_session_id)?;
+        let session = self.session_mut(&target_session_id).map_err(|_| {
+            miette!(
+                "terminal session `{target_session_id}` does not exist; \
+                 pass JSON null for `session_id` to create a new session"
+            )
+        })?;
         if session.state.status == "running" {
             bail!("terminal session `{target_session_id}` already has a running process");
         }
@@ -669,7 +677,7 @@ impl App for TerminalApp {
         Ok(vec![
             AppToolSpec {
                 name: "terminal_exec".to_string(),
-                description: "Start a terminal command and return output after the current output window ends. If `session_id` is provided, reuse that session; otherwise create a new session. If the command is still running, the result keeps the session so later calls can continue with terminal_write_stdin.".to_string(),
+                description: "Start a terminal command and return output after the current yield window ends. Set `session_id` to null to create a new session, or pass an existing session id returned by a prior terminal call to reuse that session. Never invent a session id. If the command is still running, the result keeps the session so later calls can continue with terminal_write_stdin.".to_string(),
                 input_schema: model_schema_for::<TerminalExecArgs>(),
             },
             AppToolSpec {
