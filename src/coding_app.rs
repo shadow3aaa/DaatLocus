@@ -803,6 +803,14 @@ impl App for CodingApp {
         APP_CODING.app_docs()
     }
 
+    fn cached_root_project_instructions(&self) -> Option<&[ProjectInstructionDocument]> {
+        if self.root_instructions.is_empty() {
+            None
+        } else {
+            Some(&self.root_instructions)
+        }
+    }
+
     fn tool_specs(&self) -> Result<Vec<AppToolSpec>> {
         Ok(vec![
             AppToolSpec {

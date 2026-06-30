@@ -300,6 +300,12 @@ pub trait App: Send + Sync {
         None
     }
 
+    fn cached_root_project_instructions(
+        &self,
+    ) -> Option<&[crate::coding_app::ProjectInstructionDocument]> {
+        None
+    }
+
     async fn shutdown(&mut self) -> Result<()> {
         Ok(())
     }
@@ -361,6 +367,19 @@ impl AppManager {
 
     pub fn notice_reason(&self, id: &AppId) -> Option<String> {
         self.apps.get(id).and_then(|app| app.notice_reason())
+    }
+
+    pub fn cached_root_project_instructions(
+        &self,
+    ) -> &[crate::coding_app::ProjectInstructionDocument] {
+        for id in &self.order {
+            if let Some(app) = self.apps.get(id)
+                && let Some(instructions) = app.cached_root_project_instructions()
+            {
+                return instructions;
+            }
+        }
+        &[]
     }
 
     pub async fn refresh_all_notices(&mut self) -> Result<()> {

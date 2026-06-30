@@ -60,27 +60,43 @@ impl PreTurnContextPart for PreTurnProjectInstructionsPart {
 
     fn build(&self, ctx: &Context, _state: &PreTurnState) -> Option<PromptNode> {
         let project_dir = ctx.coding_project_dir.as_deref()?;
-        match crate::coding_app::load_instruction_documents_in_dir(project_dir) {
-            Ok(instructions) if instructions.is_empty() => None,
-            Ok(instructions) => Some(PromptNode::State(PromptStateDoc::new(
-                self.key(),
-                vec![PromptBlock::Paragraph(
-                    crate::coding_app::render_project_instructions(self.key(), &instructions),
-                )],
-            ))),
-            Err(err) => {
-                tracing::warn!(
-                    project_dir = %project_dir.display(),
-                    "failed to load project instruction context: {err:?}"
-                );
-                Some(PromptNode::State(PromptStateDoc::new(
-                    self.key(),
-                    vec![PromptBlock::Paragraph(format!(
-                        "project_instruction_error={err}"
-                    ))],
-                )))
+        let cached = ctx.apps.cached_root_project_instructions();
+        let instructions = if !cached.is_empty() {
+            cached
+        } else {
+            match crate::coding_app::load_instruction_documents_in_dir(project_dir) {
+                Ok(instructions) if instructions.is_empty() => return None,
+                Ok(instructions) => {
+                    return Some(PromptNode::State(PromptStateDoc::new(
+                        self.key(),
+                        vec![PromptBlock::Paragraph(
+                            crate::coding_app::render_project_instructions(
+                                self.key(),
+                                &instructions,
+                            ),
+                        )],
+                    )));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        project_dir = %project_dir.display(),
+                        "failed to load project instruction context: {err:?}"
+                    );
+                    return Some(PromptNode::State(PromptStateDoc::new(
+                        self.key(),
+                        vec![PromptBlock::Paragraph(format!(
+                            "project_instruction_error={err}"
+                        ))],
+                    )));
+                }
             }
-        }
+        };
+        Some(PromptNode::State(PromptStateDoc::new(
+            self.key(),
+            vec![PromptBlock::Paragraph(
+                crate::coding_app::render_project_instructions(self.key(), instructions),
+            )],
+        )))
     }
 }
 
