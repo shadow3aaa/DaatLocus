@@ -326,22 +326,29 @@ function SidebarSessionSection({
 }) {
   return (
     <SidebarGroup className="gap-1 p-0">
-      <div className="flex h-8 min-w-0 items-center gap-1">
+      <div
+        className={cn(
+          "flex h-8 min-w-0 w-full items-center rounded-md hover:bg-muted hover:text-foreground focus-within:bg-muted focus-within:text-foreground",
+          open && "bg-muted text-foreground",
+        )}
+      >
         <Button
           type="button"
           variant="ghost"
           size="sm"
           aria-expanded={open}
           onClick={() => onOpenChange(!open)}
-          className="h-8 min-w-0 flex-1 justify-start px-2 text-base font-normal"
+          className="h-8 min-w-0 flex-1 justify-start bg-transparent px-2 text-left text-base font-normal hover:bg-transparent aria-expanded:bg-transparent"
         >
-          <span className="truncate">{label}</span>
+          <span className="min-w-0 flex-1 truncate">{label}</span>
           <ChevronDownIcon
             data-icon="inline-end"
             className={cn("transition-transform", !open && "-rotate-90")}
           />
         </Button>
-        {actions ? <div className="flex items-center gap-1">{actions}</div> : null}
+        {actions ? (
+          <div className="flex shrink-0 items-center pr-1">{actions}</div>
+        ) : null}
       </div>
       {open ? (
         <SidebarGroupContent className="pt-2">{children}</SidebarGroupContent>
@@ -421,14 +428,14 @@ function ProjectSessionGroup({
   });
 
   return (
-    <div className="min-w-0">
-      <div className="flex h-9 min-w-0 items-center gap-1">
+    <div className="min-w-0 w-full">
+      <div className="flex h-9 min-w-0 w-full items-center rounded-md hover:bg-muted/60 focus-within:bg-muted/60">
         <div
           className="flex min-w-0 flex-1 items-center gap-2 px-2 text-sm font-medium"
           title={group.projectDir}
         >
           <FolderIcon className="size-4 shrink-0 text-sidebar-foreground/75" />
-          <span className="truncate">{group.label}</span>
+          <span className="min-w-0 truncate">{group.label}</span>
         </div>
         <Button
           type="button"
@@ -438,13 +445,14 @@ function ProjectSessionGroup({
           title={newSessionLabel}
           disabled={isCreatingSession}
           onClick={onCreateSession}
+          className="mr-1"
         >
           <PlusIcon />
         </Button>
       </div>
 
       <SessionRows
-        className="pl-8"
+        buttonClassName="pl-8"
         sessions={visibleSessions}
         selectedSessionId={selectedSessionId}
         deletingSessionId={deletingSessionId}
@@ -455,7 +463,7 @@ function ProjectSessionGroup({
       {hiddenSessionCount > 0 ? (
         <button
           type="button"
-          className="h-8 px-8 text-left text-sm text-sidebar-foreground/45 hover:text-sidebar-foreground"
+          className="h-8 w-full rounded-md pr-2 pl-8 text-left text-sm text-sidebar-foreground/45 hover:bg-muted/50 hover:text-sidebar-foreground"
           onClick={() => setExpanded(true)}
         >
           {t("sidebar.showMore")}
@@ -463,7 +471,7 @@ function ProjectSessionGroup({
       ) : expanded && group.sessions.length > PROJECT_VISIBLE_SESSION_COUNT ? (
         <button
           type="button"
-          className="h-8 px-8 text-left text-sm text-sidebar-foreground/45 hover:text-sidebar-foreground"
+          className="h-8 w-full rounded-md pr-2 pl-8 text-left text-sm text-sidebar-foreground/45 hover:bg-muted/50 hover:text-sidebar-foreground"
           onClick={() => setExpanded(false)}
         >
           {t("sidebar.showLess")}
@@ -535,7 +543,7 @@ function ConversationSessionGroup({
         {hiddenSessionCount > 0 ? (
           <button
             type="button"
-            className="h-8 px-2 text-left text-sm text-sidebar-foreground/45 hover:text-sidebar-foreground"
+            className="h-8 w-full rounded-md px-2 text-left text-sm text-sidebar-foreground/45 hover:bg-muted/50 hover:text-sidebar-foreground"
             onClick={() => setExpanded(true)}
           >
             {t("sidebar.showMore")}
@@ -543,7 +551,7 @@ function ConversationSessionGroup({
         ) : expanded && sessions.length > GENERAL_VISIBLE_SESSION_COUNT ? (
           <button
             type="button"
-            className="h-8 px-2 text-left text-sm text-sidebar-foreground/45 hover:text-sidebar-foreground"
+            className="h-8 w-full rounded-md px-2 text-left text-sm text-sidebar-foreground/45 hover:bg-muted/50 hover:text-sidebar-foreground"
             onClick={() => setExpanded(false)}
           >
             {t("sidebar.showLess")}
@@ -555,6 +563,7 @@ function ConversationSessionGroup({
 
 function SessionRows({
   className,
+  buttonClassName,
   sessions,
   selectedSessionId,
   deletingSessionId,
@@ -562,6 +571,7 @@ function SessionRows({
   onRequestDeleteSession,
 }: {
   className?: string;
+  buttonClassName?: string;
   sessions: SessionInfo[];
   selectedSessionId: string | null;
   deletingSessionId: string | null;
@@ -569,13 +579,14 @@ function SessionRows({
   onRequestDeleteSession: (session: SessionInfo) => void;
 }) {
   return (
-    <SidebarMenu className={cn("gap-0.5", className)}>
+    <SidebarMenu className={cn("gap-0.5 overflow-hidden", className)}>
       {sessions.map((session) => (
         <SessionRow
           key={session.session_id}
           session={session}
           selected={session.session_id === selectedSessionId}
           deletingSessionId={deletingSessionId}
+          buttonClassName={buttonClassName}
           onSelectSession={onSelectSession}
           onRequestDeleteSession={onRequestDeleteSession}
         />
@@ -588,12 +599,14 @@ function SessionRow({
   session,
   selected,
   deletingSessionId,
+  buttonClassName,
   onSelectSession,
   onRequestDeleteSession,
 }: {
   session: SessionInfo;
   selected: boolean;
   deletingSessionId: string | null;
+  buttonClassName?: string;
   onSelectSession: (sessionId: string) => void;
   onRequestDeleteSession: (session: SessionInfo) => void;
 }) {
@@ -603,13 +616,17 @@ function SessionRow({
 
   return (
     <SidebarMenuItem>
-      <div className="group/session-row relative min-w-0">
+      <div className="group/session-row relative min-w-0 w-full max-w-full overflow-hidden">
         <SidebarMenuButton
           type="button"
           aria-selected={selected}
           isActive={selected}
+          title={title}
           onClick={() => onSelectSession(session.session_id)}
-          className="h-8 gap-2 pr-8 pl-2 text-sidebar-foreground/85"
+          className={cn(
+            "h-8 justify-start gap-2 pr-8 pl-2 text-left text-sidebar-foreground/85",
+            buttonClassName,
+          )}
         >
           <span className="min-w-0 flex-1 truncate">{title}</span>
           <span className="shrink-0 text-xs font-normal text-sidebar-foreground/45">
@@ -625,7 +642,7 @@ function SessionRow({
           disabled={deletingSessionId !== null}
           onClick={() => onRequestDeleteSession(session)}
           className={cn(
-            "absolute top-1 right-1 opacity-0 transition-opacity group-hover/session-row:opacity-100 focus-visible:opacity-100",
+            "absolute top-1 right-1",
             isDeleting && "opacity-100",
           )}
         >
