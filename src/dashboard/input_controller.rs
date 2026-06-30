@@ -367,15 +367,11 @@ fn handle_pending_user_input_edit_key(key: KeyEvent, view: &mut TuiViewState) ->
             view.reset_command_history_navigation();
             view.reset_command_popup();
         }
-        KeyCode::Up => {
-            if view.command_input.move_up_line() {
-                view.reset_command_popup();
-            }
+        KeyCode::Up if view.command_input.move_up_line() => {
+            view.reset_command_popup();
         }
-        KeyCode::Down => {
-            if view.command_input.move_down_line() {
-                view.reset_command_popup();
-            }
+        KeyCode::Down if view.command_input.move_down_line() => {
+            view.reset_command_popup();
         }
         KeyCode::Enter => {
             if !view.pending_image_attachments.is_empty() {
