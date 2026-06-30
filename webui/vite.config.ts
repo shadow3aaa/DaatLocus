@@ -88,5 +88,10 @@ export default defineConfig({
     outDir: process.env.DAAT_LOCUS_WEBUI_OUT_DIR ?? "dist",
     emptyOutDir: true,
     chunkSizeWarningLimit: 1_100,
+    rolldownOptions: {
+      output: {
+        codeSplitting: true,
+      },
+    },
   },
 });

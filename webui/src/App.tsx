@@ -1,13 +1,11 @@
 import type { TFunction } from "i18next";
-import { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AppSidebar } from "@/components/app-sidebar";
 import { LoginPage } from "@/components/login-page";
-import { LogsPage, type LogsPageMockData } from "@/components/logs-page";
+import type { LogsPageMockData } from "@/components/logs-page";
 import { SetupPage } from "@/components/setup-page";
-import { SettingsPage } from "@/components/settings-page";
-import { AgentPage, StatusPage } from "@/components/status-page";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,6 +39,12 @@ import {
   type StatusSummary,
 } from "@/lib/daemon-api";
 import { setWebUiLanguage } from "@/lib/i18n";
+// Lazy-loaded page components for smaller initial bundle
+const SettingsPage = lazy(() => import("@/components/settings-page").then(m => ({ default: m.SettingsPage })));
+const LogsPage = lazy(() => import("@/components/logs-page").then(m => ({ default: m.LogsPage })));
+const AgentPage = lazy(() => import("@/components/status-page").then(m => ({ default: m.AgentPage })));
+const StatusPage = lazy(() => import("@/components/status-dashboard-page").then(m => ({ default: m.StatusPage })));
+
 
 type AppPage = "agent" | "status" | "settings" | "logs";
 type ThemeMode = "light" | "dark";
@@ -437,10 +441,12 @@ export default function App() {
             onDeleteSession={handleDeleteSession}
           />
           <SidebarInset className="min-h-screen">
-            {renderAuthenticatedPage(activePage, selectedSessionId, {
-              hasLoadedSessions,
-              sessionError,
-            })}
+            <Suspense fallback={<div className="flex items-center justify-center p-8 min-h-screen"><Spinner /></div>}>
+              {renderAuthenticatedPage(activePage, selectedSessionId, {
+                hasLoadedSessions,
+                sessionError,
+              })}
+            </Suspense>
           </SidebarInset>
         </SidebarProvider>
       ) : (

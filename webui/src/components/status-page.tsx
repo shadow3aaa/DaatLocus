@@ -4094,14 +4094,42 @@ function AgentChatBubbles({
         restoreAfterPrependRef.current = null;
         return;
       }
-      panel.scrollTop =
-        panel.scrollHeight - restore.scrollHeight + restore.scrollTop;
+      // When content was shorter than viewport before prepend,
+      // keep scrollTop at 0 to prevent hiding newly loaded content.
+      if (restore.scrollTop === 0 && restore.scrollHeight <= panel.clientHeight) {
+        panel.scrollTop = 0;
+      } else {
+        panel.scrollTop =
+          panel.scrollHeight - restore.scrollHeight + restore.scrollTop;
+      }
       lastFocusedScrollTopRef.current = panel.scrollTop;
       updateScrollButtonVisibility(panel);
       updateQuickNavActiveItem(panel);
       restoreAfterPrependRef.current = null;
     });
   }, [historyBubbles.length, panelRef, updateQuickNavActiveItem]);
+
+  // Auto-load older history when content doesn't fill the viewport
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (
+      !panel ||
+      isLoadingHistory ||
+      !hasMoreBefore ||
+      oldestCursor === null
+    ) {
+      return;
+    }
+    if (panel.scrollHeight <= panel.clientHeight) {
+      loadOlderHistory();
+    }
+  }, [
+    hasMoreBefore,
+    isLoadingHistory,
+    oldestCursor,
+    historyBubbles.length,
+    loadOlderHistory,
+  ]);
 
   useEffect(() => {
     const panel = panelRef.current;

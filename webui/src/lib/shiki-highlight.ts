@@ -1,9 +1,7 @@
-import {
-  bundledLanguages,
-  codeToTokensBase,
-  type BundledLanguage,
-  type BundledTheme,
-  type ThemedToken,
+import type {
+  BundledLanguage,
+  BundledTheme,
+  ThemedToken,
 } from "shiki";
 
 export type ShikiColorScheme = "light" | "dark";
@@ -48,7 +46,8 @@ export async function highlightCodeWithShiki(
   languageOrPath: string,
   colorScheme: ShikiColorScheme = "light",
 ): Promise<ShikiHighlightedCode | null> {
-  const language = resolveShikiLanguage(languageOrPath);
+  const { codeToTokensBase, bundledLanguages } = await import("shiki");
+  const language = resolveShikiLanguage(languageOrPath, bundledLanguages);
   if (!language || !isHighlightableCode(code)) {
     return null;
   }
@@ -69,19 +68,22 @@ export async function highlightCodeWithShiki(
   }
 }
 
-export function resolveShikiLanguage(input: string): BundledLanguage | null {
+export function resolveShikiLanguage(
+  input: string,
+  bundledLanguages?: Record<string, unknown>,
+): BundledLanguage | null {
   const trimmed = input.trim();
   if (!trimmed) {
     return null;
   }
 
   for (const candidate of shikiLanguageCandidates(trimmed)) {
-    const direct = shikiLanguage(candidate);
+    const direct = shikiLanguage(candidate, bundledLanguages);
     if (direct) {
       return direct;
     }
     const aliased = shikiLanguageAliases[candidate];
-    if (aliased && shikiLanguage(aliased)) {
+    if (aliased && shikiLanguage(aliased, bundledLanguages)) {
       return aliased;
     }
   }
@@ -112,8 +114,11 @@ function shikiLanguageCandidates(input: string): string[] {
   ]);
 }
 
-function shikiLanguage(value: string | undefined): BundledLanguage | null {
-  if (!value) {
+function shikiLanguage(
+  value: string | undefined,
+  bundledLanguages?: Record<string, unknown>,
+): BundledLanguage | null {
+  if (!value || !bundledLanguages) {
     return null;
   }
   return Object.hasOwn(bundledLanguages, value)
