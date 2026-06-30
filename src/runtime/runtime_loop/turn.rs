@@ -458,6 +458,7 @@ pub(crate) async fn execute_agent_loop_step(
                     .apply_runtime_conversation_compaction(plan, summary)
                     .await;
                 context.token_estimate_baseline = TokenEstimateBaseline::default();
+                context.delivered_root_instruction_fingerprint = None;
                 pre_turn_compacted = true;
             }
             None => {
@@ -549,6 +550,7 @@ pub(crate) async fn execute_agent_loop_step(
         let tools = build_runtime_tool_specs(context);
         if maybe_compact_runtime_messages(context, &mut runtime_step, &tools, false).await {
             set_runtime_status_only(tx, "Compacting runtime context");
+            context.delivered_root_instruction_fingerprint = None;
             break 'agent_loop runtime_context_compacted_output(
                 "runtime context compacted before model request; starting a new turn",
             );

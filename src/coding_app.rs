@@ -336,7 +336,9 @@ fn instruction_payload(instruction: &ProjectInstructionDocument) -> Value {
     })
 }
 
-fn project_instruction_fingerprint(instructions: &[ProjectInstructionDocument]) -> String {
+pub(crate) fn project_instruction_fingerprint(
+    instructions: &[ProjectInstructionDocument],
+) -> String {
     let mut hasher = Sha256::new();
     for instruction in instructions {
         hasher.update(instruction.name.as_bytes());

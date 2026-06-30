@@ -9,7 +9,7 @@ use super::prompt_doc::{PromptBlock, PromptGroupDoc, PromptNode, PromptStateDoc}
 
 pub trait PreTurnContextPart: Send + Sync {
     fn key(&self) -> &'static str;
-    fn build(&self, ctx: &Context, state: &PreTurnState) -> Option<PromptNode>;
+    fn build(&self, ctx: &mut Context, state: &PreTurnState) -> Option<PromptNode>;
 }
 
 pub trait AfterClaimContextPart: Send + Sync {
@@ -41,7 +41,7 @@ impl PreTurnContextPart for PreTurnSensoryPart {
         "sensory"
     }
 
-    fn build(&self, _ctx: &Context, state: &PreTurnState) -> Option<PromptNode> {
+    fn build(&self, _ctx: &mut Context, state: &PreTurnState) -> Option<PromptNode> {
         let text = state.sensory_runtime_text();
         if text.trim().is_empty() {
             return None;
@@ -58,25 +58,16 @@ impl PreTurnContextPart for PreTurnProjectInstructionsPart {
         "project_instructions"
     }
 
-    fn build(&self, ctx: &Context, _state: &PreTurnState) -> Option<PromptNode> {
+    fn build(&self, ctx: &mut Context, _state: &PreTurnState) -> Option<PromptNode> {
         let project_dir = ctx.coding_project_dir.as_deref()?;
         let cached = ctx.apps.cached_root_project_instructions();
-        let instructions = if !cached.is_empty() {
+        let loaded;
+        let instructions: &[crate::coding_app::ProjectInstructionDocument] = if !cached.is_empty() {
             cached
         } else {
-            match crate::coding_app::load_instruction_documents_in_dir(project_dir) {
+            loaded = match crate::coding_app::load_instruction_documents_in_dir(project_dir) {
                 Ok(instructions) if instructions.is_empty() => return None,
-                Ok(instructions) => {
-                    return Some(PromptNode::State(PromptStateDoc::new(
-                        self.key(),
-                        vec![PromptBlock::Paragraph(
-                            crate::coding_app::render_project_instructions(
-                                self.key(),
-                                &instructions,
-                            ),
-                        )],
-                    )));
-                }
+                Ok(instructions) => instructions,
                 Err(err) => {
                     tracing::warn!(
                         project_dir = %project_dir.display(),
@@ -89,13 +80,28 @@ impl PreTurnContextPart for PreTurnProjectInstructionsPart {
                         ))],
                     )));
                 }
-            }
+            };
+            &loaded
         };
+        let fingerprint = crate::coding_app::project_instruction_fingerprint(instructions);
+        let previous = ctx.delivered_root_instruction_fingerprint.take();
+        if previous.as_deref() == Some(fingerprint.as_str()) {
+            ctx.delivered_root_instruction_fingerprint = previous;
+            return None;
+        }
+        let supersedes = previous.is_some();
+        ctx.delivered_root_instruction_fingerprint = Some(fingerprint);
+        let mut text = String::new();
+        if supersedes {
+            text.push_str("The following project instructions supersede the previously delivered version; treat the earlier version as fully replaced.\n\n");
+        }
+        text.push_str(&crate::coding_app::render_project_instructions(
+            self.key(),
+            instructions,
+        ));
         Some(PromptNode::State(PromptStateDoc::new(
             self.key(),
-            vec![PromptBlock::Paragraph(
-                crate::coding_app::render_project_instructions(self.key(), instructions),
-            )],
+            vec![PromptBlock::Paragraph(text)],
         )))
     }
 }
@@ -105,7 +111,7 @@ impl PreTurnContextPart for PreTurnPlanPart {
         "plan"
     }
 
-    fn build(&self, _ctx: &Context, state: &PreTurnState) -> Option<PromptNode> {
+    fn build(&self, _ctx: &mut Context, state: &PreTurnState) -> Option<PromptNode> {
         let text = state.plan_runtime_text();
         if text.trim().is_empty() {
             return None;
@@ -122,7 +128,7 @@ impl PreTurnContextPart for PreTurnWorkflowStatePart {
         "primitive"
     }
 
-    fn build(&self, ctx: &Context, _state: &PreTurnState) -> Option<PromptNode> {
+    fn build(&self, ctx: &mut Context, _state: &PreTurnState) -> Option<PromptNode> {
         let mut blocks = Vec::new();
 
         let composition_specs = ctx.bound_primitive_composition_specs();

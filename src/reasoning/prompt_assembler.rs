@@ -184,7 +184,7 @@ impl PreTurnContextAssembler {
         ])
     }
 
-    pub fn assemble(&self, ctx: &Context, state: &PreTurnState) -> PromptDocument {
+    pub fn assemble(&self, ctx: &mut Context, state: &PreTurnState) -> PromptDocument {
         PromptDocument::new(
             self.parts
                 .iter()

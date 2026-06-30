@@ -468,6 +468,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         claimed_event_ids: Vec::new(),
         claimed_app_notices: Vec::new(),
         afterclaim_context_fingerprint: None,
+        delivered_root_instruction_fingerprint: None,
         idle_since: None,
         last_idle_sleep_at: None,
         session_title: crate::runtime::session_title::SessionTitleState::default(),

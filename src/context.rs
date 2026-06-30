@@ -98,6 +98,7 @@ pub struct Context {
     pub claimed_event_ids: Vec<String>,
     pub claimed_app_notices: Vec<AppNoticeKey>,
     pub afterclaim_context_fingerprint: Option<String>,
+    pub delivered_root_instruction_fingerprint: Option<String>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
     pub session_title: crate::runtime::session_title::SessionTitleState,
@@ -172,7 +173,7 @@ impl Context {
         runtime_system_prompt_text(self)
     }
 
-    pub fn preturn_context_doc(&self, state: &PreTurnState) -> PromptDocument {
+    pub fn preturn_context_doc(&mut self, state: &PreTurnState) -> PromptDocument {
         PreTurnContextAssembler::default_runtime().assemble(self, state)
     }
 

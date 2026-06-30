@@ -85,7 +85,7 @@ pub fn build_runtime_request_envelope(context: &Context) -> RuntimeRequestEnvelo
     RuntimeRequestEnvelope::from_system_messages(vec![context.runtime_system_prompt_text()])
 }
 
-pub fn build_preturn_context_text(context: &Context, state: &PreTurnState) -> String {
+pub fn build_preturn_context_text(context: &mut Context, state: &PreTurnState) -> String {
     LlmPromptRenderer::render_document_with_root(
         &context.preturn_context_doc(state),
         Some("preturn_context"),

@@ -260,6 +260,7 @@ pub(crate) async fn run_session_serve(
         claimed_event_ids: Vec::new(),
         claimed_app_notices: Vec::new(),
         afterclaim_context_fingerprint: None,
+        delivered_root_instruction_fingerprint: None,
         idle_since: None,
         last_idle_sleep_at: None,
         session_title: crate::runtime::session_title::SessionTitleState::default(),
@@ -269,7 +270,7 @@ pub(crate) async fn run_session_serve(
     let mut sleep_status = load_sleep_status_snapshot().await;
     let startup_preturn_state = PreTurnState::new(&mut context).await;
     let startup_preturn_context_output =
-        build_preturn_context_text(&context, &startup_preturn_state);
+        build_preturn_context_text(&mut context, &startup_preturn_state);
     let app_renders = context.apps.state_renders();
     let activity_history = dashboard_history.load_initial_window();
     tx.send_modify(|state| {
