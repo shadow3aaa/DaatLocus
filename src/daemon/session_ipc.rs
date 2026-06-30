@@ -379,6 +379,7 @@ impl SessionIpcServer {
         let name = build_local_socket_name(ipc_name)?;
         let listener = ListenerOptions::new()
             .name(name)
+            .try_overwrite(true)
             .create_tokio()
             .map_err(|err| miette!("bind IPC socket {ipc_name} failed: {err}"))?;
         Ok(Self { listener })
