@@ -1,9 +1,9 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    AngleBracketedGenericArguments, Attribute, Data, DeriveInput, Field, Fields, GenericArgument,
-    Ident, Lit, PathArguments, Token, Type, parse::Parser, parse_macro_input,
-    punctuated::Punctuated,
+    AngleBracketedGenericArguments, Attribute, Data, DeriveInput, Expr, Field, Fields,
+    GenericArgument, Ident, Lit, Meta, PathArguments, Token, Type, parse::Parser,
+    parse_macro_input, punctuated::Punctuated,
 };
 
 #[proc_macro_attribute]
@@ -118,9 +118,20 @@ fn object_struct_schema(
         validate_serde_attrs(&field.attrs, SerdeAttrTarget::Field)?;
         let property_name = field_property_name(field, rename_all.as_deref())?;
         let schema = schema_expr_for_type(&field.ty);
-        properties.push(quote! {
-            property_map.insert(#property_name.to_string(), #schema);
-        });
+        let description = field_description(field);
+        if let Some(doc) = description {
+            properties.push(quote! {
+                let mut s = #schema;
+                if let ::serde_json::Value::Object(ref mut obj) = s {
+                    obj.insert("description".to_string(), ::serde_json::Value::String(#doc.to_string()));
+                }
+                property_map.insert(#property_name.to_string(), s);
+            });
+        } else {
+            properties.push(quote! {
+                property_map.insert(#property_name.to_string(), #schema);
+            });
+        }
         required.push(quote! {
             required.push(::serde_json::Value::String(#property_name.to_string()));
         });
@@ -170,6 +181,36 @@ fn field_property_name(field: &Field, rename_all: Option<&str>) -> syn::Result<S
         let ident = field.ident.as_ref().expect("named field checked");
         apply_rename_all(&ident.to_string(), rename_all)
     }))
+}
+
+fn field_description(field: &Field) -> Option<String> {
+    let docs: Vec<String> = field
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("doc"))
+        .filter_map(|attr| match &attr.meta {
+            Meta::NameValue(nv) => match &nv.value {
+                Expr::Lit(el) => match &el.lit {
+                    Lit::Str(s) => {
+                        let trimmed = s.value().trim().to_string();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed)
+                        }
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    if docs.is_empty() {
+        None
+    } else {
+        Some(docs.join(" "))
+    }
 }
 
 #[derive(Clone, Copy)]

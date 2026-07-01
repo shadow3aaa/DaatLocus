@@ -140,7 +140,9 @@ pub struct StructuredEditArgsSchema {
 pub struct StructuredEditSchema {
     pub path: String,
     pub op: StructuredEditOpSchema,
+    /// `line#hash` anchor (e.g., `42#ab`), without the `|source_line` portion shown in read output.
     pub start: String,
+    /// `line#hash` end anchor, required for `replace` and ignored for `append`/`prepend`.
     pub end: Option<String>,
     pub content: Option<String>,
 }
@@ -473,6 +475,14 @@ mod tests {
         assert_eq!(
             schema["properties"]["edits"]["items"]["properties"]["end"]["type"],
             json!(["string", "null"])
+        );
+        assert_eq!(
+            schema["properties"]["edits"]["items"]["properties"]["start"]["description"],
+            "`line#hash` anchor (e.g., `42#ab`), without the `|source_line` portion shown in read output."
+        );
+        assert_eq!(
+            schema["properties"]["edits"]["items"]["properties"]["end"]["description"],
+            "`line#hash` end anchor, required for `replace` and ignored for `append`/`prepend`."
         );
     }
 
