@@ -596,7 +596,7 @@ fn workspace_app_source_digest(app_dir: &Path) -> Result<String> {
         hasher.update(content);
         hasher.update([0xff]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn collect_digest_files_under(

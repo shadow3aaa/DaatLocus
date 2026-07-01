@@ -334,7 +334,7 @@ fn request_fingerprint_input(prefix_units: &[DashboardContextCompositionPrefixUn
 fn hash_text(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]

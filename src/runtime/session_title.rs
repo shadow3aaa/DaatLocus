@@ -297,7 +297,7 @@ fn activity_signature(events: &[EventView], messages: &[HistoryMessage]) -> Stri
         hasher.update(message.role_name().as_bytes());
         hasher.update(text.as_bytes());
     }
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn event_text(event: &EventView) -> Option<String> {

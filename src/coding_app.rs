@@ -274,7 +274,7 @@ pub(crate) fn load_instruction_documents_in_dir(
         })?;
         let mut hasher = Sha256::new();
         hasher.update(content.as_bytes());
-        let sha256 = format!("{:x}", hasher.finalize());
+        let sha256 = hex::encode(hasher.finalize());
         documents.push(ProjectInstructionDocument {
             path,
             scope_dir: dir.to_path_buf(),
@@ -307,7 +307,7 @@ fn hash_instruction_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn load_project_instruction_fingerprint_in_dir(dir: &Path) -> Result<String> {
@@ -323,7 +323,7 @@ fn load_project_instruction_fingerprint_in_dir(dir: &Path) -> Result<String> {
         hasher.update(sha256.as_bytes());
         hasher.update(b"\0");
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn instruction_payload(instruction: &ProjectInstructionDocument) -> Value {
@@ -346,7 +346,7 @@ pub(crate) fn project_instruction_fingerprint(
         hasher.update(instruction.sha256.as_bytes());
         hasher.update(b"\0");
     }
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn short_hash(hash: &str) -> &str {
@@ -725,7 +725,7 @@ impl CodingApp {
         if let Ok(json) = serde_json::to_string(edits) {
             hasher.update(json.as_bytes());
         }
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = hex::encode(hasher.finalize());
         format!("coding-edit-{}", short_hash(&hash))
     }
 }
