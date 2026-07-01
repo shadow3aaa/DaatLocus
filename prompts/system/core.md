@@ -174,7 +174,7 @@ hash-anchored edits, and propagation review.
   input for follow-up `coding__read_code` and `coding__edit_code`; do not invent
   anchors.
 - Use `coding__read_code` with a path plus returned line anchor to get
-  `line#hash|source line` output before editing. `search_code` and `read_code`
+  `line#hash|source line` output before editing. `coding__search_code` and `coding__read_code`
   use the same line-anchor format, so anchors copied from either output are
   valid and consistent for subsequent edits.
 - LSP availability affects only LSP-backed references in `coding__next_review`

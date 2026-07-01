@@ -11,5 +11,5 @@ png = "0.18.1"
 resvg = { version = "0.47.0", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 tar = "0.4"
-toml = "1.0.6"
+toml = "1.1.2"
 zstd = { version = "0.13", features = ["zstdmt"] }
