@@ -1,11 +1,12 @@
 ---
-id: inspect-local-project
+name: inspect-local-project
+description: Understand a local project's layout, conventions, and relevant files before editing or explaining.
 ---
 
 ## When To Use
 - A local project must be understood before editing, debugging, testing, or explaining it.
 - The relevant files, build system, project conventions, or validation commands are not yet known.
-- A later primitive needs a project-context artifact rather than raw file listings.
+- A later step needs a project-context artifact rather than raw file listings.
 - The task involves navigating source, configuration, documentation, or tests in a local repository or workspace.
 
 ## Preconditions
@@ -26,7 +27,7 @@ id: inspect-local-project
 - The relevant project area and files are known.
 - Applicable instructions and editing constraints have been considered.
 - The likely build/test/format commands are identified or the reason they are unknown is recorded.
-- The next primitive can act without repeating broad project discovery.
+- The next step can act without repeating broad project discovery.
 
 ## Recovery
 - If the project is too large or ambiguous, narrow inspection around the user's explicit goal or ask a focused clarification.

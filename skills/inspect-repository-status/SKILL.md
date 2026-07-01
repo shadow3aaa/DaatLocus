@@ -1,12 +1,13 @@
 ---
-id: inspect-repository-status
+name: inspect-repository-status
+description: Check Git repository branch, working-tree cleanliness, and upstream state before modifying or committing.
 ---
 
 ## When To Use
 - A task involves a local Git repository and the current branch, cleanliness, or upstream state matters.
 - Before modifying, committing, pushing, rebasing, or reporting on repository changes.
 - The user asks what changed, whether work is committed, or whether local and remote state are aligned.
-- A later primitive needs a reliable repository-status artifact as input.
+- A later step needs a reliable repository-status artifact as input.
 
 ## Preconditions
 - The repository path is known or can be discovered from the current project context.
@@ -24,11 +25,11 @@ id: inspect-repository-status
 ## Done Criteria
 - The repository root, branch, upstream relationship, and working-tree cleanliness are known.
 - Any modified, staged, untracked, or conflicted files are listed or intentionally scoped.
-- Any push/pull/authentication blockers are identified before later primitives act on the repository.
-- Downstream primitives can decide whether it is safe to edit, test, commit, or push.
+- Any push/pull/authentication blockers are identified before later steps act on the repository.
+- Downstream steps can decide whether it is safe to edit, test, commit, or push.
 
 ## Recovery
-- If the directory is not a Git repository, report that status and continue only with primitives that do not require Git.
+- If the directory is not a Git repository, report that status and continue only with work that does not require Git.
 - If Git reports conflicts or an in-progress operation, stop repository-changing actions and ask whether to continue recovery.
 - If remote inspection requires credentials or network access that is unavailable, record local status and defer remote-dependent steps.
 - If unrelated user changes are present, avoid staging, overwriting, or reverting them unless explicitly asked.

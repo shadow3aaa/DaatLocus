@@ -1,12 +1,13 @@
 ---
-id: modify-local-project
+name: modify-local-project
+description: Apply minimal coherent changes to a local project using semantic coding tools.
 ---
 
 ## When To Use
 - The task requires applying changes to a local project, such as source code, configuration, documentation, tests, or workflow assets.
 - The desired outcome is clear enough to implement without first asking a blocking clarification.
 - The work should preserve project conventions and avoid unrelated modifications.
-- A later primitive will validate, commit, or report the changes.
+- A later step will validate, commit, or report the changes.
 
 ## Preconditions
 - The target project and relevant files have been inspected or are already known.
@@ -21,7 +22,7 @@ id: modify-local-project
 4. Update nearby tests, documentation, configuration, or examples when the change makes them stale.
 5. Review the resulting diff for accidental edits, generated noise, secrets, or unrelated file changes.
 6. Inspect any propagation or impact-review events produced by the coding surface before considering the edit complete.
-7. Hand off the changed-file list and validation needs to the next primitive.
+7. Hand off the changed-file list and validation needs to the next step.
 
 ## Done Criteria
 - The requested local project changes are present in the intended files.

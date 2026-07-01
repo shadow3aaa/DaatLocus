@@ -39,6 +39,7 @@ mod runtime_context;
 mod runtime_tools;
 mod sandbox;
 mod schema_utils;
+mod skill_run_records;
 mod sleep_status;
 mod system_info;
 mod telegram_acl;
@@ -49,7 +50,7 @@ mod workflow;
 mod workspace_app;
 
 pub(crate) use runtime::bootstrap::{DaatLocusHomeOverride, build_eval_context_with_compiled};
-pub(crate) use runtime::runtime_loop::{AgentLoopStepOutput, execute_agent_loop_step};
+pub(crate) use runtime::runtime_loop::execute_agent_loop_step;
 
 fn main() {
     let cli = cli::parse_args();

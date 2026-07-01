@@ -1,5 +1,6 @@
 ---
-id: ask-clarifying-question
+name: ask-clarifying-question
+description: Ask focused clarifying questions when missing information blocks safe progress.
 ---
 
 ## When To Use

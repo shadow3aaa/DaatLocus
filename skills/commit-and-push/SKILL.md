@@ -1,12 +1,13 @@
 ---
-id: commit-and-push
+name: commit-and-push
+description: Stage, commit, and push local repository changes to a remote.
 ---
 
 ## When To Use
 - The user explicitly asks to commit, push, publish, or otherwise persist local repository changes to a remote.
 - A task's accepted completion criteria include a committed and pushed change.
 - Repository status, validation results, and intended changed files are already known or can be checked immediately before committing.
-- The operation is a Git commit/push boundary, not a general editing or validation primitive.
+- The operation is a Git commit/push boundary, not a general editing or validation step.
 
 ## Preconditions
 - The repository status has been inspected and the intended files are identifiable.

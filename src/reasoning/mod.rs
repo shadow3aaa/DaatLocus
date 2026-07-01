@@ -3,7 +3,6 @@ pub mod datasets;
 pub mod episode;
 pub mod evaluation_artifacts;
 pub mod examples;
-pub mod frontier;
 pub mod ir;
 pub mod optimizer;
 pub mod program;

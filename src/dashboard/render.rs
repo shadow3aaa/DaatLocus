@@ -13,11 +13,11 @@ use crate::{
 
 use super::{
     DashboardContextCompositionSnapshot, DashboardPendingUserInput, DashboardPlanStep,
-    DashboardPrimitiveOptimizationSnapshot, DashboardRuntimeActivity,
-    DashboardRuntimeActivityStatus, DashboardRuntimeOptimizationSnapshot,
-    DashboardRuntimeStatusLevel, DashboardState, DashboardStatusCommandSnapshot,
-    DashboardTokenUsageSnapshot, activity_events_from_history_items, dashboard_agent_name,
-    render_activity_from_messages, sync_dashboard_runtime_status_live_cell,
+    DashboardRuntimeActivity, DashboardRuntimeActivityStatus, DashboardRuntimeOptimizationSnapshot,
+    DashboardRuntimeStatusLevel, DashboardSkillOptimizationSnapshot, DashboardState,
+    DashboardStatusCommandSnapshot, DashboardTokenUsageSnapshot,
+    activity_events_from_history_items, dashboard_agent_name, render_activity_from_messages,
+    sync_dashboard_runtime_status_live_cell,
 };
 
 /// Sleep-related constants used in dashboard rendering.
@@ -63,7 +63,7 @@ pub fn sync_dashboard_state(
         state.current_plan_step = current_plan_step_for_dashboard(context);
         state.token_usage = token_usage_snapshot_for_dashboard(context);
         state.runtime_optimization = runtime_optimization_snapshot_for_dashboard(sleep_status);
-        state.primitive_optimization = primitive_optimization_snapshot_for_dashboard(sleep_status);
+        state.skill_optimization = skill_optimization_snapshot_for_dashboard(sleep_status);
         state.context_composition = context_composition_snapshot_for_dashboard(context);
     });
 }
@@ -148,30 +148,17 @@ pub fn runtime_optimization_snapshot_for_dashboard(
     }
 }
 
-pub fn primitive_optimization_snapshot_for_dashboard(
+pub fn skill_optimization_snapshot_for_dashboard(
     sleep_status: &SleepStatusSnapshot,
-) -> DashboardPrimitiveOptimizationSnapshot {
-    DashboardPrimitiveOptimizationSnapshot {
+) -> DashboardSkillOptimizationSnapshot {
+    DashboardSkillOptimizationSnapshot {
         running: sleep_status.running,
         current_trigger: sleep_status.current_trigger.map(str::to_string),
         last_result: sleep_status.last_result.clone(),
         last_completed_at_ms: sleep_status.last_completed_at_ms,
-        primitive_evidence_records: sleep_status.primitive_evidence_records,
-        total_primitive_evidence_run_records: sleep_status.total_primitive_evidence_run_records,
-        total_primitive_reflections: sleep_status.total_primitive_reflections,
-        total_primitive_patch_candidates: sleep_status.total_primitive_patch_candidates,
-        total_primitive_merge_candidates: sleep_status.total_primitive_merge_candidates,
-        total_primitive_candidate_evaluations: sleep_status.total_primitive_candidate_evaluations,
-        total_primitive_frontier_entries: sleep_status.total_primitive_frontier_entries,
-        latest_primitive_frontier_root_entries: sleep_status.latest_primitive_frontier_root_entries,
-        latest_primitive_frontier_branched_entries: sleep_status
-            .latest_primitive_frontier_branched_entries,
-        latest_primitive_frontier_max_generation: sleep_status
-            .latest_primitive_frontier_max_generation,
-        total_primitive_patch_applied: sleep_status.total_primitive_patch_applied,
-        total_primitive_merge_applied: sleep_status.total_primitive_merge_applied,
-        total_primitive_update_rollbacks: sleep_status.total_primitive_update_rollbacks,
-        total_primitive_optimization_rounds: sleep_status.total_primitive_optimization_rounds,
+        skill_evidence_records: sleep_status.skill_evidence_records,
+        total_skill_evidence_run_records: sleep_status.total_skill_evidence_run_records,
+        total_skill_patch_applied: sleep_status.total_skill_patch_applied,
     }
 }
 
@@ -307,8 +294,8 @@ pub fn render_sleep_status_output_for_dashboard(
             sleep_status.unread_runtime_error_backlog
         ),
         format!(
-            "• Workflow evidence records: {}",
-            sleep_status.primitive_evidence_records
+            "• Skill evidence records: {}",
+            sleep_status.skill_evidence_records
         ),
     ];
     sections.push(format!("Queues\n{}", queue_lines.join("\n")));
@@ -349,57 +336,19 @@ pub fn render_sleep_status_output_for_dashboard(
         runtime_error_lines.join("\n")
     ));
 
-    let primitive_lines = [
+    let skill_lines = [
         format!(
-            "• Total primitive evidence run records: {}",
-            sleep_status.total_primitive_evidence_run_records
+            "• Total skill evidence run records: {}",
+            sleep_status.total_skill_evidence_run_records
         ),
         format!(
-            "• Total primitive reflections: {}",
-            sleep_status.total_primitive_reflections
-        ),
-        format!(
-            "• Total primitive patch candidates: {}",
-            sleep_status.total_primitive_patch_candidates
-        ),
-        format!(
-            "• Total primitive merge candidates: {}",
-            sleep_status.total_primitive_merge_candidates
-        ),
-        format!(
-            "• Total primitive candidate evaluations: {}",
-            sleep_status.total_primitive_candidate_evaluations
-        ),
-        format!(
-            "• Total primitive frontier entries: {}",
-            sleep_status.total_primitive_frontier_entries
-        ),
-        format!(
-            "• Latest primitive frontier roots/branched/max_generation: {}/{}/{}",
-            sleep_status.latest_primitive_frontier_root_entries,
-            sleep_status.latest_primitive_frontier_branched_entries,
-            sleep_status.latest_primitive_frontier_max_generation
-        ),
-        format!(
-            "• Total primitive patch applied: {}",
-            sleep_status.total_primitive_patch_applied
-        ),
-        format!(
-            "• Total primitive merge applied: {}",
-            sleep_status.total_primitive_merge_applied
-        ),
-        format!(
-            "• Total primitive update rollbacks: {}",
-            sleep_status.total_primitive_update_rollbacks
-        ),
-        format!(
-            "• Total primitive optimization rounds: {}",
-            sleep_status.total_primitive_optimization_rounds
+            "• Total skill patch applied: {}",
+            sleep_status.total_skill_patch_applied
         ),
     ];
     sections.push(format!(
-        "Workflow Improvement Totals\n{}",
-        primitive_lines.join("\n")
+        "Skill Optimization Totals\n{}",
+        skill_lines.join("\n")
     ));
 
     let mut trigger_lines = vec![
@@ -534,10 +483,6 @@ fn trimmed_runtime_status_detail(status: &str) -> Option<String> {
 pub fn status_command_snapshot_for_dashboard(context: &Context) -> DashboardStatusCommandSnapshot {
     let active_plans = context.plan.active_steps().count();
     let events = render_status_event_summary(context);
-    let bound_primitive = context
-        .bound_primitive_id
-        .clone()
-        .unwrap_or_else(|| "none".to_string());
     let runtime_turn = status_command_runtime_turn(context);
     let plan_steps = context
         .plan
@@ -552,7 +497,6 @@ pub fn status_command_snapshot_for_dashboard(context: &Context) -> DashboardStat
 
     DashboardStatusCommandSnapshot {
         runtime_turn,
-        bound_primitive,
         active_plans,
         events,
         plan_steps,
@@ -578,8 +522,8 @@ pub fn render_status_command_output_for_dashboard(
     let status = status_command_snapshot_for_dashboard(context);
 
     sections.push(format!(
-        "Overview\nRuntime turn: {}\nBound primitive: {}\nPlans: {}\nEvents: {}",
-        status.runtime_turn, status.bound_primitive, status.active_plans, status.events
+        "Overview\nRuntime turn: {}\nPlans: {}\nEvents: {}",
+        status.runtime_turn, status.active_plans, status.events
     ));
 
     let usage_lines = render_status_usage_lines(context);

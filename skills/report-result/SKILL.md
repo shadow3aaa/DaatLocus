@@ -1,5 +1,6 @@
 ---
-id: report-result
+name: report-result
+description: Deliver a concise final report of task outcome, changes, and verification.
 ---
 
 ## When To Use

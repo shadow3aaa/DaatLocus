@@ -20,10 +20,6 @@ const RUNTIME_ERROR_CASES_DIR: &str = "runtime_error_cases";
 const PROMPT_REFLECTIONS_DIR: &str = "prompt_reflections";
 const RUNTIME_PROMPT_CANDIDATES_DIR: &str = "runtime_prompt_candidates";
 const RUNTIME_PROMPT_CANDIDATE_EVALUATIONS_DIR: &str = "runtime_prompt_candidate_evaluations";
-const WORKFLOW_REFLECTIONS_DIR: &str = "workflow_reflections";
-const WORKFLOW_PATCHES_DIR: &str = "workflow_patches";
-const WORKFLOW_MERGES_DIR: &str = "workflow_merges";
-const WORKFLOW_CANDIDATE_EVALUATIONS_DIR: &str = "workflow_candidate_evaluations";
 const MAX_ARTIFACT_FILE_STEM_LEN: usize = 96;
 
 const LEGACY_RUNTIME_ERROR_CORRECTION_DIRS: &[&str] = &[
@@ -124,83 +120,12 @@ pub struct EvaluationArtifactRuntimePromptCandidateEvaluation {
     pub source_trace_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactPrimitiveSpecPatch {
-    pub workflow_id: String,
-    pub title: String,
-    pub rationale: String,
-    #[serde(default)]
-    pub when_to_use_additions: Vec<String>,
-    #[serde(default)]
-    pub precondition_additions: Vec<String>,
-    #[serde(default)]
-    pub workflow_step_additions: Vec<String>,
-    #[serde(default)]
-    pub done_criteria_additions: Vec<String>,
-    #[serde(default)]
-    pub recovery_additions: Vec<String>,
-    #[serde(default)]
-    pub source_run_ids: Vec<String>,
-    pub confidence: f64,
-    pub applied: bool,
-    pub rolled_back: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactWorkflowReflection {
-    pub workflow_id: String,
-    pub rationale: String,
-    #[serde(default)]
-    pub missing_preconditions: Vec<String>,
-    #[serde(default)]
-    pub weak_primitive_steps: Vec<String>,
-    #[serde(default)]
-    pub weak_done_criteria: Vec<String>,
-    #[serde(default)]
-    pub weak_recovery: Vec<String>,
-    #[serde(default)]
-    pub recurring_failure_patterns: Vec<String>,
-    #[serde(default)]
-    pub source_run_ids: Vec<String>,
-    pub confidence: f64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactWorkflowMerge {
-    pub target_workflow_id: String,
-    #[serde(default)]
-    pub source_workflow_ids: Vec<String>,
-    pub rationale: String,
-    pub confidence: f64,
-    pub applied: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactWorkflowCandidateEvaluation {
-    pub workflow_id: String,
-    pub candidate_kind: String,
-    pub candidate_title: String,
-    pub rationale: String,
-    pub score: f64,
-    pub accepted: bool,
-    pub selected: bool,
-    #[serde(default)]
-    pub source_run_ids: Vec<String>,
-}
-
 pub struct RuntimeErrorCorrectionArtifacts<'a> {
     pub runtime_error_cases: &'a [RuntimeErrorCase],
     pub prompt_reflections: &'a [EvaluationArtifactPromptReflection],
     pub runtime_prompt_candidates: &'a [EvaluationArtifactRuntimePromptCandidate],
     pub runtime_prompt_candidate_evaluations:
         &'a [EvaluationArtifactRuntimePromptCandidateEvaluation],
-}
-
-pub struct WorkflowImprovementArtifacts<'a> {
-    pub workflow_reflections: &'a [EvaluationArtifactWorkflowReflection],
-    pub workflow_patches: &'a [EvaluationArtifactPrimitiveSpecPatch],
-    pub workflow_merges: &'a [EvaluationArtifactWorkflowMerge],
-    pub workflow_candidate_evaluations: &'a [EvaluationArtifactWorkflowCandidateEvaluation],
 }
 
 pub struct EvaluationArtifactsStore {
@@ -222,10 +147,6 @@ impl EvaluationArtifactsStore {
         ensure_dir(&root.join(PROMPT_REFLECTIONS_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_CANDIDATES_DIR)).await?;
         ensure_dir(&root.join(RUNTIME_PROMPT_CANDIDATE_EVALUATIONS_DIR)).await?;
-        ensure_dir(&root.join(WORKFLOW_REFLECTIONS_DIR)).await?;
-        ensure_dir(&root.join(WORKFLOW_PATCHES_DIR)).await?;
-        ensure_dir(&root.join(WORKFLOW_MERGES_DIR)).await?;
-        ensure_dir(&root.join(WORKFLOW_CANDIDATE_EVALUATIONS_DIR)).await?;
         Ok(Self { root })
     }
 
@@ -290,72 +211,6 @@ impl EvaluationArtifactsStore {
         .await
     }
 
-    pub async fn replace_workflow_patches(
-        &self,
-        artifacts: &[EvaluationArtifactPrimitiveSpecPatch],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                (
-                    format!("{}-{}", artifact.workflow_id, slugify(&artifact.title)),
-                    artifact,
-                )
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(WORKFLOW_PATCHES_DIR), artifacts).await
-    }
-
-    pub async fn replace_workflow_reflections(
-        &self,
-        artifacts: &[EvaluationArtifactWorkflowReflection],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| (artifact.workflow_id.clone(), artifact))
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(WORKFLOW_REFLECTIONS_DIR), artifacts).await
-    }
-
-    pub async fn replace_workflow_merges(
-        &self,
-        artifacts: &[EvaluationArtifactWorkflowMerge],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| (format!("{}-merge", artifact.target_workflow_id), artifact))
-            .collect::<Vec<_>>();
-        replace_artifacts(&self.root.join(WORKFLOW_MERGES_DIR), artifacts).await
-    }
-
-    pub async fn replace_workflow_candidate_evaluations(
-        &self,
-        artifacts: &[EvaluationArtifactWorkflowCandidateEvaluation],
-    ) -> Result<Vec<PathBuf>> {
-        let artifacts = artifacts
-            .iter()
-            .cloned()
-            .map(|artifact| {
-                let slug = slugify(&artifact.candidate_title);
-                (
-                    format!(
-                        "{}-{}-{}",
-                        artifact.workflow_id, artifact.candidate_kind, slug
-                    ),
-                    artifact,
-                )
-            })
-            .collect::<Vec<_>>();
-        replace_artifacts(
-            &self.root.join(WORKFLOW_CANDIDATE_EVALUATIONS_DIR),
-            artifacts,
-        )
-        .await
-    }
-
     pub async fn replace_runtime_error_correction_artifacts(
         &self,
         artifacts: RuntimeErrorCorrectionArtifacts<'_>,
@@ -373,21 +228,6 @@ impl EvaluationArtifactsStore {
             artifacts.runtime_prompt_candidate_evaluations,
         )
         .await?;
-        Ok(())
-    }
-
-    pub async fn replace_workflow_improvement_artifacts(
-        &self,
-        artifacts: WorkflowImprovementArtifacts<'_>,
-    ) -> Result<()> {
-        self.replace_workflow_reflections(artifacts.workflow_reflections)
-            .await?;
-        self.replace_workflow_patches(artifacts.workflow_patches)
-            .await?;
-        self.replace_workflow_merges(artifacts.workflow_merges)
-            .await?;
-        self.replace_workflow_candidate_evaluations(artifacts.workflow_candidate_evaluations)
-            .await?;
         Ok(())
     }
 }

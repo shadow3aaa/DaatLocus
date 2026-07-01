@@ -25,6 +25,7 @@ pub struct PromptGroupDoc {
 pub enum PromptBlock {
     Paragraph(String),
     BulletList(Vec<String>),
+    #[allow(dead_code)]
     KeyValueList(Vec<(String, String)>),
 }
 

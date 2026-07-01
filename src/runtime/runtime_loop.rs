@@ -1,12 +1,11 @@
+#[cfg_attr(not(test), allow(unused_imports))]
+use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::{
     activity_event::{TextActivityDescriptor, ToolCallActivityEvent, compact_preserved_body_lines},
     app::{AppId, AppToolExecutionContext},
-    context::{
-        ActivePrimitiveRunSession, AppNoticeKey, Context, PendingPrimitiveRunFlush,
-        RuntimeTurnPhase,
-    },
+    context::{AppNoticeKey, Context, RuntimeTurnPhase},
     context_budget::{
         TokenEstimateBaseline, estimate_agent_turn_request, is_context_budget_exceeded,
     },
@@ -58,9 +57,7 @@ use crate::{
     sleep_status::{
         SleepStatusSnapshot, persist_sleep_status_snapshot, refresh_sleep_status_queues,
     },
-    workflow::{PrimitiveRunRecord, append_primitive_run_records},
 };
-use chrono::Utc;
 use miette::{Result, miette};
 use serde_json::json;
 
@@ -68,7 +65,7 @@ use crate::runtime::bootstrap::{
     build_eval_context_with_compiled, load_compiled_prompts_only, summarize_sleep_summary,
 };
 mod claimed_input;
-mod coding_source_elision;
+pub(crate) mod coding_source_elision;
 mod dashboard_control;
 mod live_draft;
 mod model_driver;
@@ -88,7 +85,9 @@ pub(crate) use workflow_evidence::{AgentLoopStepExecution, AgentLoopStepOutput};
 
 use claimed_input::*;
 use live_draft::{TelegramLiveDraftSession, maybe_start_telegram_live_draft_session};
-use workflow_evidence::{record_runtime_history_messages, record_workflow_run_evidence};
+use workflow_evidence::{
+    maybe_record_skill_read, record_runtime_history_messages, record_skill_run_evidence,
+};
 use workspace_apps::sync_workspace_apps_from_invalidation;
 
 const RUNTIME_EVENT_CLAIM_BATCH_SIZE: usize = 1;
@@ -122,7 +121,6 @@ mod tests {
         sandbox::RuntimeSandboxPolicy,
         telegram_acl::TelegramAclHandle,
         telegram_transport::state::TelegramTransportState,
-        workflow::PrimitiveStore,
         workspace_app::WorkspaceAppRegistry,
     };
 
@@ -174,14 +172,10 @@ mod tests {
                 plan: Plan::new().await,
                 events: crate::events::EventStore::new().await,
                 pending_work: crate::pending_work::PendingWorkQueue::new().await,
-                workflows: PrimitiveStore::new().await,
                 openskills: OpenSkillsCatalog::default(),
-                bound_primitive_id: None,
-                bound_primitive_composition: None,
-                active_primitive_run: None,
-                pending_primitive_run_flushes: Vec::new(),
+                active_skill_run: None,
+                pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,
-                workflow_step_started_bound_id: None,
                 apps,
                 workspace_apps: WorkspaceAppRegistry::default(),
                 telegram: telegram.handle(),
@@ -208,6 +202,7 @@ mod tests {
                 claimed_event_ids: Vec::new(),
                 claimed_app_notices: Vec::new(),
                 afterclaim_context_fingerprint: None,
+                visible_source_lines: HashSet::new(),
                 delivered_root_instruction_fingerprint: None,
                 idle_since: None,
                 last_idle_sleep_at: None,

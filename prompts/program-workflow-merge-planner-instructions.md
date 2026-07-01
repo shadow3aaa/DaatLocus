@@ -1,2 +1,0 @@
-- Do not merge because wording is similar; confirm convergence in task boundaries and process structure.
-- Reject the merge if the workflows only share recovery tactics or local steps but have different overall purposes.

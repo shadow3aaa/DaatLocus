@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
@@ -35,7 +35,6 @@ use crate::{
     telegram_acl::TelegramAclHandle,
     telegram_transport::state::TelegramTransportState,
     terminal_app::TerminalApp,
-    workflow::PrimitiveStore,
     workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir},
     workspace_app::{WorkspaceAppRegistry, bootstrap_workspace_apps},
 };
@@ -376,7 +375,6 @@ pub(crate) async fn build_eval_context_with_compiled(
     let plan = Plan::new().await;
     let events = EventStore::new().await;
     let pending_work = PendingWorkQueue::new().await;
-    let workflows = PrimitiveStore::new().await;
     let openskills = load_openskills_for_runtime(&execution_cwd);
     let telegram_acl = TelegramAclHandle::load().await;
     let telegram = TelegramTransportState::new();
@@ -432,14 +430,10 @@ pub(crate) async fn build_eval_context_with_compiled(
         plan,
         events,
         pending_work,
-        workflows,
         openskills,
-        bound_primitive_composition: None,
-        bound_primitive_id: None,
-        active_primitive_run: None,
-        pending_primitive_run_flushes: Vec::new(),
+        active_skill_run: None,
+        pending_skill_run_flushes: Vec::new(),
         current_work_origin: None,
-        workflow_step_started_bound_id: None,
         apps,
         workspace_apps: runtime_apps.workspace_registry,
         telegram: telegram_handle,
@@ -468,6 +462,7 @@ pub(crate) async fn build_eval_context_with_compiled(
         claimed_event_ids: Vec::new(),
         claimed_app_notices: Vec::new(),
         afterclaim_context_fingerprint: None,
+        visible_source_lines: HashSet::new(),
         delivered_root_instruction_fingerprint: None,
         idle_since: None,
         last_idle_sleep_at: None,
@@ -498,27 +493,17 @@ pub(crate) async fn load_compiled_prompts_only(
 
 pub(crate) fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSummary) -> String {
     let correction = &summary.runtime_error_correction;
-    let workflow = &summary.workflow_improvement;
+    let skill = &summary.workflow_improvement;
     format!(
-        "sleep completed: runtime error cases consumed/cases/reflections/candidates/evaluations={}/{}/{}/{}/{}, runtime contract additions={}, workflow evidence/reflections/patch/merge/evaluations/frontier={}/{}/{}/{}/{}/{}, workflow lineage={}/{}/{}, applied patch/merge={}/{}, rollbacks={}",
+        "sleep completed: runtime error cases consumed/cases/reflections/candidates/evaluations={}/{}/{}/{}/{}, runtime contract additions={}, skill evidence records={}, skill patches applied={}",
         correction.consumed_error_cases,
         correction.runtime_error_cases,
         correction.reflections,
         correction.candidates,
         correction.candidate_evaluations,
         correction.applied_system_additions,
-        workflow.evidence_run_records,
-        workflow.workflow_reflections,
-        workflow.patch_candidates,
-        workflow.merge_candidates,
-        workflow.candidate_evaluations,
-        workflow.frontier_entries,
-        workflow.frontier_root_entries,
-        workflow.frontier_branched_entries,
-        workflow.frontier_max_generation,
-        workflow.patch_applied,
-        workflow.merge_applied,
-        workflow.update_rollbacks,
+        skill.evidence_run_records,
+        skill.patch_applied,
     )
 }
 

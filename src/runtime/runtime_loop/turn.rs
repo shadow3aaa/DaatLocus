@@ -68,9 +68,7 @@ async fn abort_runtime_turn_before_model(
     finalize_claimed_runtime_app_notices(context, claimed_app_notices, &output).await;
     context.claimed_event_ids.clear();
     context.claimed_app_notices.clear();
-    record_workflow_run_evidence(context, &output).await;
     context.current_work_origin = None;
-    context.workflow_step_started_bound_id = None;
     AgentLoopStepExecution {
         output,
         history_messages: Vec::new(),
@@ -255,7 +253,6 @@ pub(crate) async fn execute_agent_loop_step(
     let runtime_turn_id = format!("runtime-turn-{}", uuid::Uuid::new_v4());
     let claimed_inputs = claim_pending_runtime_inputs(context, RUNTIME_EVENT_CLAIM_BATCH_SIZE);
     context.current_work_origin = runtime_work_origin(&claimed_inputs);
-    context.workflow_step_started_bound_id = context.bound_primitive_id.clone();
     let claimed_input_fingerprint = claimed_runtime_input_fingerprint(&claimed_inputs);
     let claimed_event_ids = claimed_inputs
         .iter()
@@ -459,6 +456,7 @@ pub(crate) async fn execute_agent_loop_step(
                     .await;
                 context.token_estimate_baseline = TokenEstimateBaseline::default();
                 context.delivered_root_instruction_fingerprint = None;
+                context.visible_source_lines.clear();
                 pre_turn_compacted = true;
             }
             None => {
@@ -496,6 +494,7 @@ pub(crate) async fn execute_agent_loop_step(
                         "force-trimmed oldest runtime conversation messages to fit budget after preflight compaction timeout"
                     );
                     context.token_estimate_baseline = TokenEstimateBaseline::default();
+                    context.visible_source_lines.clear();
                     pre_turn_compacted = true;
                 } else {
                     return abort_runtime_turn_before_model(
@@ -551,6 +550,7 @@ pub(crate) async fn execute_agent_loop_step(
         if maybe_compact_runtime_messages(context, &mut runtime_step, &tools, false).await {
             set_runtime_status_only(tx, "Compacting runtime context");
             context.delivered_root_instruction_fingerprint = None;
+            context.visible_source_lines.clear();
             break 'agent_loop runtime_context_compacted_output(
                 "runtime context compacted before model request; starting a new turn",
             );
@@ -911,6 +911,7 @@ pub(crate) async fn execute_agent_loop_step(
                         )
                     }
                 };
+                maybe_record_skill_read(context, call);
                 if let Some(status) = render_telegram_tool_result_status(call, &result) {
                     context.emit_live_telegram_status(status);
                 }
@@ -931,7 +932,7 @@ pub(crate) async fn execute_agent_loop_step(
                     });
                 }
                 let model_content = super::coding_source_elision::elide_tool_model_content(
-                    runtime_step.agent_messages(),
+                    &mut context.visible_source_lines,
                     call,
                     &result.model_content(),
                 );
@@ -1149,6 +1150,7 @@ pub(crate) async fn execute_agent_loop_step(
             || output_is_runtime_context_compaction_boundary(&output))
     {
         context.afterclaim_context_fingerprint = None;
+        context.visible_source_lines.clear();
         context.token_estimate_baseline = TokenEstimateBaseline::default();
     }
     context.claimed_event_ids.clear();
@@ -1157,9 +1159,8 @@ pub(crate) async fn execute_agent_loop_step(
     if !runtime_step.is_history_empty() {
         record_runtime_history_messages(context, runtime_step.into_turn_draft()).await;
     }
-    record_workflow_run_evidence(context, &output).await;
+    record_skill_run_evidence(context, &output).await;
     context.current_work_origin = None;
-    context.workflow_step_started_bound_id = None;
     AgentLoopStepExecution {
         output,
         history_messages,
@@ -1204,12 +1205,6 @@ async fn record_runtime_error_case(context: &Context, input: RuntimeErrorRecordI
                 .iter()
                 .map(|notice| format!("{}:{}", notice.app, notice.reason))
                 .collect(),
-            bound_primitive_id: context.bound_primitive_id.clone(),
-            workflow_origin: context
-                .bound_primitive_id
-                .as_deref()
-                .and_then(|workflow_id| context.workflows.workflow_origin(workflow_id))
-                .map(|origin| format!("{origin:?}").to_ascii_lowercase()),
         },
         runtime: RuntimeErrorRuntimeContext {
             phase: context

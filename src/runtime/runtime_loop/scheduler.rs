@@ -196,7 +196,6 @@ fn recover_stale_runtime_turn_claims(context: &mut Context) {
     }
     context.install_live_progress(None);
     context.current_work_origin = None;
-    context.workflow_step_started_bound_id = None;
 }
 
 pub(crate) fn reset_cancelled_runtime_turn(context: &mut Context, reason: &str) {
@@ -285,7 +284,6 @@ pub(crate) fn interrupt_active_runtime_turn(
 
     context.install_live_progress(None);
     context.current_work_origin = None;
-    context.workflow_step_started_bound_id = None;
     context.active_runtime_turn = false;
     context.set_runtime_phase(None);
     context.runtime_turn_started_at = None;

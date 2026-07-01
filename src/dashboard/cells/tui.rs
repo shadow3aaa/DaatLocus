@@ -25,7 +25,6 @@ use super::{
     },
     messages::{PatchActivityData, ReplyActivityData, TelegramActivityData},
     plan::{PlanActivityData, PlanStepDisplayStatus},
-    primitive::{ActivatePrimitiveActivityData, CreatePrimitiveSpecActivityData},
 };
 use crate::activity_event::{
     ExploredCallActivityAction, PatchDiffLineActivityDescriptor, PatchDiffLineKind,
@@ -527,12 +526,6 @@ fn render_activity_cell_lines_with_options(
         SessionActivityEvent::CodingReview(cell) => render_coding_review_cell_lines(cell),
         SessionActivityEvent::GenericApp(cell) => render_generic_app_cell_lines(cell),
         SessionActivityEvent::PlanResult(cell) => render_plan_cell_lines(cell, max_width),
-        SessionActivityEvent::CreatePrimitiveSpecResult(cell) => {
-            render_create_primitive_spec_cell_lines(cell)
-        }
-        SessionActivityEvent::ActivatePrimitiveResult(cell) => {
-            render_activate_primitive_cell_lines(cell)
-        }
         SessionActivityEvent::ExecResult(cell) => render_exec_cell_lines(cell, max_width),
         SessionActivityEvent::LiveExec(cell) => render_live_exec_cell_lines(cell, max_width),
         SessionActivityEvent::Patch(cell) => render_patch_cell_lines(cell, max_width),
@@ -997,12 +990,6 @@ fn activity_cell_transcript_block(cell: &SessionActivityEvent) -> String {
                 PlanActivityKind::Updated => "PLAN",
             };
             transcript_section(title, lines.join("\n"))
-        }
-        SessionActivityEvent::CreatePrimitiveSpecResult(cell) => {
-            transcript_section("CREATED PRIMITIVE SPEC", cell.primitive_id.clone())
-        }
-        SessionActivityEvent::ActivatePrimitiveResult(cell) => {
-            transcript_section("ACTIVATED PRIMITIVE", cell.primitive_id.clone())
         }
         SessionActivityEvent::ExecResult(cell) => exec_transcript_block(
             "COMMAND",
@@ -2440,22 +2427,6 @@ fn plan_header_line(kind: PlanActivityKind) -> Line<'static> {
         ),
         PlanActivityKind::Updated => activity_header("Updated Plan"),
     }
-}
-
-fn render_create_primitive_spec_cell_lines(
-    cell: &CreatePrimitiveSpecActivityData,
-) -> Vec<Line<'static>> {
-    render_primitive_line(format!("Created Primitive Spec: {}", cell.primitive_id))
-}
-
-fn render_activate_primitive_cell_lines(
-    cell: &ActivatePrimitiveActivityData,
-) -> Vec<Line<'static>> {
-    render_primitive_line(format!("Activated Primitive: {}", cell.primitive_id))
-}
-
-fn render_primitive_line(title: String) -> Vec<Line<'static>> {
-    vec![activity_header(title)]
 }
 
 #[allow(clippy::too_many_arguments)]

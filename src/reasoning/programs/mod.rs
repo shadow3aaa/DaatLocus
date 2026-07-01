@@ -1,8 +1,6 @@
 pub mod runtime_error_correction_planner;
 pub mod runtime_turn_trace_judge;
-pub mod workflow_candidate_rollout_evaluator;
-pub mod workflow_evolution_planner;
-pub mod workflow_merge_planner;
+pub mod skill_improvement_planner;
 
 #[cfg(test)]
 mod tests {
@@ -12,9 +10,7 @@ mod tests {
             programs::{
                 runtime_error_correction_planner::RuntimeErrorCorrectionPlannerProgram,
                 runtime_turn_trace_judge::RuntimeTurnTraceJudgeProgram,
-                workflow_candidate_rollout_evaluator::WorkflowCandidateRolloutEvaluatorProgram,
-                workflow_evolution_planner::WorkflowEvolutionPlannerProgram,
-                workflow_merge_planner::WorkflowMergePlannerProgram,
+                skill_improvement_planner::SkillImprovementPlannerProgram,
             },
         },
         schema_utils::validate_model_facing_schema,
@@ -25,9 +21,7 @@ mod tests {
         let schemas = [
             RuntimeErrorCorrectionPlannerProgram.output_schema(),
             RuntimeTurnTraceJudgeProgram.output_schema(),
-            WorkflowCandidateRolloutEvaluatorProgram.output_schema(),
-            WorkflowEvolutionPlannerProgram.output_schema(),
-            WorkflowMergePlannerProgram.output_schema(),
+            SkillImprovementPlannerProgram.output_schema(),
         ];
 
         for schema in schemas {

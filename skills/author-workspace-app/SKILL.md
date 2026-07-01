@@ -1,5 +1,6 @@
 ---
-id: author-workspace-app
+name: author-workspace-app
+description: Create or complete a third-party workspace app package under ~/daat-locus-workspace/apps/.
 ---
 
 ## When To Use
@@ -26,7 +27,7 @@ id: author-workspace-app
 - The app directory structure is complete and all minimum required files exist.
 - The runtime can recognize this workspace app and produce reasonable app state and prompt information.
 - The app has at least one runnable path for its core capability, not only static placeholder files.
-- `docs.md` clearly defines app semantics and operation without mixing in SOP primitive spec content.
+- `docs.md` clearly defines app semantics and operation without mixing in SOP content.
 
 ## Recovery
 - If the app boundary is unclear, shrink to the smallest runnable capability before adding more features.

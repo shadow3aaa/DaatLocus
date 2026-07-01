@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use crate::reasoning::runtime::{AgentMessage, AgentToolCall};
+use crate::reasoning::runtime::AgentToolCall;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CodingSourceLineKey {
-    path: String,
-    anchor: String,
+pub(crate) struct CodingSourceLineKey {
+    pub(crate) path: String,
+    pub(crate) anchor: String,
 }
 
 #[derive(Debug, Clone)]
@@ -23,69 +23,23 @@ struct CodingOmittedSpan {
     len: usize,
 }
 
-#[derive(Debug, Default)]
-struct CodingSourceElider {
-    visible_full_lines: HashSet<CodingSourceLineKey>,
+#[derive(Debug)]
+struct CodingSourceElider<'a> {
+    visible_full_lines: &'a mut HashSet<CodingSourceLineKey>,
 }
 
 pub(super) fn elide_tool_model_content(
-    visible_messages: &[AgentMessage],
+    visible_lines: &mut HashSet<CodingSourceLineKey>,
     call: &AgentToolCall,
     content: &str,
 ) -> String {
-    let mut elider = CodingSourceElider::from_messages(visible_messages);
+    let mut elider = CodingSourceElider {
+        visible_full_lines: visible_lines,
+    };
     elider.elide_tool_model_content(call, content)
 }
 
-impl CodingSourceElider {
-    fn from_messages(messages: &[AgentMessage]) -> Self {
-        let mut elider = Self::default();
-        let mut read_paths_by_call_id = HashMap::new();
-        for message in messages {
-            match message {
-                AgentMessage::AssistantToolCallProtocol { calls, .. } => {
-                    for call in calls {
-                        if is_line_hash_read_tool(&call.name)
-                            && let Some(path) = line_hash_call_path(call)
-                        {
-                            read_paths_by_call_id.insert(call.id.clone(), path.to_string());
-                        }
-                    }
-                }
-                AgentMessage::Tool {
-                    tool_call_id: _,
-                    name,
-                    content,
-                } if is_coding_search_code_tool(name) => {
-                    for line in content.lines() {
-                        if let Some(record) = parse_coding_search_full_record(line) {
-                            elider.mark_visible(
-                                record.path.expect("search record path"),
-                                record.anchor,
-                            );
-                        }
-                    }
-                }
-                AgentMessage::Tool {
-                    tool_call_id,
-                    name,
-                    content,
-                } if is_line_hash_read_tool(name) => {
-                    let Some(path) = read_paths_by_call_id.get(tool_call_id) else {
-                        continue;
-                    };
-                    for line in content.lines() {
-                        if let Some(record) = parse_line_hash_read_full_record(line) {
-                            elider.mark_visible(path, record.anchor);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        elider
-    }
-
+impl CodingSourceElider<'_> {
     fn elide_tool_model_content(&mut self, call: &AgentToolCall, content: &str) -> String {
         if is_line_hash_read_tool(&call.name)
             && let Some(path) = line_hash_call_path(call)
@@ -301,27 +255,20 @@ fn anchor_line_number(anchor: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
+    fn make_visible(path: &str, anchors: &[&str]) -> HashSet<CodingSourceLineKey> {
+        anchors
+            .iter()
+            .map(|anchor| CodingSourceLineKey {
+                path: path.to_string(),
+                anchor: anchor.to_string(),
+            })
+            .collect()
+    }
+
     #[test]
     fn collapses_repeated_read_lines() {
-        let first_call = AgentToolCall {
-            id: "call_read_1".to_string(),
-            name: "coding__read_code".to_string(),
-            arguments: serde_json::json!({
-                "path": "src/foo.rs",
-                "anchor": "10#aa",
-                "mode": "around",
-            }),
-        };
-        let messages = vec![
-            AgentMessage::assistant_tool_call_protocol_with_reasoning(None, None, vec![first_call]),
-            AgentMessage::tool(
-                "call_read_1",
-                "coding__read_code",
-                "10#aa|let a = 1;\n11#bb|\n12#cc|let b = 2;\n",
-            ),
-        ];
-        let mut elider = CodingSourceElider::from_messages(&messages);
-        let next_call = AgentToolCall {
+        let mut visible = make_visible("src/foo.rs", &["10#aa", "11#bb", "12#cc"]);
+        let call = AgentToolCall {
             id: "call_read_2".to_string(),
             name: "coding__read_code".to_string(),
             arguments: serde_json::json!({
@@ -331,31 +278,24 @@ mod tests {
             }),
         };
 
-        let output = elider.elide_tool_model_content(
-            &next_call,
+        let output = elide_tool_model_content(
+            &mut visible,
+            &call,
             "10#aa|let a = 1;\n11#bb|\n12#cc|let b = 2;\n13#dd|let c = 3;\n",
         );
 
         assert_eq!(output, "10#aa...12#cc~\n13#dd|let c = 3;\n");
+        // Newly seen line is now visible
+        assert!(visible.contains(&CodingSourceLineKey {
+            path: "src/foo.rs".into(),
+            anchor: "13#dd".into(),
+        }));
     }
 
     #[test]
     fn collapses_repeated_read_file_lines() {
-        let first_call = AgentToolCall {
-            id: "call_file_1".to_string(),
-            name: "read_file".to_string(),
-            arguments: serde_json::json!({
-                "path": "AGENTS.md",
-                "start_line": 1,
-                "line_count": 3,
-            }),
-        };
-        let messages = vec![
-            AgentMessage::assistant_tool_call_protocol_with_reasoning(None, None, vec![first_call]),
-            AgentMessage::tool("call_file_1", "read_file", "1#aa|# Title\n2#bb|\n"),
-        ];
-        let mut elider = CodingSourceElider::from_messages(&messages);
-        let next_call = AgentToolCall {
+        let mut visible = make_visible("AGENTS.md", &["1#aa", "2#bb"]);
+        let call = AgentToolCall {
             id: "call_file_2".to_string(),
             name: "read_file".to_string(),
             arguments: serde_json::json!({
@@ -366,20 +306,16 @@ mod tests {
         };
 
         let output =
-            elider.elide_tool_model_content(&next_call, "1#aa|# Title\n2#bb|\n3#cc|More text\n");
+            elide_tool_model_content(&mut visible, &call, "1#aa|# Title\n2#bb|\n3#cc|More text\n");
 
         assert_eq!(output, "1#aa...2#bb~\n3#cc|More text\n");
     }
 
     #[test]
     fn collapses_search_lines_per_path_and_adjacency() {
-        let messages = vec![AgentMessage::tool(
-            "call_search_1",
-            "coding__search_code",
-            "src/foo.rs|20#aa|foo\nsrc/foo.rs|21#bb|bar\nsrc/foo.rs|23#cc|gap\nsrc/bar.rs|7#dd|baz\n",
-        )];
-        let mut elider = CodingSourceElider::from_messages(&messages);
-        let next_call = AgentToolCall {
+        let mut visible = make_visible("src/foo.rs", &["20#aa", "21#bb", "23#cc"]);
+        visible.extend(make_visible("src/bar.rs", &["7#dd"]));
+        let call = AgentToolCall {
             id: "call_search_2".to_string(),
             name: "coding__search_code".to_string(),
             arguments: serde_json::json!({
@@ -400,8 +336,9 @@ mod tests {
             }),
         };
 
-        let output = elider.elide_tool_model_content(
-            &next_call,
+        let output = elide_tool_model_content(
+            &mut visible,
+            &call,
             "src/foo.rs|20#aa|foo\nsrc/foo.rs|21#bb|bar\nsrc/foo.rs|23#cc|gap\nsrc/foo.rs|24#ee|fresh\nsrc/bar.rs|7#dd|baz\nsrc/bar.rs|8#ff|fresh\n",
         );
 
@@ -413,13 +350,8 @@ mod tests {
 
     #[test]
     fn shares_visibility_between_search_and_read() {
-        let messages = vec![AgentMessage::tool(
-            "call_search_1",
-            "coding__search_code",
-            "src/foo.rs|42#ab|    call_target();\n",
-        )];
-        let mut elider = CodingSourceElider::from_messages(&messages);
-        let read_call = AgentToolCall {
+        let mut visible = make_visible("src/foo.rs", &["42#ab"]);
+        let call = AgentToolCall {
             id: "call_read_1".to_string(),
             name: "coding__read_code".to_string(),
             arguments: serde_json::json!({
@@ -429,8 +361,9 @@ mod tests {
             }),
         };
 
-        let output = elider.elide_tool_model_content(
-            &read_call,
+        let output = elide_tool_model_content(
+            &mut visible,
+            &call,
             "41#aa|fn wrapper() {\n42#ab|    call_target();\n43#ac|}\n",
         );
 
@@ -439,13 +372,9 @@ mod tests {
 
     #[test]
     fn does_not_treat_omitted_records_as_visible_source() {
-        let messages = vec![AgentMessage::tool(
-            "call_search_1",
-            "coding__search_code",
-            "src/foo.rs|42#ab~\n",
-        )];
-        let mut elider = CodingSourceElider::from_messages(&messages);
-        let search_call = AgentToolCall {
+        let mut visible = HashSet::new();
+        // Only the ~ form was in history — should NOT be treated as visible
+        let call = AgentToolCall {
             id: "call_search_2".to_string(),
             name: "coding__search_code".to_string(),
             arguments: serde_json::json!({
@@ -467,7 +396,7 @@ mod tests {
         };
 
         let output =
-            elider.elide_tool_model_content(&search_call, "src/foo.rs|42#ab|    call_target();");
+            elide_tool_model_content(&mut visible, &call, "src/foo.rs|42#ab|    call_target();");
 
         assert_eq!(output, "src/foo.rs|42#ab|    call_target();");
     }

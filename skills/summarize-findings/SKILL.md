@@ -1,9 +1,10 @@
 ---
-id: summarize-findings
+name: summarize-findings
+description: Compress investigation findings into a concise summary tied to the user's question.
 ---
 
 ## When To Use
-- An investigation, inspection, debugging session, or research task produced facts that need to be compressed for a user or downstream primitive.
+- An investigation, inspection, debugging session, or research task produced facts that need to be compressed for a user or downstream step.
 - The task outcome is primarily understanding, not editing or committing.
 - Multiple files, commands, or observations need to be organized into a concise result.
 - The next step depends on distinguishing confirmed facts from assumptions and unknowns.
@@ -25,7 +26,7 @@ id: summarize-findings
 - The findings are concise, ordered by importance, and tied to the user's request.
 - Evidence is specific enough to be actionable without reproducing all raw output.
 - Uncertainty and blockers are clearly labeled.
-- A downstream primitive or the user can decide what to do next from the summary.
+- A downstream step or the user can decide what to do next from the summary.
 
 ## Recovery
 - If evidence is contradictory, show the conflict and identify what would resolve it.

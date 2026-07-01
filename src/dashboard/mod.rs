@@ -133,32 +133,20 @@ pub struct DashboardTokenUsageSnapshot {
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct DashboardStatusCommandSnapshot {
     pub runtime_turn: String,
-    pub bound_primitive: String,
     pub active_plans: usize,
     pub events: String,
     pub plan_steps: Vec<DashboardPlanStep>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
-pub struct DashboardPrimitiveOptimizationSnapshot {
+pub struct DashboardSkillOptimizationSnapshot {
     pub running: bool,
     pub current_trigger: Option<String>,
     pub last_result: Option<String>,
     pub last_completed_at_ms: Option<i64>,
-    pub primitive_evidence_records: usize,
-    pub total_primitive_evidence_run_records: usize,
-    pub total_primitive_reflections: usize,
-    pub total_primitive_patch_candidates: usize,
-    pub total_primitive_merge_candidates: usize,
-    pub total_primitive_candidate_evaluations: usize,
-    pub total_primitive_frontier_entries: usize,
-    pub latest_primitive_frontier_root_entries: usize,
-    pub latest_primitive_frontier_branched_entries: usize,
-    pub latest_primitive_frontier_max_generation: usize,
-    pub total_primitive_patch_applied: usize,
-    pub total_primitive_merge_applied: usize,
-    pub total_primitive_update_rollbacks: usize,
-    pub total_primitive_optimization_rounds: usize,
+    pub skill_evidence_records: usize,
+    pub total_skill_evidence_run_records: usize,
+    pub total_skill_patch_applied: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -331,7 +319,7 @@ pub struct DashboardState {
     #[serde(default)]
     pub token_usage: DashboardTokenUsageSnapshot,
     #[serde(default)]
-    pub primitive_optimization: DashboardPrimitiveOptimizationSnapshot,
+    pub skill_optimization: DashboardSkillOptimizationSnapshot,
     #[serde(default)]
     pub runtime_optimization: DashboardRuntimeOptimizationSnapshot,
     #[serde(default)]

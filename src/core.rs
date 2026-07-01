@@ -162,53 +162,6 @@ pub struct UpdatePlanArgs {
     pub plan: Vec<UpdatePlanStepArgs>,
 }
 
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct CreatePrimitiveSpecArgs {
-    #[serde(rename = "primitive_id", alias = "id")]
-    pub id: String,
-    #[serde(default)]
-    pub when_to_use: Vec<String>,
-    #[serde(default)]
-    pub preconditions: Vec<String>,
-    #[serde(default, rename = "primitive_steps", alias = "primitive_steps")]
-    pub primitive_steps: Vec<String>,
-    #[serde(default)]
-    pub done_criteria: Vec<String>,
-    #[serde(default)]
-    pub recovery: Vec<String>,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ActivateComposedPrimitiveArgs {
-    /// Single primitive id or a temporary composition encoded as existing primitive filenames joined by `-`.
-    #[serde(rename = "primitive_id", alias = "workflow_id", alias = "composition")]
-    pub workflow_id: String,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct ReadPrimitiveSpecArgs {
-    #[serde(rename = "primitive_id", alias = "workflow_id")]
-    pub workflow_id: String,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct UpdatePrimitiveSpecArgs {
-    #[serde(rename = "primitive_id", alias = "workflow_id")]
-    pub workflow_id: String,
-    #[serde(default)]
-    pub reason: Option<String>,
-    pub when_to_use: Vec<String>,
-    pub preconditions: Vec<String>,
-    #[serde(rename = "primitive_steps", alias = "primitive_steps")]
-    pub primitive_steps: Vec<String>,
-    pub done_criteria: Vec<String>,
-    pub recovery: Vec<String>,
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct TokenUsage {
     pub input_tokens: i64,

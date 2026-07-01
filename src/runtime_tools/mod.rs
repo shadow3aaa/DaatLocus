@@ -693,52 +693,6 @@ pub fn render_telegram_tool_result_status(
         }
         "browser_reload" => Some(telegram_status(glyph::BROWSER, "Browser Reloaded")),
         "browser_close_page" => Some(telegram_status(glyph::BROWSER, "Browser Closed")),
-        "create_primitive_spec" => Some(telegram_status(
-            glyph::WORKFLOW,
-            format!(
-                "Primitive Spec Created: {}",
-                compact_telegram_status_detail(
-                    workflow_id_from_result(result.activity_event.as_ref())
-                        .or_else(|| call_arg_string(call, "id"))
-                        .unwrap_or_else(|| "unknown".to_string()),
-                )
-            ),
-        )),
-        "activate_composed_primitive" => Some(telegram_status(
-            glyph::WORKFLOW,
-            format!(
-                "Primitive Active: {}",
-                compact_telegram_status_detail(
-                    workflow_id_from_result(result.activity_event.as_ref())
-                        .or_else(|| call_arg_string(call, "primitive_id"))
-                        .or_else(|| call_arg_string(call, "workflow_id"))
-                        .or_else(|| call_arg_string(call, "composition"))
-                        .unwrap_or_else(|| "unknown".to_string()),
-                )
-            ),
-        )),
-        "read_primitive_spec" => Some(telegram_status(
-            glyph::WORKFLOW,
-            format!(
-                "Primitive Spec Read: {}",
-                compact_telegram_status_detail(
-                    call_arg_string(call, "primitive_id")
-                        .or_else(|| call_arg_string(call, "workflow_id"))
-                        .unwrap_or_else(|| "unknown".to_string())
-                )
-            ),
-        )),
-        "update_primitive_spec" => Some(telegram_status(
-            glyph::WORKFLOW,
-            format!(
-                "Primitive Spec Updated: {}",
-                compact_telegram_status_detail(
-                    call_arg_string(call, "primitive_id")
-                        .or_else(|| call_arg_string(call, "workflow_id"))
-                        .unwrap_or_else(|| "unknown".to_string())
-                )
-            ),
-        )),
         _ => Some(telegram_status(glyph::EXEC, "App Updated")),
     }
 }
@@ -753,15 +707,7 @@ fn demangle_known_app_tool_name(tool_name: &str) -> &str {
 }
 
 fn canonical_runtime_tool_name(tool_name: &str) -> &str {
-    match tool_name {
-        "create_workflow" => "create_primitive_spec",
-        "activate_workflow" | "activate_primitive" | "compose_workflows" | "compose_primitives" => {
-            "activate_composed_primitive"
-        }
-        "read_workflow" => "read_primitive_spec",
-        "update_workflow" => "update_primitive_spec",
-        _ => tool_name,
-    }
+    tool_name
 }
 
 fn telegram_status_ignored_tool(tool_name: &str) -> bool {
@@ -779,18 +725,6 @@ fn telegram_tool_failure_status(tool_name: &str) -> Option<TelegramLiveStatus> {
         "browser_open_page" | "browser_snapshot" | "browser_wait" | "browser_click"
         | "browser_fill" | "browser_back" | "browser_forward" | "browser_reload"
         | "browser_close_page" => Some(telegram_status(glyph::ERROR, "Browser Action Failed")),
-        "create_primitive_spec" => Some(telegram_status(
-            glyph::ERROR,
-            "Primitive Spec Creation Failed",
-        )),
-        "activate_composed_primitive" => {
-            Some(telegram_status(glyph::ERROR, "Primitive Activation Failed"))
-        }
-        "read_primitive_spec" => Some(telegram_status(glyph::ERROR, "Primitive Spec Read Failed")),
-        "update_primitive_spec" => Some(telegram_status(
-            glyph::ERROR,
-            "Primitive Spec Update Failed",
-        )),
         _ => Some(telegram_status(glyph::ERROR, "App Failed")),
     }
 }
@@ -799,42 +733,6 @@ fn telegram_status(icon: impl Into<String>, text: impl Into<String>) -> Telegram
     TelegramLiveStatus {
         icon: icon.into(),
         text: text.into(),
-    }
-}
-
-fn call_arg_string(call: &AgentToolCall, name: &str) -> Option<String> {
-    call.arguments.get(name).and_then(|value| match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Number(_) | Value::Bool(_) => Some(value.to_string()),
-        _ => None,
-    })
-}
-
-fn workflow_id_from_result(event: Option<&SessionActivityEvent>) -> Option<String> {
-    match event {
-        Some(SessionActivityEvent::CreatePrimitiveSpecResult(event)) => {
-            Some(event.primitive_id.clone())
-        }
-        Some(SessionActivityEvent::ActivatePrimitiveResult(event)) => {
-            Some(event.primitive_id.clone())
-        }
-        _ => None,
-    }
-}
-
-fn compact_telegram_status_detail(detail: String) -> String {
-    const MAX_CHARS: usize = 40;
-
-    let compact = detail.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = compact.chars();
-    let mut truncated = chars.by_ref().take(MAX_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        truncated.push_str("...");
-    }
-    if truncated.is_empty() {
-        "unknown".to_string()
-    } else {
-        truncated
     }
 }
 
@@ -903,7 +801,6 @@ mod tests {
         telegram_acl::TelegramAclHandle,
         telegram_transport::state::TelegramTransportState,
         terminal_app::TerminalApp,
-        workflow::PrimitiveStore,
         workspace_app::WorkspaceAppRegistry,
     };
 
@@ -959,14 +856,10 @@ mod tests {
                 plan: Plan::new().await,
                 events: EventStore::new().await,
                 pending_work: PendingWorkQueue::new().await,
-                workflows: PrimitiveStore::new().await,
                 openskills: OpenSkillsCatalog::default(),
-                bound_primitive_composition: None,
-                bound_primitive_id: None,
-                active_primitive_run: None,
-                pending_primitive_run_flushes: Vec::new(),
+                active_skill_run: None,
+                pending_skill_run_flushes: Vec::new(),
                 current_work_origin: None,
-                workflow_step_started_bound_id: None,
                 apps,
                 workspace_apps: WorkspaceAppRegistry::default(),
                 telegram: telegram.handle(),
@@ -999,6 +892,7 @@ mod tests {
                 claimed_event_ids: Vec::new(),
                 claimed_app_notices: Vec::new(),
                 afterclaim_context_fingerprint: None,
+                visible_source_lines: HashSet::new(),
                 delivered_root_instruction_fingerprint: None,
                 idle_since: None,
                 last_idle_sleep_at: None,
@@ -1099,31 +993,6 @@ mod tests {
                 .text,
             "Command Ran"
         );
-    }
-
-    #[test]
-    fn telegram_tool_status_renders_primitive_activation_failure() {
-        let call = AgentToolCall {
-            id: "call_1".to_string(),
-            name: "activate_composed_primitive".to_string(),
-            arguments: serde_json::json!({ "primitive_id": "repo-analysis-summary" }),
-        };
-        let result = tool_result(
-            "activate_composed_primitive",
-            serde_json::json!({ "error": "unknown primitive" }),
-            Some(SessionActivityEvent::Error(
-                TextActivityDescriptor {
-                    title: "activate_composed_primitive failed".to_string(),
-                    body_lines: Vec::new(),
-                }
-                .into(),
-            )),
-        );
-
-        let status = render_telegram_tool_result_status(&call, &result).unwrap();
-
-        assert_eq!(status.icon, glyph::ERROR);
-        assert_eq!(status.text, "Primitive Activation Failed");
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 //! Runtime context state carried by the Daat Locus main loop.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -31,7 +31,6 @@ use crate::{
     sandbox::RuntimeSandboxPolicy,
     telegram_acl::TelegramAclHandle,
     telegram_transport::state::TelegramTransportStateHandle,
-    workflow::{PrimitiveComposition, PrimitiveRunOutcome, PrimitiveSpec, PrimitiveStore},
     workspace_app::WorkspaceAppRegistry,
 };
 
@@ -64,14 +63,10 @@ pub struct Context {
     pub plan: Plan,
     pub events: EventStore,
     pub pending_work: PendingWorkQueue,
-    pub workflows: PrimitiveStore,
     pub openskills: OpenSkillsCatalog,
-    pub bound_primitive_id: Option<String>,
-    pub bound_primitive_composition: Option<PrimitiveComposition>,
-    pub active_primitive_run: Option<ActivePrimitiveRunSession>,
-    pub pending_primitive_run_flushes: Vec<PendingPrimitiveRunFlush>,
+    pub active_skill_run: Option<ActiveSkillRunSession>,
+    pub pending_skill_run_flushes: Vec<PendingSkillRunFlush>,
     pub current_work_origin: Option<String>,
-    pub workflow_step_started_bound_id: Option<String>,
     pub apps: AppManager,
     pub workspace_apps: WorkspaceAppRegistry,
     pub telegram: TelegramTransportStateHandle,
@@ -99,6 +94,8 @@ pub struct Context {
     pub claimed_app_notices: Vec<AppNoticeKey>,
     pub afterclaim_context_fingerprint: Option<String>,
     pub delivered_root_instruction_fingerprint: Option<String>,
+    pub visible_source_lines:
+        HashSet<crate::runtime::runtime_loop::coding_source_elision::CodingSourceLineKey>,
     pub idle_since: Option<Instant>,
     pub last_idle_sleep_at: Option<Instant>,
     pub session_title: crate::runtime::session_title::SessionTitleState,
@@ -114,9 +111,9 @@ pub struct TelegramLiveDraftRecord {
 pub type TelegramLiveDraftRegistry = Arc<Mutex<HashMap<String, TelegramLiveDraftRecord>>>;
 
 #[derive(Debug, Clone)]
-pub struct ActivePrimitiveRunSession {
+pub struct ActiveSkillRunSession {
     pub run_id: String,
-    pub workflow_id: String,
+    pub skill_name: String,
     pub started_at_ms: i64,
     pub origin: String,
     pub turn_count: usize,
@@ -128,9 +125,19 @@ pub struct ActivePrimitiveRunSession {
 }
 
 #[derive(Debug, Clone)]
-pub struct PendingPrimitiveRunFlush {
-    pub session: ActivePrimitiveRunSession,
-    pub outcome: PrimitiveRunOutcome,
+#[allow(dead_code)]
+pub enum SkillRunOutcome {
+    Completed,
+    Blocked,
+    Abandoned,
+    Superseded,
+    NoProgress,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingSkillRunFlush {
+    pub session: ActiveSkillRunSession,
+    pub outcome: SkillRunOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -177,42 +184,24 @@ impl Context {
         PreTurnContextAssembler::default_runtime().assemble(self, state)
     }
 
-    pub fn bound_primitive(&self) -> Option<&PrimitiveSpec> {
-        self.bound_primitive_id
-            .as_deref()
-            .and_then(|workflow_id| self.workflows.get(workflow_id))
-    }
-
-    pub fn bound_primitive_composition_specs(&self) -> Vec<&PrimitiveSpec> {
-        self.bound_primitive_composition
-            .as_ref()
-            .map(|composition| {
-                composition
-                    .primitive_ids
-                    .iter()
-                    .filter_map(|primitive_id| self.workflows.get(primitive_id))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    pub fn begin_composed_primitive_run_session(&mut self, workflow_id: impl Into<String>) {
-        let workflow_id = workflow_id.into();
+    pub fn begin_skill_run_session(
+        &mut self,
+        skill_name: impl Into<String>,
+        origin: impl Into<String>,
+    ) {
+        let skill_name = skill_name.into();
         if self
-            .active_primitive_run
+            .active_skill_run
             .as_ref()
-            .is_some_and(|session| session.workflow_id == workflow_id)
+            .is_some_and(|session| session.skill_name == skill_name)
         {
             return;
         }
-        self.active_primitive_run = Some(ActivePrimitiveRunSession {
-            run_id: format!("workflow-run:{}", uuid::Uuid::new_v4()),
-            workflow_id,
+        self.active_skill_run = Some(ActiveSkillRunSession {
+            run_id: format!("skill-run:{}", uuid::Uuid::new_v4()),
+            skill_name,
             started_at_ms: chrono::Utc::now().timestamp_millis(),
-            origin: self
-                .current_work_origin
-                .clone()
-                .unwrap_or_else(|| "runtime_work".to_string()),
+            origin: origin.into(),
             turn_count: 0,
             tool_action_count: 0,
             manual_fix_detected: false,
@@ -222,10 +211,10 @@ impl Context {
         });
     }
 
-    pub fn queue_active_primitive_run_for_flush(&mut self, outcome: PrimitiveRunOutcome) {
-        if let Some(session) = self.active_primitive_run.take() {
-            self.pending_primitive_run_flushes
-                .push(PendingPrimitiveRunFlush { session, outcome });
+    pub fn queue_active_skill_run_for_flush(&mut self, outcome: SkillRunOutcome) {
+        if let Some(session) = self.active_skill_run.take() {
+            self.pending_skill_run_flushes
+                .push(PendingSkillRunFlush { session, outcome });
         }
     }
 
@@ -397,7 +386,6 @@ impl Context {
     }
 
     pub async fn shutdown(self) {
-        self.workflows.shutdown().await;
         self.memory.shutdown().await;
         self.plan.shutdown().await;
         self.events.shutdown().await;

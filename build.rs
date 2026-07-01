@@ -10,7 +10,7 @@ fn main() {
     emit_build_target();
     build_embedded_webui(&manifest_dir);
     write_prompt_bindings(&manifest_dir);
-    write_builtin_primitive_bindings(&manifest_dir);
+    write_builtin_skill_bindings(&manifest_dir);
 }
 
 fn emit_build_target() {
@@ -566,43 +566,40 @@ fn split_prompt_frontmatter(content: &str) -> Option<(&str, &str)> {
     Some((frontmatter, &rest[delimiter.1..]))
 }
 
-fn write_builtin_primitive_bindings(manifest_dir: &Path) {
-    let workflows_dir = manifest_dir.join("workflows");
-    println!("cargo:rerun-if-changed={}", workflows_dir.display());
+fn write_builtin_skill_bindings(manifest_dir: &Path) {
+    let skills_dir = manifest_dir.join("skills");
+    println!("cargo:rerun-if-changed={}", skills_dir.display());
 
     let mut sources = Vec::<(String, PathBuf)>::new();
-    if let Ok(entries) = fs::read_dir(&workflows_dir) {
+    if let Ok(entries) = fs::read_dir(&skills_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !is_builtin_primitive_file(&path) {
+            if !path.is_dir() {
                 continue;
             }
-            println!("cargo:rerun-if-changed={}", path.display());
-            let stem = path
-                .file_stem()
+            let skill_file = path.join("SKILL.md");
+            if !skill_file.is_file() {
+                continue;
+            }
+            println!("cargo:rerun-if-changed={}", skill_file.display());
+            let dir_name = path
+                .file_name()
                 .and_then(|value| value.to_str())
-                .expect("workflow stem")
+                .expect("skill dir name")
                 .to_string();
-            let canonical = path.canonicalize().unwrap_or_else(|_| {
-                workflows_dir.join(path.file_name().expect("primitive spec file"))
-            });
-            sources.push((stem, canonical));
+            let canonical = skill_file
+                .canonicalize()
+                .unwrap_or_else(|_| skills_dir.join(&dir_name).join("SKILL.md"));
+            sources.push((dir_name, canonical));
         }
     }
     sources.sort_by(|left, right| left.0.cmp(&right.0));
 
-    let out_path =
-        PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("builtin_workflows.rs");
-    let mut code =
-        String::from("pub(crate) const BUILTIN_PRIMITIVE_SOURCES: &[(&str, &str)] = &[\n");
+    let out_path = PathBuf::from(env::var("OUT_DIR").expect("out dir")).join("builtin_skills.rs");
+    let mut code = String::from("pub(crate) const BUILTIN_SKILL_SOURCES: &[(&str, &str)] = &[\n");
     for (id, path) in &sources {
         code.push_str(&format!("    ({id:?}, include_str!({:?})),\n", path));
     }
     code.push_str("];\n");
-    fs::write(out_path, code).expect("write builtin primitive bindings");
-}
-
-fn is_builtin_primitive_file(path: &Path) -> bool {
-    path.extension().and_then(|value| value.to_str()) == Some("md")
-        && path.file_name().and_then(|value| value.to_str()) != Some("README.md")
+    fs::write(out_path, code).expect("write builtin skill bindings");
 }

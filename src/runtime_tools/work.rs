@@ -3,23 +3,17 @@ use serde_json::json;
 
 use crate::{
     activity_event::{
-        ActivatePrimitiveActivityDescriptor, CreatePrimitiveSpecActivityDescriptor,
         PlanActivityDescriptor, PlanActivityKind, PlanStepActivityDescriptor,
-        PlanStepActivityStatus, ReplyDisposition, ReplySubject, TextActivityDescriptor,
-        ToolCallActivityEvent,
+        PlanStepActivityStatus, ReplyDisposition, ReplySubject, ToolCallActivityEvent,
     },
     context::Context,
-    core::{
-        ActivateComposedPrimitiveArgs, CreatePrimitiveSpecArgs, EventResolveArgs,
-        NoticeResolvedArgs, ReadPrimitiveSpecArgs, UpdatePlanArgs, UpdatePrimitiveSpecArgs,
-    },
+    core::{EventResolveArgs, NoticeResolvedArgs, UpdatePlanArgs},
     dashboard::SessionActivityEvent,
     dashboard::render::{current_plan_step_for_dashboard, status_command_snapshot_for_dashboard},
     events::{EventDisposition, EventPayload, EventStatus},
     plan::{Plan, PlanStatus, PlanStep},
     reasoning::{episode::EpisodeActionRecord, runtime::AgentToolCall},
     schema_utils::model_schema_for,
-    workflow::{NewPrimitiveSpec, PrimitiveActivation, PrimitiveRunOutcome, PrimitiveSpec},
 };
 
 use super::{
@@ -53,52 +47,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
             render_update_plan_call_ui,
             execute_update_plan_tool,
         )),
-        Box::new(StaticRuntimeTool::new_with_schema(
-            "create_primitive_spec",
-            "Create an initial reusable SOP primitive draft when no reusable primitive fits.",
-            model_schema_for::<CreatePrimitiveSpecArgs>(),
-            summarize_create_primitive_spec_tool,
-            render_create_primitive_spec_call_ui,
-            execute_create_primitive_spec_tool,
-        )),
-        Box::new(StaticRuntimeTool::new_with_schema(
-            "activate_composed_primitive",
-            "Bind one existing SOP primitive or a temporary composition of existing primitives to the current task.",
-            model_schema_for::<ActivateComposedPrimitiveArgs>(),
-            summarize_activate_primitive_tool,
-            render_activate_primitive_call_ui,
-            execute_activate_primitive_tool,
-        )),
-        Box::new(StaticRuntimeTool::new_with_schema(
-            "read_primitive_spec",
-            "Read the complete SOP primitive spec for a primitive id, including origin and backing file path when it is a workspace primitive.",
-            model_schema_for::<ReadPrimitiveSpecArgs>(),
-            summarize_read_workflow_tool,
-            render_read_workflow_call_ui,
-            execute_read_workflow_tool,
-        )),
-        Box::new(StaticRuntimeTool::new_with_schema(
-            "update_primitive_spec",
-            "Replace a workspace SOP primitive spec with a complete cleaned version. Use this for user-requested primitive maintenance; builtin primitives are read-only.",
-            model_schema_for::<UpdatePrimitiveSpecArgs>(),
-            summarize_update_workflow_tool,
-            render_update_workflow_call_ui,
-            execute_update_workflow_tool,
-        )),
     ]
-}
-
-fn generic_activity_event(
-    title: impl Into<String>,
-    body_lines: Vec<String>,
-) -> SessionActivityEvent {
-    SessionActivityEvent::GenericApp(
-        TextActivityDescriptor {
-            title: title.into(),
-            body_lines,
-        }
-        .into(),
-    )
 }
 
 fn reply_activity_event(
@@ -113,12 +62,6 @@ fn reply_activity_event(
             message_lines,
         }
         .into(),
-    )
-}
-
-fn activate_primitive_activity_event(primitive_id: String) -> SessionActivityEvent {
-    SessionActivityEvent::ActivatePrimitiveResult(
-        ActivatePrimitiveActivityDescriptor { primitive_id }.into(),
     )
 }
 
@@ -247,20 +190,11 @@ fn execute_event_resolve_tool<'a>(
                 )
             }
         };
-        context.queue_active_primitive_run_for_flush(PrimitiveRunOutcome::Completed);
-        context.bound_primitive_id = None;
-        context.bound_primitive_composition = None;
         let reply_lines = reply_message
             .as_deref()
-            .map(|message| {
-                message
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            })
+            .map(|message| message.lines().map(ToString::to_string).collect::<Vec<_>>())
             .unwrap_or_default();
+        context.queue_active_skill_run_for_flush(crate::context::SkillRunOutcome::Completed);
         let result_payload = json!({
             "event_id": event_id,
             "disposition": event_disposition_kind(args.disposition),
@@ -331,13 +265,8 @@ fn execute_notice_resolved_tool<'a>(
             ));
         }
 
-        context.queue_active_primitive_run_for_flush(PrimitiveRunOutcome::Completed);
-        context.bound_primitive_id = None;
-        context.bound_primitive_composition = None;
-        let result_lines = vec![
-            format!("App notice resolved: {}", key.app),
-            format!("Reason: {}", summarize_inline_text(&key.reason)),
-        ];
+        context.queue_active_skill_run_for_flush(crate::context::SkillRunOutcome::Completed);
+        let result_lines = vec![format!("Reason: {}", summarize_inline_text(&key.reason))];
         Ok(ToolExecutionResult::from_activity_event(
             format!("resolved app notice {}: {}", key.app, key.reason),
             json!({
@@ -391,9 +320,6 @@ fn execute_update_plan_tool<'a>(
         let effective_steps = context.plan.steps().to_vec();
         let summary = if effective_steps.is_empty() {
             if changed {
-                context.queue_active_primitive_run_for_flush(PrimitiveRunOutcome::Completed);
-                context.bound_primitive_id = None;
-                context.bound_primitive_composition = None;
                 "cleared plan after completion".to_string()
             } else {
                 "plan already clear".to_string()
@@ -424,296 +350,6 @@ fn execute_update_plan_tool<'a>(
                 "plan": effective_steps,
             }),
             Some(SessionActivityEvent::PlanResult(plan_event.into())),
-        ))
-    })
-}
-
-fn summarize_create_primitive_spec_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: CreatePrimitiveSpecArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "create_primitive_spec".to_string(),
-        summary: format!("primitive_id={}", args.id),
-    })
-}
-
-fn render_create_primitive_spec_call_ui(call: &AgentToolCall) -> Result<ToolCallActivityEvent> {
-    let args: CreatePrimitiveSpecArgs = parse_tool_args(call)?;
-    let lines = vec![
-        format!("id={}", args.id),
-        format!("when_to_use={}", args.when_to_use.len()),
-        format!("primitive_steps={}", args.primitive_steps.len()),
-    ];
-    Ok(ToolCallActivityEvent::create_primitive_spec(
-        "create_primitive_spec",
-        lines,
-    ))
-}
-
-fn execute_create_primitive_spec_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: CreatePrimitiveSpecArgs = parse_tool_args(call)?;
-        let created = context
-            .workflows
-            .create_workflow(NewPrimitiveSpec {
-                id: args.id,
-                when_to_use: args.when_to_use,
-                preconditions: args.preconditions,
-                primitive_steps: args.primitive_steps,
-                done_criteria: args.done_criteria,
-                recovery: args.recovery,
-            })
-            .await?;
-        let summary = format!("created primitive spec {}", created.id);
-        Ok(ToolExecutionResult::from_activity_event(
-            summary.clone(),
-            json!({
-                "created": created,
-                "bound_primitive_id": context.bound_primitive_id,
-            }),
-            Some(SessionActivityEvent::CreatePrimitiveSpecResult(
-                CreatePrimitiveSpecActivityDescriptor {
-                    primitive_id: created.id,
-                }
-                .into(),
-            )),
-        ))
-    })
-}
-
-fn summarize_activate_primitive_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: ActivateComposedPrimitiveArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "activate_composed_primitive".to_string(),
-        summary: format!("primitive_id={}", args.workflow_id),
-    })
-}
-
-fn render_activate_primitive_call_ui(call: &AgentToolCall) -> Result<ToolCallActivityEvent> {
-    let args: ActivateComposedPrimitiveArgs = parse_tool_args(call)?;
-    Ok(ToolCallActivityEvent::activate_primitive(
-        "activate_composed_primitive",
-        vec![format!("primitive_id={}", args.workflow_id)],
-    ))
-}
-
-fn execute_activate_primitive_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: ActivateComposedPrimitiveArgs = parse_tool_args(call)?;
-        let workflow_id = require_field(args.workflow_id, "primitive_id")?;
-        let activation = context
-            .workflows
-            .activate_composed_primitive(&workflow_id)?;
-        let (bound_id, primitive_ids, activated_value, is_composition) = match activation {
-            PrimitiveActivation::Single { primitive } => {
-                let primitive_id = primitive.id.clone();
-                (
-                    primitive_id,
-                    vec![primitive.id.clone()],
-                    json!(primitive),
-                    false,
-                )
-            }
-            PrimitiveActivation::Composition { composition } => {
-                let composition_id = composition.composition_id.clone();
-                (
-                    composition_id,
-                    composition.primitive_ids.clone(),
-                    json!(composition),
-                    true,
-                )
-            }
-        };
-        if context.bound_primitive_id.as_deref() == Some(bound_id.as_str()) {
-            context.begin_composed_primitive_run_session(bound_id.clone());
-            if let Some(tx) = &context.dashboard_tx {
-                let status_command = status_command_snapshot_for_dashboard(context);
-                tx.send_modify(|state| {
-                    state.status_command = status_command.clone();
-                });
-            }
-            let summary = if is_composition {
-                format!("primitive composition {bound_id} is already active")
-            } else {
-                format!("primitive {bound_id} is already active")
-            };
-            return Ok(ToolExecutionResult::from_activity_event(
-                summary.clone(),
-                json!({
-                    "bound_primitive_id": context.bound_primitive_id,
-                    "bound_primitive_composition": context.bound_primitive_composition,
-                    "primitive_ids": primitive_ids,
-                    "activated": activated_value,
-                    "is_composition": is_composition,
-                    "already_active": true,
-                }),
-                Some(activate_primitive_activity_event(workflow_id)),
-            )
-            .with_model_content(format!(
-                "summary={summary}\nalready_active=true\nbound_primitive_id={bound_id}\nprimitive_ids={}\nContinue the task using the currently bound primitive or composition; do not call activate_composed_primitive again for this binding.",
-                primitive_ids.join(",")
-            )));
-        }
-        if context.bound_primitive_id.as_deref() != Some(bound_id.as_str()) {
-            context.queue_active_primitive_run_for_flush(PrimitiveRunOutcome::Superseded);
-        }
-        context.bound_primitive_id = Some(bound_id.clone());
-        context.bound_primitive_composition =
-            is_composition.then(|| crate::workflow::PrimitiveComposition {
-                composition_id: bound_id.clone(),
-                primitive_ids: primitive_ids.clone(),
-            });
-        context.begin_composed_primitive_run_session(bound_id.clone());
-        if let Some(tx) = &context.dashboard_tx {
-            let status_command = status_command_snapshot_for_dashboard(context);
-            tx.send_modify(|state| {
-                state.status_command = status_command.clone();
-            });
-        }
-        let summary = if is_composition {
-            format!("activated primitive composition {bound_id}")
-        } else {
-            format!("activated primitive {bound_id}")
-        };
-        Ok(ToolExecutionResult::from_activity_event(
-            summary.clone(),
-            json!({
-                "bound_primitive_id": context.bound_primitive_id,
-                "bound_primitive_composition": context.bound_primitive_composition,
-                "primitive_ids": primitive_ids,
-                "activated": activated_value,
-                "is_composition": is_composition,
-            }),
-            Some(activate_primitive_activity_event(workflow_id)),
-        ))
-    })
-}
-
-fn summarize_read_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: ReadPrimitiveSpecArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "read_primitive_spec".to_string(),
-        summary: format!("primitive_id={}", args.workflow_id),
-    })
-}
-
-fn render_read_workflow_call_ui(call: &AgentToolCall) -> Result<ToolCallActivityEvent> {
-    let args: ReadPrimitiveSpecArgs = parse_tool_args(call)?;
-    Ok(ToolCallActivityEvent::app(
-        "read_primitive_spec",
-        vec![format!("primitive_id={}", args.workflow_id)],
-    ))
-}
-
-fn execute_read_workflow_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: ReadPrimitiveSpecArgs = parse_tool_args(call)?;
-        let workflow_id = require_field(args.workflow_id, "primitive_id")?;
-        let spec = context
-            .workflows
-            .get(&workflow_id)
-            .cloned()
-            .ok_or_else(|| miette::miette!("unknown primitive_id `{workflow_id}`"))?;
-        let origin = context.workflows.workflow_origin(&workflow_id);
-        let path = context
-            .workflows
-            .workflow_path(&workflow_id)
-            .map(|path| path.display().to_string());
-        let summary = format!("read primitive spec {}", spec.id);
-        let primitive_id = spec.id.clone();
-        let origin_label = origin
-            .as_ref()
-            .map(|origin| format!("{origin:?}").to_ascii_lowercase())
-            .unwrap_or_else(|| "unknown".to_string());
-        Ok(ToolExecutionResult::from_activity_event(
-            summary.clone(),
-            json!({
-                "primitive_id": primitive_id,
-                "origin": origin,
-                "path": path,
-                "spec": spec,
-            }),
-            Some(generic_activity_event(
-                "Read Primitive Spec",
-                vec![
-                    format!("primitive_id={workflow_id}"),
-                    format!("origin={origin_label}"),
-                ],
-            )),
-        ))
-    })
-}
-
-fn summarize_update_workflow_tool(call: &AgentToolCall) -> Result<EpisodeActionRecord> {
-    let args: UpdatePrimitiveSpecArgs = parse_tool_args(call)?;
-    Ok(EpisodeActionRecord {
-        kind: "update_primitive_spec".to_string(),
-        summary: format!(
-            "primitive_id={} steps={} reason={}",
-            args.workflow_id,
-            args.primitive_steps.len(),
-            args.reason.as_deref().unwrap_or("")
-        ),
-    })
-}
-
-fn render_update_workflow_call_ui(call: &AgentToolCall) -> Result<ToolCallActivityEvent> {
-    let args: UpdatePrimitiveSpecArgs = parse_tool_args(call)?;
-    Ok(ToolCallActivityEvent::app(
-        "update_primitive_spec",
-        vec![
-            format!("primitive_id={}", args.workflow_id),
-            format!("when_to_use={}", args.when_to_use.len()),
-            format!("primitive_steps={}", args.primitive_steps.len()),
-            format!("done_criteria={}", args.done_criteria.len()),
-        ],
-    ))
-}
-
-fn execute_update_workflow_tool<'a>(
-    context: &'a mut Context,
-    call: &'a AgentToolCall,
-) -> ToolFuture<'a> {
-    Box::pin(async move {
-        let args: UpdatePrimitiveSpecArgs = parse_tool_args(call)?;
-        let workflow_id = require_field(args.workflow_id, "primitive_id")?;
-        let updated = context
-            .workflows
-            .replace_workspace_workflow(
-                &workflow_id,
-                PrimitiveSpec {
-                    id: workflow_id.clone(),
-                    when_to_use: args.when_to_use,
-                    preconditions: args.preconditions,
-                    primitive_steps: args.primitive_steps,
-                    done_criteria: args.done_criteria,
-                    recovery: args.recovery,
-                },
-            )
-            .await?;
-        let summary = format!("updated primitive spec {}", updated.id);
-        Ok(ToolExecutionResult::from_activity_event(
-            summary.clone(),
-            json!({
-                "primitive_id": updated.id,
-                "updated": updated,
-                "reason": trim_optional_field(args.reason),
-            }),
-            Some(generic_activity_event(
-                "Updated Primitive Spec",
-                vec![
-                    format!("primitive_id={workflow_id}"),
-                    format!("summary={summary}"),
-                ],
-            )),
         ))
     })
 }

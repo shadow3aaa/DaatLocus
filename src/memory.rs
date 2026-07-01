@@ -1023,14 +1023,6 @@ fn summarize_activity_event(event: &SessionActivityEvent) -> String {
             format!("web search {}", summarize_runtime_inline_text(&data.query))
         }
         SessionActivityEvent::PlanResult(data) => format!("plan with {} step(s)", data.steps.len()),
-        SessionActivityEvent::CreatePrimitiveSpecResult(data) => {
-            let primitive_id = &data.primitive_id;
-            format!("created primitive spec {primitive_id}")
-        }
-        SessionActivityEvent::ActivatePrimitiveResult(data) => {
-            let primitive_id = &data.primitive_id;
-            format!("activated primitive {primitive_id}")
-        }
         SessionActivityEvent::Patch(data) => summarize_runtime_inline_text(&data.summary_line),
         SessionActivityEvent::Telegram(data) => summarize_runtime_inline_text(&data.title),
         SessionActivityEvent::Reply(data) => data

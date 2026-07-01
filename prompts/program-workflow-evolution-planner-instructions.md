@@ -1,3 +1,0 @@
-- Focus on the preconditions, workflow steps, done criteria, and recovery sections of the primitive spec.
-- Patch candidates should be small and precise; do not repeat the same meaning across multiple sections.
-- If the evidence shows the primitive itself is stable, set should_optimize=false.

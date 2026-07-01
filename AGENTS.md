@@ -2,7 +2,7 @@
 
 This document defines the agent-facing boundaries that match the current Daat Locus implementation.
 
-The goal is not to write abstract slogans. The goal is to give future changes to `app`, `events`, `runtime_tools`, `runtime_context`, `preturn_state`, `telegram_transport`, `workflow`, `memory`, `sleep`, and related modules a set of design constraints that match how the code actually works.
+The goal is not to write abstract slogans. The goal is to give future changes to `app`, `events`, `runtime_tools`, `runtime_context`, `preturn_state`, `telegram_transport`, `skill`, `memory`, `sleep`, and related modules a set of design constraints that match how the code actually works.
 
 ## Project Reality
 
@@ -195,7 +195,7 @@ BrowserSnapshot { url, content, line_count, ref_count }
 WebSearch { query, url, summary }
 PlanUpdated { kind, explanation, steps }
 PatchApplied { files }
-PrimitiveActivated { primitive_id }
+SkillRead { skill_name }
 ReplySent { disposition, subject, message }
 ```
 
@@ -1040,8 +1040,8 @@ Shared/global state:
 - Telegram ACL
 - Telegram default-session mapping
 - session registry
-- builtin primitive specs
-- workspace primitive specs when they are intentionally global assets
+- builtin skills
+- workspace skills when they are intentionally global assets
 
 Per-session state:
 
@@ -1053,7 +1053,7 @@ Per-session state:
 - app instances and app-local runtime state
 - context compaction state
 
-Sleep status and primitive run evidence must be explicitly classified as either
+Sleep status and skill run evidence must be explicitly classified as either
 global optimization input or session-scoped evidence. Do not let those records
 become accidentally mixed because Manager and Session code share helper paths.
 
@@ -1116,8 +1116,8 @@ A runtime turn usually contains these layers:
 
 Runtime context is split by lifetime:
 
-- `afterclaim_context`: claimed event/app-notice input and workflow primitive routing catalog
-- `preturn_context`: memory recall, sensory state, plan, bound workflow state, and project instruction context
+- `afterclaim_context`: claimed event/app-notice input and skill routing catalog
+- `preturn_context`: memory recall, sensory state, plan, and project instruction context
 
 Therefore, when adding an agent-facing interface, first decide which layer it belongs to. Do not directly pile prompt instructions, routing catalogs, or durable task state into app-local state.
 
@@ -1179,8 +1179,8 @@ Do not mix these layers.
 In code, keep this separation visible through `App::render_state`, `docs()`,
 and the generated `appid__get_state` surface. Do not put
 self-optimizable task execution procedures into an app's supplemental
-instruction layer. Reusable methods across tasks should be modeled as `Workflow`
-SOP primitives, not as app-local explanatory text.
+instruction layer. Reusable methods across tasks should be modeled as `Skill`
+documents, not as app-local explanatory text.
 
 ### Event
 
@@ -1231,65 +1231,63 @@ Do not use the plan as:
 - a mirror of the event list
 - an implicit cursor
 
-### Workflow
+### Skill
 
-`Workflow` is the runtime binding and evolution layer over a self-optimizable SOP primitive library. Persisted specs are SOP primitives, not composite task templates, not innate model capability, and not app-local supplemental instruction.
+`Skill` is the runtime discovery and injection layer for reusable operational
+guidance. A skill is a named Markdown document placed under
+`~/.daat-locus/skills/<name>/SKILL.md` that the model can discover through the
+system prompt skill list and read via `read_file`.
 
-A persisted `PrimitiveSpec` answers these questions:
+Skills replaced the old workflow/primitive mechanism. Key differences:
 
-- What stable procedure can be reused as a primitive?
-- What inputs, artifacts, capabilities, or preconditions does the primitive need?
-- What outputs, artifacts, completion evidence, or handoff does it produce?
-- How should this primitive recover from failures or blockers?
-- What boundary prevents it from absorbing neighboring work?
+- No explicit bind step. The model discovers available skills in the system
+  prompt skill list (name + description + path) and reads the SKILL.md content
+  through `read_file`.
+- No composition tools (`activate_composed_primitive`, etc.). The model simply
+  reads the skill content and applies it.
+- Sleep self-improvement tracks which SKILL.md files the model reads and
+  appends improvement patches under `## Sleep Improvements` sections.
 
-The runtime may temporarily compose several primitives into an execution graph for one task. That graph is runtime state, similar to a structured plan with explicit artifact handoff between steps. It must not be written back as a new persisted primitive spec just because it succeeded once.
+Persistence:
 
-`Workflow` must be split into three layers:
+- Builtin skills are compiled from `skills/*/SKILL.md` by `build.rs` and written
+  to `~/.daat-locus/skills/` on startup via `ensure_builtin_skills_on_disk()`.
+- Builtin skills are overwritten on each startup if the compiled content changed.
+- Workspace skills from `~/.agents/skills/` are loaded by the
+  `OpenSkillsCatalog` scanner and are not overwritten.
+- Skill run evidence is accumulated automatically in
+  `SkillRunRecord` (JSONL) by code at the work-completion boundary.
+  The model must not manually write skill outcome logs.
 
-- `PrimitiveSpec`: a persisted SOP primitive asset exposed to the agent through a concise name, capability summary, and thin input/output contract
-- `WorkflowBinding` / runtime composition: which primitive or temporary primitive graph the current task is using; runtime state only
-- `PrimitiveRunRecord`: evidence automatically accumulated after daytime execution for sleep; the current implementation writes it directly at the work-completion boundary instead of generating it later by replaying sleep
+Skill read tracking (`maybe_record_skill_read`):
 
-Rules:
+- Called after each tool execution in the turn loop.
+- Detects `read_file` or `coding__read_code` calls targeting a SKILL.md path.
+- Opens an `ActiveSkillRunSession` in Context, tracking the skill name.
+- At turn finalization (`record_skill_run_evidence`), the session is closed
+  with accumulated turn/action/failure evidence and flushed to
+  `SkillRunRecord` JSONL.
 
-- All persisted specs are primitives. Do not add a `kind` field just to distinguish primitive versus composite workflows; composite workflows should not be persisted in the primitive library.
-- `PrimitiveSpec` must not carry runtime selection state or transient state such as "active".
-- `WorkflowBinding` only means the current task is using a primitive or a temporary composition. It must not write back to the primitive spec itself.
-- `PrimitiveRunRecord` is recorded by code. The model must not manually write a daytime outcome log.
-- The main workflow evolution actions are `patch` and `merge`.
-- v1 does not introduce `deprecate`.
-- Agent-facing workflow primitive routing catalogs should present the full loaded primitive ID vocabulary, plus thin IO/capability contracts only for the top relevant primitives. `when_to_use` may remain as metadata for filtering, sleep-time analysis, and human documentation, but it must not be the primary runtime surface.
-- Do not show only the first N workflows by lexicographic id or only a filtered subset as if that were the whole primitive vocabulary. If the workspace contains many workflows, code should still expose all primitive IDs for composition awareness while expanding only relevant primitive details to avoid context explosion.
-- Workflow evolution must depend only on workflow-bound execution evidence. It must not depend on error demos, failure patterns, or prompt evaluation artifacts.
-- Use sleep to manufacture better primitives from successful reusable experience and merge duplicates. Do not manufacture composite task templates such as `modify-local-project-then-commit-and-push`.
+Sleep self-improvement for skills:
 
-Example primitive vocabulary:
+- Sleep is called periodically by the runtime.
+- `run_skill_improvement_pipeline()` groups unread `SkillRunRecord` entries by
+  skill name.
+- For each skill with evidence, it calls `SkillImprovementPlannerProgram` — a
+  new LLM program that analyzes the records and the current SKILL.md content.
+- The planner proposes targeted additions (not removals or rewrites).
+- The selected patch is appended under `## Sleep Improvements` in the skill's
+  SKILL.md.
+- At most one patch per skill per sleep cycle.
 
-- `inspect-local-project`
-- `inspect-repository-status`
-- `modify-local-project`
-- `run-required-checks`
-- `commit-and-push`
-- `report-result`
-- `ask-clarifying-question`
-- `summarize-findings`
-
-Example temporary graph for "modify, commit, and push":
-
-1. `inspect-repository-status`
-2. `modify-local-project`
-3. `run-required-checks`
-4. `commit-and-push`
-5. `report-result`
-
-Do not use workflow as:
+Do not use skill as:
 
 - a long-term mirror of the plan
 - an implicit runtime state slot
 - a set of auto-generated default templates for blind model use
-- a persisted composite template for every multi-step request
 - a performance ledger that the model has to maintain manually
+
+### Memory
 
 ### Memory
 
@@ -1309,14 +1307,14 @@ Daat Locus has an explicit self-improvement loop:
 - runtime error correction compile
 - compiled runtime contract additions
 
-This means runtime design is not disposable. Any agent-facing interface that systematically induces bad behavior will pollute error cases and workflow run evidence, and then affect later compilation.
+This means runtime design is not disposable. Any agent-facing interface that systematically induces bad behavior will pollute error cases and skill run evidence, and then affect later compilation.
 
 Agent-facing interfaces should therefore be stable, explicit, and reviewable. Do not rely on vague conventions.
 
 Sleep internals must be separated into two independent pipelines:
 
 - `Runtime Error Correction Pipeline`
-- `Workflow Improvement Pipeline`
+- `Skill Improvement Pipeline`
 
 They may run in parallel during the same sleep cycle, but neither pipeline may depend on the other as input.
 
@@ -1330,10 +1328,10 @@ The `Runtime Error Correction Pipeline` must not:
 
 - consume raw complete message streams as its primary input
 - consume sleep-internal program traces as daytime evidence
-- consume workflow run records directly
+- consume skill run records directly
 - infer successful task patterns from positive examples
-- generate task procedures, workflow steps, style preferences, or domain tactics
-- decide whether an arbitrary failure belongs to workflow optimization or prompt correction through semantic guessing
+- generate task procedures, skill steps, style preferences, or domain tactics
+- decide whether an arbitrary failure belongs to skill optimization or prompt correction through semantic guessing
 
 Its input unit should be a `RuntimeErrorCase`: one code-detected runtime or protocol error plus the minimum diagnostic context needed to correct the global contract. If one turn contains multiple errors, split them into multiple cases that share the same turn id.
 
@@ -1341,7 +1339,7 @@ A `RuntimeErrorCase` may include:
 
 - `case_id`, `turn_id`, `occurred_at_ms`
 - `error_kind`, `severity`, and `detected_by`
-- task context: origin, event source, user request summary, claimed ids, bound workflow id, workflow origin
+- task context: origin, event source, user request summary, claimed ids, active skill id, event/app notice source
 - runtime context: phase, available tool names, active surface, plan summary, compact context summary
 - action context: assistant text summary, tool call summaries, tool result summaries, and a short previous-action window
 - error observation: expected behavior, actual behavior, evidence, recoverability, retry counts, and terminal status
@@ -1362,28 +1360,29 @@ Allowed `error_kind` values should be an explicit code-owned whitelist. Examples
 - `claimed_input_left_unresolved`
 - `transport_completion_violation`
 
-Do not feed ordinary task quality problems into runtime error correction, such as slow news search, weak source choice, incomplete summaries, missed code-review findings, or unclear task steps. Those may be workflow or task-quality issues, but code cannot reliably assign them to prompt correction.
+Do not feed ordinary task quality problems into runtime error correction, such as slow news search, weak source choice, incomplete summaries, missed code-review findings, or unclear task steps. Those are task-quality issues, not prompt correction targets.
 
-The `Workflow Improvement Pipeline` is responsible for:
+The `Skill Improvement Pipeline` is responsible for:
 
-- fixing workspace SOP primitive specs based only on workspace `PrimitiveRunRecord`
-- producing primitive spec patches and primitive merges
+- fixing skill SKILL.md content by analyzing `SkillRunRecord` evidence
+- producing targeted additions appended under `## Sleep Improvements` sections
 
-Builtin primitives belong to the base capability layer:
+Builtin skills belong to the base capability layer:
 
-- They are compiled from repository `workflows/*.md` by `build.rs`.
-- They are read-only, not writable, and cannot be patched or merged by sleep.
-- They may be selected and bound by the agent, but they are not self-optimization targets.
+- They are compiled from repository `skills/*/SKILL.md` by `build.rs`.
+- They are writable (placed in `~/.daat-locus/skills/`), but may be overwritten
+  on startup if the compiled content changed.
+- Sleep may apply patches to builtin skill files.
 
 Explicitly forbidden:
 
-- driving workflow patches directly from runtime reviews, error demos, or failure patterns
-- using workflow merge or patch results as evidence for runtime error correction compile
+- driving skill patches from runtime error cases, error demos, or failure patterns
+- using skill improvement results as evidence for runtime error correction compile
 
 Keep these two object classes separate:
 
 - Runtime error correction compile changes global tool/protocol constraints.
-- Workflow evolution changes the primitive SOP library used during task-time composition.
+- Skill improvement evolves the skill guidance library used during task-time.
 
 ## Current App Semantics
 
@@ -1770,7 +1769,7 @@ Rules:
 - `prompt/docs.md` is the app's only prompt document. It is plain markdown
   without required frontmatter. It may include stable capability boundaries and
   operation documentation for the app's tools.
-- Third-party app packages do not carry self-optimizable workflow assets.
+- Third-party app packages do not carry self-optimizable skill assets.
 
 ### `app.toml`
 
@@ -1780,7 +1779,7 @@ Rules:
 
 - It does not carry `id`.
 - It does not carry permissions.
-- It does not carry prompt docs or workflow metadata.
+- It does not carry prompt docs or skill metadata.
 - By default, the entry point is `runtime/app.lua`.
 
 Minimal example:
@@ -1821,22 +1820,25 @@ Do not introduce additional IPC to synchronize tool results and render state.
 
 This means the behavioral body of a third-party app is an object model, not a collection of scripts.
 
-### Workflow Assets
+### Skill Assets
 
-Self-optimizable workflows do not belong to the app package. They are runtime-level SOP primitive assets.
+Skills are not attached to any app by default. They are the self-optimizable
+operational guidance layer.
 
 Rules:
 
-- Workflows are not attached to any app by default.
-- Builtin primitive specs live in repository root `workflows/*.md` and are compiled into the program by `build.rs`.
-- Evolvable workspace primitive specs live in `~/daat-locus-workspace/workflows/*.md`.
-- Each primitive spec is one Markdown file, and the filename is the primitive id.
-- Primitive filenames may contain only lowercase `a-z` and `-`; identity comes only from the file stem.
-- Primitive Markdown content is unrestricted by the primitive id; any legacy frontmatter is ignored for identity, and runtime writes specs as Markdown bodies without frontmatter.
-- A primitive spec file should describe one reusable SOP primitive, not a composite task class.
-- Composite task execution is a temporary runtime graph assembled from primitives; it is not a workflow asset to save by default.
-- `prompt/*.md` is for app descriptions; `workflows/*.md` is for self-optimizable execution processes. Do not mix them.
-- Builtin primitive specs do not fall into a writable runtime directory and are not touched by optimization pipelines.
+- Builtin skills live in repository root `skills/*/SKILL.md` and are compiled
+  into the program by `build.rs`.
+- Evolvable workspace skills live in `~/.agents/skills/<name>/SKILL.md`.
+- Each skill is a single Markdown file with the filename `SKILL.md` inside a
+  directory named for the skill id.
+- Skills do not require frontmatter; the skill id comes from the parent
+  directory name.
+- Skills are discovered by the `OpenSkillsCatalog` scanner at runtime.
+- Builtin skills are writable (placed in `~/.daat-locus/skills/` on startup),
+  but are overwritten if the compiled content changed.
+- `prompt/*.md` is for app descriptions; `skills/` is for self-optimizable
+  operational guidance. Do not mix them.
 
 ### Reload Strategy
 
@@ -1845,11 +1847,11 @@ Third-party apps should not be fully reparsed on every turn.
 Recommended strategy:
 
 - Perform one full scan of `~/daat-locus-workspace/apps` at startup.
-- Scan and watch the primitive spec directory `~/daat-locus-workspace/workflows` separately.
+- Scan and watch the skill directory `~/.agents/skills` separately.
 - Use `notify` at runtime to watch supported directory changes.
 - Map file events to the affected `<app_id_snake_case>`.
 - Mark only that app as dirty and reload it incrementally.
-- When primitive spec files change, mark only the affected primitive as dirty and reload it incrementally.
+- When skill files change, mark only the affected skill as dirty and reload it incrementally.
 - If the watcher fails or directory state becomes untrusted, fall back to one full rescan.
 
 Do not make full parsing the normal path.
@@ -1861,13 +1863,10 @@ v1 does not define a dedicated third-party app cache directory.
 Current conclusions:
 
 - Define only the source directory: `~/daat-locus-workspace/apps`.
-- Define workflow source separately as `~/daat-locus-workspace/workflows`.
 - Do not define `cache/apps`.
-- Do not define `cache/workflows`.
 - If the host later truly needs to persist app runtime state, use the protected runtime state system, for example `~/.daat-locus/state/apps/<app_id_snake_case>/`.
-- If workflow telemetry later needs host persistence, use the protected runtime state system, for example `~/.daat-locus/state/workflows/`.
 
-Third-party apps and workspace primitive specs are agent-editable assets, but they are not runtime state owned directly by the agent.
+Third-party apps and workspace skills are agent-editable assets, but they are not runtime state owned directly by the agent.
 
 ## Current Event Semantics
 
@@ -1993,21 +1992,6 @@ Do not design the final reply as assistant text itself.
 
 Do not add tools such as `append_plan_step` or `select_plan_step` that introduce hidden cursors and incremental synchronization complexity unless there is strong evidence that the current contract is insufficient.
 
-### Workflow Tools
-
-Workflow's responsibility is to expose a reusable SOP primitive library for task-time composition, not to carry dynamic world state.
-
-Current rules:
-
-- The workflow primitive routing catalog appears directly in `afterclaim_context` as a full `primitive_ids` vocabulary plus `relevant_primitives` details for the top task-relevant primitives.
-- `primitive_ids` should include every loaded primitive ID so runtime composition can see the available vocabulary; `relevant_primitives` entries should emphasize primitive name, capability, inputs, outputs, and constraints. `when_to_use` is supporting metadata, not the main interface.
-- The currently bound primitive or temporary primitive graph is exposed to the model in fuller form.
-- v1 only needs `create_primitive_spec` and `activate_composed_primitive`, or an equivalent bind tool.
-- `create_primitive_spec` may only create workspace primitive specs. It must not overwrite builtin primitives.
-- Do not make the model perform workflow semantic search or browse an expanded lexicographic workflow dump before continuing. The full ID vocabulary and relevant primitive details should be displayed directly in `afterclaim_context`.
-- Do not introduce explicit `log_workflow_outcome`. Daytime evidence should be written automatically by code into `PrimitiveRunRecord`.
-- Whether to bind a workflow is driven by task complexity and reusability, not by app domain state.
-
 ## What Code Should Do
 
 Code is responsible for:
@@ -2015,14 +1999,14 @@ Code is responsible for:
 - polling and receiving Telegram updates
 - deduplicating events
 - persisting state
-- loading builtin primitive specs and workspace primitive specs
-- writing `PrimitiveRunRecord` directly at the work-completion boundary
+- loading builtin skills and workspace skills
+- writing `SkillRunRecord` directly at the work-completion boundary
 - claiming, releasing, and requeueing pending work
 - maintaining the outbox
 - loading structured runtime context
 - enforcing tool availability policy and app namespace collisions
 - recording traces
-- running prompt compile and workflow evolution separately
+- running prompt compile and skill improvement separately
 
 Do not push these responsibilities onto the model.
 
@@ -2044,7 +2028,7 @@ The model is responsible for:
 - judging whether a response is needed
 - choosing the right tool domain
 - calling `appid__get_state` when current app state is needed
-- judging whether to create or bind a workflow
+- judging whether to load and apply relevant skills
 - planning steps
 - choosing tools
 - calling `deep_recall` when needed
@@ -2072,7 +2056,7 @@ It contains one-shot context for the currently claimed work:
 - claimed event input
 - claimed app notice input
 - event/app notice source metadata needed to handle the claimed work
-- workflow primitive routing catalog needed to choose or create primitives and compose a temporary execution graph for this claimed work
+- skill routing catalog needed for the model to discover operational guidance
 
 It is not a per-turn status dump.
 
@@ -2085,7 +2069,7 @@ Rules:
   inside the old turn.
 - Do not repeat it every turn unless compaction made reinjection necessary.
 - Event input belongs here, not in a generic world snapshot.
-- Workflow primitive routing catalog belongs here, not in per-turn execution state.
+- Skill routing catalog belongs here, not in per-turn execution state.
 - It should enter runtime history as structured context so later tool calls and assistant messages can build on a stable prefix.
 
 ### Runtime Turn Stop Reasons
@@ -2121,14 +2105,12 @@ It contains current execution state that may change after tools run:
 - sensory state such as current time and machine status
 - current plan state
 - current project instruction context when the session has a project scope
-- current bound primitive or temporary primitive graph execution context, including workflow id/origin when applicable and concise execution excerpt
 
 Rules:
 
 - Inject it before every model turn.
-- Operations that change the next context view, such as
-  `activate_composed_primitive`, `update_primitive_spec`, project instruction
-  reloads, and workspace app dynamic tools, should continue the current turn by
+- Operations that change the next context view, such as project instruction
+  reloads and workspace app dynamic tools, should continue the current turn by
   returning structured tool output or inserting a structured context-refresh
   message before the next model request. They should not end the turn unless
   they also satisfy `Finished`, `Error`, `Compacted`, or `Interrupt`.
@@ -2150,35 +2132,34 @@ Examples:
 - app docs are capability docs, not app state
 - project instructions such as `AGENTS.md` belong to project instruction
   context, not Coding app state
-- workflow primitive routing catalog rules belong in workflow contract / AfterClaim routing context
+- skill routing catalog rules belong in skill contract / AfterClaim routing context
 
-### Workflow Context Split
+### Skill Context Split
 
-Workflow context has three distinct roles:
+Skill discovery has two distinct roles:
 
-- `WorkflowRouting`: workflow primitive routing catalog plus choose/create/compose guidance for the currently claimed work; belongs in `AfterClaim Context`
-- `WorkflowState`: the currently bound primitive or temporary primitive graph execution context; belongs in `PreTurn Context`
-- `WorkflowHistoryMetadata`: which workflow a past task used; belongs in turn metadata/history, not in the primitive routing catalog
+- `SkillRouting`: skill catalog shown in system prompt for the currently claimed work; belongs in `AfterClaim Context`
+- `SkillHistoryMetadata`: which skill a past task used; belongs in turn metadata/history, not in operational guidance
 
-Do not make the model infer past task workflow ownership from adjacent tool logs if code can record it directly.
+Do not make the model infer past task skill ownership from adjacent tool logs if code can record it directly.
 
 ### Historical Metadata
 
-When context needs to support future edits to past task workflows, preserve a small structured turn metadata record rather than saving full snapshots.
+When context needs to support future edits to past task skill usage, preserve a small structured turn metadata record rather than saving full snapshots.
 
 Turn metadata should be able to record facts such as:
 
 - turn id
 - claimed event or app notice ids
 - user request summary
-- bound workflow id and origin
-- workflow run id when available
+- bound skill id and origin when applicable
+- skill run id when available
 - last active app surface when useful for UI or diagnostics
 - final disposition or outcome
 - completed event ids
 - concise tool summary
 
-This metadata should enter runtime history and be compressible. It is separate from sleep-only `PrimitiveRunRecord` evidence, which may be consumed by sleep and must not be the only source of daytime historical workflow attribution.
+This metadata should enter runtime history and be compressible. It is separate from sleep-only `SkillRunRecord` evidence, which may be consumed by sleep and must not be the only source of daytime historical skill attribution.
 
 ### Legacy Snapshot Mapping
 
@@ -2192,14 +2173,14 @@ When refactoring old snapshot parts, use this mapping:
 - old claimed events -> `AfterClaim.ClaimedInput`
 - old event queue summary -> `AfterClaim.EventQueueContext`
 - old delivery reminder -> `EventContract`
-- old workflow list and selection hint -> `AfterClaim.WorkflowRouting` workflow primitive routing catalog and composition hint
-- old bound workflow id, origin, steps, done criteria, and recovery -> `PreTurn.WorkflowState`
+- old skill list and selection hint -> `AfterClaim.SkillRouting`
+- old bound skill id -> skill history metadata
 
 Avoid these designs:
 
 - persisting the full old snapshot on every turn
 - using one context blob to carry state, routing, manuals, memory recall, and history metadata
-- repeatedly injecting event input or the workflow primitive routing catalog every turn when no compaction occurred
+- repeatedly injecting event input or the skill routing catalog every turn when no compaction occurred
 - dropping structured rendering in favor of hand-built strings
 
 ## Anti-Patterns
@@ -2212,14 +2193,13 @@ Avoid these designs:
   `opened_message` in app state.
 - Making send or resolve depend on hidden viewport state.
 - Binding events only to container ids instead of event ids.
-- Designing workflow as app-local supplemental instruction or innate model capability.
-- Forcing the model to perform workflow semantic search before continuing.
-- Auto-generating generic default workflow templates for blind model use.
-- Persisting composite workflows for every recurring combination of primitives.
-- Treating `when_to_use` text as the primary workflow runtime interface instead of exposing primitive capabilities and IO contracts.
-- Showing only the first few lexicographically sorted workflow ids, or only filtered relevant ids, when task-time composition needs the full primitive ID vocabulary plus relevant details.
-- Writing the current workflow binding back into the primitive spec itself.
-- Making the model manually submit workflow result logs.
+- Designing skill as app-local supplemental instruction or innate model capability.
+- Forcing the model to perform skill semantic search before continuing.
+- Auto-generating generic default skill templates for blind model use.
+- Persisting composite skills for every recurring combination of basic operations.
+- Treating `when_to_use` text as the primary skill runtime interface.
+- Writing the current skill binding back into the skill spec itself.
+- Making the model manually submit skill result logs.
 - Treating long-term memory as an immediate state cache.
 - Treating plan as a backlog database.
 - Letting the model implicitly submit final send actions through plain text.
@@ -2233,7 +2213,7 @@ Before adding an agent-facing interface, ask:
 3. Does code already have the facts the model needs?
 4. Does the action bind to a concrete object and freshness guard?
 5. Will this interface induce mechanical enumeration by the model?
-6. Is it compatible with the trace, workflow-run-record, and sleep evaluation loop?
+6. Is it compatible with the trace, skill-run-record, and sleep evaluation loop?
 
 If the answer leans toward a stateful capability domain with namespaced tools,
 model it as an `App`.
@@ -2248,7 +2228,7 @@ If the answer leans toward driving the next round of processing, it usually belo
   client-visible status.
 - `Event` decides what happened, whether to respond, and how to complete it.
 - `PendingWork` decides what should drive the next turn.
-- `Workflow` supplies SOP primitives that runtime can compose for the current task and sleep can keep corrected.
+- `Skill` supplies specialized instructions and workflows for specific tasks.
 - `Plan` decides how the current task continues.
 - `Memory` provides thread continuity and long-term experience.
 - `Sleep` improves behavior from runtime mistakes.

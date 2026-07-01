@@ -40,8 +40,6 @@ pub struct RuntimeErrorTaskContext {
     pub user_request_summary: Option<String>,
     pub claimed_event_ids: Vec<String>,
     pub claimed_app_notices: Vec<String>,
-    pub bound_primitive_id: Option<String>,
-    pub workflow_origin: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

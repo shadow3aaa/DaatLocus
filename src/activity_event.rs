@@ -21,8 +21,6 @@ pub enum ToolCallActivityEvent {
     CodingEdit(CodingEditActivityDescriptor),
     Telegram(TelegramActivityDescriptor),
     Plan(PlanActivityDescriptor),
-    CreatePrimitiveSpec(TextActivityDescriptor),
-    ActivatePrimitive(TextActivityDescriptor),
     #[serde(alias = "Finish", alias = "Work")]
     App(TextActivityDescriptor),
     Error(TextActivityDescriptor),
@@ -263,16 +261,6 @@ pub enum PlanStepActivityStatus {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CreatePrimitiveSpecActivityDescriptor {
-    pub primitive_id: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ActivatePrimitiveActivityDescriptor {
-    pub primitive_id: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplyDisposition {
     Resolved,
@@ -318,20 +306,6 @@ impl ToolCallActivityEvent {
 
     pub fn plan(data: PlanActivityDescriptor) -> Self {
         Self::Plan(data)
-    }
-
-    pub fn create_primitive_spec(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::CreatePrimitiveSpec(TextActivityDescriptor {
-            title: title.into(),
-            body_lines,
-        })
-    }
-
-    pub fn activate_primitive(title: impl Into<String>, body_lines: Vec<String>) -> Self {
-        Self::ActivatePrimitive(TextActivityDescriptor {
-            title: title.into(),
-            body_lines,
-        })
     }
 
     pub fn app(title: impl Into<String>, body_lines: Vec<String>) -> Self {

@@ -16,8 +16,8 @@ use crate::{
     dashboard::{
         DashboardAction, DashboardActionResult, DashboardActivityHistoryCount,
         DashboardActivityHistoryPage, DashboardContextCompositionSnapshot, DashboardInputHistory,
-        DashboardPlanStep, DashboardPrimitiveOptimizationSnapshot, DashboardRuntimeActivity,
-        DashboardRuntimeOptimizationSnapshot, DashboardRuntimeStatusLevel, DashboardSessionTitle,
+        DashboardPlanStep, DashboardRuntimeActivity, DashboardRuntimeOptimizationSnapshot,
+        DashboardRuntimeStatusLevel, DashboardSessionTitle, DashboardSkillOptimizationSnapshot,
         DashboardState, DashboardTokenUsageSnapshot,
     },
     events::{EventStatus, TelegramIncomingEvent},
@@ -246,7 +246,7 @@ pub struct SessionStatusDashboard {
     pub runtime_activity: DashboardRuntimeActivity,
     pub current_plan_step: Option<DashboardPlanStep>,
     pub token_usage: DashboardTokenUsageSnapshot,
-    pub primitive_optimization: DashboardPrimitiveOptimizationSnapshot,
+    pub skill_optimization: DashboardSkillOptimizationSnapshot,
     pub runtime_optimization: DashboardRuntimeOptimizationSnapshot,
     pub context_composition: Option<DashboardContextCompositionSnapshot>,
 }
@@ -262,7 +262,7 @@ impl SessionStatusDashboard {
             runtime_activity: state.runtime_activity.clone(),
             current_plan_step: state.current_plan_step.clone(),
             token_usage: state.token_usage.clone(),
-            primitive_optimization: state.primitive_optimization.clone(),
+            skill_optimization: state.skill_optimization.clone(),
             runtime_optimization: state.runtime_optimization.clone(),
             context_composition: state.context_composition.clone(),
         }

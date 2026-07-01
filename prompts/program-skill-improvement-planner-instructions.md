@@ -1,0 +1,4 @@
+- Focus on gaps that appear across multiple runs, not isolated issues.
+- Each proposed addition must be a self-contained operational guidance paragraph.
+- If the evidence does not clearly indicate a deficiency, set should_improve=false.
+- Patches must be written in plain English, ready to append under a "## Sleep Improvements" section.

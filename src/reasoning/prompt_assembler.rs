@@ -3,9 +3,8 @@ use crate::{context::Context, preturn_state::PreTurnState};
 use super::{
     prompt_doc::PromptDocument,
     prompt_parts::{
-        AfterClaimContextInput, AfterClaimContextPart, AfterClaimInputPart,
-        AfterClaimWorkflowPrimitiveRoutingPart, PreTurnContextPart, PreTurnPlanPart,
-        PreTurnProjectInstructionsPart, PreTurnSensoryPart, PreTurnWorkflowStatePart,
+        AfterClaimContextInput, AfterClaimContextPart, AfterClaimInputPart, PreTurnContextPart,
+        PreTurnPlanPart, PreTurnProjectInstructionsPart, PreTurnSensoryPart,
     },
     prompts::{SYSTEM_CORE, build_app_docs_prompt},
     turn_compile::{
@@ -180,7 +179,6 @@ impl PreTurnContextAssembler {
             Box::new(PreTurnSensoryPart),
             Box::new(PreTurnProjectInstructionsPart),
             Box::new(PreTurnPlanPart),
-            Box::new(PreTurnWorkflowStatePart),
         ])
     }
 
@@ -200,10 +198,7 @@ impl AfterClaimContextAssembler {
     }
 
     pub fn default_runtime() -> Self {
-        Self::new(vec![
-            Box::new(AfterClaimInputPart),
-            Box::new(AfterClaimWorkflowPrimitiveRoutingPart),
-        ])
+        Self::new(vec![Box::new(AfterClaimInputPart)])
     }
 
     pub fn assemble(&self, ctx: &Context, input: &AfterClaimContextInput) -> PromptDocument {
@@ -227,7 +222,7 @@ mod tests {
         assert!(text.starts_with("# Runtime Identity"));
         assert!(text.contains("# Event Handling"));
         assert!(text.contains("# Planning"));
-        assert!(text.contains("# Primitive Workflows"));
+        assert!(text.contains("# Tool Selection"));
         assert!(text.contains("# Runtime Prompt Additions\n\n- extra rule"));
         assert!(text.contains("for all user-visible assistant prose"));
         assert!(!text.contains("<core>"));

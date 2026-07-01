@@ -1,12 +1,13 @@
 ---
-id: run-required-checks
+name: run-required-checks
+description: Run the smallest set of validation checks that gives meaningful confidence for the current change.
 ---
 
 ## When To Use
 - Local changes, generated assets, or investigation results need validation before reporting, committing, or handing off.
 - Project instructions or common conventions identify format, lint, build, or test commands.
 - A failure must be classified as caused by the current work, pre-existing state, environment, or an external dependency.
-- Downstream primitives need concrete check results rather than assumptions.
+- Downstream steps need concrete check results rather than assumptions.
 
 ## Preconditions
 - The project path and intended change set are known.
@@ -27,7 +28,7 @@ id: run-required-checks
 - Appropriate validation commands were run, or a clear reason for not running them is recorded.
 - Check results are known with enough detail to support a final report or commit decision.
 - In-scope failures were fixed or explicitly documented as unresolved.
-- Downstream primitives can cite validation evidence without rerunning discovery.
+- Downstream steps can cite validation evidence without rerunning discovery.
 
 ## Recovery
 - If a check is too slow or resource-heavy, run a narrower targeted check and state the limitation.

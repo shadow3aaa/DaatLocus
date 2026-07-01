@@ -5,7 +5,6 @@ mod highlight;
 pub(crate) mod markdown;
 mod messages;
 mod plan;
-mod primitive;
 mod tui;
 
 use serde::{Deserialize, Serialize};
@@ -33,7 +32,6 @@ use common::{render_exposed_tool_names, render_exposed_tool_names_in_lines, thin
 use exec::{ExecResultActivityData, LiveExecActivityData, is_output_metadata_line, live_exec_cell};
 use messages::{PatchActivityData, ReplyActivityData, TelegramActivityData};
 use plan::PlanActivityData;
-use primitive::{ActivatePrimitiveActivityData, CreatePrimitiveSpecActivityData};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LiveActivityEvent {
@@ -61,8 +59,6 @@ pub enum SessionActivityEvent {
     CodingReview(CodingReviewActivityData),
     GenericApp(GenericAppActivityData),
     PlanResult(PlanActivityData),
-    CreatePrimitiveSpecResult(CreatePrimitiveSpecActivityData),
-    ActivatePrimitiveResult(ActivatePrimitiveActivityData),
     ExecResult(ExecResultActivityData),
     LiveExec(LiveExecActivityData),
     Patch(PatchActivityData),
@@ -296,9 +292,7 @@ pub fn activity_event_from_tool_call_activity_event(
         }
         ToolCallActivityEvent::Plan(event) if event.steps.is_empty() => None,
         ToolCallActivityEvent::Plan(event) => Some(SessionActivityEvent::PlanResult(event.into())),
-        ToolCallActivityEvent::CreatePrimitiveSpec(event)
-        | ToolCallActivityEvent::ActivatePrimitive(event)
-        | ToolCallActivityEvent::App(event) => Some(SessionActivityEvent::GenericApp(event.into())),
+        ToolCallActivityEvent::App(event) => Some(SessionActivityEvent::GenericApp(event.into())),
         ToolCallActivityEvent::Error(event) => Some(SessionActivityEvent::Error(event.into())),
     }
 }

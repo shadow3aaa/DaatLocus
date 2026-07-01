@@ -32,9 +32,7 @@ impl AfterClaimContextInput {
 pub struct PreTurnSensoryPart;
 pub struct PreTurnProjectInstructionsPart;
 pub struct PreTurnPlanPart;
-pub struct PreTurnWorkflowStatePart;
 pub struct AfterClaimInputPart;
-pub struct AfterClaimWorkflowPrimitiveRoutingPart;
 
 impl PreTurnContextPart for PreTurnSensoryPart {
     fn key(&self) -> &'static str {
@@ -123,103 +121,6 @@ impl PreTurnContextPart for PreTurnPlanPart {
     }
 }
 
-impl PreTurnContextPart for PreTurnWorkflowStatePart {
-    fn key(&self) -> &'static str {
-        "primitive"
-    }
-
-    fn build(&self, ctx: &mut Context, _state: &PreTurnState) -> Option<PromptNode> {
-        let mut blocks = Vec::new();
-
-        let composition_specs = ctx.bound_primitive_composition_specs();
-        if let Some(composition) = ctx.bound_primitive_composition.as_ref() {
-            blocks.push(PromptBlock::KeyValueList(vec![
-                (
-                    "bound_primitive_id".to_string(),
-                    composition.composition_id.clone(),
-                ),
-                (
-                    "bound_primitive_kind".to_string(),
-                    "composition".to_string(),
-                ),
-                (
-                    "primitive_ids".to_string(),
-                    composition.primitive_ids.join(", "),
-                ),
-            ]));
-
-            for primitive in composition_specs.iter().take(4) {
-                blocks.push(PromptBlock::Paragraph(format!(
-                    "primitive {}:",
-                    primitive.id
-                )));
-                if !primitive.primitive_steps.is_empty() {
-                    blocks.push(PromptBlock::BulletList(
-                        primitive.primitive_steps.iter().take(4).cloned().collect(),
-                    ));
-                }
-                if !primitive.done_criteria.is_empty() {
-                    blocks.push(PromptBlock::BulletList(
-                        primitive
-                            .done_criteria
-                            .iter()
-                            .take(2)
-                            .map(|item| format!("done: {item}"))
-                            .collect(),
-                    ));
-                }
-            }
-        } else if let Some(bound_primitive) = ctx.bound_primitive() {
-            let mut pairs = vec![("bound_primitive_id".to_string(), bound_primitive.id.clone())];
-            pairs.push(("bound_primitive_kind".to_string(), "single".to_string()));
-            if let Some(origin) = ctx.workflows.workflow_origin(&bound_primitive.id) {
-                pairs.push((
-                    "bound_primitive_origin".to_string(),
-                    format!("{origin:?}").to_ascii_lowercase(),
-                ));
-            }
-            blocks.push(PromptBlock::KeyValueList(pairs));
-            if !bound_primitive.primitive_steps.is_empty() {
-                blocks.push(PromptBlock::BulletList(
-                    bound_primitive
-                        .primitive_steps
-                        .iter()
-                        .take(6)
-                        .cloned()
-                        .collect(),
-                ));
-            }
-            if !bound_primitive.done_criteria.is_empty() {
-                blocks.push(PromptBlock::BulletList(
-                    bound_primitive
-                        .done_criteria
-                        .iter()
-                        .take(4)
-                        .map(|item| format!("done: {item}"))
-                        .collect(),
-                ));
-            }
-            if !bound_primitive.recovery.is_empty() {
-                blocks.push(PromptBlock::BulletList(
-                    bound_primitive
-                        .recovery
-                        .iter()
-                        .take(4)
-                        .map(|item| format!("recovery: {item}"))
-                        .collect(),
-                ));
-            }
-        } else {
-            blocks.push(PromptBlock::KeyValueList(vec![(
-                "bound_primitive_id".to_string(),
-                "<none>".to_string(),
-            )]));
-        }
-
-        Some(PromptNode::State(PromptStateDoc::new(self.key(), blocks)))
-    }
-}
-
 impl AfterClaimContextPart for AfterClaimInputPart {
     fn key(&self) -> &'static str {
         "claimed_input"
@@ -269,62 +170,6 @@ impl AfterClaimContextPart for AfterClaimInputPart {
     }
 }
 
-impl AfterClaimContextPart for AfterClaimWorkflowPrimitiveRoutingPart {
-    fn key(&self) -> &'static str {
-        "primitive_routing"
-    }
-
-    fn build(&self, ctx: &Context, input: &AfterClaimContextInput) -> Option<PromptNode> {
-        let mut blocks = Vec::new();
-        if ctx.bound_primitive_id.is_none() {
-            // Routing contract already lives in the core system prompt.
-        } else if let Some(workflow_id) = ctx.bound_primitive_id.as_deref() {
-            blocks.push(PromptBlock::KeyValueList(vec![(
-                "current_bound_primitive_id".to_string(),
-                workflow_id.to_string(),
-            )]));
-        }
-
-        let routing = ctx
-            .workflows
-            .primitive_routing_catalog(&claimed_work_query(input), 8);
-        if routing.total_count > 0 {
-            blocks.push(PromptBlock::KeyValueList(vec![(
-                "primitive_ids".to_string(),
-                render_workflow_primitive_ids(&routing.primitive_ids),
-            )]));
-        }
-        if !routing.relevant_primitives.is_empty() {
-            let shown_count = routing.relevant_primitives.len();
-            blocks.push(PromptBlock::Paragraph("relevant_primitives:".to_string()));
-            blocks.push(PromptBlock::BulletList(
-                routing
-                    .relevant_primitives
-                    .iter()
-                    .map(render_workflow_primitive_summary)
-                    .collect(),
-            ));
-            if routing.relevant_omitted_count > 0 {
-                blocks.push(PromptBlock::Paragraph(format!(
-                    "Showing {shown_count} relevant primitive details from {} loaded primitives; {} additional relevant matches are not expanded. The primitive_ids line is the full loaded primitive vocabulary; do not browse it mechanically before continuing.",
-                    routing.total_count, routing.relevant_omitted_count
-                )));
-            }
-        } else if routing.total_count > 0 {
-            blocks.push(PromptBlock::Paragraph(format!(
-                "No relevant primitive details matched the claimed input among {} loaded primitives. Use primitive_ids as filename vocabulary for possible `activate_composed_primitive` input, but do not create a composite workflow merely to satisfy routing; continue with a plan unless a new stable primitive is genuinely needed.",
-                routing.total_count
-            )));
-        }
-
-        if blocks.is_empty() {
-            None
-        } else {
-            Some(PromptNode::State(PromptStateDoc::new(self.key(), blocks)))
-        }
-    }
-}
-
 fn claimed_work_query(input: &AfterClaimContextInput) -> String {
     let mut parts = Vec::new();
     for event in &input.events {
@@ -351,39 +196,6 @@ fn claimed_work_query(input: &AfterClaimContextInput) -> String {
         parts.push(reason.as_str());
     }
     parts.join("\n")
-}
-
-fn render_workflow_primitive_summary(summary: &crate::workflow::PrimitiveSummary) -> String {
-    let prefix = match summary.origin {
-        crate::workflow::PrimitiveOrigin::Builtin => "[builtin] ",
-        crate::workflow::PrimitiveOrigin::Workspace => "[workspace] ",
-    };
-    let mut parts = vec![format!("{prefix}{}", summary.id)];
-    if !summary.capability_summary.is_empty() {
-        parts.push(format!("does={}", summary.capability_summary));
-    }
-    if !summary.inputs_summary.is_empty() {
-        parts.push(format!("inputs={}", summary.inputs_summary));
-    }
-    if !summary.outputs_summary.is_empty() {
-        parts.push(format!("outputs={}", summary.outputs_summary));
-    }
-    if !summary.when_to_use_summary.is_empty() {
-        parts.push(format!("when={}", summary.when_to_use_summary));
-    }
-    parts.join(" | ")
-}
-fn render_workflow_primitive_ids(ids: &[crate::workflow::PrimitiveId]) -> String {
-    ids.iter()
-        .map(|primitive| {
-            let prefix = match primitive.origin {
-                crate::workflow::PrimitiveOrigin::Builtin => "[builtin] ",
-                crate::workflow::PrimitiveOrigin::Workspace => "[workspace] ",
-            };
-            format!("{prefix}{}", primitive.id)
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn render_afterclaim_events(events: &[EventView]) -> String {

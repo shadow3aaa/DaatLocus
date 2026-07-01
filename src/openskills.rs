@@ -21,6 +21,10 @@ const MAX_SKILL_DIRS_PER_ROOT: usize = 2_000;
 const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1_024;
 
+mod builtin_skill_bindings {
+    include!(concat!(env!("OUT_DIR"), "/builtin_skills.rs"));
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenSkillsCatalog {
     skills: Vec<OpenSkill>,
@@ -40,7 +44,9 @@ pub struct OpenSkill {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum OpenSkillScope {
+    Builtin,
     Project,
     DaatLocusHome,
     User,
@@ -135,6 +141,11 @@ impl OpenSkillsCatalog {
     #[cfg(test)]
     fn skills(&self) -> &[OpenSkill] {
         &self.skills
+    }
+
+    /// Returns the skill whose SKILL.md path matches, if any.
+    pub(crate) fn skill_for_path(&self, path: &std::path::Path) -> Option<&OpenSkill> {
+        self.skills.iter().find(|skill| skill.path == path)
     }
 
     #[cfg(test)]
@@ -252,14 +263,16 @@ impl OpenSkillsCatalog {
 impl OpenSkillScope {
     fn rank(self) -> u8 {
         match self {
-            Self::Project => 0,
-            Self::DaatLocusHome => 1,
-            Self::User => 2,
+            Self::Builtin => 0,
+            Self::Project => 1,
+            Self::DaatLocusHome => 2,
+            Self::User => 3,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
+            Self::Builtin => "builtin",
             Self::Project => "project",
             Self::DaatLocusHome => "daat-locus",
             Self::User => "user",
@@ -274,6 +287,7 @@ impl OpenSkill {
 }
 
 pub fn load_openskills_for_runtime(execution_cwd: &Path) -> OpenSkillsCatalog {
+    ensure_builtin_skills_on_disk();
     let disabled_paths = load_openskills_user_config().disabled_paths;
     let catalog =
         load_openskills_from_roots_with_disabled_paths(skill_roots(execution_cwd), disabled_paths);
@@ -285,6 +299,41 @@ pub fn load_openskills_for_runtime(execution_cwd: &Path) -> OpenSkillsCatalog {
         );
     }
     catalog
+}
+
+#[allow(clippy::collapsible_if)]
+fn ensure_builtin_skills_on_disk() {
+    let target_dir = daat_locus_paths_sync().root().join(SKILLS_DIR_NAME);
+    if let Err(err) = fs::create_dir_all(&target_dir) {
+        tracing::warn!(
+            "failed to create builtin skills dir {}: {err}",
+            target_dir.display()
+        );
+        return;
+    }
+    for (name, content) in builtin_skill_bindings::BUILTIN_SKILL_SOURCES {
+        let skill_dir = target_dir.join(name);
+        if let Err(err) = fs::create_dir_all(&skill_dir) {
+            tracing::warn!(
+                "failed to create builtin skill dir {}: {err}",
+                skill_dir.display()
+            );
+            continue;
+        }
+        let skill_file = skill_dir.join(SKILL_FILE_NAME);
+        let need_write = match fs::read_to_string(&skill_file) {
+            Ok(existing) => existing != *content,
+            Err(_) => true,
+        };
+        if need_write {
+            if let Err(err) = fs::write(&skill_file, content) {
+                tracing::warn!(
+                    "failed to write builtin skill {}: {err}",
+                    skill_file.display()
+                );
+            }
+        }
+    }
 }
 
 pub fn reload_openskills_for_runtime(execution_cwd: &Path) -> OpenSkillsCatalog {

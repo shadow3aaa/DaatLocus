@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -22,12 +22,12 @@ use crate::{
     },
     dashboard::render::{
         AUTO_SLEEP_IDLE_THRESHOLD, AUTO_SLEEP_MIN_INTERVAL, current_plan_step_for_dashboard,
-        pending_user_inputs_from_sources, primitive_optimization_snapshot_for_dashboard,
-        render_activity_for_dashboard, render_app_status_outputs_for_dashboard,
-        render_dashboard_footer_context, render_sleep_status_output_for_dashboard,
-        render_status_command_output_for_dashboard, render_system_prompt_output_for_dashboard,
-        render_telegram_status_for_dashboard, runtime_activity_for_dashboard,
-        runtime_optimization_snapshot_for_dashboard, status_command_snapshot_for_dashboard,
+        pending_user_inputs_from_sources, render_activity_for_dashboard,
+        render_app_status_outputs_for_dashboard, render_dashboard_footer_context,
+        render_sleep_status_output_for_dashboard, render_status_command_output_for_dashboard,
+        render_system_prompt_output_for_dashboard, render_telegram_status_for_dashboard,
+        runtime_activity_for_dashboard, runtime_optimization_snapshot_for_dashboard,
+        skill_optimization_snapshot_for_dashboard, status_command_snapshot_for_dashboard,
         token_usage_snapshot_for_dashboard,
     },
     dashboard::{
@@ -64,7 +64,6 @@ use crate::{
     telegram_transport::state::{
         PendingOutboundMessage, TelegramTransportState, TelegramTransportStateHandle,
     },
-    workflow::PrimitiveStore,
     workspace_app::paths::{resolve_runtime_workspace_dir, workspace_apps_dir},
     workspace_app::{WorkspaceAppInvalidation, start_workspace_app_watcher},
 };
@@ -150,7 +149,6 @@ pub(crate) async fn run_session_serve(
     let compiled_prompts = load_compiled_prompts_only(&config).await?;
     let memory = Memory::with_session(session_id.as_str()).await;
     let plan = Plan::with_session(session_id.as_str()).await;
-    let workflows = PrimitiveStore::new().await;
     let token_usage_store = load_persistent_token_usage_store(Some(session_id.as_str())).await;
     let client = build_llm(&config.main_model, &config)?;
     let client = wrap_llm_with_persistent_token_usage(
@@ -226,14 +224,10 @@ pub(crate) async fn run_session_serve(
         plan,
         events,
         pending_work,
-        workflows,
         openskills,
-        bound_primitive_composition: None,
-        bound_primitive_id: None,
-        active_primitive_run: None,
-        pending_primitive_run_flushes: Vec::new(),
+        active_skill_run: None,
+        pending_skill_run_flushes: Vec::new(),
         current_work_origin: None,
-        workflow_step_started_bound_id: None,
         apps,
         workspace_apps: runtime_apps.workspace_registry,
         telegram: telegram_handle,
@@ -260,6 +254,7 @@ pub(crate) async fn run_session_serve(
         claimed_event_ids: Vec::new(),
         claimed_app_notices: Vec::new(),
         afterclaim_context_fingerprint: None,
+        visible_source_lines: HashSet::new(),
         delivered_root_instruction_fingerprint: None,
         idle_since: None,
         last_idle_sleep_at: None,
@@ -305,7 +300,7 @@ pub(crate) async fn run_session_serve(
             current_plan_step: current_plan_step_for_dashboard(&context),
             token_usage: token_usage_snapshot_for_dashboard(&context),
             runtime_optimization: runtime_optimization_snapshot_for_dashboard(&sleep_status),
-            primitive_optimization: primitive_optimization_snapshot_for_dashboard(&sleep_status),
+            skill_optimization: skill_optimization_snapshot_for_dashboard(&sleep_status),
             context_composition: None,
             reduced_motion: ReducedMotion::default(),
             footer_context: render_dashboard_footer_context(&context, None),

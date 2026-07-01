@@ -118,14 +118,10 @@ pub(crate) async fn handle_dashboard_control_command(
                 },
                 None => 0,
             };
-            if let Some(session) = context.active_primitive_run.as_mut() {
+            if let Some(session) = context.active_skill_run.as_mut() {
                 session.final_summary = "abandoned by dashboard /clear".to_string();
             }
-            context.queue_active_primitive_run_for_flush(
-                crate::workflow::PrimitiveRunOutcome::Abandoned,
-            );
-            context.bound_primitive_id = None;
-            context.bound_primitive_composition = None;
+            context.queue_active_skill_run_for_flush(crate::context::SkillRunOutcome::Abandoned);
             context.install_live_progress(None);
             context.claimed_event_ids.clear();
             context.active_runtime_turn = false;
@@ -133,7 +129,6 @@ pub(crate) async fn handle_dashboard_control_command(
             context.runtime_turn_started_at = None;
             context.runtime_turn_started_at_ms = None;
             context.current_work_origin = None;
-            context.workflow_step_started_bound_id = None;
             context.memory.clear_runtime_conversation().await;
             if context.plan.clear()
                 && let Err(err) = context.plan.sync_to_disk().await
