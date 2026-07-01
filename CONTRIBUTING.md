@@ -26,8 +26,7 @@ dashboard clients, or persistence. Coding-agent-facing constraints live in
 - Keep AfterClaim Context, PreTurn Context, capability docs, App state, and
   memory as separate layers.
 - Keep runtime error correction separate from workflow improvement.
-- Treat workflow changes as changes to reusable SOP primitive assets, not as
-  prompt edits or chat memory.
+- Treat workflow changes as changes to reusable SOP skill assets, not as
 
 ## Quality Gates
 
@@ -187,11 +186,10 @@ When changing workflow or sleep behavior:
 - do not feed raw full conversations into runtime error correction
 - do not patch workflows from runtime protocol errors
 - do not let sleep mutate builtin workflows
-- do not persist temporary primitive compositions as new primitive specs by
-  default
+- do not persist temporary skill compositions as new skill specs by
 
 Runtime error correction changes global tool and protocol contracts. Workflow
-improvement changes reusable SOP primitive specs for task classes.
+improvement changes reusable SOP skill specs for task classes.
 
 ## High-Risk Areas
 
