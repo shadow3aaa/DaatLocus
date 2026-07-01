@@ -78,7 +78,7 @@ daat-locus config              # open the interactive config menu
 - [Configuration](docs/configuration.md)
 - [Semantic Code Operation & Propagation Engine](crates/scope-engine/README.md)
 - [Contributing](CONTRIBUTING.md)
-- [Builtin SOP primitive specs](workflows/README.md)
+- [Skills](skills/) — Reusable skill SKILL.md files for task automation
 
 ## License
 
