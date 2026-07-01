@@ -8,14 +8,14 @@ license = "Apache-2.0"
 authors = ["shadow3 <shadow3aaaa@gmail.com>"]
 
 [dependencies]
-tokio = { version = "1.44", features = ["full"] }
+tokio = { version = "1.52.3", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = "1.0.150"
 tree-sitter = "0.25"
 tree-sitter-rust = "0.24.2"
-tree-sitter-python = "0.23.4"
+tree-sitter-python = "0.25"
 tree-sitter-typescript = "0.23.2"
-tree-sitter-go = "0.23.4"
+tree-sitter-go = "0.25"
 tree-sitter-java = "0.23.5"
 tree-sitter-c = "0.24.2"
 tree-sitter-cpp = "0.23.4"
@@ -26,8 +26,8 @@ schemars = "1.2.1"
 dirs = "6"
 globset = "0.4"
 ignore = "0.4"
-regex = "1"
-reqwest = { version = "0.12", features = ["blocking"], optional = true }
+regex = "1.12.4"
+reqwest = { version = "0.13", features = ["blocking"], optional = true }
 
 [features]
 default = ["download-ra"]
