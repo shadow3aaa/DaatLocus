@@ -13,7 +13,7 @@ produced by explicit tools and completion actions.
 
 Its architecture is organized around explicit tool calls, stateful capability
 domains, structured runtime context, isolated Sessions, and auditable evidence
-for memory, workflow, and sleep-time improvement.
+for memory, skills, and sleep-time improvement.
 
 ## Design Goals
 
@@ -27,11 +27,11 @@ The main design goals are:
 
    Natural-language output provides explanations and records. Event completion,
    file edits, terminal commands, browser interaction, code edits, plan updates,
-   primitive binding, and other effects happen through explicit tools.
+   skill binding, and other effects happen through explicit tools.
 
 2. **State is explicit**
 
-   The runtime stores events, pending work, app state, memory, plans, workflow
+   The runtime stores events, pending work, app state, memory, plans, skill run
    bindings, session metadata, dashboard state, and delivery state. Code stores
    or renders mechanical state directly so model attention stays on semantic
    judgment.
@@ -50,8 +50,8 @@ The main design goals are:
 
 5. **Experience becomes auditable assets**
 
-   Memory keeps continuity, but reusable procedures live in SOP primitive specs.
-   Runtime errors and workflow run evidence feed separate sleep-time improvement
+   Memory keeps continuity, but reusable procedures live in skill specs (SKILL.md files).
+   Runtime errors and skill run evidence feed separate sleep-time improvement
    paths.
 
 6. **Sessions are isolated runtimes**
@@ -68,15 +68,15 @@ The current high-level flow is:
    private local IPC.
 3. The Session registers an event or app notice and enqueues `PendingWork`.
 4. The runtime claims one work item.
-5. Newly claimed input and primitive routing are injected once as AfterClaim
+5. Newly claimed input and available skill context are injected once as AfterClaim
    Context.
 6. Before every model turn, current execution state is injected as PreTurn
    Context.
 7. The model makes semantic judgments and calls explicit tools.
-8. Tools mutate state, apps, files, processes, events, plans, or workflow
+8. Tools mutate state, apps, files, processes, events, plans, or skill run
    bindings.
 9. Claimed work finishes through the appropriate completion tool.
-10. The runtime records evidence needed by dashboard history, memory, workflow
+10. The runtime records evidence needed by dashboard history, memory, skill run
     runs, and sleep-time improvement.
 
 ```mermaid
@@ -89,7 +89,7 @@ flowchart LR
     Pre[PreTurn Context]
     Model[Model judgment]
     Tools[Explicit tools]
-    State[Events / apps / plan / memory / workflows]
+    State[Events / apps / plan / memory / skills]
     Sleep[Sleep improvement]
 
     Client --> Manager --> Session --> Pending --> After --> Pre --> Model --> Tools
@@ -115,8 +115,8 @@ that claimed work:
 
 - claimed events and claimed app notices;
 - source metadata needed to handle them;
-- workflow primitive routing: the full primitive id vocabulary plus expanded
-  summaries for top relevant primitives.
+- the skill directory listing: available skill names, descriptions, and paths,
+  so the model can discover and read skill content on demand.
 
 It is one-shot claimed-work context. Event input lives here as part of the
 claimed input record.
@@ -129,14 +129,14 @@ execution state that can change after tools run:
 - sensory information such as current time and machine status;
 - project instruction context when a coding project is in scope;
 - the current plan;
-- the currently bound primitive or temporary primitive composition.
+- current skill run records and active skill context.
 
 App state is read on demand through the generated `appid__get_state` tool for
 Browser, Terminal, or Coding.
 
 ### Capability Docs Are Separate
 
-Keep app docs, project instructions, event completion rules, and workflow
+Keep app docs, project instructions, event completion rules, and skill
 routing as separate instruction layers with their own responsibilities.
 
 ## Core Runtime Objects
@@ -170,25 +170,26 @@ exactly one `in_progress` step; completed plans are cleared after completion.
 ### Memory
 
 Memory provides continuity and long-term recall. Runtime state and tool results
-hold immediate facts for events, delivery, app state, and workflow binding.
+hold immediate facts for events, delivery, app state, and skill run records.
 
-### Workflow
+### Skills
 
-`Workflow` is the binding and evolution layer for reusable SOP primitives.
-Daat Locus separates three layers:
+A `Skill` is a reusable SOP specification stored as a `SKILL.md` file. Unlike
+the old workflow/primitive system — which required explicit binding steps,
+composition tools, and an evolution pipeline — the skill model is content-addressable
+and discovery-based:
 
-- `PrimitiveSpec`: a persisted primitive specification asset.
-- `WorkflowBinding`: the current task's binding to one primitive or a temporary
-  composition of existing primitives.
-- `PrimitiveRunRecord`: execution evidence recorded by runtime code at work
-  completion boundaries.
+- The system prompt lists available skill names, descriptions, and file paths.
+- The model reads a skill's `SKILL.md` through `read_file`, understands its
+  instructions, and applies them directly.
+- No explicit binding or composition tools exist. Skills are just markdown files
+  the model reads and follows.
+- Sleep self-improvement tracks which `SKILL.md` files the model has read and
+  appends improvement patches under `## Sleep Improvements` sections.
 
-A temporary composition remains runtime state. Persisted primitive specs change
-through explicit primitive editing or workflow evolution paths.
-
-Builtin primitives live in repository `workflows/*.md` and are compiled by
-`build.rs`. Evolvable workspace primitives live under
-`~/daat-locus-workspace/workflows`.
+Skill files live under `~/.agents/skills/` (builtin) and
+`~/.daat-locus-workspace/skills/` (evolvable workspace skills). Builtin skills
+are compiled into the binary and serve as read-only defaults.
 
 ## App Model
 
@@ -275,7 +276,7 @@ current Lua surface uses one module instance with hooks such as `config(ctx)`,
 `call_tool(ctx, state, name, args)`, and `poll_notices(ctx, state)`.
 
 Workspace app prompt docs describe the App capability. Reusable task SOPs live in
-workflow primitive specs.
+skill specs (SKILL.md files).
 
 ## Tool And Action Boundaries
 
@@ -288,7 +289,7 @@ Tool calls should bind to concrete identifiers or freshness guards:
 - Terminal continuation binds to `session_id`;
 - Coding reads and edits bind to `path + line#hash`;
 - session APIs bind to opaque `session_id` values;
-- primitive binding uses primitive ids or a temporary composition id.
+- skill reading uses named skill paths.
 
 Explicit identifiers make stale-state mistakes auditable.
 
@@ -434,11 +435,11 @@ Sleep is evidence-driven improvement with two independent paths:
 
 - **Runtime Error Correction** consumes code-detected runtime/protocol error
   cases and produces small global runtime contract corrections.
-- **Workflow Improvement** consumes workflow-bound primitive run records and
-  patches or merges workspace primitive specs.
+- **Skill Improvement** consumes skill run records and patches the skill's
+  SKILL.md with improvement suggestions.
 
 Keep these paths separate: runtime protocol errors feed contract corrections;
-workflow quality evidence feeds workflow primitive patch/merge decisions.
+skill run quality evidence feeds skill patch decisions.
 
 ## Persistence Boundaries
 
@@ -448,7 +449,7 @@ conversation and memory, plans, dashboard history, app-local state, and sleep
 artifacts.
 
 Editable workspace assets include project files, workspace app source packages,
-and workspace primitive specs. Builtin primitive specs are repository assets
+and skill specs. Builtin skill specs are repository assets
 compiled into the binary and are read-only at runtime.
 
 This boundary separates runtime-owned state from project-file edits while still
@@ -469,8 +470,8 @@ and stateful domains expose `get_state` with explicit identifiers.
 
 ### Source-First Workspace Apps
 
-Workspace Apps are source-first, local, auditable capability domains. Workflow
-primitive specs carry self-optimizing task procedures.
+Workspace Apps are source-first, local, auditable capability domains. Skill
+specs carry self-optimizing task procedures.
 
 ### Evidence-Driven Improvement
 
@@ -486,8 +487,8 @@ Daat Locus can be summarized by a few current invariants:
 - Events and PendingWork are separate from Apps;
 - runtime context is split into AfterClaim and PreTurn layers;
 - Manager is the only public server, and Sessions are private runtime workers;
-- workflows are reusable SOP primitives and runtime compositions;
-- sleep consumes explicit evidence through separate runtime-error and workflow
+- skills are reusable SOP specifications discovered and read as markdown files;
+- sleep consumes explicit evidence through separate runtime-error and skill
   improvement paths.
 
 The goal is a local agent runtime that can act, verify, remember, and improve
