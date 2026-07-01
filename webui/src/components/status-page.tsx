@@ -6090,7 +6090,7 @@ function AgentChatReplyActivityLine({
           bodyLines={agentMessage.bodyLines}
           fullBody={agentMessage.fullBody}
         />
-<div className="-mb-1 mt-1 flex justify-start">
+<div className="-mb-1 mt-1 flex justify-start pl-8 sm:pl-10">
           <button
             type="button"
             onClick={handleCopyReply}
@@ -6145,7 +6145,7 @@ function AgentChatReplyActivityLine({
           />
         </div>
       ) : null}
-<div className="-mb-1 mt-1 flex justify-start">
+<div className="-mb-1 mt-1 flex justify-start px-2 sm:px-3">
         <button
           type="button"
           onClick={handleCopyReply}
