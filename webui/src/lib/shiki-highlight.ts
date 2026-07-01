@@ -34,6 +34,7 @@ export type ShikiHighlightToken = {
   content: string;
   color?: string;
   fontStyle?: number;
+  offset?: number;
 };
 
 export type ShikiHighlightedCode = {
@@ -59,9 +60,10 @@ export async function highlightCodeWithShiki(
       tokenizeMaxLineLength: SHIKI_MAX_LINE_LENGTH,
       tokenizeTimeLimit: SHIKI_TOKENIZE_TIME_LIMIT_MS,
     });
+    const filledLines = fillTokenGaps(code, lines);
     return {
       language,
-      lines: lines.map((line) => line.map(shikiTokenFromThemedToken)),
+      lines: filledLines.map((line) => line.map(shikiTokenFromThemedToken)),
     };
   } catch {
     return null;
@@ -131,6 +133,7 @@ function shikiTokenFromThemedToken(token: ThemedToken): ShikiHighlightToken {
     content: token.content,
     color: token.color,
     fontStyle: token.fontStyle,
+    offset: token.offset,
   };
 }
 
@@ -143,4 +146,68 @@ function dedupeStrings(values: Array<string | undefined | null>) {
     seen.add(value);
     return true;
   });
+}
+
+/**
+ * Fill gaps in Shiki token lines where the grammar did not emit tokens
+ * for leading whitespace or other unmatched characters.
+ */
+function fillTokenGaps(
+  code: string,
+  shikiLines: ThemedToken[][],
+): ThemedToken[][] {
+  const codeLines = code.split("\n");
+  const lineOffsets = computeLineOffsets(code);
+  return shikiLines.map((lineTokens, lineIndex) => {
+    const lineText = codeLines[lineIndex];
+    if (lineIndex >= codeLines.length || lineText === undefined) {
+      return lineTokens;
+    }
+
+    const lineStartOffset = lineOffsets[lineIndex] ?? 0;
+    const filled: ThemedToken[] = [];
+    let linePos = 0;
+
+    for (const token of lineTokens) {
+      if (token.offset === undefined) {
+        filled.push(token);
+        continue;
+      }
+      const tokenStart = token.offset - lineStartOffset;
+      if (tokenStart > linePos) {
+        filled.push({
+          content: lineText.slice(linePos, tokenStart),
+          offset: lineStartOffset + linePos,
+          color: undefined,
+          fontStyle: undefined,
+        });
+      }
+      filled.push(token);
+      linePos = tokenStart + token.content.length;
+    }
+
+    if (linePos < lineText.length) {
+      filled.push({
+        content: lineText.slice(linePos),
+        offset: lineStartOffset + linePos,
+        color: undefined,
+        fontStyle: undefined,
+      });
+    }
+
+    return filled;
+  });
+}
+
+function computeLineOffsets(code: string): number[] {
+  const RE_NEWLINE = /(\r?\n)/g;
+  const parts = code.split(RE_NEWLINE);
+  const offsets: number[] = [];
+  let index = 0;
+  for (let i = 0; i < parts.length; i += 2) {
+    offsets.push(index);
+    index += parts[i].length;
+    index += parts[i + 1]?.length || 0;
+  }
+  return offsets;
 }

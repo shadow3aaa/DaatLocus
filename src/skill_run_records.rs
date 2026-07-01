@@ -1,13 +1,10 @@
-use std::{
-    collections::HashSet,
-    sync::OnceLock,
-};
+use std::{collections::HashSet, sync::OnceLock};
 
 use miette::{Result, miette};
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, OpenOptions},
-    io::{AsyncWriteExt, BufReader, AsyncBufReadExt},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
 };
 
 use crate::daat_locus_paths::daat_locus_paths;
@@ -61,9 +58,9 @@ pub async fn append_skill_run_records(records: &[SkillRunRecord]) -> Result<usiz
     let _guard = skill_run_records_io_lock().lock().await;
     let path = skill_run_records_file_path().await;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await.map_err(|err| {
-            miette!("failed to create skill run record dir: {err}")
-        })?;
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|err| miette!("failed to create skill run record dir: {err}"))?;
     }
 
     let mut existing_ids = HashSet::new();

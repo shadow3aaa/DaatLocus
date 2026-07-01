@@ -6057,6 +6057,17 @@ function AgentChatReplyActivityLine({
   subject: string;
   isLatestReply?: boolean;
 }) {
+  const [hasCopiedReply, setHasCopiedReply] = useState(false);
+  const originalText = messageLines.join("\n");
+  async function handleCopyReply() {
+    try {
+      await navigator.clipboard.writeText(originalText);
+      setHasCopiedReply(true);
+      window.setTimeout(() => setHasCopiedReply(false), 1600);
+    } catch {
+      setHasCopiedReply(false);
+    }
+  }
   const replyMarker = isLatestReply ? (
     <AgentChatReplyMarker
       disposition={disposition}
@@ -6070,14 +6081,30 @@ function AgentChatReplyActivityLine({
       return null;
     }
     return (
-      <AgentChatActivityTextCell
-        id={id}
-        icon="activity"
-        marker={replyMarker}
-        title={agentMessage.title}
-        bodyLines={agentMessage.bodyLines}
-        fullBody={agentMessage.fullBody}
-      />
+      <>
+        <AgentChatActivityTextCell
+          id={id}
+          icon="activity"
+          marker={replyMarker}
+          title={agentMessage.title}
+          bodyLines={agentMessage.bodyLines}
+          fullBody={agentMessage.fullBody}
+        />
+<div className="-mb-1 mt-1 flex justify-start">
+          <button
+            type="button"
+            onClick={handleCopyReply}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[0.7rem] text-muted-foreground/60 transition-colors hover:bg-muted/50 hover:text-muted-foreground"
+            aria-label="Copy"
+          >
+            {hasCopiedReply ? (
+              <CheckIcon className="h-3 w-3" aria-hidden="true" />
+            ) : (
+              <CopyIcon className="h-3 w-3" aria-hidden="true" />
+            )}
+          </button>
+        </div>
+      </>
     );
   }
 
@@ -6118,6 +6145,20 @@ function AgentChatReplyActivityLine({
           />
         </div>
       ) : null}
+<div className="-mb-1 mt-1 flex justify-start">
+        <button
+          type="button"
+          onClick={handleCopyReply}
+          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[0.7rem] text-muted-foreground/60 transition-colors hover:bg-muted/50 hover:text-muted-foreground"
+          aria-label="Copy"
+        >
+          {hasCopiedReply ? (
+            <CheckIcon className="h-3 w-3" aria-hidden="true" />
+          ) : (
+            <CopyIcon className="h-3 w-3" aria-hidden="true" />
+          )}
+        </button>
+      </div>
     </div>
   );
 }
@@ -6317,6 +6358,7 @@ const AgentChatMarkdownText = memo(function AgentChatMarkdownText({
   if (!limitedText.trim()) {
     return null;
   }
+
 
   return (
     <div

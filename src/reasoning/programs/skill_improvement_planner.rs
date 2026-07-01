@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::reasoning::{
     ir::PromptIR,
     program::Program,
-    prompts::{prompt_bullet_lines, PROGRAM_SKILL_IMPROVEMENT_PLANNER_INSTRUCTIONS, PROGRAM_SKILL_IMPROVEMENT_PLANNER_SYSTEM},
+    prompts::{
+        PROGRAM_SKILL_IMPROVEMENT_PLANNER_INSTRUCTIONS, PROGRAM_SKILL_IMPROVEMENT_PLANNER_SYSTEM,
+        prompt_bullet_lines,
+    },
     signature::Signature,
 };
 
@@ -69,11 +72,26 @@ impl Program for SkillImprovementPlannerProgram {
             "Analyze skill run evidence and suggest targeted improvements to a skill's SKILL.md.",
         )
         .input("skill name", "The name of the skill being analyzed.")
-        .input("skill content", "The full current content of the skill's SKILL.md.")
-        .input("skill run evidence", "JSON array of SkillRunRecord entries recording how the skill was used.")
-        .output("should_improve", "Whether the evidence justifies updating this skill.")
-        .output("reflection", "Analysis of weaknesses found in the skill content.")
-        .output("patches", "Proposed additions to improve the skill, with at most one having selected=true.")
+        .input(
+            "skill content",
+            "The full current content of the skill's SKILL.md.",
+        )
+        .input(
+            "skill run evidence",
+            "JSON array of SkillRunRecord entries recording how the skill was used.",
+        )
+        .output(
+            "should_improve",
+            "Whether the evidence justifies updating this skill.",
+        )
+        .output(
+            "reflection",
+            "Analysis of weaknesses found in the skill content.",
+        )
+        .output(
+            "patches",
+            "Proposed additions to improve the skill, with at most one having selected=true.",
+        )
         .rule("Only propose additions that are clearly missing from the current skill content.")
         .rule("At most one patch may have selected=true.")
         .rule("If should_improve=false, patches should be empty.")
