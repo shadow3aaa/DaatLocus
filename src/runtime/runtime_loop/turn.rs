@@ -1079,7 +1079,7 @@ pub(crate) async fn execute_agent_loop_step(
                         expected_behavior: reason.message(),
                         actual_behavior: "The model returned assistant text without the required completion tool.",
                         evidence: &content,
-                        recoverability: "system_follow_up_message_inserted",
+                        recoverability: "follow_up_message_inserted",
                         retry_count: 0,
                         terminal_status: None,
                         assistant_text: Some(&content),
@@ -1094,7 +1094,7 @@ pub(crate) async fn execute_agent_loop_step(
                 runtime_step.push_agent_message(AgentMessage::assistant(&content));
                 runtime_step.push_history_message(HistoryMessage::assistant(content.clone()));
             }
-            runtime_step.push_agent_message(AgentMessage::system(reason.message().to_string()));
+            runtime_step.push_agent_message(AgentMessage::user(reason.message().to_string()));
             continue 'agent_loop;
         }
         let current_doing = content
