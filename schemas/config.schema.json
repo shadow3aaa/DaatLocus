@@ -40,6 +40,7 @@
       },
       "default": {
         "default": {
+          "api_style": null,
           "auto_compact_token_limit": null,
           "context_window_tokens": 128000,
           "effective_context_window_percent": 95,
@@ -48,7 +49,7 @@
           "provider": "openai",
           "request_timeout_secs": 300,
           "rpm": null,
-          "stream_idle_timeout_secs": 45,
+          "stream_idle_timeout_secs": 900,
           "supports_vision": null,
           "temperature": 1.0,
           "thinking_budget": null,
@@ -138,6 +139,14 @@
     "ModelConfig": {
       "type": "object",
       "properties": {
+        "api_style": {
+          "description": "Selects the request/response protocol used against the provider endpoint.\nOnly honored for `openai-compatible` providers, which expose both the\nchat-completions and responses APIs under one base URL.  Set to\n`\"responses\"` to use the `/responses` endpoint; any other value (or\n`None`) uses chat completions.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "auto_compact_token_limit": {
           "type": [
             "integer",
@@ -192,7 +201,7 @@
         "stream_idle_timeout_secs": {
           "type": "integer",
           "format": "uint64",
-          "default": 45,
+          "default": 900,
           "minimum": 0
         },
         "supports_vision": {
@@ -267,13 +276,6 @@
         {
           "type": "object",
           "properties": {
-            "auth_file": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "default": null
-            },
             "base_url": {
               "type": [
                 "string",
@@ -295,13 +297,6 @@
           "properties": {
             "api_key": {
               "type": "string"
-            },
-            "api_style": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "default": null
             },
             "base_url": {
               "type": "string"

@@ -162,6 +162,8 @@ pub struct SetupModelRequest {
     pub effective_context_window_percent: Option<i64>,
     #[serde(default)]
     pub tool_output_max_tokens: Option<usize>,
+    #[serde(default)]
+    pub api_style: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -655,6 +657,7 @@ fn setup_model_from_config(name: &str, model: &ModelConfig) -> SetupModelRequest
         auto_compact_token_limit: model.auto_compact_token_limit,
         effective_context_window_percent: Some(model.effective_context_window_percent),
         tool_output_max_tokens: Some(model.tool_output_max_tokens),
+        api_style: model.api_style.clone(),
     }
 }
 
@@ -878,7 +881,6 @@ fn provider_from_setup_legacy(
         SetupProviderKind::OpenaiCompatible => Ok(ProviderConfig::OpenaiCompatible {
             base_url: required_string(base_url, "base_url")?,
             api_key,
-            api_style: None,
         }),
         SetupProviderKind::OpenaiCodexOauth => Ok(ProviderConfig::OpenaiCodexOauth {
             base_url: optional_normalized_url(base_url),
@@ -910,7 +912,6 @@ fn provider_from_setup_provider(provider: &SetupProviderRequest) -> Result<Provi
         SetupProviderKind::OpenaiCompatible => Ok(ProviderConfig::OpenaiCompatible {
             base_url: required_string(base_url, "provider.base_url")?,
             api_key: required_string(&api_key, "provider.api_key")?,
-            api_style: None,
         }),
         SetupProviderKind::OpenaiCodexOauth => Ok(ProviderConfig::OpenaiCodexOauth {
             base_url: optional_normalized_url(base_url),
@@ -1469,6 +1470,12 @@ fn model_from_setup_model(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ThinkingBudget::new),
+        api_style: model
+            .api_style
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
     })
 }
 

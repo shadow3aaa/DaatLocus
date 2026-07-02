@@ -64,8 +64,6 @@ pub enum ProviderConfig {
     OpenaiCompatible {
         base_url: String,
         api_key: String,
-        #[serde(default)]
-        api_style: Option<String>,
     },
     Ollama {
         #[serde(default)]
@@ -120,6 +118,13 @@ pub struct ModelConfig {
     /// always include images.
     #[serde(default)]
     pub supports_vision: Option<bool>,
+    /// Selects the request/response protocol used against the provider endpoint.
+    /// Only honored for `openai-compatible` providers, which expose both the
+    /// chat-completions and responses APIs under one base URL.  Set to
+    /// `"responses"` to use the `/responses` endpoint; any other value (or
+    /// `None`) uses chat completions.
+    #[serde(default)]
+    pub api_style: Option<String>,
 }
 
 impl Default for ModelConfig {
@@ -138,6 +143,7 @@ impl Default for ModelConfig {
             max_completion_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
             tool_output_max_tokens: DEFAULT_TOOL_OUTPUT_MAX_TOKENS,
             supports_vision: None,
+            api_style: None,
         }
     }
 }
@@ -614,7 +620,6 @@ mod tests {
             ProviderConfig::OpenaiCompatible {
                 base_url: "https://example.com/v1".to_string(),
                 api_key: "env:COMPATIBLE_TOKEN".to_string(),
-                api_style: None,
             },
         );
         config.providers.insert(

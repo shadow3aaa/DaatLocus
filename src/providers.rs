@@ -1231,13 +1231,9 @@ pub fn build_llm(model_name: &str, config: &Config) -> Result<Box<dyn Llm + Send
                 model_config,
             )))
         }
-        ProviderConfig::OpenaiCompatible {
-            base_url,
-            api_key,
-            api_style,
-        } => {
+        ProviderConfig::OpenaiCompatible { base_url, api_key } => {
             let api_key = resolve_env_reference(api_key);
-            if api_style.as_deref() == Some("responses") {
+            if model_config.api_style.as_deref() == Some("responses") {
                 Ok(Box::new(responses_compat::ResponsesCompatibleClient::new(
                     &api_key,
                     base_url,

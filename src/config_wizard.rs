@@ -1785,7 +1785,6 @@ async fn prompt_provider(
             ProviderConfig::OpenaiCompatible {
                 base_url: normalize_provider_base_url(&base_url),
                 api_key,
-                api_style: None,
             }
         }
         ProviderKind::Ollama => {
@@ -1914,6 +1913,8 @@ async fn prompt_model(
         &crate::tr!(locale, "config.reasoning_config"),
     )?;
 
+    let api_style = prompt_api_style(ui, provider)?;
+
     Ok((
         name,
         ModelConfig {
@@ -1923,9 +1924,27 @@ async fn prompt_model(
             max_completion_tokens: max_completion,
             supports_vision: api_vision,
             thinking_budget,
+            api_style,
             ..ModelConfig::default()
         },
     ))
+}
+
+/// Prompt for the API style of an `openai-compatible` provider endpoint.
+/// Returns `None` for other provider kinds (the field is meaningless there) and
+/// for the default chat-completions style.
+fn prompt_api_style(ui: &mut PromptUi, provider: &ProviderConfig) -> Result<Option<String>> {
+    if !matches!(provider, ProviderConfig::OpenaiCompatible { .. }) {
+        return Ok(None);
+    }
+
+    let locale = ui.locale();
+    let choices = [
+        crate::tr!(locale, "config.api_style_chat_completions"),
+        crate::tr!(locale, "config.api_style_responses"),
+    ];
+    let idx = ui.select(&crate::tr!(locale, "config.api_style"), &choices, 0)?;
+    Ok((idx == 1).then(|| "responses".to_string()))
 }
 
 fn prompt_reasoning_config(
@@ -2495,6 +2514,14 @@ fn render_config_summary_lines(config: &Config, locale: Locale) -> Vec<String> {
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "auto".to_string()),
         );
+        push_config_subfield(
+            &mut lines,
+            "api_style",
+            model
+                .api_style
+                .clone()
+                .unwrap_or_else(|| "chat-completions".to_string()),
+        );
     }
 
     push_config_section(&mut lines, crate::tr!(locale, "config.judge_heading"));
@@ -2780,7 +2807,6 @@ mod tests {
         ProviderConfig::OpenaiCompatible {
             base_url: base_url.to_string(),
             api_key: "test".to_string(),
-            api_style: None,
         }
     }
 
@@ -3096,7 +3122,6 @@ mod tests {
             ProviderConfig::OpenaiCompatible {
                 base_url: "https://example.test/v1".to_string(),
                 api_key: "sk-secret-token".to_string(),
-                api_style: None,
             },
         );
         config.models.insert(
@@ -3115,6 +3140,7 @@ mod tests {
                 max_completion_tokens: 16_000,
                 tool_output_max_tokens: 32_000,
                 supports_vision: Some(false),
+                api_style: Some("responses".to_string()),
             },
         );
         config.main_model = "coder".to_string();
@@ -3130,6 +3156,7 @@ mod tests {
         assert!(summary.contains("effective_window     100000 tokens (50%)"));
         assert!(summary.contains("reserved_output      0"));
         assert!(summary.contains("supports_vision      false"));
+        assert!(summary.contains("api_style            responses"));
     }
 
     #[test]
