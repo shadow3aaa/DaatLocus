@@ -7644,7 +7644,7 @@ function agentChatSessionActivityRenderForBubble(
       kind: "text",
       icon: "activity",
       title: `Opened Project: ${stringValue(codingOpenProject.project_root, "unknown")}`,
-      bodyLines: stringArrayValue(codingOpenProject.detail_lines),
+      bodyLines: stringArrayValuePreserveWhitespace(codingOpenProject.detail_lines),
     };
   }
 
@@ -7767,7 +7767,7 @@ function agentChatSessionActivityRenderForBubble(
       icon: "activity",
       title: stringValue(telegram.title, "Telegram"),
       detailLines: stringArrayValue(telegram.detail_lines),
-      messageLines: stringArrayValue(telegram.message_lines),
+      messageLines: stringArrayValuePreserveWhitespace(telegram.message_lines),
       detailLimit: AGENT_CHAT_TELEGRAM_DETAIL_LIMIT,
       messageLimit: AGENT_CHAT_TELEGRAM_MESSAGE_LIMIT,
     };
@@ -7782,7 +7782,7 @@ function agentChatSessionActivityRenderForBubble(
         disposition,
         stringValue(reply.subject, "message"),
       ),
-      messageLines: stringArrayValue(reply.message_lines),
+      messageLines: stringArrayValuePreserveWhitespace(reply.message_lines),
       disposition,
       subject: stringValue(reply.subject, "message").toLowerCase(),
     };
@@ -7794,7 +7794,7 @@ function agentChatSessionActivityRenderForBubble(
       kind: "text",
       icon: "activity",
       title: stringValue(terminalWait.title, "Terminal wait"),
-      bodyLines: stringArrayValue(terminalWait.body_lines),
+      bodyLines: stringArrayValuePreserveWhitespace(terminalWait.body_lines),
       bodyLimit: AGENT_CHAT_TERMINAL_WAIT_LINE_LIMIT,
     };
   }
@@ -7805,7 +7805,7 @@ function agentChatSessionActivityRenderForBubble(
       kind: "text",
       icon: "activity",
       title: stringValue(warning.title, "Warning"),
-      bodyLines: stringArrayValue(warning.body_lines),
+      bodyLines: stringArrayValuePreserveWhitespace(warning.body_lines),
       bodyLimit: AGENT_CHAT_ERROR_LINE_LIMIT,
       tone: "muted",
     };
@@ -7817,7 +7817,7 @@ function agentChatSessionActivityRenderForBubble(
       kind: "text",
       icon: "error",
       title: stringValue(error.title, "Error"),
-      bodyLines: stringArrayValue(error.body_lines),
+      bodyLines: stringArrayValuePreserveWhitespace(error.body_lines),
       bodyLimit: AGENT_CHAT_ERROR_LINE_LIMIT,
       tone: "error",
       preserveSoftBreaks: true,
