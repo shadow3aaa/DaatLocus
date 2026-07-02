@@ -93,6 +93,24 @@ pub(crate) fn sync_dashboard_runtime_status_live_cell(state: &mut DashboardState
     }
 }
 
+/// Keep the "Working" runtime-status cell pinned to the end of the live cell
+/// list after other live cells are appended or updated. `sync_*` rebuilds the
+/// cell from state, but the live streaming path only mutates individual cells,
+/// so it must re-pin the existing runtime-status cell without recomputing it.
+fn repin_runtime_status_live_cell(live_cells: &mut Vec<LiveActivityEvent>) {
+    let Some(index) = live_cells
+        .iter()
+        .position(|cell| cell.key == RUNTIME_STATUS_LIVE_CELL_KEY)
+    else {
+        return;
+    };
+    if index + 1 == live_cells.len() {
+        return;
+    }
+    let cell = live_cells.remove(index);
+    live_cells.push(cell);
+}
+
 fn runtime_status_live_cell(state: &DashboardState) -> Option<LiveActivityEvent> {
     if !state.runtime_activity.active_runtime_turn {
         return None;
@@ -217,6 +235,7 @@ pub fn apply_activity_event(state: &mut DashboardState, event: DashboardActivity
             state.live_activity_events.retain(|cell| cell.key != key);
         }
     }
+    repin_runtime_status_live_cell(&mut state.live_activity_events);
 }
 
 pub fn assistant_activity_cell(content: &str) -> Option<SessionActivityEvent> {
@@ -660,6 +679,62 @@ mod tests {
             }),
             last_error: None,
         }
+    }
+
+    fn runtime_status_live_event() -> LiveActivityEvent {
+        LiveActivityEvent {
+            key: RUNTIME_STATUS_LIVE_CELL_KEY.to_string(),
+            event: SessionActivityEvent::RuntimeStatus(
+                crate::dashboard::cells::common::RuntimeStatusActivityData {
+                    label: "Working".to_string(),
+                    detail: None,
+                    active_runtime_started_at_ms: Some(1),
+                    reduced_motion: Default::default(),
+                },
+            ),
+        }
+    }
+
+    #[test]
+    fn apply_activity_event_keeps_running_cell_above_working() {
+        let mut state = DashboardState::default();
+        state.live_activity_events.push(runtime_status_live_event());
+
+        apply_activity_event(
+            &mut state,
+            DashboardActivityEvent::ExecBegin {
+                key: "exec-1".to_string(),
+                title: "cargo test".to_string(),
+                call_lines: vec!["cargo test".to_string()],
+            },
+        );
+
+        let keys: Vec<&str> = state
+            .live_activity_events
+            .iter()
+            .map(|cell| cell.key.as_str())
+            .collect();
+        assert_eq!(keys, vec!["exec-1", RUNTIME_STATUS_LIVE_CELL_KEY]);
+    }
+
+    #[test]
+    fn repin_runtime_status_live_cell_moves_existing_cell_to_end() {
+        let mut live_cells = vec![
+            runtime_status_live_event(),
+            LiveActivityEvent {
+                key: "exec-1".to_string(),
+                event: SessionActivityEvent::LiveExec(live_exec_cell(
+                    "cargo test".to_string(),
+                    Vec::new(),
+                    Some(1),
+                )),
+            },
+        ];
+
+        repin_runtime_status_live_cell(&mut live_cells);
+
+        let keys: Vec<&str> = live_cells.iter().map(|cell| cell.key.as_str()).collect();
+        assert_eq!(keys, vec!["exec-1", RUNTIME_STATUS_LIVE_CELL_KEY]);
     }
 
     #[test]
