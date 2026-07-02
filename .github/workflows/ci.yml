@@ -77,6 +77,15 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+      - name: Check config schema is up to date
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo run -p daat-locus --locked -- config-schema > schemas/config.schema.json
+          if ! git diff --exit-code -- schemas/config.schema.json; then
+            echo "::error::schemas/config.schema.json is out of date. Regenerate with: cargo run -p daat-locus -- config-schema > schemas/config.schema.json"
+            exit 1
+          fi
+
   dependency-policy:
     name: Dependency policy
     runs-on: ubuntu-latest

@@ -54,6 +54,17 @@ run "Rust formatting" cargo fmt --all -- --check
 run_no_warnings "Rust warnings" env RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings" cargo check --locked --all-targets
 run "Rust clippy" cargo clippy --locked --all-targets -- -D warnings
 
+section "Config schema"
+schema_file="schemas/config.schema.json"
+schema_tmp="$(mktemp "${TMPDIR:-/tmp}/daat-locus-schema.XXXXXX")"
+cargo run -p daat-locus --locked -- config-schema > "$schema_tmp"
+if ! diff -u "$schema_file" "$schema_tmp"; then
+    rm -f "$schema_tmp"
+    printf '\n%s is out of date; regenerate with: cargo run -p daat-locus -- config-schema > %s\n' "$schema_file" "$schema_file" >&2
+    exit 1
+fi
+rm -f "$schema_tmp"
+
 if [ ! -f webui/package.json ]; then
     printf 'webui/package.json not found; cannot check WebUI warnings.\n' >&2
     exit 1
