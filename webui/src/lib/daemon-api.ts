@@ -628,6 +628,7 @@ export type SetupModelRequest = {
   auto_compact_token_limit?: number | null;
   effective_context_window_percent?: number | null;
   tool_output_max_tokens?: number | null;
+  api_style?: string | null;
 };
 
 export type SetupConfigRequest = {

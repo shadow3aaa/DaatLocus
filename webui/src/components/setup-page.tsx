@@ -5,6 +5,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import {
   ArrowRightIcon,
@@ -86,6 +87,7 @@ type CodexAuthMethod =
 
 type GithubAuthMethod = "device_login" | "manual_token" | "env_token";
 type SupportsVisionValue = "auto" | "true" | "false";
+type ApiStyleValue = "chat_completions" | "responses";
 
 export type SetupProviderDraft = {
   id: string;
@@ -108,6 +110,7 @@ export type SetupModelDraft = {
   maxCompletionTokens: string;
   supportsVision: SupportsVisionValue;
   thinkingBudget: string;
+  apiStyle: ApiStyleValue;
   source?: SetupModelRequest;
 };
 
@@ -162,96 +165,52 @@ type SetupPageProps = {
   ) => Promise<ConfigReadinessReport>;
 };
 
-const PROVIDER_KIND_OPTIONS: Array<{
-  value: SetupProviderKind;
-  label: string;
-  description: string;
-}> = [
-  {
-    value: "openai",
-    label: "OpenAI",
-    description: "Use an API key with OpenAI Responses-compatible access.",
-  },
-  {
-    value: "openai_codex_oauth",
-    label: "OpenAI Codex",
-    description: "Use a ChatGPT Codex OAuth account file.",
-  },
-  {
-    value: "github_copilot",
-    label: "GitHub Copilot",
-    description: "Use a GitHub Copilot account token.",
-  },
-  {
-    value: "openai_compatible",
-    label: "OpenAI compatible",
-    description: "Use an API key with a custom base URL.",
-  },
-  {
-    value: "ollama",
-    label: "Ollama local",
-    description: "Use a local Ollama endpoint.",
-  },
-  {
-    value: "ollama_cloud",
-    label: "Ollama Cloud",
-    description: "Use an Ollama Cloud API key.",
-  },
+const PROVIDER_KIND_ORDER: SetupProviderKind[] = [
+  "openai",
+  "openai_codex_oauth",
+  "github_copilot",
+  "openai_compatible",
+  "ollama",
+  "ollama_cloud",
 ];
 
-const CODEX_AUTH_METHODS: Array<{
-  value: CodexAuthMethod;
-  label: string;
-  description: string;
-}> = [
-  {
-    value: "browser_login",
-    label: "Browser login",
-    description: "Open the OpenAI authorization page and write this provider's OAuth file.",
-  },
-  {
-    value: "device_login",
-    label: "Device code login",
-    description: "Show a device code and complete authorization in the browser.",
-  },
-  {
-    value: "import_local_codex",
-    label: "Import local Codex",
-    description: "Read auth.json from the local Codex CLI.",
-  },
-  {
-    value: "import_auth_file",
-    label: "Import auth.json",
-    description: "Import from a selected Codex auth.json path.",
-  },
-  {
-    value: "existing_auth_file",
-    label: "Use existing Daat Locus OAuth file",
-    description: "Keep or manually place the OAuth file for this provider.",
-  },
+const CODEX_AUTH_METHOD_ORDER: CodexAuthMethod[] = [
+  "browser_login",
+  "device_login",
+  "import_local_codex",
+  "import_auth_file",
+  "existing_auth_file",
 ];
 
-const GITHUB_AUTH_METHODS: Array<{
-  value: GithubAuthMethod;
-  label: string;
-  description: string;
-}> = [
-  {
-    value: "device_login",
-    label: "Device code login",
-    description: "Get a Copilot access token through the GitHub device flow.",
-  },
-  {
-    value: "manual_token",
-    label: "Manual token",
-    description: "Paste a GitHub token.",
-  },
-  {
-    value: "env_token",
-    label: "Environment variable",
-    description: "Save a $GITHUB_TOKEN reference.",
-  },
+const GITHUB_AUTH_METHOD_ORDER: GithubAuthMethod[] = [
+  "device_login",
+  "manual_token",
+  "env_token",
 ];
+
+function providerKindOption(kind: SetupProviderKind, t: TFunction) {
+  return {
+    value: kind,
+    label: t(`setup.modelAccess.providerKinds.${kind}.label`),
+    description: t(`setup.modelAccess.providerKinds.${kind}.description`),
+  };
+}
+
+function codexAuthMethodOption(method: CodexAuthMethod, t: TFunction) {
+  return {
+    value: method,
+    label: t(`setup.modelAccess.codexAuthMethods.${method}.label`),
+    description: t(`setup.modelAccess.codexAuthMethods.${method}.description`),
+  };
+}
+
+function githubAuthMethodOption(method: GithubAuthMethod, t: TFunction) {
+  return {
+    value: method,
+    label: t(`setup.modelAccess.githubAuthMethods.${method}.label`),
+    description: t(`setup.modelAccess.githubAuthMethods.${method}.description`),
+  };
+}
 
 const PERSONA_LANGUAGES = [
   { value: "zh-CN", label: "Simplified Chinese", greeting: "你好" },
@@ -1003,16 +962,16 @@ function ProviderList({
                 {provider.name}
               </span>
               <Badge variant="secondary">
-                {providerKindLabel(provider.kind)}
+                {providerKindLabel(provider.kind, t)}
               </Badge>
               {provider.kind === "openai_codex_oauth" ? (
                 <Badge variant="outline">
-                  {codexAuthMethodLabel(provider.codexAuthMethod)}
+                  {codexAuthMethodLabel(provider.codexAuthMethod, t)}
                 </Badge>
               ) : null}
             </div>
             <p className="mt-1 truncate text-sm text-muted-foreground">
-              {providerSummary(provider)}
+              {providerSummary(provider, t)}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -1142,6 +1101,7 @@ function ProviderDialog({
   onSubmit: (provider: SetupProviderDraft) => void;
   providers: SetupProviderDraft[];
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState<SetupProviderDraft>(() =>
     createDefaultProvider([]),
   );
@@ -1151,15 +1111,9 @@ function ProviderDialog({
   const [authError, setAuthError] = useState<string | null>(null);
   const [deviceFlow, setDeviceFlow] =
     useState<SetupProviderAuthStartResponse | null>(null);
-  const selectedKind = PROVIDER_KIND_OPTIONS.find(
-    (kind) => kind.value === draft.kind,
-  );
-  const selectedCodexMethod = CODEX_AUTH_METHODS.find(
-    (method) => method.value === draft.codexAuthMethod,
-  );
-  const selectedGithubMethod = GITHUB_AUTH_METHODS.find(
-    (method) => method.value === draft.githubAuthMethod,
-  );
+  const selectedKind = providerKindOption(draft.kind, t);
+  const selectedCodexMethod = codexAuthMethodOption(draft.codexAuthMethod, t);
+  const selectedGithubMethod = githubAuthMethodOption(draft.githubAuthMethod, t);
   const needsApiKey =
     draft.kind === "openai" ||
     draft.kind === "openai_compatible" ||
@@ -1181,7 +1135,7 @@ function ProviderDialog({
     draft.kind === "openai_codex_oauth" ||
     (draft.kind === "github_copilot" &&
       draft.githubAuthMethod === "device_login");
-  const providerAuthButtonLabel = providerAuthActionLabel(draft);
+  const providerAuthButtonLabel = providerAuthActionLabel(draft, t);
   const requiresCompletedProviderAuth =
     providerRequiresCompletedAuthBeforeSave(draft);
   const canSaveProvider =
@@ -1292,7 +1246,9 @@ function ProviderDialog({
     }
     if (!draft.name.trim()) {
       setAuthState("error");
-      setAuthError("Enter a provider name first.");
+      setAuthError(
+        t("setup.modelAccess.providerDialog.errors.enterNameFirst"),
+      );
       return;
     }
     if (
@@ -1301,7 +1257,9 @@ function ProviderDialog({
       !draft.codexAuthFile.trim()
     ) {
       setAuthState("error");
-      setAuthError("Enter an auth.json path first.");
+      setAuthError(
+        t("setup.modelAccess.providerDialog.errors.enterAuthFileFirst"),
+      );
       return;
     }
 
@@ -1314,7 +1272,7 @@ function ProviderDialog({
         setDeviceFlow(flow);
         setAuthState("device_pending");
         setAuthMessage(
-          "Authorization page opened. Enter the device code in the browser to finish authorization.",
+          t("setup.modelAccess.providerDialog.deviceAuthOpened"),
         );
         return;
       }
@@ -1349,35 +1307,35 @@ function ProviderDialog({
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!draft.name.trim()) {
-      setError("Provider name is required.");
+      setError(t("setup.modelAccess.providerDialog.errors.nameRequired"));
       return;
     }
     if (duplicateName) {
-      setError("Provider name already exists.");
+      setError(t("setup.modelAccess.providerDialog.errors.nameExists"));
       return;
     }
     if (needsApiKey && !draft.apiKey.trim()) {
-      setError("This provider requires an API key.");
+      setError(t("setup.modelAccess.providerDialog.errors.apiKeyRequired"));
       return;
     }
     if (draft.kind === "github_copilot" && !draft.apiKey.trim()) {
       setError(
-        "GitHub Copilot requires a token or environment variable reference.",
+        t("setup.modelAccess.providerDialog.errors.githubTokenRequired"),
       );
       return;
     }
     if (needsBaseUrl && !draft.baseUrl.trim()) {
-      setError("OpenAI compatible providers require a base URL.");
+      setError(t("setup.modelAccess.providerDialog.errors.baseUrlRequired"));
       return;
     }
     if (draft.kind === "openai_codex_oauth" && showCodexAuthFile) {
       if (!draft.codexAuthFile.trim()) {
-        setError("This Codex authentication method requires an auth.json path.");
+        setError(t("setup.modelAccess.providerDialog.errors.authFileRequired"));
         return;
       }
     }
     if (requiresCompletedProviderAuth && authState !== "success") {
-      setError(providerAuthSaveBlockMessage(draft));
+      setError(providerAuthSaveBlockMessage(draft, t));
       return;
     }
     onSubmit({
@@ -1395,17 +1353,20 @@ function ProviderDialog({
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
-            {dialog?.mode === "edit" ? "Edit provider" : "Add provider"}
+            {dialog?.mode === "edit"
+              ? t("setup.modelAccess.providerDialog.editTitle")
+              : t("setup.modelAccess.providerDialog.addTitle")}
           </DialogTitle>
           <DialogDescription>
-            Providers define credentials and API endpoints. Models are bound to
-            providers in the next section.
+            {t("setup.modelAccess.providerDialog.description")}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="flex flex-col gap-5">
           <FieldGroup>
             <Field data-invalid={Boolean(error)}>
-              <FieldLabel htmlFor="setup-provider-name">Name</FieldLabel>
+              <FieldLabel htmlFor="setup-provider-name">
+                {t("setup.modelAccess.providerDialog.name")}
+              </FieldLabel>
               <Input
                 id="setup-provider-name"
                 value={draft.name}
@@ -1417,16 +1378,22 @@ function ProviderDialog({
             </Field>
 
             <Field>
-              <FieldLabel htmlFor="setup-provider-kind">Type</FieldLabel>
+              <FieldLabel htmlFor="setup-provider-kind">
+                {t("setup.modelAccess.providerDialog.type")}
+              </FieldLabel>
               <Select value={draft.kind} onValueChange={handleKindChange}>
                 <SelectTrigger id="setup-provider-kind" className="w-full">
-                  <SelectValue placeholder="Select provider type" />
+                  <SelectValue
+                    placeholder={t(
+                      "setup.modelAccess.providerDialog.selectProviderType",
+                    )}
+                  />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
-                    {PROVIDER_KIND_OPTIONS.map((kind) => (
-                      <SelectItem key={kind.value} value={kind.value}>
-                        {kind.label}
+                    {PROVIDER_KIND_ORDER.map((kind) => (
+                      <SelectItem key={kind} value={kind}>
+                        {providerKindLabel(kind, t)}
                       </SelectItem>
                     ))}
                   </SelectGroup>
@@ -1439,7 +1406,9 @@ function ProviderDialog({
               <>
                 <Field>
                   <FieldLabel htmlFor="setup-codex-auth-method">
-                    Codex authentication method
+                    {t(
+                      "setup.modelAccess.providerDialog.codexAuthMethodLabel",
+                    )}
                   </FieldLabel>
                   <Select
                     value={draft.codexAuthMethod}
@@ -1451,13 +1420,17 @@ function ProviderDialog({
                       id="setup-codex-auth-method"
                       className="w-full"
                     >
-                      <SelectValue placeholder="Select authentication method" />
+                      <SelectValue
+                        placeholder={t(
+                          "setup.modelAccess.providerDialog.selectAuthMethod",
+                        )}
+                      />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectGroup>
-                        {CODEX_AUTH_METHODS.map((method) => (
-                          <SelectItem key={method.value} value={method.value}>
-                            {method.label}
+                        {CODEX_AUTH_METHOD_ORDER.map((method) => (
+                          <SelectItem key={method} value={method}>
+                            {codexAuthMethodLabel(method, t)}
                           </SelectItem>
                         ))}
                       </SelectGroup>
@@ -1471,7 +1444,7 @@ function ProviderDialog({
                 {showCodexAuthFile ? (
                   <Field>
                     <FieldLabel htmlFor="setup-codex-auth-file">
-                      auth.json path
+                      {t("setup.modelAccess.providerDialog.authFilePath")}
                     </FieldLabel>
                     <Input
                       id="setup-codex-auth-file"
@@ -1491,7 +1464,9 @@ function ProviderDialog({
               <>
                 <Field>
                   <FieldLabel htmlFor="setup-github-auth-method">
-                    GitHub authentication method
+                    {t(
+                      "setup.modelAccess.providerDialog.githubAuthMethodLabel",
+                    )}
                   </FieldLabel>
                   <Select
                     value={draft.githubAuthMethod}
@@ -1503,13 +1478,17 @@ function ProviderDialog({
                       id="setup-github-auth-method"
                       className="w-full"
                     >
-                      <SelectValue placeholder="Select authentication method" />
+                      <SelectValue
+                        placeholder={t(
+                          "setup.modelAccess.providerDialog.selectAuthMethod",
+                        )}
+                      />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectGroup>
-                        {GITHUB_AUTH_METHODS.map((method) => (
-                          <SelectItem key={method.value} value={method.value}>
-                            {method.label}
+                        {GITHUB_AUTH_METHOD_ORDER.map((method) => (
+                          <SelectItem key={method} value={method}>
+                            {githubAuthMethodLabel(method, t)}
                           </SelectItem>
                         ))}
                       </SelectGroup>
@@ -1521,7 +1500,7 @@ function ProviderDialog({
                 </Field>
                 <Field>
                   <FieldLabel htmlFor="setup-github-token">
-                    GitHub token
+                    {t("setup.modelAccess.providerDialog.githubToken")}
                   </FieldLabel>
                   <Input
                     id="setup-github-token"
@@ -1546,7 +1525,9 @@ function ProviderDialog({
 
             {usesProviderAuthAction ? (
               <Field data-invalid={authState === "error"}>
-                <FieldLabel>Authentication</FieldLabel>
+                <FieldLabel>
+                  {t("setup.modelAccess.providerDialog.authentication")}
+                </FieldLabel>
                 <div className="flex flex-wrap items-center gap-2">
                   <Button
                     type="button"
@@ -1559,7 +1540,9 @@ function ProviderDialog({
                     ) : (
                       <ArrowRightIcon data-icon="inline-start" aria-hidden="true" />
                     )}
-                    {deviceFlow ? "Restart" : providerAuthButtonLabel}
+                    {deviceFlow
+                      ? t("setup.modelAccess.providerDialog.restart")
+                      : providerAuthButtonLabel}
                   </Button>
                   {deviceFlow ? (
                     <Button
@@ -1572,7 +1555,9 @@ function ProviderDialog({
                       ) : (
                         <CheckIcon data-icon="inline-start" aria-hidden="true" />
                       )}
-                      Complete authorization
+                      {t(
+                        "setup.modelAccess.providerDialog.completeAuthorization",
+                      )}
                     </Button>
                   ) : null}
                 </div>
@@ -1595,7 +1580,7 @@ function ProviderDialog({
                   <FieldError>{authError}</FieldError>
                 ) : (
                   <FieldDescription>
-                    {authMessage ?? providerAuthDescription(draft)}
+                    {authMessage ?? providerAuthDescription(draft, t)}
                   </FieldDescription>
                 )}
               </Field>
@@ -1604,7 +1589,7 @@ function ProviderDialog({
             {needsApiKey ? (
               <Field>
                 <FieldLabel htmlFor="setup-provider-api-key">
-                  API Key
+                  {t("setup.modelAccess.providerDialog.apiKey")}
                 </FieldLabel>
                 <Input
                   id="setup-provider-api-key"
@@ -1625,7 +1610,9 @@ function ProviderDialog({
             {showBaseUrl ? (
               <Field data-invalid={needsBaseUrl && !draft.baseUrl.trim()}>
                 <FieldLabel htmlFor="setup-provider-base-url">
-                  {draft.kind === "ollama" ? "Host" : "Base URL"}
+                  {draft.kind === "ollama"
+                    ? t("setup.modelAccess.providerDialog.host")
+                    : t("setup.modelAccess.providerDialog.baseUrl")}
                 </FieldLabel>
                 <Input
                   id="setup-provider-base-url"
@@ -1636,15 +1623,17 @@ function ProviderDialog({
                       baseUrl: event.target.value,
                     }))
                   }
-                  placeholder={providerBaseUrlPlaceholder(draft.kind)}
+                  placeholder={providerBaseUrlPlaceholder(draft.kind, t)}
                   aria-invalid={needsBaseUrl && !draft.baseUrl.trim()}
                   spellCheck={false}
                 />
                 <FieldDescription>
-                  Leave empty to use the provider default when optional.
+                  {t("setup.modelAccess.providerDialog.baseUrlOptionalHint")}
                 </FieldDescription>
                 <FieldError>
-                  {needsBaseUrl ? "OpenAI compatible requires a base URL." : null}
+                  {needsBaseUrl
+                    ? t("setup.modelAccess.providerDialog.baseUrlRequiredError")
+                    : null}
                 </FieldError>
               </Field>
             ) : null}
@@ -1652,7 +1641,7 @@ function ProviderDialog({
             {showKeepAlive ? (
               <Field>
                 <FieldLabel htmlFor="setup-provider-keep-alive">
-                  keep_alive
+                  {t("setup.modelAccess.providerDialog.keepAlive")}
                 </FieldLabel>
                 <Input
                   id="setup-provider-keep-alive"
@@ -1676,10 +1665,10 @@ function ProviderDialog({
               variant="outline"
               onClick={() => onOpenChange(false)}
             >
-              Cancel
+              {t("setup.modelAccess.providerDialog.cancel")}
             </Button>
             <Button type="submit" disabled={!canSaveProvider}>
-              Save provider
+              {t("setup.modelAccess.providerDialog.saveProvider")}
             </Button>
           </DialogFooter>
         </form>
@@ -1701,6 +1690,7 @@ function ModelDialog({
   onSubmit: (model: SetupModelDraft) => void;
   providers: SetupProviderDraft[];
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState<SetupModelDraft>(() =>
     createDefaultModel([]),
   );
@@ -1834,6 +1824,7 @@ function ModelDialog({
             maxCompletionTokens: DEFAULT_MAX_COMPLETION_TOKENS,
             supportsVision: "auto" as const,
             thinkingBudget: "",
+            apiStyle: "chat_completions" as const,
           }
         : {}),
     }));
@@ -1842,27 +1833,27 @@ function ModelDialog({
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!draft.providerName.trim()) {
-      setError("Select a provider.");
+      setError(t("setup.modelAccess.modelDialog.errors.providerRequired"));
       return;
     }
     if (!draft.name.trim()) {
-      setError("Model name is required.");
+      setError(t("setup.modelAccess.modelDialog.errors.nameRequired"));
       return;
     }
     if (duplicateName) {
-      setError("Model name already exists.");
+      setError(t("setup.modelAccess.modelDialog.errors.nameExists"));
       return;
     }
     if (!draft.modelId.trim()) {
-      setError("Model ID is required.");
+      setError(t("setup.modelAccess.modelDialog.errors.modelIdRequired"));
       return;
     }
     if (!parseOptionalPositiveInt(draft.contextWindowTokens)) {
-      setError("Context window tokens must be a positive integer.");
+      setError(t("setup.modelAccess.modelDialog.errors.contextWindowInvalid"));
       return;
     }
     if (!parseOptionalPositiveInt(draft.maxCompletionTokens)) {
-      setError("Max completion tokens must be a positive integer.");
+      setError(t("setup.modelAccess.modelDialog.errors.maxCompletionInvalid"));
       return;
     }
     onSubmit({
@@ -1880,23 +1871,30 @@ function ModelDialog({
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
-            {dialog?.mode === "edit" ? "Edit model" : "Add model"}
+            {dialog?.mode === "edit"
+              ? t("setup.modelAccess.modelDialog.editTitle")
+              : t("setup.modelAccess.modelDialog.addTitle")}
           </DialogTitle>
           <DialogDescription>
-            Model definitions are bound to providers and can be selected as the
-            main or efficient model.
+            {t("setup.modelAccess.modelDialog.description")}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="flex flex-col gap-5">
           <FieldGroup>
             <Field data-invalid={Boolean(error)}>
-              <FieldLabel htmlFor="setup-model-provider">Provider</FieldLabel>
+              <FieldLabel htmlFor="setup-model-provider">
+                {t("setup.modelAccess.modelDialog.provider")}
+              </FieldLabel>
               <Select
                 value={draft.providerName}
                 onValueChange={handleProviderChange}
               >
                 <SelectTrigger id="setup-model-provider" className="w-full">
-                  <SelectValue placeholder="Select provider" />
+                  <SelectValue
+                    placeholder={t(
+                      "setup.modelAccess.modelDialog.selectProvider",
+                    )}
+                  />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
@@ -1914,7 +1912,7 @@ function ModelDialog({
             <Field>
               <div className="flex items-center justify-between gap-3">
                 <FieldLabel htmlFor="setup-model-discovered">
-                  Discovered models
+                  {t("setup.modelAccess.modelDialog.discoveredModels")}
                 </FieldLabel>
                 <Button
                   type="button"
@@ -1928,7 +1926,7 @@ function ModelDialog({
                   ) : (
                     <RotateCcwIcon data-icon="inline-start" aria-hidden="true" />
                   )}
-                  Rediscover
+                  {t("setup.modelAccess.modelDialog.rediscover")}
                 </Button>
               </div>
               <Select
@@ -1941,7 +1939,11 @@ function ModelDialog({
                 disabled={!selectedProvider}
               >
                 <SelectTrigger id="setup-model-discovered" className="w-full">
-                  <SelectValue placeholder="Select a model or enter manually" />
+                  <SelectValue
+                    placeholder={t(
+                      "setup.modelAccess.modelDialog.selectModelOrManual",
+                    )}
+                  />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
@@ -1953,7 +1955,9 @@ function ModelDialog({
                         {model.id}
                       </SelectItem>
                     ))}
-                    <SelectItem value="__manual__">Manual input</SelectItem>
+                    <SelectItem value="__manual__">
+                      {t("setup.modelAccess.modelDialog.manualInput")}
+                    </SelectItem>
                   </SelectGroup>
                 </SelectContent>
               </Select>
@@ -1965,6 +1969,7 @@ function ModelDialog({
                     selectedProvider,
                     discoveryState,
                     discoveredModels.length,
+                    t,
                   )}
                 </FieldDescription>
               )}
@@ -1972,7 +1977,9 @@ function ModelDialog({
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field>
-                <FieldLabel htmlFor="setup-model-name">Model name</FieldLabel>
+                <FieldLabel htmlFor="setup-model-name">
+                  {t("setup.modelAccess.modelDialog.modelName")}
+                </FieldLabel>
                 <Input
                   id="setup-model-name"
                   value={draft.name}
@@ -1987,7 +1994,9 @@ function ModelDialog({
                 />
               </Field>
               <Field>
-                <FieldLabel htmlFor="setup-model-id">Model ID</FieldLabel>
+                <FieldLabel htmlFor="setup-model-id">
+                  {t("setup.modelAccess.modelDialog.modelId")}
+                </FieldLabel>
                 <Input
                   id="setup-model-id"
                   value={draft.modelId}
@@ -2003,7 +2012,7 @@ function ModelDialog({
               </Field>
               <Field>
                 <FieldLabel htmlFor="setup-model-context">
-                  Context window tokens
+                  {t("setup.modelAccess.modelDialog.contextWindowTokens")}
                 </FieldLabel>
                 <Input
                   id="setup-model-context"
@@ -2019,7 +2028,7 @@ function ModelDialog({
               </Field>
               <Field>
                 <FieldLabel htmlFor="setup-model-output">
-                  Max completion tokens
+                  {t("setup.modelAccess.modelDialog.maxCompletionTokens")}
                 </FieldLabel>
                 <Input
                   id="setup-model-output"
@@ -2034,7 +2043,9 @@ function ModelDialog({
                 />
               </Field>
               <Field>
-                <FieldLabel htmlFor="setup-model-vision">Vision</FieldLabel>
+                <FieldLabel htmlFor="setup-model-vision">
+                  {t("setup.modelAccess.modelDialog.vision")}
+                </FieldLabel>
                 <Select
                   value={draft.supportsVision}
                   onValueChange={(value) =>
@@ -2049,16 +2060,59 @@ function ModelDialog({
                   </SelectTrigger>
                   <SelectContent>
                     <SelectGroup>
-                      <SelectItem value="auto">Auto</SelectItem>
-                      <SelectItem value="true">Supported</SelectItem>
-                      <SelectItem value="false">Unsupported</SelectItem>
+                      <SelectItem value="auto">
+                        {t("setup.modelAccess.modelDialog.visionAuto")}
+                      </SelectItem>
+                      <SelectItem value="true">
+                        {t("setup.modelAccess.modelDialog.visionSupported")}
+                      </SelectItem>
+                      <SelectItem value="false">
+                        {t("setup.modelAccess.modelDialog.visionUnsupported")}
+                      </SelectItem>
                     </SelectGroup>
                   </SelectContent>
                 </Select>
               </Field>
+              {selectedProvider?.kind === "openai_compatible" ? (
+                <Field>
+                  <FieldLabel htmlFor="setup-model-api-style">
+                    {t("setup.modelAccess.modelDialog.apiStyle")}
+                  </FieldLabel>
+                  <Select
+                    value={draft.apiStyle}
+                    onValueChange={(value) =>
+                      setDraft((current) => ({
+                        ...current,
+                        apiStyle: value as ApiStyleValue,
+                      }))
+                    }
+                  >
+                    <SelectTrigger id="setup-model-api-style" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="chat_completions">
+                          {t(
+                            "setup.modelAccess.modelDialog.apiStyleChatCompletions",
+                          )}
+                        </SelectItem>
+                        <SelectItem value="responses">
+                          {t(
+                            "setup.modelAccess.modelDialog.apiStyleResponses",
+                          )}
+                        </SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <FieldDescription>
+                    {t("setup.modelAccess.modelDialog.apiStyleDescription")}
+                  </FieldDescription>
+                </Field>
+              ) : null}
               <Field>
                 <FieldLabel htmlFor="setup-model-thinking">
-                  Reasoning / thinking
+                  {t("setup.modelAccess.modelDialog.reasoning")}
                 </FieldLabel>
                 <Select
                   value={thinkingSelection}
@@ -2096,7 +2150,7 @@ function ModelDialog({
                   <SelectContent>
                     <SelectGroup>
                       <SelectItem value={THINKING_UNSET_VALUE}>
-                        Not configured
+                        {t("setup.modelAccess.modelDialog.notConfigured")}
                       </SelectItem>
                       {thinkingOptions.map((option) => (
                         <SelectItem key={option} value={option}>
@@ -2104,7 +2158,7 @@ function ModelDialog({
                         </SelectItem>
                       ))}
                       <SelectItem value={THINKING_CUSTOM_VALUE}>
-                        Custom
+                        {t("setup.modelAccess.modelDialog.custom")}
                       </SelectItem>
                     </SelectGroup>
                   </SelectContent>
@@ -2118,7 +2172,9 @@ function ModelDialog({
                         thinkingBudget: event.target.value,
                       }))
                     }
-                    placeholder="Enter a custom reasoning / thinking value"
+                    placeholder={t(
+                      "setup.modelAccess.modelDialog.customReasoningPlaceholder",
+                    )}
                     spellCheck={false}
                   />
                 ) : null}
@@ -2132,9 +2188,11 @@ function ModelDialog({
               variant="outline"
               onClick={() => onOpenChange(false)}
             >
-              Cancel
+              {t("setup.modelAccess.modelDialog.cancel")}
             </Button>
-            <Button type="submit">Save model</Button>
+            <Button type="submit">
+              {t("setup.modelAccess.modelDialog.saveModel")}
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -2256,6 +2314,7 @@ function modelRequestToDraft(model: SetupModelRequest): SetupModelDraft {
           ? "true"
           : "false",
     thinkingBudget: model.thinking_budget ?? "",
+    apiStyle: model.api_style === "responses" ? "responses" : "chat_completions",
     source: model,
   };
 }
@@ -2318,6 +2377,7 @@ function createDefaultModel(providers: SetupProviderDraft[]): SetupModelDraft {
     maxCompletionTokens: DEFAULT_MAX_COMPLETION_TOKENS,
     supportsVision: "auto",
     thinkingBudget: "",
+    apiStyle: "chat_completions",
   };
 }
 
@@ -2383,33 +2443,33 @@ function modelToRequest(model: SetupModelDraft): SetupModelRequest {
     supports_vision:
       model.supportsVision === "auto" ? null : model.supportsVision === "true",
     thinking_budget: model.thinkingBudget.trim() || null,
+    api_style: model.apiStyle === "responses" ? "responses" : null,
   };
 }
 
-function providerKindLabel(kind: SetupProviderKind) {
-  return (
-    PROVIDER_KIND_OPTIONS.find((option) => option.value === kind)?.label ?? kind
-  );
+function providerKindLabel(kind: SetupProviderKind, t: TFunction) {
+  return t(`setup.modelAccess.providerKinds.${kind}.label`);
 }
 
 function modelDiscoveryDescription(
   provider: SetupProviderDraft | undefined,
   state: "idle" | "loading" | "loaded" | "error",
   count: number,
+  t: TFunction,
 ) {
   if (!provider) {
-    return "Select a provider first.";
+    return t("setup.modelAccess.modelDialog.discovery.selectProviderFirst");
   }
   if (state === "loading") {
-    return "Discovering models from this provider.";
+    return t("setup.modelAccess.modelDialog.discovery.loading");
   }
   if (state === "loaded" && count > 0) {
-    return `Discovered ${count} models. You can also enter a model ID manually.`;
+    return t("setup.modelAccess.modelDialog.discovery.loadedSome", { count });
   }
   if (state === "loaded") {
-    return "No models discovered. You can enter a model ID manually.";
+    return t("setup.modelAccess.modelDialog.discovery.loadedNone");
   }
-  return "Models are discovered automatically after a provider is selected.";
+  return t("setup.modelAccess.modelDialog.discovery.idle");
 }
 
 function defaultThinkingBudget(values: string[]) {
@@ -2435,14 +2495,18 @@ function uniqueStrings(values: string[]) {
   return Array.from(new Set(values));
 }
 
-function providerSummary(provider: SetupProviderDraft) {
+function providerSummary(provider: SetupProviderDraft, t: TFunction) {
   if (provider.kind === "openai_codex_oauth") {
     return provider.baseUrl.trim()
-      ? `Codex OAuth · ${provider.baseUrl}`
-      : "Codex OAuth · default endpoint";
+      ? t("setup.modelAccess.providerDialog.summary.codexEndpoint", {
+          url: provider.baseUrl,
+        })
+      : t("setup.modelAccess.providerDialog.summary.codexDefaultEndpoint");
   }
   if (provider.kind === "github_copilot") {
-    return `GitHub Copilot · ${githubAuthMethodLabel(provider.githubAuthMethod)}`;
+    return t("setup.modelAccess.providerDialog.summary.githubCopilot", {
+      method: githubAuthMethodLabel(provider.githubAuthMethod, t),
+    });
   }
   if (provider.kind === "ollama") {
     return provider.baseUrl.trim() || "http://127.0.0.1:11434";
@@ -2450,7 +2514,10 @@ function providerSummary(provider: SetupProviderDraft) {
   if (provider.kind === "ollama_cloud") {
     return "https://ollama.com";
   }
-  return provider.baseUrl.trim() || "provider default";
+  return (
+    provider.baseUrl.trim() ||
+    t("setup.modelAccess.providerDialog.summary.providerDefault")
+  );
 }
 
 function defaultProviderName(kind: SetupProviderKind) {
@@ -2503,58 +2570,40 @@ function defaultProviderBaseUrl(kind: SetupProviderKind) {
   return "";
 }
 
-function providerBaseUrlPlaceholder(kind: SetupProviderKind) {
+function providerBaseUrlPlaceholder(kind: SetupProviderKind, t: TFunction) {
   if (kind === "ollama") {
     return "http://127.0.0.1:11434";
   }
   if (kind === "openai_compatible") {
     return "https://api.example.com/v1";
   }
-  return "Use provider default";
+  return t("setup.modelAccess.providerDialog.baseUrlPlaceholderDefault");
 }
 
-function codexAuthMethodLabel(method: CodexAuthMethod) {
-  return CODEX_AUTH_METHODS.find((item) => item.value === method)?.label ?? method;
+function codexAuthMethodLabel(method: CodexAuthMethod, t: TFunction) {
+  return t(`setup.modelAccess.codexAuthMethods.${method}.label`);
 }
 
-function githubAuthMethodLabel(method: GithubAuthMethod) {
-  return GITHUB_AUTH_METHODS.find((item) => item.value === method)?.label ?? method;
+function githubAuthMethodLabel(method: GithubAuthMethod, t: TFunction) {
+  return t(`setup.modelAccess.githubAuthMethods.${method}.label`);
 }
 
-function providerAuthActionLabel(provider: SetupProviderDraft) {
+function providerAuthActionLabel(provider: SetupProviderDraft, t: TFunction) {
   if (provider.kind === "github_copilot") {
-    return "Start device code login";
+    return t("setup.modelAccess.providerDialog.authAction.github");
   }
-  switch (provider.codexAuthMethod) {
-    case "browser_login":
-      return "Open browser login";
-    case "device_login":
-      return "Start device code login";
-    case "import_local_codex":
-      return "Import local Codex";
-    case "import_auth_file":
-      return "Import auth.json";
-    case "existing_auth_file":
-      return "Check OAuth file";
-  }
+  return t(
+    `setup.modelAccess.providerDialog.authAction.${provider.codexAuthMethod}`,
+  );
 }
 
-function providerAuthDescription(provider: SetupProviderDraft) {
+function providerAuthDescription(provider: SetupProviderDraft, t: TFunction) {
   if (provider.kind === "github_copilot") {
-    return "Authorization writes the GitHub token into the current provider draft.";
+    return t("setup.modelAccess.providerDialog.authDescription.github");
   }
-  switch (provider.codexAuthMethod) {
-    case "browser_login":
-      return "After login, Daat Locus writes the fixed Codex OAuth file for this provider.";
-    case "device_login":
-      return "Start the flow, enter the device code, then return here to complete authorization.";
-    case "import_local_codex":
-      return "Import from the local Codex CLI auth.json into this provider.";
-    case "import_auth_file":
-      return "Import from the specified auth.json into this provider.";
-    case "existing_auth_file":
-      return "Check whether this provider's fixed Codex OAuth file exists.";
-  }
+  return t(
+    `setup.modelAccess.providerDialog.authDescription.${provider.codexAuthMethod}`,
+  );
 }
 
 function providerRequiresCompletedAuthBeforeSave(provider: SetupProviderDraft) {
@@ -2565,22 +2614,16 @@ function providerRequiresCompletedAuthBeforeSave(provider: SetupProviderDraft) {
   );
 }
 
-function providerAuthSaveBlockMessage(provider: SetupProviderDraft) {
+function providerAuthSaveBlockMessage(
+  provider: SetupProviderDraft,
+  t: TFunction,
+) {
   if (provider.kind === "github_copilot") {
-    return "Complete GitHub device code login first.";
+    return t("setup.modelAccess.providerDialog.authSaveBlock.github");
   }
-  switch (provider.codexAuthMethod) {
-    case "browser_login":
-      return "Complete browser login first.";
-    case "device_login":
-      return "Complete device code login first.";
-    case "import_local_codex":
-      return "Import local Codex and wait for it to finish first.";
-    case "import_auth_file":
-      return "Import auth.json and wait for it to finish first.";
-    case "existing_auth_file":
-      return "Check the existing OAuth file first.";
-  }
+  return t(
+    `setup.modelAccess.providerDialog.authSaveBlock.${provider.codexAuthMethod}`,
+  );
 }
 
 

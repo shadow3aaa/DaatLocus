@@ -173,6 +173,200 @@ const resources = {
           modelSummary:
             "context {{context}} · output {{output}} · vision {{vision}}",
         },
+        providerKinds: {
+          openai: {
+            label: "OpenAI",
+            description: "Use an API key with OpenAI Responses-compatible access.",
+          },
+          openai_codex_oauth: {
+            label: "OpenAI Codex",
+            description: "Use a ChatGPT Codex OAuth account file.",
+          },
+          github_copilot: {
+            label: "GitHub Copilot",
+            description: "Use a GitHub Copilot account token.",
+          },
+          openai_compatible: {
+            label: "OpenAI compatible",
+            description: "Use an API key with a custom base URL.",
+          },
+          ollama: {
+            label: "Ollama local",
+            description: "Use a local Ollama endpoint.",
+          },
+          ollama_cloud: {
+            label: "Ollama Cloud",
+            description: "Use an Ollama Cloud API key.",
+          },
+        },
+        codexAuthMethods: {
+          browser_login: {
+            label: "Browser login",
+            description:
+              "Open the OpenAI authorization page and write this provider's OAuth file.",
+          },
+          device_login: {
+            label: "Device code login",
+            description:
+              "Show a device code and complete authorization in the browser.",
+          },
+          import_local_codex: {
+            label: "Import local Codex",
+            description: "Read auth.json from the local Codex CLI.",
+          },
+          import_auth_file: {
+            label: "Import auth.json",
+            description: "Import from a selected Codex auth.json path.",
+          },
+          existing_auth_file: {
+            label: "Use existing Daat Locus OAuth file",
+            description:
+              "Keep or manually place the OAuth file for this provider.",
+          },
+        },
+        githubAuthMethods: {
+          device_login: {
+            label: "Device code login",
+            description:
+              "Get a Copilot access token through the GitHub device flow.",
+          },
+          manual_token: {
+            label: "Manual token",
+            description: "Paste a GitHub token.",
+          },
+          env_token: {
+            label: "Environment variable",
+            description: "Save a $GITHUB_TOKEN reference.",
+          },
+        },
+        providerDialog: {
+          editTitle: "Edit provider",
+          addTitle: "Add provider",
+          description:
+            "Providers define credentials and API endpoints. Models are bound to providers in the next section.",
+          name: "Name",
+          type: "Type",
+          selectProviderType: "Select provider type",
+          codexAuthMethodLabel: "Codex authentication method",
+          githubAuthMethodLabel: "GitHub authentication method",
+          selectAuthMethod: "Select authentication method",
+          authFilePath: "auth.json path",
+          githubToken: "GitHub token",
+          authentication: "Authentication",
+          restart: "Restart",
+          completeAuthorization: "Complete authorization",
+          apiKey: "API Key",
+          host: "Host",
+          baseUrl: "Base URL",
+          baseUrlOptionalHint:
+            "Leave empty to use the provider default when optional.",
+          baseUrlRequiredError: "OpenAI compatible requires a base URL.",
+          baseUrlPlaceholderDefault: "Use provider default",
+          keepAlive: "keep_alive",
+          cancel: "Cancel",
+          saveProvider: "Save provider",
+          deviceAuthOpened:
+            "Authorization page opened. Enter the device code in the browser to finish authorization.",
+          authAction: {
+            github: "Start device code login",
+            browser_login: "Open browser login",
+            device_login: "Start device code login",
+            import_local_codex: "Import local Codex",
+            import_auth_file: "Import auth.json",
+            existing_auth_file: "Check OAuth file",
+          },
+          authDescription: {
+            github:
+              "Authorization writes the GitHub token into the current provider draft.",
+            browser_login:
+              "After login, Daat Locus writes the fixed Codex OAuth file for this provider.",
+            device_login:
+              "Start the flow, enter the device code, then return here to complete authorization.",
+            import_local_codex:
+              "Import from the local Codex CLI auth.json into this provider.",
+            import_auth_file:
+              "Import from the specified auth.json into this provider.",
+            existing_auth_file:
+              "Check whether this provider's fixed Codex OAuth file exists.",
+          },
+          authSaveBlock: {
+            github: "Complete GitHub device code login first.",
+            browser_login: "Complete browser login first.",
+            device_login: "Complete device code login first.",
+            import_local_codex:
+              "Import local Codex and wait for it to finish first.",
+            import_auth_file: "Import auth.json and wait for it to finish first.",
+            existing_auth_file: "Check the existing OAuth file first.",
+          },
+          summary: {
+            codexDefaultEndpoint: "Codex OAuth · default endpoint",
+            codexEndpoint: "Codex OAuth · {{url}}",
+            githubCopilot: "GitHub Copilot · {{method}}",
+            providerDefault: "provider default",
+          },
+          errors: {
+            nameRequired: "Provider name is required.",
+            nameExists: "Provider name already exists.",
+            apiKeyRequired: "This provider requires an API key.",
+            githubTokenRequired:
+              "GitHub Copilot requires a token or environment variable reference.",
+            baseUrlRequired: "OpenAI compatible providers require a base URL.",
+            authFileRequired:
+              "This Codex authentication method requires an auth.json path.",
+            enterNameFirst: "Enter a provider name first.",
+            enterAuthFileFirst: "Enter an auth.json path first.",
+          },
+        },
+        modelDialog: {
+          editTitle: "Edit model",
+          addTitle: "Add model",
+          description:
+            "Model definitions are bound to providers and can be selected as the main or efficient model.",
+          provider: "Provider",
+          selectProvider: "Select provider",
+          discoveredModels: "Discovered models",
+          rediscover: "Rediscover",
+          selectModelOrManual: "Select a model or enter manually",
+          manualInput: "Manual input",
+          modelName: "Model name",
+          modelId: "Model ID",
+          contextWindowTokens: "Context window tokens",
+          maxCompletionTokens: "Max completion tokens",
+          vision: "Vision",
+          visionAuto: "Auto",
+          visionSupported: "Supported",
+          visionUnsupported: "Unsupported",
+          apiStyle: "API style",
+          apiStyleChatCompletions: "Chat completions (default)",
+          apiStyleResponses: "Responses",
+          apiStyleDescription:
+            "Selects the endpoint protocol for this openai-compatible model: chat completions or the responses API.",
+          reasoning: "Reasoning / thinking",
+          notConfigured: "Not configured",
+          custom: "Custom",
+          customReasoningPlaceholder:
+            "Enter a custom reasoning / thinking value",
+          cancel: "Cancel",
+          saveModel: "Save model",
+          discovery: {
+            selectProviderFirst: "Select a provider first.",
+            loading: "Discovering models from this provider.",
+            loadedSome:
+              "Discovered {{count}} models. You can also enter a model ID manually.",
+            loadedNone: "No models discovered. You can enter a model ID manually.",
+            idle: "Models are discovered automatically after a provider is selected.",
+          },
+          errors: {
+            providerRequired: "Select a provider.",
+            nameRequired: "Model name is required.",
+            nameExists: "Model name already exists.",
+            modelIdRequired: "Model ID is required.",
+            contextWindowInvalid:
+              "Context window tokens must be a positive integer.",
+            maxCompletionInvalid:
+              "Max completion tokens must be a positive integer.",
+          },
+        },
         validation: {
           providerRequired: "Add at least one provider.",
           modelRequired: "Add at least one model.",
@@ -410,6 +604,182 @@ const resources = {
           visionYes: "是",
           visionNo: "否",
           modelSummary: "上下文 {{context}} · 输出 {{output}} · 视觉 {{vision}}",
+        },
+        providerKinds: {
+          openai: {
+            label: "OpenAI",
+            description: "使用 API 密钥访问 OpenAI Responses 兼容接口。",
+          },
+          openai_codex_oauth: {
+            label: "OpenAI Codex",
+            description: "使用 ChatGPT Codex 的 OAuth 账户文件。",
+          },
+          github_copilot: {
+            label: "GitHub Copilot",
+            description: "使用 GitHub Copilot 账户令牌。",
+          },
+          openai_compatible: {
+            label: "OpenAI 兼容",
+            description: "使用 API 密钥和自定义 base URL。",
+          },
+          ollama: {
+            label: "Ollama 本地",
+            description: "使用本地 Ollama 端点。",
+          },
+          ollama_cloud: {
+            label: "Ollama Cloud",
+            description: "使用 Ollama Cloud API 密钥。",
+          },
+        },
+        codexAuthMethods: {
+          browser_login: {
+            label: "浏览器登录",
+            description: "打开 OpenAI 授权页面，并写入该供应商的 OAuth 文件。",
+          },
+          device_login: {
+            label: "设备码登录",
+            description: "显示设备码，并在浏览器中完成授权。",
+          },
+          import_local_codex: {
+            label: "导入本地 Codex",
+            description: "从本地 Codex CLI 读取 auth.json。",
+          },
+          import_auth_file: {
+            label: "导入 auth.json",
+            description: "从选定的 Codex auth.json 路径导入。",
+          },
+          existing_auth_file: {
+            label: "使用现有的 Daat Locus OAuth 文件",
+            description: "保留或手动放置该供应商的 OAuth 文件。",
+          },
+        },
+        githubAuthMethods: {
+          device_login: {
+            label: "设备码登录",
+            description: "通过 GitHub 设备流程获取 Copilot 访问令牌。",
+          },
+          manual_token: {
+            label: "手动令牌",
+            description: "粘贴一个 GitHub 令牌。",
+          },
+          env_token: {
+            label: "环境变量",
+            description: "保存一个 $GITHUB_TOKEN 引用。",
+          },
+        },
+        providerDialog: {
+          editTitle: "编辑供应商",
+          addTitle: "添加供应商",
+          description:
+            "供应商定义凭据和 API 端点。模型将在下一部分绑定到供应商。",
+          name: "名称",
+          type: "类型",
+          selectProviderType: "选择供应商类型",
+          codexAuthMethodLabel: "Codex 认证方式",
+          githubAuthMethodLabel: "GitHub 认证方式",
+          selectAuthMethod: "选择认证方式",
+          authFilePath: "auth.json 路径",
+          githubToken: "GitHub 令牌",
+          authentication: "认证",
+          restart: "重新开始",
+          completeAuthorization: "完成授权",
+          apiKey: "API 密钥",
+          host: "主机",
+          baseUrl: "Base URL",
+          baseUrlOptionalHint: "可选时留空则使用供应商默认值。",
+          baseUrlRequiredError: "OpenAI 兼容需要 base URL。",
+          baseUrlPlaceholderDefault: "使用供应商默认值",
+          keepAlive: "keep_alive",
+          cancel: "取消",
+          saveProvider: "保存供应商",
+          deviceAuthOpened:
+            "授权页面已打开。在浏览器中输入设备码以完成授权。",
+          authAction: {
+            github: "开始设备码登录",
+            browser_login: "打开浏览器登录",
+            device_login: "开始设备码登录",
+            import_local_codex: "导入本地 Codex",
+            import_auth_file: "导入 auth.json",
+            existing_auth_file: "检查 OAuth 文件",
+          },
+          authDescription: {
+            github: "授权会将 GitHub 令牌写入当前供应商草稿。",
+            browser_login:
+              "登录后，Daat Locus 会为该供应商写入固定的 Codex OAuth 文件。",
+            device_login: "开始流程，输入设备码，然后返回此处完成授权。",
+            import_local_codex: "从本地 Codex CLI 的 auth.json 导入到该供应商。",
+            import_auth_file: "从指定的 auth.json 导入到该供应商。",
+            existing_auth_file: "检查该供应商的固定 Codex OAuth 文件是否存在。",
+          },
+          authSaveBlock: {
+            github: "请先完成 GitHub 设备码登录。",
+            browser_login: "请先完成浏览器登录。",
+            device_login: "请先完成设备码登录。",
+            import_local_codex: "请先导入本地 Codex 并等待完成。",
+            import_auth_file: "请先导入 auth.json 并等待完成。",
+            existing_auth_file: "请先检查现有的 OAuth 文件。",
+          },
+          summary: {
+            codexDefaultEndpoint: "Codex OAuth · 默认端点",
+            codexEndpoint: "Codex OAuth · {{url}}",
+            githubCopilot: "GitHub Copilot · {{method}}",
+            providerDefault: "供应商默认值",
+          },
+          errors: {
+            nameRequired: "供应商名称不能为空。",
+            nameExists: "供应商名称已存在。",
+            apiKeyRequired: "该供应商需要 API 密钥。",
+            githubTokenRequired: "GitHub Copilot 需要令牌或环境变量引用。",
+            baseUrlRequired: "OpenAI 兼容供应商需要 base URL。",
+            authFileRequired: "该 Codex 认证方式需要 auth.json 路径。",
+            enterNameFirst: "请先输入供应商名称。",
+            enterAuthFileFirst: "请先输入 auth.json 路径。",
+          },
+        },
+        modelDialog: {
+          editTitle: "编辑模型",
+          addTitle: "添加模型",
+          description: "模型定义绑定到供应商，可被选为主模型或高效模型。",
+          provider: "供应商",
+          selectProvider: "选择供应商",
+          discoveredModels: "发现的模型",
+          rediscover: "重新发现",
+          selectModelOrManual: "选择一个模型或手动输入",
+          manualInput: "手动输入",
+          modelName: "模型名称",
+          modelId: "模型 ID",
+          contextWindowTokens: "上下文窗口 tokens",
+          maxCompletionTokens: "最大输出 tokens",
+          vision: "视觉",
+          visionAuto: "自动",
+          visionSupported: "支持",
+          visionUnsupported: "不支持",
+          apiStyle: "API 风格",
+          apiStyleChatCompletions: "Chat completions（默认）",
+          apiStyleResponses: "Responses",
+          apiStyleDescription:
+            "为该 openai-compatible 模型选择端点协议：chat completions 或 responses API。",
+          reasoning: "推理 / 思考",
+          notConfigured: "未配置",
+          custom: "自定义",
+          customReasoningPlaceholder: "输入自定义的推理 / 思考值",
+          cancel: "取消",
+          saveModel: "保存模型",
+          discovery: {
+            selectProviderFirst: "请先选择一个供应商。",
+            loading: "正在从该供应商发现模型。",
+            loadedSome: "发现了 {{count}} 个模型。也可以手动输入模型 ID。",
+            loadedNone: "未发现模型。可以手动输入模型 ID。",
+            idle: "选择供应商后会自动发现模型。",
+          },
+          errors: {
+            providerRequired: "请选择一个供应商。",
+            nameRequired: "模型名称不能为空。",
+            nameExists: "模型名称已存在。",
+            modelIdRequired: "模型 ID 不能为空。",
+            contextWindowInvalid: "上下文窗口 tokens 必须是正整数。",
+            maxCompletionInvalid: "最大输出 tokens 必须是正整数。",
+          },
         },
         validation: {
           providerRequired: "请至少添加一个供应商。",
