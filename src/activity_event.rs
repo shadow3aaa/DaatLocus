@@ -325,7 +325,7 @@ impl ToolCallActivityEvent {
 
 pub fn compact_body_lines(text: &str, max_lines: usize) -> Vec<String> {
     text.lines()
-        .map(str::trim)
+        .map(|line| line.trim_end())
         .filter(|line| !line.is_empty())
         .take(max_lines)
         .map(ToString::to_string)
