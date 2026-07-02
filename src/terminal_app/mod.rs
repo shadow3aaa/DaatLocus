@@ -16,7 +16,7 @@ use serde_json::json;
 use crate::{
     activity_event::{
         TerminalActivityAction, TerminalActivityDescriptor, ToolCallActivityEvent,
-        compact_body_lines,
+        compact_preserved_body_lines,
     },
     app::{
         App, AppDocs, AppId, AppStateRender, AppToolExecutionContext, AppToolExecutionResult,
@@ -837,7 +837,7 @@ impl App for TerminalApp {
                                         DashboardActivityEvent::ExecUpdate {
                                             key: call.id.clone(),
                                             meta: Some(terminal_session_meta(session)),
-                                            output_lines: compact_body_lines(delta, 10),
+                                            output_lines: compact_preserved_body_lines(delta, 10),
                                         },
                                     );
                                 });
@@ -903,7 +903,7 @@ impl App for TerminalApp {
                         body_lines: {
                             let mut body = vec![terminal_session_meta(&result.session)];
                             body.extend(terminal_output_metadata_lines(&result));
-                            body.extend(compact_body_lines(&result.output, 10));
+                            body.extend(compact_preserved_body_lines(&result.output, 10));
                             body
                         },
                     }),
@@ -944,7 +944,7 @@ impl App for TerminalApp {
                                         DashboardActivityEvent::ExecUpdate {
                                             key: call.id.clone(),
                                             meta: Some(terminal_session_meta(session)),
-                                            output_lines: compact_body_lines(delta, 10),
+                                            output_lines: compact_preserved_body_lines(delta, 10),
                                         },
                                     );
                                 });
@@ -1044,7 +1044,7 @@ impl App for TerminalApp {
                         body_lines: {
                             let mut body = vec![terminal_session_meta(&result.session)];
                             body.extend(terminal_output_metadata_lines(&result));
-                            body.extend(compact_body_lines(&result.output, 10));
+                            body.extend(compact_preserved_body_lines(&result.output, 10));
                             body
                         },
                     }),
