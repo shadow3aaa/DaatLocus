@@ -20,6 +20,15 @@ impl StreamingToolCallBuilder {
         }
     }
 
+    /// A builder that never received any tool_call delta content. Some
+    /// OpenAI-compatible proxies (e.g. Anthropic models fronted by a gateway)
+    /// emit tool_call deltas with a non-zero `index`, leaving lower indices as
+    /// empty placeholders that must be skipped rather than treated as
+    /// incomplete calls.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.id.is_empty() && self.name.is_empty() && self.arguments.is_empty()
+    }
+
     pub(crate) fn try_build(&self) -> Option<AgentToolCall> {
         if self.id.is_empty() || self.name.is_empty() {
             return None;
@@ -599,5 +608,22 @@ mod tests {
             "Codex Responses stream read failed: streaming response body read failed"
         );
         assert!(!headline.contains("decoding"));
+    }
+
+    #[test]
+    fn default_tool_call_builder_is_empty_and_populated_one_is_not() {
+        let empty = StreamingToolCallBuilder::default();
+        assert!(empty.is_empty());
+        assert!(empty.try_build().is_none());
+
+        let mut builder = StreamingToolCallBuilder::default();
+        builder.apply_delta(&serde_json::json!({
+            "id": "toolu_1",
+            "function": { "name": "read_file", "arguments": "{\"path\": \"/tmp/x\"}" }
+        }));
+        assert!(!builder.is_empty());
+        let call = builder.try_build().expect("populated builder should build");
+        assert_eq!(call.name, "read_file");
+        assert_eq!(call.arguments["path"], "/tmp/x");
     }
 }

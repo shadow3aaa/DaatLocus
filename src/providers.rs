@@ -878,6 +878,13 @@ impl OpenAIClient {
             self.record_last_usage(usage);
         }
 
+        // Some OpenAI-compatible proxies emit tool_call deltas with a non-zero
+        // `index`, which leaves lower slots as empty placeholders. Drop those
+        // placeholders so they are not mistaken for incomplete tool calls.
+        let tool_calls: Vec<StreamingToolCallBuilder> = tool_calls
+            .into_iter()
+            .filter(|builder| !builder.is_empty())
+            .collect();
         if !tool_calls.is_empty() {
             let mut calls = Vec::with_capacity(tool_calls.len());
             for (index, builder) in tool_calls.into_iter().enumerate() {
