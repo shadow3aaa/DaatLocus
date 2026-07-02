@@ -6082,14 +6082,15 @@ function AgentChatReplyActivityLine({
     }
     return (
       <>
-        <AgentChatActivityTextCell
-          id={id}
-          icon="activity"
-          marker={replyMarker}
-          title={agentMessage.title}
-          bodyLines={agentMessage.bodyLines}
-          fullBody={agentMessage.fullBody}
-        />
+        <div className="flex min-w-0 max-w-full flex-col gap-1 text-sm leading-6 text-foreground/90 [overflow-wrap:anywhere]">
+          <div className={AGENT_CHAT_ACTIVITY_ROW_CLASS}>
+            {replyMarker ?? <AgentChatActivityMarker icon="activity" />}
+            <AgentChatMarkdownText
+              text={agentMessage.fullBody}
+              limit={AGENT_CHAT_FULL_MESSAGE_LINE_LIMIT}
+            />
+          </div>
+        </div>
 <div className="-mb-1 mt-1 flex justify-start pl-8 sm:pl-10">
           <button
             type="button"
