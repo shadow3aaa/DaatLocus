@@ -408,7 +408,9 @@ fn project_files(
     }
 
     for entry in builder.build() {
-        let entry = entry.map_err(|e| format!("failed to walk project files: {e}"))?;
+        let Ok(entry) = entry else {
+            continue;
+        };
         if !entry
             .file_type()
             .is_some_and(|file_type| file_type.is_file())
