@@ -497,10 +497,24 @@ fn build_optional_type_exts(types: &[String]) -> Result<Option<HashSet<String>>,
 }
 
 fn relative_file_path(project_root: &Path, path: &Path) -> String {
-    path.strip_prefix(project_root)
+    let normalized_root = normalize_for_comparison(project_root);
+    let normalized_path = normalize_for_comparison(path);
+    normalized_path
+        .strip_prefix(&normalized_root)
         .ok()
-        .map(|path| normalize_relative_path(&path.to_string_lossy()))
+        .map(|p| normalize_relative_path(&p.to_string_lossy()))
         .unwrap_or_else(|| normalize_relative_path(&path.to_string_lossy()))
+}
+
+fn normalize_for_comparison(p: &Path) -> PathBuf {
+    // Strip Windows extended-length prefix \\?\ for comparison; it is a
+    // syntactic prefix that does not change the logical path.
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p.to_path_buf()
+    }
 }
 
 fn project_relative_arg(root: &Path, path: Option<&str>) -> Result<Option<String>, String> {
@@ -509,7 +523,9 @@ fn project_relative_arg(root: &Path, path: Option<&str>) -> Result<Option<String
     };
     let path = PathBuf::from(path);
     if path.is_absolute() {
-        let relative = path.strip_prefix(root).map_err(|_| {
+        let normalized_root = normalize_for_comparison(root);
+        let normalized_path = normalize_for_comparison(&path);
+        let relative = normalized_path.strip_prefix(&normalized_root).map_err(|_| {
             format!(
                 "path {} is outside project root {}",
                 path.display(),

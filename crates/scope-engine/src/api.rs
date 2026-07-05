@@ -142,7 +142,7 @@ pub struct EditCodeInput {
 }
 
 /// Operation kind for a single structured edit.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum EditOp {
     Replace,

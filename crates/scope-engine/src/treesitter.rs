@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tree_sitter::StreamingIterator;
 
@@ -14,10 +14,19 @@ pub struct SymbolMatch {
     pub end_line: usize,
 }
 
+fn normalize_path_for_cmp(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p.to_path_buf()
+    }
+}
+
 impl SymbolMatch {
     pub fn canonical_selector(&self, file_path: &Path, project_root: &Path) -> String {
-        let rel_path = file_path
-            .strip_prefix(project_root)
+        let rel_path = normalize_path_for_cmp(file_path)
+            .strip_prefix(&normalize_path_for_cmp(project_root))
             .ok()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| file_path.to_string_lossy().to_string())

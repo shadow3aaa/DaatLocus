@@ -160,15 +160,12 @@ fn collect_propagation_results(
             lsp_refs = lsp.find_references_for_symbol(full_path, line, character, project_root);
         }
         if lsp_refs.is_empty() {
-            let selector = format!(
-                "{}::{}",
-                full_path
-                    .strip_prefix(project_root)
-                    .ok()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|| full_path.to_string_lossy().to_string()),
-                sym_name
-            );
+            let rel = normalize_for_comparison(full_path)
+                .strip_prefix(&normalize_for_comparison(project_root))
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| full_path.to_string_lossy().to_string());
+            let selector = format!("{}::{}", rel, sym_name);
             if seen.insert(selector.clone()) {
                 let first_line = edits.first().map(|edit| edit.start_line).unwrap_or(1);
                 let file_snippet = original
@@ -188,9 +185,10 @@ fn collect_propagation_results(
                             })
                             .filter_map(|e| std::fs::read_dir(e.path()).ok())
                             .flat_map(|entries| {
-                                entries.filter_map(|e| e.ok()).filter_map(|e| {
-                                    e.path()
-                                        .strip_prefix(project_root)
+                                let normalized_root = normalize_for_comparison(project_root);
+                                entries.filter_map(|e| e.ok()).filter_map(move |e| {
+                                    normalize_for_comparison(&e.path())
+                                        .strip_prefix(&normalized_root)
                                         .ok()
                                         .map(|p| p.to_string_lossy().to_string())
                                 })
@@ -313,23 +311,19 @@ fn prepare_structured_edits(
             std::fs::read_to_string(&full_path)
                 .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?
         } else {
-            // New file creation: validate all edits are Append/Prepend at line 1
+            // New file creation: only line-1 operations are valid (no
+            // existing content to anchor against).  Replace at line 1 is
+            // accepted and treated equivalently to Append.
             for e in &group.edits {
-                let op = e.op.clone().unwrap_or(EditOp::Append);
-                if !matches!(op, EditOp::Append | EditOp::Prepend) {
+                let start_valid = match &e.start {
+                    Some(start) => start == "1#" || start.starts_with("1#"),
+                    None => true,
+                };
+                if !start_valid {
                     return Err(format!(
-                        "cannot create new file {}: only append/prepend at line 1 is allowed",
+                        "cannot create new file {}: start anchor must be `1#`",
                         full_path.display()
                     ));
-                }
-                if let Some(start) = &e.start {
-                    let valid = start == "1#" || (start.starts_with("1#") && start.len() > 2);
-                    if !valid {
-                        return Err(format!(
-                            "cannot create new file {}: start anchor must be `1#`",
-                            full_path.display()
-                        ));
-                    }
                 }
             }
             String::new()
@@ -340,6 +334,7 @@ fn prepare_structured_edits(
         for edit in group.edits {
             // Resolve op: default to Append for new files, required for existing
             let op = match edit.op.clone() {
+                Some(op) if original.is_empty() && op == EditOp::Replace => EditOp::Append,
                 Some(op) => op,
                 None if original.is_empty() => EditOp::Append,
                 None => {
@@ -517,13 +512,24 @@ fn applied_summary_from_prepared(
 }
 
 fn display_path_for_edit(project_root: &Path, full_path: &Path) -> String {
-    if let Ok(relative) = full_path.strip_prefix(project_root) {
+    let normalized_root = normalize_for_comparison(project_root);
+    let normalized_path = normalize_for_comparison(full_path);
+    if let Ok(relative) = normalized_path.strip_prefix(&normalized_root) {
         let relative = relative.to_string_lossy().replace('\\', "/");
         if !relative.is_empty() {
             return relative;
         }
     }
     full_path.to_string_lossy().replace('\\', "/")
+}
+
+fn normalize_for_comparison(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        p.to_path_buf()
+    }
 }
 
 #[cfg(test)]
