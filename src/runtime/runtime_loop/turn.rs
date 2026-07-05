@@ -535,10 +535,19 @@ pub(crate) async fn execute_agent_loop_step(
     let mut runtime_step = context
         .memory
         .begin_runtime_step_from_parts(request_envelope, conversation_slice);
-    for message in injected_context_messages {
+    for message in &injected_context_messages {
         let committed_cells = render_activity_from_messages(vec![message.clone()]);
-        runtime_step.push_history_message(message);
+        runtime_step.push_history_message(message.clone());
         append_committed_activity_cells(context, tx, committed_cells);
+    }
+    // Pre-commit injected context so it survives select! cancellation.
+    // Duplicates from the final commit are removed by normalize_runtime_prompt_messages.
+    if !injected_context_messages.is_empty() {
+        context.memory.runtime_conversation_mut().append_turn(
+            String::new(),
+            injected_context_messages,
+            Vec::new(),
+        );
     }
     let mut tool_results = Vec::new();
     let mut actions = Vec::new();
