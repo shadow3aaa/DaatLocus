@@ -1,0 +1,4 @@
+[submodule "crates/daat-locus-md"]
+	path = crates/daat-locus-md
+	url = https://github.com/shadow3aaa/ratatui-markdown
+	branch = main
