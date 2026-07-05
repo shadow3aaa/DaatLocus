@@ -26,7 +26,7 @@ fn normalize_path_for_cmp(p: &Path) -> PathBuf {
 impl SymbolMatch {
     pub fn canonical_selector(&self, file_path: &Path, project_root: &Path) -> String {
         let rel_path = normalize_path_for_cmp(file_path)
-            .strip_prefix(&normalize_path_for_cmp(project_root))
+            .strip_prefix(normalize_path_for_cmp(project_root))
             .ok()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| file_path.to_string_lossy().to_string())

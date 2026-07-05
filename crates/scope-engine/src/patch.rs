@@ -161,7 +161,7 @@ fn collect_propagation_results(
         }
         if lsp_refs.is_empty() {
             let rel = normalize_for_comparison(full_path)
-                .strip_prefix(&normalize_for_comparison(project_root))
+                .strip_prefix(normalize_for_comparison(project_root))
                 .ok()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| full_path.to_string_lossy().to_string());
