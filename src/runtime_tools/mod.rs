@@ -62,6 +62,7 @@ pub struct ToolExecutionResult {
     pub payload: Value,
     pub model_content_override: Option<String>,
     pub activity_event: Option<SessionActivityEvent>,
+    pub skip_source_elision: bool,
 }
 
 impl ToolExecutionResult {
@@ -75,11 +76,17 @@ impl ToolExecutionResult {
             payload,
             model_content_override: None,
             activity_event,
+            skip_source_elision: false,
         }
     }
 
     pub fn with_model_content(mut self, model_content: impl Into<String>) -> Self {
         self.model_content_override = Some(model_content.into());
+        self
+    }
+
+    pub fn with_skip_source_elision(mut self, skip: bool) -> Self {
+        self.skip_source_elision = skip;
         self
     }
 

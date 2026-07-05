@@ -33,6 +33,8 @@ struct ReadFileArgs {
     start_line: Option<usize>,
     #[serde(default)]
     line_count: Option<usize>,
+    #[serde(default)]
+    force_no_elide: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -45,7 +47,7 @@ pub(super) fn register_tools() -> Vec<Box<dyn RuntimeTool>> {
     vec![
         Box::new(StaticRuntimeTool::new_with_schema(
             "read_file",
-            "Read a file path or path range and return line-hash anchored source lines.",
+            "Read a file path or path range and return line-hash anchored source lines. Lines already shown earlier in context are automatically elided with ~ to save space. If you need the exact original content of previously-seen lines (e.g. to count indent, verify characters, or perform other precise inspection), set force_no_elide=true to disable elision for this call.",
             model_schema_for::<ReadFileArgs>(),
             summarize_read_file_tool,
             render_read_file_call_ui,
@@ -172,6 +174,7 @@ fn execute_read_file_runtime_tool<'a>(
         } else {
             format!("{display_path}#L{start_line}-L{end_line}")
         };
+        let skip_elision = args.force_no_elide.unwrap_or(false);
         Ok(ToolExecutionResult::from_activity_event(
             summary.clone(),
             json!({
@@ -192,7 +195,8 @@ fn execute_read_file_runtime_tool<'a>(
                 vec![format!("{actual_line_count} lines")],
             )),
         )
-        .with_model_content(model_content))
+        .with_model_content(model_content)
+        .with_skip_source_elision(skip_elision))
     })
 }
 

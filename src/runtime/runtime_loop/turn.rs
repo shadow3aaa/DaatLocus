@@ -931,11 +931,15 @@ pub(crate) async fn execute_agent_loop_step(
                         );
                     });
                 }
-                let model_content = super::coding_source_elision::elide_tool_model_content(
-                    &mut context.visible_source_lines,
-                    call,
-                    &result.model_content(),
-                );
+                let model_content = if result.skip_source_elision {
+                    result.model_content()
+                } else {
+                    super::coding_source_elision::elide_tool_model_content(
+                        &mut context.visible_source_lines,
+                        call,
+                        &result.model_content(),
+                    )
+                };
                 runtime_step.push_agent_message(AgentMessage::tool(
                     call.id.clone(),
                     call.name.clone(),
