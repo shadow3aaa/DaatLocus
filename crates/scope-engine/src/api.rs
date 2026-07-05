@@ -172,9 +172,13 @@ impl EditContent {
 pub struct StructuredEdit {
     /// Relative file path from project root.
     pub path: String,
-    pub op: EditOp,
+    /// Operation kind (auto-defaults to `append` for new files when omitted).
+    #[serde(default)]
+    pub op: Option<EditOp>,
     /// `line#hash` anchor from read_code output.
-    pub start: String,
+    /// For new files this can be omitted (defaults to `"1#"`).
+    #[serde(default)]
+    pub start: Option<String>,
     /// `line#hash` end anchor (required for replace, ignored otherwise).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end: Option<String>,

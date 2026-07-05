@@ -139,9 +139,11 @@ pub struct StructuredEditArgsSchema {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct StructuredEditSchema {
     pub path: String,
-    pub op: StructuredEditOpSchema,
+    /// Operation kind. Omitted or null defaults to `append` for new files.
+    pub op: Option<StructuredEditOpSchema>,
     /// `line#hash` anchor (e.g., `42#ab`), without the `|source_line` portion shown in read output.
-    pub start: String,
+    /// Omitted or null defaults to `"1#"` for new files.
+    pub start: Option<String>,
     /// `line#hash` end anchor, required for `replace` and ignored for `append`/`prepend`.
     pub end: Option<String>,
     pub content: Option<String>,
@@ -478,7 +480,7 @@ mod tests {
         );
         assert_eq!(
             schema["properties"]["edits"]["items"]["properties"]["start"]["description"],
-            "`line#hash` anchor (e.g., `42#ab`), without the `|source_line` portion shown in read output."
+            "`line#hash` anchor (e.g., `42#ab`), without the `|source_line` portion shown in read output. Omitted or null defaults to `\"1#\"` for new files."
         );
         assert_eq!(
             schema["properties"]["edits"]["items"]["properties"]["end"]["description"],

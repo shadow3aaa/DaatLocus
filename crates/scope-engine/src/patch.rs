@@ -313,16 +313,24 @@ fn prepare_structured_edits(
             std::fs::read_to_string(&full_path)
                 .map_err(|e| format!("cannot read {}: {e}", full_path.display()))?
         } else {
-            // New file creation: only allow if all edits are Append to line 1
-            let can_create = group.edits.iter().all(|e| {
-                matches!(e.op, EditOp::Append | EditOp::Prepend)
-                    && (e.start == "1#" || (e.start.starts_with("1#") && e.start.len() > 2))
-            });
-            if !can_create {
-                return Err(format!(
-                    "cannot create new file {}: only append/prepend at line 1 is allowed",
-                    full_path.display()
-                ));
+            // New file creation: validate all edits are Append/Prepend at line 1
+            for e in &group.edits {
+                let op = e.op.clone().unwrap_or(EditOp::Append);
+                if !matches!(op, EditOp::Append | EditOp::Prepend) {
+                    return Err(format!(
+                        "cannot create new file {}: only append/prepend at line 1 is allowed",
+                        full_path.display()
+                    ));
+                }
+                if let Some(start) = &e.start {
+                    let valid = start == "1#" || (start.starts_with("1#") && start.len() > 2);
+                    if !valid {
+                        return Err(format!(
+                            "cannot create new file {}: start anchor must be `1#`",
+                            full_path.display()
+                        ));
+                    }
+                }
             }
             String::new()
         };
@@ -330,7 +338,31 @@ fn prepare_structured_edits(
         let mut planned: Vec<PlannedEdit> = Vec::new();
 
         for edit in group.edits {
-            let (start_line, start_hash) = parse_start_anchor(&edit.start)?;
+            // Resolve op: default to Append for new files, required for existing
+            let op = match edit.op.clone() {
+                Some(op) => op,
+                None if original.is_empty() => EditOp::Append,
+                None => {
+                    return Err(format!(
+                        "op is required for editing existing file {}",
+                        edit.path
+                    ));
+                }
+            };
+
+            // Resolve start anchor: default to "1#" for new files, required for existing
+            let start = match &edit.start {
+                Some(s) => s.clone(),
+                None if original.is_empty() => "1#".to_string(),
+                None => {
+                    return Err(format!(
+                        "start anchor is required for editing existing file {}",
+                        edit.path
+                    ));
+                }
+            };
+
+            let (start_line, start_hash) = parse_start_anchor(&start)?;
 
             if !original.is_empty() {
                 verify_line(&original, start_line, &start_hash)?;
@@ -346,7 +378,7 @@ fn prepare_structured_edits(
                 primary_symbol_name = parsed.name().map(str::to_string);
             }
 
-            match edit.op {
+            match op {
                 EditOp::Replace => {
                     let (end_line, end_hash) = match &edit.end {
                         Some(end_anchor) => parse_start_anchor(end_anchor)?,
@@ -529,8 +561,8 @@ mod e2e_tests {
 
         let edits = vec![api::StructuredEdit {
             path: "src/lib.rs".to_string(),
-            op: api::EditOp::Replace,
-            start: hashes[0].clone(),
+            op: Some(api::EditOp::Replace),
+            start: Some(hashes[0].clone()),
             end: Some(hashes[2].clone()),
             content: Some(api::EditContent::Lines(vec![
                 "pub fn hello() {".to_string(),
@@ -569,8 +601,8 @@ mod e2e_tests {
         let edits = vec![
             api::StructuredEdit {
                 path: "src/lib.rs".to_string(),
-                op: api::EditOp::Append,
-                start: hashes[0].clone(),
+                op: Some(api::EditOp::Append),
+                start: Some(hashes[0].clone()),
                 end: None,
                 content: Some(api::EditContent::Lines(vec![
                     "pub fn added() {".to_string(),
@@ -581,8 +613,8 @@ mod e2e_tests {
             },
             api::StructuredEdit {
                 path: "src/lib.rs".to_string(),
-                op: api::EditOp::Replace,
-                start: hashes[4].clone(),
+                op: Some(api::EditOp::Replace),
+                start: Some(hashes[4].clone()),
                 end: Some(hashes[6].clone()),
                 content: None, // delete
             },
@@ -606,8 +638,8 @@ mod e2e_tests {
 
         let edits = vec![api::StructuredEdit {
             path: "src/new_file.rs".to_string(),
-            op: api::EditOp::Append,
-            start: "1#00".to_string(),
+            op: Some(api::EditOp::Append),
+            start: Some("1#00".to_string()),
             end: None,
             content: Some(api::EditContent::Lines(vec![
                 "pub fn created() {".to_string(),
@@ -642,8 +674,8 @@ mod e2e_tests {
 
         let edits = vec![api::StructuredEdit {
             path: "src/lib.rs".to_string(),
-            op: api::EditOp::Replace,
-            start: "1#ff".to_string(),     // wrong hash
+            op: Some(api::EditOp::Replace),
+            start: Some("1#ff".to_string()),     // wrong hash
             end: Some("3#ff".to_string()), // wrong hash
             content: Some(api::EditContent::Text(
                 "pub fn hello() {\n    println!(\"goodbye\");\n}\n".to_string(),
@@ -668,8 +700,8 @@ mod e2e_tests {
 
         let edits = vec![api::StructuredEdit {
             path: "src/lib.rs".to_string(),
-            op: api::EditOp::Replace,
-            start: hashes[0].clone(),
+            op: Some(api::EditOp::Replace),
+            start: Some(hashes[0].clone()),
             end: Some(hashes[2].clone()),
             content: Some(api::EditContent::Lines(vec![
                 "pub fn hello() {".to_string(),
@@ -707,8 +739,8 @@ mod e2e_tests {
 
         let edits = vec![api::StructuredEdit {
             path: "src/lib.rs".to_string(),
-            op: api::EditOp::Replace,
-            start: hashes[0].clone(),
+            op: Some(api::EditOp::Replace),
+            start: Some(hashes[0].clone()),
             end: None, // missing end
             content: Some(api::EditContent::Text("replaced".to_string())),
         }];
