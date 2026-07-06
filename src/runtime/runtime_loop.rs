@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::{
     activity_event::{TextActivityDescriptor, ToolCallActivityEvent, compact_preserved_body_lines},
     app::{AppId, AppToolExecutionContext},
-    context::{AppNoticeKey, Context, RuntimeTurnPhase},
+    context::{Context, RuntimeTurnPhase},
     context_budget::{
         TokenEstimateBaseline, estimate_agent_turn_request, is_context_budget_exceeded,
     },
@@ -93,8 +93,6 @@ use workspace_apps::sync_workspace_apps_from_invalidation;
 const RUNTIME_EVENT_CLAIM_BATCH_SIZE: usize = 1;
 const RUNTIME_OVERFLOW_FUSE_THRESHOLD: usize = 3;
 const RUNTIME_MODEL_REQUEST_FUSE_THRESHOLD: usize = 3;
-const APP_NOTICE_UNRESOLVED_SUPPRESSION_THRESHOLD: usize = 3;
-const APP_NOTICE_OVERFLOW_SUPPRESSION: Duration = Duration::from_secs(300);
 const RUNTIME_HISTORY_MIN_MESSAGES: usize = 0;
 const RUNTIME_HISTORY_SUMMARY_MAX_TOKENS: usize = 800;
 const RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS: u64 = 60;
@@ -193,14 +191,11 @@ mod tests {
                 runtime_turn_started_at: None,
                 runtime_turn_started_at_ms: None,
                 runtime_turn_epoch: 0,
-                active_app_notices: HashMap::new(),
                 runtime_overflow_failures: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 runtime_model_request_failures: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-                suppressed_app_notices: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 live_progress_tx: Arc::new(parking_lot::Mutex::new(None)),
                 telegram_live_drafts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 claimed_event_ids: Vec::new(),
-                claimed_app_notices: Vec::new(),
                 afterclaim_context_fingerprint: None,
                 visible_source_lines: HashSet::new(),
                 delivered_root_instruction_fingerprint: None,
@@ -249,7 +244,6 @@ mod tests {
         let outcome = interrupt_active_runtime_turn(context, "test interrupt");
 
         assert_eq!(outcome.failed_events, 1);
-        assert_eq!(outcome.suppressed_app_notices, 0);
         assert!(!context.active_runtime_turn);
         assert!(context.runtime_turn_started_at.is_none());
         assert!(context.claimed_event_ids.is_empty());
@@ -272,45 +266,6 @@ mod tests {
                 .expect("claim after interrupt")
                 .is_empty()
         );
-    }
-
-    #[tokio::test]
-    async fn user_interrupt_suppresses_claimed_app_notice_without_requeueing() {
-        let mut isolated = IsolatedRuntimeContext::new().await;
-        let context = &mut isolated.context;
-        let notice = AppNoticeKey::new(AppId::terminal(), "busy");
-        context.activate_app_notice(notice.app.clone(), notice.reason.clone());
-        context
-            .pending_work
-            .enqueue(PendingWork::AppNotice {
-                app: notice.app.clone(),
-                reason: notice.reason.clone(),
-            })
-            .expect("enqueue notice");
-
-        let claimed = context.pending_work.claim_batch(1).expect("claim notice");
-        assert_eq!(claimed.len(), 1);
-        context.claimed_app_notices = vec![notice.clone()];
-        context.active_runtime_turn = true;
-        context.runtime_turn_started_at = Some(Instant::now());
-        context.runtime_turn_started_at_ms = Some(42);
-
-        let outcome = interrupt_active_runtime_turn(context, "test interrupt");
-
-        assert_eq!(outcome.failed_events, 0);
-        assert_eq!(outcome.suppressed_app_notices, 1);
-        assert!(!context.active_runtime_turn);
-        assert!(context.claimed_app_notices.is_empty());
-        assert_eq!(context.pending_work.pending_count(), 0);
-        assert!(
-            context
-                .pending_work
-                .claim_batch(1)
-                .expect("claim after interrupt")
-                .is_empty()
-        );
-        assert!(context.is_app_notice_suppressed(&notice.app, &notice.reason));
-        assert!(!context.active_app_notices.contains_key(&notice));
     }
 
     #[tokio::test]
@@ -421,8 +376,6 @@ mod tests {
         let state = RuntimeTurnFollowUpState {
             raw_stream_requested_follow_up: true,
             claimed_statuses: &[],
-            has_claimed_app_notice: false,
-            claimed_app_notice_resolved: false,
         };
         assert!(matches!(
             runtime_turn_follow_up_decision_from_state(&state),
@@ -432,8 +385,6 @@ mod tests {
         let state = RuntimeTurnFollowUpState {
             raw_stream_requested_follow_up: false,
             claimed_statuses: &[EventStatus::Claimed],
-            has_claimed_app_notice: false,
-            claimed_app_notice_resolved: false,
         };
         assert!(matches!(
             runtime_turn_follow_up_decision_from_state(&state),
@@ -443,30 +394,6 @@ mod tests {
         let state = RuntimeTurnFollowUpState {
             raw_stream_requested_follow_up: false,
             claimed_statuses: &[EventStatus::Resolved],
-            has_claimed_app_notice: false,
-            claimed_app_notice_resolved: false,
-        };
-        assert!(matches!(
-            runtime_turn_follow_up_decision_from_state(&state),
-            RuntimeFollowUpDecision::AllowFinish
-        ));
-
-        let state = RuntimeTurnFollowUpState {
-            raw_stream_requested_follow_up: false,
-            claimed_statuses: &[EventStatus::Resolved],
-            has_claimed_app_notice: true,
-            claimed_app_notice_resolved: false,
-        };
-        assert!(matches!(
-            runtime_turn_follow_up_decision_from_state(&state),
-            RuntimeFollowUpDecision::Continue { .. }
-        ));
-
-        let state = RuntimeTurnFollowUpState {
-            raw_stream_requested_follow_up: false,
-            claimed_statuses: &[EventStatus::Resolved],
-            has_claimed_app_notice: true,
-            claimed_app_notice_resolved: true,
         };
         assert!(matches!(
             runtime_turn_follow_up_decision_from_state(&state),
@@ -479,10 +406,6 @@ mod tests {
         let event_a = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
         let event_b = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let inputs = vec![
-            ClaimedRuntimeInput::AppNotice {
-                app: AppId::terminal(),
-                reason: "busy".to_string(),
-            },
             ClaimedRuntimeInput::Event(Box::new(EventView {
                 event_id: event_a,
                 source: crate::events::EventSource::Telegram,
@@ -526,7 +449,7 @@ mod tests {
         assert_eq!(
             claimed_runtime_input_fingerprint(&inputs).as_deref(),
             Some(
-                "events=[00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000002]|app_notices=[terminal:busy]"
+                "events=[00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000002]"
             )
         );
     }
@@ -546,11 +469,6 @@ mod tests {
             RuntimeFollowUpReason::ClaimedEventNeedsExplicitResolution
                 .message()
                 .contains("finish_and_send")
-        );
-        assert!(
-            RuntimeFollowUpReason::ClaimedAppNoticeNeedsExplicitResolution
-                .message()
-                .contains("notice_resolved")
         );
     }
 

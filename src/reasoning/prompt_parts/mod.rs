@@ -1,5 +1,4 @@
 use crate::{
-    app::AppId,
     context::Context,
     events::{EventPayload, EventView},
     preturn_state::PreTurnState,
@@ -20,12 +19,11 @@ pub trait AfterClaimContextPart: Send + Sync {
 #[derive(Clone, Default)]
 pub struct AfterClaimContextInput {
     pub events: Vec<EventView>,
-    pub app_notices: Vec<(AppId, String)>,
 }
 
 impl AfterClaimContextInput {
     pub fn is_empty(&self) -> bool {
-        self.events.is_empty() && self.app_notices.is_empty()
+        self.events.is_empty()
     }
 }
 
@@ -140,20 +138,6 @@ impl AfterClaimContextPart for AfterClaimInputPart {
                 ))],
             )));
         }
-        if !input.app_notices.is_empty() {
-            children.push(PromptNode::State(PromptStateDoc::new(
-                "app_notices",
-                vec![PromptBlock::BulletList(
-                    input
-                        .app_notices
-                        .iter()
-                        .map(|(app, reason)| {
-                            format!("app={app} reason={}", summarize_context_text(reason, 160))
-                        })
-                        .collect(),
-                )],
-            )));
-        }
         let skill_injections = ctx
             .openskills
             .explicit_skill_injections_for_text(&claimed_work_query(input));
@@ -191,9 +175,6 @@ fn claimed_work_query(input: &AfterClaimContextInput) -> String {
                 }
             }
         }
-    }
-    for (_app, reason) in &input.app_notices {
-        parts.push(reason.as_str());
     }
     parts.join("\n")
 }

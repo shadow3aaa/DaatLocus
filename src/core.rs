@@ -8,7 +8,6 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    app::AppId,
     context::Context,
     events::EventDisposition,
     plan::PlanStatus,
@@ -137,14 +136,6 @@ pub struct BrowserClosePageArgs {
 pub struct EventResolveArgs {
     pub disposition: EventDisposition,
     pub reply_message: Option<String>,
-    pub note: Option<String>,
-}
-
-#[model_schema]
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-pub struct NoticeResolvedArgs {
-    pub app: AppId,
-    pub reason: String,
     pub note: Option<String>,
 }
 

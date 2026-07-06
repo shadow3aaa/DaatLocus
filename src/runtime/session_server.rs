@@ -77,8 +77,6 @@ pub(crate) struct SessionServeArgs {
 }
 
 // Workspace app notices are pull-based, so poll them only when a workspace app is loaded.
-const WORKSPACE_APP_NOTICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
 pub(crate) async fn run_session_serve(
     config: crate::config::Config,
     args: SessionServeArgs,
@@ -245,14 +243,11 @@ pub(crate) async fn run_session_serve(
         runtime_turn_started_at: None,
         runtime_turn_started_at_ms: None,
         runtime_turn_epoch: 0,
-        active_app_notices: HashMap::new(),
         runtime_overflow_failures: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         runtime_model_request_failures: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-        suppressed_app_notices: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         live_progress_tx: Arc::new(parking_lot::Mutex::new(None)),
         telegram_live_drafts: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         claimed_event_ids: Vec::new(),
-        claimed_app_notices: Vec::new(),
         afterclaim_context_fingerprint: None,
         visible_source_lines: HashSet::new(),
         delivered_root_instruction_fingerprint: None,
@@ -355,16 +350,13 @@ pub(crate) async fn run_session_serve(
 
         let runtime_idle_sleep_delay = next_runtime_idle_sleep_delay(&context, sleep_running);
         let runtime_idle_sleep_enabled = runtime_idle_sleep_delay.is_some();
-        let workspace_app_notice_poll_enabled = context.workspace_apps.has_loaded_apps();
         let runtime_idle_sleep = async move {
             match runtime_idle_sleep_delay {
                 Some(delay) => tokio::time::sleep(delay).await,
                 None => std::future::pending::<()>().await,
             }
         };
-        let workspace_app_notice_poll = tokio::time::sleep(WORKSPACE_APP_NOTICE_POLL_INTERVAL);
         tokio::pin!(runtime_idle_sleep);
-        tokio::pin!(workspace_app_notice_poll);
 
         tokio::select! {
             cycle = daat_locus_loop(
@@ -380,9 +372,6 @@ pub(crate) async fn run_session_serve(
                 runtime_idle = false;
             }
             _ = &mut runtime_idle_sleep, if runtime_idle && runtime_idle_sleep_enabled => {
-                runtime_idle = false;
-            }
-            _ = &mut workspace_app_notice_poll, if runtime_idle && workspace_app_notice_poll_enabled => {
                 runtime_idle = false;
             }
             Some(invalidation) = workspace_app_invalidation_rx.recv(), if runtime_idle => {

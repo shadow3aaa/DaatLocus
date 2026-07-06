@@ -718,12 +718,12 @@ fn canonical_runtime_tool_name(tool_name: &str) -> &str {
 }
 
 fn telegram_status_ignored_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "finish_and_send" | "notice_resolved")
+    matches!(tool_name, "finish_and_send")
 }
 
 fn telegram_tool_failure_status(tool_name: &str) -> Option<TelegramLiveStatus> {
     match tool_name {
-        "finish_and_send" | "notice_resolved" => None,
+        "finish_and_send" => None,
         "update_plan" => Some(telegram_status(glyph::ERROR, "Plan Update Failed")),
         "edit_file" => Some(telegram_status(glyph::ERROR, "File Edit Failed")),
         "terminal_exec" => Some(telegram_status(glyph::ERROR, "Command Failed")),

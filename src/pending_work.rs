@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{app::AppId, persistence::PersistenceStore};
+use crate::persistence::PersistenceStore;
 
 const PENDING_WORK_FILE_NAME: &str = "pending_work_queue";
 
@@ -45,14 +45,12 @@ pub enum PendingEventMoveDirection {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PendingWork {
     Event { event_id: Uuid },
-    AppNotice { app: AppId, reason: String },
 }
 
 impl PartialEq for PendingWork {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Event { event_id: a }, Self::Event { event_id: b }) => a == b,
-            (Self::AppNotice { app: a, .. }, Self::AppNotice { app: b, .. }) => a == b,
             _ => false,
         }
     }
@@ -64,7 +62,6 @@ impl PendingWork {
     fn priority(&self) -> u8 {
         match self {
             Self::Event { .. } => 0,
-            Self::AppNotice { .. } => 1,
         }
     }
 }
@@ -362,10 +359,6 @@ fn select_next_pending_index(queue: &VecDeque<PendingWorkEntry>) -> Option<usize
 fn same_work_payload(left: &PendingWork, right: &PendingWork) -> bool {
     match (left, right) {
         (PendingWork::Event { event_id: a }, PendingWork::Event { event_id: b }) => a == b,
-        (
-            PendingWork::AppNotice { app: a, reason: ra },
-            PendingWork::AppNotice { app: b, reason: rb },
-        ) => a == b && ra == rb,
         _ => false,
     }
 }

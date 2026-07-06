@@ -292,14 +292,6 @@ pub trait App: Send + Sync {
         Err(miette!("unknown app tool"))
     }
 
-    async fn refresh_notice(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    fn notice_reason(&self) -> Option<String> {
-        None
-    }
-
     fn cached_root_project_instructions(
         &self,
     ) -> Option<&[crate::coding_app::ProjectInstructionDocument]> {
@@ -365,10 +357,6 @@ impl AppManager {
         self.order.clone()
     }
 
-    pub fn notice_reason(&self, id: &AppId) -> Option<String> {
-        self.apps.get(id).and_then(|app| app.notice_reason())
-    }
-
     pub fn cached_root_project_instructions(
         &self,
     ) -> &[crate::coding_app::ProjectInstructionDocument] {
@@ -380,22 +368,6 @@ impl AppManager {
             }
         }
         &[]
-    }
-
-    pub async fn refresh_all_notices(&mut self) -> Result<()> {
-        for id in self.order.clone() {
-            if let Some(app) = self.apps.get_mut(&id) {
-                app.refresh_notice().await?;
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn refresh_notice_for(&mut self, id: &AppId) -> Result<()> {
-        if let Some(app) = self.apps.get_mut(id) {
-            app.refresh_notice().await?;
-        }
-        Ok(())
     }
 
     pub fn all_tool_specs(&self) -> Vec<(AppId, Vec<AppToolSpec>)> {

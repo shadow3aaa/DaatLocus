@@ -27,7 +27,6 @@ struct RuntimeTurnAbort<'a> {
     live_draft_session: Option<TelegramLiveDraftSession>,
     claimed_input_fingerprint: Option<&'a str>,
     claimed_event_ids: &'a [String],
-    claimed_app_notices: &'a [AppNoticeKey],
     observation: String,
     description: String,
 }
@@ -40,7 +39,6 @@ async fn abort_runtime_turn_before_model(
         live_draft_session,
         claimed_input_fingerprint,
         claimed_event_ids,
-        claimed_app_notices,
         observation,
         description,
     } = abort;
@@ -65,9 +63,7 @@ async fn abort_runtime_turn_before_model(
         }],
     };
     finalize_claimed_runtime_events(context, claimed_event_ids, &output);
-    finalize_claimed_runtime_app_notices(context, claimed_app_notices, &output).await;
     context.claimed_event_ids.clear();
-    context.claimed_app_notices.clear();
     context.current_work_origin = None;
     AgentLoopStepExecution {
         output,
@@ -258,20 +254,9 @@ pub(crate) async fn execute_agent_loop_step(
         .iter()
         .filter_map(|input| match input {
             ClaimedRuntimeInput::Event(event) => Some(event.event_id.to_string()),
-            ClaimedRuntimeInput::AppNotice { .. } => None,
         })
         .collect::<Vec<_>>();
     context.claimed_event_ids = claimed_event_ids.clone();
-    let claimed_app_notice_entries = claimed_inputs
-        .iter()
-        .filter_map(|input| match input {
-            ClaimedRuntimeInput::Event(_) => None,
-            ClaimedRuntimeInput::AppNotice { app, reason } => {
-                Some(AppNoticeKey::new(app.clone(), reason.clone()))
-            }
-        })
-        .collect::<Vec<_>>();
-    context.claimed_app_notices = claimed_app_notice_entries.clone();
     append_claimed_input_activity_cells(context, tx, &claimed_inputs);
 
     let preflight_timeout = Duration::from_secs(RUNTIME_PREFLIGHT_STAGE_TIMEOUT_SECS);
@@ -280,7 +265,6 @@ pub(crate) async fn execute_agent_loop_step(
         .iter()
         .filter_map(|input| match input {
             ClaimedRuntimeInput::Event(event) => Some((**event).clone()),
-            ClaimedRuntimeInput::AppNotice { .. } => None,
         })
         .collect::<Vec<_>>();
     let live_draft_session = maybe_start_telegram_live_draft_session(context, &claimed_event_views);
@@ -302,7 +286,7 @@ pub(crate) async fn execute_agent_loop_step(
                 live_draft_session,
                 claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
                 claimed_event_ids: &claimed_event_ids,
-                claimed_app_notices: &claimed_app_notice_entries,
+
                 observation: format!("runtime preflight failed: auto coding project setup: {err}"),
                 description: "Failed to prepare the Coding app for the project session."
                     .to_string(),
@@ -351,7 +335,7 @@ pub(crate) async fn execute_agent_loop_step(
                         live_draft_session,
                         claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
                         claimed_event_ids: &claimed_event_ids,
-                        claimed_app_notices: &claimed_app_notice_entries,
+        
                         observation: format!("runtime preflight failed: {err}"),
                         description: "Failed to build preturn context.".to_string(),
                     },
@@ -503,7 +487,7 @@ pub(crate) async fn execute_agent_loop_step(
                             live_draft_session,
                             claimed_input_fingerprint: claimed_input_fingerprint.as_deref(),
                             claimed_event_ids: &claimed_event_ids,
-                            claimed_app_notices: &claimed_app_notice_entries,
+            
                             observation: format!("runtime preflight failed: {err}"),
                             description: "Failed to execute pre-turn context compaction."
                                 .to_string(),
@@ -612,7 +596,6 @@ pub(crate) async fn execute_agent_loop_step(
                         context,
                         claimed_input_fingerprint.as_deref(),
                         &claimed_event_ids,
-                        &claimed_app_notice_entries,
                         &err.to_string(),
                     )
                 } else {
@@ -625,7 +608,7 @@ pub(crate) async fn execute_agent_loop_step(
                             turn_id: &runtime_turn_id,
                             claimed_inputs: &claimed_inputs,
                             claimed_event_ids: &claimed_event_ids,
-                            claimed_app_notices: &claimed_app_notice_entries,
+            
                             tools: &tools,
                             context_text: &runtime_context_text,
                             error_kind: RuntimeErrorKind::ContextOverflowAfterRecovery,
@@ -660,7 +643,6 @@ pub(crate) async fn execute_agent_loop_step(
                         context,
                         claimed_input_fingerprint.as_deref(),
                         &claimed_event_ids,
-                        &claimed_app_notice_entries,
                         &err.to_string(),
                         !is_permanent_model_request,
                     );
@@ -671,7 +653,7 @@ pub(crate) async fn execute_agent_loop_step(
                                 turn_id: &runtime_turn_id,
                                 claimed_inputs: &claimed_inputs,
                                 claimed_event_ids: &claimed_event_ids,
-                                claimed_app_notices: &claimed_app_notice_entries,
+                
                                 tools: &tools,
                                 context_text: &runtime_context_text,
                                 error_kind: RuntimeErrorKind::ModelRequestRepeatedFailure,
@@ -884,7 +866,7 @@ pub(crate) async fn execute_agent_loop_step(
                                 turn_id: &runtime_turn_id,
                                 claimed_inputs: &claimed_inputs,
                                 claimed_event_ids: &claimed_event_ids,
-                                claimed_app_notices: &claimed_app_notice_entries,
+                
                                 tools: &tools,
                                 context_text: &runtime_context_text,
                                 error_kind: classify_tool_runtime_error(&call.name, &error_text),
@@ -989,25 +971,7 @@ pub(crate) async fn execute_agent_loop_step(
                         actions: terminal_actions,
                     };
                 }
-                if context.claimed_app_notices_are_resolved() {
-                    let mut terminal_actions = actions.clone();
-                    terminal_actions.push(EpisodeActionRecord {
-                        kind: "finished".to_string(),
-                        summary: "claimed app notices were explicitly resolved".to_string(),
-                    });
-                    break 'agent_loop AgentLoopStepOutput {
-                        observation: if tool_results.is_empty() {
-                            "claimed app notices were explicitly resolved".to_string()
-                        } else {
-                            tool_results.join("\n")
-                        },
-                        description:
-                            "Finished: claimed app notices for this turn were explicitly resolved."
-                                .to_string(),
-                        current_doing: "waiting for next tool decision".to_string(),
-                        actions: terminal_actions,
-                    };
-                }
+
             }
             continue 'agent_loop;
         }
@@ -1033,7 +997,7 @@ pub(crate) async fn execute_agent_loop_step(
                         turn_id: &runtime_turn_id,
                         claimed_inputs: &claimed_inputs,
                         claimed_event_ids: &claimed_event_ids,
-                        claimed_app_notices: &claimed_app_notice_entries,
+        
                         tools: &tools,
                         context_text: &runtime_context_text,
                         error_kind: RuntimeErrorKind::ModelEmptyReasoningOutput,
@@ -1083,7 +1047,7 @@ pub(crate) async fn execute_agent_loop_step(
                         turn_id: &runtime_turn_id,
                         claimed_inputs: &claimed_inputs,
                         claimed_event_ids: &claimed_event_ids,
-                        claimed_app_notices: &claimed_app_notice_entries,
+        
                         tools: &tools,
                         context_text: &runtime_context_text,
                         error_kind,
@@ -1154,12 +1118,9 @@ pub(crate) async fn execute_agent_loop_step(
     }
     let claimed_events_finished =
         claimed_event_ids.is_empty() || claimed_events_are_terminal(context, &claimed_event_ids);
-    let claimed_app_notices_finished =
-        claimed_app_notice_entries.is_empty() || context.claimed_app_notices_are_resolved();
     finalize_claimed_runtime_events(context, &claimed_event_ids, &output);
-    finalize_claimed_runtime_app_notices(context, &claimed_app_notice_entries, &output).await;
-    if (!claimed_event_ids.is_empty() || !claimed_app_notice_entries.is_empty())
-        && (claimed_events_finished && claimed_app_notices_finished
+    if !claimed_event_ids.is_empty()
+        && (claimed_events_finished
             || output_is_runtime_context_compaction_boundary(&output))
     {
         context.afterclaim_context_fingerprint = None;
@@ -1167,7 +1128,6 @@ pub(crate) async fn execute_agent_loop_step(
         context.token_estimate_baseline = TokenEstimateBaseline::default();
     }
     context.claimed_event_ids.clear();
-    context.claimed_app_notices.clear();
     let history_messages = runtime_step.history_messages().to_vec();
     if !runtime_step.is_history_empty() {
         record_runtime_history_messages(context, runtime_step.into_turn_draft()).await;
@@ -1184,7 +1144,6 @@ struct RuntimeErrorRecordInput<'a> {
     turn_id: &'a str,
     claimed_inputs: &'a [ClaimedRuntimeInput],
     claimed_event_ids: &'a [String],
-    claimed_app_notices: &'a [AppNoticeKey],
     tools: &'a [crate::reasoning::runtime::AgentToolSpec],
     context_text: &'a str,
     error_kind: RuntimeErrorKind,
@@ -1213,11 +1172,6 @@ async fn record_runtime_error_case(context: &Context, input: RuntimeErrorRecordI
             event_sources: runtime_error_event_sources(input.claimed_inputs),
             user_request_summary: runtime_error_user_request_summary(input.claimed_inputs),
             claimed_event_ids: input.claimed_event_ids.to_vec(),
-            claimed_app_notices: input
-                .claimed_app_notices
-                .iter()
-                .map(|notice| format!("{}:{}", notice.app, notice.reason))
-                .collect(),
         },
         runtime: RuntimeErrorRuntimeContext {
             phase: context
@@ -1294,9 +1248,6 @@ fn runtime_follow_up_error_kind(reason: RuntimeFollowUpReason) -> Option<Runtime
         RuntimeFollowUpReason::ClaimedEventNeedsExplicitResolution => {
             Some(RuntimeErrorKind::MissingFinishAndSend)
         }
-        RuntimeFollowUpReason::ClaimedAppNoticeNeedsExplicitResolution => {
-            Some(RuntimeErrorKind::MissingNoticeResolved)
-        }
         RuntimeFollowUpReason::RawStreamRequestedFollowUp => None,
     }
 }
@@ -1342,7 +1293,7 @@ fn runtime_error_contract_refs(kind: RuntimeErrorKind) -> Vec<String> {
         | RuntimeErrorKind::TransportCompletionViolation => {
             vec!["event completion contract".to_string()]
         }
-        RuntimeErrorKind::MissingNoticeResolved | RuntimeErrorKind::ClaimedInputLeftUnresolved => {
+        RuntimeErrorKind::ClaimedInputLeftUnresolved => {
             vec!["app notice completion contract".to_string()]
         }
         RuntimeErrorKind::InvalidToolArgs | RuntimeErrorKind::ToolSchemaError => {
@@ -1371,7 +1322,6 @@ fn runtime_error_event_sources(inputs: &[ClaimedRuntimeInput]) -> Vec<String> {
         .iter()
         .filter_map(|input| match input {
             ClaimedRuntimeInput::Event(event) => Some(event.source.to_string()),
-            ClaimedRuntimeInput::AppNotice { .. } => None,
         })
         .collect::<Vec<_>>();
     sources.sort();
@@ -1396,9 +1346,6 @@ fn runtime_error_user_request_summary(inputs: &[ClaimedRuntimeInput]) -> Option<
                     240,
                 ),
             },
-            ClaimedRuntimeInput::AppNotice { app, reason } => {
-                compact_runtime_error_text(&format!("app notice {app}: {reason}"), 240)
-            }
         })
         .collect::<Vec<_>>();
     if summaries.is_empty() {

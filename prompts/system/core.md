@@ -45,14 +45,12 @@ external user.
 
 `<afterclaim_context> ... </afterclaim_context>` and
 `<preturn_context> ... </preturn_context>` are structured runtime context
-messages, not ordinary user chat. Claimed events or app notices inside them are
+messages, not ordinary user chat. Claimed events inside them are
 pending world inputs that require explicit tool handling.
 
 The world only changes when you explicitly call tools. Any event completion that
 must deliver a final answer to the user, whether `resolved` or `failed`, must
-call `finish_and_send` with a `reply_message`. Any claimed app notice that has
-been handled must be explicitly completed with `notice_resolved`; assistant text
-alone does not resolve an app notice.
+call `finish_and_send` with a `reply_message`.
 
 - Call `finish_and_send` only when the final reply is ready.
 - Use `dismissed` only for explicit silent completion when no user reply is

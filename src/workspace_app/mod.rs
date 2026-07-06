@@ -118,7 +118,6 @@ struct WorkspaceAppManifest {
 #[derive(Debug)]
 struct WorkspaceAppRuntimeState {
     state: JsonValue,
-    notice_reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -133,7 +132,6 @@ struct WorkspaceAppHandleState {
     render: AppStateRender,
     render_cache_served: bool,
     tool_specs: Vec<AppDynamicToolSpec>,
-    notice_reason: Option<String>,
     last_error: Option<String>,
 }
 
@@ -1022,7 +1020,6 @@ impl WorkspaceApp {
                 render,
                 render_cache_served: false,
                 tool_specs,
-                notice_reason: None,
                 last_error: None,
             }),
         })
@@ -1139,27 +1136,6 @@ impl App for WorkspaceApp {
         Ok(result)
     }
 
-    async fn refresh_notice(&mut self) -> Result<()> {
-        let mut state = self.handle_state.lock();
-        state.notice_reason = match state.worker.request(WorkerRequestOp::PollNotices) {
-            Ok(WorkerResponsePayload::Notice(reason)) => reason,
-            Ok(other) => {
-                return Err(miette!(
-                    "unexpected workspace app notice payload: {other:?}"
-                ));
-            }
-            Err(err) => {
-                state.last_error = Some(err.to_string());
-                return Err(err);
-            }
-        };
-        Self::refresh_worker_cache(&mut state)
-    }
-
-    fn notice_reason(&self) -> Option<String> {
-        self.handle_state.lock().notice_reason.clone()
-    }
-
     async fn shutdown(&mut self) -> Result<()> {
         self.handle_state.lock().worker.shutdown();
         Ok(())
@@ -1209,7 +1185,6 @@ fn load_runtime_state(path: &Path) -> Result<WorkspaceAppRuntimeState> {
         .unwrap_or_else(|| JsonValue::Object(Default::default()));
     Ok(WorkspaceAppRuntimeState {
         state,
-        notice_reason: None,
     })
 }
 

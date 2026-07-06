@@ -17,7 +17,6 @@ static RUNTIME_ERROR_CASE_IO_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeErrorKind {
     MissingFinishAndSend,
-    MissingNoticeResolved,
     InvalidToolArgs,
     ToolSchemaError,
     StaleBrowserRef,
@@ -39,7 +38,6 @@ pub struct RuntimeErrorTaskContext {
     pub event_sources: Vec<String>,
     pub user_request_summary: Option<String>,
     pub claimed_event_ids: Vec<String>,
-    pub claimed_app_notices: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

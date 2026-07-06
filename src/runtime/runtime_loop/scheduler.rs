@@ -1,8 +1,6 @@
 use super::sleep_driver::{maybe_start_forced_sleep, maybe_start_idle_sleep};
 use super::*;
 
-const USER_INTERRUPT_APP_NOTICE_SUPPRESSION: Duration = Duration::from_secs(30);
-
 pub(crate) enum RuntimeLoopCycle {
     Idle,
     ProcessedWork,
@@ -17,13 +15,10 @@ pub(crate) async fn daat_locus_loop(
 ) -> RuntimeLoopCycle {
     let cycle_started_at = std::time::Instant::now();
     sync_workspace_apps_from_invalidation(context).await;
-    if let Err(err) = context.apps.refresh_all_notices().await {
-        tracing::error!("failed to refresh app notices: {err:?}");
-    }
-    refresh_sleep_status_queues(sleep_status).await;
+
     let forced_sleep_status =
         maybe_start_forced_sleep(context, tx, sleep_result_tx, sleep_running, sleep_status).await;
-    enqueue_app_notice_work(context);
+    refresh_sleep_status_queues(sleep_status).await;
     sync_driver_frontier_from_sources(context);
     if context.active_runtime_turn {
         tracing::warn!(
@@ -102,20 +97,12 @@ pub(crate) async fn daat_locus_loop(
     context.active_runtime_turn = false;
     context.runtime_turn_started_at = None;
     context.runtime_turn_started_at_ms = None;
-    context.set_runtime_phase(None);
-    clear_runtime_status(Some(tx));
-    refresh_sleep_status_queues(sleep_status).await;
     sync_dashboard_state(
         context,
         tx,
         sleep_status,
         Some(cycle_started_at.elapsed().as_millis()),
     );
-    if let Err(err) =
-        crate::runtime::session_title::refresh_session_title_after_activity(context, tx).await
-    {
-        tracing::warn!("session title refresh failed: {err:?}");
-    }
     RuntimeLoopCycle::ProcessedWork
 }
 
@@ -147,53 +134,6 @@ fn recover_stale_runtime_turn_claims(context: &mut Context) {
         requeue_claimed_runtime_events(context, &claimed_event_ids);
     }
 
-    let claimed_app_notices = std::mem::take(&mut context.claimed_app_notices);
-    let mut released_app_notices = Vec::new();
-    for notice in claimed_app_notices {
-        let work = PendingWork::AppNotice {
-            app: notice.app.clone(),
-            reason: notice.reason.clone(),
-        };
-        match context.pending_work.release_claimed(work.clone()) {
-            Ok(true) => {
-                released_app_notices.push(format!("{}:{}", notice.app, notice.reason));
-            }
-            Ok(false) => {
-                let current_reason = context
-                    .apps
-                    .notice_reason(&notice.app)
-                    .and_then(|reason| crate::context::normalize_app_notice_reason(&reason));
-                if current_reason.as_deref() == Some(notice.reason.as_str())
-                    && !context.app_notice_is_resolved(&notice)
-                {
-                    if let Err(err) = context.pending_work.requeue_front(work) {
-                        let app = &notice.app;
-                        tracing::error!(
-                            "failed to requeue stale runtime app notice driver for {app}: {err:?}"
-                        );
-                    } else {
-                        released_app_notices.push(format!("{}:{}", notice.app, notice.reason));
-                    }
-                }
-            }
-            Err(err) => {
-                let app = &notice.app;
-                tracing::error!(
-                    "failed to release stale runtime app notice driver for {app}: {err:?}"
-                );
-            }
-        }
-    }
-
-    if !claimed_event_ids.is_empty() || !released_app_notices.is_empty() {
-        tracing::warn!(
-            requeued_claimed_events = claimed_event_ids.len(),
-            event_ids = claimed_event_ids.join(","),
-            requeued_app_notices = released_app_notices.len(),
-            app_notices = released_app_notices.join(","),
-            "requeued claimed runtime inputs after stale turn reset"
-        );
-    }
     context.install_live_progress(None);
     context.current_work_origin = None;
 }
@@ -209,7 +149,6 @@ pub(crate) fn reset_cancelled_runtime_turn(context: &mut Context, reason: &str) 
 
 pub(crate) struct RuntimeInterruptOutcome {
     pub(crate) failed_events: usize,
-    pub(crate) suppressed_app_notices: usize,
 }
 
 pub(crate) fn interrupt_active_runtime_turn(
@@ -248,31 +187,10 @@ pub(crate) fn interrupt_active_runtime_turn(
         }
     }
 
-    let claimed_app_notices = std::mem::take(&mut context.claimed_app_notices);
-    let mut suppressed_app_notices = 0usize;
-    for notice in claimed_app_notices {
-        let work = PendingWork::AppNotice {
-            app: notice.app.clone(),
-            reason: notice.reason.clone(),
-        };
-        if let Err(err) = context.pending_work.consume(work) {
-            let app = &notice.app;
-            tracing::error!("failed to consume interrupted app notice driver for {app}: {err:?}");
-        }
-        context.suppress_app_notice(
-            &notice.app,
-            notice.reason.clone(),
-            USER_INTERRUPT_APP_NOTICE_SUPPRESSION,
-        );
-        context.clear_active_app_notice(&notice.app);
-        suppressed_app_notices += 1;
-    }
-
-    if failed_events > 0 || suppressed_app_notices > 0 {
+    if failed_events > 0 {
         tracing::warn!(
             reason,
             failed_events,
-            suppressed_app_notices,
             "interrupted active runtime turn and terminated claimed inputs"
         );
     } else {
@@ -289,68 +207,5 @@ pub(crate) fn interrupt_active_runtime_turn(
     context.runtime_turn_started_at = None;
     context.runtime_turn_started_at_ms = None;
 
-    RuntimeInterruptOutcome {
-        failed_events,
-        suppressed_app_notices,
-    }
-}
-
-fn enqueue_app_notice_work(context: &mut Context) {
-    for app_id in context.apps.app_ids() {
-        let Some(reason) = context
-            .apps
-            .notice_reason(&app_id)
-            .and_then(|reason| crate::context::normalize_app_notice_reason(&reason))
-        else {
-            context.clear_active_app_notice(&app_id);
-            context.clear_app_notice_suppression(&app_id);
-            if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
-                app: app_id.clone(),
-                reason: String::new(),
-            }) {
-                tracing::error!("failed to remove cleared app notice work for {app_id}: {err:?}");
-            }
-            continue;
-        };
-
-        if context.is_app_notice_suppressed(&app_id, &reason) {
-            context.clear_active_app_notice(&app_id);
-            if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
-                app: app_id.clone(),
-                reason: String::new(),
-            }) {
-                tracing::error!(
-                    "failed to remove suppressed app notice work for {app_id}: {err:?}"
-                );
-            }
-            continue;
-        }
-
-        let key = AppNoticeKey::new(app_id.clone(), reason.clone());
-        let should_enqueue = match context.active_app_notices.get(&key) {
-            Some(active) if active.resolved => {
-                if let Err(err) = context.pending_work.consume(PendingWork::AppNotice {
-                    app: app_id.clone(),
-                    reason: String::new(),
-                }) {
-                    tracing::error!(
-                        "failed to remove resolved app notice work for {app_id}: {err:?}"
-                    );
-                }
-                false
-            }
-            Some(_) => false,
-            None => true,
-        };
-
-        if should_enqueue {
-            context.activate_app_notice(app_id.clone(), reason.clone());
-            if let Err(err) = context.pending_work.enqueue(PendingWork::AppNotice {
-                app: app_id.clone(),
-                reason,
-            }) {
-                tracing::error!("failed to enqueue app notice work for {app_id}: {err:?}");
-            }
-        }
-    }
+    RuntimeInterruptOutcome { failed_events }
 }

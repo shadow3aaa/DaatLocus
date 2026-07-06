@@ -159,8 +159,8 @@ pub(crate) async fn handle_dashboard_control_command(
                     Some(tx),
                     RuntimeStatusLevel::Info,
                     format!(
-                        "runtime turn interrupted (events={}, app_notices={})",
-                        outcome.failed_events, outcome.suppressed_app_notices
+                        "runtime turn interrupted (events={})",
+                        outcome.failed_events
                     ),
                 );
             } else {

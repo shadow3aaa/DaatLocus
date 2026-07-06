@@ -475,7 +475,6 @@ impl LuaWorkerRuntime {
             module.get::<Option<Function>>("poll_notices"),
         )?
         else {
-            self.runtime.notice_reason = None;
             return Ok(None);
         };
         let state_value = self.map_lua(
@@ -497,8 +496,7 @@ impl LuaWorkerRuntime {
             self.runtime.state = next_state;
             self.persist_runtime_state()?;
         }
-        self.runtime.notice_reason = summarize_notices(&output.notices);
-        Ok(self.runtime.notice_reason.clone())
+        Ok(summarize_notices(&output.notices))
     }
 
     fn persist_runtime_state(&self) -> Result<()> {

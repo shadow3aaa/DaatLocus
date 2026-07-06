@@ -1071,21 +1071,6 @@ impl App for TerminalApp {
         }
     }
 
-    fn notice_reason(&self) -> Option<String> {
-        let unread_count = self
-            .sessions
-            .values()
-            .filter(|session| session.state.has_unread_output)
-            .count();
-        if unread_count > 0 {
-            Some(format!(
-                "{unread_count} terminal session(s) have unread output"
-            ))
-        } else {
-            None
-        }
-    }
-
     async fn wait_until_settled(&self, silence_duration: Duration, timeout: Duration) -> bool {
         let Some(session) = self
             .sessions

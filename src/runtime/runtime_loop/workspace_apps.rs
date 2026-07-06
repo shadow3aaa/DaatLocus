@@ -18,7 +18,7 @@ pub(super) async fn sync_workspace_apps_from_invalidation(context: &mut Context)
     }
 
     for removed in &report.removed {
-        context.clear_active_app_notice(removed);
+        let _ = removed;
     }
     if !report.added.is_empty() {
         tracing::info!(
