@@ -116,11 +116,6 @@ struct WorkspaceAppManifest {
 }
 
 #[derive(Debug)]
-struct WorkspaceAppRuntimeState {
-    state: JsonValue,
-}
-
-#[derive(Debug)]
 struct WorkspaceLuaRuntime {
     lua: Lua,
     module: Table,
@@ -1179,13 +1174,10 @@ fn resolve_relative_child_path(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(root.join(relative_path))
 }
 
-fn load_runtime_state(path: &Path) -> Result<WorkspaceAppRuntimeState> {
-    let state = PersistenceStore::runtime_sync()
+fn load_runtime_state(path: &Path) -> Result<JsonValue> {
+    Ok(PersistenceStore::runtime_sync()
         .read_json_file_sync(path, "workspace app state")
-        .unwrap_or_else(|| JsonValue::Object(Default::default()));
-    Ok(WorkspaceAppRuntimeState {
-        state,
-    })
+        .unwrap_or_else(|| JsonValue::Object(Default::default())))
 }
 
 #[cfg(test)]

@@ -253,7 +253,7 @@ pub(crate) async fn execute_agent_loop_step(
     let claimed_event_ids = claimed_inputs
         .iter()
         .filter_map(|input| match input {
-            ClaimedRuntimeInput::Event(event) => Some(event.event_id.to_string()),
+            event => Some(event.event_id.to_string()),
         })
         .collect::<Vec<_>>();
     context.claimed_event_ids = claimed_event_ids.clone();
@@ -264,7 +264,7 @@ pub(crate) async fn execute_agent_loop_step(
     let claimed_event_views = claimed_inputs
         .iter()
         .filter_map(|input| match input {
-            ClaimedRuntimeInput::Event(event) => Some((**event).clone()),
+            event => Some((**event).clone()),
         })
         .collect::<Vec<_>>();
     let live_draft_session = maybe_start_telegram_live_draft_session(context, &claimed_event_views);
@@ -1321,7 +1321,7 @@ fn runtime_error_event_sources(inputs: &[ClaimedRuntimeInput]) -> Vec<String> {
     let mut sources = inputs
         .iter()
         .filter_map(|input| match input {
-            ClaimedRuntimeInput::Event(event) => Some(event.source.to_string()),
+            event => Some(event.source.to_string()),
         })
         .collect::<Vec<_>>();
     sources.sort();
@@ -1333,7 +1333,7 @@ fn runtime_error_user_request_summary(inputs: &[ClaimedRuntimeInput]) -> Option<
     let summaries = inputs
         .iter()
         .map(|input| match input {
-            ClaimedRuntimeInput::Event(event) => match &event.payload {
+            event => match &event.payload {
                 EventPayload::TelegramIncoming(payload) => compact_runtime_error_text(
                     &format!(
                         "telegram from {}: {}",
@@ -1466,7 +1466,7 @@ fn append_claimed_input_activity_cells(
 ) {
     if inputs
         .iter()
-        .any(|input| matches!(input, ClaimedRuntimeInput::Event(_)))
+        .any(|_input| true)
     {
         refresh_pending_user_inputs_for_dashboard(context, tx);
     }
@@ -1474,11 +1474,9 @@ fn append_claimed_input_activity_cells(
     let mut cells = Vec::new();
     let mut stable_ids = Vec::new();
     for input in inputs {
-        if let ClaimedRuntimeInput::Event(event) = input
-            && let Some(cell) = user_activity_cell_from_event(event)
-        {
+        if let Some(cell) = user_activity_cell_from_event(input) {
             cells.push(cell);
-            stable_ids.push(dashboard_user_activity_item_id(event));
+            stable_ids.push(dashboard_user_activity_item_id(input));
         }
     }
     append_committed_activity_cells_with_ids(context, tx, cells, Some(stable_ids));

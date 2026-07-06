@@ -11,7 +11,7 @@ use crate::{
     app::{AppDynamicToolResult, AppDynamicToolSpec, AppId, AppStateRender},
     persistence::PersistenceStore,
     workspace_app::{
-        WorkspaceAppConfigOutput, WorkspaceAppRuntimeState, WorkspaceLuaRuntime,
+        WorkspaceAppConfigOutput, WorkspaceLuaRuntime,
         WorkspaceNoticeOutput, WorkspaceRenderOutput, WorkspaceToolCallOutput,
         WorkspaceToolDescriptor, load_runtime_state, load_workspace_lua_runtime,
         protocol::{
@@ -21,6 +21,7 @@ use crate::{
         validate_workspace_tool_schema, validate_workspace_tool_value,
     },
 };
+use serde_json::Value as JsonValue;
 
 pub(crate) struct WorkspaceAppWorkerArgs {
     pub app_id: String,
@@ -93,7 +94,7 @@ struct LuaWorkerRuntime {
     state_file: PathBuf,
     entry_relative_path: String,
     lua_runtime: WorkspaceLuaRuntime,
-    runtime: WorkspaceAppRuntimeState,
+    runtime: JsonValue,
     init_ran: bool,
 }
 
@@ -291,14 +292,14 @@ impl LuaWorkerRuntime {
         if let Some(init_fn) = init_fn {
             let state_value = self.map_lua(
                 "failed to encode runtime state for `init`",
-                lua.to_value(&self.runtime.state),
+                lua.to_value(&self.runtime),
             )?;
             let result = self.map_lua(
                 "failed to execute `init`",
                 init_fn.call::<LuaValue>((ctx.clone(), state_value)),
             )?;
             if !matches!(result, LuaValue::Nil) {
-                self.runtime.state =
+                self.runtime =
                     self.map_lua("failed to decode `init` result", lua.from_value(result))?;
                 self.persist_runtime_state()?;
             }
@@ -320,7 +321,7 @@ impl LuaWorkerRuntime {
         };
         let state_value = self.map_lua(
             "failed to encode runtime state for `render_state`",
-            lua.to_value(&self.runtime.state),
+            lua.to_value(&self.runtime),
         )?;
         let result = self.map_lua(
             "failed to execute `render_state`",
@@ -334,7 +335,7 @@ impl LuaWorkerRuntime {
             )?,
         };
         if let Some(next_state) = output.state {
-            self.runtime.state = next_state;
+            self.runtime = next_state;
             self.persist_runtime_state()?;
         }
         let mut lines = output.lines;
@@ -372,7 +373,7 @@ impl LuaWorkerRuntime {
         };
         let state_value = self.map_lua(
             "failed to encode runtime state for `list_tools`",
-            lua.to_value(&self.runtime.state),
+            lua.to_value(&self.runtime),
         )?;
         let value = self.map_lua(
             "failed to execute `list_tools`",
@@ -426,7 +427,7 @@ impl LuaWorkerRuntime {
             .ok_or_else(|| miette!("workspace app `{}` does not define `call_tool`", self.id))?;
         let state_value = self.map_lua(
             "failed to encode runtime state for `call_tool`",
-            lua.to_value(&self.runtime.state),
+            lua.to_value(&self.runtime),
         )?;
         let args_value = self.map_lua(
             "failed to encode tool arguments for `call_tool`",
@@ -455,7 +456,7 @@ impl LuaWorkerRuntime {
             )?;
         }
         if let Some(next_state) = output.state {
-            self.runtime.state = next_state;
+            self.runtime = next_state;
             self.persist_runtime_state()?;
         }
         Ok(AppDynamicToolResult {
@@ -479,7 +480,7 @@ impl LuaWorkerRuntime {
         };
         let state_value = self.map_lua(
             "failed to encode runtime state for `poll_notices`",
-            lua.to_value(&self.runtime.state),
+            lua.to_value(&self.runtime),
         )?;
         let value = self.map_lua(
             "failed to execute `poll_notices`",
@@ -493,7 +494,7 @@ impl LuaWorkerRuntime {
             )?,
         };
         if let Some(next_state) = output.state {
-            self.runtime.state = next_state;
+            self.runtime = next_state;
             self.persist_runtime_state()?;
         }
         Ok(summarize_notices(&output.notices))
@@ -501,7 +502,7 @@ impl LuaWorkerRuntime {
 
     fn persist_runtime_state(&self) -> Result<()> {
         PersistenceStore::runtime_sync()
-            .write_json_file_sync(&self.state_file, &self.runtime.state)
+            .write_json_file_sync(&self.state_file, &self.runtime)
             .map_err(|err| {
                 miette!(
                     "failed to write app state {}: {err}",

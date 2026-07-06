@@ -241,9 +241,9 @@ mod tests {
         context.runtime_turn_started_at = Some(Instant::now());
         context.runtime_turn_started_at_ms = Some(42);
 
-        let outcome = interrupt_active_runtime_turn(context, "test interrupt");
+        let failed = interrupt_active_runtime_turn(context, "test interrupt");
 
-        assert_eq!(outcome.failed_events, 1);
+        assert_eq!(failed, 1);
         assert!(!context.active_runtime_turn);
         assert!(context.runtime_turn_started_at.is_none());
         assert!(context.claimed_event_ids.is_empty());
@@ -406,7 +406,7 @@ mod tests {
         let event_a = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
         let event_b = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let inputs = vec![
-            ClaimedRuntimeInput::Event(Box::new(EventView {
+            Box::new(EventView {
                 event_id: event_a,
                 source: crate::events::EventSource::Telegram,
                 status: EventStatus::Pending,
@@ -424,8 +424,8 @@ mod tests {
                     attachments: Vec::new(),
                 }),
                 last_error: None,
-            })),
-            ClaimedRuntimeInput::Event(Box::new(EventView {
+            }),
+            Box::new(EventView {
                 event_id: event_b,
                 source: crate::events::EventSource::Telegram,
                 status: EventStatus::Pending,
@@ -443,7 +443,7 @@ mod tests {
                     attachments: Vec::new(),
                 }),
                 last_error: None,
-            })),
+            }),
         ];
 
         assert_eq!(

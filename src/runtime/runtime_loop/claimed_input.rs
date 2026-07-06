@@ -8,14 +8,12 @@ pub(super) fn runtime_work_origin(inputs: &[ClaimedRuntimeInput]) -> Option<Stri
         return Some("runtime_work:batch".to_string());
     }
     match inputs.first() {
-        Some(ClaimedRuntimeInput::Event(event)) => Some(format!("event:{}", event.event_id)),
+        Some(event) => Some(format!("event:{}", event.event_id)),
         None => None,
     }
 }
 
-pub(super) enum ClaimedRuntimeInput {
-    Event(Box<EventView>),
-}
+pub(super) type ClaimedRuntimeInput = Box<EventView>;
 
 pub(super) fn claimed_runtime_input_fingerprint(inputs: &[ClaimedRuntimeInput]) -> Option<String> {
     if inputs.is_empty() {
@@ -25,7 +23,7 @@ pub(super) fn claimed_runtime_input_fingerprint(inputs: &[ClaimedRuntimeInput]) 
     let mut event_ids = inputs
         .iter()
         .filter_map(|input| match input {
-            ClaimedRuntimeInput::Event(event) => Some(event.event_id.to_string()),
+            event => Some(event.event_id.to_string()),
         })
         .collect::<Vec<_>>();
     event_ids.sort();
@@ -51,7 +49,7 @@ pub(super) fn claim_pending_runtime_inputs(
             PendingWork::Event { event_id } => {
                 match context.events.claim_event_if_pending(event_id) {
                     Ok(Some(event)) => {
-                        claimed_inputs.push(ClaimedRuntimeInput::Event(Box::new(event)));
+                        claimed_inputs.push(Box::new(event));
                     }
                     Ok(None) => {
                         if let Err(err) = context
@@ -393,7 +391,7 @@ pub(super) fn afterclaim_context_input_for_claimed_inputs(
     let mut context = AfterClaimContextInput::default();
     for input in inputs {
         match input {
-            ClaimedRuntimeInput::Event(event) => context.events.push((**event).clone()),
+            event => context.events.push((**event).clone()),
         }
     }
     context
