@@ -1933,7 +1933,7 @@ async fn dir_list_handler(
     let input = query.path.unwrap_or_default().trim().to_string();
 
     let result = if input.is_empty() {
-        list_root_dirs()
+        default_dir_listing()
     } else {
         let requested = PathBuf::from(&input);
         if !requested.is_dir() {
@@ -1991,6 +1991,21 @@ fn list_root_dirs() -> Result<DirListResponse> {
             parent: None,
             entries,
         })
+    }
+}
+
+fn default_dir_listing() -> Result<DirListResponse> {
+    match crate::workspace_app::paths::resolve_runtime_workspace_dir() {
+        Ok(ws) if ws.is_dir() => {
+            let parent = ws.parent().map(|p| p.display().to_string());
+            let entries = list_subdirs(&ws);
+            Ok(DirListResponse {
+                path: ws.display().to_string(),
+                parent,
+                entries,
+            })
+        }
+        _ => list_root_dirs(),
     }
 }
 
