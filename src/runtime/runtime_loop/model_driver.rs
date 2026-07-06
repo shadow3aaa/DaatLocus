@@ -50,6 +50,10 @@ pub(super) async fn run_agent_turn_with_retry(
             state.context_composition = Some(context_composition.clone());
         });
     }
+    const MAX_RETRIES: usize = 6;
+    const BASE_REQUEST_TIMEOUT_SECS: u64 = 300;
+    const MAX_REQUEST_TIMEOUT_SECS: u64 = 1200;
+
     let model_name = context
         .llm
         .model_name()
@@ -57,7 +61,21 @@ pub(super) async fn run_agent_turn_with_retry(
     let mut attempt = 1usize;
     loop {
         set_runtime_status_only(tx, "Working");
-        let turn_result = context.llm.run_agent_turn(context, request.clone()).await;
+        let timeout_shift = (attempt.saturating_sub(1)).min(6) as u32;
+        let request_timeout_secs = BASE_REQUEST_TIMEOUT_SECS
+            .saturating_mul(1u64 << timeout_shift)
+            .min(MAX_REQUEST_TIMEOUT_SECS);
+        let turn_result = match tokio::time::timeout(
+            Duration::from_secs(request_timeout_secs),
+            context.llm.run_agent_turn(context, request.clone()),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(miette!(
+                "model request timed out after {request_timeout_secs}s"
+            )),
+        };
         match turn_result {
             Ok(response) => {
                 write_current_turn_response_dump(session_id.as_deref(), &response, attempt).await;
@@ -76,7 +94,7 @@ pub(super) async fn run_agent_turn_with_retry(
                 return Ok(response);
             }
             Err(err) => {
-                let will_retry = should_retry_agent_turn_error(&err);
+                let will_retry = should_retry_agent_turn_error(&err) && attempt < MAX_RETRIES;
                 let error_detail = plain_report_text(&err);
                 write_current_turn_response_error_dump(
                     session_id.as_deref(),
