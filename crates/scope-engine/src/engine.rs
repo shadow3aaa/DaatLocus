@@ -525,13 +525,15 @@ fn project_relative_arg(root: &Path, path: Option<&str>) -> Result<Option<String
     if path.is_absolute() {
         let normalized_root = normalize_for_comparison(root);
         let normalized_path = normalize_for_comparison(&path);
-        let relative = normalized_path.strip_prefix(&normalized_root).map_err(|_| {
-            format!(
-                "path {} is outside project root {}",
-                path.display(),
-                root.display()
-            )
-        })?;
+        let relative = normalized_path
+            .strip_prefix(&normalized_root)
+            .map_err(|_| {
+                format!(
+                    "path {} is outside project root {}",
+                    path.display(),
+                    root.display()
+                )
+            })?;
         Ok(Some(normalize_relative_path(&relative.to_string_lossy())))
     } else {
         Ok(Some(normalize_relative_path(&path.to_string_lossy())))

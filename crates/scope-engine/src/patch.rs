@@ -681,8 +681,8 @@ mod e2e_tests {
         let edits = vec![api::StructuredEdit {
             path: "src/lib.rs".to_string(),
             op: Some(api::EditOp::Replace),
-            start: Some("1#ff".to_string()),     // wrong hash
-            end: Some("3#ff".to_string()), // wrong hash
+            start: Some("1#ff".to_string()), // wrong hash
+            end: Some("3#ff".to_string()),   // wrong hash
             content: Some(api::EditContent::Text(
                 "pub fn hello() {\n    println!(\"goodbye\");\n}\n".to_string(),
             )),
