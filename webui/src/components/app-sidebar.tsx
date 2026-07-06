@@ -7,6 +7,7 @@ import {
   MessageSquareIcon,
   MoonIcon,
   PlusIcon,
+  SearchIcon,
   ScrollTextIcon,
   SettingsIcon,
   SunIcon,
@@ -26,6 +27,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { DirBrowserDialog } from "@/components/dir-browser-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -367,36 +369,54 @@ function NewCodingSessionMenu({
   onCreateSession: (projectDir: string) => void;
 }) {
   const { t } = useTranslation();
+  const [dirBrowserOpen, setDirBrowserOpen] = useState(false);
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          aria-label={t("sidebar.newCodingSession")}
-          title={t("sidebar.newCodingSession")}
-          disabled={disabled || projectGroups.length === 0}
-        >
-          <FolderPlusIcon />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-60">
-        <DropdownMenuLabel>{t("sidebar.newProjectSession")}</DropdownMenuLabel>
-        <DropdownMenuGroup>
-          {projectGroups.map((group) => (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={t("sidebar.newCodingSession")}
+            title={t("sidebar.newCodingSession")}
+            disabled={disabled}
+          >
+            <FolderPlusIcon />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-60">
+          <DropdownMenuLabel>{t("sidebar.newProjectSession")}</DropdownMenuLabel>
+          <DropdownMenuGroup>
+            {projectGroups.map((group) => (
+              <DropdownMenuItem
+                key={group.projectDir}
+                onSelect={() => onCreateSession(group.projectDir)}
+              >
+                <FolderIcon />
+                <span className="truncate">{group.label}</span>
+              </DropdownMenuItem>
+            ))}
             <DropdownMenuItem
-              key={group.projectDir}
-              onSelect={() => onCreateSession(group.projectDir)}
+              onSelect={() => setDirBrowserOpen(true)}
             >
-              <FolderIcon />
-              <span className="truncate">{group.label}</span>
+              <SearchIcon />
+              <span>{t("sidebar.browseDirectory")}</span>
             </DropdownMenuItem>
-          ))}
-        </DropdownMenuGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <DirBrowserDialog
+        open={dirBrowserOpen}
+        onOpenChange={setDirBrowserOpen}
+        onSelect={(dirPath) => {
+          setDirBrowserOpen(false);
+          onCreateSession(dirPath);
+        }}
+      />
+    </>
   );
 }
 

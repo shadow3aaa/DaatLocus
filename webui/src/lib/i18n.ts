@@ -395,6 +395,8 @@ const resources = {
         noChats: "No chats",
         newCodingSession: "New coding session",
         newProjectSession: "New project session",
+
+        browseDirectory: "Browse directory…",
         newSessionInProject: "New session in {{project}}",
         newConversation: "New conversation",
         showMore: "Show more",
@@ -411,6 +413,18 @@ const resources = {
           month: "{{count}} mo",
           year: "{{count}} yr",
         },
+      },
+
+      dirBrowser: {
+        title: "Select project directory",
+        description: "Choose a directory on this machine to open as a project.",
+        root: "This PC",
+        pathPlaceholder: "Paste or type a path…",
+        go: "Go",
+        loading: "Loading…",
+        noDirs: "No subdirectories",
+        cancel: "Cancel",
+        select: "Select",
       },
       theme: {
         switchToLight: "Switch to light mode",
@@ -810,6 +824,8 @@ const resources = {
         noChats: "暂无聊天",
         newCodingSession: "新建代码会话",
         newProjectSession: "新建项目会话",
+
+        browseDirectory: "浏览目录…",
         newSessionInProject: "在 {{project}} 中新建会话",
         newConversation: "新建会话",
         showMore: "显示更多",
@@ -826,6 +842,18 @@ const resources = {
           month: "{{count}} 月",
           year: "{{count}} 年",
         },
+      },
+
+      dirBrowser: {
+        title: "选择项目目录",
+        description: "选择本机上的一个目录作为项目打开。",
+        root: "此电脑",
+        pathPlaceholder: "粘贴或输入路径…",
+        go: "跳转",
+        loading: "加载中…",
+        noDirs: "无子目录",
+        cancel: "取消",
+        select: "选择",
       },
       theme: {
         switchToLight: "切换到浅色模式",

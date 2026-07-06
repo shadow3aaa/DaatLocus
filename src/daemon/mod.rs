@@ -678,6 +678,7 @@ pub async fn start_server(params: DaemonServerStartParams) -> Result<DaemonServe
         .route("/send", post(send_handler))
         .route("/daemon/shutdown", post(shutdown_handler))
         .route("/daemon/restart", post(restart_handler))
+        .route("/filesystem/dirs", get(dir_list_handler))
         .route("/sessions", get(session_list_handler))
         .route("/sessions", post(session_create_handler))
         .route("/sessions/{session_id}", delete(session_delete_handler))
@@ -1900,6 +1901,113 @@ async fn restart_handler(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     (StatusCode::ACCEPTED, "daemon restart scheduled").into_response()
+}
+
+#[derive(Deserialize)]
+struct DirListQuery {
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DirEntry {
+    name: String,
+    kind: String,
+}
+
+#[derive(Serialize)]
+struct DirListResponse {
+    path: String,
+    parent: Option<String>,
+    entries: Vec<DirEntry>,
+}
+
+async fn dir_list_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    Query(query): Query<DirListQuery>,
+) -> impl IntoResponse {
+    if !state.auth_registry.authorize_headers(&headers).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let input = query.path.unwrap_or_default().trim().to_string();
+
+    let result = if input.is_empty() {
+        list_root_dirs()
+    } else {
+        let requested = PathBuf::from(&input);
+        if !requested.is_dir() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("not a directory or does not exist: {}", requested.display())})),
+            )
+                .into_response();
+        }
+        let parent = requested
+            .parent()
+            .map(|p| p.display().to_string());
+        let entries = list_subdirs(&requested);
+        Ok(DirListResponse {
+            path: requested.display().to_string(),
+            parent,
+            entries,
+        })
+    };
+
+    match result {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{err}")})),
+        )
+            .into_response(),
+    }
+}
+
+fn list_root_dirs() -> Result<DirListResponse> {
+    let mut entries = Vec::new();
+    #[cfg(windows)]
+    {
+        for letter in b'A'..=b'Z' {
+            let drive = format!("{}:\\", letter as char);
+            if StdPath::new(&drive).exists() {
+                entries.push(DirEntry {
+                    name: drive,
+                    kind: "dir".to_string(),
+                });
+            }
+        }
+        Ok(DirListResponse {
+            path: String::new(),
+            parent: None,
+            entries,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let entries = list_subdirs(StdPath::new("/"));
+        Ok(DirListResponse {
+            path: String::new(),
+            parent: None,
+            entries,
+        })
+    }
+}
+
+fn list_subdirs(path: &StdPath) -> Vec<DirEntry> {
+    let mut entries: Vec<DirEntry> = match std::fs::read_dir(path) {
+        Ok(read_dir) => read_dir
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+            .map(|e| DirEntry {
+                name: e.file_name().to_string_lossy().to_string(),
+                kind: "dir".to_string(),
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    entries
 }
 
 async fn session_list_handler(

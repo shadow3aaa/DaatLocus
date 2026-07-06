@@ -1388,6 +1388,44 @@ export async function createSession({
   return parseJsonResponse<SessionInfo>(response, "Create session");
 }
 
+export type DirEntry = {
+  name: string;
+  kind: string;
+};
+
+export type DirListResponse = {
+  path: string;
+  parent: string | null;
+  entries: DirEntry[];
+};
+
+export async function listDirs({
+  path,
+  signal,
+  token = getStoredDaemonToken(),
+}: FetchOptions & { path?: string } = {}): Promise<DirListResponse> {
+  const daemonToken = token.trim();
+
+  if (!daemonToken) {
+    throw new DaemonApiError("Missing daemon token for directory listing.");
+  }
+
+  const url = new URL("/filesystem/dirs", window.location.origin);
+  if (path) {
+    url.searchParams.set("path", path);
+  }
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${daemonToken}`,
+    },
+    signal,
+  });
+
+  return parseJsonResponse<DirListResponse>(response, "List directories");
+}
+
 export async function deleteSession({
   sessionId,
   signal,
