@@ -2771,6 +2771,15 @@ That's it.";
             content: body.to_string(),
         };
         let lines = render_assistant_cell_lines(&cell, 80);
+        for (i, line) in lines.iter().enumerate() {
+            eprintln!("LINE {}: {}", i, line_text(line));
+            for (j, span) in line.spans.iter().enumerate() {
+                eprintln!(
+                    "  SPAN {}: content={:?} fg={:?}",
+                    j, span.content, span.style.fg
+                );
+            }
+        }
 
         // ── Fence line(s) are hidden ───────────────────────────
         let fence_lines: Vec<_> = lines
@@ -2815,20 +2824,23 @@ That's it.";
         );
 
         // ── Plain text is White (base_color) ────────────────────
-        let plain_text = lines
+        let plain_text_spans: Vec<_> = lines
             .iter()
             .flat_map(|line| line.spans.iter())
-            .find(|span| span.content.contains("That's it"))
-            .and_then(|span| span.style.fg);
+            .filter(|span| span.content.contains("That's") || span.content.contains("it."))
+            .collect();
         assert!(
-            plain_text.is_some(),
+            !plain_text_spans.is_empty(),
             "expected to find plain text line in rendered output"
         );
-        assert_eq!(
-            plain_text,
-            Some(Color::White),
-            "plain text should have White fg (base_color)"
-        );
+        for span in plain_text_spans {
+            assert_eq!(
+                span.style.fg,
+                Some(Color::White),
+                "plain text span '{}' should have White fg (base_color)",
+                span.content
+            );
+        }
     }
 
     #[test]

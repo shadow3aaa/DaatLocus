@@ -114,7 +114,7 @@ tokio-stream = "0.1.18"
 scope-engine = { version = "0.1.0", path = "crates/scope-engine" }
 interprocess = { version = "2.4.2", features = ["tokio"] }
 daat-locus-macros = { version = "0.1.0", path = "crates/daat-locus-macros" }
-daat-locus-md = { path = "crates/daat-locus-md", default-features = false, features = ["markdown"] }
+daat-locus-md = { version = "0.3.6", path = "crates/daat-locus-md", default-features = false, features = ["markdown"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 tao = "0.35.3"
