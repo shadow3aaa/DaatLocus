@@ -175,7 +175,7 @@ impl TerminalApp {
         } = request;
 
         let target_session_id = match session_id {
-            Some(id) if !id.trim().is_empty() => id,
+            Some(id) if !id.trim().is_empty() && id.trim().to_lowercase() != "null" => id,
             _ => self.create_session(),
         };
         if let Some(reason) = Self::forbidden_input_reason(&command) {
