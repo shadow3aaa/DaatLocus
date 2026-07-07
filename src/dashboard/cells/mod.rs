@@ -663,7 +663,6 @@ mod tests {
         EventView {
             event_id: uuid::Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
                 .expect("valid uuid"),
-            source: crate::events::EventSource::Terminal,
             status: crate::events::EventStatus::Claimed,
             reply_message: None,
             arrived_at_ms: 1,

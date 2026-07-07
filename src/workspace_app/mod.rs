@@ -309,6 +309,7 @@ impl WorkspaceAppRegistry {
         }
     }
 
+    #[allow(dead_code)]
     pub fn has_loaded_apps(&self) -> bool {
         self.records.values().any(|record| record.app_id.is_some())
     }

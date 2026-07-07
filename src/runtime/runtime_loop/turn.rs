@@ -252,9 +252,7 @@ pub(crate) async fn execute_agent_loop_step(
     let claimed_input_fingerprint = claimed_runtime_input_fingerprint(&claimed_inputs);
     let claimed_event_ids = claimed_inputs
         .iter()
-        .filter_map(|input| match input {
-            event => Some(event.event_id.to_string()),
-        })
+        .map(|input| input.event_id.to_string())
         .collect::<Vec<_>>();
     context.claimed_event_ids = claimed_event_ids.clone();
     append_claimed_input_activity_cells(context, tx, &claimed_inputs);
@@ -263,9 +261,7 @@ pub(crate) async fn execute_agent_loop_step(
     let afterclaim_context_input = afterclaim_context_input_for_claimed_inputs(&claimed_inputs);
     let claimed_event_views = claimed_inputs
         .iter()
-        .filter_map(|input| match input {
-            event => Some((**event).clone()),
-        })
+        .map(|input| (**input).clone())
         .collect::<Vec<_>>();
     let live_draft_session = maybe_start_telegram_live_draft_session(context, &claimed_event_views);
     enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightPreTurnContext);
@@ -1320,9 +1316,7 @@ fn runtime_error_contract_refs(kind: RuntimeErrorKind) -> Vec<String> {
 fn runtime_error_event_sources(inputs: &[ClaimedRuntimeInput]) -> Vec<String> {
     let mut sources = inputs
         .iter()
-        .filter_map(|input| match input {
-            event => Some(event.source.to_string()),
-        })
+        .map(|input| input.source_label().to_string())
         .collect::<Vec<_>>();
     sources.sort();
     sources.dedup();
@@ -1332,8 +1326,9 @@ fn runtime_error_event_sources(inputs: &[ClaimedRuntimeInput]) -> Vec<String> {
 fn runtime_error_user_request_summary(inputs: &[ClaimedRuntimeInput]) -> Option<String> {
     let summaries = inputs
         .iter()
-        .map(|input| match input {
-            event => match &event.payload {
+        .map(|input| {
+            let event = input;
+            match &event.payload {
                 EventPayload::TelegramIncoming(payload) => compact_runtime_error_text(
                     &format!(
                         "telegram from {}: {}",
@@ -1345,7 +1340,7 @@ fn runtime_error_user_request_summary(inputs: &[ClaimedRuntimeInput]) -> Option<
                     &format!("terminal {}: {}", payload.origin, payload.incoming_text),
                     240,
                 ),
-            },
+            }
         })
         .collect::<Vec<_>>();
     if summaries.is_empty() {

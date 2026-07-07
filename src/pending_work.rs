@@ -51,7 +51,6 @@ impl PartialEq for PendingWork {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Event { event_id: a }, Self::Event { event_id: b }) => a == b,
-            _ => false,
         }
     }
 }
@@ -142,6 +141,7 @@ impl PendingWorkQueue {
         Ok(claimed)
     }
 
+    #[allow(dead_code)]
     pub fn release_claimed(&self, work: PendingWork) -> Result<bool> {
         let mut inner = self.inner.lock();
         let Some(entry) = inner
@@ -359,7 +359,6 @@ fn select_next_pending_index(queue: &VecDeque<PendingWorkEntry>) -> Option<usize
 fn same_work_payload(left: &PendingWork, right: &PendingWork) -> bool {
     match (left, right) {
         (PendingWork::Event { event_id: a }, PendingWork::Event { event_id: b }) => a == b,
-        _ => false,
     }
 }
 

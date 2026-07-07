@@ -7,10 +7,7 @@ pub(super) fn runtime_work_origin(inputs: &[ClaimedRuntimeInput]) -> Option<Stri
     if inputs.len() > 1 {
         return Some("runtime_work:batch".to_string());
     }
-    match inputs.first() {
-        Some(event) => Some(format!("event:{}", event.event_id)),
-        None => None,
-    }
+    inputs.first().map(|event| format!("event:{}", event.event_id))
 }
 
 pub(super) type ClaimedRuntimeInput = Box<EventView>;
@@ -22,9 +19,7 @@ pub(super) fn claimed_runtime_input_fingerprint(inputs: &[ClaimedRuntimeInput]) 
 
     let mut event_ids = inputs
         .iter()
-        .filter_map(|input| match input {
-            event => Some(event.event_id.to_string()),
-        })
+        .map(|input| input.event_id.to_string())
         .collect::<Vec<_>>();
     event_ids.sort();
 
@@ -390,9 +385,8 @@ pub(super) fn afterclaim_context_input_for_claimed_inputs(
 ) -> AfterClaimContextInput {
     let mut context = AfterClaimContextInput::default();
     for input in inputs {
-        match input {
-            event => context.events.push((**event).clone()),
-        }
+        let event = input;
+        context.events.push((**event).clone());
     }
     context
 }

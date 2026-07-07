@@ -19,7 +19,9 @@ use crate::{
     },
 };
 
+#[allow(dead_code)]
 const SESSION_TITLE_REFRESH_INTERVAL_MS: i64 = 5 * 60 * 1000;
+#[allow(dead_code)]
 const SESSION_TITLE_GENERATE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TITLE_CHARS: usize = 64;
 const MAX_EXCERPT_ITEMS: usize = 16;
@@ -29,7 +31,9 @@ const MAX_EXCERPT_ITEM_CHARS: usize = 360;
 pub struct SessionTitleState {
     current: Option<DashboardSessionTitle>,
     last_activity_signature: Option<String>,
+    #[allow(dead_code)]
     last_generated_signature: Option<String>,
+    #[allow(dead_code)]
     last_generated_at_ms: Option<i64>,
 }
 
@@ -55,6 +59,7 @@ impl SessionTitleState {
         true
     }
 
+    #[allow(dead_code)]
     fn should_generate(&self, signature: &str, now_ms: i64) -> bool {
         if self.last_generated_signature.as_deref() == Some(signature) {
             return false;
@@ -65,6 +70,7 @@ impl SessionTitleState {
         }
     }
 
+    #[allow(dead_code)]
     fn apply_generated(&mut self, signature: String, title: String, now_ms: i64) -> bool {
         self.last_activity_signature = Some(signature.clone());
         self.last_generated_signature = Some(signature);
@@ -102,6 +108,7 @@ pub fn sync_session_title_placeholder(
     }
 }
 
+#[allow(dead_code)]
 pub async fn refresh_session_title_after_activity(
     context: &mut Context,
     tx: &tokio::sync::watch::Sender<DashboardState>,
@@ -160,6 +167,7 @@ fn sync_dashboard_session_title(
 struct SessionTitleInput {
     placeholder_title: String,
     activity_signature: String,
+    #[allow(dead_code)]
     excerpt: String,
 }
 
@@ -182,10 +190,12 @@ impl SessionTitleInput {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct TitleOutput {
     title: String,
 }
 
+#[allow(dead_code)]
 async fn generate_session_title(context: &Context, excerpt: &str) -> Result<String> {
     let request = PromptRequest {
         tool_name: "set_session_title".to_string(),
@@ -358,14 +368,13 @@ fn is_runtime_context_text(text: &str) -> bool {
 mod tests {
     use super::*;
     use crate::{
-        events::{EventSource, EventStatus, TelegramIncomingEvent},
+        events::{EventStatus, TelegramIncomingEvent},
         reasoning::runtime::HistoryMessage,
     };
 
     fn event(id: &str, text: &str) -> EventView {
         EventView {
             event_id: uuid::Uuid::parse_str(id).expect("uuid"),
-            source: EventSource::Telegram,
             status: EventStatus::Resolved,
             reply_message: None,
             arrived_at_ms: 0,

@@ -408,7 +408,6 @@ mod tests {
         let inputs = vec![
             Box::new(EventView {
                 event_id: event_a,
-                source: crate::events::EventSource::Telegram,
                 status: EventStatus::Pending,
                 reply_message: None,
                 arrived_at_ms: 0,
@@ -427,7 +426,6 @@ mod tests {
             }),
             Box::new(EventView {
                 event_id: event_b,
-                source: crate::events::EventSource::Telegram,
                 status: EventStatus::Pending,
                 reply_message: None,
                 arrived_at_ms: 0,

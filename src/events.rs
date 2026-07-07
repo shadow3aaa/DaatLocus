@@ -29,7 +29,6 @@ struct PersistedEventStore {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Event {
-    pub source: EventSource,
     pub status: EventStatus,
     #[serde(default)]
     pub reply_message: Option<String>,
@@ -39,11 +38,13 @@ pub struct Event {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EventSource {
-    Telegram,
-    Terminal,
-    System,
+impl Event {
+    pub fn source_label(&self) -> &str {
+        match &self.payload {
+            EventPayload::TelegramIncoming(_) => "telegram",
+            EventPayload::TerminalIncoming(p) => &p.origin,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,12 +159,20 @@ fn default_terminal_origin() -> String {
 #[derive(Clone)]
 pub struct EventView {
     pub event_id: Uuid,
-    pub source: EventSource,
     pub status: EventStatus,
     pub reply_message: Option<String>,
     pub arrived_at_ms: i64,
     pub payload: EventPayload,
     pub last_error: Option<String>,
+}
+
+impl EventView {
+    pub fn source_label(&self) -> &str {
+        match &self.payload {
+            EventPayload::TelegramIncoming(_) => "telegram",
+            EventPayload::TerminalIncoming(p) => &p.origin,
+        }
+    }
 }
 
 impl EventStore {
@@ -223,7 +232,6 @@ impl EventStore {
         inner.state.events.insert(
             event_id,
             Event {
-                source: EventSource::Telegram,
                 status: EventStatus::Pending,
                 reply_message: None,
                 arrived_at_ms: now,
@@ -244,7 +252,6 @@ impl EventStore {
         inner.state.events.insert(
             event_id,
             Event {
-                source: EventSource::Terminal,
                 status: EventStatus::Pending,
                 reply_message: None,
                 arrived_at_ms: now,
@@ -270,7 +277,6 @@ impl EventStore {
         event.last_updated_at_ms = Utc::now().timestamp_millis();
         let view = EventView {
             event_id,
-            source: event.source,
             status: event.status,
             reply_message: event.reply_message.clone(),
             arrived_at_ms: event.arrived_at_ms,
@@ -458,22 +464,11 @@ impl EventStore {
 fn event_view(event_id: Uuid, event: &Event) -> EventView {
     EventView {
         event_id,
-        source: event.source,
         status: event.status,
         reply_message: event.reply_message.clone(),
         arrived_at_ms: event.arrived_at_ms,
         payload: event.payload.clone(),
         last_error: event.last_error.clone(),
-    }
-}
-
-impl Display for EventSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Telegram => write!(f, "Telegram"),
-            Self::Terminal => write!(f, "Terminal"),
-            Self::System => write!(f, "System"),
-        }
     }
 }
 
@@ -563,7 +558,6 @@ mod tests {
         events.insert(
             telegram_id,
             Event {
-                source: EventSource::Telegram,
                 status: EventStatus::AwaitingDelivery,
                 reply_message: None,
                 arrived_at_ms: 10,
@@ -592,7 +586,6 @@ mod tests {
         events.insert(
             terminal_id,
             Event {
-                source: EventSource::Terminal,
                 status: EventStatus::Failed,
                 reply_message: Some("raw local failure reply".to_string()),
                 arrived_at_ms: 30,
@@ -615,7 +608,7 @@ mod tests {
 
         assert_eq!(restored.order, vec![telegram_id, terminal_id]);
         let telegram = restored.events.get(&telegram_id).expect("telegram event");
-        assert_eq!(telegram.source, EventSource::Telegram);
+        assert_eq!(telegram.source_label(), "telegram");
         assert_eq!(telegram.status, EventStatus::AwaitingDelivery);
         assert_eq!(telegram.last_error.as_deref(), Some("queued for delivery"));
         match &telegram.payload {
@@ -634,7 +627,7 @@ mod tests {
             EventPayload::TerminalIncoming(_) => panic!("expected telegram payload"),
         }
         let terminal = restored.events.get(&terminal_id).expect("terminal event");
-        assert_eq!(terminal.source, EventSource::Terminal);
+        assert_eq!(terminal.source_label(), "test");
         assert_eq!(terminal.status, EventStatus::Failed);
         assert_eq!(
             terminal.reply_message.as_deref(),
@@ -663,7 +656,7 @@ mod tests {
         let event = store
             .view(&event_id.to_string())
             .expect("view terminal event");
-        assert_eq!(event.source, EventSource::Terminal);
+        assert_eq!(event.source_label(), "test");
         assert_eq!(event.status, EventStatus::Pending);
         match event.payload {
             EventPayload::TerminalIncoming(payload) => {
@@ -682,7 +675,6 @@ mod tests {
         state.events.insert(
             event_id,
             Event {
-                source: EventSource::Terminal,
                 status: EventStatus::Claimed,
                 reply_message: Some("stale reply".to_string()),
                 arrived_at_ms: 1,
