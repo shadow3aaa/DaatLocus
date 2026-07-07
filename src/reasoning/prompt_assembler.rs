@@ -8,7 +8,7 @@ use super::{
     },
     prompts::{SYSTEM_CORE, build_app_docs_prompt},
     turn_compile::{
-        PromptPersonaSpec, load_or_create_prompt_persona_spec_sync, load_prompt_persona_spec_sync,
+        PromptPersonaSpec, load_or_create_prompt_persona_spec_sync,
         resolve_prompt_persona_language,
     },
 };
@@ -57,6 +57,7 @@ pub fn runtime_system_prompt_text(ctx: &Context) -> String {
     })
 }
 
+#[cfg(test)]
 pub fn runtime_system_prompt_text_from_additions(additions: &[String]) -> String {
     let persona = load_prompt_persona_spec_sync();
     render_runtime_system_prompt(RuntimeSystemPromptSections {

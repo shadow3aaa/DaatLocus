@@ -2,12 +2,11 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::sync::OwnedMutexGuard;
 
 use crate::{
     app::AppManager,
@@ -54,8 +53,6 @@ const TOKEN_USAGE_FILE: &str = "token_usage.json";
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PersistentTokenUsageRole {
     Main,
-    Judge,
-    #[allow(dead_code)]
     Efficient,
 }
 
@@ -63,8 +60,6 @@ pub(crate) enum PersistentTokenUsageRole {
 struct PersistedTokenUsageSnapshot {
     #[serde(default)]
     main: PersistedTokenUsageRole,
-    #[serde(default)]
-    judge: PersistedTokenUsageRole,
     #[serde(default)]
     efficient: PersistedTokenUsageRole,
 }
@@ -242,7 +237,6 @@ impl PersistedTokenUsageSnapshot {
     fn role(&self, role: PersistentTokenUsageRole) -> &PersistedTokenUsageRole {
         match role {
             PersistentTokenUsageRole::Main => &self.main,
-            PersistentTokenUsageRole::Judge => &self.judge,
             PersistentTokenUsageRole::Efficient => &self.efficient,
         }
     }
@@ -250,7 +244,6 @@ impl PersistedTokenUsageSnapshot {
     fn role_mut(&mut self, role: PersistentTokenUsageRole) -> &mut PersistedTokenUsageRole {
         match role {
             PersistentTokenUsageRole::Main => &mut self.main,
-            PersistentTokenUsageRole::Judge => &mut self.judge,
             PersistentTokenUsageRole::Efficient => &mut self.efficient,
         }
     }
@@ -392,31 +385,20 @@ pub(crate) async fn build_eval_context_with_compiled(
         client,
         token_usage_store.clone(),
     );
-    let judge_model_key = config
-        .judge
-        .model
-        .as_deref()
-        .unwrap_or(&config.main_model)
-        .to_string();
-    let judge_model_id = config
-        .models
-        .get(&judge_model_key)
-        .map(|model| model.model_id.clone())
-        .unwrap_or_else(|| judge_model_key.clone());
-    let judge_client = build_llm(&judge_model_key, &config)
-        .unwrap_or_else(|err| panic!("failed to construct judge LLM client: {err:?}"));
-    let judge_client = wrap_llm_with_persistent_token_usage(
-        PersistentTokenUsageRole::Judge,
-        judge_model_id,
-        judge_client,
-        token_usage_store.clone(),
+    let efficient_client = build_llm(&config.efficient_model, &config)
+        .unwrap_or_else(|err| panic!("failed to construct efficient LLM client: {err:?}"));
+    let efficient_client = wrap_llm_with_persistent_token_usage(
+        PersistentTokenUsageRole::Efficient,
+        config.efficient_model_config().model_id.clone(),
+        efficient_client,
+        token_usage_store,
     );
     let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();
 
     Context {
         session_id: None,
         llm: client,
-        judge_llm: judge_client,
+        efficient_llm: efficient_client,
         config,
         memory,
         plan,
@@ -496,11 +478,13 @@ pub(crate) fn summarize_sleep_summary(summary: &crate::reasoning::sleep::SleepSu
     )
 }
 
+#[cfg(test)]
 pub(crate) struct DaatLocusHomeOverride {
     previous: Option<String>,
     _guard: OwnedMutexGuard<()>,
 }
 
+#[cfg(test)]
 impl DaatLocusHomeOverride {
     pub(crate) async fn set(path: PathBuf) -> Self {
         let guard = daat_locus_home_override_lock().lock_owned().await;
@@ -514,7 +498,7 @@ impl DaatLocusHomeOverride {
         }
     }
 }
-
+#[cfg(test)]
 impl Drop for DaatLocusHomeOverride {
     fn drop(&mut self) {
         match &self.previous {
@@ -528,6 +512,7 @@ impl Drop for DaatLocusHomeOverride {
     }
 }
 
+#[cfg(test)]
 fn daat_locus_home_override_lock() -> Arc<tokio::sync::Mutex<()>> {
     static LOCK: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
     Arc::clone(LOCK.get_or_init(|| Arc::new(tokio::sync::Mutex::new(()))))
@@ -584,14 +569,14 @@ mod tests {
         let store = load_persistent_token_usage_store(Some("session-b")).await;
         store
             .persist_role(
-                PersistentTokenUsageRole::Judge,
+                PersistentTokenUsageRole::Efficient,
                 "model-a".to_string(),
                 sample_usage(24),
             )
             .await;
 
         let reloaded = load_persistent_token_usage_store(Some("session-b")).await;
-        let ignored = reloaded.baseline_for_role(PersistentTokenUsageRole::Judge, "model-b");
+        let ignored = reloaded.baseline_for_role(PersistentTokenUsageRole::Efficient, "model-b");
         assert!(ignored.total_token_usage.is_zero());
         assert!(ignored.daily_token_usage.is_empty());
     }

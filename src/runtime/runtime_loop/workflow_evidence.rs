@@ -8,10 +8,7 @@ use crate::{
     skill_run_records::{SkillRunRecord, append_skill_run_records},
 };
 
-pub(crate) struct AgentLoopStepExecution {
-    pub(crate) output: AgentLoopStepOutput,
-    pub(crate) history_messages: Vec<HistoryMessage>,
-}
+pub(crate) struct AgentLoopStepExecution;
 
 pub(crate) struct AgentLoopStepOutput {
     pub(crate) observation: String,
@@ -119,10 +116,7 @@ fn skill_run_record_from_flush(flush: PendingSkillRunFlush, ended_at_ms: i64) ->
         origin: flush.session.origin,
         outcome: match flush.outcome {
             SkillRunOutcome::Completed => "completed",
-            SkillRunOutcome::Blocked => "blocked",
             SkillRunOutcome::Abandoned => "abandoned",
-            SkillRunOutcome::Superseded => "superseded",
-            SkillRunOutcome::NoProgress => "no_progress",
         }
         .to_string(),
         turn_count: flush.session.turn_count,

@@ -44,9 +44,7 @@ pub struct OpenSkill {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub enum OpenSkillScope {
-    Builtin,
     Project,
     DaatLocusHome,
     User,
@@ -263,16 +261,14 @@ impl OpenSkillsCatalog {
 impl OpenSkillScope {
     fn rank(self) -> u8 {
         match self {
-            Self::Builtin => 0,
-            Self::Project => 1,
-            Self::DaatLocusHome => 2,
-            Self::User => 3,
+            Self::Project => 0,
+            Self::DaatLocusHome => 1,
+            Self::User => 2,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::Builtin => "builtin",
             Self::Project => "project",
             Self::DaatLocusHome => "daat-locus",
             Self::User => "user",
@@ -301,7 +297,6 @@ pub fn load_openskills_for_runtime(execution_cwd: &Path) -> OpenSkillsCatalog {
     catalog
 }
 
-#[allow(clippy::collapsible_if)]
 fn ensure_builtin_skills_on_disk() {
     let target_dir = daat_locus_paths_sync().root().join(SKILLS_DIR_NAME);
     if let Err(err) = fs::create_dir_all(&target_dir) {
@@ -325,13 +320,11 @@ fn ensure_builtin_skills_on_disk() {
             Ok(existing) => existing != *content,
             Err(_) => true,
         };
-        if need_write {
-            if let Err(err) = fs::write(&skill_file, content) {
-                tracing::warn!(
-                    "failed to write builtin skill {}: {err}",
-                    skill_file.display()
-                );
-            }
+        if need_write && let Err(err) = fs::write(&skill_file, content) {
+            tracing::warn!(
+                "failed to write builtin skill {}: {err}",
+                skill_file.display()
+            );
         }
     }
 }

@@ -1,5 +1,4 @@
 //! Runtime turn-trace judge program used in offline evaluation.
-#![allow(dead_code)]
 
 use daat_locus_macros::model_schema;
 use schemars::JsonSchema;
@@ -61,29 +60,3 @@ impl Program for RuntimeTurnTraceJudgeProgram {
     }
 }
 
-impl RuntimeTurnTraceJudgeProgram {
-    #[allow(clippy::too_many_arguments)]
-    pub fn dataset_ir(
-        &self,
-        current_system_prompt: String,
-        previous_system_prompt: String,
-        demo_title: String,
-        scenario_summary: String,
-        expected_behavior: String,
-        judge_focus: String,
-        turn_trace: String,
-    ) -> PromptIR {
-        let mut ir = PromptIR::with_system(PROGRAM_RUNTIME_TURN_TRACE_JUDGE_SYSTEM);
-        for instruction in prompt_bullet_lines(PROGRAM_RUNTIME_TURN_TRACE_JUDGE_INSTRUCTIONS) {
-            ir.push_instruction(instruction);
-        }
-        ir.push_section("current system prompt", current_system_prompt);
-        ir.push_section("previous system prompt", previous_system_prompt);
-        ir.push_section("demo title", demo_title);
-        ir.push_section("scenario summary", scenario_summary);
-        ir.push_section("expected behavior", expected_behavior);
-        ir.push_section("judge focus", judge_focus);
-        ir.push_section("turn trace", turn_trace);
-        ir
-    }
-}

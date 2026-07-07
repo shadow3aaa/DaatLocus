@@ -1,16 +1,14 @@
 //! Reasoning trace recording and playback.
 //! Some trace functions serve offline evaluation pipelines.
-#![allow(dead_code)]
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::OnceLock;
-use tokio::fs;
 
 use crate::{
     daat_locus_paths::daat_locus_paths,
-    persistence::{PersistenceFileMode, append_bytes_durable, write_bytes_atomic},
+    persistence::append_bytes_durable,
 };
 
 use super::{runtime::PromptRequest, signature::Signature};
@@ -45,11 +43,6 @@ pub struct ProgramTraceRecord {
     pub deserialization_error: Option<String>,
 }
 
-pub struct RuntimeTraceBatch {
-    pub records: Vec<ProgramTraceRecord>,
-    pub unread_runtime_count: usize,
-    pub next_offset: u64,
-}
 
 pub struct ProgramTraceRecordParts {
     pub origin: TraceOrigin,
@@ -101,89 +94,7 @@ impl ProgramTraceRecord {
     }
 }
 
-pub async fn load_runtime_trace_batch() -> miette::Result<RuntimeTraceBatch> {
-    let trace_io_guard = trace_io_lock().lock().await;
-    let trace_path = daat_locus_paths().await.journal_file(TRACE_FILE_NAME);
-    let bytes = match fs::read(&trace_path).await {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            drop(trace_io_guard);
-            return Ok(RuntimeTraceBatch {
-                records: Vec::new(),
-                unread_runtime_count: 0,
-                next_offset: 0,
-            });
-        }
-        Err(err) => {
-            return Err(miette::miette!(
-                "failed to read reasoning trace file {}: {err}",
-                trace_path.display()
-            ));
-        }
-    };
-    let slice = &bytes[..];
-    let mut offset = 0u64;
-    let mut records = Vec::new();
-    let mut unread_runtime_count = 0usize;
 
-    for chunk in slice.split_inclusive(|byte| *byte == b'\n') {
-        offset += chunk.len() as u64;
-        let line = std::str::from_utf8(chunk)
-            .map(str::trim)
-            .unwrap_or_default();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(record) = serde_json::from_str::<ProgramTraceRecord>(line)
-            && record.origin == TraceOrigin::Runtime
-        {
-            unread_runtime_count += 1;
-            records.push(record);
-        }
-    }
-
-    let batch = RuntimeTraceBatch {
-        records,
-        unread_runtime_count,
-        next_offset: offset,
-    };
-    drop(trace_io_guard);
-    Ok(batch)
-}
-
-pub async fn unread_runtime_trace_count() -> miette::Result<usize> {
-    Ok(load_runtime_trace_batch().await?.unread_runtime_count)
-}
-
-pub async fn compact_runtime_trace_file(consumed_offset: u64) -> miette::Result<()> {
-    let trace_io_guard = trace_io_lock().lock().await;
-    let trace_path = daat_locus_paths().await.journal_file(TRACE_FILE_NAME);
-    let bytes = match fs::read(&trace_path).await {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            drop(trace_io_guard);
-            return Ok(());
-        }
-        Err(err) => {
-            return Err(miette::miette!(
-                "failed to read reasoning trace file {} for compaction: {err}",
-                trace_path.display()
-            ));
-        }
-    };
-    let keep_from = (consumed_offset as usize).min(bytes.len());
-    let remaining = bytes[keep_from..].to_vec();
-    write_bytes_atomic(trace_path.clone(), remaining, PersistenceFileMode::Default)
-        .await
-        .map_err(|err| {
-            miette::miette!(
-                "failed to rewrite reasoning trace file {} during compaction: {err}",
-                trace_path.display()
-            )
-        })?;
-    drop(trace_io_guard);
-    Ok(())
-}
 
 fn trace_io_lock() -> &'static tokio::sync::Mutex<()> {
     TRACE_IO_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))

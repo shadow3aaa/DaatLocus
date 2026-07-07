@@ -232,7 +232,7 @@ impl DaemonLifecycleHandle {
         self.set(DaemonLifecycleState::Stopping);
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn mark_failed_if_initializing(&self) {
         let _ = self.state.compare_exchange(
             DaemonLifecycleState::Initializing.as_u8(),
@@ -2607,7 +2607,7 @@ fn settings_summary_response(
         .judge
         .model
         .clone()
-        .unwrap_or_else(|| config.main_model.clone());
+        .unwrap_or_else(|| config.efficient_model.clone());
     let mut providers = config
         .providers
         .iter()

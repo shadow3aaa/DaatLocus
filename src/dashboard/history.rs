@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    daat_locus_paths::{DaatLocusPaths, daat_locus_paths},
+    daat_locus_paths::DaatLocusPaths,
     dashboard::SessionActivityEvent,
 };
 
@@ -92,11 +92,6 @@ pub struct DashboardInputHistory {
 }
 
 impl DashboardActivityHistoryStore {
-    #[allow(dead_code)]
-    pub async fn new() -> Result<Self> {
-        let paths = daat_locus_paths().await;
-        Self::open_at_path(paths.memory_file(DASHBOARD_ACTIVITY_HISTORY_DB_FILE))
-    }
 
     pub async fn with_session(session_id: &str) -> Result<Self> {
         let paths = DaatLocusPaths::for_session(session_id);

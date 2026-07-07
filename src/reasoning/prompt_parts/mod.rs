@@ -4,7 +4,7 @@ use crate::{
     preturn_state::PreTurnState,
 };
 
-use super::prompt_doc::{PromptBlock, PromptGroupDoc, PromptNode, PromptStateDoc};
+use super::prompt_doc::{PromptGroupDoc, PromptNode, PromptStateDoc};
 
 pub trait PreTurnContextPart: Send + Sync {
     fn key(&self) -> &'static str;
@@ -16,16 +16,7 @@ pub trait AfterClaimContextPart: Send + Sync {
     fn build(&self, ctx: &Context, input: &AfterClaimContextInput) -> Option<PromptNode>;
 }
 
-#[derive(Clone, Default)]
-pub struct AfterClaimContextInput {
-    pub events: Vec<EventView>,
-}
-
-impl AfterClaimContextInput {
-    pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
-    }
-}
+pub type AfterClaimContextInput = Vec<EventView>;
 
 pub struct PreTurnSensoryPart;
 pub struct PreTurnProjectInstructionsPart;
@@ -44,7 +35,7 @@ impl PreTurnContextPart for PreTurnSensoryPart {
         }
         Some(PromptNode::State(PromptStateDoc::new(
             self.key(),
-            vec![PromptBlock::Paragraph(text)],
+            vec![(text)],
         )))
     }
 }
@@ -71,7 +62,7 @@ impl PreTurnContextPart for PreTurnProjectInstructionsPart {
                     );
                     return Some(PromptNode::State(PromptStateDoc::new(
                         self.key(),
-                        vec![PromptBlock::Paragraph(format!(
+                        vec![(format!(
                             "project_instruction_error={err}"
                         ))],
                     )));
@@ -97,7 +88,7 @@ impl PreTurnContextPart for PreTurnProjectInstructionsPart {
         ));
         Some(PromptNode::State(PromptStateDoc::new(
             self.key(),
-            vec![PromptBlock::Paragraph(text)],
+            vec![(text)],
         )))
     }
 }
@@ -114,7 +105,7 @@ impl PreTurnContextPart for PreTurnPlanPart {
         }
         Some(PromptNode::State(PromptStateDoc::new(
             self.key(),
-            vec![PromptBlock::Paragraph(text)],
+            vec![(text)],
         )))
     }
 }
@@ -130,11 +121,11 @@ impl AfterClaimContextPart for AfterClaimInputPart {
         }
 
         let mut children = Vec::new();
-        if !input.events.is_empty() {
+        if !input.is_empty() {
             children.push(PromptNode::State(PromptStateDoc::new(
                 "events",
-                vec![PromptBlock::Paragraph(render_afterclaim_events(
-                    &input.events,
+                vec![(render_afterclaim_events(
+                    input,
                 ))],
             )));
         }
@@ -144,7 +135,7 @@ impl AfterClaimContextPart for AfterClaimInputPart {
         if !skill_injections.is_empty() {
             children.push(PromptNode::State(PromptStateDoc::new(
                 "explicit_skills",
-                vec![PromptBlock::Paragraph(render_explicit_skill_injections(
+                vec![(render_explicit_skill_injections(
                     &skill_injections,
                 ))],
             )));
@@ -156,7 +147,7 @@ impl AfterClaimContextPart for AfterClaimInputPart {
 
 fn claimed_work_query(input: &AfterClaimContextInput) -> String {
     let mut parts = Vec::new();
-    for event in &input.events {
+    for event in input {
         match &event.payload {
             EventPayload::TelegramIncoming(payload) => {
                 parts.push(payload.incoming_text.as_str());

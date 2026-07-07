@@ -1,4 +1,5 @@
 pub mod runtime_error_correction_planner;
+#[cfg(test)]
 pub mod runtime_turn_trace_judge;
 pub mod skill_improvement_planner;
 

@@ -1,4 +1,4 @@
-use super::prompt_doc::{PromptBlock, PromptDocument, PromptGroupDoc, PromptNode, PromptStateDoc};
+use super::prompt_doc::{PromptDocument, PromptGroupDoc, PromptNode, PromptStateDoc};
 
 pub struct LlmPromptRenderer;
 
@@ -47,29 +47,11 @@ fn render_state(state: &PromptStateDoc) -> String {
     format!("<{}>\n{}\n</{}>", state.key, body, state.key)
 }
 
-fn render_blocks(blocks: &[PromptBlock]) -> String {
+fn render_blocks(blocks: &[String]) -> String {
     blocks
         .iter()
-        .map(render_block)
         .filter(|block| !block.trim().is_empty())
+        .cloned()
         .collect::<Vec<_>>()
         .join("\n\n")
-}
-
-fn render_block(block: &PromptBlock) -> String {
-    match block {
-        PromptBlock::Paragraph(text) => text.clone(),
-        PromptBlock::BulletList(items) => items
-            .iter()
-            .filter(|item| !item.trim().is_empty())
-            .map(|item| format!("- {item}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        PromptBlock::KeyValueList(items) => items
-            .iter()
-            .filter(|(key, value)| !key.trim().is_empty() && !value.trim().is_empty())
-            .map(|(key, value)| format!("{key}: {value}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    }
 }

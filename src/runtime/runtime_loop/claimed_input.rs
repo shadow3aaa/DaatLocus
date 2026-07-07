@@ -386,7 +386,7 @@ pub(super) fn afterclaim_context_input_for_claimed_inputs(
     let mut context = AfterClaimContextInput::default();
     for input in inputs {
         let event = input;
-        context.events.push((**event).clone());
+        context.push((**event).clone());
     }
     context
 }

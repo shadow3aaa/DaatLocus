@@ -215,17 +215,17 @@ pub fn spawn_restricted(
     let cap_sid_ptr = LocalSid::from_string(&cap_sid)?;
     let token = create_restricted_token(&cap_sid_ptr)?;
     let mut acl_guards = Vec::new();
-    let process = match spawn_restricted_inner(
+    let process = match spawn_restricted_inner(RestrictedSpawnInput {
         policy,
-        &program,
+        program: &program,
         args,
         options,
-        cap_sid_ptr.as_ptr(),
-        token.logon_sid.as_ptr().cast::<c_void>().cast_mut(),
-        token.everyone_sid.as_ptr().cast::<c_void>().cast_mut(),
-        token.handle.raw(),
-        &mut acl_guards,
-    ) {
+        psid_capability: cap_sid_ptr.as_ptr(),
+        psid_logon: token.logon_sid.as_ptr().cast::<c_void>().cast_mut(),
+        psid_everyone: token.everyone_sid.as_ptr().cast::<c_void>().cast_mut(),
+        token: token.handle.raw(),
+        acl_guards: &mut acl_guards,
+    }) {
         Ok(process) => process,
         Err(err) => {
             restore_acl_guards(&acl_guards);
@@ -246,17 +246,17 @@ pub fn spawn_restricted_async(
     let cap_sid_ptr = LocalSid::from_string(&cap_sid)?;
     let token = create_restricted_token(&cap_sid_ptr)?;
     let mut acl_guards = Vec::new();
-    let process = match spawn_restricted_async_inner(
+    let process = match spawn_restricted_async_inner(RestrictedSpawnInput {
         policy,
-        &program,
+        program: &program,
         args,
         options,
-        cap_sid_ptr.as_ptr(),
-        token.logon_sid.as_ptr().cast::<c_void>().cast_mut(),
-        token.everyone_sid.as_ptr().cast::<c_void>().cast_mut(),
-        token.handle.raw(),
-        &mut acl_guards,
-    ) {
+        psid_capability: cap_sid_ptr.as_ptr(),
+        psid_logon: token.logon_sid.as_ptr().cast::<c_void>().cast_mut(),
+        psid_everyone: token.everyone_sid.as_ptr().cast::<c_void>().cast_mut(),
+        token: token.handle.raw(),
+        acl_guards: &mut acl_guards,
+    }) {
         Ok(process) => process,
         Err(err) => {
             restore_acl_guards(&acl_guards);
@@ -267,42 +267,45 @@ pub fn spawn_restricted_async(
     Ok(process)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn spawn_restricted_inner(
-    policy: &RuntimeSandboxPolicy,
-    program: &Path,
+struct RestrictedSpawnInput<'a> {
+    policy: &'a RuntimeSandboxPolicy,
+    program: &'a Path,
     args: Vec<String>,
     options: SandboxProcessOptions,
     psid_capability: PSID,
     psid_logon: PSID,
     psid_everyone: PSID,
     token: HANDLE,
-    acl_guards: &mut Vec<AclGuard>,
+    acl_guards: &'a mut Vec<AclGuard>,
+}
+
+fn spawn_restricted_inner(
+    input: RestrictedSpawnInput<'_>,
 ) -> io::Result<RestrictedWindowsChild> {
     apply_policy_acl_rules(
-        policy,
-        program,
-        psid_capability,
-        psid_logon,
-        psid_everyone,
-        acl_guards,
+        input.policy,
+        input.program,
+        input.psid_capability,
+        input.psid_logon,
+        input.psid_everyone,
+        input.acl_guards,
     )?;
-    let current_dir = options
+    let current_dir = input.options
         .current_dir
         .clone()
         .unwrap_or(std::env::current_dir()?);
-    let argv = command_argv(program, args);
+    let argv = command_argv(input.program, input.args);
     let mut command_line = to_wide(argv_to_command_line(&argv));
-    let program_wide = to_wide(program.as_os_str());
+    let program_wide = to_wide(input.program.as_os_str());
     let current_dir_wide = to_wide(current_dir.as_os_str());
-    let env_block = environment_block(policy);
-    let stdio = StartupHandles::new(options)?;
+    let env_block = environment_block(input.policy);
+    let stdio = StartupHandles::new(input.options)?;
     let startup_info = startup_info(&stdio);
     let mut process_info = PROCESS_INFORMATION::default();
 
     let created = unsafe {
         CreateProcessAsUserW(
-            token,
+            input.token,
             program_wide.as_ptr(),
             command_line.as_mut_ptr(),
             ptr::null(),
@@ -337,47 +340,38 @@ fn spawn_restricted_inner(
         job,
         process_id: unsafe { GetProcessId(process_info.hProcess) },
         exit_status: None,
-        acl_guards: std::mem::take(acl_guards),
+        acl_guards: std::mem::take(input.acl_guards),
         acl_cleaned: false,
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_restricted_async_inner(
-    policy: &RuntimeSandboxPolicy,
-    program: &Path,
-    args: Vec<String>,
-    options: SandboxProcessOptions,
-    psid_capability: PSID,
-    psid_logon: PSID,
-    psid_everyone: PSID,
-    token: HANDLE,
-    acl_guards: &mut Vec<AclGuard>,
+    input: RestrictedSpawnInput<'_>,
 ) -> io::Result<WindowsSandboxAsyncChild> {
     apply_policy_acl_rules(
-        policy,
-        program,
-        psid_capability,
-        psid_logon,
-        psid_everyone,
-        acl_guards,
+        input.policy,
+        input.program,
+        input.psid_capability,
+        input.psid_logon,
+        input.psid_everyone,
+        input.acl_guards,
     )?;
-    let current_dir = options
+    let current_dir = input.options
         .current_dir
         .clone()
         .unwrap_or(std::env::current_dir()?);
-    let argv = command_argv(program, args);
+    let argv = command_argv(input.program, input.args);
     let mut command_line = to_wide(argv_to_command_line(&argv));
-    let program_wide = to_wide(program.as_os_str());
+    let program_wide = to_wide(input.program.as_os_str());
     let current_dir_wide = to_wide(current_dir.as_os_str());
-    let env_block = environment_block(policy);
-    let (stdio, parent_pipes) = StartupHandles::new_with_parent_pipes(options)?;
+    let env_block = environment_block(input.policy);
+    let (stdio, parent_pipes) = StartupHandles::new_with_parent_pipes(input.options)?;
     let startup_info = startup_info(&stdio);
     let mut process_info = PROCESS_INFORMATION::default();
 
     let created = unsafe {
         CreateProcessAsUserW(
-            token,
+            input.token,
             program_wide.as_ptr(),
             command_line.as_mut_ptr(),
             ptr::null(),
@@ -412,7 +406,7 @@ fn spawn_restricted_async_inner(
         job,
         process_id: unsafe { GetProcessId(process_info.hProcess) },
         exit_status: None,
-        acl_guards: std::mem::take(acl_guards),
+        acl_guards: std::mem::take(input.acl_guards),
         acl_cleaned: false,
     };
     let (stdin, stdout, stderr) = parent_pipes.into_async_files()?;

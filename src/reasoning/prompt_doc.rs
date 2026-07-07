@@ -21,14 +21,7 @@ pub struct PromptGroupDoc {
     pub children: Vec<PromptNode>,
 }
 
-#[derive(Clone, Debug)]
-pub enum PromptBlock {
-    Paragraph(String),
-    #[allow(dead_code)]
-    BulletList(Vec<String>),
-    #[allow(dead_code)]
-    KeyValueList(Vec<(String, String)>),
-}
+pub type PromptBlock = String;
 
 impl PromptDocument {
     pub fn new(nodes: Vec<PromptNode>) -> Self {

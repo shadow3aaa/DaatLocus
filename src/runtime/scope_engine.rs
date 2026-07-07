@@ -12,9 +12,7 @@ use miette::{Result, miette};
 use scope_engine::analyzer::Analyzer;
 use scope_engine::api;
 use scope_engine::engine;
-use scope_engine::language::LanguageRegistry;
 use scope_engine::state::PropagationState;
-use scope_engine::treesitter::TreeSitterAnalyzer;
 
 pub struct ScopeEditCodeResult {
     pub propagation_results: Vec<api::PropagationResult>,
@@ -26,30 +24,25 @@ pub struct ScopeEditCodeResult {
 /// Wraps the scope-engine library to provide:
 /// - Path plus line-hash code search and reading
 /// - Hash-anchored code editing and deletion
-/// - Propagation review events
-/// - Tree-sitter symbol lookup
+    /// - Propagation review events
 /// - Config hints for language servers
 pub struct ScopeEngineHandle {
     project_root: Option<PathBuf>,
     propagation_state: Mutex<PropagationState>,
     lsp_analyzer: Mutex<Option<Box<dyn Analyzer + Send>>>,
-    tree_sitter: TreeSitterAnalyzer,
 }
 
 impl ScopeEngineHandle {
     /// Create a new scope engine handle (no project opened yet).
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             project_root: None,
             propagation_state: Mutex::new(PropagationState::new()),
             lsp_analyzer: Mutex::new(None),
-            tree_sitter: TreeSitterAnalyzer::new(),
         }
     }
 
     /// Open a project, setting the root directory for subsequent operations.
-    #[allow(dead_code)]
     pub fn open_project(
         &mut self,
         project_root: impl Into<PathBuf>,
@@ -74,7 +67,7 @@ impl ScopeEngineHandle {
     }
 
     /// The project root path, if a project has been opened.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn project_root(&self) -> Option<&Path> {
         self.project_root.as_deref()
     }
@@ -86,7 +79,7 @@ impl ScopeEngineHandle {
     }
 
     /// Accumulate propagation results and get the next review event, if any.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn next_review_event(
         &self,
         results: Vec<api::PropagationResult>,
@@ -99,16 +92,8 @@ impl ScopeEngineHandle {
         state.next_review()
     }
 
-    /// Find the containing symbol for a given file and line number using tree-sitter.
-    #[allow(dead_code)]
-    pub fn find_containing_symbol(&self, file_path: &Path, line_number: usize) -> Option<String> {
-        let root = self.project_root.as_deref()?;
-        self.tree_sitter
-            .find_containing_symbol(file_path, line_number, root)
-    }
 
     /// Read code using a path plus line-hash anchor.
-    #[allow(dead_code)]
     pub fn read_code(&self, input: api::ReadCodeInput) -> Result<api::ReadCodeOutput> {
         let root = self.require_project_root()?;
         engine::read_code(root, &input)
@@ -116,7 +101,6 @@ impl ScopeEngineHandle {
     }
 
     /// Search code and return matched line-hash hits.
-    #[allow(dead_code)]
     pub fn search_code(&self, input: api::SearchCodeInput) -> Result<api::SearchCodeOutput> {
         let root = self.require_project_root()?;
         engine::search_code(root, &input)
@@ -124,7 +108,6 @@ impl ScopeEngineHandle {
     }
 
     /// Apply structured edits via scope-engine.
-    #[allow(dead_code)]
     pub fn edit_code(&self, edits: &[api::StructuredEdit]) -> Result<ScopeEditCodeResult> {
         let root = self.require_project_root()?;
         let output = engine::edit_code(
@@ -143,7 +126,6 @@ impl ScopeEngineHandle {
     }
 
     /// Return whether SCOPE owns semantic source operations for a path.
-    #[allow(dead_code)]
     pub fn is_responsible_source(&self, path: &Path) -> Result<api::SourceResponsibility> {
         let root = self.require_project_root()?;
         engine::is_responsible_source(
@@ -156,7 +138,6 @@ impl ScopeEngineHandle {
     }
 
     /// Count accumulated propagation review events.
-    #[allow(dead_code)]
     pub fn pending_review_count(&self) -> usize {
         let state = self
             .propagation_state
@@ -166,28 +147,26 @@ impl ScopeEngineHandle {
     }
 
     /// Acknowledge and return accumulated propagation review events.
-    #[allow(dead_code)]
     pub fn ack_next_events(&self, limit: Option<usize>) -> api::ReviewBatch {
         engine::ack_next_events(&self.propagation_state, limit)
             .unwrap_or_else(|err| panic!("scope-engine ack_next_events failed: {err}"))
     }
 
     /// Get the next accumulated propagation review event, if any.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn ack_next_event(&self) -> Option<api::ReviewEvent> {
         self.ack_next_events(None).review
     }
 
     /// Get config hints for language servers and tree-sitter languages.
-    #[allow(dead_code)]
     pub fn get_config_hints() -> serde_json::Value {
         engine::config_hints()
     }
 
+    #[cfg(test)]
     /// Get the list of supported tree-sitter languages.
-    #[allow(dead_code)]
     pub fn supported_languages() -> Vec<(String, Vec<String>)> {
-        let registry = LanguageRegistry::new();
+        let registry = scope_engine::language::LanguageRegistry::new();
         registry
             .list_languages()
             .into_iter()

@@ -56,7 +56,7 @@ impl RuntimeTurnPhase {
 pub struct Context {
     pub session_id: Option<String>,
     pub llm: Box<dyn Llm + Send + Sync>,
-    pub judge_llm: Box<dyn Llm + Send + Sync>,
+    pub efficient_llm: Box<dyn Llm + Send + Sync>,
     pub config: Config,
     pub memory: Memory,
     pub plan: Plan,
@@ -121,13 +121,9 @@ pub struct ActiveSkillRunSession {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum SkillRunOutcome {
     Completed,
-    Blocked,
     Abandoned,
-    Superseded,
-    NoProgress,
 }
 
 #[derive(Debug, Clone)]

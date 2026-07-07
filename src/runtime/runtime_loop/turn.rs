@@ -1,5 +1,6 @@
 use super::model_driver::{is_permanent_model_request_error, run_agent_turn_with_retry};
 use super::*;
+use crate::memory::PlanCompactionInput;
 use crate::reasoning::prompt_parts::compact_horizontal_whitespace;
 use std::path::{Path, PathBuf};
 use tracing::warn;
@@ -65,10 +66,7 @@ async fn abort_runtime_turn_before_model(
     finalize_claimed_runtime_events(context, claimed_event_ids, &output);
     context.claimed_event_ids.clear();
     context.current_work_origin = None;
-    AgentLoopStepExecution {
-        output,
-        history_messages: Vec::new(),
-    }
+    AgentLoopStepExecution
 }
 
 fn maybe_build_afterclaim_context_message(
@@ -109,9 +107,7 @@ fn preview_afterclaim_context_message(
 }
 
 fn afterclaim_agent_content(text: String, input: &AfterClaimContextInput) -> AgentContent {
-    let parts = input
-        .events
-        .iter()
+    let parts = input.iter()
         .flat_map(|event| match &event.payload {
             EventPayload::TelegramIncoming(payload) => payload
                 .attachments
@@ -379,13 +375,15 @@ pub(crate) async fn execute_agent_loop_step(
     if let Some(plan) = context
         .memory
         .plan_runtime_conversation_compaction_for_request(
-            &request_envelope,
-            &initial_injected_context_messages,
-            &initial_tools,
-            request_budget_limits,
-            &context.token_estimate_baseline,
-            RUNTIME_HISTORY_MIN_MESSAGES,
-            runtime_conversation_summary_budget,
+            PlanCompactionInput {
+                envelope: &request_envelope,
+                injected_messages: &initial_injected_context_messages,
+                tools: &initial_tools,
+                limits: request_budget_limits,
+                baseline: &context.token_estimate_baseline,
+                min_messages: RUNTIME_HISTORY_MIN_MESSAGES,
+                summary_max_tokens: runtime_conversation_summary_budget,
+            },
         )
     {
         enter_runtime_phase(context, tx, RuntimeTurnPhase::PreflightCompaction);
@@ -1124,16 +1122,13 @@ pub(crate) async fn execute_agent_loop_step(
         context.token_estimate_baseline = TokenEstimateBaseline::default();
     }
     context.claimed_event_ids.clear();
-    let history_messages = runtime_step.history_messages().to_vec();
+    let _history_messages = runtime_step.history_messages().to_vec();
     if !runtime_step.is_history_empty() {
         record_runtime_history_messages(context, runtime_step.into_turn_draft()).await;
     }
     record_skill_run_evidence(context, &output).await;
     context.current_work_origin = None;
-    AgentLoopStepExecution {
-        output,
-        history_messages,
-    }
+    AgentLoopStepExecution
 }
 
 struct RuntimeErrorRecordInput<'a> {
@@ -1550,8 +1545,7 @@ mod tests {
 
     #[test]
     fn afterclaim_agent_content_carries_telegram_image_parts() {
-        let input = AfterClaimContextInput {
-            events: vec![crate::events::EventView {
+        let input: AfterClaimContextInput = vec![crate::events::EventView {
                 event_id: uuid::Uuid::nil(),
                 source: crate::events::EventSource::Telegram,
                 status: crate::events::EventStatus::Claimed,
@@ -1578,9 +1572,7 @@ mod tests {
                     },
                 ),
                 last_error: None,
-            }],
-            app_notices: Vec::new(),
-        };
+            }];
 
         let content = afterclaim_agent_content("claimed input".to_string(), &input);
 

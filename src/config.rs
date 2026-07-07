@@ -289,14 +289,6 @@ impl Config {
             .unwrap_or_else(|| panic!("main_model '{}' not found in models", self.main_model))
     }
 
-    /// Return the judge model config, falling back through efficient model then to main model.
-    pub fn judge_model_config(&self) -> &ModelConfig {
-        let key = self.judge.model.as_deref().unwrap_or(&self.efficient_model);
-        self.models
-            .get(key)
-            .unwrap_or_else(|| panic!("judge model '{}' not found in models", key))
-    }
-
     /// Return the efficient model config. Missing keys panic because startup validation should catch them.
     pub fn efficient_model_config(&self) -> &ModelConfig {
         self.models.get(&self.efficient_model).unwrap_or_else(|| {

@@ -1,6 +1,5 @@
 //! Evaluation artifact types used across offline evaluation and training runs.
 //! Many items here exist for evaluation pipelines not linked into the main binary.
-#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 
@@ -9,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::reasoning::{examples::ExampleField, runtime_error::RuntimeErrorCase};
+use crate::reasoning::runtime_error::RuntimeErrorCase;
 use crate::{
     daat_locus_paths::daat_locus_paths,
     persistence::{PersistenceFileMode, write_bytes_atomic},
@@ -31,54 +30,7 @@ const LEGACY_RUNTIME_ERROR_CORRECTION_DIRS: &[&str] = &[
     "turn_demos",
 ];
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactTurnDemo {
-    pub compile_key: String,
-    pub title: String,
-    pub scenario_summary: String,
-    #[serde(default)]
-    pub initial_inputs: Vec<ExampleField>,
-    pub expected_behavior: String,
-    #[serde(default)]
-    pub judge_focus: Vec<String>,
-    #[serde(default)]
-    pub covered_tests: Vec<String>,
-    pub must_use_tools: bool,
-    #[serde(default)]
-    pub must_not_final_answer_patterns: Vec<String>,
-    pub must_end_with_terminal_answer: bool,
-}
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct EvaluationArtifactTurnDemoEvaluation {
-    pub compile_key: String,
-    pub demo_title: String,
-    pub passed: bool,
-    pub regression_detected: bool,
-    pub confidence: f64,
-    #[serde(default)]
-    pub needed_changes: Vec<String>,
-    pub reason: String,
-    pub trace_summary: String,
-    #[serde(default)]
-    pub incoming_text: String,
-    #[serde(default)]
-    pub expected_behavior: String,
-    #[serde(default)]
-    pub judge_focus: Vec<String>,
-    #[serde(default)]
-    pub must_use_tools: bool,
-    #[serde(default)]
-    pub must_not_final_answer_patterns: Vec<String>,
-    #[serde(default)]
-    pub trace_rendered: String,
-    #[serde(default)]
-    pub final_assistant_message: String,
-    #[serde(default)]
-    pub final_reply_message: String,
-    #[serde(default)]
-    pub actions_rendered: String,
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvaluationArtifactRuntimePromptCandidate {

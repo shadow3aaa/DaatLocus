@@ -104,11 +104,11 @@ pub fn token_usage_snapshot_for_dashboard(context: &Context) -> DashboardTokenUs
             .llm
             .model_name()
             .or_else(|| Some(context.config.main_model_config().model_id.clone())),
-        judge: visible_token_usage(context.judge_llm.token_usage_info()),
+        judge: visible_token_usage(context.efficient_llm.token_usage_info()),
         judge_model: context
-            .judge_llm
+            .efficient_llm
             .model_name()
-            .or_else(|| Some(context.config.judge_model_config().model_id.clone())),
+            .or_else(|| Some(context.config.efficient_model_config().model_id.clone())),
         efficient_model: Some(context.config.efficient_model_config().model_id.clone()),
     }
 }
@@ -598,7 +598,7 @@ fn render_status_usage_lines(context: &Context) -> Vec<String> {
     }
 
     let mut lines = Vec::new();
-    for (label, llm) in [("main", &context.llm), ("judge", &context.judge_llm)] {
+    for (label, llm) in [("main", &context.llm), ("efficient", &context.efficient_llm)] {
         let Some(info) = llm.token_usage_info() else {
             continue;
         };

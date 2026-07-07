@@ -43,13 +43,7 @@ pub struct SkillRunRecord {
     pub final_summary: String,
 }
 
-pub struct SkillRunBatch {
-    pub records: Vec<SkillRunRecord>,
-    #[allow(dead_code)]
-    pub unread_record_count: usize,
-    #[allow(dead_code)]
-    pub next_offset: u64,
-}
+pub type SkillRunBatch = Vec<SkillRunRecord>;
 
 pub async fn append_skill_run_records(records: &[SkillRunRecord]) -> Result<usize> {
     if records.is_empty() {
@@ -107,16 +101,11 @@ pub async fn append_skill_run_records(records: &[SkillRunRecord]) -> Result<usiz
 pub async fn load_skill_run_batch(max_records: usize, offset: u64) -> Result<SkillRunBatch> {
     let path = skill_run_records_file_path().await;
     let Ok(file) = OpenOptions::new().read(true).open(&path).await else {
-        return Ok(SkillRunBatch {
-            records: Vec::new(),
-            unread_record_count: 0,
-            next_offset: offset,
-        });
+        return Ok(Vec::new());
     };
     let mut lines = BufReader::new(file).lines();
     let mut line_index = 0u64;
     let mut records = Vec::new();
-    let mut unread_record_count = 0usize;
     while let Ok(Some(line)) = lines.next_line().await {
         let trimmed = line.trim().to_string();
         if trimmed.is_empty() {
@@ -126,20 +115,13 @@ pub async fn load_skill_run_batch(max_records: usize, offset: u64) -> Result<Ski
             line_index += 1;
             continue;
         }
-        if let Ok(record) = serde_json::from_str::<SkillRunRecord>(&trimmed) {
-            if records.len() < max_records {
-                records.push(record);
-            } else {
-                unread_record_count += 1;
-            }
+        if let Ok(record) = serde_json::from_str::<SkillRunRecord>(&trimmed)
+            && records.len() < max_records
+        {
+            records.push(record);
         }
-        line_index += 1;
     }
-    Ok(SkillRunBatch {
-        records,
-        unread_record_count,
-        next_offset: line_index,
-    })
+    Ok(records)
 }
 
 pub async fn skill_run_record_count() -> Result<usize> {

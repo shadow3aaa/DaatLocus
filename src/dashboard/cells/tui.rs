@@ -2288,15 +2288,15 @@ fn render_patch_cell_lines(cell: &PatchActivityData, max_width: u16) -> Vec<Line
 }
 
 fn render_telegram_cell_lines(cell: &TelegramActivityData, max_width: u16) -> Vec<Line<'static>> {
-    render_message_activity_lines(
-        &cell.title,
-        &cell.detail_lines,
-        &cell.message_lines,
-        6,
-        6,
-        false,
+    render_message_activity_lines(MessageActivityInput {
+        title: &cell.title,
+        detail_lines: &cell.detail_lines,
+        message_lines: &cell.message_lines,
+        detail_limit: 6,
+        message_limit: 6,
+        markdown: false,
         max_width,
-    )
+    })
 }
 
 fn render_reply_cell_lines(cell: &ReplyActivityData, max_width: u16) -> Vec<Line<'static>> {
@@ -2429,21 +2429,24 @@ fn plan_header_line(kind: PlanActivityKind) -> Line<'static> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_message_activity_lines(
-    title: &str,
-    detail_lines: &[String],
-    message_lines: &[String],
+struct MessageActivityInput<'a> {
+    title: &'a str,
+    detail_lines: &'a [String],
+    message_lines: &'a [String],
     detail_limit: usize,
     message_limit: usize,
     markdown: bool,
     max_width: u16,
+}
+
+fn render_message_activity_lines(
+    input: MessageActivityInput<'_>,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![activity_header(title.to_string())];
+    let mut lines = vec![activity_header(input.title.to_string())];
     lines.extend(prefixed_body_lines(
-        detail_lines
+        input.detail_lines
             .iter()
-            .take(detail_limit)
+            .take(input.detail_limit)
             .map(|line| {
                 Line::from(Span::styled(
                     line.to_string(),
@@ -2451,24 +2454,24 @@ fn render_message_activity_lines(
                 ))
             })
             .collect(),
-        max_width,
+        input.max_width,
     ));
 
-    if markdown && !message_lines.is_empty() {
-        let joined = message_lines
+    if input.markdown && !input.message_lines.is_empty() {
+        let joined = input.message_lines
             .iter()
-            .take(message_limit)
+            .take(input.message_limit)
             .cloned()
             .collect::<Vec<_>>()
             .join("\n");
         let md_lines =
-            render_markdown_with_width(&joined, Color::White, detail_markdown_width(max_width));
-        lines.extend(prefixed_detail_lines(md_lines, max_width));
+            render_markdown_with_width(&joined, Color::White, detail_markdown_width(input.max_width));
+        lines.extend(prefixed_detail_lines(md_lines, input.max_width));
     } else {
         lines.extend(prefixed_detail_lines(
-            message_lines
+            input.message_lines
                 .iter()
-                .take(message_limit)
+                .take(input.message_limit)
                 .map(|line| {
                     Line::from(Span::styled(
                         line.to_string(),
@@ -2476,7 +2479,7 @@ fn render_message_activity_lines(
                     ))
                 })
                 .collect(),
-            max_width,
+            input.max_width,
         ));
     }
     lines

@@ -54,29 +54,19 @@ struct BrowserRuntimeInstallMetadata {
 }
 
 fn browser_runtime_platform() -> Result<&'static str> {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        return Ok("mac-arm64");
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Ok("mac-arm64")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Ok("mac-x64")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Ok("linux64")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Ok("win64")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86")) {
+        Ok("win32")
+    } else {
+        Err(miette!("unsupported browser runtime platform"))
     }
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    {
-        return Ok("mac-x64");
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    {
-        return Ok("linux64");
-    }
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    {
-        return Ok("win64");
-    }
-    #[cfg(all(target_os = "windows", target_arch = "x86"))]
-    {
-        return Ok("win32");
-    }
-
-    #[allow(unreachable_code)]
-    Err(miette!("unsupported browser runtime platform"))
 }
 
 /// Download and install the browser runtime when it is missing. Called automatically during daemon startup.

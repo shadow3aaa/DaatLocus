@@ -48,19 +48,12 @@ struct HistoryCompactionOutput {
     summary: String,
 }
 
-#[derive(Clone)]
-struct HistoryCompactionSourceItem {
-    messages: Vec<HistoryMessage>,
-}
+type HistoryCompactionSourceItem = Vec<HistoryMessage>;
 
 struct TrimmedHistoryCompactionInput {
     messages: Vec<HistoryMessage>,
     source_item_count: usize,
     trimmed_item_count: usize,
-}
-
-struct RuntimeCompactionExecution {
-    outcome: RuntimeCompactionOutcome,
 }
 
 #[derive(Serialize)]
@@ -134,7 +127,7 @@ pub async fn execute_pre_turn_runtime_compaction(
         },
     )
     .await
-    .map(|execution| execution.outcome)
+
 }
 
 pub async fn maybe_compact_runtime_messages(
@@ -171,7 +164,7 @@ fn runtime_step_compaction_policy() -> RuntimeStepCompactionPolicy {
 }
 
 fn judge_request_budget_limits(context: &Context) -> RequestBudgetLimits {
-    let model = context.config.judge_model_config();
+    let model = context.config.efficient_model_config();
     RequestBudgetLimits {
         context_window_tokens: model.effective_context_window_tokens(),
         auto_compact_threshold_tokens: model.auto_compact_token_limit(),
@@ -209,13 +202,13 @@ fn build_history_compaction_source_items(
 
     for message in messages {
         if message.is_user() && !current.is_empty() {
-            items.push(HistoryCompactionSourceItem { messages: current });
+            items.push(current);
             current = Vec::new();
         }
         current.push(message.clone());
     }
     if !current.is_empty() {
-        items.push(HistoryCompactionSourceItem { messages: current });
+        items.push(current);
     }
 
     items
@@ -226,7 +219,7 @@ fn flatten_history_compaction_source_items(
 ) -> Vec<HistoryMessage> {
     items
         .iter()
-        .flat_map(|item| item.messages.clone())
+        .flat_map(|item| item.clone())
         .collect()
 }
 
@@ -238,7 +231,6 @@ fn collapse_history_compaction_source_item(
         return None;
     }
     let rendered = item
-        .messages
         .iter()
         .map(|message| {
             format!(
@@ -324,7 +316,7 @@ struct RuntimeCompactionRequest<'a> {
 async fn execute_runtime_compaction(
     context: &Context,
     request: RuntimeCompactionRequest<'_>,
-) -> Option<RuntimeCompactionExecution> {
+) -> Option<RuntimeCompactionOutcome> {
     let RuntimeCompactionRequest {
         source_messages,
         retained_user_message_count,
@@ -358,7 +350,7 @@ async fn execute_runtime_compaction(
             );
         }
         let request = build_history_compaction_request(trimmed.messages.clone())?;
-        match context.judge_llm.run_json(context, request).await {
+        match context.efficient_llm.run_json(context, request).await {
             Ok(value) => match serde_json::from_value::<HistoryCompactionOutput>(value) {
                 Ok(output) if !output.summary.trim().is_empty() => truncate_text_to_token_budget(
                     &format!(
@@ -427,9 +419,7 @@ async fn execute_runtime_compaction(
         error: error_message,
     })
     .await;
-    Some(RuntimeCompactionExecution {
-        outcome: RuntimeCompactionOutcome { summary, record },
-    })
+    Some(RuntimeCompactionOutcome { summary, record })
 }
 
 fn summarize_compacted_agent_message(message: &AgentMessage) -> Option<String> {
@@ -625,7 +615,7 @@ async fn build_mid_turn_compaction_outcome(
         },
     )
     .await
-    .map(|execution| execution.outcome)
+
 }
 
 async fn append_runtime_compaction_event(event: RuntimeCompactionTelemetryEvent) {

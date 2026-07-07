@@ -91,6 +91,17 @@ pub struct RuntimeCompactionRecord {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct PlanCompactionInput<'a> {
+    pub envelope: &'a RuntimeRequestEnvelope,
+    pub injected_messages: &'a [HistoryMessage],
+    pub tools: &'a [AgentToolSpec],
+    pub limits: RequestBudgetLimits,
+    pub baseline: &'a TokenEstimateBaseline,
+    pub min_messages: usize,
+    pub summary_max_tokens: usize,
+}
+
+#[derive(Clone, Copy)]
 pub struct RuntimeStepCompactionPolicy {
     pub summary_max_tokens: usize,
     pub max_recoveries: usize,
@@ -156,26 +167,11 @@ impl Memory {
             .await;
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn plan_runtime_conversation_compaction_for_request(
         &self,
-        envelope: &RuntimeRequestEnvelope,
-        injected_messages: &[HistoryMessage],
-        tools: &[AgentToolSpec],
-        limits: RequestBudgetLimits,
-        baseline: &TokenEstimateBaseline,
-        min_messages: usize,
-        summary_max_tokens: usize,
+        input: PlanCompactionInput<'_>,
     ) -> Option<RuntimeConversationCompactionPlan> {
-        self.runtime_conversation.plan_compaction_for_request(
-            envelope,
-            injected_messages,
-            tools,
-            limits,
-            baseline,
-            min_messages,
-            summary_max_tokens,
-        )
+        self.runtime_conversation.plan_compaction_for_request(input)
     }
 
     pub async fn apply_runtime_conversation_compaction(
@@ -722,27 +718,21 @@ impl RuntimeConversation {
         check.within_context_window()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn plan_compaction_for_request(
         &self,
-        envelope: &RuntimeRequestEnvelope,
-        injected_messages: &[HistoryMessage],
-        tools: &[AgentToolSpec],
-        limits: RequestBudgetLimits,
-        baseline: &TokenEstimateBaseline,
-        _min_messages: usize,
-        summary_max_tokens: usize,
+        input: PlanCompactionInput<'_>,
     ) -> Option<RuntimeConversationCompactionPlan> {
+        let _ = input.min_messages;
         let all_messages = self.messages();
         let mut request_messages = all_messages.clone();
-        request_messages.extend(injected_messages.iter().cloned());
-        let agent_messages = envelope.agent_messages_with_history(&request_messages);
-        let breakdown = estimate_agent_turn_request(&agent_messages, tools, limits)
-            .with_calibrated_input_tokens(baseline);
+        request_messages.extend(input.injected_messages.iter().cloned());
+        let agent_messages = input.envelope.agent_messages_with_history(&request_messages);
+        let breakdown = estimate_agent_turn_request(&agent_messages, input.tools, input.limits)
+            .with_calibrated_input_tokens(input.baseline);
         if !breakdown.above_auto_compact_threshold() {
             return None;
         }
-        let summary_max_tokens = summary_max_tokens
+        let summary_max_tokens = input.summary_max_tokens
             .min(breakdown.input_budget_tokens())
             .min(breakdown.auto_compact_input_threshold_tokens());
         Self::compaction_plan_from_messages(all_messages, summary_max_tokens)
@@ -1147,15 +1137,15 @@ mod tests {
         assert!(history_messages_total_token_cost(&history_only_messages) <= history_only_budget);
         assert!(
             conversation
-                .plan_compaction_for_request(
-                    &envelope,
-                    &injected_messages,
-                    &tools,
+                .plan_compaction_for_request(PlanCompactionInput {
+                    envelope: &envelope,
+                    injected_messages: &injected_messages,
+                    tools: &tools,
                     limits,
-                    &TokenEstimateBaseline::default(),
-                    0,
-                    80,
-                )
+                    baseline: &TokenEstimateBaseline::default(),
+                    min_messages: 0,
+                    summary_max_tokens: 80,
+                })
                 .is_some()
         );
     }

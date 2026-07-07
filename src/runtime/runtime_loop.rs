@@ -1,4 +1,4 @@
-#[cfg_attr(not(test), allow(unused_imports))]
+#[cfg(test)]
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -163,7 +163,7 @@ mod tests {
             let context = Context {
                 session_id: None,
                 llm: Box::new(UnusedLlm),
-                judge_llm: Box::new(UnusedLlm),
+                efficient_llm: Box::new(UnusedLlm),
                 config: Config::default(),
                 memory: Memory::new().await,
                 plan: Plan::new().await,

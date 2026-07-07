@@ -151,7 +151,7 @@ impl SleepPlannerRuntime for LlmSleepPlannerRuntime {
         let runtime_error_cases_json =
             serde_json::to_string_pretty(runtime_error_cases).into_diagnostic()?;
         let outcome = execute_program_with_ir_report(
-            context.judge_llm.as_ref(),
+            context.efficient_llm.as_ref(),
             context,
             &renderer,
             &program,
@@ -176,7 +176,7 @@ async fn run_skill_improvement_pipeline(
     context: &mut Context,
     batch: &SkillRunBatch,
 ) -> Result<WorkflowImprovementSummary> {
-    if batch.records.is_empty() {
+    if batch.is_empty() {
         tracing::info!("[sleep] no skill run records, skipping skill improvement pipeline");
         return Ok(WorkflowImprovementSummary {
             evidence_run_records: 0,
@@ -187,7 +187,7 @@ async fn run_skill_improvement_pipeline(
     // Group records by skill name
     let mut by_skill: std::collections::HashMap<String, Vec<&SkillRunRecord>> =
         std::collections::HashMap::new();
-    for record in &batch.records {
+    for record in batch {
         by_skill
             .entry(record.skill_name.clone())
             .or_default()
@@ -216,7 +216,7 @@ async fn run_skill_improvement_pipeline(
         let evidence_json = serde_json::to_string_pretty(records).into_diagnostic()?;
         let ir = program.dataset_ir(skill_name.clone(), skill_content.clone(), evidence_json);
         let outcome = match execute_program_with_ir_report(
-            context.judge_llm.as_ref(),
+            context.efficient_llm.as_ref(),
             context,
             &renderer,
             &program,
@@ -270,7 +270,7 @@ async fn run_skill_improvement_pipeline(
     }
 
     Ok(WorkflowImprovementSummary {
-        evidence_run_records: batch.records.len(),
+        evidence_run_records: batch.len(),
         patch_applied: total_patches_applied,
     })
 }

@@ -49,7 +49,9 @@ mod terminal_logo;
 mod workflow;
 mod workspace_app;
 
+#[cfg(test)]
 pub(crate) use runtime::bootstrap::{DaatLocusHomeOverride, build_eval_context_with_compiled};
+#[cfg(test)]
 pub(crate) use runtime::runtime_loop::execute_agent_loop_step;
 
 fn main() {

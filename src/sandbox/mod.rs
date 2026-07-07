@@ -16,7 +16,6 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
-#[cfg_attr(test, allow(dead_code))]
 mod windows;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
