@@ -39,6 +39,7 @@ pub struct Event {
 }
 
 impl Event {
+#[cfg(test)]
     pub fn source_label(&self) -> &str {
         match &self.payload {
             EventPayload::TelegramIncoming(_) => "telegram",

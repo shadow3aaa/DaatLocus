@@ -857,7 +857,6 @@ mod tests {
                 session_id: None,
                 llm: Box::new(UnusedLlm),
                 judge_llm: Box::new(UnusedLlm),
-                efficient_llm: Box::new(UnusedLlm),
                 config,
                 memory: Memory::new().await,
                 plan: Plan::new().await,

@@ -1,28 +1,13 @@
-use std::time::Duration;
-
 use chrono::Utc;
-use miette::{Result, miette};
-use serde::Deserialize;
-use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::{
     context::Context,
     dashboard::{DashboardSessionTitle, DashboardState},
     events::{EventPayload, EventView},
-    reasoning::{
-        prompts::{
-            SESSION_TITLE_SYSTEM_REQUIREMENTS, SESSION_TITLE_SYSTEM_ROLE,
-            SESSION_TITLE_TOOL_DESCRIPTION, SESSION_TITLE_USER_MESSAGE_PREFIX,
-        },
-        runtime::{HistoryMessage, PromptRequest},
-    },
+    reasoning::runtime::HistoryMessage,
 };
 
-#[allow(dead_code)]
-const SESSION_TITLE_REFRESH_INTERVAL_MS: i64 = 5 * 60 * 1000;
-#[allow(dead_code)]
-const SESSION_TITLE_GENERATE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_TITLE_CHARS: usize = 64;
 const MAX_EXCERPT_ITEMS: usize = 16;
 const MAX_EXCERPT_ITEM_CHARS: usize = 360;
@@ -31,10 +16,6 @@ const MAX_EXCERPT_ITEM_CHARS: usize = 360;
 pub struct SessionTitleState {
     current: Option<DashboardSessionTitle>,
     last_activity_signature: Option<String>,
-    #[allow(dead_code)]
-    last_generated_signature: Option<String>,
-    #[allow(dead_code)]
-    last_generated_at_ms: Option<i64>,
 }
 
 impl SessionTitleState {
@@ -59,36 +40,6 @@ impl SessionTitleState {
         true
     }
 
-    #[allow(dead_code)]
-    fn should_generate(&self, signature: &str, now_ms: i64) -> bool {
-        if self.last_generated_signature.as_deref() == Some(signature) {
-            return false;
-        }
-        match self.last_generated_at_ms {
-            None => true,
-            Some(last) => now_ms.saturating_sub(last) >= SESSION_TITLE_REFRESH_INTERVAL_MS,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn apply_generated(&mut self, signature: String, title: String, now_ms: i64) -> bool {
-        self.last_activity_signature = Some(signature.clone());
-        self.last_generated_signature = Some(signature);
-        self.last_generated_at_ms = Some(now_ms);
-        if self
-            .current
-            .as_ref()
-            .is_some_and(|current| current.generated && current.title.trim() == title.trim())
-        {
-            return false;
-        }
-        self.current = Some(DashboardSessionTitle {
-            title,
-            generated: true,
-            updated_at_ms: now_ms,
-        });
-        true
-    }
 }
 
 pub fn sync_session_title_placeholder(
@@ -108,51 +59,6 @@ pub fn sync_session_title_placeholder(
     }
 }
 
-#[allow(dead_code)]
-pub async fn refresh_session_title_after_activity(
-    context: &mut Context,
-    tx: &tokio::sync::watch::Sender<DashboardState>,
-) -> Result<()> {
-    let Some(input) = SessionTitleInput::from_context(context) else {
-        return Ok(());
-    };
-    let now_ms = Utc::now().timestamp_millis();
-    if context.session_title.apply_placeholder(
-        &input.activity_signature,
-        input.placeholder_title.clone(),
-        now_ms,
-    ) {
-        sync_dashboard_session_title(context, tx);
-    }
-    if !context
-        .session_title
-        .should_generate(&input.activity_signature, now_ms)
-    {
-        return Ok(());
-    }
-
-    let generated = match tokio::time::timeout(
-        SESSION_TITLE_GENERATE_TIMEOUT,
-        generate_session_title(context, &input.excerpt),
-    )
-    .await
-    {
-        Ok(result) => result?,
-        Err(_) => {
-            return Err(miette!(
-                "session title generation timed out after {}s",
-                SESSION_TITLE_GENERATE_TIMEOUT.as_secs()
-            ));
-        }
-    };
-    if context
-        .session_title
-        .apply_generated(input.activity_signature, generated, now_ms)
-    {
-        sync_dashboard_session_title(context, tx);
-    }
-    Ok(())
-}
 
 fn sync_dashboard_session_title(
     context: &Context,
@@ -167,8 +73,6 @@ fn sync_dashboard_session_title(
 struct SessionTitleInput {
     placeholder_title: String,
     activity_signature: String,
-    #[allow(dead_code)]
-    excerpt: String,
 }
 
 impl SessionTitleInput {
@@ -184,47 +88,10 @@ impl SessionTitleInput {
         Some(Self {
             placeholder_title,
             activity_signature: activity_signature(&events, &messages),
-            excerpt,
         })
     }
 }
 
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct TitleOutput {
-    title: String,
-}
-
-#[allow(dead_code)]
-async fn generate_session_title(context: &Context, excerpt: &str) -> Result<String> {
-    let request = PromptRequest {
-        tool_name: "set_session_title".to_string(),
-        tool_description: SESSION_TITLE_TOOL_DESCRIPTION.to_string(),
-        output_schema: json!({
-            "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "A concise human-readable session title."
-                }
-            },
-            "required": ["title"],
-            "additionalProperties": false
-        }),
-        system_messages: vec![
-            SESSION_TITLE_SYSTEM_ROLE.to_string(),
-            SESSION_TITLE_SYSTEM_REQUIREMENTS.to_string(),
-        ],
-        long_term_memory_messages: Vec::new(),
-        history_messages: Vec::new(),
-        current_user_message: format!("{SESSION_TITLE_USER_MESSAGE_PREFIX}\n{excerpt}"),
-        retry_messages: Vec::new(),
-    };
-    let value = context.efficient_llm.run_json(context, request).await?;
-    let output = serde_json::from_value::<TitleOutput>(value)
-        .map_err(|err| miette!("decode session title output failed: {err}"))?;
-    normalize_session_title(&output.title).ok_or_else(|| miette!("session title output was empty"))
-}
 
 fn first_event_title(events: &[EventView]) -> Option<String> {
     events
@@ -419,13 +286,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn generation_requires_changed_activity_and_interval() {
-        let mut state = SessionTitleState::default();
-        assert!(state.should_generate("a", 0));
-        assert!(state.apply_generated("a".to_string(), "Initial".to_string(), 0));
-        assert!(!state.should_generate("a", SESSION_TITLE_REFRESH_INTERVAL_MS + 1));
-        assert!(!state.should_generate("b", SESSION_TITLE_REFRESH_INTERVAL_MS - 1));
-        assert!(state.should_generate("b", SESSION_TITLE_REFRESH_INTERVAL_MS));
-    }
 }

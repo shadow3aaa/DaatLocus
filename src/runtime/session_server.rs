@@ -173,13 +173,6 @@ pub(crate) async fn run_session_serve(
         judge_client,
         token_usage_store.clone(),
     );
-    let efficient_client = build_llm(&config.efficient_model, &config)?;
-    let efficient_client = wrap_llm_with_persistent_token_usage(
-        PersistentTokenUsageRole::Efficient,
-        config.efficient_model_config().model_id.clone(),
-        efficient_client,
-        token_usage_store,
-    );
     let coding_project_dir = args.project_dir;
     let execution_cwd = if let Some(project_dir) = coding_project_dir.as_ref() {
         if !project_dir.is_dir() {
@@ -216,7 +209,6 @@ pub(crate) async fn run_session_serve(
         session_id: Some(session_id.as_str().to_string()),
         llm: client,
         judge_llm: judge_client,
-        efficient_llm: efficient_client,
         config,
         memory,
         plan,

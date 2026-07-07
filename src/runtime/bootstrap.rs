@@ -55,6 +55,7 @@ const TOKEN_USAGE_FILE: &str = "token_usage.json";
 pub(crate) enum PersistentTokenUsageRole {
     Main,
     Judge,
+    #[allow(dead_code)]
     Efficient,
 }
 
@@ -410,21 +411,12 @@ pub(crate) async fn build_eval_context_with_compiled(
         judge_client,
         token_usage_store.clone(),
     );
-    let efficient_client = build_llm(&config.efficient_model, &config)
-        .unwrap_or_else(|err| panic!("failed to construct efficient LLM client: {err:?}"));
-    let efficient_client = wrap_llm_with_persistent_token_usage(
-        PersistentTokenUsageRole::Efficient,
-        config.efficient_model_config().model_id.clone(),
-        efficient_client,
-        token_usage_store,
-    );
     let (daemon_control_tx, _daemon_control_rx) = tokio::sync::mpsc::unbounded_channel();
 
     Context {
         session_id: None,
         llm: client,
         judge_llm: judge_client,
-        efficient_llm: efficient_client,
         config,
         memory,
         plan,

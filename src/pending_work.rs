@@ -141,24 +141,6 @@ impl PendingWorkQueue {
         Ok(claimed)
     }
 
-    #[allow(dead_code)]
-    pub fn release_claimed(&self, work: PendingWork) -> Result<bool> {
-        let mut inner = self.inner.lock();
-        let Some(entry) = inner
-            .state
-            .queue
-            .iter_mut()
-            .find(|entry| entry.work == work)
-        else {
-            return Ok(false);
-        };
-        if matches!(entry.state, PendingWorkEntryState::Claimed) {
-            entry.state = PendingWorkEntryState::Pending;
-            persist_locked(&inner)?;
-            return Ok(true);
-        }
-        Ok(false)
-    }
 
     pub fn consume(&self, work: PendingWork) -> Result<bool> {
         let mut inner = self.inner.lock();

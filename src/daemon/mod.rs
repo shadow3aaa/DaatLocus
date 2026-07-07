@@ -2875,8 +2875,13 @@ async fn session_dashboard_ws(
         }
     };
     loop {
-        match session_ipc::read_stream_event(&mut stream).await {
-            Ok(session_ipc::SessionIpcStreamEvent::DashboardSnapshot { state }) => {
+        let stream_event = tokio::time::timeout(
+            Duration::from_secs(10),
+            session_ipc::read_stream_event(&mut stream),
+        )
+        .await;
+        match stream_event {
+            Ok(Ok(session_ipc::SessionIpcStreamEvent::DashboardSnapshot { state })) => {
                 let mut snapshot = *state;
                 overlay_manager_owned_dashboard_state(&telegram_acl, &mut snapshot);
                 sync_session_title_from_dashboard_state(&sessions, &session_id, &snapshot).await;
@@ -2887,12 +2892,24 @@ async fn session_dashboard_ws(
                     break;
                 }
             }
-            Ok(session_ipc::SessionIpcStreamEvent::DashboardClosed { .. }) => break,
-            Ok(session_ipc::SessionIpcStreamEvent::Error { message, .. }) => {
+            Ok(Ok(session_ipc::SessionIpcStreamEvent::DashboardClosed { .. })) => break,
+            Ok(Ok(session_ipc::SessionIpcStreamEvent::Error { message, .. })) => {
                 let _ = socket.send(Message::Text(message.into())).await;
                 break;
             }
-            Err(_) => break,
+            Ok(Err(_)) => break,
+            Err(_) => {
+                let sid = match session::SessionId::from_string(session_id.clone()) {
+                    Ok(sid) => sid,
+                    Err(_) => break,
+                };
+                if let Some(info) = sessions.get(&sid)
+                    && matches!(info.status, session::SessionStatus::Dead)
+                {
+                    break;
+                }
+                continue;
+            }
         }
     }
 }
