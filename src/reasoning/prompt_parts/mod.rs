@@ -193,7 +193,7 @@ fn render_afterclaim_events(events: &[EventView]) -> String {
                     format!(" attachments={}", payload.attachments.len())
                 };
                 lines.push(format!(
-                    "- {}. telegram {} @ {}{}: {}",
+                    "- {}. from telegram {} @ {}{}: {}",
                     event.event_id,
                     payload.sender,
                     payload.chat_title,
@@ -208,7 +208,7 @@ fn render_afterclaim_events(events: &[EventView]) -> String {
                     format!(" attachments={}", payload.attachments.len())
                 };
                 lines.push(format!(
-                    "- {}. {}{}: {}",
+                    "- {}. from {}{}: {}",
                     event.event_id,
                     payload.origin,
                     attachment_summary,
